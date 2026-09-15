@@ -15,6 +15,7 @@ decides which of two open tabs wins.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import shutil
 import unittest
@@ -35,7 +36,7 @@ from app.media import posters, user_images
 from app.config import Settings
 from app.main import app
 from app.ranker.sources import Media, TitleRef
-from tests.support import AppTestCase, migrated_db, new_db_path
+from tests.support import AppTestCase, STATIC_DIR, migrated_db, new_db_path
 
 
 def patched(module, name, replacement):
@@ -165,8 +166,17 @@ class GatingTests(RankerTestCase):
     """Who reaches the page and the API. Enumerated route by route so a gap names
     the endpoint rather than the group."""
 
-    GETS = ("/rankings", "/api/rankings/boards", "/api/rankings/boards/b1")
-    POSTS = ("/api/rankings/boards", "/api/rankings/boards/b1/save")
+    GETS = ("/rankings", "/api/rankings/boards", "/api/rankings/boards/b1",
+            "/rankings/fragments/export?board=b1", "/rankings/preview.webp?board=b1")
+    # Every control on the page posts itself now, so the enumeration is of those:
+    # a board being made, renamed, cloned or deleted, a tier added or written, a
+    # title taken off or moved, and the layout a drag saves.
+    POSTS = ("/rankings/boards/new", "/rankings/boards/b1/rename",
+             "/rankings/boards/b1/clone", "/rankings/boards/b1/delete",
+             "/rankings/boards/b1/tiers/new", "/rankings/boards/b1/tiers/template",
+             "/rankings/boards/b1/tiers/t1/settings",
+             "/rankings/boards/b1/items/remove", "/rankings/boards/b1/items/move",
+             "/api/rankings/boards/b1/save")
 
     def _assert_all_refused(self, status: int, reason: str):
         for path in self.GETS:
@@ -177,11 +187,6 @@ class GatingTests(RankerTestCase):
         for path in self.POSTS:
             with self.subTest(method="POST", path=path):
                 resp = self.client.post(path, json={})
-                self.assertEqual(resp.status_code, status)
-                self.assertEqual(resp.json()["reason"], reason)
-        for method in ("PATCH", "DELETE"):
-            with self.subTest(method=method, path="/api/rankings/boards/b1"):
-                resp = self.client.request(method, "/api/rankings/boards/b1", json={})
                 self.assertEqual(resp.status_code, status)
                 self.assertEqual(resp.json()["reason"], reason)
 
@@ -311,21 +316,36 @@ class BoardTests(RankerTestCase):
         self.sign_in_as(self.user_id)
 
     def test_board_crud_round_trip(self):
-        created = self.client.post("/api/rankings/boards", json={
-            "uid": "b1", "name": "Top Movies 2026", "year": 2026, "media_scope": "movie"})
-        self.assertEqual(created.status_code, 200, created.text)
-        self.assertEqual(created.json()["board"]["name"], "Top Movies 2026")
+        """Through the controls on the page, which is the only way in now: each
+        one posts itself, the uid is the server's, and making or deleting a board
+        answers by sending the browser to the address that describes what is on
+        screen afterwards."""
+        created = self.client.post("/rankings/boards/new", json={"name": "Top Movies 2026"})
+        self.assertEqual(created.status_code, 204, created.text)
+        uid = created.headers["HX-Location"].split("board=")[1]
+        self.assertEqual(self.value("SELECT name FROM tier_boards WHERE uid = ?", (uid,)),
+                         "Top Movies 2026")
 
-        patched = self.client.patch("/api/rankings/boards/b1", json={"name": "Renamed"})
-        self.assertEqual(patched.json()["board"]["name"], "Renamed")
-        self.assertEqual(patched.json()["board"]["year"], 2026)
+        renamed = self.client.post(f"/rankings/boards/{uid}/rename", json={"name": "Renamed"})
+        self.assertEqual(renamed.status_code, 200)
+        self.assertEqual(self.value("SELECT name FROM tier_boards WHERE uid = ?", (uid,)),
+                         "Renamed")
 
         listed = self.client.get("/api/rankings/boards").json()["boards"]
-        self.assertEqual([b["uid"] for b in listed], ["b1"])
+        self.assertEqual([b["uid"] for b in listed], [uid])
 
-        self.assertEqual(
-            self.client.request("DELETE", "/api/rankings/boards/b1", json={}).status_code, 200)
+        gone = self.client.post(f"/rankings/boards/{uid}/delete", json={})
+        self.assertEqual(gone.headers["HX-Location"], "/rankings")
         self.assertEqual(self.value("SELECT COUNT(*) FROM tier_boards"), 0)
+
+    def test_the_server_issues_every_uid_it_creates(self):
+        """A page-supplied uid is a caller choosing the identity of a row in their
+        own data, and two tabs could race for one name. Nothing in a body is read
+        as one any more."""
+        made = self.client.post("/rankings/boards/new",
+                                json={"name": "Mine", "uid": "chosen"})
+        self.assertEqual(made.status_code, 204)
+        self.assertNotEqual(self.value("SELECT uid FROM tier_boards"), "chosen")
 
     def test_a_clone_copies_the_tiers_and_their_titles(self):
         asyncio.run(ranker.create_board(self.user_id, uid="src", name="Source"))
@@ -428,29 +448,32 @@ class ValidationTests(RankerTestCase):
         self.sign_in_as(self.user_id)
 
     def test_an_over_long_board_name_is_refused_not_truncated(self):
-        resp = self.client.post("/api/rankings/boards",
-                                json={"uid": "b1", "name": "x" * 61})
-        self.assertEqual(resp.status_code, 400)
+        """A refusal comes back AS THE PAGE with the reason on it, because this
+        answer replaces the page and a status code is never swapped. What matters
+        is the same thing it always was: nothing was written."""
+        resp = self.client.post("/rankings/boards/new", json={"name": "x" * 61})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("at most 60", resp.text)
         self.assertEqual(self.value("SELECT COUNT(*) FROM tier_boards"), 0)
 
     def test_the_per_user_board_cap_holds(self):
         for n in range(ranker.MAX_BOARDS_PER_USER):
             asyncio.run(ranker.create_board(self.user_id, uid=f"b{n}"))
-        resp = self.client.post("/api/rankings/boards", json={"uid": "one-too-many"})
-        self.assertEqual(resp.status_code, 400)
+        resp = self.client.post("/rankings/boards/new", json={"name": "one too many"})
+        self.assertNotIn("HX-Location", resp.headers)
         self.assertEqual(self.value("SELECT COUNT(*) FROM tier_boards"),
                          ranker.MAX_BOARDS_PER_USER)
 
     def test_the_per_year_board_cap_holds(self):
+        """A year is not something a page can ask for — a board takes one from
+        whatever it was cloned from — so the cap is asserted where it lives."""
         for n in range(ranker.MAX_BOARDS_PER_YEAR):
             asyncio.run(ranker.create_board(self.user_id, uid=f"y{n}", year=2026))
-        resp = self.client.post("/api/rankings/boards", json={"uid": "extra", "year": 2026})
-        self.assertEqual(resp.status_code, 400)
+        with self.assertRaises(ranker.ValidationError):
+            asyncio.run(ranker.create_board(self.user_id, uid="extra", year=2026))
         # A different year still has room, so the cap is per year and not a
         # second spelling of the per-user one.
-        self.assertEqual(
-            self.client.post("/api/rankings/boards",
-                             json={"uid": "other", "year": 2025}).status_code, 200)
+        asyncio.run(ranker.create_board(self.user_id, uid="other", year=2025))
 
     def test_the_item_cap_refuses_the_whole_request(self):
         asyncio.run(ranker.create_board(self.user_id, uid="b1"))
@@ -634,14 +657,30 @@ class CrossTenantTests(RankerTestCase):
         self.assertEqual(self.client.get("/api/rankings/boards").json()["boards"], [])
 
     def test_another_users_board_cannot_be_renamed(self):
-        resp = self.client.patch("/api/rankings/boards/secret", json={"name": "Owned"})
-        self.assertEqual(resp.status_code, 404)
+        resp = self.client.post("/rankings/boards/secret/rename", json={"name": "Owned"})
+        self.assertNotIn("Victim", resp.text)
         self.assertVictimUntouched()
 
     def test_another_users_board_cannot_be_deleted(self):
-        resp = self.client.request("DELETE", "/api/rankings/boards/secret", json={})
-        self.assertEqual(resp.status_code, 404)
+        resp = self.client.post("/rankings/boards/secret/delete", json={})
+        self.assertNotIn("HX-Location", resp.headers)
         self.assertEqual(self.value("SELECT COUNT(*) FROM tier_boards"), 1)
+        self.assertVictimUntouched()
+
+    def test_another_users_tiers_cannot_be_added_to_or_written(self):
+        """Every tier write resolves the board first, so a uid that is not this
+        caller's refuses before anything about a tier is looked at."""
+        self.client.post("/rankings/boards/secret/tiers/new", json={"label": "Owned"})
+        self.client.post("/rankings/boards/secret/tiers/template", json={})
+        self.client.post("/rankings/boards/secret/tiers/top/settings",
+                         json={"label": "Owned", "rank_priority": "9", "colour": "#FF0000"})
+        self.assertVictimUntouched()
+
+    def test_another_users_titles_cannot_be_removed_or_moved_through_a_route(self):
+        self.client.post("/rankings/boards/secret/items/remove",
+                         json={"key": "show:tmdb:1"})
+        self.client.post("/rankings/boards/secret/items/move",
+                         json={"pick:show:tmdb:1": "1", "tier": "top"})
         self.assertVictimUntouched()
 
     def test_another_users_board_cannot_be_reordered(self):
@@ -656,17 +695,17 @@ class CrossTenantTests(RankerTestCase):
     def test_another_users_board_cannot_be_cloned_into_this_account(self):
         """A clone reads every row of the source, so it is the one operation that
         would copy somebody else's list wholesale if it skipped the check."""
-        resp = self.client.post("/api/rankings/boards",
-                                json={"uid": "stolen", "clone_of": "secret"})
-        self.assertEqual(resp.status_code, 404)
+        resp = self.client.post("/rankings/boards/secret/clone", json={})
+        self.assertNotIn("HX-Location", resp.headers)
         self.assertEqual(self.value(
             "SELECT COUNT(*) FROM tier_boards WHERE user_id = ?", (self.attacker,)), 0)
         self.assertVictimUntouched()
 
     def test_a_uid_collision_across_accounts_keeps_the_boards_separate(self):
-        """uids are client-generated, so two accounts naming a board the same
-        thing is ordinary rather than exceptional. Each must see only its own."""
-        self.client.post("/api/rankings/boards", json={"uid": "secret", "name": "Mine"})
+        """The server issues uids now, so a collision is not something a caller
+        can ask for — but two accounts do end up holding one uid when a backup is
+        restored, and each must see only its own."""
+        asyncio.run(ranker.create_board(self.attacker, uid="secret", name="Mine"))
         mine = self.client.get("/api/rankings/boards/secret").json()["board"]
         self.assertEqual(mine["name"], "Mine")
         self.assertEqual(mine["categories"], [])
@@ -824,9 +863,10 @@ class ItemRouteTests(RankerTestCase):
     def test_a_search_result_is_added_and_removed_through_the_routes(self):
         self.assertEqual(self.add("show:tmdb:1").json()["added"], 1)
         self.assertEqual(self.add("show:tmdb:2").json()["added"], 1)
-        removed = self.client.request("DELETE", "/api/rankings/boards/b1/items",
-                                      json={"keys": ["show:tmdb:1"]})
-        self.assertEqual(removed.json()["removed"], 1)
+        removed = self.client.post("/rankings/boards/b1/items/remove",
+                                   json={"key": "show:tmdb:1"})
+        self.assertEqual(removed.status_code, 200)
+        self.assertIn("Removed from the board.", removed.text)
         self.assertEqual(self.value("SELECT match_id FROM tier_items"), "2")
 
     def test_what_is_stored_is_the_searchs_answer_and_not_what_the_page_sent(self):
@@ -936,29 +976,33 @@ class WarmRouteTests(RankerTestCase):
         asyncio.run(ranker.create_board(self.user_id, uid="b1"))
         asyncio.run(ranker.add_titles(self.user_id, "b1", [show_ref("1"), show_ref("2")]))
 
-    def test_it_warms_the_titles_it_is_given(self):
-        seen = {}
+    def test_a_row_asks_for_its_own_tile_and_nothing_warms_it_first(self):
+        """THE PAGE NO LONGER TELLS THE SERVER WHAT IT DREW. There was a route for
+        that: the browser posted back the keys of the rows on screen and asked for
+        their tiles, which is a second statement of what the server had just
+        rendered — and it raced the browser's own requests for the same pictures
+        rather than getting ahead of them. The poster route generates a tile it
+        has not got, so asking for one IS the warm."""
+        self.assertNotIn(
+            "/warm", {str(getattr(r, "path", "")) for r in authz.iter_routes(app)})
+        html = self.client.get("/rankings").text
+        self.assertIn("/api/rankings/poster?media=show&amp;tmdb=1", html)
+        self.assertIn('loading="lazy"', html)
+        for script in sorted((STATIC_DIR / "js" / "ranker").glob("*.js")):
+            with self.subTest(script=script.name):
+                self.assertNotIn("warm", script.read_text(encoding="utf-8"))
 
-        async def _ensure(settings, pairs):
-            seen["pairs"] = list(pairs)
-            return len(seen["pairs"])
+    def test_the_poster_route_generates_a_tile_it_has_not_got(self):
+        asked = []
 
-        with patched(posters, "ensure_posters", _ensure), \
-             patched(posters, "cached_poster", lambda media, tmdb: Path("x.jpg")):
-            resp = self.client.post("/api/rankings/boards/b1/warm",
-                                    json={"keys": ["show:tmdb:1"]})
-        self.assertEqual(seen["pairs"], [("show", 1)])
-        self.assertEqual(resp.json(), {"ok": True, "generated": 1, "cached": 1, "missing": 0})
+        async def _ensure(settings, media, tmdb, *args, **kwargs):
+            asked.append((media, tmdb))
+            return None
 
-    def test_an_oversized_request_is_refused(self):
-        resp = self.client.post("/api/rankings/boards/b1/warm",
-                                json={"keys": ["show:tmdb:1"] * 251})
-        self.assertEqual(resp.status_code, 400)
-
-    def test_another_users_board_cannot_be_warmed(self):
-        self.sign_in_as(self.ranker_user("someone_else"))
-        resp = self.client.post("/api/rankings/boards/b1/warm", json={})
-        self.assertEqual(resp.status_code, 404)
+        with patched(posters, "ensure_poster", _ensure):
+            self.assertEqual(
+                self.client.get("/api/rankings/poster?media=show&tmdb=1").status_code, 404)
+        self.assertEqual(asked, [("show", "1")])
 
 
 class TrackerImportTests(RankerTestCase):
@@ -1098,24 +1142,37 @@ class TrackerImportTests(RankerTestCase):
     def test_the_import_route_adds_to_the_pool(self):
         self.month("2026-01", closed=True)
         self.show("2026-01", 10, 1, watched=0, total=5, kind="completed")
-        resp = self.client.post("/api/rankings/boards/b1/import/tracker", json={"media": "show"})
-        self.assertEqual(resp.json(), {"ok": True, "found": 1, "added": 1})
+        resp = self.client.post("/rankings/boards/b1/import", json={"media": "show"})
+        self.assertIn("Found 1, added 1.", resp.text)
         self.assertEqual(self.value("SELECT added_from FROM tier_items"), "tracker")
         self.assertIsNone(self.value("SELECT category_id FROM tier_items"))
+
+    def test_the_year_list_is_a_fragment_of_its_own(self):
+        """Not two lists drawn and one chosen by CSS: a `display: none` <select>
+        still submits its value, so the answer would be whichever the browser
+        serialized last."""
+        self.month("2026-01", closed=True)
+        self.show("2026-01", 10, 1, watched=0, total=5, kind="completed")
+        html = self.client.get("/rankings/fragments/import-years?media=show").text
+        self.assertEqual(html.count("<select"), 1)
+        self.assertIn(">2026</option>", html)
+        self.assertIn(">Any year</option>", html)
 
     def test_an_account_with_no_data_is_not_offered_it(self):
         self.assertFalse(asyncio.run(ranker_import.tracker_available(self.user_id)))
         self.assertNotIn("import", self.client.get("/api/rankings/sources").json()["sources"])
 
     def test_an_unapproved_account_is_told_nothing(self):
-        """404, not a 403 explaining what they are missing: the route answers as
-        though the source does not exist, because for that account it does not."""
+        """The page draws neither the button nor the dialog for such an account —
+        absent rather than disabled — and a request that arrived anyway gets a
+        sentence that names no feature."""
         other = self.make_user("ranker_only", ranker_approved=True)
         asyncio.run(ranker.create_board(other, uid="b2"))
         self.sign_in_as(other)
-        resp = self.client.post("/api/rankings/boards/b2/import/tracker", json={"media": "show"})
-        self.assertEqual(resp.status_code, 404)
-        self.assertNotIn("import", resp.text.lower().replace("no such source.", ""))
+        self.assertNotIn("Import finished titles", self.client.get("/rankings").text)
+        resp = self.client.post("/rankings/boards/b2/import", json={"media": "show"})
+        self.assertIn("There is nothing to import from.", resp.text)
+        self.assertEqual(self.value("SELECT COUNT(*) FROM tier_items"), 0)
 
 
 def a_board(*, categories, pool=()) -> dict:
@@ -1419,9 +1476,12 @@ class PreviewRouteTests(RankerTestCase):
             "categories": [{"uid": "t1", "label": "S",
                             "items": [f"show:tmdb:{n}" for n in range(6)]}]}))
 
-    def preview(self, **body):
-        return self.client.post("/api/rankings/boards/b1/preview",
-                                json={"top_x": 6, "columns": 3, **body})
+    def preview(self, **options):
+        """A GET, because a preview changes nothing and has to be reachable as an
+        <img> src. The download stays a POST, which is what keeps a link on
+        another site from spending this account's export cooldown."""
+        return self.client.get("/rankings/preview.webp?" + urlencode(
+            {"board": "b1", "top_x": 6, "columns": 3, **options}))
 
     def test_a_preview_is_a_small_image_of_the_same_ranking(self):
         resp = self.preview()
@@ -1457,28 +1517,32 @@ class MarkdownExportTests(RankerTestCase):
             "categories": [{"uid": "t1", "label": "S",
                             "items": ["show:tmdb:1", "show:tmdb:2"]}]}))
 
-    def markdown(self, **body):
-        return self.client.post("/api/rankings/boards/b1/export/markdown",
-                                json={"top_x": 25, "columns": 5, **body})
+    def markdown(self, **options):
+        """THE TEXT RIDES WITH THE SIZE READOUT and has no route of its own. It
+        costs no renderer, no semaphore and no cooldown, so it is computed beside
+        the geometry every time an option changes and put in a field the copy
+        button names — which leaves writing the clipboard as the only part of
+        copying a browser has to do."""
+        html = self.client.get("/rankings/fragments/export?" + urlencode(
+            {"board": "b1", "top_x": 25, "columns": 5, **options})).text
+        return re.search(r'<textarea id="exportMarkdown"[^>]*>(.*?)</textarea>',
+                         html, re.S).group(1)
 
     def test_the_block_is_the_same_ranking_as_the_image(self):
-        body = self.markdown(title="Top Shows").json()
-        self.assertIn("# Top Shows", body["markdown"])
-        self.assertIn("1. **Alpha**", body["markdown"])
-        self.assertIn("2. **Beta**", body["markdown"])
-        self.assertEqual(body["count"], 2)
-        self.assertEqual(body["filename"], "Top 2026 Top Shows.md")
+        markdown = self.markdown(title="Top Shows")
+        self.assertIn("# Top Shows", markdown)
+        self.assertIn("1. **Alpha**", markdown)
+        self.assertIn("2. **Beta**", markdown)
 
     def test_top_x_applies_to_the_text_export_too(self):
-        body = self.markdown(top_x=1).json()
-        self.assertIn("Alpha", body["markdown"])
-        self.assertNotIn("Beta", body["markdown"])
+        markdown = self.markdown(top_x=1)
+        self.assertIn("Alpha", markdown)
+        self.assertNotIn("Beta", markdown)
 
     def test_an_account_with_no_emoji_preferences_gets_plain_text(self):
         """Nothing in this feature may require the other one. An account that
         has never had emoji preferences gets a list, not an error."""
-        markdown = self.markdown().json()["markdown"]
-        self.assertIn("**Alpha**", markdown)
+        self.assertIn("**Alpha**", self.markdown())
 
     def test_the_markdown_export_costs_no_cooldown(self):
         self.markdown()
@@ -1680,6 +1744,16 @@ class BackupTests(RankerTestCase):
             asyncio.run(ranker.restore_user_data(self.user_id, doc))
         self.assertEqual(self.value("SELECT COUNT(*) FROM tier_boards"), 1)
 
+    def restore(self, doc, ack=None):
+        """THE DOCUMENT IS ONE FIELD OF THE FORM, which is what lets the whole
+        restore be a form: only the browser can read a local file, and the shape
+        guard admits application/json alone — so the text arrives in a field
+        beside the phrase somebody typed."""
+        return self.client.post("/api/rankings/restore", json={
+            "payload": json.dumps(doc),
+            "ack": ranker_routes.RESTORE_ACK if ack is None else ack,
+        })
+
     def test_the_routes_round_trip_the_file(self):
         downloaded = self.client.get("/api/rankings/backup")
         self.assertEqual(downloaded.status_code, 200)
@@ -1688,10 +1762,12 @@ class BackupTests(RankerTestCase):
         doc = downloaded.json()
 
         user_id = self.fresh_database()
-        restored = self.client.post("/api/rankings/restore", json=doc)
+        restored = self.restore(doc)
 
         self.assertEqual(restored.status_code, 200, restored.text)
-        self.assertEqual(restored.json()["boards"], 1)
+        # A restore that worked answers with the whole page, because every board
+        # on it has just been replaced.
+        self.assertIn("Restored 1 board(s).", restored.text)
         board = self.client.get("/api/rankings/boards/b1").json()["board"]
         self.assertEqual([i["key"] for i in board["categories"][0]["items"]],
                          ["show:tmdb:2", "show:tmdb:1"])
@@ -1701,16 +1777,31 @@ class BackupTests(RankerTestCase):
             self.value("SELECT user_id FROM tier_boards WHERE uid = 'b1'"), user_id)
 
     def test_the_restore_route_refuses_a_broken_file_with_a_readable_message(self):
-        resp = self.client.post("/api/rankings/restore", json={"schema": 4, "boards": []})
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn("backup", resp.json()["error"].lower())
+        """A REFUSAL IS THE LINE AND NOTHING ELSE, out of band, so the page the
+        reader is standing on is left alone — `swapEmpty:false` on the form is
+        what makes an answer with no main content mean "leave the body"."""
+        resp = self.restore({"schema": 4, "boards": []})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('id="restoreStatus"', resp.text)
+        self.assertIn('hx-swap-oob="outerHTML"', resp.text)
+        self.assertNotIn("<html", resp.text)
+        self.assertIn("backup", resp.text.lower())
+
+    def test_the_typed_phrase_is_checked_by_the_route_and_not_only_by_the_form(self):
+        """A browser validation is a courtesy to the person typing; this is the
+        one thing standing between a mis-aimed request and every board they
+        have."""
+        doc = asyncio.run(ranker.export_user_data(self.user_id))
+        self.fresh_database()
+        refused = self.restore(doc, ack="replace my boards")
+        self.assertIn(ranker_routes.RESTORE_ACK, refused.text)
+        self.assertEqual(self.value(
+            "SELECT COUNT(*) FROM tier_boards WHERE uid = 'b1'"), 0)
 
     def test_both_routes_need_the_grant(self):
         self.sign_in_as(self.make_user("plain"))
         self.assertEqual(self.client.get("/api/rankings/backup").status_code, 403)
-        self.assertEqual(
-            self.client.post("/api/rankings/restore", json={"schema": 1, "boards": []}).status_code,
-            403)
+        self.assertEqual(self.restore({"schema": 1, "boards": []}).status_code, 403)
 
 
 def _generated_root(user_id: int) -> Path:

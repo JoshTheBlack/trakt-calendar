@@ -47,8 +47,8 @@ from ..endpoints import endpoint_choices
 from ..media import logos
 from ..perftrace import span
 from ..providers import detail_source
-from ..providers.base import (ID_KEYS, ItemKey, Media, Source, SourceUnavailable,
-                              collect_ids, parse_item_key, parse_media, resolve_key)
+from ..providers.base import (ItemKey, Media, Source, SourceUnavailable,
+                              parse_item_key, parse_media, resolve_key)
 from ..providers.trakt import TraktError, TraktRateLimitError
 # Reached through the MODULE rather than by importing the functions off it. A name
 # bound at import time is a second reference to the same function that patching
@@ -67,8 +67,6 @@ guard = authz.Guard(router)
 # numbers and slugs are words, so those stay text; everything else is a numeric id
 # in its own namespace and is coerced rather than stored as whatever the client
 # happened to send, or the same title would key differently on two adds.
-_NUMERIC_ID_KEYS = frozenset(ID_KEYS) - {"imdb", "slug"}
-
 # What an empty month that has not begun says for itself. There is only ever one
 # sentence for it now, at any distance ahead: every future month is waiting to be
 # asked, and the ask is a button on the page saying this.
@@ -79,29 +77,6 @@ MONTH_AWAITS_IMPORT = ("This month hasn't begun yet, so nothing has been gathere
 class RequestError(ValueError):
     """A request body the caller has to fix. Its message is what the client is
     told, so it says what is wrong rather than naming a field type."""
-
-
-def _client_ids(raw) -> dict:
-    """An id map out of a request body: known namespaces only, numbers as numbers.
-
-    The client supplies these on the add flows, which it always has — what is new
-    is that they decide which row the record becomes, so they are narrowed and
-    coerced here at the boundary rather than trusted into a key.
-    """
-    if not isinstance(raw, dict):
-        return {}
-    cleaned = {}
-    for key, value in raw.items():
-        if key not in ID_KEYS or value in (None, ""):
-            continue
-        if key in _NUMERIC_ID_KEYS:
-            try:
-                cleaned[key] = int(value)
-            except (TypeError, ValueError):
-                continue  # a numeric namespace with a non-number in it names nothing
-        else:
-            cleaned[key] = str(value)
-    return collect_ids(cleaned)
 
 
 def _row_target(data: dict) -> tuple[ItemKey, int]:

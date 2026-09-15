@@ -376,6 +376,81 @@ document.addEventListener('click', (e) => {
     );
 });
 
+// `data-file-into="<selector>"` — read the chosen file into that field, so a
+// form can carry it.
+//
+// THE ONE THING ONLY A BROWSER CAN DO HERE, and the reason is the shape guard:
+// app/authz.py admits `application/json` and nothing else, because a
+// cross-origin multipart form post is exactly what that rule exists to refuse.
+// So a file's contents have to reach the server as a FIELD of a JSON body, and
+// only this side can read a local file. Everything around it is markup: the
+// submit is the form's, the typed confirmation is its `required pattern`, and
+// the answer is a fragment the server draws.
+//
+// `data-file-as="base64"` for a picture (the payload `user_images.add_image`
+// takes), text otherwise. `data-file-name="<selector>"` fills a name field from
+// the file's own name, which is the obvious first guess and is also something
+// only this side knows. `data-file-status="<selector>"` is where an unreadable
+// file is reported — said BEFORE anything else is asked of the reader, which
+// beats typing a confirmation phrase and then finding out.
+//
+// `data-file-count="<key>:<noun>,…"` summarizes a JSON document the same way for
+// every caller: the named top-level arrays are counted, entries sharing a noun
+// are added together, and the sentence is one sentence rather than one per page.
+async function readChosenFile(input) {
+    const into = document.querySelector(input.dataset.fileInto);
+    const status = input.dataset.fileStatus
+        ? document.querySelector(input.dataset.fileStatus) : null;
+    const file = input.files && input.files[0];
+    if (into) into.value = '';
+    if (!file) { if (status) status.textContent = ''; return; }
+    const asBase64 = input.dataset.fileAs === 'base64';
+    let text;
+    try {
+        text = asBase64 ? await fileAsBase64(file) : await file.text();
+    } catch (e) {
+        if (status) status.textContent = 'That file could not be read.';
+        input.value = '';
+        return;
+    }
+    if (into) into.value = text;
+    const namer = input.dataset.fileName ? document.querySelector(input.dataset.fileName) : null;
+    if (namer && !namer.value) {
+        namer.value = file.name.replace(/\.[^.]+$/, '').slice(0, namer.maxLength || 40);
+    }
+    if (status) status.textContent = asBase64 ? '' : describeDocument(text, input.dataset.fileCount);
+}
+
+function fileAsBase64(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        // Everything after the comma of a data: URL, which is what the upload
+        // routes decode — the prefix names a media type they establish for
+        // themselves from the bytes.
+        reader.onload = () => resolve(String(reader.result).split(',').pop());
+        reader.onerror = () => reject(new Error('unreadable'));
+        reader.readAsDataURL(file);
+    });
+}
+
+function describeDocument(text, spec) {
+    let doc;
+    try { doc = JSON.parse(text); } catch (e) { return "That file isn't readable JSON."; }
+    const totals = new Map();
+    for (const entry of (spec || '').split(',').filter(Boolean)) {
+        const [key, noun] = entry.split(':');
+        const rows = Array.isArray(doc[key]) ? doc[key].length : 0;
+        totals.set(noun, (totals.get(noun) || 0) + rows);
+    }
+    if (!totals.size) return '';
+    return 'Ready to restore ' +
+        [...totals].map(([noun, n]) => `${n} ${noun}(s)`).join(' and ') + '.';
+}
+
+document.addEventListener('change', (e) => {
+    if (e.target instanceof Element && e.target.dataset.fileInto) readChosenFile(e.target);
+});
+
 // `data-modal-open="<id>"` and `data-modal-close="<id>"` — show and hide an
 // overlay.
 //

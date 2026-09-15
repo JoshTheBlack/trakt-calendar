@@ -1,141 +1,22 @@
-// The export modal: what to render, how big it comes out, and getting the file.
+// Getting the finished image, and that is all this file is now.
 //
-// The preview inside it is ranker/export-preview.js and the header-image picker
-// is ranker/export-image.js; both are separate because each has its own
-// endpoint and its own reasons to change.
-
-// ---------------------------------------------------------------------------
-// the export modal
-// ---------------------------------------------------------------------------
-
-function openExportModal() {
-    const modal = document.getElementById('exportModal');
-    const limits = state.limits;
-    const cols = document.getElementById('exCols');
-    if (!cols.options.length) {
-        limits.columns.forEach(n => cols.add(new Option(n + ' columns', n)));
-        cols.value = limits.columns.includes(5) ? 5 : limits.columns[0];
-        const fmt = document.getElementById('exFmt');
-        // Each format's ceiling is stated where it is chosen, so the hard refusal
-        // is something the user was already warned about rather than a surprise.
-        [['webp', 'WebP — smallest'], ['jpeg', 'JPEG — widest support'],
-         ['png', 'PNG — lossless, largest']].forEach(([value, label]) => {
-            const option = new Option(label, value);
-            option.title = 'Maximum ' + limits.max_dimension[value].toLocaleString() +
-                'px in either direction.';
-            fmt.add(option);
-        });
-        document.getElementById('exTitle').value = defaultExportTitle();
-        document.getElementById('exUser').value = state.username || '';
-    }
-    const scope = document.getElementById('exScope');
-    scope.innerHTML = '<option value="global">All tiers, consolidated</option>';
-    (state.board.categories || []).forEach(cat => {
-        scope.add(new Option('Only: ' + (cat.label || 'Untitled'), 'cat:' + cat.uid));
-    });
-    loadHeaderImageChoices();
-    modal.classList.add('open');
-    onExportChange();
-}
-
-function closeExportModal() {
-    closeModal('exportModal');
-}
-
-// The preview redraw is queued behind a debounce; a panel that is gone has
-// nothing to redraw into.
-onModalClose('exportModal', () => clearTimeout(previewTimer));
-
-function defaultExportTitle() {
-    const scope = state.board.media_scope;
-    const what = scope === 'movie' ? 'Movies' : (scope === 'show' ? 'Shows' : 'Titles');
-    return 'Top ' + what + ' of ' + (state.board.year || new Date().getFullYear());
-}
+// THE OPTIONS ARE A FORM THE SERVER DRAWS, and the size beside them is the
+// renderer's own arithmetic asked for as the form changes (ranker.html,
+// _ranker_export_readout.html). What used to be here — the column and format
+// lists, the scope list, the header picker, the three-shape header value, a
+// second implementation of compute_layout fed by constants the page was sent for
+// no other reason, and the Markdown copy — is all gone with it.
+//
+// THE DOWNLOAD IS THE ONE THING LEFT, AND IT IS SCRIPT ON ITS OWN MERITS. It has
+// to be a POST: export_grid spends a per-account cooldown, and SameSite=Lax
+// cookies ride a top-level GET navigation, so as a GET a link on another site
+// could spend it for whoever followed it. A POST whose answer is a file, saved
+// under the name the response gives it, is something only a browser can finish.
 
 function exportOptions() {
-    const scope = document.getElementById('exScope').value;
-    const header = document.getElementById('exHeader').value;
-    return {
-        top_x: parseInt(document.getElementById('exTopX').value, 10) || 1,
-        columns: parseInt(document.getElementById('exCols').value, 10),
-        title: document.getElementById('exTitle').value,
-        username: document.getElementById('exUser').value,
-        scope: scope.startsWith('cat:') ? 'category' : 'global',
-        category_uid: scope.startsWith('cat:') ? scope.slice(4) : null,
-        scale: parseFloat(document.getElementById('exScale').value),
-        fmt: document.getElementById('exFmt').value,
-        show_titles: document.getElementById('exTitles').checked,
-        podium: document.getElementById('exPodium').checked,
-        // Three shapes, matching what _header_bytes accepts server-side: the
-        // bare string for the avatar, and one keyed object each for a saved
-        // image and for a connected service's picture. The server validates
-        // both names against what this account actually owns — nothing here is
-        // trusted to have picked a real one.
-        header_image: headerImageSpec(header),
-    };
-}
-
-function headerImageSpec(header) {
-    if (header === 'avatar') return 'avatar';
-    if (header.startsWith('img:')) return { image_uid: header.slice(4) };
-    if (header.startsWith('provider:')) return { provider: header.slice(9) };
-    return null;
-}
-
-// How many titles the chosen scope actually contributes — the grid is that many
-// or top_x, whichever is smaller.
-function scopedCount(options) {
-    const cats = state.board.categories || [];
-    const contributing = options.scope === 'category'
-        ? cats.filter(c => c.uid === options.category_uid)
-        : cats.filter(c => !c.is_isolated);
-    return contributing.reduce((total, c) => total + c.items.length, 0);
-}
-
-// THE SAME ARITHMETIC compute_layout does, from the same constants — which the
-// server sends rather than this file restating them, so the number shown here
-// and the number the pre-render check refuses on cannot drift apart.
-function computeCanvas(count, columns, scale, showTitles, podium) {
-    const L = state.limits;
-    const s = v => Math.max(1, Math.round(v * scale));
-    const tileW = s(L.tile_w), tileH = s(L.tile_h);
-    const labelH = s(L.label_h), captionH = showTitles ? s(L.caption_h) : 0;
-    const gutter = Math.round(L.gutter * scale), margin = Math.round(L.margin * scale);
-    const width = margin * 2 + columns * tileW + (columns - 1) * gutter;
-    const contentW = width - margin * 2;
-    let y = margin + s(L.header_h);
-    let placed = 0;
-    const podiumCount = podium ? Math.min(L.podium_ranks, count) : 0;
-    if (podiumCount) {
-        const podiumW = Math.floor((contentW - (podiumCount - 1) * gutter) / podiumCount);
-        y += Math.round(podiumW * tileH / tileW) + labelH + captionH + gutter;
-        placed += podiumCount;
-    }
-    const remaining = count - placed;
-    const rows = remaining > 0 ? Math.ceil(remaining / columns) : 0;
-    y += rows * (tileH + labelH + captionH + gutter);
-    return { width: width, height: (count > 0 ? y - gutter : y) + margin };
-}
-
-function onExportChange() {
-    showHeaderThumb();
-    const options = exportOptions();
-    const count = Math.min(options.top_x, scopedCount(options));
-    const size = computeCanvas(count, options.columns, options.scale,
-                               options.show_titles, options.podium);
-    const limit = state.limits.max_dimension[options.fmt];
-    const over = size.width > limit || size.height > limit;
-    const readout = document.getElementById('exSize');
-    readout.classList.toggle('is-over', over);
-    readout.textContent = count
-        ? (size.width + ' × ' + size.height + 'px' + (over
-            ? ' — too tall for ' + options.fmt.toUpperCase() + ' (limit ' +
-              limit.toLocaleString() + 'px). Try more columns, half size, or PNG.'
-            : ''))
-        : 'Nothing tiered to export yet.';
-    document.getElementById('exportGo').disabled = over || !count;
-    clearTimeout(previewTimer);
-    if (!over && count) previewTimer = setTimeout(refreshPreview, 450);
+    // The form's own fields, exactly as the readout and the preview beside it
+    // were built from — so what is downloaded cannot be options nobody saw.
+    return Object.fromEntries(new FormData(document.getElementById('exportForm')));
 }
 
 async function downloadExport() {
@@ -145,7 +26,8 @@ async function downloadExport() {
     button.disabled = true;
     button.textContent = 'Rendering…';
     try {
-        const res = await fetch('/api/rankings/boards/' + encodeURIComponent(boardUid()) + '/export', {
+        const board = document.getElementById('rankerBoard').dataset.board;
+        const res = await fetch('/api/rankings/boards/' + encodeURIComponent(board) + '/export', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(exportOptions()),
         });
@@ -158,8 +40,7 @@ async function downloadExport() {
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
-        link.download = filenameFrom(res.headers.get('Content-Disposition')) ||
-            ('ranking.' + exportOptions().fmt);
+        link.download = filenameFrom(res.headers.get('Content-Disposition')) || 'ranking.webp';
         document.body.appendChild(link);
         link.click();
         link.remove();
@@ -172,24 +53,15 @@ async function downloadExport() {
         toast('Could not export.', false);
     } finally {
         button.textContent = 'Download';
-        // Through onExportChange rather than a plain re-enable, so a size that
-        // the format cannot hold stays refused instead of being re-armed by the
-        // act of having tried it.
-        onExportChange();
+        // THE SERVER DECIDES WHETHER IT MAY BE PRESSED AGAIN, not this: a size the
+        // chosen format cannot hold must stay refused rather than being re-armed
+        // by the act of having tried it. Asking the readout for itself is what
+        // draws the button back in whichever state this board's options leave it.
+        htmx.trigger('#exportForm', 'export-changed');
     }
 }
 
 function filenameFrom(disposition) {
     const match = /filename="([^"]+)"/.exec(disposition || '');
     return match ? match[1] : null;
-}
-
-async function copyMarkdown() {
-    try {
-        const data = await api(
-            '/api/rankings/boards/' + encodeURIComponent(boardUid()) + '/export/markdown',
-            'POST', exportOptions());
-        await navigator.clipboard.writeText(data.markdown);
-        toast('Copied ' + data.count + ' titles as Markdown.', true);
-    } catch (e) { toast(e.message || 'Could not copy.', false); }
 }

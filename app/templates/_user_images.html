@@ -1,0 +1,75 @@
+{% import '_confirm.html' as confirm_box %}
+{# THE PICTURES AN EXPORTED POSTER GRID CAN CARRY AT ITS TOP: seeing what is
+   saved, naming one, removing one, and adding one.
+
+   DRAWN BY THE SERVER, WHICH IS WHERE THEY LIVE. This was a client renderer over
+   /api/me/images: a card built with createElement per image, a rename posted on
+   the field's change, a delete, an upload, and a reload of the whole list after
+   each — with the cap, the name length and the positional default name all
+   restated in the browser. Every one of those is a fact the account already
+   holds, so each action posts itself and is answered with this list.
+
+   THE WHOLE LIST IS THE ANSWER, not the card that changed. A rename can change
+   what another card is called (clearing a name falls back to its position), and
+   an upload and a delete both change how many are left — so the list is the unit
+   that is always right.
+
+   Context: `images` ({uid, name}), `cap`, `name_cap`, `message` (a line to say
+   when something did not work). #}
+<div class="auth-list" id="imageLibrary" hx-target="#imageLibrary" hx-swap="outerHTML">
+    <div class="row">
+        <span class="label">Ranker images</span>
+        <span class="auth-hint">{{ images | length }} of {{ cap }} saved.</span>
+    </div>
+    <div class="row">
+        <div class="image-manager">
+            {%- if not images %}
+            <span class="auth-hint">Nothing saved yet.</span>
+            {%- endif %}
+            {%- for image in images %}
+            <div class="image-card">
+                <img src="/api/me/images/{{ image.uid }}" alt="{{ image.name }}">
+                {# ON CHANGE RATHER THAN ON EVERY KEYSTROKE: renaming is not worth
+                   a request per letter, and leaving the field is the moment
+                   somebody is done. #}
+                <input type="text" name="name" value="{{ image.name }}"
+                       maxlength="{{ name_cap }}" aria-label="Name for this image"
+                       autocomplete="off"
+                       hx-post="/me/images/{{ image.uid }}/name" hx-json-enc
+                       hx-trigger="change">
+                {% call confirm_box.ask('image-' ~ image.uid, 'Remove this image?',
+                                    'Remove', danger=true, face='btn-ghost tiny') %}
+                <button type="button" class="btn-primary small"
+                        hx-post="/me/images/{{ image.uid }}/delete" hx-json-enc>Remove</button>
+                {% endcall %}
+            </div>
+            {%- endfor %}
+        </div>
+    </div>
+    {%- if images | length < cap %}
+    <div class="row">
+        <div class="row-main">
+            {# THE FILE READ IS THE ONLY PART LEFT TO THE BROWSER: the shape guard
+               admits application/json alone, so the bytes reach the body as a
+               field (static/js/ui.js's `data-file-into`). The suggested name is
+               the file's own, which is also the browser's to know. #}
+            <input type="file" id="imageFile" form="imageUpload"
+                   accept="image/png,image/jpeg,image/webp,image/gif"
+                   data-file-into="#imageData" data-file-as="base64"
+                   data-file-name="#imageName" data-file-status="#imageError">
+            <input type="hidden" name="image_b64" id="imageData" form="imageUpload">
+            <input type="text" name="name" id="imageName" form="imageUpload"
+                   maxlength="{{ name_cap }}" placeholder="Name this picture"
+                   autocomplete="off">
+            <button class="btn-ghost tiny" type="submit" form="imageUpload">Save it</button>
+        </div>
+    </div>
+    {%- endif %}
+    <div class="row">
+        <span class="auth-error" id="imageError" role="alert">{{ message }}</span>
+    </div>
+    {# The upload's own form, empty because this page's other forms would
+       otherwise contain it: association by `form=` reaches exactly the controls
+       named, wherever they sit. #}
+    <form id="imageUpload" hidden hx-boost="false" hx-post="/me/images" hx-json-enc></form>
+</div>

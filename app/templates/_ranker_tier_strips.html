@@ -1,0 +1,11 @@
+{# EVERY TIER'S ARTWORK STRIP, REDRAWN, and nothing else.
+
+   ONE ANSWER FOR THE WHOLE BOARD rather than one request per tier: a drag can
+   move a title out of one tier and into another, so two of them change at once,
+   and asking for the board's tiers is one read either way.
+
+   ALL OF IT TRAVELS OUT OF BAND, so the request that asks for it swaps nothing
+   of its own (`hx-swap="none"` on the element that asks). A tier deleted since
+   the request went out simply matches no element. #}
+{% import '_ranker_tier_strip.html' as tier_strip %}
+{%- for category in categories %}{{ tier_strip.strip(category, oob=True) }}{% endfor %}

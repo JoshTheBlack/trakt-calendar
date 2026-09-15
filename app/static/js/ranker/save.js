@@ -1,9 +1,14 @@
 // Writing the board back: reading the current arrangement out of the DOM,
-// coalescing a run of drags into one request, and the two ways a save ends.
+// coalescing a run of drags into one request, the two ways a save ends, and the
+// one hook that makes every other action on this page safe to press mid-drag.
 
 let saveTimer = null;
-let saving = false;
+let inFlight = null;            // the write currently on the wire, so a flush can wait for it
 let dirty = false;
+
+// Coalesces a run of quick drags into one write, and is also the window in which
+// a pending arrangement can be lost — see the flush at the bottom of this file.
+const SAVE_DELAY_MS = 800;
 
 // ---------------------------------------------------------------------------
 // saving
@@ -51,26 +56,46 @@ function setSaveState(value) {
     el.textContent = { idle: '', saving: 'Saving…', saved: 'Saved', error: 'Not saved' }[value] || '';
 }
 
-// Coalesces a run of quick drags into one write. The delay is also what makes a
-// drag-drag-drag sequence cost one request rather than three.
 function scheduleSave() {
     dirty = true;
     setSaveState('saving');
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(saveNow, 800);
+    saveTimer = setTimeout(() => saveNow(), SAVE_DELAY_MS);
 }
 
+// Writes the arrangement if there is one to write, waiting for any write already
+// on the wire. ANSWERS WHETHER THE SERVER NOW HOLDS WHAT THIS PAGE SHOWS, which
+// is what the flush below needs: a 409 or a refusal answers false, and the caller
+// decides what that means for whatever it was about to do.
 async function saveNow() {
-    if (!state.board) return;
-    if (saving) { scheduleSave(); return; }
-    saving = true;
+    if (!state.board) return true;
+    while (inFlight) await inFlight;     // writeLayout never rejects
+    if (!dirty) return true;             // somebody else's flush already wrote it
+    clearTimeout(saveTimer);
     dirty = false;
+    inFlight = writeLayout();
     try {
-        const payload = readLayout();
+        return await inFlight;
+    } finally {
+        inFlight = null;
+    }
+}
+
+async function writeLayout() {
+    try {
         const data = await api('/api/rankings/boards/' + encodeURIComponent(boardUid()) + '/save',
-                               'POST', payload);
+                               'POST', readLayout());
         state.board.version = data.version;
         setSaveState(dirty ? 'saving' : 'saved');
+        // THE TIER HEADERS' ARTWORK IS THE SERVER'S VIEW OF WHAT EACH TIER HOLDS,
+        // and a drag, a nudge or the move menu has just changed that — so the
+        // strip drawn with the page is now describing an arrangement that no
+        // longer exists. Every other action on this page answers with the board
+        // and redraws them; these end in a save instead, so the save says the
+        // tiers moved and the markup beside them owns the address
+        // (_ranker_board_shell.html). Nothing on this side draws a strip.
+        htmx.trigger('#tierStripsRefresh', 'tiers-changed');
+        return true;
     } catch (e) {
         if (e.status === 409) {
             // Another tab saved first. Reloading is the honest answer: guessing
@@ -78,12 +103,11 @@ async function saveNow() {
             setSaveState('error');
             toast('This board changed in another tab — reloading it.', false);
             setTimeout(() => window.location.reload(), 1200);
-            return;
+            return false;
         }
         setSaveState('error');
         toast(e.message, false);
-    } finally {
-        saving = false;
+        return false;
     }
 }
 
@@ -106,19 +130,47 @@ function refreshCounts() {
     });
 }
 
-// Structural changes to the tiers themselves — created, renamed, recoloured —
-// change what the server renders, so the page comes back from the server rather
-// than being patched in two places that could then disagree.
-async function saveAndReload() {
-    setSaveState('saving');
-    try {
-        await api('/api/rankings/boards/' + encodeURIComponent(boardUid()) + '/save',
-                  'POST', readLayout());
-    } catch (e) { setSaveState('error'); toast(e.message, false); return; }
-    window.location.reload();
-}
+// ---------------------------------------------------------------------------
+// a pending drag, and everything else on this page
+// ---------------------------------------------------------------------------
+// EVERY ACTION HERE THAT IS NOT A DRAG NOW ANSWERS WITH THE BOARD REDRAWN, which
+// replaces the DOM the next save would have read its arrangement out of. A drag
+// made in the last SAVE_DELAY_MS and not yet written would simply be gone. So the
+// pending write is flushed FIRST, once, stated here rather than remembered at
+// each of the dozen controls that would otherwise have to.
+//
+// HOW A REQUEST IS HELD, READ IN THE VENDORED htmx RATHER THAN ASSUMED. The event
+// cannot do it: `htmx:before:request` is dispatched synchronously and its only
+// power is to CANCEL, with no way to re-issue what it cancelled — a listener that
+// returned a promise would be ignored. What can is the context's own `fetch`:
+// htmx sets `ctx.fetch ||= window.fetch.bind(window)` immediately BEFORE that
+// event and then calls `await ctx.fetch(...)`, reading the property at call time.
+// Wrapping it therefore holds the request for exactly as long as the save takes,
+// with htmx's own indicators and abort signal still in place.
+//
+// A FAILED SAVE ABORTS THE REQUEST. Throwing from the wrapper leaves htmx in its
+// catch with no swap at all, so a 409 gets the reload it asked for instead of a
+// freshly-drawn board landing on top of an arrangement the server has rejected.
+//
+// GETs ARE LET THROUGH. A read changes nothing this page would have to save
+// first, and holding the pool's paging sentinel — which fires while a drag is in
+// progress, because dragging scrolls it into view — behind a write would be the
+// one place this hook could make things worse.
+document.addEventListener('htmx:before:request', (event) => {
+    const ctx = event.detail && event.detail.ctx;
+    // The board on screen, not the board this file last read: these scripts stay
+    // resident across a boosted navigation, so on any other page there is nothing
+    // here to save.
+    if (!ctx || ctx.request.method === 'GET') return;
+    if (!state.board || !document.getElementById('rankerBoard')) return;
+    const send = ctx.fetch;
+    ctx.fetch = async (...args) => {
+        if (!await saveNow()) throw new Error('The board could not be saved first.');
+        return send(...args);
+    };
+});
 
 // A drag that has not been written yet must not leave with the tab.
 window.addEventListener('beforeunload', (event) => {
-    if (dirty || saving) { event.preventDefault(); event.returnValue = ''; }
+    if (dirty || inFlight) { event.preventDefault(); event.returnValue = ''; }
 });

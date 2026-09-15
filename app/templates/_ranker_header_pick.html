@@ -1,0 +1,68 @@
+{# THE PICTURE ACROSS THE TOP OF AN EXPORTED GRID: which one, and adding one.
+
+   THE CHOICES ARE THE SERVER'S. They used to be fetched from /api/me/images and
+   turned into <option>s in the browser, which meant the export dialog knew what a
+   saved image and a service picture are, how each one's value is spelled, and
+   what to do when one had been deleted since. The three prefixes are stated once
+   each — in `routes._header_choice`, which reads them back — and the pictures
+   themselves belong to the ACCOUNT rather than to a board, which is why the place
+   to name, see and remove them is the account page.
+
+   A CONNECTED SERVICE'S PICTURE IS A THIRD KIND OF CHOICE, listed ahead of the
+   saved ones because there are at most three and they need no naming — the
+   service IS the name — and because they count against no quota.
+
+   THE THUMBNAIL IS THE READOUT'S, delivered out of band when the options change
+   (_ranker_export_readout.html): "Beach photo" and "Beach photo 2" are not a
+   choice anybody can make from the words alone.
+
+   `chosen` is the value to select — set when this is redrawn after an upload, so
+   a picture somebody has just added is the one now in use.
+
+   Context: `board_uid`, `export_images`, `export_providers`, `export_image_cap`,
+   `export_name_cap`, and optionally `chosen`. #}
+<div class="field" id="exHeaderField">
+    <label for="exHeader">Header image</label>
+    <div class="ranker-header-pick">
+        <img id="exHeaderThumb" alt="" hidden>
+        <select id="exHeader" name="header_image" autocomplete="off">
+            <option value=""{% if not chosen %} selected{% endif %}>None</option>
+            <option value="avatar"{% if chosen == 'avatar' %} selected{% endif %}>My avatar</option>
+            {%- for name in export_providers %}
+            <option value="provider:{{ name }}"{% if chosen == 'provider:' ~ name %} selected{% endif %}>{{ name | capitalize }}</option>
+            {%- endfor %}
+            {%- for image in export_images %}
+            <option value="img:{{ image.uid }}"{% if chosen == 'img:' ~ image.uid %} selected{% endif %}>{{ image.name }}</option>
+            {%- endfor %}
+        </select>
+    </div>
+    <span class="hint">Name, view and remove saved images on your
+        <a href="/me">account page</a>. Uploading here saves it there too.</span>
+    {# UPLOADING IS THE ONE THING LEFT THAT IS THE BROWSER'S, and only the reading
+       part: the shape guard admits application/json alone, so the bytes reach the
+       body as a field. The name, the submit and the answer are the form's — and
+       the answer is this picker redrawn with the new picture chosen, plus an
+       `export-changed` event so the readout beside it follows.
+
+       THE CONTROLS NAME A FORM THAT SITS OUTSIDE THE ONE THEY ARE DRAWN IN. A
+       form cannot be nested in a form, and these have to sit beside the choice
+       they add to — so `form=` associates them with the empty element ranker.html
+       keeps for them, which also keeps them out of the export options' own GET. #}
+    {% if export_images | length < export_image_cap %}
+    <div class="ranker-header-upload">
+        <input type="file" id="exUpload" form="headerUpload"
+               accept="image/png,image/jpeg,image/webp,image/gif"
+               data-file-into="#exImageData" data-file-as="base64"
+               data-file-name="#exImageName" data-file-status="#exUploadStatus">
+        <input type="hidden" name="image_b64" id="exImageData" form="headerUpload">
+        <input type="text" name="name" id="exImageName" form="headerUpload"
+               maxlength="{{ export_name_cap }}" placeholder="Name this picture"
+               autocomplete="off">
+        <button type="submit" class="btn-ghost small" form="headerUpload">Save it</button>
+        <span class="hint" id="exUploadStatus">{{ message }}</span>
+    </div>
+    {% else %}
+    <span class="hint">You have all {{ export_image_cap }} saved pictures. Remove one on your
+        <a href="/me">account page</a> to add another.</span>
+    {% endif %}
+</div>

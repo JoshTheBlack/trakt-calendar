@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 from collections.abc import Mapping
 from typing import Any
 
@@ -130,6 +131,22 @@ def parse_item_key(value: Any) -> ItemKey:
 # ---------------------------------------------------------------------------
 # validation
 # ---------------------------------------------------------------------------
+
+def new_uid(prefix: str) -> str:
+    """A uid for something this server is about to create.
+
+    ISSUED HERE, NOT BY THE PAGE. A board's and a tier's uid used to be made up
+    in the browser and posted along with the name, which is a caller choosing the
+    identity of a row in their own data: two tabs could race for one name, and
+    the collision came back as "That board already exists." about a board nobody
+    had asked for. Nothing on the page ever needs a uid before the server answers
+    with one, so nothing on the page has any business inventing one.
+
+    The alphabet is `_UID`'s — `secrets.token_urlsafe` emits exactly [A-Za-z0-9_-]
+    — and prefix plus eleven characters is far inside MAX_UID_LENGTH.
+    """
+    return f"{prefix}-{secrets.token_urlsafe(8)}"
+
 
 def _uid(value: Any, what: str) -> str:
     if not isinstance(value, str) or not _UID.match(value):
@@ -934,6 +951,142 @@ async def delete_category(user_id: int, board_uid: str, category_uid: str) -> in
         )
         _touch(conn, board_id, user_id, db.now())
         return returned
+
+    return await db.transaction(_work)
+
+
+async def add_categories(user_id: int, board_uid: str,
+                         wanted: list[Mapping[str, Any]]) -> int:
+    """Create tiers on a board, skipping any uid it already has. Returns how many
+    were actually created.
+
+    ONE FUNCTION FOR "NEW TIER" AND FOR THE TEMPLATE, because they differ only in
+    how many entries they hand over: a template press is "create these six if they
+    are not here", and a new tier is "create this one". Skipping rather than
+    refusing is what makes a second template press a no-op instead of an error
+    about a tier the board legitimately already has.
+
+    APPENDED AFTER WHATEVER IS THERE, by sort_order. The board is DRAWN by
+    priority (routes._tiers_by_priority), so sort_order only breaks ties — but a
+    new tier arriving in the middle of two equal-priority ones would reshuffle a
+    board nobody asked to reshuffle.
+    """
+    entries = [
+        {
+            "uid": _uid(entry.get("uid"), "tier"),
+            "label": _name(entry.get("label"), MAX_CATEGORY_LABEL, "tier label"),
+            "rank_priority": _rank_priority(entry.get("rank_priority", 0)),
+            "colour": _colour(entry.get("colour")),
+        }
+        for entry in wanted
+    ]
+    ts = db.now()
+
+    def _work(conn: db.Connection) -> int:
+        board = _resolve_board(conn, user_id, board_uid)
+        board_id = int(board["id"])
+        existing = _category_ids(conn, board_id)
+        missing = [entry for entry in entries if entry["uid"] not in existing]
+        if not missing:
+            return 0
+        if len(existing) + len(missing) > MAX_CATEGORIES_PER_BOARD:
+            raise ValidationError(f"A board holds at most {MAX_CATEGORIES_PER_BOARD} tiers.")
+        order = int(conn.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM tier_categories WHERE board_id = ?",
+            (board_id,),
+        ).fetchone()[0])
+        for offset, entry in enumerate(missing):
+            conn.execute(
+                "INSERT INTO tier_categories (board_id, uid, label, rank_priority, "
+                "is_isolated, sort_order, colour, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?)",
+                (board_id, entry["uid"], entry["label"], entry["rank_priority"],
+                 order + offset, entry["colour"], ts),
+            )
+        _touch(conn, board_id, user_id, ts)
+        return len(missing)
+
+    return await db.transaction(_work)
+
+
+async def update_category(user_id: int, board_uid: str, category_uid: str, *,
+                          label: Any, rank_priority: Any, colour: Any,
+                          is_isolated: Any) -> None:
+    """Write one tier's own settings.
+
+    EVERY FIELD IS WRITTEN, not only the ones that changed, because this is the
+    whole of what the settings dialog holds: a field it does not send is a field
+    the reader cleared. `is_isolated` therefore arrives from a hidden companion
+    input rather than from the checkbox alone — an unchecked box sends nothing,
+    and "absent" here has to mean off rather than leave alone.
+    """
+    values = {
+        "label": _name(label, MAX_CATEGORY_LABEL, "tier label"),
+        "rank_priority": _rank_priority(rank_priority),
+        "colour": _colour(colour),
+        "is_isolated": int(bool(is_isolated)),
+    }
+
+    def _work(conn: db.Connection) -> None:
+        board = _resolve_board(conn, user_id, board_uid)
+        board_id = int(board["id"])
+        category_id = _category_ids(conn, board_id).get(_uid(category_uid, "tier"))
+        if category_id is None:
+            raise ValidationError(f"No tier {category_uid!r} on this board.")
+        conn.execute(
+            "UPDATE tier_categories SET label = ?, rank_priority = ?, colour = ?, "
+            "is_isolated = ? WHERE id = ? AND board_id = ?",
+            (*values.values(), category_id, board_id),
+        )
+        _touch(conn, board_id, user_id, db.now())
+
+    await db.transaction(_work)
+
+
+async def move_items(user_id: int, board_uid: str, keys: list[Any],
+                     category_uid: Any) -> int:
+    """Move titles into one tier, or back to the pool when `category_uid` is
+    empty. Returns how many moved.
+
+    APPENDED AFTER WHAT THE TIER ALREADY HOLDS, in the order the keys arrive, so
+    a bulk move reads as "these went to the bottom of A" rather than as a
+    reshuffle of A. The pool stores no order — every pooled title shares rank 0 —
+    so a move out of a tier has no position to give.
+
+    ONE UNKNOWN KEY REFUSES THE WHOLE MOVE, which is save_layout's rule and for
+    its reason: writing the part we understood leaves the board in a state the
+    caller did not ask for and cannot see.
+    """
+    wanted = [str(parse_item_key(key)) for key in keys]
+    if not wanted:
+        raise ValidationError("Nothing was selected to move.")
+    if len(set(wanted)) != len(wanted):
+        raise ValidationError("A title cannot be moved twice in one request.")
+    ts = db.now()
+
+    def _work(conn: db.Connection) -> int:
+        board = _resolve_board(conn, user_id, board_uid)
+        board_id = int(board["id"])
+        category_id = None
+        if category_uid:
+            category_id = _category_ids(conn, board_id).get(_uid(category_uid, "tier"))
+            if category_id is None:
+                raise ValidationError(f"No tier {category_uid!r} on this board.")
+        known = _item_ids(conn, board_id)
+        for name in wanted:
+            if name not in known:
+                raise ValidationError(f"No title {name!r} on this board.")
+        rank = 0
+        if category_id is not None:
+            rank = _next_ranks(conn, board_id, [category_id])[category_id]
+        for offset, name in enumerate(wanted):
+            conn.execute(
+                "UPDATE tier_items SET category_id = ?, rank_in_category = ? "
+                " WHERE id = ? AND board_id = ?",
+                (category_id, rank + offset if category_id is not None else 0,
+                 known[name], board_id),
+            )
+        _touch(conn, board_id, user_id, ts)
+        return len(wanted)
 
     return await db.transaction(_work)
 

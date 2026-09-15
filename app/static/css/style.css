@@ -1377,6 +1377,12 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
    would still jolt nothing — but the first version of this notice sat in the pool
    column and shrank, and everything beneath it juddered upward as it went. */
 .toast.is-flash { animation: toast-flash 4.2s ease forwards; }
+/* AN OFFER RATHER THAN A REPORT — the rankings board's removal, which draws an
+   Undo beside its sentence. It stays twice as long because it is something to
+   act on, and it takes pointer events back from the host (which has them off, so
+   a toast never sits over what is underneath it). The nine seconds used to be a
+   setTimeout in the browser. */
+.toast.is-flash.is-offer { animation-duration: 9s; pointer-events: auto; }
 /* A BUTTON INSIDE A TOAST — the rankings page's Undo. `.btn-ghost`'s own colours
    are for the dark page, and on a toast's green or red they all but vanish, so a
    toast's button takes the toast's white text and a white outline instead, on a
@@ -2321,12 +2327,22 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
    whether the list has anything in it is what keeps that free of script. */
 .ranker-results:not(:has(*)) { display: none; }
 
-/* ---- bulk selection ---- */
+/* ---- bulk selection ----
+   ALL OF IT IS THE CHECKBOX ON EACH ROW (_ranker_row.html). Whether the bar is
+   there, how many are picked and which rows are lit are three readings of that
+   one fact, so none of them needs a script to keep in step.
+
+   BELOW THE POOL, WHICH IS WHAT MAKES THE COUNT FREE: a CSS counter reads what
+   has been counted BEFORE it in the document, so a readout above the rows it
+   counts would always say nought. */
+.ranker-pool-col { counter-reset: picked; }
 .ranker-bulk {
-    display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px;
     padding: 7px 10px; border-radius: 10px; font-size: 0.78rem;
     background: rgba(232,181,69,0.12); border: 1px solid rgba(232,181,69,0.4);
 }
+.ranker-pool-col:not(:has(#rankerPool .ranker-pick:checked)) .ranker-bulk { display: none; }
+#poolSelectedCount::after { content: counter(picked) " selected"; }
 .ranker-bulk select {
     background: var(--card); border: 1px solid var(--card-border); color: var(--text);
     border-radius: 7px; padding: 5px 8px; font-family: inherit; font-size: 0.78rem;
@@ -2342,7 +2358,13 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 }
 .ranker-item:hover { border-color: rgba(232,181,69,0.5); }
 .ranker-item:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }
-.ranker-item.is-selected { border-color: var(--gold); background: rgba(232,181,69,0.14); }
+/* SCOPED TO THE POOL, which is also what clears a highlight the moment a picked
+   row is dragged into a tier — it stops being one of the pool's rows, so it stops
+   being one of the pool's selection. */
+#rankerPool .ranker-item:has(.ranker-pick:checked) {
+    border-color: var(--gold); background: rgba(232,181,69,0.14);
+    counter-increment: picked;
+}
 .ranker-grip { color: var(--text-faint); cursor: grab; line-height: 1; }
 .ranker-thumb {
     width: 46px; height: 69px; object-fit: cover; border-radius: 4px;
@@ -2408,9 +2430,11 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     border-radius: 11px; background: var(--card); margin-bottom: 8px; overflow: hidden;
 }
 .ranker-tier.is-isolated { border-style: dashed; }
+/* The right padding leaves room for the tier's own controls, which sit outside
+   the summary and are placed over it (.ranker-tier-acts). */
 .ranker-tier-head {
-    display: flex; align-items: center; gap: 10px; padding: 9px 12px; cursor: pointer;
-    list-style: none;
+    display: flex; align-items: center; gap: 10px; padding: 9px 56px 9px 12px;
+    cursor: pointer; list-style: none;
 }
 .ranker-tier-head::-webkit-details-marker { display: none; }
 .ranker-tier-head:hover { background: rgba(255,255,255,0.04); }
@@ -2423,7 +2447,13 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .ranker-iso { color: var(--accent-blue); }
 .ranker-strip { flex: 1; display: flex; gap: 2px; overflow: hidden; justify-content: flex-end; }
 .ranker-strip img { width: 24px; height: 36px; object-fit: cover; border-radius: 2px; }
-.ranker-tier-acts { display: flex; gap: 2px; }
+/* A TIER'S OWN CONTROLS SIT OUTSIDE ITS <summary> and are put back onto the
+   header line here. A click on a button inside a summary still toggles the
+   disclosure it is in, so ⚙ used to close the tier it was opened on unless an
+   inline handler stopped it; out here nothing has to. The offset is the header's
+   own vertical padding. */
+.ranker-tier-shell { position: relative; }
+.ranker-tier-acts { position: absolute; top: 9px; right: 12px; display: flex; gap: 2px; }
 .ranker-rows { padding: 4px 10px 10px; }
 
 /* ---- a fragment that failed: a gap with a way out, not a broken board ---- */
@@ -2433,18 +2463,40 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     background: rgba(232,181,69,0.1); border: 1px solid rgba(232,181,69,0.5); color: var(--gold-soft);
 }
 
-/* ---- move-to-tier menu ---- */
+/* ---- move-to-tier menu ----
+   A POPOVER, so the browser gives it the top layer, light-dismiss and Escape.
+   That means overriding the defaults it also gives it: `inset: 0` with
+   `margin: auto` centres one in the viewport, and the script that opens it sets
+   top/left instead (ranker/rows.js). In the top layer those are viewport
+   coordinates, which is why nothing has to add the page's scroll offset back. */
 .ranker-menu {
-    position: absolute; z-index: 9000; min-width: 150px; padding: 5px;
+    position: fixed; inset: auto; margin: 0; overflow: visible;
+    min-width: 150px; padding: 5px;
     background: var(--bg-panel); border: 1px solid var(--card-border);
     border-radius: 10px; box-shadow: 0 18px 40px rgba(0,0,0,0.6);
-    display: flex; flex-direction: column; gap: 2px;
+    color: var(--text);
 }
+.ranker-menu:popover-open { display: flex; flex-direction: column; gap: 2px; }
 .ranker-menu button {
     cursor: pointer; background: none; border: none; color: var(--text); text-align: left;
     padding: 6px 10px; border-radius: 6px; font-family: inherit; font-size: 0.8rem;
 }
 .ranker-menu button:hover { background: rgba(255,255,255,0.08); }
+
+/* ---- the seed's own confirmation, and the backup's line ----
+   The seed control turns into its question and back, one partial per state, the
+   way the calendar's "Add all" does. */
+.ranker-seed-confirm { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ranker-restore-status { font-size: 0.78rem; color: var(--text-dim); margin-top: 6px; }
+.ranker-restore-status:empty { display: none; }
+
+/* The header picture's upload, beside the choice it adds to. */
+.ranker-header-upload { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+.ranker-header-upload input[type="text"] {
+    flex: 1; min-width: 120px; background: var(--card); color: var(--text);
+    border: 1px solid var(--card-border); border-radius: 7px; padding: 5px 8px;
+    font-family: inherit; font-size: 0.78rem;
+}
 
 /* ---- saving indicator ---- */
 .ranker-save-state { font-size: 0.74rem; color: var(--text-faint); min-width: 54px; text-align: right; }

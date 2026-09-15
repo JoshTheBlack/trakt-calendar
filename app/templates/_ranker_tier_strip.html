@@ -1,0 +1,29 @@
+{# WHAT A TIER HOLDS, AS ARTWORK: the little row of posters in its header.
+
+   ONE RENDERER, TWO WAYS IN — the shell draws it inline with the tier, and
+   `_ranker_tier_strips.html` draws every one of them again out of band. A second
+   copy of this markup is how the strip and the tier would come to disagree about
+   what a tier holds, which is the thing this partial exists to keep from
+   happening.
+
+   IT IS A VIEW OF THE TIER'S CONTENTS, SO ONLY THE SERVER CAN DRAW IT. A drag, a
+   nudge and the move menu change which titles a tier holds without the server
+   hearing about it until the save lands, so the strip the page was rendered with
+   goes stale. Every action that answers with the board redraws it; the ones that
+   answer with a save ask for the fragment instead.
+
+   `oob` ADDRESSES IT BY SELECTOR RATHER THAN BY id, because there is one of these
+   per tier and an out-of-band swap needs to reach the right one. The value must
+   contain no space for htmx to read it as a style and a selector;
+   `.ranker-strip[data-tier='…']` has none, and a uid is `[A-Za-z0-9_-]` so it can
+   never close the quote. #}
+{% macro strip(category, oob=False) -%}
+<span class="ranker-strip" aria-hidden="true" data-tier="{{ category.uid }}"
+      {%- if oob %} hx-swap-oob="outerHTML:.ranker-strip[data-tier='{{ category.uid }}']"{% endif %}>
+    {%- for item in category['items'][:8] %}{% if item.tmdb %}
+    <img loading="lazy" width="24" height="36" alt=""
+         src="/api/rankings/poster?media={{ item.media }}&amp;tmdb={{ item.tmdb }}"
+         onerror="this.remove()">
+    {%- endif %}{% endfor %}
+</span>
+{%- endmacro %}

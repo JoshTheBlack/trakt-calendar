@@ -6,7 +6,9 @@
    EVERYTHING HERE IS SERVER-RENDERED AND USABLE WITHOUT SCRIPT. The pool's first
    page, every tier's header, and the rows of a board small enough to draw them
    all come down in the initial HTML. What JavaScript adds is dragging, saving
-   and the export modal — not the ability to see what is on a board. #}
+   and the export download — not the ability to see what is on a board, and no
+   longer the ability to change it. #}
+{% import '_ranker_tier_strip.html' as tier_strip %}
 <div class="ranker-board" id="rankerBoard" data-board="{{ board.uid }}">
 
     <section class="ranker-pool-col">
@@ -42,19 +44,20 @@
             </div>
             <div class="ranker-results" id="searchResults"></div>
 
-            {# ABSENT, NOT DISABLED. GET /api/rankings/sources answers by omitting
-               the keys for sources this account cannot use, and these controls
-               follow it exactly: an account with nothing to import from is not
-               shown an import button that would only ever refuse. #}
+            {# ABSENT, NOT DISABLED. `_sources` answers by omitting the keys for
+               sources this account cannot use, and these controls follow it
+               exactly: an account with nothing to import from is not shown an
+               import button that would only ever refuse. #}
             <div class="ranker-source-actions">
                 {% if sources.import %}
-                <button type="button" class="btn-ghost small" onclick="openImportModal()">
+                {# Opening the dialog is also what asks for its year list, so a
+                   page nobody imports from pays nothing for one. #}
+                <button type="button" class="btn-ghost small" data-modal-open="importModal"
+                        hx-get="/rankings/fragments/import-years?media=show"
+                        hx-target="#importYear" hx-swap="outerHTML">
                     ⬇ Import finished titles</button>
                 {% endif %}
-                {% if sources.ratings %}
-                <button type="button" class="btn-ghost small" onclick="seedFromRatings(false)">
-                    ★ Seed from ratings</button>
-                {% endif %}
+                {% if sources.ratings %}{% include "_ranker_seed.html" %}{% endif %}
             </div>
         </div>
 
@@ -65,29 +68,6 @@
         <details class="ranker-removed" id="rankerRemoved"{% if removals_open %} open{% endif %}>
             {% include "_ranker_removed.html" %}
         </details>
-        {# THE LIST'S REDRAW LIVES BESIDE IT, NOT ON THE <details> AROUND IT. It is
-           redrawn when the page says a title was removed (`removals-changed`, fired
-           by ranker/rows.js), so the address is markup and the script names only an
-           event. It is not on the <details> because this app turns attribute
-           inheritance on (static/js/boost.js), and htmx looks a request's verb up
-           through that inheritance — a Restore button inside an element carrying
-           hx-get would send that GET instead of its own POST. #}
-        <span id="rankerRemovedRefresh" hidden
-              hx-get="{{ removals_url }}" hx-trigger="removals-changed"
-              hx-target="#rankerRemoved" hx-swap="innerHTML"></span>
-
-        <div class="ranker-bulk" id="poolBulk" hidden>
-            <span id="poolSelectedCount">0 selected</span>
-            {# The same tiers as the move menu in ranker.html, rendered for the same
-               reason: they are the server's to list, not the browser's to rebuild. #}
-            <select id="bulkTarget" aria-label="Tier to move the selection into">
-                {%- for category in board.categories %}
-                <option value="{{ category.uid }}" data-tier-choice="{{ category.uid }}">{{ category.label or "Untitled" }}</option>
-                {%- endfor %}
-            </select>
-            <button type="button" class="btn-ghost small" onclick="moveSelectionToTier()">Move</button>
-            <button type="button" class="btn-ghost small" onclick="clearSelection()">Clear</button>
-        </div>
 
         {# The first page inline, the rest behind the sentinel below it.
            TWO ELEMENTS, NOT ONE: the scroller is what the sentinel needs to be
@@ -106,21 +86,65 @@
         <p class="ranker-empty" id="poolEmpty">Nothing waiting. Search above, or drag a
             title back out of a tier.</p>
         {% endif %}
+
+        {# THE BULK MOVE IS A FORM, AND THE SELECTION IS ITS FIELDS. Each pool row
+           carries a hidden checkbox named `pick:<key>` (_ranker_row.html); ticking
+           them is the one part of this that has to be script, because it is done
+           by ctrl- and shift-clicking rows. Everything else is the form's: Move
+           submits the ticked boxes plus the chosen tier, Clear is the form's own
+           reset, the bar shows itself through `:has(:checked)` and the count is a
+           CSS counter over the same question.
+
+           AN EMPTY FORM ELEMENT, WITH THE CONTROLS ASSOCIATED BY `form=`, rather
+           than one wrapped round the pool. A row's own ✕ posts itself, and htmx
+           sends the enclosing form's fields with any request from inside it — so
+           wrapping the rows would have put the whole selection in the body of
+           every removal. Association reaches exactly the controls named, wherever
+           they sit.
+
+           BELOW THE POOL RATHER THAN ABOVE IT, and that is what makes the count
+           free: a CSS counter reads whatever has been counted BEFORE it in the
+           document, so a readout above the rows it counts would always say nought. #}
+        <form id="poolForm" hidden hx-boost="false"></form>
+        <div class="ranker-bulk" id="poolBulk">
+            <span id="poolSelectedCount"></span>
+            {# The same tiers as the move menu in ranker.html, rendered for the same
+               reason: they are the server's to list, not the browser's to rebuild. #}
+            <select id="bulkTarget" name="tier" form="poolForm"
+                    aria-label="Tier to move the selection into">
+                {%- for category in board.categories %}
+                <option value="{{ category.uid }}" data-tier-choice="{{ category.uid }}">{{ category.label or "Untitled" }}</option>
+                {%- endfor %}
+            </select>
+            <button type="button" class="btn-ghost small" form="poolForm"
+                    hx-post="/rankings/boards/{{ board.uid }}/items/move" hx-json-enc
+                    hx-target="body" hx-swap="innerHTML">Move</button>
+            <button type="reset" class="btn-ghost small" form="poolForm">Clear</button>
+        </div>
     </section>
 
     <section class="ranker-tier-col">
         <div class="ranker-panel-head">
             <h2>Tiers</h2>
             <div class="ranker-panel-actions">
-                <button type="button" class="btn-ghost small" onclick="applyTierTemplate()"
-                        title="Add an S/A/B/C/D/F set, keeping any tiers you already have">
+                <button type="button" class="btn-ghost small"
+                        title="Add an S/A/B/C/D/F set, keeping any tiers you already have"
+                        hx-post="/rankings/boards/{{ board.uid }}/tiers/template" hx-json-enc
+                        hx-target="body" hx-swap="innerHTML">
                     ✨ Apply template</button>
-                <button type="button" class="btn-ghost small" onclick="addTier()">＋ New tier</button>
+                <button type="button" class="btn-ghost small" data-modal-open="newTierModal">
+                    ＋ New tier</button>
             </div>
         </div>
 
         <div id="rankerTiers">
             {% for category in board.categories %}
+            {# THE TIER'S OWN CONTROLS SIT BESIDE THE <summary>, NOT INSIDE IT, and
+               that is what took an inline `event.preventDefault()` off both of
+               them: a click on a button inside a summary still toggles the
+               disclosure it is in, so pressing ⚙ on an open tier used to close it.
+               They are placed back onto the header line by the stylesheet. #}
+            <div class="ranker-tier-shell">
             {# A closed tier draws its header, its count and a strip of its
                artwork, and fetches its rows on first open. `click once` on the
                summary is the whole mechanism: the tier opens natively and the
@@ -143,19 +167,7 @@
                             isolated</span>
                         {% endif %}
                     </span>
-                    <span class="ranker-strip" aria-hidden="true">
-                        {% for item in category['items'][:8] %}{% if item.tmdb %}
-                        <img loading="lazy" width="24" height="36" alt=""
-                             src="/api/rankings/poster?media={{ item.media }}&amp;tmdb={{ item.tmdb }}"
-                             onerror="this.remove()">
-                        {% endif %}{% endfor %}
-                    </span>
-                    <span class="ranker-tier-acts">
-                        <button type="button" class="ranker-act" title="Tier settings"
-                                onclick="event.preventDefault(); openTierModal('{{ category.uid }}')">⚙</button>
-                        <button type="button" class="ranker-act danger" title="Delete this tier"
-                                onclick="event.preventDefault(); deleteTier(this, '{{ category.uid }}')">✕</button>
-                    </span>
+                    {{ tier_strip.strip(category) }}
                 </summary>
                 {# Height reserved from the count the server already knows, so
                    opening a tier does not lurch the page while its rows arrive. #}
@@ -165,8 +177,36 @@
                     {% if rows_open %}{% with items = category['items'] %}{% include "_ranker_category_rows.html" %}{% endwith %}{% endif %}
                 </div>
             </details>
+            <span class="ranker-tier-acts">
+                {# THE SETTINGS DIALOG IS THE ANSWER, not a standing dialog filled
+                   in from the page's copy of the tier: the whole overlay arrives
+                   already open, swapped over the placeholder in ranker.html, so
+                   it can never be showing one tier's values while another's are on
+                   the way. #}
+                <button type="button" class="ranker-act" title="Tier settings"
+                        aria-label="Tier settings"
+                        hx-get="/rankings/fragments/tier-settings?{{ {'board': board.uid, 'tier': category.uid} | urlencode }}"
+                        hx-target="#tierSettings" hx-swap="outerHTML">⚙</button>
+                <button type="button" class="ranker-act danger" title="Delete this tier"
+                        aria-label="Delete this tier"
+                        onclick="deleteTier(this, '{{ category.uid }}')">✕</button>
+            </span>
+            </div>
             {% endfor %}
         </div>
+
+        {# THE HEADERS' ARTWORK, REDRAWN WHEN A SAVE SAYS THE TIERS MOVED.
+           A drag, a nudge and the move menu change which titles a tier holds
+           without the server hearing until the save lands, so the strip the page
+           was drawn with goes stale — every other action answers with the board
+           and redraws it. The address is markup and the page names only an event
+           (ranker/save.js), which is the shape the removal history's refresh
+           used; and it sits OUTSIDE the tier list, because this app turns
+           attribute inheritance on and htmx looks a request's verb up through it,
+           so an hx-get on an ancestor of the tiers would become the verb of every
+           control inside them. #}
+        <span id="tierStripsRefresh" hidden
+              hx-get="{{ strips_url }}" hx-trigger="tiers-changed" hx-swap="none"></span>
 
         {% if not board.categories %}
         <p class="ranker-empty">No tiers yet. Apply the template for an S/A/B/C/D/F

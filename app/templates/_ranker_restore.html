@@ -1,0 +1,9 @@
+{# WHY A RESTORE DID NOT HAPPEN, said in the panel it was asked from.
+
+   OUT OF BAND, AND THE ONLY THING IN THAT ANSWER. The form aims at the body,
+   because a restore that WORKS has replaced every board on the page and the whole
+   page has to come back from the server — but a refusal has changed nothing and
+   must not replace the page the reader is standing on. `swapEmpty:false` on the
+   form is what makes an answer whose entire content is out-of-band leave the body
+   alone, which is the pairing the tracker's own refusals use. #}
+<p class="ranker-restore-status" id="restoreStatus" hx-swap-oob="outerHTML">{{ message }}</p>

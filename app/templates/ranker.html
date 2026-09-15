@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 {% import '_head.html' as page with context %}
+{% import '_confirm.html' as confirm_box %}
 {% call page.head('Rankings' ~ (' – ' ~ (board.name or 'Untitled board') if board else ''),
                   scripts=assets.scripts('rankings'),
                   site_suffix=false) %}
@@ -30,20 +31,25 @@
                         ranker_available=ranker_available, is_admin=is_admin) %}
         <span class="ranker-save-state" id="saveState" data-state="idle"></span>
         {% if board %}
-        <button type="button" class="pill-btn" onclick="openExportModal()">🖼️ Export</button>
+        {# Opening the dialog and asking for its first readout are the same press:
+           the options are already in the page, so this GET is what turns them
+           into a size, a preview and a Download button in the right state. #}
+        <button type="button" class="pill-btn" data-modal-open="exportModal"
+                hx-get="/rankings/fragments/export?board={{ board.uid | urlencode }}"
+                hx-include="#exportForm" hx-target="#exportReadout"
+                hx-swap="innerHTML">🖼️ Export</button>
         {% endif %}
-        <button type="button" class="pill-btn" onclick="openBackupModal()">🗄️ Backup</button>
+        <button type="button" class="pill-btn" data-modal-open="backupModal">🗄️ Backup</button>
 {% endcall %}
 
-{# Everything the client needs about THIS board that the markup cannot carry:
-   the version a save has to echo back, every tier's settings, and the item keys
-   of tiers whose rows have not been drawn. It lives inside the swapped region so
-   a boosted board switch replaces it along with the board. #}
-<script id="rankerData" type="application/json">{{ {
-    "board": board_state, "sources": sources, "username": username,
-    "limits": export_limits, "template": tier_template,
-    "poolPageSize": pool_page_size
-} | tojson }}</script>
+{# THE ONE THING ABOUT THIS BOARD THE MARKUP CANNOT CARRY: the version a save has
+   to echo back, every tier's settings, and the item keys of tiers whose rows have
+   not been drawn. Everything else the page used to be handed — the export limits,
+   the tier template, the import years, the page size, the account's name — became
+   markup the server draws, because every one of them was a fact the browser was
+   given in order to build something with. It lives inside the swapped region so a
+   boosted board switch replaces it along with the board. #}
+<script id="rankerData" type="application/json">{{ {"board": board_state} | tojson }}</script>
 
 <div class="ranker-shell">
 
@@ -64,12 +70,26 @@
             {% endfor %}
         </span>
         {% endfor %}
+        {# EVERY ONE OF THESE POSTS ITSELF. A board's uid is the server's to issue
+           (ranker.new_uid), so making one is a name and nothing else; making,
+           cloning and deleting all land on the new address through HX-Location,
+           which is the same arrival a boosted link produces. #}
         <span class="ranker-board-tools">
-            <button type="button" class="btn-ghost small" onclick="newBoard()">＋ New board</button>
+            <button type="button" class="btn-ghost small" data-modal-open="newBoardModal">
+                ＋ New board</button>
             {% if board %}
-            <button type="button" class="btn-ghost small" onclick="renameBoard()">✎ Rename</button>
-            <button type="button" class="btn-ghost small" onclick="cloneBoard()">⧉ Clone</button>
-            <button type="button" class="btn-ghost small" onclick="deleteBoard(event)">🗑 Delete</button>
+            <button type="button" class="btn-ghost small" data-modal-open="renameBoardModal">
+                ✎ Rename</button>
+            <button type="button" class="btn-ghost small"
+                    hx-post="/rankings/boards/{{ board.uid }}/clone" hx-json-enc
+                    hx-target="body" hx-swap="innerHTML">⧉ Clone</button>
+            {% call confirm_box.ask('board-delete',
+                                'Delete this board and everything on it? This cannot be undone.',
+                                '🗑 Delete', danger=true) %}
+            <button type="button" class="btn-primary small"
+                    hx-post="/rankings/boards/{{ board.uid }}/delete" hx-json-enc
+                    hx-target="body" hx-swap="innerHTML">Delete</button>
+            {% endcall %}
             {% endif %}
         </span>
     </nav>
@@ -81,7 +101,7 @@
         <h2>No board open</h2>
         <p>Make a board to start ranking. Each one has its own pool of titles and
             its own tiers, so "Top Movies" and "Top Drama" can happily coexist.</p>
-        <button type="button" class="btn-primary" onclick="newBoard()">Create a board</button>
+        <button type="button" class="btn-primary" data-modal-open="newBoardModal">Create a board</button>
     </div>
     {% endif %}
 </div>
@@ -90,11 +110,14 @@
    ITS CHOICES ARE MARKUP. Which tiers a board has, and in what order, is the
    server's to say — the same list and the same order the board is drawn in — so
    they are rendered here rather than rebuilt in the browser each time the menu
-   opens. What is left to script (ranker/rows.js) is which row the menu was opened
-   from and where on the screen it appears, which are a click and a measurement.
-   `data-tier-choice` marks every control naming a tier, so deleting a tier
-   without a reload removes its choices in one step (ranker/tiers.js). #}
-<div class="ranker-menu" id="moveMenu" hidden>
+   opens. `data-tier-choice` marks every control naming a tier, so deleting a tier
+   without a reload removes its choices in one step (ranker/tiers.js).
+
+   A POPOVER, which is what deleted the document-wide click listener that used to
+   close it: the browser gives an `auto` popover light-dismiss, Escape and the top
+   layer for nothing. What is left to script is which row it was opened from and
+   where on the screen it goes — a click and a measurement (ranker/rows.js). #}
+<div class="ranker-menu" id="moveMenu" popover>
     {%- if board %}
     <button type="button" data-move-to="">Pool (unranked)</button>
     {%- for category in board.categories %}
@@ -108,170 +131,239 @@
    the document. #}
 {% include "_details_modal.html" %}
 
+{# ---- Where a tier's settings dialog lands ----
+   A placeholder, not a dialog: the ⚙ button fetches the whole overlay and swaps
+   it over this, so what is on screen is always the tier that was asked about. #}
+<div id="tierSettings" hidden></div>
+
 {# ---- What the request that drew this page did ----
-   A restore answers with this whole page, so what it did is said by the page —
-   in the same floating toast the page's scripts show (static/js/ui.js's toast),
-   drawn by the server and faded by the stylesheet (`.toast.is-flash`).
-   FLOATING, NOT IN THE POOL COLUMN, and that is a correction: it was first drawn
-   above the removal history and shrank itself away, which dragged everything
-   under it upward as it went. #toastHost is out of the page's flow, so the toast
-   arriving and leaving moves nothing. #}
-{% if notice %}<div id="toastHost"><div class="toast {{ 'ok' if notice_ok else 'err' }} is-flash" role="status">{{ notice }}</div></div>{% endif %}
+   EVERY ACTION ON THIS PAGE ANSWERS WITH THE PAGE, so what it did is said by the
+   page — in the same floating toast static/js/ui.js shows, drawn by the server
+   and faded by the stylesheet (`.toast.is-flash`). #toastHost is out of the
+   page's flow, so a toast arriving and leaving moves nothing.
 
-{# ---- Asking the user something ----
-   ONE dialog for "type a name" and for "are you sure", so nothing on this page
-   reaches for the browser's own prompt()/confirm(). Those block the page, cannot
-   be styled to look like anything else here, and a browser that suppresses them
-   leaves a board that simply cannot be named. #}
-<div class="modal-overlay" id="askModal" onclick="if (event.target === this) closeAsk(null)">
+   A REMOVAL'S TOAST CARRIES AN UNDO, AND IT IS THE REMOVAL HISTORY'S OWN BUTTON:
+   the same route, the same key, the same answer. The nine-second offer that used
+   to be built and timed in the browser is the stylesheet's animation now. #}
+{% if notice %}
+<div id="toastHost">
+    <div class="toast {{ 'ok' if notice_ok else 'err' }} is-flash{{ ' is-offer' if undo_key }}"
+         role="status">{{ notice }}
+        {%- if undo_key and board %}
+        <button type="button" class="btn-ghost small"
+                hx-post="/rankings/boards/{{ board.uid }}/removals/restore"
+                hx-json-enc hx-vals='{{ {"key": undo_key} | tojson }}'
+                hx-trigger="click" hx-target="body" hx-swap="innerHTML">Undo</button>
+        {%- endif %}
+    </div>
+</div>
+{% endif %}
+
+{# ---- Naming a board, and naming a tier ----
+   Two small forms rather than one dialog the page filled in and read back: each
+   posts itself, and the value it carries is the only thing it has ever held. #}
+<div class="modal-overlay" id="newBoardModal">
     <div class="modal">
-        <div class="modal-head"><h2 id="askTitle"></h2>
-            <button type="button" class="modal-close" onclick="closeAsk(null)">×</button></div>
-        <div class="modal-body">
-            <p class="hint" id="askMessage" hidden></p>
-            <div class="field" id="askField">
-                <label for="askInput" id="askLabel">Name</label>
-                <input type="text" id="askInput" maxlength="60" autocomplete="off">
+        <div class="modal-head"><h2>New board</h2>
+            <button type="button" class="modal-close" data-modal-close="newBoardModal">×</button></div>
+        <form hx-post="/rankings/boards/new{% if board %}?board={{ board.uid | urlencode }}{% endif %}"
+              hx-json-enc hx-boost="false" hx-target="body" hx-swap="innerHTML">
+            <div class="modal-body">
+                <div class="field"><label for="newBoardName">Name</label>
+                    <input type="text" id="newBoardName" name="name" maxlength="60"
+                           autocomplete="off" autofocus></div>
             </div>
-        </div>
-        <div class="modal-foot">
-            <button type="button" class="btn-ghost" onclick="closeAsk(null)">Cancel</button>
-            <button type="button" class="btn-primary" id="askOk" onclick="submitAsk()">OK</button>
-        </div>
+            <div class="modal-foot">
+                <button type="button" class="btn-ghost" data-modal-close="newBoardModal">Cancel</button>
+                <button type="submit" class="btn-primary">Create</button>
+            </div>
+        </form>
     </div>
 </div>
 
-{# ---- Tier settings ---- #}
-<div class="modal-overlay" id="tierModal" onclick="if (event.target === this) closeTierModal()">
+{% if board %}
+<div class="modal-overlay" id="renameBoardModal">
     <div class="modal">
-        <div class="modal-head"><h2>Tier</h2>
-            <button type="button" class="modal-close" onclick="closeTierModal()">×</button></div>
-        <div class="modal-body">
-            <div class="field"><label for="tierLabel">Label</label>
-                <input type="text" id="tierLabel" maxlength="40"></div>
-            <div class="field"><label for="tierPriority">Ranking priority</label>
-                <input type="number" id="tierPriority" min="0" max="1000" step="1">
-                <span class="hint">Higher tiers rank above lower ones in a consolidated
-                    export. Ties fall back to the order the tiers are in.</span></div>
-            <div class="field"><label for="tierColour">Colour</label>
-                <input type="color" id="tierColour" value="#E8B545">
-                <span class="hint">Tints this tier's rank numbers in the exported image.</span></div>
-            <div class="field checkbox">
-                <input type="checkbox" id="tierIsolated">
-                <label for="tierIsolated">Isolated — keep out of the consolidated ranking</label></div>
-        </div>
-        <div class="modal-foot">
-            <button type="button" class="btn-ghost" onclick="closeTierModal()">Cancel</button>
-            <button type="button" class="btn-primary" onclick="saveTierSettings()">Save tier</button>
-        </div>
+        <div class="modal-head"><h2>Rename board</h2>
+            <button type="button" class="modal-close" data-modal-close="renameBoardModal">×</button></div>
+        <form hx-post="/rankings/boards/{{ board.uid }}/rename" hx-json-enc hx-boost="false"
+              hx-target="body" hx-swap="innerHTML">
+            <div class="modal-body">
+                <div class="field"><label for="renameBoardName">Name</label>
+                    <input type="text" id="renameBoardName" name="name" maxlength="60"
+                           value="{{ board.name or '' }}" autocomplete="off" autofocus></div>
+            </div>
+            <div class="modal-foot">
+                <button type="button" class="btn-ghost" data-modal-close="renameBoardModal">Cancel</button>
+                <button type="submit" class="btn-primary">Rename</button>
+            </div>
+        </form>
     </div>
 </div>
+
+<div class="modal-overlay" id="newTierModal">
+    <div class="modal">
+        <div class="modal-head"><h2>New tier</h2>
+            <button type="button" class="modal-close" data-modal-close="newTierModal">×</button></div>
+        <form hx-post="/rankings/boards/{{ board.uid }}/tiers/new" hx-json-enc hx-boost="false"
+              hx-target="body" hx-swap="innerHTML">
+            <div class="modal-body">
+                <div class="field"><label for="newTierLabel">Label</label>
+                    <input type="text" id="newTierLabel" name="label" maxlength="40"
+                           autocomplete="off" autofocus></div>
+            </div>
+            <div class="modal-foot">
+                <button type="button" class="btn-ghost" data-modal-close="newTierModal">Cancel</button>
+                <button type="submit" class="btn-primary">Add tier</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endif %}
 
 {# ---- Import finished titles ----
    Rendered ONLY when the account actually has this source, exactly as its button
    is. "Absent, not disabled" has to mean absent from the markup: leaving the
    dialog in the page for an account that cannot use it would advertise a feature
-   the sources endpoint deliberately declines to mention. #}
-{% if sources.import %}
-<div class="modal-overlay" id="importModal" onclick="if (event.target === this) closeImportModal()">
+   `_sources` deliberately declines to mention. #}
+{% if board and sources.import %}
+<div class="modal-overlay" id="importModal">
     <div class="modal">
         <div class="modal-head"><h2>Import finished titles</h2>
-            <button type="button" class="modal-close" onclick="closeImportModal()">×</button></div>
-        <div class="modal-body">
-            <div class="field"><label for="importMedia">What to import</label>
-                <select id="importMedia" onchange="refreshImportYears()">
-                    <option value="show">Shows</option>
-                    <option value="movie">Movies</option>
-                </select></div>
-            <div class="field"><label for="importYear">Finished during</label>
-                <select id="importYear"><option value="">Any year</option></select>
-                <span class="hint">The year you finished it, not the year it came
-                    out — "what I watched in 2026" is a different list.</span></div>
-        </div>
-        <div class="modal-foot">
-            <button type="button" class="btn-ghost" onclick="closeImportModal()">Cancel</button>
-            <button type="button" class="btn-primary" id="importGo" onclick="runImport()">Import</button>
-        </div>
+            <button type="button" class="modal-close" data-modal-close="importModal">×</button></div>
+        <form hx-post="/rankings/boards/{{ board.uid }}/import" hx-json-enc hx-boost="false"
+              hx-target="body" hx-swap="innerHTML">
+            <div class="modal-body">
+                <div class="field"><label for="importMedia">What to import</label>
+                    {# The year list follows the medium, because only the server
+                       knows which years this account has anything in.
+                       `hx-json-enc="false"` IS LOAD-BEARING AND WAS MEASURED: the
+                       extension is activated by an attribute it looks up through
+                       inheritance, so a GET inside a json-enc form inherits it —
+                       and a GET has no body to encode (htmx moves its fields onto
+                       the address and sets the body to null), which the encoder
+                       walks and throws on. The request is then aborted with
+                       nothing but a console line to say so. A read inside a
+                       writing form has to opt out. #}
+                    <select id="importMedia" name="media" hx-json-enc="false"
+                            hx-get="/rankings/fragments/import-years"
+                            hx-trigger="change" hx-target="#importYear" hx-swap="outerHTML">
+                        <option value="show">Shows</option>
+                        <option value="movie">Movies</option>
+                    </select></div>
+                <div class="field"><label for="importYear">Finished during</label>
+                    {% with years = [] %}{% include "_ranker_import_years.html" %}{% endwith %}
+                    <span class="hint">The year you finished it, not the year it came
+                        out — "what I watched in 2026" is a different list.</span></div>
+            </div>
+            <div class="modal-foot">
+                <button type="button" class="btn-ghost" data-modal-close="importModal">Cancel</button>
+                <button type="submit" class="btn-primary" id="importGo">Import</button>
+            </div>
+        </form>
     </div>
 </div>
 {% endif %}
 
-{# ---- Export ---- #}
-<div class="modal-overlay" id="exportModal" onclick="if (event.target === this) closeExportModal()">
+{# ---- Export ----
+   THE OPTIONS ARE A FORM AND EVERY CHOICE IN IT IS THE SERVER'S: the column
+   counts and sizes it accepts, each format with the ceiling it refuses at, this
+   board's tiers, and the pictures this account owns. The form asks for its own
+   readout as it is changed — a GET, because it changes nothing — and the answer
+   carries the size, the preview, the Markdown and the Download button's state.
+
+   THE DOWNLOAD STAYS A POST AND STAYS SCRIPT. `export_grid` spends a per-account
+   cooldown, and SameSite=Lax cookies ride a top-level GET navigation, so as a GET
+   a link somewhere else could spend it for whoever followed it. A POST that saves
+   a file is the one thing here a browser has to do. #}
+{% if board %}
+<div class="modal-overlay" id="exportModal">
     <div class="modal wide">
         <div class="modal-head"><h2>Export a poster grid</h2>
-            <button type="button" class="modal-close" onclick="closeExportModal()">×</button></div>
+            <button type="button" class="modal-close" data-modal-close="exportModal">×</button></div>
         <div class="modal-body ranker-export-body">
-            <div class="ranker-export-opts">
+            <form class="ranker-export-opts" id="exportForm" hx-boost="false"
+                  hx-get="/rankings/fragments/export?board={{ board.uid | urlencode }}"
+                  hx-trigger="input delay:450ms, change delay:450ms, submit, export-changed from:body"
+                  hx-target="#exportReadout" hx-swap="innerHTML"
+                  hx-sync="this:replace">
                 <div class="field"><label for="exTitle">Title</label>
-                    <input type="text" id="exTitle" maxlength="80" oninput="onExportChange()"></div>
+                    <input type="text" id="exTitle" name="title" maxlength="{{ max_export_text }}"
+                           value="{{ export_title }}" autocomplete="off"></div>
                 <div class="field"><label for="exUser">Name</label>
-                    <input type="text" id="exUser" maxlength="80" oninput="onExportChange()"></div>
+                    <input type="text" id="exUser" name="username" maxlength="{{ max_export_text }}"
+                           value="{{ username }}" autocomplete="off"></div>
                 <div class="ranker-opt-row">
                     <div class="field"><label for="exTopX">Top X</label>
-                        <input type="number" id="exTopX" min="1" max="100" value="25"
-                               oninput="onExportChange()"></div>
+                        <input type="number" id="exTopX" name="top_x" min="1"
+                               max="{{ max_top_x }}" value="25"></div>
                     <div class="field"><label for="exCols">Columns</label>
-                        <select id="exCols" onchange="onExportChange()"></select></div>
+                        <select id="exCols" name="columns" autocomplete="off">
+                            {%- for n in export_columns %}
+                            <option value="{{ n }}"{% if n == 5 %} selected{% endif %}>{{ n }} columns</option>
+                            {%- endfor %}
+                        </select></div>
                 </div>
                 <div class="ranker-opt-row">
                     <div class="field"><label for="exScope">Scope</label>
-                        <select id="exScope" onchange="onExportChange()">
+                        <select id="exScope" name="scope">
                             <option value="global">All tiers, consolidated</option>
+                            {%- for category in board.categories %}
+                            <option value="cat:{{ category.uid }}" data-tier-choice="{{ category.uid }}">Only: {{ category.label or "Untitled" }}</option>
+                            {%- endfor %}
                         </select></div>
                     <div class="field"><label for="exScale">Size</label>
-                        <select id="exScale" onchange="onExportChange()">
+                        <select id="exScale" name="scale">
                             <option value="1">Full</option>
                             <option value="0.5">Half — for attachment limits</option>
                         </select></div>
                 </div>
                 <div class="field"><label for="exFmt">Format</label>
-                    <select id="exFmt" onchange="onExportChange()"></select></div>
-                <div class="field"><label for="exHeader">Header image</label>
-                    <div class="ranker-header-pick">
-                        {# The picture beside the name, because "Beach photo" and
-                           "Beach photo 2" are not a choice anybody can make from
-                           the words alone. #}
-                        <img id="exHeaderThumb" alt="" hidden>
-                        <select id="exHeader" onchange="onExportChange()">
-                            <option value="">None</option>
-                            <option value="avatar">My avatar</option>
-                        </select>
-                    </div>
-                    <span class="hint">Name, view and remove saved images on your
-                        <a href="/me">account page</a>. Uploading here saves it there too.</span>
-                    <input type="file" id="exUpload" accept="image/*" onchange="uploadHeaderImage(this)">
-                </div>
+                    {# Each format's ceiling is stated where it is chosen, so the
+                       hard refusal is something the reader was already warned
+                       about rather than a surprise. #}
+                    <select id="exFmt" name="fmt">
+                        {%- for fmt in export_formats %}
+                        <option value="{{ fmt.value }}"
+                                title="Maximum {{ fmt.limit }}px in either direction.">{{ fmt.label }}</option>
+                        {%- endfor %}
+                    </select></div>
+                {% include "_ranker_header_pick.html" %}
                 <div class="ranker-opt-row">
                     <div class="field checkbox"><input type="checkbox" id="exTitles"
-                        onchange="onExportChange()"><label for="exTitles">Show titles</label></div>
+                        name="show_titles" value="1"><label for="exTitles">Show titles</label></div>
                     <div class="field checkbox"><input type="checkbox" id="exPodium"
-                        onchange="onExportChange()"><label for="exPodium">Podium top 3</label></div>
+                        name="podium" value="1"><label for="exPodium">Podium top 3</label></div>
                 </div>
-                {# The live readout mirrors the renderer's own geometry, so the
-                   hard refusal on the way in is a backstop rather than the first
-                   time anybody hears the canvas is too big. #}
-                <p class="ranker-size" id="exSize"></p>
-            </div>
+            </form>
+            {# The header upload's own form, empty and outside the options form
+               because a form cannot be nested in a form — see
+               _ranker_header_pick.html, whose controls name it. #}
+            <form id="headerUpload" hidden hx-boost="false"
+                  hx-post="/rankings/boards/{{ board.uid }}/header-image" hx-json-enc
+                  hx-target="#exHeaderField" hx-swap="outerHTML"></form>
             <div class="ranker-export-preview">
-                {# Click to see it at rendered size and move the pointer to look
-                   around it — the header is a few percent of a tall grid, and
-                   shrunk into this column it cannot be judged at all. #}
-                <div class="ranker-preview-frame" id="exPreview"
-                     onclick="togglePreviewZoom()" onmousemove="panPreview(event)"
-                     title="Click to zoom, then move the pointer to look around">
-                    <span class="ranker-preview-hint">Preview appears here.</span>
+                <div id="exportReadout">
+                    <p class="ranker-size" id="exSize"></p>
+                    <div class="ranker-preview-frame" id="exPreview">
+                        <span class="ranker-preview-hint">Preview appears here.</span>
+                    </div>
                 </div>
                 <p class="hint">Click the preview to zoom in.</p>
             </div>
         </div>
         <div class="modal-foot">
-            <button type="button" class="btn-ghost" onclick="copyMarkdown()">📋 Copy as Markdown</button>
-            <button type="button" class="btn-ghost" onclick="closeExportModal()">Close</button>
-            <button type="button" class="btn-primary" id="exportGo" onclick="downloadExport()">Download</button>
+            {# Copying is `data-copy` and nothing else (static/js/ui.js): the text
+               rides down with the readout, and writing the clipboard is the only
+               part of copying a browser has to do. #}
+            <button type="button" class="btn-ghost" data-copy="#exportMarkdown">📋 Copy as Markdown</button>
+            <button type="button" class="btn-ghost" data-modal-close="exportModal">Close</button>
+            <button type="button" class="btn-primary" id="exportGo"
+                    onclick="downloadExport()" disabled>Download</button>
         </div>
     </div>
 </div>
+{% endif %}
 
 {# ---- Backup ----
    Every board, tier and title as one file. Restore REPLACES rather than merges,
@@ -279,10 +371,10 @@
    by dragging something back — hence the typed acknowledgement, which is
    deliberately more friction than a confirmation somebody can dismiss by reflex.
    Same shape the other backup screen in this app uses. #}
-<div class="modal-overlay" id="backupModal" onclick="if (event.target === this) closeBackupModal()">
+<div class="modal-overlay" id="backupModal">
     <div class="modal">
         <div class="modal-head"><h2>Backup</h2>
-            <button type="button" class="modal-close" onclick="closeBackupModal()">×</button></div>
+            <button type="button" class="modal-close" data-modal-close="backupModal">×</button></div>
         <div class="modal-body">
             <p class="hint">Every board you have, its tiers and everything in them, as one
                 file. It holds no credentials and nobody else's data. Profile and header
@@ -304,20 +396,32 @@
                 <p class="hint warn">This <strong>replaces</strong> every board here
                     with the ones in the file. What is here now is not recoverable
                     afterwards unless you downloaded it first.</p>
-                <input type="file" id="backupFile" accept="application/json,.json"
-                       onchange="onBackupFileChosen(this)">
-                <div id="backupConfirm" hidden>
-                    <label for="backupAck">Type <code>REPLACE MY BOARDS</code> to confirm:</label>
-                    <input type="text" id="backupAck" spellcheck="false" autocomplete="off"
-                           placeholder="REPLACE MY BOARDS" oninput="onBackupAckInput()">
-                </div>
-                <p class="hint" id="backupStatus"></p>
+                {# THE FORM AIMS AT THE BODY because a restore that works has
+                   replaced every board and the page has to come back from the
+                   server. `swapEmpty:false` is what lets a REFUSAL answer with
+                   nothing but the line below, out of band, and leave the page
+                   standing. #}
+                <form hx-post="/api/rankings/restore" hx-json-enc hx-boost="false"
+                      hx-target="body" hx-swap="innerHTML swapEmpty:false">
+                    {# THE ONE THING ONLY THE BROWSER CAN DO: read a chosen file.
+                       The shape guard admits application/json alone — a
+                       cross-origin multipart upload is exactly what it exists to
+                       refuse — so the text has to reach the body through a field. #}
+                    <input type="file" id="backupFile" accept="application/json,.json"
+                           data-file-into="#backupPayload" data-file-status="#restoreStatus"
+                           data-file-count="boards:board">
+                    <input type="hidden" name="payload" id="backupPayload">
+                    <label for="backupAck">Type <code>{{ restore_ack }}</code> to confirm:</label>
+                    <input type="text" id="backupAck" name="ack" spellcheck="false"
+                           autocomplete="off" placeholder="{{ restore_ack }}"
+                           required pattern="{{ restore_ack }}">
+                    <button type="submit" class="btn-primary small">Replace my boards</button>
+                </form>
+                <p class="ranker-restore-status" id="restoreStatus"></p>
             </div>
         </div>
         <div class="modal-foot">
-            <button type="button" class="btn-ghost" onclick="closeBackupModal()">Close</button>
-            <button type="button" class="btn-primary" id="backupGo"
-                    onclick="restoreBoardsBackup()" disabled>Replace my boards</button>
+            <button type="button" class="btn-ghost" data-modal-close="backupModal">Close</button>
         </div>
     </div>
 </div>

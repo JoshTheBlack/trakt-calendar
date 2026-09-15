@@ -37,6 +37,7 @@ RANKER_TEMPLATES = (
     "_ranker_pool_rows.html", "_ranker_pool_sentinel.html",
     "_ranker_category_rows.html", "_ranker_row.html", "_ranker_failed.html",
     "_ranker_removed.html", "_ranker_search_results.html",
+    "_ranker_tier_strip.html", "_ranker_tier_strips.html",
 )
 
 # Markup that belongs to a whole page and must never appear in a fragment: a
@@ -247,7 +248,8 @@ class TierChoicesAreMarkupTests(FragmentTestCase):
     def test_the_move_menu_offers_the_pool_and_every_tier_in_board_order(self):
         self.board_with(tiered=1)
         html = self.client.get("/rankings").text
-        menu = re.search(r'<div class="ranker-menu" id="moveMenu" hidden>(.*?)</div>', html, re.S).group(1)
+        menu = re.search(r'<div class="ranker-menu" id="moveMenu" popover>(.*?)</div>',
+                         html, re.S).group(1)
         self.assertEqual(re.findall(r'data-move-to="([^"]*)"', menu), ["", "tier-s"])
         self.assertIn(">Pool (unranked)</button>", menu)
 
@@ -258,18 +260,24 @@ class TierChoicesAreMarkupTests(FragmentTestCase):
         self.assertEqual(re.findall(r'<option value="([^"]*)"', select), ["tier-s"])
 
     def test_every_tier_choice_is_marked_so_a_deleted_tier_can_take_its_choices_away(self):
+        """Three of them now: the move menu, the bulk-move list and the export
+        dialog's scope, which is drawn with the page rather than built when the
+        dialog opens."""
         self.board_with(tiered=1)
         html = self.client.get("/rankings").text
-        self.assertEqual(html.count('data-tier-choice="tier-s"'), 2)
+        self.assertEqual(html.count('data-tier-choice="tier-s"'), 3)
         tiers = (STATIC_DIR / "js" / "ranker" / "tiers.js").read_text(encoding="utf-8")
         self.assertIn("[data-tier-choice=", tiers)
 
     def test_no_script_builds_the_tier_choices(self):
-        selection = (STATIC_DIR / "js" / "ranker" / "selection.js").read_text(encoding="utf-8")
         rows = (STATIC_DIR / "js" / "ranker" / "rows.js").read_text(encoding="utf-8")
-        self.assertNotIn("createElement('option')", selection)
-        menu = rows[rows.index("function openMoveMenu"):rows.index("function closeMoveMenu")]
+        menu = rows[rows.index("function openMoveMenu"):rows.index("async function moveRowTo")]
         self.assertNotIn("createElement", menu)
+        for name in ("selection.js", "export.js"):
+            source = (STATIC_DIR / "js" / "ranker" / name).read_text(encoding="utf-8")
+            with self.subTest(script=name):
+                self.assertNotIn("createElement('option')", source)
+                self.assertNotIn("new Option(", source)
 
 
 class PoolSentinelPlacementTests(FragmentTestCase):
@@ -474,8 +482,8 @@ class DropTargetTests(FragmentTestCase):
 
 
 class NoBrowserDialogTests(FragmentTestCase):
-    """This page asks for a name and asks to confirm through its own dialog, never
-    through the browser's.
+    """This page asks for a name and asks to confirm in markup, never through the
+    browser's own dialogs.
 
     prompt()/confirm()/alert() block the page, cannot be styled to match anything
     around them, and a browser set to suppress them turns "name your board" into
@@ -498,11 +506,17 @@ class NoBrowserDialogTests(FragmentTestCase):
                         f"{script.name} calls {name}(); ask() is the in-page replacement",
                     )
 
-    def test_the_page_carries_the_dialog_that_replaces_them(self):
+    def test_the_page_carries_the_markup_that_replaces_them(self):
+        """The one generic dialog that asked for a name or for a yes is gone: each
+        question is its own form now, and "are you sure" is templates/_confirm.html
+        — a control that turns into its own confirmation with no request behind
+        it."""
         self.board_with(pool=1)
         html = self.client.get("/rankings").text
-        for element in ('id="askModal"', 'id="askInput"', 'id="askOk"', 'id="askMessage"'):
+        for element in ('id="newBoardModal"', 'id="renameBoardModal"',
+                        'id="newTierModal"', 'id="confirm-board-delete"'):
             self.assertIn(element, html)
+        self.assertNotIn('id="askModal"', html)
 
 
 class FragmentGatingTests(FragmentTestCase):
@@ -572,44 +586,59 @@ class CategoryDeleteRouteTests(FragmentTestCase):
             asyncio.run(db.fetch_value("SELECT COUNT(*) FROM tier_categories")), 1)
 
 
+def png_bytes(colour=(200, 30, 30)) -> str:
+    """A small PNG, base64'd, as an upload body carries one."""
+    import base64
+    import io
+
+    from PIL import Image
+    buffer = io.BytesIO()
+    Image.new("RGB", (64, 64), colour).save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
 class SavedImageRouteTests(FragmentTestCase):
-    """The two GETs the export modal's header-image picker needs. Session 4 left
-    them to whoever built that modal."""
+    """The account's saved pictures, which the export dialog chooses between.
 
-    def test_listing_starts_empty_and_reports_the_cap(self):
-        data = self.client.get("/api/me/images").json()
-        self.assertEqual(data["images"], [])
-        self.assertEqual(data["max"], user_images.MAX_IMAGES_PER_USER)
+    THE LIBRARY IS MARKUP NOW, so these ask the fragment what it drew rather than
+    a JSON list what it holds. The one route that still answers bytes is the
+    picture itself, which is what an <img> asks for."""
 
-    def test_an_uploaded_image_lists_and_serves(self):
-        import base64
-        import io
+    def test_the_library_starts_empty_and_reports_the_cap(self):
+        html = self.client.get("/me/fragments/images").text
+        self.assertIn("Nothing saved yet.", html)
+        self.assertIn(f"0 of {user_images.MAX_IMAGES_PER_USER} saved.", html)
 
-        from PIL import Image
-        buffer = io.BytesIO()
-        Image.new("RGB", (64, 64), (200, 30, 30)).save(buffer, format="PNG")
-        encoded = base64.b64encode(buffer.getvalue()).decode()
-        created = self.client.post("/api/me/images", json={"image_b64": encoded})
-        self.assertEqual(created.status_code, 200)
-        uid = created.json()["uid"]
+    def test_an_uploaded_image_is_drawn_in_the_library_and_serves(self):
+        added = self.client.post("/me/images", json={"image_b64": png_bytes()})
+        self.assertEqual(added.status_code, 200)
+        uid = re.search(r'/api/me/images/([0-9a-f]{32})', added.text).group(1)
+        self.assertIn('value="Image 1"', added.text)
+        self.assertIn(f"1 of {user_images.MAX_IMAGES_PER_USER} saved.", added.text)
 
-        self.assertEqual(self.client.get("/api/me/images").json()["images"],
-                         [{"uid": uid, "name": "Image 1"}])
         served = self.client.get(f"/api/me/images/{uid}")
         self.assertEqual(served.status_code, 200)
         self.assertEqual(served.headers["content-type"], "image/webp")
 
-    def test_an_image_belonging_to_somebody_else_is_not_served(self):
-        import base64
-        import io
+    def test_naming_and_removing_answer_with_the_library(self):
+        added = self.client.post("/me/images", json={"image_b64": png_bytes()})
+        uid = re.search(r'/api/me/images/([0-9a-f]{32})', added.text).group(1)
+        named = self.client.post(f"/me/images/{uid}/name", json={"name": "Beach"})
+        self.assertIn('value="Beach"', named.text)
+        gone = self.client.post(f"/me/images/{uid}/delete", json={})
+        self.assertIn("Nothing saved yet.", gone.text)
 
-        from PIL import Image
-        buffer = io.BytesIO()
-        Image.new("RGB", (64, 64)).save(buffer, format="PNG")
-        uid = self.client.post("/api/me/images", json={
-            "image_b64": base64.b64encode(buffer.getvalue()).decode()}).json()["uid"]
+    def test_an_image_belonging_to_somebody_else_is_not_served_or_touched(self):
+        added = self.client.post("/me/images", json={"image_b64": png_bytes((0, 0, 0))})
+        uid = re.search(r'/api/me/images/([0-9a-f]{32})', added.text).group(1)
         self.sign_in_as(self.make_user("stranger"))
         self.assertEqual(self.client.get(f"/api/me/images/{uid}").status_code, 404)
+        # A stranger's delete says "No such image" and leaves the owner's alone,
+        # asserted on the store rather than on the answer.
+        self.assertIn("No such image.",
+                      self.client.post(f"/me/images/{uid}/delete", json={}).text)
+        self.sign_in_as(self.user_id)
+        self.assertIn(uid, self.client.get("/me/fragments/images").text)
 
     def test_a_traversal_uid_is_refused_before_it_becomes_a_path(self):
         self.assertEqual(

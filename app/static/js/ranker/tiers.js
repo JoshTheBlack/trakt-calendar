@@ -1,6 +1,45 @@
 // ---------------------------------------------------------------------------
-// tiers
+// deleting a tier, and taking it back
 // ---------------------------------------------------------------------------
+// EVERY OTHER TIER ACTION IS MARKUP NOW. Adding one, applying the template and
+// writing a tier's settings are forms that post themselves and are answered with
+// the board redrawn (_ranker_board_shell.html, _ranker_tier_settings.html), so
+// what a tier may be called, which uid a new one gets and what the template means
+// are all the server's.
+//
+// THIS ONE IS NOT, AND IT IS WAITING ON SOMETHING RATHER THAN DEFENDED. A deleted
+// tier's undo is the only undo in this app still held in the browser: it keeps a
+// snapshot of the tier, re-creates it through a layout save and reloads, so it is
+// one level deep, gone on reload and invisible to a second tab. Titles removed
+// from a board already have the lasting kind — a history on the server, offered
+// after a reload and from another tab — and a tier needs a record of its own
+// before it can have the same. Until then the snapshot stays, because what it
+// does for the person who mis-clicked is real.
+
+let undoAction = null;          // the toast's one pending action
+
+// A moment's offer tied to the click that made it, with no state of its own on
+// the server to be a fragment of. The removal toast that used to share this is
+// the server's now (ranker.html): it draws a toast whose Undo is the removal
+// history's own Restore button. This is the one caller left.
+function offerUndo(message, action) {
+    undoAction = action;
+    let host = document.getElementById('toastHost');
+    if (!host) { host = document.createElement('div'); host.id = 'toastHost'; document.body.appendChild(host); }
+    const t = document.createElement('div');
+    t.className = 'toast ok';
+    t.style.pointerEvents = 'auto';
+    t.textContent = message + '  ';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn-ghost small';
+    btn.textContent = 'Undo';
+    btn.onclick = async () => { t.remove(); const run = undoAction; undoAction = null; if (run) await run(); };
+    t.appendChild(btn);
+    host.appendChild(t);
+    requestAnimationFrame(() => t.classList.add('show'));
+    setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 9000);
+}
 
 function deleteTier(button, uid) {
     const cat = tierByUid(uid);
@@ -28,14 +67,14 @@ function deleteTier(button, uid) {
         const empty = document.getElementById('poolEmpty');
         if (empty) empty.remove();
         state.board.categories = (state.board.categories || []).filter(c => c.uid !== uid);
-        // The move menu and the bulk-move list are server markup naming every tier
-        // (ranker.html, _ranker_board_shell.html). A delete is the one tier change
-        // that does not reload the page, so its choices are taken out here.
+        // The move menu, the bulk-move list and the export dialog's scope are
+        // server markup naming every tier. A delete is the one tier change that
+        // does not redraw the page, so its choices are taken out here.
         document.querySelectorAll('[data-tier-choice="' + CSS.escape(uid) + '"]')
             .forEach(choice => choice.remove());
         state.board.pool = (state.board.pool || []).concat(snapshot.items);
         bumpVersion();
-        if (details) details.remove();
+        if (details) details.closest('.ranker-tier-shell').remove();
         refreshCounts();
         offerUndo('Tier deleted — its ' + snapshot.items.length +
                   ' title(s) went back to the pool.', async () => {
@@ -61,55 +100,4 @@ function deleteTier(button, uid) {
             window.location.reload();
         });
     }, { danger: true });
-}
-
-async function addTier() {
-    const label = await ask({ title: 'New tier', label: 'Label', maxlength: 40 });
-    if (label === null) return;
-    state.board.categories.push({
-        uid: newUid('tier'), label: label.slice(0, 40), rank_priority: 0,
-        is_isolated: false, colour: null, items: [],
-    });
-    saveAndReload();
-}
-
-// THE ONE S/A/B/C/D/F SET, taken from the server rather than spelled out here.
-// A board seeded from ratings already holds tiers with those exact uids, so a
-// second spelling would give it two S tiers.
-function applyTierTemplate() {
-    const held = new Set((state.board.categories || []).map(c => c.uid));
-    const missing = (state.template || []).filter(entry => !held.has(entry.uid));
-    if (!missing.length) { toast('Those tiers are already on this board.', true); return; }
-    missing.forEach(entry => state.board.categories.push({
-        uid: entry.uid, label: entry.label, rank_priority: entry.rank_priority,
-        is_isolated: false, colour: entry.colour, items: [],
-    }));
-    saveAndReload();
-}
-
-function openTierModal(uid) {
-    const cat = tierByUid(uid);
-    if (!cat) return;
-    document.getElementById('tierModal').dataset.uid = uid;
-    document.getElementById('tierLabel').value = cat.label || '';
-    document.getElementById('tierPriority').value = cat.rank_priority;
-    // Lowercased on the way in: a colour input rejects an uppercase value and
-    // silently falls back to black, and the data layer stores these uppercase.
-    document.getElementById('tierColour').value = (cat.colour || '#E8B545').toLowerCase();
-    document.getElementById('tierIsolated').checked = !!cat.is_isolated;
-    document.getElementById('tierModal').classList.add('open');
-}
-
-function closeTierModal() { closeModal('tierModal'); }
-
-function saveTierSettings() {
-    const modal = document.getElementById('tierModal');
-    const cat = tierByUid(modal.dataset.uid);
-    if (!cat) return;
-    cat.label = document.getElementById('tierLabel').value.slice(0, 40);
-    cat.rank_priority = parseInt(document.getElementById('tierPriority').value, 10) || 0;
-    cat.colour = document.getElementById('tierColour').value.toUpperCase();
-    cat.is_isolated = document.getElementById('tierIsolated').checked;
-    closeTierModal();
-    saveAndReload();
 }

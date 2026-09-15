@@ -12,6 +12,7 @@ import asyncio
 import base64
 import itertools
 import os
+import re
 import shutil
 import unittest
 from io import BytesIO
@@ -414,52 +415,63 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertTrue(resp.json()["error"])
 
+    # THE SAVED-PICTURE LIBRARY IS MARKUP, so these ask what it drew rather than
+    # what a JSON list held. What each action answers with is the whole list —
+    # a cleared name falls back to a position, and an upload and a delete both
+    # change how many are left, so the list is the unit that is always right.
+
+    def uid_in(self, html: str) -> str:
+        return re.search(r"/api/me/images/([0-9a-f]{32})", html).group(1)
+
     def test_saved_images_upload_cap_and_delete(self):
         uids = []
         for _ in range(user_images.MAX_IMAGES_PER_USER):
-            resp = self.client.post("/api/me/images", json={"image_b64": _data_url(_png_bytes())})
+            resp = self.client.post("/me/images", json={"image_b64": _data_url(_png_bytes())})
             self.assertEqual(resp.status_code, 200, resp.text)
-            uids.append(resp.json()["uid"])
+            uids = re.findall(r"/api/me/images/([0-9a-f]{32})", resp.text)
+        self.assertEqual(len(uids), user_images.MAX_IMAGES_PER_USER)
 
-        resp = self.client.post("/api/me/images", json={"image_b64": _data_url(_png_bytes())})
-        self.assertEqual(resp.status_code, 409)
+        full = self.client.post("/me/images", json={"image_b64": _data_url(_png_bytes())})
+        self.assertIn(f"up to {user_images.MAX_IMAGES_PER_USER} images", full.text)
+        # And the upload control is gone from a library that is full.
+        self.assertNotIn('id="imageFile"', full.text)
 
-        resp = self.client.request("DELETE", f"/api/me/images/{uids[0]}", json={})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        gone = self.client.post(f"/me/images/{uids[0]}/delete", json={})
+        self.assertNotIn(uids[0], gone.text)
+        self.assertIn('id="imageFile"', gone.text)
 
-        resp = self.client.request("DELETE", "/api/me/images/not-a-real-uid", json={})
-        self.assertEqual(resp.status_code, 404)
+        missing = self.client.post("/me/images/not-a-real-uid/delete", json={})
+        self.assertIn("No such image.", missing.text)
 
     def test_naming_an_image_over_http(self):
         created = self.client.post(
-            "/api/me/images", json={"image_b64": _data_url(_png_bytes()), "name": "Holiday"})
-        uid = created.json()["uid"]
-        listed = self.client.get("/api/me/images").json()
-        self.assertEqual(listed["images"], [{"uid": uid, "name": "Holiday"}])
-        self.assertEqual(listed["max_name"], user_images.MAX_IMAGE_NAME)
+            "/me/images", json={"image_b64": _data_url(_png_bytes()), "name": "Holiday"})
+        uid = self.uid_in(created.text)
+        self.assertIn('value="Holiday"', created.text)
+        self.assertIn(f'maxlength="{user_images.MAX_IMAGE_NAME}"', created.text)
 
-        renamed = self.client.patch(f"/api/me/images/{uid}", json={"name": "Holiday 2019"})
+        renamed = self.client.post(f"/me/images/{uid}/name", json={"name": "Holiday 2019"})
         self.assertEqual(renamed.status_code, 200, renamed.text)
-        self.assertEqual(self.client.get("/api/me/images").json()["images"][0]["name"],
-                         "Holiday 2019")
+        self.assertIn('value="Holiday 2019"', renamed.text)
 
-    def test_renaming_an_image_that_is_not_this_accounts_is_a_404(self):
-        created = self.client.post("/api/me/images", json={"image_b64": _data_url(_png_bytes())})
-        uid = created.json()["uid"]
+    def test_renaming_an_image_that_is_not_this_accounts_says_so_and_changes_nothing(self):
+        created = self.client.post("/me/images", json={"image_b64": _data_url(_png_bytes())})
+        uid = self.uid_in(created.text)
         stranger = asyncio.run(auth.create_user(
             username="stranger", password="hunter2hunter2", settings=Settings()))
         self.client.cookies.set(auth.COOKIE_NAME_SECURE,
                                 asyncio.run(auth.create_session(stranger)))
-        resp = self.client.patch(f"/api/me/images/{uid}", json={"name": "Mine now"})
-        self.assertEqual(resp.status_code, 404)
+        resp = self.client.post(f"/me/images/{uid}/name", json={"name": "Mine now"})
+        self.assertIn("No such image.", resp.text)
+        self.assertNotIn(uid, resp.text)
 
     def test_an_over_long_name_is_refused_over_http(self):
-        created = self.client.post("/api/me/images", json={"image_b64": _data_url(_png_bytes())})
-        uid = created.json()["uid"]
-        resp = self.client.patch(f"/api/me/images/{uid}",
-                                 json={"name": "x" * (user_images.MAX_IMAGE_NAME + 1)})
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(self.client.get("/api/me/images").json()["images"][0]["name"], "Image 1")
+        created = self.client.post("/me/images", json={"image_b64": _data_url(_png_bytes())})
+        uid = self.uid_in(created.text)
+        resp = self.client.post(f"/me/images/{uid}/name",
+                                json={"name": "x" * (user_images.MAX_IMAGE_NAME + 1)})
+        self.assertIn(f"at most {user_images.MAX_IMAGE_NAME}", resp.text)
+        self.assertIn('value="Image 1"', resp.text)
 
 
 if __name__ == "__main__":

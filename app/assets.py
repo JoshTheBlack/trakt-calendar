@@ -90,14 +90,14 @@ PAGE_SCRIPTS = {
     "tracker": (
         "static/js/ui.js",
         "static/js/nav.js",
-        # TWO FILES, AND EACH IS ONE THING THE BROWSER MUST DO: measuring whether
-        # a title overflows the cell drawn for it, and reading a chosen backup
-        # file into a JSON body. Everything else this page used to run — the
-        # month, the rows, the row actions, the add flow, the emoji editor, the
-        # backfill, the copy blocks and the tab strip — is markup the server
-        # draws, and the page needs no init of its own any more.
+        # ONE FILE, AND IT IS ONE THING THE BROWSER MUST DO: measuring whether a
+        # title overflows the cell drawn for it. Everything else this page used to
+        # run — the month, the rows, the row actions, the add flow, the emoji
+        # editor, the backfill, the copy blocks and the tab strip — is markup the
+        # server draws, and the page needs no init of its own any more. Reading
+        # the chosen backup file into a JSON body is ui.js's `data-file-into`,
+        # because four pages now do exactly that and it is one act.
         "static/js/tracker/rows.js",
-        "static/js/tracker/backup.js",
         # The calendar's file, on this page too, because the Konami code is ONE
         # listener for both — see static/js/calendar/easter-egg.js. Loading it
         # twice is not a re-declaration: boost.js keys what is running on the
@@ -111,20 +111,23 @@ PAGE_SCRIPTS = {
         "static/js/sortable.min.js",
         "static/js/ui.js",
         "static/js/nav.js",
+        # WHAT IS LEFT IS THE POINTER AND THE FILE. The drag and its coalesced
+        # save, the keyboard and modifier-key ways of moving a title, where a
+        # menu opens, the preview's zoom and pan, and a download that has to be a
+        # POST. Every other action on this page — the boards, the tiers, the
+        # removal, the bulk move, the import, the seed, the export options and
+        # the backup restore — is markup that posts itself and is answered with
+        # the board redrawn, so five of this feature's files have no contents
+        # left at all.
         "static/js/ranker/core.js",
-        "static/js/ranker/ask.js",
         "static/js/ranker/dnd.js",
         "static/js/ranker/save.js",
         "static/js/ranker/rows.js",
         "static/js/ranker/tiers.js",
-        "static/js/ranker/boards.js",
         "static/js/ranker/search.js",
-        "static/js/ranker/sources.js",
         "static/js/ranker/selection.js",
         "static/js/ranker/export.js",
         "static/js/ranker/export-preview.js",
-        "static/js/ranker/export-image.js",
-        "static/js/ranker/backup.js",
         "static/js/ranker/boot.js",
     ),
     "admin": ("static/js/ui.js", "static/js/nav.js"),

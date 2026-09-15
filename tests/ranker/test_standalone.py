@@ -40,6 +40,7 @@ from app.auth import trakt_routes
 from app.providers.trakt import detail as trakt_detail, sync as trakt_sync
 from app.config import Settings, save_settings
 from app.main import app
+from app.ranker import core as ranker
 from app.ranker import routes as ranker_routes, sources as ranker_sources
 from app.ranker.sources import Media, RatedTitle, TitleRef
 from tests.support import APP_DIR, ORIGIN, migrated_db
@@ -145,11 +146,13 @@ class ExportNameDefaultTests(StandaloneTestCase):
     username otherwise."""
 
     def _prefilled_name(self):
-        """What the page hands the export dialog, out of the JSON island the
-        ranker page embeds for its own script."""
+        """What the export dialog's own field is DRAWN with. It used to be handed
+        to a script in the page's JSON island and written into the field when the
+        dialog opened; the field carries it now, like every other option there."""
+        asyncio.run(ranker.create_board(self.user_id, uid="b1", name="Top"))
         body = self.client.get("/rankings").text
-        blob = body.split('id="rankerData"', 1)[1].split(">", 1)[1].split("</script>", 1)[0]
-        return json.loads(blob)["username"]
+        return re.search(r'<input type="text" id="exUser" name="username"[^>]*?'
+                         r'value="([^"]*)"', body, re.S).group(1)
 
     def test_it_falls_back_to_the_username(self):
         self.assertEqual(self._prefilled_name(), "just_the_ranker")
@@ -169,49 +172,52 @@ class JourneyTests(StandaloneTestCase):
         self.assertEqual(self.client.get("/rankings").status_code, 200)
 
         source = FakeSearchSource([a_show(1396, "Breaking Bad"), a_movie(550, "Fight Club")])
-        self.client.post("/api/rankings/boards", json={"uid": "b1", "name": "Top 2026"})
+        made = self.client.post("/rankings/boards/new", json={"name": "Top 2026"})
+        board = made.headers["HX-Location"].split("board=")[1]
         with mock.patch.object(ranker_sources, "search_source", lambda: source):
             found = self.client.get("/rankings/fragments/search?q=brea&media=show").text
             self.assertEqual(result_titles(found), ["Breaking Bad"])
             key, = result_keys(found)
             self.assertEqual(key, "show:tmdb:1396")
-            added = self.client.post("/api/rankings/boards/b1/items",
+            added = self.client.post(f"/api/rankings/boards/{board}/items",
                                      json={"query": "brea", "key": key})
         self.assertEqual(added.json()["added"], 1)
         # One real search, and the add read that search back rather than asking.
         self.assertEqual([call[2] for call in source.calls], [False, True])
 
-        saved = self.client.post("/api/rankings/boards/b1/save", json={
-            "version": 1,
-            "categories": [{"uid": "s", "label": "S", "rank_priority": 60,
+        tiered = self.client.post(f"/rankings/boards/{board}/tiers/new", json={"label": "S"})
+        tier_uid = re.search(r'<details class="ranker-tier"[^>]*data-uid="([^"]+)"',
+                             tiered.text).group(1)
+        saved = self.client.post(f"/api/rankings/boards/{board}/save", json={
+            "version": 2,
+            "categories": [{"uid": tier_uid, "label": "S", "rank_priority": 60,
                             "items": ["show:tmdb:1396"]}],
             "pool": [],
         })
         self.assertEqual(saved.status_code, 200, saved.text)
 
-        board = self.client.get("/api/rankings/boards/b1").json()["board"]
-        tier, = board["categories"]
-        self.assertEqual([i["title"] for i in tier["items"]], ["Breaking Bad"])
-        self.assertEqual(board["pool"], [])
+        stored = self.client.get(f"/api/rankings/boards/{board}").json()["board"]
+        one_tier, = stored["categories"]
+        self.assertEqual([i["title"] for i in one_tier["items"]], ["Breaking Bad"])
+        self.assertEqual(stored["pool"], [])
 
         # And out the other end, which is the half of "end to end" that matters
         # most here: an account with nothing but this feature can take its
         # ranking away as both an image and a text block.
-        image = self.client.post("/api/rankings/boards/b1/export", json={
+        image = self.client.post(f"/api/rankings/boards/{board}/export", json={
             "top_x": 1, "columns": 3, "fmt": "jpeg", "title": "Top Shows",
             "username": "ranker_only"})
         self.assertEqual(image.status_code, 200, image.text)
         self.assertEqual(image.headers["content-type"], "image/jpeg")
 
-        text = self.client.post("/api/rankings/boards/b1/export/markdown",
-                                json={"top_x": 1, "columns": 3, "title": "Top Shows"})
-        self.assertIn("**Breaking Bad**", text.json()["markdown"])
+        readout = self.client.get(
+            f"/rankings/fragments/export?board={board}&top_x=1&columns=3&title=Top+Shows")
+        self.assertIn("**Breaking Bad**", readout.text)
         self.assertHasNothingElse()
 
     def test_a_movie_only_board_works_the_same_way(self):
         source = FakeSearchSource([a_movie(550, "Fight Club")])
-        self.client.post("/api/rankings/boards",
-                         json={"uid": "m1", "media_scope": "movie"})
+        asyncio.run(ranker.create_board(self.user_id, uid="m1", media_scope="movie"))
         with mock.patch.object(ranker_sources, "search_source", lambda: source):
             found = self.client.get("/rankings/fragments/search?q=figh&media=movie").text
             for key in result_keys(found):
@@ -280,11 +286,11 @@ class CredentialTests(StandaloneTestCase):
             seen["token"] = settings.trakt_access_token
             return []
 
-        self.client.post("/api/rankings/boards", json={"uid": "b1"})
+        asyncio.run(ranker.create_board(self.user_id, uid="b1"))
         with mock.patch.object(trakt_routes, "access_token_for_user",
                                _token_for(USER_TOKEN)), \
              mock.patch.object(trakt_sync, "fetch_ratings", _ratings):
-            resp = self.client.post("/api/rankings/boards/b1/seed/ratings", json={})
+            resp = self.client.post("/rankings/boards/b1/seed", json={})
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(seen["token"], USER_TOKEN)
         self.assertNotEqual(seen["token"], OPERATOR_TOKEN)
@@ -318,18 +324,20 @@ class ProtocolTests(StandaloneTestCase):
             RatedTitle(title=a_show(1396, "Breaking Bad"), rating=10),
             RatedTitle(title=a_show(1399, "Game of Thrones"), rating=7),
         ])
-        self.client.post("/api/rankings/boards", json={"uid": "b1"})
+        asyncio.run(ranker.create_board(self.user_id, uid="b1"))
         with mock.patch.object(ranker_sources, "ratings_source", lambda: source), \
              mock.patch.object(ranker_sources, "ratings_available", _true()), \
              mock.patch.object(trakt_sync, "fetch_ratings", exploding("the provider was called")):
-            preview = self.client.post("/api/rankings/boards/b1/seed/ratings", json={}).json()
-            committed = self.client.post("/api/rankings/boards/b1/seed/ratings",
-                                         json={"commit": True}).json()
+            # THE DRY RUN ANSWERS THE CONFIRMATION ITS OWN COUNTS ARE WRITTEN
+            # INTO, and pressing that is the same request with `commit` on.
+            preview = self.client.post("/rankings/boards/b1/seed", json={}).text
+            committed = self.client.post("/rankings/boards/b1/seed",
+                                         json={"commit": "1"}).text
 
         self.assertEqual(source.calls, [self.user_id, self.user_id])
-        self.assertEqual(preview["titles_added"], 2)
-        self.assertFalse(preview["committed"])
-        self.assertEqual(committed["tiers_created"], 2)
+        self.assertIn("would add 2 title(s)", preview)
+        self.assertEqual(self.value("SELECT COUNT(*) FROM tier_items"), 2)
+        self.assertIn("2 new tier(s)", committed)
 
         board = self.client.get("/api/rankings/boards/b1").json()["board"]
         placed = {c["uid"]: [i["title"] for i in c["items"]] for c in board["categories"]}

@@ -78,6 +78,7 @@ function initSearchDrag() {
 
 function onDragEnd(evt) {
     if (evt.from === evt.to && evt.oldIndex === evt.newIndex) return;
+    if (evt.to && evt.to.id !== 'rankerPool') unpick(evt.item);
     refreshCounts();
     scheduleSave();
 }

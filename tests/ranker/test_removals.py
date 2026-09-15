@@ -19,7 +19,8 @@ import json
 import re
 from unittest import mock
 
-from app import db
+from app import authz, db
+from app.main import app
 from app.ranker import core as ranker
 from tests.support import STATIC_DIR, TEMPLATES_DIR, AppTestCase
 
@@ -315,8 +316,10 @@ class RestoreRouteTests(_BoardTestCase):
         self.assertIn("Put back on the board.", page.text)
         # In the floating toast host, which is out of the page's flow — the first
         # version sat in the pool column and moved everything under it as it went.
-        self.assertIn('<div id="toastHost"><div class="toast ok is-flash" role="status">'
-                      'Put back on the board.</div></div>', page.text)
+        self.assertRegex(
+            page.text,
+            r'<div id="toastHost">\s*<div class="toast ok is-flash"\s+role="status">\s*'
+            r'Put back on the board\.')
         self.assertEqual(self.tier("s"), ["1", "2", "3"])
         drawn = int(re.search(r'"version": (\d+)', page.text).group(1))
         self.assertEqual(drawn, self.version())
@@ -380,31 +383,39 @@ class HistoryMarkupTests(_BoardTestCase):
             ("Title 4", "from the pool", key("4")),
         ])
 
-    def test_the_fragment_is_the_inside_of_the_disclosure_and_nothing_else(self):
-        """Swapped INTO the <details>, so it must not bring the element itself —
-        that would close a disclosure the viewer had open on every restore."""
+    def test_the_history_arrives_with_the_page_a_removal_answers_with(self):
+        """IT HAS NO FRAGMENT OF ITS OWN ANY MORE. It used to redraw itself on an
+        event the page fired after a removal; a removal answers with the whole
+        page now, so the list comes with everything else and there is nothing
+        left to keep in step."""
         self.build(pool=("1",))
-        self.remove("1")
-        html = self.client.get(f"/rankings/fragments/removed?board={BOARD}").text
-        self.assertIn("<summary", html)
-        self.assertIn(f'data-restore-key="{key("1")}"', html)
-        self.assertNotIn("<details", html)
-        for chrome in ("<html", "<head", "<body"):
-            self.assertNotIn(chrome, html)
+        page = self.client.post(f"/rankings/boards/{BOARD}/items/remove",
+                                json={"key": key("1")})
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(f'data-restore-key="{key("1")}"', page.text)
+        self.assertNotIn("rankerRemovedRefresh", page.text)
+        self.assertNotIn(
+            "/rankings/fragments/removed",
+            {str(getattr(r, "path", "")) for r in authz.iter_routes(app)})
 
-    def test_the_refresher_listens_for_the_event_the_script_fires(self):
-        """The list redraws itself when the page names an event, so the markup
-        and the script have to agree on its name — a rename in one alone would
-        leave the history silently stale."""
-        shell = (TEMPLATES_DIR / "_ranker_board_shell.html").read_text(encoding="utf-8")
-        rows = (STATIC_DIR / "js" / "ranker" / "rows.js").read_text(encoding="utf-8")
-        event = re.search(r'id="rankerRemovedRefresh"[^>]*hx-trigger="([^"]+)"', shell, re.S).group(1)
-        self.assertIn(f"htmx.trigger('#rankerRemovedRefresh', '{event}')", rows)
+    def test_a_removal_offers_the_same_button_in_a_toast(self):
+        """One way a title comes back however it is asked for: the toast's Undo is
+        the history's own Restore, posting to the same route with the same key.
+        The nine seconds it stands for are the stylesheet's animation."""
+        self.build(pool=("1",))
+        page = self.client.post(f"/rankings/boards/{BOARD}/items/remove",
+                                json={"key": key("1")})
+        toast = re.search(r'<div id="toastHost">(.*?)</div>\s*</div>', page.text, re.S).group(1)
+        self.assertIn("is-offer", toast)
+        self.assertIn(f'hx-post="/rankings/boards/{BOARD}/removals/restore"', toast)
+        self.assertIn('hx-vals=\'{"key": "show:tmdb:1"}\'', toast)
+        css = (STATIC_DIR / "css" / "style.css").read_text(encoding="utf-8")
+        self.assertIn(".toast.is-flash.is-offer { animation-duration: 9s;", css)
 
     def test_a_restore_button_posts_itself_as_json(self):
         self.build(pool=("1",))
         self.remove("1")
-        html = self.client.get(f"/rankings/fragments/removed?board={BOARD}").text
+        html = self.client.get(f"/rankings?board={BOARD}").text
         button = re.search(r'<button[^>]*data-restore-key="show:tmdb:1"[^>]*>', html, re.S).group(0)
         self.assertIn(f'hx-post="/rankings/boards/{BOARD}/removals/restore"', button)
         self.assertIn("hx-json-enc", button)

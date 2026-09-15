@@ -1331,7 +1331,10 @@ class SharedBodyGuardTests(RegressionTestCase):
         request is too large". The two image routes carry their own ceiling, so
         the wording no longer changes with the size of the file."""
         pad = b"x" * user_images.MAX_UPLOAD_BODY_BYTES
-        for path in ("/api/me/avatar", "/api/me/images"):
+        # `/me/images` rather than `/api/me/images`: the saved-picture library is
+        # markup the server draws now, so the route that takes an upload is the
+        # one the library's own form posts to. Its ceiling is the same one.
+        for path in ("/api/me/avatar", "/me/images"):
             with self.subTest(path=path):
                 resp = self.client.post(
                     path, content=b'{"image_b64": "' + pad + b'"}',

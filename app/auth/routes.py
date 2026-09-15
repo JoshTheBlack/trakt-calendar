@@ -631,6 +631,11 @@ async def me_page(request: Request):
         # links that were handed out months ago, which is exactly what somebody
         # wants when they change their mind about publishing it at all.
         "share_watch_history": bool(prefs["share_watch_history"]),
+        # The saved-picture library, drawn with the page rather than fetched by it
+        # — the same context every one of its own actions answers with.
+        "images": user_images.describe_images(user.user_id),
+        "cap": user_images.MAX_IMAGES_PER_USER,
+        "name_cap": user_images.MAX_IMAGE_NAME,
         # THE SERVICES THAT COULD SUPPLY A WATCH HISTORY AND ARE NOT LINKED, by
         # their own labels, for the notice that tells somebody with the tracker
         # grant why it has nothing to read. Asked of the registry rather than
@@ -1192,61 +1197,79 @@ async def remove_avatar_source(request: Request):
     return JSONResponse({"ok": True})
 
 
-@guard.post("/api/me/images", AuthLevel.SESSION)
+# ---------------------------------------------------------------------------
+# the saved pictures a poster grid can carry at its top
+# ---------------------------------------------------------------------------
+# THE LIBRARY IS MARKUP THE SERVER DRAWS. It was a client renderer over a JSON
+# list: a card built per image, a rename, a delete, an upload, and a re-fetch of
+# the whole list after each — with the cap, the name length and the positional
+# default name all restated in the browser. Every action posts itself now and is
+# answered with the list, which is the unit that is always right (a cleared name
+# falls back to a position, and both an upload and a delete change how many are
+# left).
+#
+# TWO SURFACES SHOW THESE PICTURES and each draws its own markup: this list, and
+# the rankings board's export picker, which chooses between them. What they share
+# is the one place the bytes are validated and stored — user_images.add_image.
+
+def _image_library(request: Request, user_id: int, message: str = "") -> Response:
+    """This account's saved pictures, as the account page draws them."""
+    return templates.TemplateResponse(request, "_user_images.html", {
+        "request": request,
+        "images": user_images.describe_images(user_id),
+        "cap": user_images.MAX_IMAGES_PER_USER,
+        "name_cap": user_images.MAX_IMAGE_NAME,
+        "message": message,
+    })
+
+
+@guard.get("/me/fragments/images", AuthLevel.SESSION)
+async def saved_images_fragment(request: Request):
+    user = await auth.require_session(request)
+    return _image_library(request, user.user_id)
+
+
+@guard.post("/me/images", AuthLevel.SESSION)
 async def upload_saved_image(request: Request):
-    """Add a saved image (an alternative grid-header icon to the avatar),
-    capped at user_images.MAX_IMAGES_PER_USER per account."""
+    """Add a saved image, capped at user_images.MAX_IMAGES_PER_USER per account."""
     user = await auth.require_session(request)
     # Same known ceiling as the avatar route above, for the same reason.
     data = await authz.json_body(request, user_images.MAX_UPLOAD_BODY_BYTES,
                                  user_images.TOO_LARGE_MESSAGE)
+    message = ""
     try:
-        uid = await user_images.add_image(
+        await user_images.add_image(
             user.user_id, str(data.get("image_b64") or ""), str(data.get("name") or ""))
     except user_images.TooManyImages:
-        return authz.error(
-            f"You can save up to {user_images.MAX_IMAGES_PER_USER} images. Delete one first.", 409,
-        )
+        message = (f"You can save up to {user_images.MAX_IMAGES_PER_USER} images. "
+                   "Remove one first.")
     except user_images.ValidationError as exc:
-        return authz.error(str(exc))
-    return JSONResponse({"ok": True, "uid": uid})
+        message = str(exc)
+    return _image_library(request, user.user_id, message)
 
 
-@guard.get("/api/me/images", AuthLevel.SESSION)
-async def list_saved_images(request: Request):
-    """This account's saved images as {uid, name}, oldest first — enough for a
-    picker to render a named thumbnail of each through the route below.
-
-    `provider_avatars` TRAVELS BESIDE THEM RATHER THAN AMONG THEM. The export
-    picker offers both, but they are different things: a saved image is one of
-    five an account may upload, and a provider picture is a copy of a connected
-    service's, owned by the server and counting against no quota. Folding them
-    into one list would have meant `max` describing a count that included things
-    it does not cap.
-    """
-    user = await auth.require_session(request)
-    return JSONResponse({
-        "ok": True,
-        "images": user_images.describe_images(user.user_id),
-        "provider_avatars": user_images.list_provider_avatars(user.user_id),
-        "max": user_images.MAX_IMAGES_PER_USER,
-        "max_name": user_images.MAX_IMAGE_NAME,
-    })
-
-
-@guard.patch("/api/me/images/{image_uid}", AuthLevel.SESSION)
+@guard.post("/me/images/{image_uid}/name", AuthLevel.SESSION)
 async def rename_saved_image(image_uid: str, request: Request):
     """Name or rename one saved image. An empty name clears it, and the image
     falls back to its positional default rather than being left blank."""
     user = await auth.require_session(request)
     data = await authz.json_body(request)
+    message = ""
     try:
         name = user_images.clean_name(data.get("name"))
+        if not user_images.set_image_name(user.user_id, image_uid, name):
+            message = "No such image."
     except user_images.ValidationError as exc:
-        return authz.error(str(exc))
-    if not user_images.set_image_name(user.user_id, image_uid, name):
-        return authz.error("No such image.", 404)
-    return JSONResponse({"ok": True, "name": name})
+        message = str(exc)
+    return _image_library(request, user.user_id, message)
+
+
+@guard.post("/me/images/{image_uid}/delete", AuthLevel.SESSION)
+async def remove_saved_image(image_uid: str, request: Request):
+    user = await auth.require_session(request)
+    await authz.json_body(request)
+    message = "" if user_images.delete_image(user.user_id, image_uid) else "No such image."
+    return _image_library(request, user.user_id, message)
 
 
 @guard.get("/api/me/images/{image_uid}", AuthLevel.SESSION)
@@ -1263,15 +1286,6 @@ async def get_saved_image(image_uid: str, request: Request):
         return Response(status_code=404)
     return FileResponse(user_images.image_path(user.user_id, image_uid),
                         media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
-
-
-@guard.delete("/api/me/images/{image_uid}", AuthLevel.SESSION)
-async def remove_saved_image(image_uid: str, request: Request):
-    user = await auth.require_session(request)
-    await authz.json_body(request)
-    if not user_images.delete_image(user.user_id, image_uid):
-        return authz.error("No such image.", 404)
-    return JSONResponse({"ok": True})
 
 
 # ---------------------------------------------------------------------------

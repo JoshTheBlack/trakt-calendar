@@ -1,0 +1,66 @@
+{# ONE TIER'S SETTINGS, AND THE DIALOG AROUND THEM, drawn from the tier itself.
+
+   THE WHOLE OVERLAY IS THE ANSWER and it arrives already open, swapped over the
+   placeholder ranker.html leaves for it. A dialog that stood in the page and was
+   filled in when it opened had to be filled in from somewhere: the page's own
+   copy of the board, which is the copy this phase exists to stop anything reading
+   from. It also could not avoid showing the last tier's values for as long as
+   this tier's were on their way.
+
+   Closing it leaves the overlay in the page with its `open` class stripped
+   (static/js/ui.js's closeModal, reached by the × , by the backdrop and by
+   Escape); the next ⚙ replaces the whole thing, so nothing stale survives.
+
+   `category` is None for a tier that has gone since the page was drawn — another
+   tab deleted it — and the dialog says so rather than opening on empty fields. #}
+<div class="modal-overlay open" id="tierSettings">
+    <div class="modal">
+        <div class="modal-head"><h2>Tier</h2>
+            <button type="button" class="modal-close" data-modal-close="tierSettings">×</button></div>
+        {% if not category %}
+        <div class="modal-body"><p class="hint">That tier is no longer on this board.</p></div>
+        <div class="modal-foot">
+            <button type="button" class="btn-ghost" data-modal-close="tierSettings">Close</button>
+        </div>
+        {% else %}
+        {# A form, so Enter saves and the browser checks the number field before
+           anything is sent. `hx-boost="false"` because htmx boosts every form
+           under a boosted <body>, and this one has nowhere to navigate. #}
+        <form hx-post="/rankings/boards/{{ board_uid }}/tiers/{{ category.uid }}/settings"
+              hx-json-enc hx-boost="false" hx-target="body" hx-swap="innerHTML">
+            <div class="modal-body">
+                <div class="field"><label for="tierLabel">Label</label>
+                    <input type="text" id="tierLabel" name="label" maxlength="{{ max_label }}"
+                           value="{{ category.label or '' }}" autofocus autocomplete="off"></div>
+                <div class="field"><label for="tierPriority">Ranking priority</label>
+                    <input type="number" id="tierPriority" name="rank_priority"
+                           min="0" max="{{ max_priority }}" step="1"
+                           value="{{ category.rank_priority }}">
+                    <span class="hint">Higher tiers rank above lower ones in a consolidated
+                        export. Ties fall back to the order the tiers are in.</span></div>
+                <div class="field"><label for="tierColour">Colour</label>
+                    {# Lowercased: a colour input refuses an uppercase value and
+                       silently falls back to black, and the data layer stores
+                       these uppercase. #}
+                    <input type="color" id="tierColour" name="colour"
+                           value="{{ (category.colour or '#E8B545') | lower }}">
+                    <span class="hint">Tints this tier's rank numbers in the exported image.</span></div>
+                <div class="field checkbox">
+                    {# THE HIDDEN COMPANION IS WHAT MAKES "off" SAYABLE. An
+                       unchecked box sends nothing at all, and this form writes
+                       every one of a tier's settings — so absent has to mean off
+                       rather than leave alone. The ticked box overrides the
+                       value before it, and the route reads the last one. #}
+                    <input type="hidden" name="is_isolated" value="0">
+                    <input type="checkbox" id="tierIsolated" name="is_isolated" value="1"
+                           {% if category.is_isolated %}checked{% endif %}>
+                    <label for="tierIsolated">Isolated — keep out of the consolidated ranking</label></div>
+            </div>
+            <div class="modal-foot">
+                <button type="button" class="btn-ghost" data-modal-close="tierSettings">Cancel</button>
+                <button type="submit" class="btn-primary">Save tier</button>
+            </div>
+        </form>
+        {% endif %}
+    </div>
+</div>

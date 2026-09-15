@@ -17,7 +17,9 @@ deleting a board sends `{}` rather than nothing at all.
 from __future__ import annotations
 
 import functools
+import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -73,10 +75,6 @@ SEARCH_MAX_PER_WINDOW = 30
 SEARCH_WINDOW_SECONDS = 60
 MIN_SEARCH_LENGTH = 2
 MAX_SEARCH_RESULTS = 20
-
-# One warm request stays a bounded piece of work: the client asks for the page
-# of titles it is about to show, not for the whole board.
-MAX_WARM_ITEMS = 250
 
 # How much of the unranked pool comes down in the first response. Everything past
 # it arrives a page at a time behind an intersect sentinel, because a board may
@@ -201,25 +199,6 @@ def _board_state(board: dict) -> dict:
     }
 
 
-def _export_limits() -> dict:
-    """The geometry the export modal's live size readout works from.
-
-    SENT RATHER THAN RESTATED IN JAVASCRIPT. The pre-render refusal and the
-    number the modal shows beside it have to agree, and the only way to be sure
-    of that is for both to come from the constants the renderer itself uses.
-    """
-    return {
-        "tile_w": grid_builder.TILE_W, "tile_h": grid_builder.TILE_H,
-        "header_h": grid_builder.HEADER_H, "label_h": grid_builder.LABEL_H,
-        "caption_h": grid_builder.CAPTION_H, "gutter": grid_builder.GUTTER,
-        "margin": grid_builder.MARGIN, "podium_ranks": grid_builder.PODIUM_RANKS,
-        "max_dimension": grid_builder.MAX_DIMENSION,
-        "columns": list(EXPORT_COLUMNS), "scales": list(EXPORT_SCALES),
-        "max_top_x": ranker_export.MAX_TOP_X,
-        "tiers": ranker.MAX_CATEGORIES_PER_BOARD,
-    }
-
-
 def _board_groups(boards: list[dict]) -> list[dict]:
     """The switcher's year groupings.
 
@@ -245,8 +224,8 @@ def _rows_url(board_uid: str, category_uid: str) -> str:
             f"&tier={quote(category_uid)}")
 
 
-def _removals_url(board_uid: str) -> str:
-    return f"/rankings/fragments/removed?board={quote(board_uid)}"
+def _strips_url(board_uid: str) -> str:
+    return f"/rankings/fragments/tier-strips?board={quote(board_uid)}"
 
 
 def _pool_context(board: dict, page: int) -> dict:
@@ -265,6 +244,17 @@ def _pool_context(board: dict, page: int) -> dict:
         # slot into space already made for them instead of shoving the page down.
         "next_rows": min(remaining, POOL_PAGE_SIZE),
     }
+
+
+# NOTHING PRE-WARMS A POSTER ANY MORE, and that is a deletion rather than a move.
+# The page used to post back the keys of the rows it had just drawn and ask for
+# their tiles, which is a second statement of what is on screen — and it raced the
+# browser's own requests for the same pictures rather than getting ahead of them.
+# GET /api/rankings/poster already generates a tile it has not got, every row's
+# <img> carries `loading="lazy"` so only what is on screen is asked for, and a
+# browser opens about six connections to one origin at a time, which is the same
+# pacing the batch warm's own semaphore gave (posters._FAN_OUT is eight). So the
+# requests the page makes anyway are the warm.
 
 
 async def _removals_context(user_id: int, board_uid: str) -> dict:
@@ -299,12 +289,11 @@ async def _sources(user_id: int) -> dict[str, object]:
     if await ranker_sources.ratings_available(user_id):
         sources["ratings"] = True
     if await ranker_import.tracker_available(user_id):
-        sources["import"] = {
-            "years": {
-                str(media): await ranker_import.available_years(user_id, media)
-                for media in Media
-            },
-        }
+        # WHETHER, NOT WHICH YEARS. The import dialog's year list is a fragment of
+        # its own now (`import_years_fragment`), asked for when a medium is chosen
+        # — so every page load stopped paying for two years-per-medium queries to
+        # fill a <select> most visits never open.
+        sources["import"] = True
     return sources
 
 
@@ -323,18 +312,24 @@ async def rankings_page(request: Request):
 
 async def _rankings_response(request: Request, user, wanted: str | None, *,
                              notice: str = "", notice_ok: bool = True,
-                             removals_open: bool = False):
+                             removals_open: bool = False, undo_key: str = ""):
     """The rankings page for the board `wanted`, or for the account's first.
 
-    ONE BUILDER FOR EVERY ANSWER THAT IS THE WHOLE PAGE: opening it, and putting a
-    removed title back, which answers with the board redrawn. A second builder
-    would be a second idea of what the page carries, and the version a save echoes
-    is exactly the kind of thing two of them would disagree about.
+    ONE BUILDER FOR EVERY ANSWER THAT IS THE WHOLE PAGE, and that is now every
+    action on this page which is not a drag: making a board, renaming, cloning,
+    adding a tier, applying the template, writing a tier's settings, taking a
+    title off, moving a selection, importing, seeding, and putting a removed title
+    back. A second builder would be a second idea of what the page carries, and
+    the version a save echoes is exactly the kind of thing two of them would
+    disagree about.
 
     `notice` is a sentence about what the request that drew this page did, and
     `notice_ok` whether it is good news or a refusal, which only decides its
-    colour; `removals_open` draws the removal history already open. All three are
-    for the restore, whose button sits inside that history.
+    colour; `removals_open` draws the removal history already open.
+    `undo_key` names a title the toast should offer to put back — it draws an Undo
+    beside the sentence, and that Undo is the SAME button the removal history
+    carries, posting to the same route, so a title comes back one way however it
+    is asked for.
     """
     boards = await ranker.fetch_boards(user.user_id)
     wanted = wanted or (boards[0]["uid"] if boards else None)
@@ -370,20 +365,20 @@ async def _rankings_response(request: Request, user, wanted: str | None, *,
         "board_groups": _board_groups(boards),
         "board": board,
         "rows_url": _rows_url,
-        "pool_page_size": POOL_PAGE_SIZE,
         "board_state": _board_state(board) if board else None,
         "sources": await _sources(user.user_id),
         "rows_open": tiered <= EAGER_ROW_LIMIT,
-        "export_limits": _export_limits(),
-        "tier_template": ranker.TIER_TEMPLATE,
         "notice": notice,
         "notice_ok": notice_ok,
+        "undo_key": undo_key,
         "removals_open": removals_open,
+        "restore_ack": RESTORE_ACK,
     }
     if board:
         context.update(_pool_context(board, 0))
         context.update(await _removals_context(user.user_id, board["uid"]))
-        context["removals_url"] = _removals_url(board["uid"])
+        context.update(_export_context(user.user_id, board))
+        context["strips_url"] = _strips_url(board["uid"])
     return templates.TemplateResponse(request, "ranker.html", context)
 
 
@@ -403,8 +398,9 @@ async def pool_page_fragment(request: Request):
     except ranker.RankerError as exc:
         return _fragment_failure(request, str(exc), _pool_url(board_uid, page),
                                  "ranker-pool-sentinel")
+    context = _pool_context(board, page)
     return templates.TemplateResponse(
-        request, "_ranker_pool_page.html", {"request": request, **_pool_context(board, page)},
+        request, "_ranker_pool_page.html", {"request": request, **context},
     )
 
 
@@ -425,6 +421,33 @@ async def category_rows_fragment(request: Request):
     return templates.TemplateResponse(
         request, "_ranker_category_rows.html",
         {"request": request, "items": found[0]["items"], "board_uid": board["uid"]},
+    )
+
+
+@guard.get("/rankings/fragments/tier-strips", AuthLevel.RANKER_APPROVED)
+async def tier_strips_fragment(request: Request):
+    """Every tier header's artwork, redrawn.
+
+    THE STRIP IS A VIEW OF WHAT A TIER HOLDS, so the server is the only thing that
+    can draw it — and a drag, a nudge or the move menu changes what a tier holds
+    without the server hearing about it until the save lands. Every other action
+    on this page answers with the board and redraws them for free; this is what
+    those three ask for once their save has been accepted.
+
+    THE WHOLE BOARD'S IN ONE ANSWER, out of band. A drag moves a title out of one
+    tier and into another, so two of them change at once, and reading the board is
+    one query either way.
+    """
+    user = await auth.current_user(request)
+    try:
+        board = await ranker.fetch_board(user.user_id, request.query_params.get("board") or "")
+    except ranker.RankerError:
+        # A board that went away in another tab has no headers to redraw, and this
+        # is not where that should be discovered.
+        return HTMLResponse("")
+    return templates.TemplateResponse(
+        request, "_ranker_tier_strips.html",
+        {"request": request, "categories": _tiers_by_priority(board["categories"])},
     )
 
 
@@ -456,18 +479,10 @@ async def row_fragment(request: Request):
     )
 
 
-@guard.get("/rankings/fragments/removed", AuthLevel.RANKER_APPROVED)
-async def removals_fragment(request: Request):
-    """What this board could put back, redrawn after something was removed or
-    restored. The history's own container asks for it (see
-    _ranker_board_shell.html), so the page's script names an event and never
-    this address."""
-    user = await auth.current_user(request)
-    board_uid = request.query_params.get("board") or ""
-    return templates.TemplateResponse(
-        request, "_ranker_removed.html",
-        {"request": request, **await _removals_context(user.user_id, board_uid)},
-    )
+# THE REMOVAL HISTORY HAS NO FRAGMENT OF ITS OWN ANY MORE. It used to redraw
+# itself on an event the page fired after a removal; a removal answers with the
+# whole page now, and so does a restore, so the list arrives with everything else
+# and there is nothing left to keep in step.
 
 
 # ---------------------------------------------------------------------------
@@ -635,63 +650,252 @@ async def list_boards(request: Request):
     return JSONResponse({"ok": True, "boards": await ranker.fetch_boards(user.user_id)})
 
 
-@guard.post("/api/rankings/boards", AuthLevel.RANKER_APPROVED)
-async def create_board(request: Request):
-    """Create a board, or clone an existing one when `clone_of` names one.
+# ---------------------------------------------------------------------------
+# what a board's own controls do
+# ---------------------------------------------------------------------------
+# EVERY ACTION ON THIS PAGE THAT IS NOT A DRAG POSTS ITSELF AND IS ANSWERED WITH
+# THE PAGE. They used to edit the page's copy of the board and then save the whole
+# layout, which meant the browser held the rules — what a tier may be called,
+# which uid a new one gets, what "apply the template" means — and the server saw
+# only the arrangement that came out of them.
+#
+# THE ANSWER IS THE WHOLE PAGE (`_rankings_response`) rather than a patch of it,
+# for the reason the restore already gave: the layout the next save reads and the
+# version it echoes both come back from the server, so nothing on this side has to
+# adjust two copies of the board and keep them agreeing. What it costs is a drag
+# made in the last moment — and that is what the flush in static/js/ranker/save.js
+# is for, which writes a pending arrangement before any of these is sent.
+#
+# WHICH BOARD IS ON SCREEN RIDES ON THE ADDRESS (`?board=`), never in the body: it
+# is a reference the server resolves, so a refusal can redraw the page the reader
+# was looking at instead of guessing at one.
 
-    Both live on one endpoint because a clone IS a create — same caps, same uid
-    rules, same response — differing only in what the new board starts out
-    holding.
+def _elsewhere(path: str) -> Response:
+    """Take the page somewhere else, the way following a link would.
+
+    `HX-Location` is a client-side GET of `path` swapped into the body with the
+    address pushed — the same arrival a boosted link produces — so a board that
+    has just been made, cloned or deleted lands on ITS OWN URL. Answering with the
+    page instead would draw the right board under the wrong address, and a reload
+    would then go back to the board that is gone.
+
+    204 rather than an empty 200: htmx acts on this header before it decides
+    anything about swapping, and a status the no-swap list already covers is the
+    safer thing to be holding if it ever stops doing so.
     """
+    return Response(status_code=204, headers={"HX-Location": path})
+
+
+def _viewed_board(request: Request) -> str | None:
+    """The board the page making this request is showing."""
+    return request.query_params.get("board")
+
+
+@guard.post("/rankings/boards/new", AuthLevel.RANKER_APPROVED)
+async def new_board(request: Request):
+    """Make a board and open it. The uid is the server's (ranker.new_uid)."""
     user = await auth.current_user(request)
     data = await authz.json_body(request)
     try:
-        if clone_of := data.get("clone_of"):
-            board = await ranker.clone_board(
-                user.user_id, str(clone_of), uid=data.get("uid"), name=data.get("name") or "",
-            )
-        else:
-            board = await ranker.create_board(
-                user.user_id,
-                uid=data.get("uid"),
-                name=data.get("name") or "",
-                year=data.get("year"),
-                media_scope=data.get("media_scope") or "mixed",
-            )
+        board = await ranker.create_board(
+            user.user_id, uid=ranker.new_uid("board"), name=str(data.get("name") or ""))
     except ranker.RankerError as exc:
-        return _refusal(exc)
-    return JSONResponse({"ok": True, "board": board})
+        return await _rankings_response(request, user, _viewed_board(request),
+                                        notice=str(exc), notice_ok=False)
+    return _elsewhere(f"/rankings?board={quote(board['uid'])}")
 
 
-@guard.patch("/api/rankings/boards/{board_uid}", AuthLevel.RANKER_APPROVED)
-async def patch_board(board_uid: str, request: Request):
-    """Rename a board, or change its year or media scope.
-
-    Only the keys present are applied, so the client sends what changed. An empty
-    string for `year` clears it; omitting `year` leaves it alone.
-    """
+@guard.post("/rankings/boards/{board_uid}/rename", AuthLevel.RANKER_APPROVED)
+async def rename_board(board_uid: str, request: Request):
+    """Rename the open board. The address does not change, so this answers with
+    the page rather than going anywhere."""
     user = await auth.current_user(request)
     data = await authz.json_body(request)
+    notice, ok = "Renamed.", True
     try:
-        board = await ranker.update_board(
-            user.user_id, board_uid,
-            name=data.get("name"), year=data.get("year"),
-            media_scope=data.get("media_scope"),
-        )
+        await ranker.update_board(user.user_id, board_uid, name=str(data.get("name") or ""))
     except ranker.RankerError as exc:
-        return _refusal(exc)
-    return JSONResponse({"ok": True, "board": board})
+        notice, ok = str(exc), False
+    return await _rankings_response(request, user, board_uid, notice=notice, notice_ok=ok)
 
 
-@guard.delete("/api/rankings/boards/{board_uid}", AuthLevel.RANKER_APPROVED)
-async def remove_board(board_uid: str, request: Request):
+@guard.post("/rankings/boards/{board_uid}/clone", AuthLevel.RANKER_APPROVED)
+async def clone_board(board_uid: str, request: Request):
+    """Copy this board, its tiers and everything in them, and open the copy."""
+    user = await auth.current_user(request)
+    await authz.json_body(request)
+    try:
+        board = await ranker.clone_board(user.user_id, board_uid, uid=ranker.new_uid("board"))
+    except ranker.RankerError as exc:
+        return await _rankings_response(request, user, board_uid,
+                                        notice=str(exc), notice_ok=False)
+    return _elsewhere(f"/rankings?board={quote(board['uid'])}")
+
+
+@guard.post("/rankings/boards/{board_uid}/delete", AuthLevel.RANKER_APPROVED)
+async def delete_board(board_uid: str, request: Request):
+    """Delete a board and everything on it. Lands on the switcher, which is where
+    a page whose board no longer exists belongs."""
     user = await auth.current_user(request)
     await authz.json_body(request)
     try:
         await ranker.delete_board(user.user_id, board_uid)
     except ranker.RankerError as exc:
-        return _refusal(exc)
-    return JSONResponse({"ok": True})
+        return await _rankings_response(request, user, board_uid,
+                                        notice=str(exc), notice_ok=False)
+    return _elsewhere("/rankings")
+
+
+@guard.post("/rankings/boards/{board_uid}/tiers/new", AuthLevel.RANKER_APPROVED)
+async def new_tier(board_uid: str, request: Request):
+    """Add one tier. Its uid is the server's, and its label is validated where
+    every other tier label is (ranker.add_categories)."""
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+    notice, ok = "Tier added.", True
+    try:
+        await ranker.add_categories(
+            user.user_id, board_uid,
+            [{"uid": ranker.new_uid("tier"), "label": data.get("label")}])
+    except ranker.RankerError as exc:
+        notice, ok = str(exc), False
+    return await _rankings_response(request, user, board_uid, notice=notice, notice_ok=ok)
+
+
+@guard.post("/rankings/boards/{board_uid}/tiers/template", AuthLevel.RANKER_APPROVED)
+async def apply_tier_template(board_uid: str, request: Request):
+    """Add whichever of the S/A/B/C/D/F set this board has not got.
+
+    THE SET IS ranker.TIER_TEMPLATE AND THE UIDS ARE ITS OWN. A board seeded from
+    ratings already holds tiers with those exact uids, so creating them under
+    fresh ones would give it two S tiers — which is why this is the one create
+    that does not go through `new_uid`.
+    """
+    user = await auth.current_user(request)
+    await authz.json_body(request)
+    try:
+        created = await ranker.add_categories(user.user_id, board_uid,
+                                              list(ranker.TIER_TEMPLATE))
+        notice = (f"Added {created} tier(s)." if created else
+                  "Those tiers are already on this board.")
+        ok = True
+    except ranker.RankerError as exc:
+        notice, ok = str(exc), False
+    return await _rankings_response(request, user, board_uid, notice=notice, notice_ok=ok)
+
+
+@guard.get("/rankings/fragments/tier-settings", AuthLevel.RANKER_APPROVED)
+async def tier_settings_fragment(request: Request):
+    """One tier's settings dialog, DRAWN FROM THE TIER rather than filled in from
+    the page's copy of it.
+
+    THE WHOLE OVERLAY IS THE ANSWER, and it arrives already open, swapped over the
+    placeholder that asked. That is what stops a dialog opening on the tier before
+    this one while this one's values are still on the way: there is no standing
+    dialog to leave stale, because the dialog IS the response.
+    """
+    user = await auth.current_user(request)
+    board_uid = request.query_params.get("board") or ""
+    tier_uid = request.query_params.get("tier") or ""
+    category = None
+    try:
+        board = await ranker.fetch_board(user.user_id, board_uid)
+        category = next((c for c in board["categories"] if c["uid"] == tier_uid), None)
+    except ranker.RankerError:
+        board = None
+    return templates.TemplateResponse(request, "_ranker_tier_settings.html", {
+        "request": request, "board_uid": board_uid, "category": category,
+        "max_label": ranker.MAX_CATEGORY_LABEL,
+        "max_priority": ranker.MAX_RANK_PRIORITY,
+    })
+
+
+@guard.post("/rankings/boards/{board_uid}/tiers/{tier_uid}/settings",
+            AuthLevel.RANKER_APPROVED)
+async def save_tier_settings(board_uid: str, tier_uid: str, request: Request):
+    """Write one tier's label, priority, colour and isolation."""
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+    notice, ok = "Tier saved.", True
+    try:
+        await ranker.update_category(
+            user.user_id, board_uid, tier_uid,
+            label=data.get("label"), rank_priority=data.get("rank_priority"),
+            colour=data.get("colour"), is_isolated=_ticked(data.get("is_isolated")))
+    except ranker.RankerError as exc:
+        notice, ok = str(exc), False
+    return await _rankings_response(request, user, board_uid, notice=notice, notice_ok=ok)
+
+
+def _ticked(value: Any) -> bool:
+    """Whether a checkbox arrived ticked.
+
+    json-enc sends a checkbox's VALUE when it is ticked and nothing at all when it
+    is not, so a control that must always be mentioned carries a hidden companion
+    input before it — the ticked box then overrides that value and both reach the
+    body under one name, as a two-element list. The last one wins, which is the
+    order the browser serializes a form in.
+    """
+    if isinstance(value, list):
+        value = value[-1] if value else ""
+    return str(value).lower() in {"1", "true", "on", "yes"}
+
+
+@guard.post("/rankings/boards/{board_uid}/items/remove", AuthLevel.RANKER_APPROVED)
+async def remove_board_item(board_uid: str, request: Request):
+    """Take one title off the board, and offer to put it back.
+
+    THE OFFER IS THE SAME BUTTON THE REMOVAL HISTORY DRAWS. The toast's Undo posts
+    to the restore route with the same key, so there is one way a title comes back
+    however it is asked for — and the history behind it outlives the toast, the
+    page and the tab, which the nine-second offer never did.
+    """
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+    key = str(data.get("key") or "")
+    undo_key = ""
+    try:
+        removed = await ranker.remove_items(user.user_id, board_uid, [key])
+        notice, ok = ("Removed from the board.", True) if removed else (
+            "That title was not on this board.", False)
+        undo_key = key if removed else ""
+    except ranker.RankerError as exc:
+        notice, ok = str(exc), False
+    return await _rankings_response(request, user, board_uid, notice=notice,
+                                    notice_ok=ok, undo_key=undo_key)
+
+
+# The prefix a bulk move names each chosen title with. ONE FIELD PER KEY, the
+# shape the calendar's filter chips already use, because json-enc turns a
+# repeated name into a list only when there is more than one of it — so a
+# selection of one would arrive as a string where a selection of two arrives as a
+# list, and every reader would have to know that.
+PICK_PREFIX = "pick:"
+
+
+def _picked(data: dict) -> list[str]:
+    """The item keys a form named with `pick:<key>`, in the order they arrived."""
+    return [name[len(PICK_PREFIX):] for name in data if name.startswith(PICK_PREFIX)]
+
+
+@guard.post("/rankings/boards/{board_uid}/items/move", AuthLevel.RANKER_APPROVED)
+async def move_board_items(board_uid: str, request: Request):
+    """Move the pool's checked titles into a tier.
+
+    A BULK MOVE IS A LAYOUT CHANGE LIKE A DRAG, so it bumps the board's version
+    and answers with the page: the arrangement the next drag saves from is the
+    server's own, and the selection is gone because the page it was made on is.
+    """
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+    notice, ok = "", True
+    try:
+        moved = await ranker.move_items(user.user_id, board_uid, _picked(data),
+                                        data.get("tier"))
+        notice = f"Moved {moved} title(s)."
+    except ranker.RankerError as exc:
+        notice, ok = str(exc), False
+    return await _rankings_response(request, user, board_uid, notice=notice, notice_ok=ok)
 
 
 @guard.get("/api/rankings/boards/{board_uid}", AuthLevel.RANKER_APPROVED)
@@ -758,19 +962,64 @@ async def download_backup(request: Request):
     })
 
 
+# The phrase a restore has to be confirmed with. A phrase that has to be READ and
+# typed cannot be dismissed by reflex the way a confirmation button can, and a
+# restore REPLACES every board this account has rather than merging into them.
+RESTORE_ACK = "REPLACE MY BOARDS"
+
+
+def _restore_refusal(request: Request, message: str) -> Response:
+    """Why a restore did not happen, said in the panel it was asked from.
+
+    OUT OF BAND, AND THE ONLY THING IN THE ANSWER. The form aims at the body,
+    because a restore that WORKS has replaced every board and the page has to come
+    back from the server — but a refusal has changed nothing, so it must not
+    replace the page the reader is standing on. `swapEmpty:false` on the form is
+    what makes an answer whose whole content is out-of-band leave the body alone;
+    the same pairing the tracker's own refusals use.
+    """
+    return templates.TemplateResponse(request, "_ranker_restore.html", {
+        "request": request, "message": message,
+    })
+
+
 @guard.post("/api/rankings/restore", AuthLevel.RANKER_APPROVED)
 async def restore_backup(request: Request):
     """Replace the requesting user's boards with an exported document's.
 
     REPLACE, not merge, in one transaction — see ranker.restore_user_data for
-    why merging an arrangement is not a coherent thing to ask for."""
+    why merging an arrangement is not a coherent thing to ask for.
+
+    THE DOCUMENT ARRIVES AS ONE FIELD OF THE FORM, which is what lets the whole
+    restore be a form. The browser reads the chosen file — the one thing only it
+    can do, because app/authz.py's shape guard admits application/json alone and a
+    cross-origin multipart upload is exactly what that rule exists to refuse — and
+    puts the text in a hidden input. The typed phrase, the submit and the answer
+    are all markup.
+    """
     user = await auth.current_user(request)
-    data = await authz.json_body(request, MAX_RESTORE_BYTES)
+    body = await authz.json_body(request, MAX_RESTORE_BYTES)
+    try:
+        data = json.loads(str(body.get("payload") or ""))
+    except ValueError:
+        return _restore_refusal(request, "That file isn't readable as a backup.")
+    if not isinstance(data, dict):
+        return _restore_refusal(request, "That file is not a rankings backup.")
+    # CHECKED HERE TOO, not only by the form's own `pattern`. A browser validation
+    # is a courtesy to the person typing; this is the one thing standing between a
+    # mis-aimed request and every board this account has, and it used to be
+    # checked nowhere but in the page.
+    if str(body.get("ack") or "").strip() != RESTORE_ACK:
+        return _restore_refusal(request, f"Type {RESTORE_ACK} to confirm.")
     try:
         boards = await ranker.restore_user_data(user.user_id, data)
     except ranker.RankerError as exc:
-        return _refusal(exc)
-    return JSONResponse({"ok": True, "boards": boards})
+        return _restore_refusal(request, str(exc))
+    # EVERY BOARD ON THIS PAGE HAS JUST BEEN REPLACED, so the page comes back from
+    # the server rather than being patched: the switcher, the board and the
+    # version a save echoes are all somebody else's now.
+    return await _rankings_response(request, user, None,
+                                    notice=f"Restored {boards} board(s).")
 
 
 # ---------------------------------------------------------------------------
@@ -792,51 +1041,6 @@ async def rankings_poster(request: Request):
     if path is None or not path.exists():
         return Response(status_code=404, headers=_POSTER_CACHE_HEADERS)
     return FileResponse(path, media_type="image/jpeg", headers=_POSTER_CACHE_HEADERS)
-
-
-@guard.post("/api/rankings/boards/{board_uid}/warm", AuthLevel.RANKER_APPROVED)
-async def warm_board_posters(board_uid: str, request: Request):
-    """Pre-generate the poster tiles a slice of this board is about to show.
-
-    The client names the titles it is rendering — a page of the pool, or the
-    tiered items on first open — because a board may hold a thousand and
-    warming all of them on every visit would spend the instance's provider
-    budget on tiles nobody is looking at. With no keys given it warms whatever
-    is tiered, which is the first-open case.
-    """
-    user = await auth.current_user(request)
-    data = await authz.json_body(request)
-    keys = data.get("keys")
-    if keys is not None and not isinstance(keys, list):
-        return authz.error("`keys` must be a list of item keys.")
-    try:
-        board = await ranker.fetch_board(user.user_id, board_uid)
-    except ranker.RankerError as exc:
-        return _refusal(exc)
-
-    tiered = [item for category in board["categories"] for item in category["items"]]
-    known = {item["key"]: item for item in [*tiered, *board["pool"]]}
-    wanted = [known[key] for key in keys if key in known] if keys is not None else tiered
-    if len(wanted) > MAX_WARM_ITEMS:
-        return authz.error(f"Warm at most {MAX_WARM_ITEMS} titles at a time.")
-
-    pairs = [(item["media"], item["tmdb"]) for item in wanted if item["tmdb"]]
-    # THE HEAVIEST THING THE RANKER ASKS FOR, and until now the least visible: up
-    # to MAX_WARM_ITEMS titles, each a provider lookup plus an image download.
-    # It is bounded in count but not in time, and a cold board pays all of it at
-    # once. (It was heavier still until the resize moved to the image proxy —
-    # see app/media/posters.py — which took a Pillow decode and re-encode per
-    # title off this path.)
-    with span("ranker.warm", n=len(pairs)) as sp:
-        generated = await posters.ensure_posters(load_settings(), pairs)
-        sp.set(generated=generated)
-    cached = sum(1 for media, tmdb in pairs if posters.cached_poster(media, tmdb))
-    # `missing` counts the titles that will render a placeholder: the ones with
-    # no tmdb at all as well as the ones whose lookup came back with nothing.
-    return JSONResponse({
-        "ok": True, "generated": generated, "cached": cached,
-        "missing": len(wanted) - cached,
-    })
 
 
 # ---------------------------------------------------------------------------
@@ -942,22 +1146,6 @@ async def add_board_items(board_uid: str, request: Request):
     return JSONResponse({"ok": True, "added": added})
 
 
-@guard.delete("/api/rankings/boards/{board_uid}/items", AuthLevel.RANKER_APPROVED)
-async def remove_board_items(board_uid: str, request: Request):
-    """Take titles off a board entirely. The only true delete in this feature —
-    every other removal returns something to the pool."""
-    user = await auth.current_user(request)
-    data = await authz.json_body(request)
-    keys = data.get("keys")
-    if not isinstance(keys, list):
-        return authz.error("`keys` must be a list of item keys.")
-    try:
-        removed = await ranker.remove_items(user.user_id, board_uid, keys)
-    except ranker.RankerError as exc:
-        return _refusal(exc)
-    return JSONResponse({"ok": True, "removed": removed})
-
-
 @guard.post("/rankings/boards/{board_uid}/removals/restore", AuthLevel.RANKER_APPROVED)
 async def restore_board_item(board_uid: str, request: Request):
     """Put a removed title back where it sat — see ranker.restore_removal for what
@@ -989,28 +1177,48 @@ async def restore_board_item(board_uid: str, request: Request):
                                     notice_ok=notice_ok, removals_open=True)
 
 
-@guard.post("/api/rankings/boards/{board_uid}/import/tracker", AuthLevel.RANKER_APPROVED)
+@guard.get("/rankings/fragments/import-years", AuthLevel.RANKER_APPROVED)
+async def import_years_fragment(request: Request):
+    """The years this account actually has finished titles for, for one medium.
+
+    A FRAGMENT RATHER THAN BOTH LISTS DRAWN AND ONE CHOSEN BY CSS, and that is not
+    a preference: a `display: none` <select> still submits its value, so two lists
+    in the page would put two `year` fields in the body and the reader's choice
+    would be whichever the browser serialized last. One list is the only shape
+    that serializes one answer.
+    """
+    user = await auth.current_user(request)
+    media = _media(request.query_params.get("media"), Media.SHOW)
+    years: list[int] = []
+    if await ranker_import.tracker_available(user.user_id):
+        years = await ranker_import.available_years(user.user_id, media)
+    return templates.TemplateResponse(
+        request, "_ranker_import_years.html", {"request": request, "years": years})
+
+
+@guard.post("/rankings/boards/{board_uid}/import", AuthLevel.RANKER_APPROVED)
 async def import_finished_titles(board_uid: str, request: Request):
     """Add everything this account has finished watching to the board's pool.
 
-    404 WHEN THE SOURCE IS NOT AVAILABLE TO THIS ACCOUNT, rather than an error
-    explaining what they are missing. The route answers as though it does not
-    exist, because for that account it does not.
+    ABSENT RATHER THAN REFUSED when the account has no such source: the page draws
+    neither the button nor the dialog, and this says the same thing in a sentence
+    for the request that arrived anyway.
     """
     user = await auth.current_user(request)
     data = await authz.json_body(request)
     media = _media(data.get("media"), Media.SHOW)
     year = data.get("year")
-    if year not in (None, ""):
+    if year in (None, ""):
+        year = None
+    else:
         try:
             year = int(year)
         except (TypeError, ValueError):
-            return authz.error("Year must be a whole number.")
-    else:
-        year = None
-
+            return await _rankings_response(request, user, board_uid, notice_ok=False,
+                                            notice="Year must be a whole number.")
     if not await ranker_import.tracker_available(user.user_id):
-        return authz.error("No such source.", 404)
+        return await _rankings_response(request, user, board_uid, notice_ok=False,
+                                        notice="There is nothing to import from.")
     source = ranker_import.finished_titles_source()
     refs = await source.finished_titles(user.user_id, media=media, year=year)
     try:
@@ -1018,31 +1226,41 @@ async def import_finished_titles(board_uid: str, request: Request):
             user.user_id, board_uid, ranker_sources.items_from_refs(refs),
             added_from="tracker",
         )
+        notice, ok = f"Found {len(refs)}, added {added}.", True
     except ranker.RankerError as exc:
-        return _refusal(exc)
-    return JSONResponse({"ok": True, "found": len(refs), "added": added})
+        notice, ok = str(exc), False
+    return await _rankings_response(request, user, board_uid, notice=notice, notice_ok=ok)
 
 
-@guard.post("/api/rankings/boards/{board_uid}/seed/ratings", AuthLevel.RANKER_APPROVED)
+@guard.get("/rankings/fragments/seed", AuthLevel.RANKER_APPROVED)
+async def seed_control_fragment(request: Request):
+    """The seed control back in its resting state — what Cancel asks for."""
+    return _seed_answer(request, request.query_params.get("board") or "")
+
+
+@guard.post("/rankings/boards/{board_uid}/seed", AuthLevel.RANKER_APPROVED)
 async def seed_from_ratings(board_uid: str, request: Request):
     """Arrange titles into tiers from the scores this account has already given
     them, using ITS OWN credential — ratings are private data, unlike a search.
 
-    Previews by default and only writes when `commit` is true, so the counts are
-    seen before a board changes. 404 when the account has nothing linked to read
-    ratings from: an action that can never work is not offered.
+    THE DRY RUN ANSWERS A CONFIRMATION WHOSE BUTTON COMMITS, replacing the control
+    that asked (_ranker_seed.html, the shape templates/_add_all.html gave the
+    calendar's own month action). So the counts a seed is about to produce are the
+    server's sentence about its own dry run rather than one composed in the
+    browser from a JSON answer, and pressing the confirmation is the same request
+    with `commit` on.
     """
     user = await auth.current_user(request)
     data = await authz.json_body(request)
-    commit = bool(data.get("commit"))
+    commit = _ticked(data.get("commit"))
     if not await ranker_sources.ratings_available(user.user_id):
-        return authz.error("No such source.", 404)
-
+        return await _rankings_response(request, user, board_uid, notice_ok=False,
+                                        notice="There are no ratings to seed from.")
     source = ranker_sources.ratings_source()
     try:
         rated = await source.fetch_ratings(user.user_id)
     except ranker_sources.SourceUnavailable as exc:
-        return authz.error(str(exc), 502)
+        return _seed_answer(request, board_uid, message=str(exc), ok=False)
     entries = [
         item for rating in rated
         if (item := rating.title.as_item(user_rating=rating.rating)) is not None
@@ -1050,8 +1268,33 @@ async def seed_from_ratings(board_uid: str, request: Request):
     try:
         summary = await ranker.seed_ratings(user.user_id, board_uid, entries, commit=commit)
     except ranker.RankerError as exc:
-        return _refusal(exc)
-    return JSONResponse({"ok": True, "committed": commit, "rated": len(rated), **summary})
+        if commit:
+            return await _rankings_response(request, user, board_uid,
+                                            notice=str(exc), notice_ok=False)
+        return _seed_answer(request, board_uid, message=str(exc), ok=False)
+    if commit:
+        return await _rankings_response(
+            request, user, board_uid,
+            notice=f"Seeded {summary['titles_placed']} title(s) into "
+                   f"{summary['tiers_created']} new tier(s).")
+    return _seed_answer(
+        request, board_uid,
+        confirm=f"This would add {summary['titles_added']} title(s), place "
+                f"{summary['titles_placed']} and create {summary['tiers_created']} "
+                f"tier(s). {summary['already_placed']} are already in a tier and "
+                "will not be moved.")
+
+
+def _seed_answer(request: Request, board_uid: str, *, confirm: str = "",
+                 message: str = "", ok: bool = True) -> Response:
+    """The seed control in whichever of its states this answer leaves it in: the
+    button, the confirmation it turns into, or the button again with a line
+    saying why nothing happened. One partial, because each answer REPLACES the
+    element that was pressed."""
+    return templates.TemplateResponse(request, "_ranker_seed.html", {
+        "request": request, "board_uid": board_uid, "confirm": confirm,
+        "message": message, "ok": ok,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -1079,9 +1322,16 @@ class _ExportOptions:
     header_image: Any
 
 
-def _parse_export(data: dict) -> _ExportOptions:
-    """Validate an export body, raising ExportError with a message meant for the
-    person who asked. Nothing here reaches the database or the renderer."""
+def _parse_export(data: Mapping[str, Any]) -> _ExportOptions:
+    """Validate an export request, raising ExportError with a message meant for
+    the person who asked. Nothing here reaches the database or the renderer.
+
+    IT READS A FORM'S OWN FIELDS, which is what took the export options out of
+    script: every value arrives as the string a control holds, the two checkboxes
+    arrive only when they are ticked, and the two compound choices — which tier to
+    export, which picture to put at the top — arrive as the one value their
+    <select> can carry. Both used to be split into a pair of keys in the browser.
+    """
     top_x = _whole_number(data.get("top_x"), "Top X", 1, ranker_export.MAX_TOP_X)
     columns = _whole_number(data.get("columns"), "Columns", min(EXPORT_COLUMNS),
                             max(EXPORT_COLUMNS))
@@ -1100,23 +1350,56 @@ def _parse_export(data: dict) -> _ExportOptions:
     fmt = str(data.get("fmt") or "webp").lower()
     if fmt not in grid_builder.FORMATS:
         raise ranker_export.ExportError("Format must be WebP, JPEG or PNG.")
-    scope = str(data.get("scope") or "global")
-    if scope not in ranker_export.SCOPES:
-        raise ranker_export.ExportError("Export scope must be either the whole board or one tier.")
-    category_uid = data.get("category_uid") or None
-    if scope == "category" and not category_uid:
-        raise ranker_export.ExportError("Choose which tier to export.")
+    scope, category_uid = _export_scope(data.get("scope"))
 
     return _ExportOptions(
         top_x=top_x, columns=columns,
         title=_export_text(data.get("title"), "title"),
         username=_export_text(data.get("username"), "name"),
-        scope=scope, category_uid=str(category_uid) if category_uid else None,
+        scope=scope, category_uid=category_uid,
         scale=scale, fmt=fmt,
-        show_titles=bool(data.get("show_titles")),
-        podium=bool(data.get("podium")),
-        header_image=data.get("header_image"),
+        show_titles=_ticked(data.get("show_titles")),
+        podium=_ticked(data.get("podium")),
+        header_image=_header_choice(data.get("header_image")),
     )
+
+
+# What the two compound <select>s mean, spelled where the request is read rather
+# than where it is built: `cat:<uid>` is one tier and anything else is the whole
+# board; `img:<uid>` and `provider:<name>` are the two kinds of saved picture, and
+# `avatar` is the account's own. The bare prefixes are the markup's too — the
+# options are rendered from the same constants — so there is one spelling of each.
+CATEGORY_SCOPE_PREFIX = "cat:"
+SAVED_IMAGE_PREFIX = "img:"
+PROVIDER_IMAGE_PREFIX = "provider:"
+
+
+def _export_scope(value: Any) -> tuple[str, str | None]:
+    chosen = str(value or "global")
+    if chosen.startswith(CATEGORY_SCOPE_PREFIX):
+        uid = chosen[len(CATEGORY_SCOPE_PREFIX):]
+        if not uid:
+            raise ranker_export.ExportError("Choose which tier to export.")
+        return "category", uid
+    if chosen != "global":
+        raise ranker_export.ExportError(
+            "Export scope must be either the whole board or one tier.")
+    return "global", None
+
+
+def _header_choice(value: Any) -> Any:
+    """The header picture as `_header_bytes` names it: the bare string for the
+    avatar, and one keyed object each for a saved image and a service's picture.
+    Neither name is trusted here — both are checked against what this account
+    actually owns before either becomes a path."""
+    chosen = str(value or "")
+    if chosen == "avatar":
+        return "avatar"
+    if chosen.startswith(SAVED_IMAGE_PREFIX):
+        return {"image_uid": chosen[len(SAVED_IMAGE_PREFIX):]}
+    if chosen.startswith(PROVIDER_IMAGE_PREFIX):
+        return {"provider": chosen[len(PROVIDER_IMAGE_PREFIX):]}
+    return None
 
 
 def _whole_number(value: Any, what: str, low: int, high: int) -> int:
@@ -1248,35 +1531,193 @@ async def _consolidated(user_id: int, board_uid: str, options: _ExportOptions):
     return board, ranked
 
 
-@guard.post("/api/rankings/boards/{board_uid}/preview", AuthLevel.RANKER_APPROVED)
-async def preview_grid(board_uid: str, request: Request):
+def _export_context(user_id: int, board: dict) -> dict:
+    """Everything the export dialog's form is drawn from.
+
+    THE CHOICES ARE THE SERVER'S, ALL OF THEM: the column counts and the scales it
+    accepts, each format with the ceiling it is refused at, the tiers this board
+    has, and the pictures this account owns — which used to be fetched from
+    /api/me/images and turned into <option>s in the browser. Nothing on the page
+    decides what may be asked for any more.
+    """
+    default = ("Movies" if board["media_scope"] == "movie" else
+               "Shows" if board["media_scope"] == "show" else "Titles")
+    year = board["year"] or datetime.now(timezone.utc).year
+    return {
+        "board_uid": board["uid"],
+        "export_title": f"Top {default} of {year}",
+        "export_columns": EXPORT_COLUMNS,
+        "export_scales": EXPORT_SCALES,
+        "export_formats": [
+            {"value": fmt, "label": label,
+             "limit": f"{grid_builder.MAX_DIMENSION[fmt]:,}"}
+            for fmt, label in (("webp", "WebP — smallest"),
+                               ("jpeg", "JPEG — widest support"),
+                               ("png", "PNG — lossless, largest"))
+        ],
+        "export_images": user_images.describe_images(user_id),
+        "export_providers": user_images.list_provider_avatars(user_id),
+        "export_image_cap": user_images.MAX_IMAGES_PER_USER,
+        "export_name_cap": user_images.MAX_IMAGE_NAME,
+        "max_top_x": ranker_export.MAX_TOP_X,
+        "max_export_text": MAX_EXPORT_TEXT,
+    }
+
+
+@guard.post("/rankings/boards/{board_uid}/header-image", AuthLevel.RANKER_APPROVED)
+async def add_header_image(board_uid: str, request: Request):
+    """Save a picture for the top of an exported grid, and choose it.
+
+    THE BYTES ARE VALIDATED AND NORMALIZED IN ONE PLACE — user_images.add_image,
+    which the account page's own library calls too — so this route decides
+    nothing about them. What it decides is what the reader sees next: the picker
+    redrawn with the new picture already chosen, and an `export-changed` event so
+    the readout and the preview beside it follow without a second press.
+    """
+    user = await auth.current_user(request)
+    data = await authz.json_body(request, user_images.MAX_UPLOAD_BODY_BYTES,
+                                 user_images.TOO_LARGE_MESSAGE)
+    chosen, message = "", ""
+    try:
+        board = await ranker.fetch_board(user.user_id, board_uid)
+    except ranker.RankerError as exc:
+        return authz.error(str(exc), 404)
+    try:
+        uid = await user_images.add_image(
+            user.user_id, str(data.get("image_b64") or ""), str(data.get("name") or ""))
+        chosen = f"{SAVED_IMAGE_PREFIX}{uid}"
+    except user_images.TooManyImages:
+        message = (f"You can save up to {user_images.MAX_IMAGES_PER_USER} pictures. "
+                   "Remove one on your account page first.")
+    except user_images.ValidationError as exc:
+        message = str(exc)
+    return templates.TemplateResponse(
+        request, "_ranker_header_pick.html",
+        {"request": request, "chosen": chosen, "message": message,
+         **_export_context(user.user_id, board)},
+        headers={"HX-Trigger": "export-changed"} if chosen else None,
+    )
+
+
+def _preview_url(query: str) -> str:
+    return f"/rankings/preview.webp?{query}" if query else "/rankings/preview.webp"
+
+
+@guard.get("/rankings/fragments/export", AuthLevel.RANKER_APPROVED)
+async def export_readout_fragment(request: Request):
+    """How big this export comes out, what it would look like, and whether it can
+    be downloaded at all.
+
+    THE SIZE IS THE RENDERER'S OWN ARITHMETIC. It used to be computed a second
+    time in the browser, from layout constants the page was sent for no other
+    reason — so the number a reader saw and the geometry the pre-render check
+    refused on were two implementations of one thing, and the constants had to be
+    published to keep them agreeing. `compute_layout` is now asked directly, which
+    is the same call the download makes before it allocates a pixel.
+
+    A GET, BECAUSE IT CHANGES NOTHING and because the preview beside it has to be
+    an <img>. What rides on the address is the options being composed — a title
+    and a name somebody is typing, which no server could look them up — and every
+    other field is a choice out of a set this route owns.
+    """
+    user = await auth.current_user(request)
+    board_uid = request.query_params.get("board") or ""
+    query = str(request.url.query)
+    try:
+        options = _parse_export(request.query_params)
+        board, ranked = await _consolidated(user.user_id, board_uid, options)
+    except ranker.RankerError as exc:
+        return _export_readout(request, message=str(exc))
+    except ranker_export.ExportError as exc:
+        return _export_readout(request, message=str(exc))
+
+    layout = grid_builder.compute_layout(
+        len(ranked), columns=options.columns, scale=options.scale,
+        show_titles=options.show_titles, podium=options.podium,
+    )
+    # A board with nothing tiered never reaches here: `consolidate` refuses it,
+    # and its sentence is the one drawn above.
+    over = not layout.fits(options.fmt)
+    if over:
+        limit = grid_builder.MAX_DIMENSION[options.fmt]
+        message = (f"{layout.width} × {layout.height}px — too tall for "
+                   f"{options.fmt.upper()} (limit {limit:,}px). Try more columns, "
+                   "half size, or PNG.")
+    else:
+        message = f"{layout.width} × {layout.height}px"
+    emojis, default_emoji = await ranker_import.network_emojis(user.user_id)
+    return _export_readout(
+        request, message=message, over=over, count=len(ranked), query=query,
+        header=_header_thumb(options.header_image),
+        markdown=ranker_export.to_markdown(ranked, title=options.title, emojis=emojis,
+                                           default_emoji=default_emoji),
+    )
+
+
+def _export_readout(request: Request, *, message: str, over: bool = True, count: int = 0,
+                    query: str = "", header: str = "", markdown: str = "") -> Response:
+    """The dialog's live half: the size line, the preview, the Markdown the copy
+    button takes, and — out of band, because they sit elsewhere in the dialog —
+    the Download button in the state this size leaves it in and the thumbnail of
+    the picture now chosen."""
+    return templates.TemplateResponse(request, "_ranker_export_readout.html", {
+        "request": request, "message": message, "over": over, "count": count,
+        "preview_url": _preview_url(query) if count and not over else "",
+        "header_thumb": header, "markdown": markdown,
+    })
+
+
+def _header_thumb(spec: Any) -> str:
+    """The address of the picture a header choice names, at thumbnail size. The
+    avatar route resizes its master on demand, so this asks for 96px of it rather
+    than the 512 it holds."""
+    if spec == "avatar":
+        return "/api/me/avatar?size=96"
+    if isinstance(spec, dict) and (name := spec.get("provider")):
+        return f"/api/me/avatar/source/{quote(str(name))}?size=96"
+    if isinstance(spec, dict) and (uid := spec.get("image_uid")):
+        return f"/api/me/images/{quote(str(uid))}"
+    return ""
+
+
+@guard.get("/rankings/preview.webp", AuthLevel.RANKER_APPROVED)
+async def preview_grid(request: Request):
     """A small render of exactly what the export would produce.
 
     Same consolidation, same renderer, same options — only the scale differs, so
     what is previewed is what is downloaded. Exempt from the export cooldown: a
-    preview is what stops somebody exporting repeatedly to find the settings
-    they wanted.
+    preview is what stops somebody exporting repeatedly to find the settings they
+    wanted.
+
+    A GET WHERE THE DOWNLOAD IS A POST, and the difference is what each one spends.
+    `export_grid` spends a per-account cooldown, so as a GET a link on another site
+    could spend it for whoever followed it — SameSite=Lax cookies ride a top-level
+    GET navigation. This spends a render slot and nothing that is recorded, and a
+    cross-site <img> carries no cookie at all, so it cannot be spent from anywhere
+    but a page of this app.
     """
     user = await auth.current_user(request)
-    data = await authz.json_body(request)
+    board_uid = request.query_params.get("board") or ""
     try:
-        options = _parse_export(data)
+        options = _parse_export(request.query_params)
         _, ranked = await _consolidated(user.user_id, board_uid, options)
         header = _header_bytes(user.user_id, options.header_image)
-    except ranker.RankerError as exc:
-        return _refusal(exc)
-    except ranker_export.ExportError as exc:
-        return authz.error(str(exc))
+    except ranker.RankerError:
+        return Response(status_code=404)
+    except ranker_export.ExportError:
+        # The readout beside this one says what is wrong in words; a picture that
+        # cannot be drawn has nowhere to say it.
+        return Response(status_code=404)
 
     scale = PREVIEW_WIDTH / (options.columns * grid_builder.TILE_W)
     try:
         payload = await _render(_grid_entries(ranked), options, scale=scale,
                                 fmt=PREVIEW_FORMAT, header=header)
-    except grid_builder.GridError as exc:
+    except grid_builder.GridError:
         # A preview is small enough that no allowed request reaches a format
         # ceiling, but the renderer is the authority on that rather than this
         # route's arithmetic about it.
-        return authz.error(str(exc))
+        return Response(status_code=404)
     return Response(payload, media_type="image/webp",
                     headers={"Cache-Control": "no-store"})
 
@@ -1354,33 +1795,9 @@ async def export_grid(board_uid: str, request: Request):
     })
 
 
-@guard.post("/api/rankings/boards/{board_uid}/export/markdown", AuthLevel.RANKER_APPROVED)
-async def export_markdown(board_uid: str, request: Request):
-    """The same ranking as a pasteable text block.
-
-    A ranking is already an ordered list, so this is the cheapest export there
-    is: no renderer, no semaphore, no cooldown. Network emoji come from the
-    account's own preferences WHERE THEY EXIST — an account that has none gets
-    plain text rather than an error, because nothing in this feature may require
-    them.
-    """
-    user = await auth.current_user(request)
-    data = await authz.json_body(request)
-    try:
-        options = _parse_export(data)
-        board, ranked = await _consolidated(user.user_id, board_uid, options)
-    except ranker.RankerError as exc:
-        return _refusal(exc)
-    except ranker_export.ExportError as exc:
-        return authz.error(str(exc))
-
-    emojis, default_emoji = await ranker_import.network_emojis(user.user_id)
-    markdown = ranker_export.to_markdown(
-        ranked, title=options.title, emojis=emojis, default_emoji=default_emoji,
-    )
-    return JSONResponse({
-        "ok": True,
-        "markdown": markdown,
-        "filename": ranker_export.download_name((board["name"], options.title), "md"),
-        "count": len(ranked),
-    })
+# THE MARKDOWN RIDES WITH THE READOUT rather than having a route of its own.
+# A ranking is already an ordered list, so the text costs no renderer, no
+# semaphore and no cooldown — it is computed beside the size every time an option
+# changes and put in a field the copy button names (`data-copy`, static/js/ui.js).
+# Writing the clipboard is the only part of copying a browser has to do, and it
+# is the only part left.

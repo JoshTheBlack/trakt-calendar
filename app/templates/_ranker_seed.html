@@ -1,0 +1,38 @@
+{# SEED FROM RATINGS, IN ALL THREE OF ITS STATES, drawn by the server every time.
+
+   The button, the confirmation it turns into, and the button again afterwards are
+   ONE partial because they replace each other: every answer this control gives is
+   swapped over the element that was pressed (`hx-target="this"`,
+   `hx-swap="outerHTML"`, inherited by the two controls inside the confirmation),
+   so a state drawn somewhere else would be a state the next answer could not
+   replace. It is templates/_add_all.html's shape, which the calendar's own
+   month-wide action already uses.
+
+   THE COUNTS ARE THE SERVER'S SENTENCE ABOUT ITS OWN DRY RUN. A seed rearranges a
+   board, so it says what it is about to do first — and it used to say it by
+   composing that sentence in the browser out of a JSON answer and putting it in a
+   generic "are you sure" dialog.
+
+   Context: `board_uid`, `confirm` (the sentence, when this IS the confirmation),
+   and `message`/`ok` (a line to say when nothing happened). #}
+{% if confirm %}
+<span class="ranker-seed-confirm" hx-target="this" hx-swap="outerHTML">
+    <span class="hint">{{ confirm }}</span>
+    {# Cancel DRAWS THE BUTTON AGAIN rather than restoring anything: the
+       confirmation is what is on the page, so the way back is to ask for the
+       control. A GET, because it changes nothing — and because posting the dry
+       run again to cancel it would spend a ratings read to do nothing. #}
+    <button type="button" class="btn-ghost small"
+            hx-get="/rankings/fragments/seed?board={{ board_uid | urlencode }}">Cancel</button>
+    <button type="button" class="btn-primary small"
+            hx-post="/rankings/boards/{{ board_uid }}/seed" hx-json-enc
+            hx-vals='{"commit": "1"}'
+            hx-target="body" hx-swap="innerHTML">Seed the board</button>
+</span>
+{% else %}
+<button type="button" class="btn-ghost small" id="seedBtn"
+        title="Arrange titles into tiers from the scores you have already given them"
+        hx-post="/rankings/boards/{{ board_uid }}/seed" hx-json-enc
+        hx-target="this" hx-swap="outerHTML">★ Seed from ratings</button>
+{% endif %}
+{%- if message %}{% import '_toast.html' as toast %}{{ toast.flash(message, ok) }}{% endif %}

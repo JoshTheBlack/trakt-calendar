@@ -1,0 +1,46 @@
+{# HOW BIG THIS EXPORT COMES OUT, WHAT IT LOOKS LIKE, AND WHETHER IT CAN BE
+   DOWNLOADED — one answer, because they are one question asked of one set of
+   options.
+
+   THE SIZE IS THE RENDERER'S OWN. `compute_layout` is asked directly, which is
+   the same call the download makes before it allocates a pixel. The page used to
+   do that arithmetic a second time, from tile, label and gutter constants it was
+   sent for no other reason, so the number a reader saw and the geometry the
+   pre-render check refused on were two implementations of one thing.
+
+   THE PREVIEW IS AN <img>, so it is an ordinary GET of an address carrying the
+   options being composed. It is drawn only when there is something to draw and
+   the canvas fits — the two cases the download itself refuses.
+
+   TWO THINGS TRAVEL OUT OF BAND because they live elsewhere in the dialog: the
+   Download button, in whatever state this size leaves it in, and the thumbnail of
+   the picture now chosen. Both are addressed by their own id.
+
+   THE MARKDOWN RIDES ALONG in a field the copy button names. Writing the
+   clipboard is the only part of copying only a browser can do; composing the text
+   was never one of them.
+
+   Context: `message` (the size line, or why there is none), `over`, `count`,
+   `preview_url`, `header_thumb`, `markdown`. #}
+<p class="ranker-size{{ ' is-over' if over and count }}" id="exSize">{{ message }}</p>
+{% if preview_url %}
+{# Click to see it at rendered size and move the pointer to look around it — the
+   header is a few percent of a tall grid, and shrunk into this column it cannot
+   be judged at all. #}
+<div class="ranker-preview-frame" id="exPreview"
+     onclick="togglePreviewZoom()" onmousemove="panPreview(event)"
+     title="Click to zoom, then move the pointer to look around">
+    <img alt="Preview of the poster grid" src="{{ preview_url }}">
+</div>
+{% else %}
+<div class="ranker-preview-frame" id="exPreview">
+    <span class="ranker-preview-hint">No preview.</span>
+</div>
+{% endif %}
+<textarea id="exportMarkdown" hidden aria-hidden="true">{{ markdown }}</textarea>
+
+<img id="exHeaderThumb" hx-swap-oob="outerHTML" alt=""
+     {% if header_thumb %}src="{{ header_thumb }}"{% else %}hidden{% endif %}>
+
+<button type="button" class="btn-primary" id="exportGo" hx-swap-oob="outerHTML"
+        onclick="downloadExport()"{% if over or not count %} disabled{% endif %}>Download</button>

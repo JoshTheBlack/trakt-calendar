@@ -19,6 +19,7 @@ from PIL import Image
 from app import auth
 from app.auth import provider_avatars, provider_login
 from app.media import user_images
+from app.ranker import core as ranker
 from tests.support import AppTestCase
 
 
@@ -200,7 +201,7 @@ class AccountPageAndExportSurfaceTests(AppTestCase):
 
     def setUp(self):
         super().setUp()
-        self.user_id = self.make_user("surfaces")
+        self.user_id = self.make_user("surfaces", ranker_approved=True)
         user_images.delete_user_data(self.user_id)
         self.addCleanup(user_images.delete_user_data, self.user_id)
         self.sign_in_as(self.user_id)
@@ -228,16 +229,21 @@ class AccountPageAndExportSurfaceTests(AppTestCase):
                 resp = self.client.post("/api/me/avatar/source", json={"source": bad})
                 self.assertEqual(resp.status_code, 400)
 
-    def test_the_export_picker_is_told_which_service_pictures_exist(self):
+    def test_the_export_picker_offers_the_service_pictures_that_exist(self):
         """THE OTHER DEFECT: the server accepted a provider header spec and
-        nothing ever offered one, because the picker builds its options from
-        this payload."""
-        data = self.client.get("/api/me/images").json()
-        self.assertEqual(data["provider_avatars"], ["plex"])
-        # Beside the saved images rather than among them: `max` caps uploads and
-        # a provider picture is not one.
-        self.assertEqual(data["images"], [])
-        self.assertEqual(data["max"], user_images.MAX_IMAGES_PER_USER)
+        nothing ever offered one, because the picker was built in the browser from
+        a payload that did not mention them. The picker is markup the server draws
+        now, so this asks the markup."""
+        asyncio.run(ranker.create_board(self.user_id, uid="b1", name="Top"))
+        html = self.client.get("/rankings").text
+        picker = re.search(r'<select id="exHeader"[^>]*>(.*?)</select>', html, re.S).group(1)
+        self.assertIn('<option value="provider:plex"', picker)
+        # Beside the saved images rather than among them: the cap counts uploads
+        # and a service picture is not one.
+        self.assertNotIn('value="img:', picker)
+        # And the upload beside it is still offered, because none of the cap is
+        # spent: a service picture counts against nothing.
+        self.assertIn("Name this picture", html)
 
 
 class SigningInDoesNotReseedTests(AppTestCase):

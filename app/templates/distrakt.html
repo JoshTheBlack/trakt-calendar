@@ -208,10 +208,12 @@
                        The shape guard admits application/json alone — a
                        cross-origin multipart upload is exactly what it exists to
                        refuse — so the text has to reach the body through a field.
-                       static/js/tracker/backup.js is those few lines and nothing
-                       else. #}
+                       static/js/ui.js's `data-file-into` is those few lines, once
+                       for every page that reads a file: this one, the rankings
+                       board's backup, and both picture uploads. #}
                     <input type="file" id="restoreFile" accept="application/json,.json"
-                           data-file-into="#restorePayload" data-file-status="#restoreStatus">
+                           data-file-into="#restorePayload" data-file-status="#restoreStatus"
+                           data-file-count="distrakt_months:month,distrakt_month_records:record,distrakt_user_seasons:record">
                     <input type="hidden" name="payload" id="restorePayload">
                     <label for="restoreAck">Type <code>{{ restore_ack }}</code> to confirm:</label>
                     <input type="text" id="restoreAck" name="ack" spellcheck="false" autocomplete="off"

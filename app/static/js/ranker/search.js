@@ -40,7 +40,6 @@ async function addSearchResult(el) {
     if (empty) empty.remove();
     markHeldResults();
     refreshCounts();
-    warmPosters([key]);
 }
 
 document.addEventListener('click', (event) => {

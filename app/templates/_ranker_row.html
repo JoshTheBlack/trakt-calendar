@@ -8,7 +8,7 @@
    and lives in ranker.css.
 
    THE ONLY BUILDER OF A ROW THERE IS. A title that arrives after first paint — a
-   search result clicked or dragged in, a removed title put back — is fetched from
+   search result clicked or dragged in — is fetched from
    /rankings/fragments/row, which renders this file, because every one of those
    reaches the page only once the title is on the board. A JavaScript copy of this
    markup used to sit beside it, kept in step by hand.
@@ -24,6 +24,18 @@
    history holds that now (ranker/core.py's `restore_removal`), where a reload or
    a second tab cannot lose it. #}
 <div class="ranker-item" data-key="{{ item.key }}" tabindex="0" role="listitem">
+    {# WHETHER THIS ROW IS PICKED, AS STATE THE STYLESHEET AND THE FORM CAN BOTH
+       READ. The highlight is `#rankerPool .ranker-item:has(.ranker-pick:checked)`,
+       the "N selected" count is a CSS counter over the same question, and the
+       bulk move is the pool's form submitting one field per ticked box — so a
+       selection is one fact rather than an array in the page, a class written
+       onto each row and a list rebuilt for the move.
+       HIDDEN, BECAUSE IT IS NOT A CONTROL ANYBODY OPERATES: a selection is made
+       by ctrl- and shift-clicking rows, which is the one part of this that has to
+       be script (static/js/ranker/selection.js), and it sets this.
+       `autocomplete="off"` so a reload cannot come back with rows still ticked. #}
+    <input type="checkbox" class="ranker-pick" name="pick:{{ item.key }}" value="1"
+           form="poolForm" hidden autocomplete="off" tabindex="-1" aria-hidden="true">
     <span class="ranker-grip" aria-hidden="true">⠿</span>
     {# width/height and loading="lazy" on every poster, so the browser's own
        deferral backs up the fragment-level laziness and the row reserves its
@@ -65,9 +77,23 @@
                 onclick="nudgeItem(this, -1)">▲</button>
         <button type="button" class="ranker-act" title="Move down" aria-label="Move down"
                 onclick="nudgeItem(this, 1)">▼</button>
+        {# The menu itself is one element in the page (ranker.html) rather than one
+           per row: a board of a thousand titles would otherwise carry a thousand
+           copies of the same list of tiers. What this button says is only that it
+           is the one that opened it. #}
         <button type="button" class="ranker-act" title="Move to tier" aria-label="Move to tier"
-                onclick="openMoveMenu(this)">⇄</button>
+                data-move-menu onclick="openMoveMenu(this)">⇄</button>
+        {# TAKING A TITLE OFF IS A BUTTON POSTING ITSELF, answered with the board
+           redrawn and a toast whose Undo is the SAME button the removal history
+           carries. It asks nothing first, and that is a decision rather than an
+           omission: the confirmation existed because a removal used to be hard to
+           reverse, and a removal is now one press to put back — offered on the
+           toast for as long as it is on screen, and kept in "Recently removed"
+           for a month after that. #}
         <button type="button" class="ranker-act danger" title="Remove from board"
-                aria-label="Remove from board" onclick="removeItem(this)">✕</button>
+                aria-label="Remove from board"
+                hx-post="/rankings/boards/{{ board_uid }}/items/remove"
+                hx-json-enc hx-vals='{{ {"key": item.key} | tojson }}'
+                hx-trigger="click" hx-target="body" hx-swap="innerHTML">✕</button>
     </span>
 </div>

@@ -1,0 +1,15 @@
+{# The years this account has finished titles for, for the medium now chosen.
+
+   A FRAGMENT RATHER THAN BOTH MEDIA'S LISTS DRAWN AND ONE CHOSEN BY CSS: a
+   `display: none` <select> still submits its value, so two lists in one form
+   would put two `year` fields in the body and the answer would be whichever the
+   browser serialized last. One list is the only shape that serializes one answer.
+
+   IT CARRIES NO REQUEST OF ITS OWN. The medium select asks for this and swaps it
+   over whatever is here (ranker.html), so this element is only ever the answer. #}
+<select id="importYear" name="year">
+    <option value="">Any year</option>
+    {%- for year in years %}
+    <option value="{{ year }}">{{ year }}</option>
+    {%- endfor %}
+</select>
