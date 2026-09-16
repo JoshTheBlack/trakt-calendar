@@ -214,37 +214,6 @@ async def _viewer_source_selection(request: Request, user, media=None) -> source
     return saved
 
 
-def _answering_services(endpoint, settings) -> list[tuple[str, str]]:
-    """(name, label) for every service that could actually fill THIS calendar on
-    THIS instance, in declared order — or an empty list when there is nothing to
-    choose between. The two source controls are both built out of this, so they
-    cannot come to different answers about what this calendar has to offer.
-
-    IT IS TWO QUESTIONS AND NEITHER OF THEM IS ASKED HERE. Whether a service is
-    on this INSTANCE's calendar at all belongs to `providers.calendar_sources`,
-    and it is asked through `resolve.instance_sources` so that an operator
-    switching a service off empties these controls by the same rule that empties
-    the calendar underneath them — a second spelling of that question living here
-    is a copy that answers differently the first time either is edited. Whether
-    it publishes THIS calendar is `capabilities.answers`. No service is named in
-    either check, so a third one is offered the day it is registered.
-
-    AND WITH FEWER THAN TWO THERE IS NOTHING TO OFFER, which is returned as an
-    empty list rather than as one entry. One service that can answer means every
-    label a control could carry names the same outcome, and drawing it makes the
-    page look as though a choice is available when none is. Nothing else on
-    either surface is drawn to be inert either.
-    """
-    from .. import providers  # deferred: see _coverage_gap, same reason
-
-    admitted = calendar_resolve.instance_sources(settings)
-    services = [(str(source), provider.label)
-                for source, provider in providers.registered().items()
-                if provider.capabilities.answers(endpoint.key)
-                and (admitted is None or str(source) in admitted)]
-    return services if len(services) >= 2 else []
-
-
 def _answering_services_for_media(media, settings) -> list[tuple[str, str]]:
     """(name, label) for every service that could fill ANY calendar of `media`.
 
@@ -263,7 +232,7 @@ def _answering_services_for_media(media, settings) -> list[tuple[str, str]]:
     for endpoint in ENDPOINTS.values():
         if endpoint.media is not media:
             continue
-        for name, label in _answering_services(endpoint, settings):
+        for name, label in calendar_resolve.answering_services(endpoint, settings):
             seen.setdefault(name, label)
     return list(seen.items()) if len(seen) > 1 else []
 
@@ -366,7 +335,7 @@ def _source_choices(endpoint, requested, settings) -> list[dict]:
     reader did not do.
     """
     chosen = requested if requested and source_prefs.is_selection(requested) else ""
-    services = _answering_services(endpoint, settings)
+    services = calendar_resolve.answering_services(endpoint, settings)
     if not services:
         return []
     choices = [
@@ -384,53 +353,6 @@ def _source_choices(endpoint, requested, settings) -> list[dict]:
     for choice in choices:
         choice["selected"] = choice["value"] == chosen
     return choices
-
-
-def _share_source_choices(endpoint, settings) -> list[dict]:
-    """The Share panel's Sources control: one TICK per service a generated link
-    may be narrowed to. An empty list means the panel draws nothing, by
-    `_answering_services`' rule rather than by a second count of the same thing,
-    so the panel and the toolbar disappear together.
-
-    TICKS RATHER THAN A LIST OF ANSWERS, because a source selection is a SET.
-    It is the same shape the 🎚️ Filters panel draws for the stored version of
-    this question, and it is the shape that survives a service being registered:
-    a list of answers would have to enumerate the combinations, and those double
-    per service.
-
-    NOTHING TICKED IS THE DEFAULT AND MEANS "MY SOURCES" — the link carries no
-    source at all and the page resolves the owner's own preference, which is
-    what a share page has always done. That is also why there is no "every
-    service" tick to draw: a link narrows the owner's calendar and can never
-    widen it (app/calendar/share_routes.py's `_narrowed_prefs` says why), so
-    "all of them" and "none of them" are one outcome, and the empty state
-    already names it.
-
-    Nothing is pre-ticked here: which services a link names is stored per link,
-    and the panel sets the ticks from that rather than from whichever calendar
-    the owner happens to be looking at.
-    """
-    return [{"value": name, "label": label}
-            for name, label in _answering_services(endpoint, settings)]
-
-
-def _share_source_choices_by_endpoint(settings) -> dict[str, list[dict]]:
-    """The panel's Sources ticks for EVERY calendar, keyed by endpoint.
-
-    THE PANEL PICKS ITS OWN CALENDAR, which is why one list is not enough. A
-    link's Calendar option is chosen inside the dialog and need not be the
-    calendar the owner is looking at — so the moment that dropdown moves, the
-    question "which services could fill this link" has a different answer, and
-    on Season Finales it has none. Sending the whole map with the page lets the
-    control answer that on the spot rather than on the next page load, which is
-    the difference between a block that disappears when it should and one that
-    lingers offering a service the link's calendar cannot use.
-
-    ONE ENTRY PER CALENDAR, INCLUDING THE EMPTY ONES, because empty is the
-    answer the control needs most: it is what tells the panel to draw nothing.
-    """
-    return {key: _share_source_choices(endpoint, settings)
-            for key, endpoint in ENDPOINTS.items()}
 
 
 def _coverage_gap(prefs: source_prefs.SourcePrefs,
@@ -804,21 +726,10 @@ async def calendar_page(request: Request):
         # never from `?source=`, so a look at one service does not leave the
         # panel offering to make that permanent.
         "filter_panel": _filter_panel(prefs, saved_sources, settings, endpoint),
-        # The Share panel's own Sources control, which asks a narrower question
-        # than the toolbar's — see _share_source_choices — and is likewise absent
-        # when there is nothing to choose between. TWO SHAPES OF THE SAME ANSWER:
-        # the list for THIS calendar renders the panel on arrival, and the map
-        # keeps it right when the panel's own Calendar option is changed.
-        "share_source_choices": _share_source_choices(endpoint, settings),
-        "share_source_choices_by_endpoint": _share_source_choices_by_endpoint(settings),
-        "timezone_groups": build_timezone_options(settings.timezone),
         "viewer_timezone_groups": build_timezone_options(tz.key),
         "year": year,
         "month": month,
         "month_label": _calendar.month_name[month],
-        # For the Share panel's "opens on" month picker, which names months
-        # rather than numbering them.
-        "month_names": [_calendar.month_name[m] for m in range(1, 13)],
         "nav": route_params.adjacent_months(year, month),
         # WHICH CARD A JUMP IS AIMED AT, so that card can carry the anchor rather
         # than a script hunting for it after the fact. The template tests identity
@@ -1881,7 +1792,8 @@ def _network_list(value) -> list[str]:
 async def get_me_prefs(request: Request):
     """The viewer's own view preferences, for the Filters panel to populate from.
 
-    Separate from /api/settings, which is ADMIN-only and describes the instance.
+    Separate from the Settings panel (app/settings_routes.py), which is
+    ADMIN-only and describes the instance.
     These are the values that actually filter this person's calendar, so every
     signed-in account has to be able to read them back.
     """

@@ -1,0 +1,5 @@
+{# What a typed custom name came to: taken or unusable (and nothing written), or
+   saved — in which case the link it now resolves to rides along out of band. One
+   request for both halves; it used to be a check followed by a save. #}
+{% if share_slug_status %}<span class="hint {{ 'ok' if share_slug_ok else 'err' }}">{{ share_slug_status }}</span>{% endif %}
+{% if share_slug_ok %}{% with oob = true %}{% include '_share_link.html' %}{% endwith %}{% endif %}

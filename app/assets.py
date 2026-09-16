@@ -76,14 +76,14 @@ PAGE_SCRIPTS = {
         "static/js/calendar/view.js",
         "static/js/calendar/layout.js",
         "static/js/calendar/source-swap.js",
-        "static/js/calendar/cert-picker.js",
         "static/js/calendar/filters.js",
         "static/js/calendar/search.js",
         "static/js/calendar/badge-filters.js",
-        "static/js/calendar/settings.js",
-        "static/js/calendar/settings-encryption.js",
-        "static/js/calendar/settings-trakt.js",
-        "static/js/calendar/share-links.js",
+        # NO SETTINGS OR SHARE SCRIPT, ON THIS PAGE OR ANY OTHER. Both panels are
+        # fragments the server draws and every control in them posts itself; the
+        # Settings panel opens from the site menu on every page an administrator
+        # reaches, and what it still asks of a browser — copying a value and
+        # closing an overlay — is ui.js's, which every page with a header loads.
         "static/js/calendar/easter-egg.js",
         "static/js/calendar/boot.js",
     ),

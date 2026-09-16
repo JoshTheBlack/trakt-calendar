@@ -1168,14 +1168,68 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 .modal.settings-modal { max-width: 860px; }
 .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px; border-bottom: 1px solid var(--card-border); }
 
-/* Modal tabs. The strip scrolls sideways rather than wrapping onto a second row,
-   which would move the panel below it every time a label changed length. */
-.tabs { display: flex; gap: 4px; padding: 0 24px; border-bottom: 1px solid var(--card-border); overflow-x: auto; scrollbar-width: none; }
-.tabs::-webkit-scrollbar { display: none; }
-.tab-btn { flex: none; cursor: pointer; background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-faint); font-family: inherit; font-size: 0.84rem; font-weight: 600; padding: 12px 14px; margin-bottom: -1px; white-space: nowrap; transition: color .15s ease, border-color .15s ease; }
-.tab-btn:hover { color: var(--text-dim); }
-.tab-btn.active { color: var(--gold-soft); border-bottom-color: var(--gold); }
-.tab-panel { display: flex; flex-direction: column; gap: 16px; }
+/* THE SETTINGS PANEL'S TABS ARE RADIOS (templates/_settings_panel.html), the
+   Filters panel's pattern with `:has()` on the modal doing the reaching, so the
+   radios need no particular place in the markup. The strip scrolls sideways
+   rather than wrapping onto a second row, which would move the panel below it
+   every time a label changed length. */
+.stab-radio { position: absolute; opacity: 0; pointer-events: none; }
+.stabs { display: flex; gap: 4px; padding: 0 24px; border-bottom: 1px solid var(--card-border); overflow-x: auto; scrollbar-width: none; }
+.stabs::-webkit-scrollbar { display: none; }
+.stab { flex: none; cursor: pointer; border-bottom: 2px solid transparent; color: var(--text-faint); font-size: 0.84rem; font-weight: 600; padding: 12px 14px; margin-bottom: -1px; white-space: nowrap; transition: color .15s ease, border-color .15s ease; }
+.stab:hover { color: var(--text-dim); }
+.stab-panel { display: none; flex-direction: column; gap: 16px; }
+.settings-modal:has(#stab_server:checked) [data-tab="server"],
+.settings-modal:has(#stab_trakt:checked) [data-tab="trakt"],
+.settings-modal:has(#stab_simkl:checked) [data-tab="simkl"],
+.settings-modal:has(#stab_calendar:checked) [data-tab="calendar"],
+.settings-modal:has(#stab_integrations:checked) [data-tab="integrations"] { color: var(--gold-soft); border-bottom-color: var(--gold); }
+.settings-modal:has(#stab_server:checked) [data-tab-panel="server"],
+.settings-modal:has(#stab_trakt:checked) [data-tab-panel="trakt"],
+.settings-modal:has(#stab_simkl:checked) [data-tab-panel="simkl"],
+.settings-modal:has(#stab_calendar:checked) [data-tab-panel="calendar"],
+.settings-modal:has(#stab_integrations:checked) [data-tab-panel="integrations"] { display: flex; }
+/* A keyboard focus lands on the hidden radio, so the visible tab has to show it. */
+.settings-modal:has(#stab_server:focus-visible) [data-tab="server"],
+.settings-modal:has(#stab_trakt:focus-visible) [data-tab="trakt"],
+.settings-modal:has(#stab_simkl:focus-visible) [data-tab="simkl"],
+.settings-modal:has(#stab_calendar:focus-visible) [data-tab="calendar"],
+.settings-modal:has(#stab_integrations:focus-visible) [data-tab="integrations"] { outline: 2px solid var(--gold); outline-offset: -2px; }
+
+/* A HINT THAT DEPENDS ON A CHOICE STILL BEING MADE. Every sentence it could be is
+   drawn by the server, and the selects decide which one shows — so the warning is
+   right the moment the choice changes, with no script composing it.
+     - The cookie policy against the scheme the browser is on: the server draws
+       only the warning that scheme makes possible, and it replaces the ordinary
+       line while its option is chosen.
+     - Open registration and automatic approval: it is the PAIR that is worth a
+       warning, so both fields' sentences read both selects. */
+[data-cookie-hint="never"], [data-cookie-hint="always"],
+[data-registration-hint="open"], [data-registration-hint="open-auto"],
+[data-approval-hint="open-auto"] { display: none; }
+.settings-modal:has(#s_cookie_secure option[value="never"]:checked) [data-cookie-hint="never"],
+.settings-modal:has(#s_cookie_secure option[value="always"]:checked) [data-cookie-hint="always"] { display: block; }
+.settings-modal:has(#s_cookie_secure option[value="never"]:checked):has([data-cookie-hint="never"]) [data-cookie-hint="base"],
+.settings-modal:has(#s_cookie_secure option[value="always"]:checked):has([data-cookie-hint="always"]) [data-cookie-hint="base"] { display: none; }
+.settings-modal:has(#s_allow_open_registration option[value="true"]:checked) [data-registration-hint="closed"] { display: none; }
+.settings-modal:has(#s_allow_open_registration option[value="true"]:checked):has(#s_auto_approve_calendar option[value="false"]:checked) [data-registration-hint="open"],
+.settings-modal:has(#s_allow_open_registration option[value="true"]:checked):has(#s_auto_approve_calendar option[value="true"]:checked) [data-registration-hint="open-auto"],
+.settings-modal:has(#s_allow_open_registration option[value="true"]:checked):has(#s_auto_approve_calendar option[value="true"]:checked) [data-approval-hint="open-auto"] { display: block; }
+.settings-modal:has(#s_allow_open_registration option[value="true"]:checked):has(#s_auto_approve_calendar option[value="true"]:checked) [data-approval-hint="base"] { display: none; }
+
+/* A stored credential's clear box, and the line that confirms what it will do. */
+.secret-clear { display: flex; align-items: center; gap: 8px; font-size: 0.78rem; font-weight: 400; color: var(--text-dim); cursor: pointer; }
+.secret-clear input { width: 16px; height: 16px; accent-color: var(--crimson); }
+.secret-clearing { display: none; color: var(--crimson); }
+.secret-field:has(.secret-clear input:checked) .secret-clearing { display: block; }
+.secret-field:has(.secret-clear input:checked) input[type=password] { opacity: 0.45; }
+.field-label { font-size: 0.8rem; color: var(--text-dim); font-weight: 600; }
+.arr-options-load { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.trakt-token { display: flex; flex-direction: column; gap: 6px; margin-top: -8px; }
+.device-auth-block { flex-basis: 100%; display: flex; flex-direction: column; gap: 8px; }
+/* Why a save was refused, beside the button that asked. Empty takes no room. */
+.settings-notice { margin: 0 auto 0 0; align-self: center; color: var(--crimson); font-size: 0.8rem; }
+.settings-notice a { color: var(--gold-soft); text-decoration: underline; }
 .modal-head h2 { font-family: 'Bebas Neue', sans-serif; font-size: 1.6rem; letter-spacing: 1px; color: var(--gold-soft); }
 .modal-head-right { display: flex; align-items: center; gap: 14px; }
 .modal-close { cursor: pointer; background: none; border: none; color: var(--text-dim); font-size: 1.4rem; line-height: 1; }
@@ -1202,12 +1256,6 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 .field.checkbox { flex-direction: row; align-items: center; gap: 10px; }
 .field.checkbox input { width: 18px; height: 18px; accent-color: var(--gold); }
 .field.checkbox label { font-weight: 400; }
-/* Certification chip pickers (Content floor + Filters). The vocabulary is a
-   small frozen external standard, so these replace free-text entry: each chip
-   cycles grey (ignored) -> green (keep only these) -> red (exclude these), the
-   three states app/calendar/filter.py reads back as an include token, a `-` exclude
-   token, or absence. */
-.chip-picker { display: flex; flex-wrap: wrap; gap: 8px; }
 /* WHICH SERVICES SHOW, in the filters panel. Laid out like the certification
    chips above rather than as a stack of rows: it is the same kind of control —
    a short set of switches over a vocabulary — and there are only ever as many of
@@ -1280,16 +1328,6 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
     color: var(--green); border-color: rgba(34,197,94,0.55); background: rgba(34,197,94,0.12);
 }
 .source-toggle input { margin: 0; accent-color: var(--green); }
-.cert-chip {
-    cursor: pointer; user-select: none; line-height: 1;
-    background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: var(--text-dim);
-    padding: 6px 12px; border-radius: 999px; font-size: 0.8rem; font-weight: 600; font-family: inherit;
-    transition: color 0.12s, border-color 0.12s, background 0.12s;
-}
-.cert-chip:hover { border-color: var(--text-dim); }
-.cert-chip.on-include { color: var(--green); border-color: rgba(34,197,94,0.55); background: rgba(34,197,94,0.12); }
-.cert-chip.on-exclude { color: var(--crimson); border-color: rgba(224,56,77,0.55); background: rgba(224,56,77,0.12); text-decoration: line-through; }
-.cert-chip.on-exclude::before { content: '\2212'; margin-right: 2px; }
 .modal-foot { padding: 18px 24px; border-top: 1px solid var(--card-border); display: flex; justify-content: flex-end; gap: 12px; }
 .btn-primary { cursor: pointer; background: linear-gradient(90deg, var(--gold), var(--crimson)); color: #0a0c10; border: none; padding: 10px 22px; border-radius: 8px; font-weight: 700; font-family: inherit; font-size: 0.88rem; }
 .btn-primary:hover { filter: brightness(1.08); }
@@ -1347,15 +1385,22 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 .auth-notice-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .auth-notice-actions .btn-ghost { align-self: auto; text-decoration: none; }
 
-/* Share modal */
-.share-row { border-top: 1px solid var(--card-border); padding-top: 14px; }
-.share-row:first-of-type { border-top: none; padding-top: 0; }
+/* Share panel (templates/_share_panel.html) */
 .checkbox-label { display: flex; align-items: center; gap: 10px; font-size: 0.85rem; font-weight: 600; cursor: pointer; }
 .checkbox-label input { width: 18px; height: 18px; accent-color: var(--gold); }
-.share-link-box { display: flex; gap: 8px; margin-top: 8px; }
-.share-link-box input { flex: 1; background: var(--bg-input, #12151c); border: 1px solid var(--card-border); border-radius: 8px; color: var(--text-dim); padding: 8px 10px; font-family: inherit; font-size: 0.8rem; }
-.share-slug-edit { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
-.share-slug-edit input { background: var(--bg-input, #12151c); border: 1px solid var(--card-border); border-radius: 8px; color: var(--text-dim); padding: 8px 10px; font-family: inherit; }
+.share-link-box { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+.share-link-box input { flex: 1; min-width: 0; background: var(--bg-input, #12151c); border: 1px solid var(--card-border); border-radius: 8px; color: var(--text-dim); padding: 8px 10px; font-family: inherit; font-size: 0.8rem; }
+/* WHAT SHOWS IS A CHOICE BEING MADE IN THE PANEL, so the panel's own controls
+   decide it: the custom name belongs to the custom link, the display options to
+   "Choose display options", and a year only to a pinned month. The server draws
+   every control; none of these needs a round trip to appear. */
+.share-slug-field, .share-view-options { display: none; }
+#shareModal:has(#share_kind option[value="slug"]:checked) .share-slug-field { display: flex; }
+#shareModal:has(input[name="mode"][value="custom"]:checked) .share-view-options { display: flex; flex-direction: column; gap: 16px; }
+#shareModal:has(#share_view_month option[value=""]:checked) #share_view_year { display: none; }
+/* htmx marks the indicator while the name is being checked. */
+.share-slug-checking { display: none; }
+.share-slug-checking.htmx-request { display: inline; }
 /* A literal the user has to type exactly, called out inside hint text. */
 .hint code { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; background: var(--bg-input, #12151c); border: 1px solid var(--card-border); border-radius: 4px; padding: 0 4px; }
 .hint.ok { color: #4caf50; }

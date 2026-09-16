@@ -146,8 +146,10 @@ class SharedProxyIpCounterTests(RegressionTestCase):
 
 
 class ProxyDiagnosticsTests(RegressionTestCase):
-    """The Settings screen has to be able to answer "what do I type here?" —
+    """The Settings panel has to be able to answer "what do I type here?" —
     guessing a container subnet is exactly how this gets left at the default."""
+
+    PANEL = "/settings/fragments/panel"
 
     def admin_client(self):
         self.make_user("admin", is_admin=True)
@@ -155,40 +157,35 @@ class ProxyDiagnosticsTests(RegressionTestCase):
         return self.client
 
     def test_settings_reports_the_detected_peer_and_trust_state(self):
-        body = self.admin_client().get("/api/settings").json()
-        self.assertIn("detected_peer_ip", body)
-        self.assertIn("forwarded_headers_present", body)
-        self.assertIn("peer_is_trusted_proxy", body)
-        self.assertEqual(body["trusted_proxy_ips"], TRUSTED_PROXY_IPS_DEFAULT)
+        body = self.admin_client().get(self.PANEL).text
+        self.assertIn("This request came from testclient.", body)
+        self.assertIn(f'value="{TRUSTED_PROXY_IPS_DEFAULT}"', body)
+        self.assertNotIn("ARE arriving", body)
 
     def test_forwarded_headers_from_an_untrusted_peer_are_reported(self):
         """The silent misconfiguration: headers arriving, peer not trusted, so
         they are ignored and every user collapses onto one address."""
         client = self.admin_client()
-        body = client.get("/api/settings", headers={"X-Forwarded-For": "203.0.113.9"}).json()
-        self.assertTrue(body["forwarded_headers_present"])
-        self.assertFalse(body["peer_is_trusted_proxy"])
+        body = client.get(self.PANEL, headers={"X-Forwarded-For": "203.0.113.9"}).text
+        self.assertIn("Forwarded headers ARE arriving but are being ignored", body)
 
     def test_trusted_proxy_ips_is_saveable_and_takes_effect(self):
         client = self.admin_client()
-        self.assertTrue(client.post("/api/settings", json={
-            "trusted_proxy_ips": "127.0.0.1/32, 172.18.0.0/16",
-        }).json()["ok"])
-        body = client.get("/api/settings").json()
-        self.assertEqual(body["trusted_proxy_ips"], "127.0.0.1/32, 172.18.0.0/16")
+        resp = client.post("/settings", json={"trusted_proxy_ips": "127.0.0.1/32, 172.18.0.0/16"})
+        self.assertEqual(resp.status_code, 204, resp.text)
+        self.assertIn('value="127.0.0.1/32, 172.18.0.0/16"', client.get(self.PANEL).text)
         # And the parsed value is what client_ip actually consults.
         nets = auth.parse_trusted_networks("127.0.0.1/32, 172.18.0.0/16")
         self.assertEqual(len(nets), 2)
 
     def test_a_secret_is_still_never_returned(self):
-        """The new fields sit alongside the redaction that is the whole point of
-        this endpoint; assert it did not regress."""
+        """The diagnostics sit alongside the redaction that is the whole point of
+        this surface; assert it did not regress."""
         client = self.admin_client()
-        client.post("/api/settings", json={"tmdb_api_key": "super-secret-value"})
-        body = client.get("/api/settings").json()
-        self.assertNotIn("tmdb_api_key", body)
-        self.assertTrue(body["secrets_set"]["tmdb_api_key"])
-        self.assertNotIn("super-secret-value", str(body))
+        client.post("/settings", json={"tmdb_api_key": "super-secret-value"})
+        body = client.get(self.PANEL).text
+        self.assertIn('name="clear:tmdb_api_key"', body)
+        self.assertNotIn("super-secret-value", body)
 
 
 class AdminSessionScopingTests(RegressionTestCase):
@@ -467,14 +464,14 @@ class CookieMismatchWarningTests(RegressionTestCase):
         save_settings(Settings(cookie_secure="never"))
         self.assertIn("const cookieIsSecure = false", self.client.get("/login").text)
 
-    def test_the_settings_screen_can_see_the_policy(self):
-        """The Settings modal compares cookie_secure against the browser's own
-        protocol, so the value has to be in the payload — and must never be
-        mistaken for a secret and redacted away."""
+    def test_the_settings_panel_draws_the_policy(self):
+        """The Settings panel warns when cookie_secure disagrees with the scheme
+        the browser is on, so the value has to be drawn — and must never be
+        mistaken for a secret and left out."""
         self.make_user("admin", is_admin=True)
         self.login("admin")
-        body = self.client.get("/api/settings").json()
-        self.assertEqual(body["cookie_secure"], "always")
+        body = self.client.get("/settings/fragments/panel").text
+        self.assertRegex(body, r'<option value="always" selected>Always')
 
 
 class CookieSecureEditingTests(RegressionTestCase):
@@ -490,7 +487,7 @@ class CookieSecureEditingTests(RegressionTestCase):
     def _req(origin=None):
         from starlette.requests import Request as StarletteRequest
         headers = [(b"origin", origin.encode())] if origin else []
-        return StarletteRequest({"type": "http", "method": "POST", "path": "/api/settings",
+        return StarletteRequest({"type": "http", "method": "POST", "path": "/settings",
                                  "headers": headers})
 
     def _error(self, mode, origin):
@@ -526,20 +523,22 @@ class CookieSecureEditingTests(RegressionTestCase):
         """End to end on the authenticated https client — the normal path."""
         self.make_user("admin", is_admin=True)
         self.login("admin")
-        resp = self.client.post("/api/settings", json={"cookie_secure": "auto"})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        resp = self.client.post("/settings", json={"cookie_secure": "auto"})
+        self.assertEqual(resp.status_code, 204, resp.text)
         self.assertEqual(load_settings().cookie_secure, "auto")
 
     def test_an_unknown_value_is_rejected_through_the_route(self):
         self.make_user("admin", is_admin=True)
         self.login("admin")
-        resp = self.client.post("/api/settings", json={"cookie_secure": "sometimes"})
-        self.assertEqual(resp.status_code, 400)
+        resp = self.client.post("/settings", json={"cookie_secure": "sometimes"})
+        # Drawn beside Save at 200: a statused refusal is never swapped.
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Session cookie security must be one of", resp.text)
         self.assertEqual(load_settings().cookie_secure, "always")  # unchanged
 
 
 class ShareLinkSelectorTests(RegressionTestCase):
-    """The Share panel's dropdown is PRESENTATION: it picks which URL you are
+    """The Share panel's link select is PRESENTATION: it picks which URL you are
     handed. Every published form keeps answering, because a link already given to
     somebody must not break because its owner later looked at a different one."""
 
@@ -552,16 +551,25 @@ class ShareLinkSelectorTests(RegressionTestCase):
         self.user_id = self.make_user("josh")
         self.login("josh")
 
+    def row(self):
+        return asyncio.run(share_links.get_or_create(self.user_id))
+
+    def urls(self):
+        return share_links.generated_urls(self.row(), "josh", "https://testserver")
+
     def active(self, kind):
-        return self.client.post("/api/me/share/active", json={"kind": kind}).json()
+        resp = self.client.post("/calendar/share/kind", json={"kind": kind})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return self.row()
 
     def test_selecting_a_form_changes_only_which_one_is_offered(self):
-        body = self.active("username")
-        self.assertEqual(body["preferred_kind"], "username")
+        row = self.active("username")
+        self.assertEqual(row["preferred_kind"], "username")
         # Every form stays live; the selection is about what the panel shows.
-        self.assertEqual(body["enabled"], {"token": True, "username": True, "slug": True})
-        self.assertTrue(body["urls"]["username"])
-        self.assertTrue(body["urls"]["token"])
+        self.assertEqual((row["enabled_token"], row["enabled_username"], row["enabled_slug"]),
+                         (1, 1, 1))
+        self.assertTrue(self.urls()["username"])
+        self.assertTrue(self.urls()["token"])
 
     def test_switching_forms_does_not_break_a_link_already_shared(self):
         """The regression this guards: handing someone a token link, then
@@ -575,35 +583,33 @@ class ShareLinkSelectorTests(RegressionTestCase):
 
     def test_every_form_answers_once_it_can_resolve(self):
         self.active("token")
-        self.client.post("/api/me/share/slug", json={"slug": "my-shows"})
-        body = self.client.get("/api/me/share").json()
-        for kind, path in (("token", f"/s/{body['token']}"),
+        self.client.post("/calendar/share/slug", json={"slug": "my-shows"})
+        token = self.row()["token"]
+        for kind, path in (("token", f"/s/{token}"),
                            ("username", "/u/josh"),
                            ("slug", "/c/my-shows")):
             with self.subTest(kind=kind):
                 self.assertEqual(self.client.get(path).status_code, 200)
 
     def test_an_unknown_kind_is_refused(self):
-        self.assertEqual(
-            self.client.post("/api/me/share/active", json={"kind": "carrier-pigeon"}).status_code,
-            400,
-        )
-        self.assertEqual(self.client.post("/api/me/share/active", json={}).status_code, 400)
+        for body in ({"kind": "carrier-pigeon"}, {}):
+            with self.subTest(body=body):
+                resp = self.client.post("/calendar/share/kind", json=body)
+                self.assertIn("That is not a kind of link.", resp.text)
+        self.assertEqual(self.row()["preferred_kind"], "token")
 
     def test_the_slug_form_needs_a_name_before_it_resolves(self):
         """Selecting "custom name" with no name saved yet is a normal state, not
         an error — the panel shows the name field and an empty link box."""
-        body = self.active("slug")
-        self.assertEqual(body["preferred_kind"], "slug")
-        self.assertIsNone(body["urls"]["slug"])
-        self.client.post("/api/me/share/slug", json={"slug": "my-shows"})
-        body = self.client.get("/api/me/share").json()
-        self.assertEqual(body["urls"]["slug"], "https://testserver/c/my-shows")
+        self.assertEqual(self.active("slug")["preferred_kind"], "slug")
+        self.assertIsNone(self.urls()["slug"])
+        self.client.post("/calendar/share/slug", json={"slug": "my-shows"})
+        self.assertEqual(self.urls()["slug"], "https://testserver/c/my-shows")
         self.assertEqual(self.client.get("/c/my-shows").status_code, 200)
 
     def test_it_needs_a_session_like_every_other_share_route(self):
         self.client.post("/logout", json={})
-        self.assertIn(self.client.post("/api/me/share/active", json={"kind": "token"}).status_code,
+        self.assertIn(self.client.post("/calendar/share/kind", json={"kind": "token"}).status_code,
                       (401, 403))
 
 
@@ -619,7 +625,19 @@ class RetiredSlugTests(RegressionTestCase):
         self.login("josh")
 
     def set_slug(self, slug):
-        return self.client.post("/api/me/share/slug", json={"slug": slug}).json()
+        """A name set through the Share panel's own route, answered as {ok, error,
+        custom_slug} so the assertions below read the same as they always have.
+
+        CLEARING goes through the data layer instead: the panel's name box writes
+        nothing when it is emptied, so a cleared slug is
+        share_links.set_custom_slug's rule to hold rather than a route's."""
+        if not slug:
+            error = asyncio.run(share_links.set_custom_slug(self.user_id, ""))
+        else:
+            text = self.client.post("/calendar/share/slug", json={"slug": slug}).text
+            error = None if "Saved." in text else text
+        row = asyncio.run(share_links.get(self.user_id))
+        return {"ok": error is None, "error": error, "custom_slug": row["custom_slug"]}
 
     def retired(self):
         rows = asyncio.run(db.fetch_all(
@@ -964,12 +982,13 @@ class SiteHeaderTests(RegressionTestCase):
         _, head = self.header("/?month=7&year=2026")
         actions = head.split('class="hero-actions"', 1)[1]
         menu = actions.split("nav-menu-items", 1)[1]
+        entries = ('href="/me"', 'hx-get="/settings/fragments/panel"', 'href="/admin"')
         # All three destinations live inside the menu...
-        for entry in ('href="/me"', "openSettings()", 'href="/admin"'):
+        for entry in entries:
             self.assertIn(entry, menu, entry)
         # ...and none of them is also a top-level pill in the bar itself.
         bar = actions.split("nav-menu-items", 1)[0]
-        for entry in ('href="/me"', "openSettings()", 'href="/admin"'):
+        for entry in entries:
             self.assertNotIn(entry, bar, entry)
 
     def test_the_tracker_links_back_to_the_calendar_from_the_right(self):
@@ -1032,24 +1051,28 @@ class SharePanelDisclosureTests(RegressionTestCase):
     """public_base_url is an admin-only setting, so the "set a base URL" prompt is
     an unfixable complaint for everybody else."""
 
-    def test_the_calendar_tells_the_page_whether_the_viewer_is_an_admin(self):
-        # The panel gates the warning on this flag, which the calendar already
-        # renders server-side from the session.
+    PROMPT = "Set a public base URL in Settings before sharing a link"
+    PANEL = "/calendar/fragments/share"
+
+    def test_only_an_administrator_is_told_to_set_a_base_url(self):
+        # The panel is drawn by the server from the session, so the decision is
+        # made there rather than by a flag the page hands a script.
+        save_settings(Settings(public_base_url=""))
         self.make_user("plain")
         self.login("plain")
-        self.assertIn("window.IS_ADMIN = false", self.client.get("/?month=1&year=2026").text)
+        self.assertNotIn(self.PROMPT, self.client.get(self.PANEL).text)
         self.client.post("/logout", json={})
         self.make_user("boss", is_admin=True)
         self.login("boss")
-        self.assertIn("window.IS_ADMIN = true", self.client.get("/?month=1&year=2026").text)
+        self.assertIn(self.PROMPT, self.client.get(self.PANEL).text)
 
-    def test_base_url_missing_is_still_reported_in_the_payload(self):
-        """The flag stays in the API — it is the PANEL that decides who sees it,
-        so the server keeps telling the truth."""
+    def test_everybody_is_told_why_the_link_box_is_empty(self):
+        """The panel keeps telling the truth about a missing base URL — the empty
+        box says why — and only the fix is an administrator's to be told about."""
         save_settings(Settings(public_base_url=""))
         self.make_user("josh")
         self.login("josh")
-        self.assertTrue(self.client.get("/api/me/share").json()["base_url_missing"])
+        self.assertIn('placeholder="No public base URL set"', self.client.get(self.PANEL).text)
 
 
 class AccountPageDisclosureTests(RegressionTestCase):
@@ -1116,6 +1139,8 @@ class DeviceAuthAdoptsTheTokenTests(RegressionTestCase):
     cleared by the one button that looked like it should clear it — and the
     tracker kept refusing the account for want of a Trakt link."""
 
+    CODE = {"device_code": "dc", "user_code": "ABCD-1234",
+            "verification_url": "https://trakt.tv/activate", "expires_in": 600, "interval": 5}
     TOKEN = {"access_token": "fresh-token", "refresh_token": "fresh-refresh",
              "expires_in": 7776000, "created_at": 1_700_000_000}
     ACCOUNT = {"id": 424242, "name": "Josh"}
@@ -1130,15 +1155,22 @@ class DeviceAuthAdoptsTheTokenTests(RegressionTestCase):
         self.login("boss")
         asyncio.run(db.set_meta("trakt_reconnect_notice", "1"))
 
-    def poll(self):
-        with patch("app.auth.trakt.poll_device_token", return_value=self.TOKEN), \
-             patch("app.auth.trakt.fetch_account", return_value=self.ACCOUNT):
-            return self.client.post("/api/auth/device/poll", json={"device_code": "dc"})
+    def poll(self, lookup=None):
+        """Start a pairing, then have Trakt approve it — both through the Settings
+        panel's own routes, with Trakt stood in for."""
+        with patch("app.auth.trakt.request_device_code", return_value=self.CODE):
+            self.client.post("/settings/trakt/device/start", json={})
+        lookup = lookup or patch("app.auth.trakt.fetch_account", return_value=self.ACCOUNT)
+        with patch("app.auth.trakt.poll_device_token", return_value=self.TOKEN), lookup:
+            return self.client.post("/settings/trakt/device/poll", json={})
+
+    def notice_shown(self) -> bool:
+        body = self.client.get("/settings/fragments/panel").text
+        return 'id="traktReconnect" class="field" hidden' not in body
 
     def test_a_successful_authorization_links_the_admin_and_clears_the_notice(self):
-        body = self.poll().json()
-        self.assertTrue(body["ok"])
-        self.assertTrue(body["trakt_linked"])
+        body = self.poll().text
+        self.assertIn("Authorized, and linked to your account.", body)
         self.assertEqual(asyncio.run(db.get_meta("trakt_reconnect_notice")), "")
         rows = asyncio.run(auth.list_identities(self.user_id))
         self.assertEqual([r["provider"] for r in rows], ["trakt"])
@@ -1162,12 +1194,9 @@ class DeviceAuthAdoptsTheTokenTests(RegressionTestCase):
         """Adoption is best effort — it must never fail an authorization that
         actually succeeded."""
         from app.auth import trakt as trakt_auth
-        with patch("app.auth.trakt.poll_device_token", return_value=self.TOKEN), \
-             patch("app.auth.trakt.fetch_account",
-                   side_effect=trakt_auth.AccountLookupError("no")):
-            body = self.client.post("/api/auth/device/poll", json={"device_code": "dc"}).json()
-        self.assertTrue(body["ok"])
-        self.assertFalse(body["trakt_linked"])
+        body = self.poll(patch("app.auth.trakt.fetch_account",
+                               side_effect=trakt_auth.AccountLookupError("no"))).text
+        self.assertIn("Authorized, but not linked to your login", body)
         self.assertEqual(asyncio.run(db.get_meta("trakt_reconnect_notice")), "1")
         self.assertEqual(load_settings().trakt_access_token, "fresh-token")
 
@@ -1176,23 +1205,22 @@ class DeviceAuthAdoptsTheTokenTests(RegressionTestCase):
         must go away, whichever route did the linking and whether or not that
         route remembered to clear the stored flag — a "do this" that stays up
         after the thing is done is worse than no prompt at all."""
-        self.assertTrue(self.client.get("/api/settings").json()["trakt_reconnect_notice"])
+        self.assertTrue(self.notice_shown())
         # Link by a path that leaves the flag alone.
         asyncio.run(db.transaction(lambda conn: auth.insert_linked_identity(
             conn, user_id=self.user_id, provider="trakt", provider_user_id="30ee8617",
         )))
         self.assertEqual(asyncio.run(db.get_meta("trakt_reconnect_notice")), "1")
         self.login("boss")  # a fresh session re-reads has_trakt_identity
-        self.assertFalse(self.client.get("/api/settings").json()["trakt_reconnect_notice"])
+        self.assertFalse(self.notice_shown())
 
     def test_an_account_linked_elsewhere_is_never_stolen(self):
         other = self.make_user("someone-else")
         asyncio.run(db.transaction(lambda conn: auth.insert_linked_identity(
             conn, user_id=other, provider="trakt", provider_user_id="424242",
         )))
-        body = self.poll().json()
-        self.assertTrue(body["ok"])
-        self.assertFalse(body["trakt_linked"])
+        body = self.poll().text
+        self.assertIn("not linked to your login", body)
         # Still on the original owner, and the notice stays up.
         rows = asyncio.run(auth.list_identities(other))
         self.assertEqual(len(rows), 1)
@@ -1291,7 +1319,7 @@ class SharedBodyGuardTests(RegressionTestCase):
         self.login()
 
     def test_malformed_json_is_refused_everywhere(self):
-        for path in ("/api/admin/invites", "/api/state", "/api/settings"):
+        for path in ("/api/admin/invites", "/api/state", "/settings"):
             resp = self.client.post(path, content=b"{not json",
                                     headers={"Content-Type": "application/json"})
             self.assertEqual(resp.status_code, 400, path)
@@ -1299,7 +1327,7 @@ class SharedBodyGuardTests(RegressionTestCase):
     def test_a_body_that_is_not_an_object_is_refused_everywhere(self):
         """A route reads its body with .get(); a list or a string has no .get,
         and the copies that returned {} or None for one only moved the failure."""
-        for path in ("/api/admin/invites", "/api/state", "/api/settings"):
+        for path in ("/api/admin/invites", "/api/state", "/settings"):
             resp = self.client.post(path, json=[1, 2, 3])
             self.assertEqual(resp.status_code, 400, path)
 

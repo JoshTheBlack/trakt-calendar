@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 # `auth` is this module's OWN package, read through the package object one level
 # up: auth.current_user is the surface app/auth/__init__.py exists to present, and
 # a route has no business knowing which submodule happens to define it.
-from .. import auth, authz, chrome, db, secrets_box
+from .. import auth, authz, chrome, db, route_params, secrets_box
 from ..templating import templates
 from . import encryption_flow, secrets_backfill
 from .levels import AuthLevel
@@ -59,8 +59,12 @@ async def _secrets_present() -> bool:
     return bool(has_secret or has_token)
 
 
-async def _status_payload() -> dict:
-    """The current lifecycle state for the Settings panel and the recovery screen.
+PANEL_TEMPLATE = "_encryption_panel.html"
+
+
+async def panel_state() -> dict:
+    """The current lifecycle state the Settings panel's encryption section is
+    drawn from.
 
     `key_present` vs `key_valid`: the environment can hold a value that is not a
     usable Fernet key, which the flow has to tell apart from no key at all so it can
@@ -87,52 +91,69 @@ async def _status_payload() -> dict:
 # status + consent flow (admin)
 # ---------------------------------------------------------------------------
 
-@guard.get("/api/admin/encryption", AuthLevel.ADMIN)
-async def encryption_status():
-    return JSONResponse({"ok": True, **await _status_payload()})
+# EVERY ACTION ANSWERS WITH THE SECTION REDRAWN FROM THE FLOW'S OWN STATE. The
+# panel used to be a state machine in the browser over the four fields this module
+# reports, restating encryption_flow's rules in a second language — that `phase`
+# is a one-way ratchet, that a missing key outranks everything — and drawing its
+# sentences with innerHTML. The template reads `panel_state()` instead, so there
+# is one statement of what each state means and it is next to the state.
+#
+# A REFUSAL IS DRAWN, AT 200. A non-200 is never swapped (static/js/boost.js's
+# `noSwap`), so a sentence answered with 409 would be a press that did nothing.
 
-
-@guard.post("/api/admin/encryption/enable", AuthLevel.ADMIN)
-async def encryption_enable(request: Request):
-    """Begin turning encryption on, or — when a valid key is already in the
-    environment — move straight to the confirm step with no restart. A generated key
-    is revealed exactly once here and never stored; the admin copies it into their
-    environment."""
-    data = await authz.json_body(request)
-    result = await encryption_flow.begin_enable(generate=bool(data.get("generate")))
-    return JSONResponse({"ok": True, "phase": await encryption_flow.get_phase(), **result})
-
-
-@guard.post("/api/admin/encryption/verify", AuthLevel.ADMIN)
-async def encryption_verify():
-    """After the restart, report whether the expected key actually arrived. Advances
-    to the confirm step on success; leaves everything as-is on failure so the modal
-    can re-show the instructions and the still-available opt-out."""
-    detected = await encryption_flow.verify_key()
-    return JSONResponse({
-        "ok": True, "detected": detected, "phase": await encryption_flow.get_phase(),
+async def _panel(request: Request, *, reveal: dict | None = None,
+                 error: str | None = None):
+    return templates.TemplateResponse(request, PANEL_TEMPLATE, {
+        "request": request,
+        "encryption": await panel_state(),
+        "encryption_reveal": reveal,
+        "encryption_error": error,
     })
 
 
-@guard.post("/api/admin/encryption/encrypt", AuthLevel.ADMIN)
-async def encryption_encrypt():
+@guard.post("/admin/encryption/enable", AuthLevel.ADMIN)
+async def encryption_enable(request: Request):
+    """Begin turning encryption on, or — when a valid key is already in the
+    environment — move straight to the confirm step with no restart.
+
+    A GENERATED KEY IS IN THIS ANSWER AND NOWHERE ELSE. It is never stored, and no
+    later answer can draw it again: the admin copies it into their own environment
+    from this one response, which is what "revealed once" has always meant."""
+    data = await authz.json_body(request)
+    result = await encryption_flow.begin_enable(generate=route_params.ticked(data.get("generate")))
+    return await _panel(request, reveal=result if result["restart_required"] else None)
+
+
+@guard.post("/admin/encryption/verify", AuthLevel.ADMIN)
+async def encryption_verify(request: Request):
+    """After the restart, check whether the expected key actually arrived. Advances
+    to the confirm step on success; on failure the section says so beside the
+    instructions and the still-available opt-out, and nothing has changed."""
+    if await encryption_flow.verify_key():
+        return await _panel(request)
+    return await _panel(request, error=(
+        f"No valid key found in the environment yet. Set {secrets_box.ENV_VAR} and "
+        "restart, then check again."))
+
+
+@guard.post("/admin/encryption/encrypt", AuthLevel.ADMIN)
+async def encryption_encrypt(request: Request):
     """Seal every plaintext secret and token in place and mark the instance
     encrypted. Refused without a valid key so a missing one cannot be mistaken for
     'nothing to do'."""
     if not secrets_box.is_enabled():
-        return authz.error(
+        return await _panel(request, error=(
             "No valid encryption key is set in the environment yet. Set "
-            f"{secrets_box.ENV_VAR} and restart before encrypting.", 409,
-        )
-    result = await encryption_flow.encrypt_now()
-    return JSONResponse({"ok": True, **result})
+            f"{secrets_box.ENV_VAR} and restart before encrypting."))
+    await encryption_flow.encrypt_now()
+    return await _panel(request)
 
 
-@guard.post("/api/admin/encryption/opt-out", AuthLevel.ADMIN)
-async def encryption_opt_out():
-    """Leave secrets in plaintext for now; the Settings opt-in re-offers it later."""
+@guard.post("/admin/encryption/opt-out", AuthLevel.ADMIN)
+async def encryption_opt_out(request: Request):
+    """Leave secrets in plaintext for now; the section re-offers it later."""
     await encryption_flow.opt_out()
-    return JSONResponse({"ok": True, "phase": await encryption_flow.get_phase()})
+    return await _panel(request)
 
 
 # ---------------------------------------------------------------------------

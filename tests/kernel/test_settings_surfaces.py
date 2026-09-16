@@ -84,7 +84,7 @@ class SelfServiceCredentialsTests(SettingsSurfaceTestCase):
         registration."""
         owner = self._make_user("slugowner", calendar_approved=True)
         self.sign_in_as(owner)
-        self.client.post("/api/me/share/slug", json={"slug": "wanted-name"})
+        self.client.post("/calendar/share/slug", json={"slug": "wanted-name"})
 
         user_id = self._make_user(None, password=None, calendar_approved=True)
         self._link_trakt(user_id, provider_user_id=4343)
@@ -179,32 +179,35 @@ class CacheSettingsWidgetTests(SettingsSurfaceTestCase):
         super().setUp()
         self.sign_in_as(self.admin_id)
 
-    def test_the_settings_screen_renders_both_inputs(self):
-        body = self.client.get("/?month=1&year=2026").text
+    def test_the_settings_panel_renders_both_inputs(self):
+        body = self.client.get("/settings/fragments/panel").text
         self.assertIn('name="calendar_cache_ttl_minutes"', body)
         self.assertIn('name="api_cache_max_bytes"', body)
 
     def test_saving_them_persists(self):
-        resp = self.client.post("/api/settings", json={
-            "calendar_cache_ttl_minutes": 25,
-            "api_cache_max_bytes": 512 * 1024 * 1024,
+        """The cap is TYPED in megabytes and stored in bytes — the writer's
+        conversion, not the browser's."""
+        resp = self.client.post("/settings", json={
+            "calendar_cache_ttl_minutes": "25",
+            "api_cache_max_bytes": "512",
         })
-        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.status_code, 204, resp.text)
         settings = load_settings()
         self.assertEqual(settings.calendar_cache_ttl_minutes, 25)
         self.assertEqual(settings.api_cache_max_bytes, 512 * 1024 * 1024)
 
-    def test_they_are_readable_back_through_the_settings_endpoint(self):
-        """The screen loads its values from here, so a field missing from the
-        response is a field that renders blank and then saves a zero."""
-        payload = self.client.get("/api/settings").json()
-        self.assertIn("calendar_cache_ttl_minutes", payload)
-        self.assertIn("api_cache_max_bytes", payload)
+    def test_they_are_drawn_with_their_stored_values(self):
+        """A field drawn without its value renders blank and then saves a
+        refusal, so the panel carries what is stored."""
+        save_settings(dataclasses.replace(load_settings(), calendar_cache_ttl_minutes=33))
+        body = self.client.get("/settings/fragments/panel").text
+        self.assertRegex(body, r'name="calendar_cache_ttl_minutes"[^>]*value="33"')
+        self.assertRegex(body, r'name="api_cache_max_bytes"[^>]*value="1024"')
 
 
 class CheckboxSettingCoercionTests(SettingsSurfaceTestCase):
-    """A checkbox setting's round trip through /api/settings, coerced to a real
-    bool by `_as_bool`.
+    """A checkbox setting's round trip through the Settings form, coerced to a
+    real bool by the one writer (config.apply_form).
 
     IT USED TO BE `calendar_prewarm_enabled` THAT CARRIED THIS, and that setting
     is gone — the scheduled month refresh replaced the pre-warm it gated, and a
@@ -218,33 +221,35 @@ class CheckboxSettingCoercionTests(SettingsSurfaceTestCase):
         super().setUp()
         self.sign_in_as(self.admin_id)
 
-    def test_the_settings_screen_renders_the_toggle(self):
-        body = self.client.get("/?month=1&year=2026").text
+    def test_the_settings_panel_renders_the_toggle(self):
+        body = self.client.get("/settings/fragments/panel").text
         self.assertIn('name="hide_not_watching"', body)
 
     def test_saving_it_persists_as_a_bool(self):
-        resp = self.client.post("/api/settings", json={"hide_not_watching": True})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        resp = self.client.post("/settings", json={"hide_not_watching": True})
+        self.assertEqual(resp.status_code, 204, resp.text)
         self.assertIs(load_settings().hide_not_watching, True)
 
-        resp = self.client.post("/api/settings", json={"hide_not_watching": False})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        resp = self.client.post("/settings", json={"hide_not_watching": False})
+        self.assertEqual(resp.status_code, 204, resp.text)
         self.assertIs(load_settings().hide_not_watching, False)
 
-    def test_a_checkbox_style_string_value_coerces_to_a_bool(self):
-        """A form posts "true"/"false", not a JSON boolean; `_as_bool` must still
-        turn that into a real bool rather than storing the truthy string."""
-        resp = self.client.post("/api/settings", json={"hide_not_watching": "true"})
-        self.assertEqual(resp.status_code, 200, resp.text)
+    def test_a_checkbox_and_its_companion_coerce_to_a_bool(self):
+        """A form posts the hidden companion's "0" and, when ticked, the box's
+        "1" under the same name; the writer must still store a real bool."""
+        resp = self.client.post("/settings", json={"hide_not_watching": ["0", "1"]})
+        self.assertEqual(resp.status_code, 204, resp.text)
         self.assertIs(load_settings().hide_not_watching, True)
 
-    def test_it_is_readable_back_through_the_settings_endpoint(self):
-        self.assertIn("hide_not_watching", self.client.get("/api/settings").json())
+    def test_it_is_drawn_ticked_once_it_is_on(self):
+        self.client.post("/settings", json={"hide_not_watching": "1"})
+        self.assertRegex(self.client.get("/settings/fragments/panel").text,
+                         r'id="s_hide_not_watching"[^>]*checked')
 
 
 class SimklPublicCalendarSettingWidgetTests(SettingsSurfaceTestCase):
     """simkl_public_calendar_enabled: the checkbox on the Simkl tab and its
-    round trip through /api/settings, defaulting to True the way an instance
+    round trip through the Settings form, defaulting to True the way an instance
     that never opens this tab needs it to.
 
     THE STORED KEY KEEPS ITS ORIGINAL SPELLING while the label says something
@@ -256,16 +261,17 @@ class SimklPublicCalendarSettingWidgetTests(SettingsSurfaceTestCase):
         super().setUp()
         self.sign_in_as(self.admin_id)
 
-    def test_the_settings_screen_renders_the_toggle(self):
-        body = self.client.get("/?month=1&year=2026").text
-        self.assertIn('name="simkl_public_calendar_enabled"', body)
+    def panel(self) -> str:
+        return self.client.get("/settings/fragments/panel").text
+
+    def test_the_settings_panel_renders_the_toggle(self):
+        self.assertIn('name="simkl_public_calendar_enabled"', self.panel())
 
     def test_the_label_says_what_the_setting_does(self):
         """It governs whether Simkl contributes to the calendar, full stop —
         not only whether an unconfigured Simkl may be reached, which was a
         qualifier that almost never failed to apply and so said nothing."""
-        body = self.client.get("/?month=1&year=2026").text
-        self.assertIn("Include Simkl results on the calendar", body)
+        self.assertIn("Include Simkl results on the calendar", self.panel())
 
     def test_it_defaults_on(self):
         """An instance that never saves this field must read it back as True —
@@ -276,75 +282,69 @@ class SimklPublicCalendarSettingWidgetTests(SettingsSurfaceTestCase):
         # through the saved instance would measure that choice instead of the
         # default it is about.
         self.assertIs(Settings().simkl_public_calendar_enabled, True)
-        payload = self.client.get("/api/settings").json()
-        self.assertIs(payload["simkl_public_calendar_enabled"],
-                      load_settings().simkl_public_calendar_enabled)
+        drawn_ticked = bool(re.search(r'id="s_simkl_public_calendar_enabled"[^>]*checked', self.panel()))
+        self.assertIs(drawn_ticked, load_settings().simkl_public_calendar_enabled)
 
     def test_saving_it_persists_as_a_bool(self):
-        resp = self.client.post("/api/settings", json={"simkl_public_calendar_enabled": False})
-        self.assertEqual(resp.status_code, 200, resp.text)
-        settings = load_settings()
-        self.assertIs(settings.simkl_public_calendar_enabled, False)
+        resp = self.client.post("/settings", json={"simkl_public_calendar_enabled": ["0"]})
+        self.assertEqual(resp.status_code, 204, resp.text)
+        self.assertIs(load_settings().simkl_public_calendar_enabled, False)
 
-        resp = self.client.post("/api/settings", json={"simkl_public_calendar_enabled": True})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        resp = self.client.post("/settings", json={"simkl_public_calendar_enabled": ["0", "1"]})
+        self.assertEqual(resp.status_code, 204, resp.text)
         self.assertIs(load_settings().simkl_public_calendar_enabled, True)
-
-    def test_it_is_readable_back_through_the_settings_endpoint(self):
-        payload = self.client.get("/api/settings").json()
-        self.assertIn("simkl_public_calendar_enabled", payload)
 
 
 class SettingsTabsTests(SettingsSurfaceTestCase):
-    """Settings is a handful of tabbed groups in one form."""
+    """Settings is a handful of tabbed groups over one form."""
 
     def setUp(self):
         super().setUp()
         self.sign_in_as(self.admin_id)
 
     def _body(self) -> str:
-        return self.client.get("/?month=1&year=2026").text
+        return self.client.get("/settings/fragments/panel").text
 
-    def test_every_tab_has_a_panel_and_only_the_first_is_showing(self):
+    def test_every_tab_has_a_panel_and_only_the_first_is_chosen(self):
         body = self._body()
         tabs = re.findall(r'data-tab="([\w-]+)"', body)
         panels = re.findall(r'data-tab-panel="([\w-]+)"', body)
         self.assertEqual(tabs, ["server", "trakt", "simkl", "calendar", "integrations"])
         self.assertEqual(panels, tabs)
-        # Every tab but the first starts hidden; the CSS cannot be relied on to
-        # hide them, so the attribute has to be in the markup.
-        self.assertEqual(len(re.findall(r'data-tab-panel="\w+" role="tabpanel" hidden', body)),
-                         len(tabs) - 1)
+        # The tab showing is the radio that is checked, and exactly one is.
+        self.assertEqual(re.findall(r'name="settings_tab" id="stab_(\w+)"[^>]*checked', body),
+                         ["server"])
 
     def test_no_field_was_dropped_on_the_way_into_the_tabs(self):
-        """The regrouping moved markup around every input the save path reads by
-        id, and a field left behind would save as a blank or a zero."""
+        """A field left out of the panel would never be saved again, and one
+        drawn without its form would never be sent."""
         body = self._body()
-        for field_id in ("s_base_url", "s_trusted_proxies", "s_client_id", "s_client_secret",
-                         "s_access_token", "s_timezone", "s_endpoint", "s_limit", "s_cache",
-                         "s_calcache", "s_cachecap", "s_hide", "s_sonarr_url", "s_sonarr_key",
-                         "s_radarr_url", "s_radarr_key", "s_seer_url", "s_seer_key",
-                         "s_tmdb_key", "s_simkl_client_id", "s_simkl_client_secret",
-                         "s_simkl_access_token", "s_simkl_public_calendar"):
-            with self.subTest(field=field_id):
-                self.assertIn(f'id="{field_id}"', body)
+        for name in ("public_base_url", "trusted_proxy_ips", "trakt_client_id",
+                     "trakt_client_secret", "trakt_access_token", "timezone", "endpoint",
+                     "pagination_limit", "cache_ttl_minutes", "calendar_cache_ttl_minutes",
+                     "api_cache_max_bytes", "hide_not_watching", "sonarr_url", "sonarr_api_key",
+                     "radarr_url", "radarr_api_key", "seer_url", "seer_api_key", "tmdb_api_key",
+                     "simkl_client_id", "simkl_client_secret", "simkl_access_token",
+                     "simkl_public_calendar_enabled"):
+            with self.subTest(field=name):
+                self.assertRegex(body, rf'id="s_{name}" name="{name}"[^>]*form="settingsForm"')
 
     def test_the_reconnect_notice_sits_outside_the_tabs(self):
         """It is an alert about the instance, and an alert that only appears on
         the tab you happen to be standing on is one you can miss."""
         body = self._body()
-        notice = body.index('id="s_reconnect_box"')
+        notice = body.index('id="traktReconnect"')
         first_panel = body.index('data-tab-panel="server"')
         self.assertLess(notice, first_panel)
 
     def test_one_save_still_writes_fields_from_several_tabs(self):
-        """Tabs are presentation only — the panels share a single form, so a
+        """Tabs are presentation only — every field names the one form, so a
         value from the Server tab and one from Integrations go together."""
-        resp = self.client.post("/api/settings", json={
+        resp = self.client.post("/settings", json={
             "public_base_url": ORIGIN, "sonarr_url": "http://localhost:8989",
-            "calendar_cache_ttl_minutes": 30,
+            "calendar_cache_ttl_minutes": "30",
         })
-        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.status_code, 204, resp.text)
         settings = load_settings()
         self.assertEqual(settings.sonarr_url, "http://localhost:8989")
         self.assertEqual(settings.calendar_cache_ttl_minutes, 30)

@@ -1,0 +1,43 @@
+{# ONE SERVICE'S QUALITY PROFILES AND ROOT FOLDERS, as the <select>s themselves.
+
+   THE OPTIONS ARE THE SERVER'S. They used to be strings the browser assembled out
+   of a JSON answer and escaped by hand into innerHTML; now the route that asks
+   Sonarr or Radarr draws the <option>s, and a refusal is the line under them.
+
+   THE LOAD BUTTON SENDS WHAT IS TYPED, not the form: the URL and key beside it
+   (either may be blank, and the route falls back to what is saved) and the choice
+   the selects are holding, so a reload of the lists keeps it selected. `kind`
+   rides as a value the button carries, because it names which service this
+   block IS rather than anything the reader chose. #}
+{%- set service = arr_service -%}
+{%- set kind = service.kind -%}
+<div id="arrOptions-{{ kind }}" class="arr-options">
+    <div class="two-col">
+        <div class="field">
+            <label for="s_{{ kind }}_quality_profile_id">Quality profile</label>
+            <select id="s_{{ kind }}_quality_profile_id" name="{{ kind }}_quality_profile_id"
+                    form="settingsForm" autocomplete="off">
+                {% for option in service.profiles %}
+                <option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="field">
+            <label for="s_{{ kind }}_root_folder">Root folder</label>
+            <select id="s_{{ kind }}_root_folder" name="{{ kind }}_root_folder"
+                    form="settingsForm" autocomplete="off">
+                {% for option in service.folders %}
+                <option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+    <div class="arr-options-load">
+        <button type="button" class="btn-ghost small"
+                hx-post="/settings/arr-options" hx-json-enc
+                hx-vals='{{ {"kind": kind} | tojson }}'
+                hx-include="#s_{{ kind }}_url, #s_{{ kind }}_api_key, #s_{{ kind }}_quality_profile_id, #s_{{ kind }}_root_folder"
+                hx-target="#arrOptions-{{ kind }}" hx-swap="outerHTML">↻ Load {{ service.label }} profiles &amp; folders</button>
+        {% if service.message %}<span class="hint {{ 'ok' if service.ok else 'err' }}" role="status">{{ service.message }}</span>{% endif %}
+    </div>
+</div>

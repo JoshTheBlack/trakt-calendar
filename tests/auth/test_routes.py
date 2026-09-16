@@ -556,18 +556,23 @@ class OpenRegistrationSettingTests(RouteTestCase):
         self.setup_account()  # bootstrap admin "josh", already signed in
 
     def _save(self, value):
-        return self.client.post("/api/settings", json={"allow_open_registration": value})
+        # As the panel's select sends it: the string, not a JSON boolean.
+        return self.client.post("/settings", json={"allow_open_registration": str(value).lower()})
+
+    def _drawn_open(self) -> bool:
+        body = self.client.get("/settings/fragments/panel").text
+        return '<option value="true" selected>Open' in body
 
     def test_it_defaults_to_invite_only(self):
         self.assertFalse(load_settings().allow_open_registration)
-        self.assertFalse(self.client.get("/api/settings").json()["allow_open_registration"])
+        self.assertFalse(self._drawn_open())
 
     def test_an_admin_can_turn_it_on_and_off_again(self):
-        self.assertEqual(self._save(True).status_code, 200)
+        self.assertEqual(self._save(True).status_code, 204)
         self.assertTrue(load_settings().allow_open_registration)
-        self.assertTrue(self.client.get("/api/settings").json()["allow_open_registration"])
+        self.assertTrue(self._drawn_open())
 
-        self.assertEqual(self._save(False).status_code, 200)
+        self.assertEqual(self._save(False).status_code, 204)
         self.assertFalse(load_settings().allow_open_registration)
 
     def test_it_still_persists_to_the_settings_file(self):
@@ -620,9 +625,10 @@ class AutoApproveSettingTests(RouteTestCase):
         self.setup_account()  # bootstrap admin "josh", already signed in
 
     def _configure(self, *, open_reg, auto):
-        resp = self.client.post("/api/settings", json={
-            "allow_open_registration": open_reg, "auto_approve_calendar": auto})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        resp = self.client.post("/settings", json={
+            "allow_open_registration": str(open_reg).lower(),
+            "auto_approve_calendar": str(auto).lower()})
+        self.assertEqual(resp.status_code, 204, resp.text)
         self.client.cookies.clear()
 
     def _register(self, username):
@@ -653,7 +659,7 @@ class AutoApproveSettingTests(RouteTestCase):
         particular invite happened to grant."""
         invite = self.client.post("/api/admin/invites", json={
             "grants_calendar_on_accept": False}).json()
-        self.client.post("/api/settings", json={"auto_approve_calendar": True})
+        self.client.post("/settings", json={"auto_approve_calendar": "true"})
         self.client.cookies.clear()
         resp = self.client.post(f"/register?invite={invite['token']}", json={
             "username": "invited", "password": "hunter2hunter2",

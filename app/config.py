@@ -18,7 +18,7 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import secrets_box
+from . import route_params, secrets_box
 from .perftrace import span
 
 logger = logging.getLogger(__name__)
@@ -573,10 +573,179 @@ def apply_update(current: Settings, update: dict) -> Settings:
     return Settings.from_dict(data)
 
 
+# ---------------------------------------------------------------------------
+# the Settings form
+# ---------------------------------------------------------------------------
+#
+# THE ONE PLACE A SUBMITTED VALUE BECOMES A SETTING. The Settings panel is markup
+# the server draws, and a form sends strings: "300", "true", "on", a byte cap in
+# megabytes, an empty password field. What each of those means used to be forty
+# lines of parseInt and `=== 'true'` in the browser, each with its own fallback
+# restating a default this dataclass already declares — and a wrong coercion
+# there wrote a wrong setting whose failure showed up somewhere else, later.
+#
+# THE TYPE STILL COMES FROM THE FIELD'S DECLARATION (`_scalar_field_types`), so a
+# new setting is still a one-line change. What this section adds is the two facts
+# a declaration cannot carry — how a number is typed, and what range of it is
+# sane — and a refusal for a value outside either, rather than the silent default
+# `Settings.from_dict` falls back to for a hand-edited file.
+
+MB = 1024 * 1024
+GB = 1024 * MB
+
+
+@dataclass(frozen=True)
+class NumberField:
+    """A whole-number setting as the Settings form offers it.
+
+    `unit` is how many stored units one typed unit is. The two cache caps are
+    STORED in bytes and TYPED in megabytes and gigabytes, because nobody wants to
+    count zeros — and that conversion is a type decision like any other, so it
+    lives here rather than beside the input.
+
+    The bounds are the ones the form's own `min`/`max` render from, so the browser
+    refuses what this refuses and the two cannot disagree about a limit.
+    """
+    label: str
+    low: int
+    high: int
+    unit: int = 1
+
+
+# The id of a quality profile is Sonarr's or Radarr's to issue, so its only sane
+# range is "a non-negative database id"; 0 is this app's "none chosen".
+_SERVICE_ID = (0, 2**31 - 1)
+
+NUMBER_FIELDS: dict[str, NumberField] = {
+    "pagination_limit": NumberField("Pagination limit", 1, 1000),
+    "cache_ttl_minutes": NumberField("Detail cache (minutes)", 0, 10080),
+    "calendar_cache_ttl_minutes": NumberField("Calendar cache (minutes)", 1, 1440),
+    "api_cache_max_bytes": NumberField("Cache size cap (MB)", 16, 65536, MB),
+    "poster_cache_max_bytes": NumberField("Poster cache cap (GB)", 1, 1024, GB),
+    "sonarr_quality_profile_id": NumberField("Sonarr quality profile", *_SERVICE_ID),
+    "radarr_quality_profile_id": NumberField("Radarr quality profile", *_SERVICE_ID),
+}
+
+# A stored secret is never drawn back into markup, so its field arrives EMPTY and
+# an empty field means "leave it alone". Removing one is therefore a control of
+# its own, posted under this prefix — named here, beside the rule that reads it,
+# so the panel never spells the format for itself.
+CLEAR_PREFIX = "clear:"
+
+
+def clear_field(name: str) -> str:
+    """The form field that asks for the secret `name` to be removed."""
+    return f"{CLEAR_PREFIX}{name}"
+
+
+class SettingsFormError(ValueError):
+    """A submitted value the writer will not store. Its message is the sentence
+    the Settings panel shows, and nothing has been written when it is raised."""
+
+
+@dataclass(frozen=True)
+class SecretInput:
+    """One credential field as the panel draws it: its name, the name its clear
+    control posts under, and whether a value is stored. NEVER the value — not
+    masked, not its length."""
+    name: str
+    clear_name: str
+    is_set: bool
+
+
+@dataclass(frozen=True)
+class NumberInput:
+    """One number field as the panel draws it, already in the unit it is typed in."""
+    name: str
+    label: str
+    low: int
+    high: int
+    value: int
+
+
+def secret_inputs(settings: Settings) -> dict[str, SecretInput]:
+    """Every credential field's drawable state, from `redacted()`'s own flags so
+    "is it set" has one answer."""
+    stored = settings.redacted()["secrets_set"]
+    return {name: SecretInput(name, clear_field(name), stored[name]) for name in stored}
+
+
+def number_inputs(settings: Settings) -> dict[str, NumberInput]:
+    """Every number field's drawable state, converted into its typed unit."""
+    return {
+        name: NumberInput(name, spec.label, spec.low, spec.high,
+                          round(getattr(settings, name) / spec.unit))
+        for name, spec in NUMBER_FIELDS.items()
+    }
+
+
+def _form_number(name: str, value: object) -> int:
+    spec = NUMBER_FIELDS.get(name)
+    label = spec.label if spec else name.replace("_", " ").capitalize()
+    try:
+        number = int(str(value).strip())
+    except ValueError:
+        raise SettingsFormError(f"{label} must be a whole number.") from None
+    if spec is None:
+        return number
+    if not spec.low <= number <= spec.high:
+        raise SettingsFormError(f"{label} must be between {spec.low} and {spec.high}.")
+    return number * spec.unit
+
+
+def apply_form(current: Settings, form: dict) -> Settings:
+    """The settings a submitted Settings form describes, merged onto `current`.
+
+    Every field is read by what its declaration says it is:
+
+      a credential     a typed value replaces it; otherwise its `clear:` box,
+                       ticked, removes it; otherwise it is left exactly as stored
+      a bool           a checkbox, a two-option select or a JSON boolean alike
+      an int           a whole number inside NUMBER_FIELDS' bounds, converted
+                       from the unit it is typed in — anything else is REFUSED
+      anything else    the text as typed, trimmed
+
+    A field the form does not mention is left alone, as `apply_update` has always
+    done, so a panel that draws some settings cannot clobber the rest.
+
+    Raises SettingsFormError, having changed nothing, for a value it will not
+    store. The public base URL is judged on the merged result because
+    `Settings.from_dict` normalizes it (a trailing slash) before it is used.
+    """
+    declared = _scalar_field_types()
+    update: dict[str, object] = {}
+    for name, spec in Settings.__dataclass_fields__.items():  # type: ignore[attr-defined]
+        if name in SECRET_FIELDS:
+            typed = route_params.last_value(form.get(name))
+            if isinstance(typed, str) and typed.strip():
+                update[name] = typed
+            elif route_params.ticked(form.get(clear_field(name))):
+                update[name] = None
+            continue
+        if name not in form:
+            continue
+        kind = declared.get(name)
+        # A list-typed setting (the network floor) is typed as one comma-joined
+        # line, which from_dict splits; only a scalar can have arrived twice.
+        value = form[name] if spec.type.startswith("list") else route_params.last_value(form[name])
+        if kind is bool:
+            update[name] = _as_bool(value)
+        elif kind is int:
+            update[name] = _form_number(name, value)
+        elif isinstance(value, str):
+            update[name] = value.strip()
+        else:
+            update[name] = value
+    settings = apply_update(current, update)
+    if error := public_base_url_error(settings.public_base_url):
+        raise SettingsFormError(error)
+    return settings
+
+
 def _as_bool(v) -> bool:
     if isinstance(v, bool):
         return v
-    return str(v).strip().lower() in {"1", "true", "yes", "on"}
+    return route_params.ticked(v)
 
 
 @lru_cache(maxsize=1)

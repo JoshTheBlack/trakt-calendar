@@ -1,0 +1,27 @@
+{# THE LINK THE SHARE PANEL HANDS OUT, and what every mutation in the panel changes.
+
+   Answered whole by the kind select and by Rotate, and out of band by a saved
+   name and by the display options — each of which changes the URL in this box —
+   so there is one drawing of "the link" rather than one per action.
+
+   ROTATE IS DRAWN ONLY FOR THE TOKEN LINK, which is the only one a rotation
+   changes; the server knows which link is chosen, so the markup says so rather
+   than a stylesheet guessing from the select. #}
+{% import '_confirm.html' as confirm_box %}
+<div id="shareLink" class="field share-link"{% if oob %} hx-swap-oob="true"{% endif %}>
+    <div class="share-link-box">
+        <input type="text" id="share_url" readonly value="{{ share_url or '' }}" aria-label="The link to share"
+               placeholder="{% if share_base_missing %}No public base URL set{% elif share_kind == 'slug' %}Pick a custom name above{% else %}No link yet{% endif %}">
+        <button type="button" class="btn-ghost small" data-copy="#share_url"{% if not share_url %} disabled{% endif %}>Copy</button>
+        {% if share_kind == 'token' %}
+        {% call confirm_box.ask('share-rotate', 'Rotate the token link? The old link will stop working immediately.',
+                                '↻ Rotate', title='Invalidate the old link and issue a new one', danger=true) %}
+        <button type="button" class="btn-primary small"
+                hx-post="/calendar/share/rotate" hx-json-enc
+                hx-target="#shareLink" hx-swap="outerHTML">Rotate</button>
+        {% endcall %}
+        {% endif %}
+    </div>
+    {% if share_message %}<span class="hint ok" role="status">{{ share_message }}</span>{% endif %}
+    {% if share_error %}<span class="hint err" role="alert">{{ share_error }}</span>{% endif %}
+</div>

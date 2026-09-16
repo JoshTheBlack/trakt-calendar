@@ -821,24 +821,10 @@ async def save_tier_settings(board_uid: str, tier_uid: str, request: Request):
         await ranker.update_category(
             user.user_id, board_uid, tier_uid,
             label=data.get("label"), rank_priority=data.get("rank_priority"),
-            colour=data.get("colour"), is_isolated=_ticked(data.get("is_isolated")))
+            colour=data.get("colour"), is_isolated=route_params.ticked(data.get("is_isolated")))
     except ranker.RankerError as exc:
         notice, ok = str(exc), False
     return await _rankings_response(request, user, board_uid, notice=notice, notice_ok=ok)
-
-
-def _ticked(value: Any) -> bool:
-    """Whether a checkbox arrived ticked.
-
-    json-enc sends a checkbox's VALUE when it is ticked and nothing at all when it
-    is not, so a control that must always be mentioned carries a hidden companion
-    input before it — the ticked box then overrides that value and both reach the
-    body under one name, as a two-element list. The last one wins, which is the
-    order the browser serializes a form in.
-    """
-    if isinstance(value, list):
-        value = value[-1] if value else ""
-    return str(value).lower() in {"1", "true", "on", "yes"}
 
 
 @guard.post("/rankings/boards/{board_uid}/items/remove", AuthLevel.RANKER_APPROVED)
@@ -1252,7 +1238,7 @@ async def seed_from_ratings(board_uid: str, request: Request):
     """
     user = await auth.current_user(request)
     data = await authz.json_body(request)
-    commit = _ticked(data.get("commit"))
+    commit = route_params.ticked(data.get("commit"))
     if not await ranker_sources.ratings_available(user.user_id):
         return await _rankings_response(request, user, board_uid, notice_ok=False,
                                         notice="There are no ratings to seed from.")
@@ -1358,8 +1344,8 @@ def _parse_export(data: Mapping[str, Any]) -> _ExportOptions:
         username=_export_text(data.get("username"), "name"),
         scope=scope, category_uid=category_uid,
         scale=scale, fmt=fmt,
-        show_titles=_ticked(data.get("show_titles")),
-        podium=_ticked(data.get("podium")),
+        show_titles=route_params.ticked(data.get("show_titles")),
+        podium=route_params.ticked(data.get("podium")),
         header_image=_header_choice(data.get("header_image")),
     )
 

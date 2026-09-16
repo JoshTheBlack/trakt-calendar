@@ -1,0 +1,12 @@
+{# The app-wide Trakt token's line — when it runs out — and the button that renews
+   it now. Answered whole by that button, and out of band by an authorization,
+   which is the other thing that changes the token. #}
+<div id="traktToken" class="trakt-token"{% if oob %} hx-swap-oob="true"{% endif %}>
+    {% if token_status %}<span class="hint">{{ token_status }}</span>{% endif %}
+    <div class="auth-notice-actions">
+        <button type="button" class="btn-ghost small"
+                hx-post="/settings/trakt/refresh" hx-json-enc
+                hx-target="#traktToken" hx-swap="outerHTML">↻ Refresh token now</button>
+    </div>
+    {% if token_message %}<span class="hint {{ 'ok' if token_ok else 'err' }}" role="status">{{ token_message }}</span>{% endif %}
+</div>

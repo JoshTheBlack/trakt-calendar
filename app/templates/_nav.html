@@ -32,7 +32,7 @@
    — and so the whole header's line count — depend on which page you were on. #}
 
 {% macro navbar(title=None, brand='trakt', lead=None, controls=None,
-                settings_button=false, calendar_href='/calendar', distrakt_href='/distrakt',
+                calendar_href='/calendar', distrakt_href='/distrakt',
                 calendar_available=false, ranker_available=false, is_admin=false,
                 distrakt_available=None) %}
 {# WORK IS HAPPENING, SAID WITHOUT A LINE OF JAVASCRIPT.
@@ -129,17 +129,26 @@
                 {% if distrakt_available is none or distrakt_available %}
                 <a id="distraktNav" href="{{ distrakt_href }}" title="Open Distrakt (Discord thread tracker)">🧵 Distrakt</a>
                 {% endif %}
-                {# Only the calendar defines openSettings(); everywhere else the
-                   button would be a no-op, so it isn't rendered. #}
-                {% if settings_button and is_admin %}
-                <button type="button" onclick="closeNavMenus(); openSettings()">⚙️ Settings</button>
-                {% endif %}
+                {# ON EVERY PAGE, for an administrator, because the panel is a
+                   fragment the server draws on request rather than markup one
+                   page carries. FETCHED EVERY TIME IT OPENS — not `once` — because
+                   each opening must re-read which credentials are stored. #}
                 {% if is_admin %}
+                <button type="button" hx-get="/settings/fragments/panel"
+                        hx-target="#settingsSlot" hx-swap="innerHTML">⚙️ Settings</button>
                 <a href="/admin">🛠️ Admin</a>
                 {% endif %}
                 {# No gate: any signed-in account may read the release notes, so
-                   the entry is the same on every page for every account. #}
-                <button type="button" onclick="closeNavMenus(); openChangelog()">📜 What's new</button>
+                   the entry is the same on every page for every account. The
+                   press opens the overlay (ui.js's data-modal-open) and asks for
+                   its body; asked on EVERY press rather than `once`, so an answer
+                   that failed is tried again rather than leaving "Loading…" for
+                   ever — and the notes are rendered once per process
+                   (app/changelog.py), so asking again costs a response, not a
+                   render. #}
+                <button type="button" data-modal-open="changelogModal"
+                        hx-get="/api/changelog" hx-target="#changelogBody"
+                        hx-swap="innerHTML">📜 What's new</button>
                 <button type="button" onclick="signOut()">🚪 Sign out</button>
             </div>
         </details>
@@ -147,17 +156,20 @@
 </header>
 
 {# Lives in the macro rather than in each page so it reaches all six of them
-   through the one insertion point the header already is. The body is empty
-   until first open — see openChangelog() in nav.js, which fetches it once. #}
+   through the one insertion point the header already is. #}
 <div id="changelogModal" class="modal-overlay">
     <div class="modal wide">
         <div class="modal-head">
             <h2>What's new</h2>
-            <button type="button" class="modal-close" onclick="closeChangelog()">&times;</button>
+            <button type="button" class="modal-close" data-modal-close="changelogModal">&times;</button>
         </div>
         <div class="modal-body" id="changelogBody">
             <p class="hint">Loading…</p>
         </div>
     </div>
 </div>
+{# WHERE THE SETTINGS PANEL LANDS, on every page an administrator can reach. Empty
+   until the menu asks: the panel is the server's answer, and it removes itself
+   when it closes. #}
+{% if is_admin %}<div id="settingsSlot"></div>{% endif %}
 {% endmacro %}

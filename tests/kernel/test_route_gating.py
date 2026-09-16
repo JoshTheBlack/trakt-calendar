@@ -48,7 +48,7 @@ def _request(*, host: str, origin: str | None = None, client: str = "127.0.0.1",
     if forwarded_proto:
         headers.append((b"x-forwarded-proto", forwarded_proto.encode()))
     return Request({
-        "type": "http", "method": "POST", "path": "/api/settings", "query_string": b"",
+        "type": "http", "method": "POST", "path": "/settings", "query_string": b"",
         "scheme": "http", "server": (host, 80), "client": (client, 51234),
         "headers": headers,
     })
@@ -195,13 +195,13 @@ class UnauthenticatedTests(GatingTestCase):
                 self.assertEqual(self.client.post(path, json={}).status_code, 401)
 
     def test_admin_level_is_refused(self):
-        for path in ("/api/settings", "/api/admin/encryption"):
-            with self.subTest(path=path):
-                self.assertEqual(self.client.get(path).status_code, 401)
-        for path in ("/api/settings", "/api/auth/device/start",
-                     "/api/auth/device/poll", "/api/auth/refresh",
-                     "/api/integrations/options", "/calendar/library/add",
-                     "/calendar/library/add-month",
+        self.assertEqual(self.client.get("/settings/fragments/panel").status_code, 401)
+        for path in ("/settings", "/settings/arr-options", "/settings/trakt/device/start",
+                     "/settings/trakt/device/poll", "/settings/trakt/device/cancel",
+                     "/settings/trakt/refresh", "/settings/trakt/adopt",
+                     "/admin/encryption/enable", "/admin/encryption/verify",
+                     "/admin/encryption/encrypt", "/admin/encryption/opt-out",
+                     "/calendar/library/add", "/calendar/library/add-month",
                      "/api/network-logo/regenerate"):
             with self.subTest(path=path):
                 self.assertEqual(self.client.post(path, json={}).status_code, 401)
@@ -226,8 +226,8 @@ class ApprovalTests(GatingTestCase):
     def test_calendar_user_is_not_an_admin_and_not_a_distrakt_user(self):
         self.sign_in_as(self._make_user("viewer", calendar_approved=True))
         self.assertEqual(self.client.get("/").status_code, 200)
-        self.assertEqual(self.client.get("/api/settings").status_code, 403)
-        self.assertEqual(self.client.get("/api/admin/encryption").status_code, 403)
+        self.assertEqual(self.client.get("/settings/fragments/panel").status_code, 403)
+        self.assertEqual(self.client.post("/admin/encryption/opt-out", json={}).status_code, 403)
         self.assertEqual(self.client.get("/distrakt").status_code, 403)
 
     def test_distrakt_needs_a_linked_trakt_identity_as_well_as_approval(self):
@@ -252,8 +252,8 @@ class ApprovalTests(GatingTestCase):
 
     def test_admin_reaches_the_admin_routes(self):
         self.sign_in_as(self.admin_id)
-        self.assertEqual(self.client.get("/api/settings").status_code, 200)
-        self.assertEqual(self.client.get("/api/admin/encryption").status_code, 200)
+        self.assertEqual(self.client.get("/settings/fragments/panel").status_code, 200)
+        self.assertEqual(self.client.post("/admin/encryption/opt-out", json={}).status_code, 200)
 
 
 class CalendarTemplateTests(GatingTestCase):
@@ -261,36 +261,37 @@ class CalendarTemplateTests(GatingTestCase):
     then refused — a button that always fails is worse than no button."""
 
     CALENDAR = "/?month=1&year=2026"
+    PANEL = "/settings/fragments/panel"
 
     def test_a_plain_user_gets_no_admin_controls(self):
         self.sign_in_as(self._make_user("viewer", calendar_approved=True))
         body = self.client.get(self.CALENDAR).text
-        self.assertIn("window.IS_ADMIN = false", body)
-        self.assertNotIn("openSettings()", body)
-        self.assertNotIn("settingsModal", body)
+        self.assertNotIn(self.PANEL, body)
+        self.assertNotIn("settingsSlot", body)
         self.assertNotIn("arr-btn", body)
 
     def test_an_admin_gets_them(self):
         self.sign_in_as(self.admin_id)
         body = self.client.get(self.CALENDAR).text
-        self.assertIn("window.IS_ADMIN = true", body)
-        self.assertIn("openSettings()", body)
-        self.assertIn("settingsModal", body)
+        self.assertIn(f'hx-get="{self.PANEL}"', body)
+        self.assertIn('<div id="settingsSlot"></div>', body)
 
-    def test_the_credential_inputs_are_marked_for_the_write_only_handling(self):
-        """The Settings screen builds its "leave blank to keep it" behaviour off
-        these markers, so every credential input needs one.
+    def test_every_credential_input_is_drawn_write_only(self):
+        """Every credential the panel offers is an EMPTY password field — the
+        stored value is never drawn — so the "leave blank to keep it" rule has
+        something to apply to for each one.
 
         `trakt_refresh_token` has no input by design — it is only ever issued by
         Trakt during authorization, never typed.
         """
         self.sign_in_as(self.admin_id)
-        body = self.client.get(self.CALENDAR).text
+        body = self.client.get(self.PANEL).text
         typed = config.SECRET_FIELDS - {"trakt_refresh_token"}
         for name in typed:
             with self.subTest(field=name):
-                self.assertRegex(body, rf'name="{name}"[^>]*data-secret|data-secret[^>]*name="{name}"')
-        self.assertEqual(body.count('data-secret="1"'), len(typed))
+                self.assertRegex(body, rf'<input type="password" id="s_{name}" name="{name}"'
+                                       rf' form="settingsForm" value=""')
+        self.assertEqual(body.count('class="field secret-field"'), len(typed))
 
 
 class DistraktTemplateTests(GatingTestCase):
@@ -357,9 +358,12 @@ class DistraktTemplateTests(GatingTestCase):
 
 
 class SettingsRedactionTests(GatingTestCase):
-    """The single highest-value fix here: this endpoint used to hand the Trakt
-    access token, the Trakt client secret, the TMDB key, and every Sonarr /
-    Radarr / Seerr API key to any unauthenticated caller."""
+    """The single highest-value fix here: the settings endpoint used to hand the
+    Trakt access token, the Trakt client secret, the TMDB key, and every Sonarr /
+    Radarr / Seerr API key to any unauthenticated caller. The Settings panel is
+    markup now, and the same promise is asserted of it."""
+
+    PANEL = "/settings/fragments/panel"
 
     def setUp(self):
         super().setUp()
@@ -367,14 +371,10 @@ class SettingsRedactionTests(GatingTestCase):
         self.sign_in_as(self.admin_id)
 
     def test_no_credential_value_appears_in_the_response(self):
-        resp = self.client.get("/api/settings")
-        payload = resp.json()
+        body = self.client.get(self.PANEL).text
         for name, value in SECRET_VALUES.items():
             with self.subTest(field=name):
-                # Not anywhere in the bytes, and the field itself isn't a key —
-                # only its name inside the `secrets_set` flags.
-                self.assertNotIn(value, resp.text)
-                self.assertNotIn(name, payload)
+                self.assertNotIn(value, body)
 
     def test_no_credential_is_written_to_settings_json_on_disk(self):
         """Secrets persist to the DB now, not the file. settings.json is reduced to
@@ -386,22 +386,24 @@ class SettingsRedactionTests(GatingTestCase):
         self.assertNotIn("public-client-id", on_disk)
         self.assertEqual(set(json.loads(on_disk)), {"cookie_secure", "allow_open_registration"})
 
-    def test_the_response_says_which_credentials_are_stored(self):
-        payload = self.client.get("/api/settings").json()
-        self.assertEqual(set(payload["secrets_set"]), set(config.SECRET_FIELDS))
-        self.assertTrue(all(payload["secrets_set"].values()))
+    def test_the_panel_says_which_credentials_are_stored(self):
+        typed = config.SECRET_FIELDS - {"trakt_refresh_token"}
+        body = self.client.get(self.PANEL).text
+        for name in typed:
+            with self.subTest(field=name):
+                self.assertIn(f'name="clear:{name}"', body)
         # An explicit clear, because a blank secret alone no longer removes a
         # stored one — see config.save_settings.
         save_settings(Settings(), clear_unset_secrets=True)
-        payload = self.client.get("/api/settings").json()
-        self.assertFalse(any(payload["secrets_set"].values()))
+        body = self.client.get(self.PANEL).text
+        self.assertNotIn('name="clear:', body)
 
     def test_non_secret_settings_still_come_back(self):
-        payload = self.client.get("/api/settings").json()
+        body = self.client.get(self.PANEL).text
         # The OAuth client id is public — it goes to Trakt in the browser during
         # authorization, and the Settings screen has to show it.
-        self.assertEqual(payload["trakt_client_id"], "public-client-id")
-        self.assertEqual(payload["endpoint"], Settings().endpoint)
+        self.assertIn('value="public-client-id"', body)
+        self.assertRegex(body, rf'<option value="{Settings().endpoint}" selected>')
 
     def test_every_credential_shaped_setting_is_declared_secret(self):
         """What makes a NEWLY ADDED credential field fail this suite instead of
@@ -418,31 +420,32 @@ class SettingsRedactionTests(GatingTestCase):
         ))
 
     def test_saving_without_a_credential_keeps_the_stored_one(self):
-        """The Settings screen renders its credential inputs empty because it
+        """The Settings panel renders its credential inputs empty because it
         cannot read them back, so a save that omits them must not wipe them."""
-        resp = self.client.post("/api/settings", json={"endpoint": "shows/premieres"})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        resp = self.client.post("/settings", json={"endpoint": "shows/premieres"})
+        self.assertEqual(resp.status_code, 204, resp.text)
         settings = config.load_settings()
         self.assertEqual(settings.endpoint, "shows/premieres")
         self.assertEqual(settings.tmdb_api_key, SECRET_VALUES["tmdb_api_key"])
 
     def test_a_blank_credential_keeps_the_stored_one(self):
-        self.client.post("/api/settings", json={"tmdb_api_key": "   "})
+        self.client.post("/settings", json={"tmdb_api_key": "   "})
         self.assertEqual(config.load_settings().tmdb_api_key, SECRET_VALUES["tmdb_api_key"])
 
     def test_a_new_credential_replaces_the_stored_one(self):
-        self.client.post("/api/settings", json={"tmdb_api_key": "fresh-key"})
+        self.client.post("/settings", json={"tmdb_api_key": "fresh-key"})
         self.assertEqual(config.load_settings().tmdb_api_key, "fresh-key")
 
-    def test_an_explicit_null_clears_a_credential(self):
+    def test_a_ticked_clear_box_clears_a_credential(self):
         """Clearing has to be possible and has to be deliberate — otherwise the
         only way to disable an integration would be to hand-edit the file."""
-        self.client.post("/api/settings", json={"sonarr_api_key": None})
+        self.client.post("/settings", json={"clear:sonarr_api_key": "1"})
         self.assertEqual(config.load_settings().sonarr_api_key, "")
         self.assertEqual(config.load_settings().tmdb_api_key, SECRET_VALUES["tmdb_api_key"])
 
     def test_the_save_response_is_redacted_too(self):
-        body = self.client.post("/api/settings", json={"endpoint": "shows/new"}).text
+        body = self.client.post("/settings", json={"pagination_limit": "not a number"}).text
+        self.assertIn("whole number", body)
         for value in SECRET_VALUES.values():
             self.assertNotIn(value, body)
 
@@ -459,7 +462,7 @@ class RequestShapeTests(GatingTestCase):
         """A form-encoded cross-origin POST is a CORS "simple request": the
         browser sends it with cookies and asks nobody's permission first. Not
         accepting the shape at all is what removes the whole class."""
-        for path in ("/api/settings", "/api/state", "/api/distrakt/refresh",
+        for path in ("/settings", "/api/state", "/api/distrakt/refresh",
                      "/calendar/library/add", "/onboarding", "/login", "/logout"):
             with self.subTest(path=path):
                 resp = self.client.post(path, data={"trakt_access_token": "stolen"})
@@ -467,11 +470,11 @@ class RequestShapeTests(GatingTestCase):
         self.assertEqual(config.load_settings().trakt_access_token, "")
 
     def test_a_body_with_no_content_type_is_refused(self):
-        resp = self.client.post("/api/settings", content=b"{}")
+        resp = self.client.post("/settings", content=b"{}")
         self.assertEqual(resp.status_code, 415)
 
     def test_a_request_from_another_origin_is_refused(self):
-        resp = self.client.post("/api/settings", json={"endpoint": "shows/premieres"},
+        resp = self.client.post("/settings", json={"endpoint": "shows/premieres"},
                                 headers={"Origin": "https://evil.example"})
         self.assertEqual(resp.status_code, 403)
         self.assertEqual(resp.json()["reason"], "cross_origin")
@@ -504,20 +507,20 @@ class RequestShapeTests(GatingTestCase):
 
     def test_a_same_origin_fetch_without_an_origin_header_is_allowed(self):
         del self.client.headers["Origin"]
-        resp = self.client.post("/api/settings", json={},
+        resp = self.client.post("/settings", json={},
                                 headers={"Sec-Fetch-Site": "same-origin"})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.status_code, 204, resp.text)
 
     def test_a_cross_site_fetch_without_an_origin_header_is_refused(self):
         del self.client.headers["Origin"]
         for site in ("cross-site", "same-site", ""):
             with self.subTest(sec_fetch_site=site):
-                resp = self.client.post("/api/settings", json={},
+                resp = self.client.post("/settings", json={},
                                         headers={"Sec-Fetch-Site": site})
                 self.assertEqual(resp.status_code, 403)
 
     def test_reads_are_not_subject_to_either_rule(self):
-        resp = self.client.get("/api/settings", headers={"Origin": "https://evil.example"})
+        resp = self.client.get("/settings/fragments/panel", headers={"Origin": "https://evil.example"})
         self.assertEqual(resp.status_code, 200)
 
 
@@ -537,7 +540,7 @@ class FirstRunTests(AppTestCase):
         self.assertEqual(resp.headers["location"], "/onboarding")
 
     def test_everything_else_is_refused(self):
-        resp = self.client.get("/api/settings")
+        resp = self.client.get("/settings/fragments/panel")
         self.assertEqual(resp.status_code, 401)
         self.assertEqual(resp.json()["reason"], "setup_required")
 

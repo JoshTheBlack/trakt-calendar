@@ -171,11 +171,12 @@ def filter_by_network(items: Sequence[ItemT], networks: Iterable[str] | None,
                       *, exempt_unenriched: bool = False) -> list[ItemT]:
     """Keep the normalized `items` whose network survives `networks`.
 
-    Takes normalized items rather than raw entries because that is what the
-    caller holds when it filters: cache.py's per-viewer read-time pass runs
-    after the stored entries have been replayed through the provider's
-    normalizer, and `network` only exists on the far side of that. An empty spec
-    is a pass-through.
+    Takes anything carrying `network` and `enriched`, which is both shapes this
+    is asked about: a Record at fill (cache.py's instance floor, before a window
+    is stored) and a normalized item at read (the same floor again, then the
+    viewer's own list). `network` survives normalization unchanged, so one
+    predicate answers for both rather than a second one written per shape. An
+    empty spec is a pass-through.
 
     `exempt_unenriched` is the same exemption keep_record applies, said here
     because network is filtered separately and later (see the module
@@ -458,16 +459,18 @@ def keep_record(record, g_inc: set[str], g_exc: set[str],
 
     `exempt_unenriched` lets a record that has not been enriched yet survive
     regardless of what the spec says, rather than being judged on values it
-    cannot yet answer for — see Record.enriched. It is OFF by default and used
-    in exactly one place: app/calendar/cache.py's per-viewer READ. The
-    instance-wide content floor filter.filter_records applies at FILL time
-    (cache.py's fetch_window_records) deliberately does NOT set it — a Simkl
-    record is always unenriched at that point (enrichment only ever overlays
-    at read, never at fill; see app/calendar/enrich.py), so exempting it there
-    would make the floor a permanent no-op for every Simkl title rather than a
-    temporary gap that closes once enrichment catches up. The floor keeps
-    judging what it is given; only the read a viewer actually sees gets the
-    grace period.
+    cannot yet answer for — see Record.enriched. It is OFF by default and set by
+    both of app/calendar/cache.py's READS: the instance floor and the per-viewer
+    layer that follows it (`visible_records`). The instance floor's OTHER
+    application — at FILL time, in cache.py's fetch_window_records — deliberately
+    does NOT set it: a Simkl record is always unenriched at that point
+    (enrichment only ever overlays at read, never at fill; see
+    app/calendar/enrich.py), so exempting it there would make the floor a
+    permanent no-op for every Simkl title rather than a temporary gap that closes
+    once enrichment catches up. The fill keeps judging what it is given; the
+    reads a viewer actually sees give the grace period, so a title whose genres
+    are not known yet is shown rather than hidden for something nobody has
+    established about it.
     """
     if exempt_unenriched and not record.enriched:
         return True
@@ -488,7 +491,7 @@ def filter_records(records, genres_spec: str, countries_spec: str,
     once there is something to be exempt FROM.
 
     `exempt_unenriched` is passed straight through to keep_record — see there
-    for why only one caller sets it.
+    for which callers set it and why the fill does not.
     """
     g_inc, g_exc = parse_spec(genres_spec)
     c_inc, c_exc = parse_spec(countries_spec)

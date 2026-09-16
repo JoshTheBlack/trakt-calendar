@@ -143,6 +143,34 @@ def instance_sources(settings=None) -> frozenset[str] | None:
     return frozenset(str(p.source) for p in providers.calendar_sources(settings=settings))
 
 
+def answering_services(endpoint, settings) -> list[tuple[str, str]]:
+    """(name, label) for every service that could actually fill THIS calendar on
+    THIS instance, in declared order — or an empty list when there is nothing to
+    choose between. Every source control is built out of this — the calendar
+    toolbar's, the Filters panel's and a share link's — so none of them can come
+    to a different answer about what a calendar has to offer.
+
+    IT IS TWO QUESTIONS AND NEITHER OF THEM IS ASKED HERE. Whether a service is
+    on this INSTANCE's calendar at all belongs to `providers.calendar_sources`,
+    and it is asked through `instance_sources` so that an operator switching a
+    service off empties these controls by the same rule that empties the calendar
+    underneath them. Whether it publishes THIS calendar is
+    `capabilities.answers`. No service is named in either check, so a third one
+    is offered the day it is registered.
+
+    AND WITH FEWER THAN TWO THERE IS NOTHING TO OFFER, which is returned as an
+    empty list rather than as one entry. One service that can answer means every
+    label a control could carry names the same outcome, and drawing it makes the
+    page look as though a choice is available when none is.
+    """
+    admitted = instance_sources(settings)
+    services = [(str(source), provider.label)
+                for source, provider in providers.registered().items()
+                if provider.capabilities.answers(endpoint.key)
+                and (admitted is None or str(source) in admitted)]
+    return services if len(services) >= 2 else []
+
+
 def admitted_order(group, prefs=None, endpoint=None, settings=None) -> list[str]:
     """The sources in `group` this viewer will read, in declared order.
 

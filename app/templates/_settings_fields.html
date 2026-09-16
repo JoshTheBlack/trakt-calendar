@@ -1,0 +1,87 @@
+{# THE SETTINGS FORM'S FIELDS, one macro per kind of value.
+
+   EVERY FIELD NAMES ITS FORM (`form="settingsForm"`) rather than sitting inside
+   it. The panel holds controls that are not settings — the encryption section,
+   the Trakt pairing, the arr loaders — and htmx sends an enclosing form's fields
+   with any request made from inside it, so wrapping the panel in the form would
+   put every typed credential into the body of every one of those presses. The
+   form is an empty element and the fields point at it: the shape the rankings
+   board's selection form already takes.
+
+   A CREDENTIAL IS NEVER DRAWN BACK, not masked, not its length. Its field arrives
+   EMPTY, says whether a value is stored, and — only when one is — offers a box to
+   clear it. What is typed replaces it, and an empty field leaves it alone; that
+   rule is app/config.py's `apply_form`, which is also where the clear box's name
+   is spelled (`secrets[name].clear_name`).
+
+   IMPORT THIS `with context`: the macros read `secrets` and `numbers`, which the
+   panel's route resolves. #}
+
+{% macro text(name, label, value='', placeholder='', hint='') %}
+<div class="field">
+    <label for="s_{{ name }}">{{ label }}</label>
+    <input type="text" id="s_{{ name }}" name="{{ name }}" form="settingsForm"
+           value="{{ value }}" placeholder="{{ placeholder }}" autocomplete="off" spellcheck="false">
+    {% if hint %}<span class="hint">{{ hint }}</span>{% endif %}
+</div>
+{% endmacro %}
+
+{# `autocomplete="new-password"` BECAUSE `off` IS IGNORED FOR A PASSWORD FIELD. A
+   browser that autofills a saved password into one of these would post it, and
+   the writer would read that as a new credential typed on purpose. #}
+{% macro secret(name, label, hint='', oob=false) %}
+{%- set stored = secrets[name] -%}
+<div class="field secret-field" id="secret-{{ name }}"{% if oob %} hx-swap-oob="true"{% endif %}>
+    <label for="s_{{ name }}">{{ label }}</label>
+    <input type="password" id="s_{{ name }}" name="{{ name }}" form="settingsForm" value=""
+           autocomplete="new-password" spellcheck="false"
+           placeholder="{{ 'Saved — leave blank to keep it' if stored.is_set else 'Not set' }}">
+    {% if stored.is_set %}
+    <label class="secret-clear">
+        <input type="checkbox" name="{{ stored.clear_name }}" value="1" form="settingsForm"
+               autocomplete="off"> Clear the saved value when I save
+    </label>
+    <span class="hint secret-clearing">Will be cleared when you save.</span>
+    {% endif %}
+    {% if hint %}<span class="hint">{{ hint }}</span>{% endif %}
+</div>
+{% endmacro %}
+
+{% macro number(name, hint='') %}
+{%- set field = numbers[name] -%}
+<div class="field">
+    <label for="s_{{ name }}">{{ field.label }}</label>
+    <input type="number" id="s_{{ name }}" name="{{ name }}" form="settingsForm"
+           min="{{ field.low }}" max="{{ field.high }}" step="1" value="{{ field.value }}"
+           autocomplete="off">
+    {% if hint %}<span class="hint">{{ hint }}</span>{% endif %}
+</div>
+{% endmacro %}
+
+{# THE HIDDEN COMPANION IS WHAT MAKES "off" SAYABLE. An unticked box sends nothing
+   at all, and "absent" means LEAVE ALONE to the writer — so the companion posts
+   "0" under the same name, the ticked box overrides it, and the writer reads the
+   last one (route_params.last_value). #}
+{% macro checkbox(name, label, checked, hint='') %}
+<div class="field checkbox">
+    <input type="hidden" name="{{ name }}" value="0" form="settingsForm">
+    <input type="checkbox" id="s_{{ name }}" name="{{ name }}" value="1" form="settingsForm"
+           autocomplete="off"{% if checked %} checked{% endif %}>
+    <label for="s_{{ name }}">{{ label }}</label>
+    {% if hint %}<span class="hint">{{ hint }}</span>{% endif %}
+</div>
+{% endmacro %}
+
+{# A value the operator has to paste somewhere else EXACTLY, shown rather than
+   described. Copying is ui.js's `data-copy`, the one thing here only a browser
+   can do. #}
+{% macro copyable(id, label, value, hint) %}
+<div class="field">
+    <label for="{{ id }}">{{ label }}</label>
+    <div class="share-link-box">
+        <input type="text" id="{{ id }}" readonly value="{{ value }}">
+        <button type="button" class="btn-ghost small" data-copy="#{{ id }}">Copy</button>
+    </div>
+    <span class="hint">{{ hint }}</span>
+</div>
+{% endmacro %}

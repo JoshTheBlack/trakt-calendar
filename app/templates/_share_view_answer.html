@@ -1,0 +1,9 @@
+{# The answer to a change in "How the link opens": a refusal where there was one
+   (nothing written), the link as it now reads, and — only when the link's own
+   Calendar option moved — the Sources ticks for that calendar. Redrawn only then
+   so that ticking a service does not replace the box somebody is on. #}
+{{ share_view_error or '' }}
+{% with oob = true %}
+{% include '_share_link.html' %}
+{% if share_sources_moved %}{% include '_share_sources.html' %}{% endif %}
+{% endwith %}

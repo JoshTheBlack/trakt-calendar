@@ -62,6 +62,31 @@ def season(value) -> int | None:
     return _as_int(value)
 
 
+def last_value(value):
+    """What a form field said, when it may have arrived as a list.
+
+    htmx's json-enc turns a name that appears more than once into a list, and a
+    checkbox that must always be mentioned carries a hidden companion of the same
+    name before it — so a ticked box reaches the body as `["", "on"]` and an
+    unticked one as `""`. The LAST entry is the one the browser serialized last,
+    which is the box overriding its companion.
+    """
+    if isinstance(value, list):
+        return value[-1] if value else ""
+    return value
+
+
+# The spellings that mean "on", from a checkbox, a two-option select or a JSON
+# boolean alike. Stated once: a second set somewhere else is how "0" came to be
+# read as a truthy string.
+_TICKED = frozenset({"1", "true", "on", "yes"})
+
+
+def ticked(value) -> bool:
+    """Whether a checkbox or on/off field arrived switched on."""
+    return str(last_value(value)).strip().lower() in _TICKED
+
+
 def adjacent_months(year: int, month: int) -> dict:
     """The months either side of {year, month}, for a page's prev/next links.
 

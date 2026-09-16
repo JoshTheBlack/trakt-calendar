@@ -28,21 +28,28 @@
 
    THE NAME CARRIES THE DESTINATION. `chip:<pref column>:<token>` is spelled by
    app/calendar/vocab.py's `field_name` and parsed back by the same module, so
-   this template never spells the format itself. #}
-{% macro chip(state, field, index) %}
-{%- set id = 'fchip-' ~ field ~ '-' ~ index -%}
+   this template never spells the format itself.
+
+   TWO SURFACES DRAW THESE, and the calendar page can hold both at once: the
+   Filters panel and the Settings panel's content floor, which reuses the same
+   certification chips. `id_prefix` keeps their ids apart — a duplicate id would
+   point one panel's labels at the other panel's radios — and `form` names the
+   form a chip belongs to where its panel's fields are not inside one. #}
+{% macro chip(state, field, index, id_prefix='fchip', form=none) %}
+{%- set id = id_prefix ~ '-' ~ field ~ '-' ~ index -%}
+{%- set owner = (' form="' ~ form ~ '"') | safe if form else '' -%}
 <span class="fchip" role="radiogroup" aria-label="{{ state.label }}">
-    <input type="radio" id="{{ id }}-0" name="{{ state.name }}" value=""
+    <input type="radio" id="{{ id }}-0" name="{{ state.name }}" value=""{{ owner }}
            autocomplete="off" aria-label="{{ state.label }}: not filtered"
            {% if state.mode == '' %}checked{% endif %}>
     <label class="fchip-face" for="{{ id }}-1" aria-hidden="true"
            title="{{ state.label }} — press to keep only this">{{ state.label }}</label>
-    <input type="radio" id="{{ id }}-1" name="{{ state.name }}" value="include"
+    <input type="radio" id="{{ id }}-1" name="{{ state.name }}" value="include"{{ owner }}
            autocomplete="off" aria-label="{{ state.label }}: only this"
            {% if state.mode == 'include' %}checked{% endif %}>
     <label class="fchip-face" for="{{ id }}-2" aria-hidden="true"
            title="{{ state.label }} — press to filter this out">{{ state.label }}</label>
-    <input type="radio" id="{{ id }}-2" name="{{ state.name }}" value="exclude"
+    <input type="radio" id="{{ id }}-2" name="{{ state.name }}" value="exclude"{{ owner }}
            autocomplete="off" aria-label="{{ state.label }}: filter out"
            {% if state.mode == 'exclude' %}checked{% endif %}>
     <label class="fchip-face" for="{{ id }}-0" aria-hidden="true"

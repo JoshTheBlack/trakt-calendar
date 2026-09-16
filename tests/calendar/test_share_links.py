@@ -75,9 +75,9 @@ class ShareTestCase(AppTestCase):
         for kind in ("token", "username", "slug"):
             resp = self.client.post("/api/me/share/enabled", json={"kind": kind, "enabled": True})
             self.assertEqual(resp.status_code, 200, resp.text)
-        resp = self.client.post("/api/me/share/slug", json={"slug": slug})
-        self.assertEqual(resp.status_code, 200, resp.text)
-        return resp.json()
+        resp = self.client.post("/calendar/share/slug", json={"slug": slug})
+        self.assertIn("Saved.", resp.text)
+        return dict(asyncio.run(share_links.get(user_id)))
 
 
 # ---------------------------------------------------------------------------

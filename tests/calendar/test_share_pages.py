@@ -68,15 +68,25 @@ class SharePageTestCase(AppTestCase):
 
 class ShareLinkViewOptionsTests(SharePageTestCase):
     """The display options written into the generated link — and the promise
-    that they are written into the LINK and nowhere else."""
+    that they are written into the LINK and nowhere else.
+
+    ASKED OF THE DATA LAYER (share_links.set_link_view), because that is where
+    the rule lives: the Share panel's own route turns a form into a view and is
+    held to its half in tests/calendar/test_share_panel.py. What is here is what
+    a view MEANS once stored — the link it produces and the page that opens."""
 
     def setUp(self):
         super().setUp()
         self.user_id = self._make_user("linkowner", calendar_approved=True)
         self.sign_in_as(self.user_id)
 
+    def _set(self, view):
+        return asyncio.run(share_links.set_link_view(self.user_id, view))
+
     def _share(self) -> dict:
-        return self.client.get("/api/me/share").json()
+        row = asyncio.run(share_links.get_or_create(self.user_id))
+        return {"link_view": share_links.link_view(row),
+                "urls": share_links.generated_urls(row, "linkowner", ORIGIN)}
 
     def test_the_default_link_carries_no_view_params(self):
         """"Use my current display" is the absence of params: the page then
@@ -95,17 +105,16 @@ class ShareLinkViewOptionsTests(SharePageTestCase):
     def test_chosen_options_are_written_into_the_link(self):
         view = {"endpoint": "shows/premieres", "card": "poster", "packing": "packed",
                 "hidenw": "1", "tz": "America/New_York"}
-        resp = self.client.post("/api/me/share/view", json={"view": view})
-        self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(self._link_view_of(resp.json()["urls"]["token"]), view)
+        self.assertIsNone(self._set(view))
+        self.assertEqual(self._link_view_of(self._share()["urls"]["token"]), view)
 
     def test_the_link_is_handed_out_short(self):
         """A link people paste into chat: one short code rather than seven
         params, two of them percent-encoded."""
-        self.client.post("/api/me/share/view", json={"view": {
+        self._set({
             "endpoint": "shows/premieres", "card": "horizontal", "packing": "stacked",
             "hidenw": "1", "tz": "America/New_York", "year": "2026", "month": "8",
-        }})
+        })
         query = urlsplit(self._share()["urls"]["token"]).query
         self.assertLess(len(query), 20, query)
         self.assertEqual(list(dict(parse_qsl(query))), ["p"])
@@ -116,10 +125,10 @@ class ShareLinkViewOptionsTests(SharePageTestCase):
         before = asyncio.run(auth.get_user_prefs(self.user_id))
         before_tz = asyncio.run(auth.get_user(self.user_id))["timezone"]
 
-        self.client.post("/api/me/share/view", json={"view": {
+        self._set({
             "endpoint": "shows/finales", "card": "poster", "packing": "packed",
             "hidenw": "1", "tz": "Pacific/Auckland",
-        }})
+        })
 
         self.assertEqual(asyncio.run(auth.get_user_prefs(self.user_id)), before)
         self.assertEqual(asyncio.run(auth.get_user(self.user_id))["timezone"], before_tz)
@@ -131,15 +140,15 @@ class ShareLinkViewOptionsTests(SharePageTestCase):
         row = asyncio.run(share_links.get_or_create(self.user_id))
         before = {key: row[key] for key in ("endpoint", "card_style", "day_packing",
                                             "hide_not_watching", "timezone")}
-        self.client.post("/api/me/share/view", json={"view": {"endpoint": "shows/finales"}})
+        self._set({"endpoint": "shows/finales"})
         after = asyncio.run(share_links.get(self.user_id))
         self.assertEqual({key: after[key] for key in before}, before)
 
     def test_clearing_goes_back_to_a_bare_link(self):
-        self.client.post("/api/me/share/view", json={"view": {"endpoint": "shows/finales"}})
-        resp = self.client.post("/api/me/share/view", json={"view": None})
-        self.assertIsNone(resp.json()["link_view"])
-        self.assertNotIn("?", resp.json()["urls"]["token"])
+        self._set({"endpoint": "shows/finales"})
+        self.assertIsNone(self._set(None))
+        self.assertIsNone(self._share()["link_view"])
+        self.assertNotIn("?", self._share()["urls"]["token"])
 
     def test_an_unusable_option_is_refused_rather_than_silently_dropped(self):
         """These end up in a URL handed to someone else. A value the page would
@@ -149,13 +158,12 @@ class ShareLinkViewOptionsTests(SharePageTestCase):
                      {"tz": "Mars/Olympus_Mons"}, {"nonsense": "1"},
                      {"source": "netflix"}, {"source": ""}, {"source": "trakt "}):
             with self.subTest(view=view):
-                resp = self.client.post("/api/me/share/view", json={"view": view})
-                self.assertEqual(resp.status_code, 400)
+                self.assertIsNotNone(self._set(view))
         self.assertIsNone(self._share()["link_view"])
 
     def test_the_options_apply_to_whichever_link_form_is_generated(self):
         self.client.post("/api/me/share/enabled", json={"kind": "username", "enabled": True})
-        self.client.post("/api/me/share/view", json={"view": {"endpoint": "shows/premieres"}})
+        self._set({"endpoint": "shows/premieres"})
         urls = self._share()["urls"]
         for kind in ("token", "username"):
             with self.subTest(kind=kind):
@@ -164,10 +172,8 @@ class ShareLinkViewOptionsTests(SharePageTestCase):
     def test_a_named_source_is_written_into_the_link(self):
         """The one view option the panel was missing, and it travels the same
         way every other one does — short code included."""
-        resp = self.client.post("/api/me/share/view",
-                                json={"view": {"endpoint": "shows", "source": "simkl"}})
-        self.assertEqual(resp.status_code, 200, resp.text)
-        url = resp.json()["urls"]["token"]
+        self.assertIsNone(self._set({"endpoint": "shows", "source": "simkl"}))
+        url = self._share()["urls"]["token"]
         self.assertIn("?p=", url)
         self.assertEqual(self._link_view_of(url), {"endpoint": "shows", "source": "simkl"})
 
@@ -175,7 +181,7 @@ class ShareLinkViewOptionsTests(SharePageTestCase):
         """"My sources" is the ABSENCE of the param, so the page resolves the
         owner's own preference — the standing behaviour of a share page, which a
         link that opted out of choosing must not change."""
-        self.client.post("/api/me/share/view", json={"view": {"card": "poster"}})
+        self._set({"card": "poster"})
         self.assertNotIn("source", self._link_view_of(self._share()["urls"]["token"]))
 
     def test_a_link_may_name_a_combination_of_services(self):
@@ -183,17 +189,14 @@ class ShareLinkViewOptionsTests(SharePageTestCase):
         say it in the short form, since the number of combinations grows with
         every service registered and none of them may be the one that quietly
         stops fitting."""
-        resp = self.client.post("/api/me/share/view",
-                                json={"view": {"source": "trakt+simkl"}})
-        self.assertEqual(resp.status_code, 200, resp.text)
-        url = resp.json()["urls"]["token"]
+        self.assertIsNone(self._set({"source": "trakt+simkl"}))
+        url = self._share()["urls"]["token"]
         self.assertIn("?p=", url)
         self.assertEqual(self._link_view_of(url), {"source": "trakt+simkl"})
 
     def test_a_pinned_month_is_written_into_the_link(self):
-        resp = self.client.post("/api/me/share/view", json={"view": {"year": "2026", "month": "8"}})
-        self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(self._link_view_of(resp.json()["urls"]["token"]),
+        self.assertIsNone(self._set({"year": "2026", "month": "8"}))
+        self.assertEqual(self._link_view_of(self._share()["urls"]["token"]),
                          {"year": "2026", "month": "8"})
 
     def test_half_a_pinned_month_is_refused(self):
@@ -202,20 +205,19 @@ class ShareLinkViewOptionsTests(SharePageTestCase):
         for view in ({"year": "2026"}, {"month": "8"},
                      {"year": "2026", "month": "13"}, {"year": "40000", "month": "8"}):
             with self.subTest(view=view):
-                resp = self.client.post("/api/me/share/view", json={"view": view})
-                self.assertEqual(resp.status_code, 400)
+                self.assertIsNotNone(self._set(view))
         self.assertIsNone(self._share()["link_view"])
 
     def test_a_link_with_no_pinned_month_opens_on_the_current_one(self):
         """The default stays what it was: nothing in the URL, so the page lands
         on whatever month it is opened in."""
-        self.client.post("/api/me/share/view", json={"view": {"card": "poster"}})
+        self._set({"card": "poster"})
         self.assertEqual(self._link_view_of(self._share()["urls"]["token"]), {"card": "poster"})
 
     def test_the_pinned_month_is_the_month_the_public_page_opens_on(self):
         """End to end: what the panel pins is where a visitor lands, without
         them having to touch the month arrows."""
-        self.client.post("/api/me/share/view", json={"view": {"year": "2026", "month": "8"}})
+        self._set({"year": "2026", "month": "8"})
         url = self._share()["urls"]["token"]
         self.client.cookies.clear()
         resp = self.client.get(url.replace(ORIGIN, ""))
@@ -225,7 +227,7 @@ class ShareLinkViewOptionsTests(SharePageTestCase):
     def test_the_generated_link_actually_opens_on_the_chosen_view(self):
         """End to end: the params the panel writes are the params the public
         page honours."""
-        self.client.post("/api/me/share/view", json={"view": {"card": "poster"}})
+        self._set({"card": "poster"})
         url = self._share()["urls"]["token"]
         self.client.cookies.clear()
         resp = self.client.get(url.replace(ORIGIN, "") + "&year=2026&month=7")
@@ -242,7 +244,7 @@ class ShareCodeArrivalTests(SharePageTestCase):
         super().setUp()
         self.user_id = self._make_user("codeowner", calendar_approved=True)
         self.sign_in_as(self.user_id)
-        self.token = self.client.get("/api/me/share").json()["token"]
+        self.token = asyncio.run(share_links.get_or_create(self.user_id))["token"]
         self.client.cookies.clear()
 
     def _arrive(self, query: str):
@@ -322,7 +324,7 @@ class ASharePageOnAnInstanceWithNoCredentialsTests(SharePageTestCase):
         save_settings(Settings(public_base_url=ORIGIN))
         self.user_id = self._make_user("shareowner", calendar_approved=True)
         self.sign_in_as(self.user_id)
-        self.token = self.client.get("/api/me/share").json()["token"]
+        self.token = asyncio.run(share_links.get_or_create(self.user_id))["token"]
         self.client.cookies.clear()
         entry = {
             "first_aired": "2026-07-15T20:00:00Z",
@@ -365,7 +367,7 @@ class SharePageViewControlsTests(SharePageTestCase):
         super().setUp()
         self.user_id = self._make_user("pageowner", calendar_approved=True)
         self.sign_in_as(self.user_id)
-        self.token = self.client.get("/api/me/share").json()["token"]
+        self.token = asyncio.run(share_links.get_or_create(self.user_id))["token"]
         self.client.cookies.clear()
 
     def test_the_page_renders_view_controls(self):
@@ -440,7 +442,7 @@ class _ShareDetailsTestCase(SharePageTestCase):
                                trakt_access_token="tok"))
         self.user_id = self._make_user("modalowner", calendar_approved=True)
         self.sign_in_as(self.user_id)
-        self.token = self.client.get("/api/me/share").json()["token"]
+        self.token = asyncio.run(share_links.get_or_create(self.user_id))["token"]
         self.client.cookies.clear()
         # A cached window so the page renders a card to wire up.
         entry = {
@@ -698,7 +700,7 @@ class ShareEmbedTextTests(SharePageTestCase):
         super().setUp()
         self.user_id = self._make_user("embedowner", calendar_approved=True)
         self.sign_in_as(self.user_id)
-        self.token = self.client.get("/api/me/share").json()["token"]
+        self.token = asyncio.run(share_links.get_or_create(self.user_id))["token"]
         self.client.cookies.clear()
 
     def _head(self, path: str | None = None) -> str:

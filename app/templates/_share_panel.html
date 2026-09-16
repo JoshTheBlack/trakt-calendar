@@ -1,0 +1,155 @@
+{# THE SHARE PANEL — the whole overlay, already open, drawn from this account's
+   share row. Fetched when 🔗 Share is pressed, so it always shows the links as
+   they stand (another tab may have rotated one), and removed when it closes
+   (`data-modal-discard`).
+
+   NOTHING HERE IS ASSEMBLED IN THE BROWSER. It used to be an empty dialog that a
+   script filled from a JSON read, rebuilding its source ticks from a per-calendar
+   map the calendar page carried for no other reason; every control now posts
+   itself and is answered with the part of the panel that changed
+   (app/calendar/share_routes.py).
+
+   WHAT THE STYLESHEET DECIDES, because each is a choice still being made in this
+   panel: the custom-name field shows for the custom link, the display options for
+   "Choose display options", and the year beside a pinned month (style.css, beside
+   .share-slug-field). #}
+<div id="shareModal" class="modal-overlay open" data-modal-discard>
+    <div class="modal">
+        <div class="modal-head">
+            <h2>🔗 Share this calendar</h2>
+            <button type="button" class="modal-close" data-modal-close="shareModal">&times;</button>
+        </div>
+        <div class="modal-body">
+            {# Only an administrator can set the public base URL, so only they are
+               told about it. For anyone else it is an unfixable complaint about a
+               setting they cannot see. #}
+            {% if share_base_missing and share_is_admin %}
+            <p class="hint err">Set a public base URL in Settings before sharing a link — without it there
+                is nothing to build one from.</p>
+            {% endif %}
+
+            <div class="field">
+                <label for="share_kind">Share link</label>
+                <select id="share_kind" name="kind" autocomplete="off"
+                        hx-post="/calendar/share/kind" hx-trigger="change" hx-json-enc
+                        hx-target="#shareLink" hx-swap="outerHTML">
+                    {% for kind, kind_label in share_kinds %}
+                    <option value="{{ kind }}"{% if kind == share_kind %} selected{% endif %}>{{ kind_label }}</option>
+                    {% endfor %}
+                </select>
+                {# Every link already handed out keeps answering — this chooses which
+                   one the panel gives you. It used to say the others were switched
+                   off, which app/calendar/share_links.py's set_active_kind has
+                   deliberately never done. #}
+                <span class="hint">Chooses which link this panel gives you. Links you have already shared keep working.</span>
+            </div>
+
+            <div class="field share-slug-field">
+                <label for="share_slug">Custom name</label>
+                {# CHECKED AND SAVED IN ONE REQUEST as the typing pauses. Syncing on
+                   itself drops a check a later keystroke has overtaken. #}
+                <input type="text" id="share_slug" name="slug" value="{{ share_slug }}"
+                       placeholder="your-custom-name" spellcheck="false" autocomplete="off"
+                       hx-post="/calendar/share/slug" hx-trigger="input changed delay:500ms"
+                       hx-json-enc hx-sync="this:replace" hx-indicator="#shareSlugChecking"
+                       hx-target="#shareSlugStatus" hx-swap="innerHTML">
+                <span class="hint share-slug-checking" id="shareSlugChecking">Checking…</span>
+                <span id="shareSlugStatus"></span>
+            </div>
+
+            {% include '_share_link.html' %}
+
+            <div class="settings-section">🎛️ How the link opens</div>
+            {# ONE FORM FOR THE LINK'S VIEW, posting on every change. It writes the
+               WHOLE view each time — "Use my current display" writes none — which is
+               why an unticked source simply is not ticked, with no companion field
+               needed. `hx-boost="false"` because a boosted form under a boosted
+               <body> would try to navigate. #}
+            <form id="shareView" class="share-view" hx-post="/calendar/share/view" hx-trigger="change"
+                  hx-json-enc hx-boost="false" hx-target="#shareViewNotice" hx-swap="innerHTML">
+                <div class="field">
+                    <label class="checkbox-label">
+                        <input type="radio" name="mode" value="current" autocomplete="off"{% if not share_custom %} checked{% endif %}>
+                        Use my current display
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="radio" name="mode" value="custom" autocomplete="off"{% if share_custom %} checked{% endif %}>
+                        Choose display options for the link
+                    </label>
+                </div>
+                <div class="share-view-options">
+                    <div class="two-col">
+                        <div class="field">
+                            <label for="share_view_endpoint">Calendar</label>
+                            <select id="share_view_endpoint" name="endpoint" autocomplete="off">
+                                {% for ep in share_endpoints %}
+                                <option value="{{ ep.key }}"{% if ep.key == share_view.endpoint %} selected{% endif %}>{{ ep.label }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label for="share_view_tz">Timezone</label>
+                            <select id="share_view_tz" name="tz" autocomplete="off">
+                                {% for tzgroup in share_timezones %}
+                                <optgroup label="{{ tzgroup.group }}">
+                                    {% for tz in tzgroup['options'] %}
+                                    <option value="{{ tz.value }}"{% if tz.selected %} selected{% endif %}>{{ tz.label }}</option>
+                                    {% endfor %}
+                                </optgroup>
+                                {% endfor %}
+                            </select>
+                        </div>
+                    </div>
+                    <div class="two-col">
+                        <div class="field">
+                            <label for="share_view_card">Card style</label>
+                            <select id="share_view_card" name="card" autocomplete="off">
+                                {% for value, text in [('vertical', 'Poster on top'), ('horizontal', 'Poster beside'), ('poster', 'Poster only')] %}
+                                <option value="{{ value }}"{% if value == share_view.card %} selected{% endif %}>{{ text }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label for="share_view_packing">Day packing</label>
+                            <select id="share_view_packing" name="packing" autocomplete="off">
+                                {% for value, text in [('stacked', 'Stacked bands'), ('packed', 'Days packed beside each other')] %}
+                                <option value="{{ value }}"{% if value == share_view.packing %} selected{% endif %}>{{ text }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                    </div>
+                    {% include '_share_sources.html' %}
+                    <div class="field checkbox">
+                        <input type="hidden" name="hidenw" value="0">
+                        <input type="checkbox" id="share_view_hidenw" name="hidenw" value="1" autocomplete="off"{% if share_view.hidenw %} checked{% endif %}>
+                        <label for="share_view_hidenw">Hide not-watching items on the shared page</label>
+                    </div>
+                    {# Pinning a month is the one option that goes stale by itself, so it
+                       defaults to off and says what off means. #}
+                    <div class="field">
+                        <label for="share_view_month">Opens on</label>
+                        <div class="two-col">
+                            <select id="share_view_month" name="month" autocomplete="off">
+                                <option value=""{% if not share_view.month %} selected{% endif %}>Whichever month it's opened in</option>
+                                {% for number, name in share_months %}
+                                <option value="{{ number }}"{% if share_view.month == number | string %} selected{% endif %}>{{ name }}</option>
+                                {% endfor %}
+                            </select>
+                            <select id="share_view_year" name="year" autocomplete="off" aria-label="Year">
+                                {% for year_option in share_years %}
+                                <option value="{{ year_option }}"{% if year_option | string == share_view.year %} selected{% endif %}>{{ year_option }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <span class="hint">Pin the link to one month and it lands there however late it's opened —
+                            whoever has it can still page to any other month from there.</span>
+                    </div>
+                </div>
+                <p class="hint err" id="shareViewNotice" role="alert"></p>
+            </form>
+        </div>
+        <div class="modal-foot">
+            <button type="button" class="btn-ghost" data-modal-close="shareModal">Close</button>
+        </div>
+    </div>
+</div>

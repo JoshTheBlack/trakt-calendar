@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import unittest
 
 from cryptography.fernet import Fernet
@@ -75,29 +76,30 @@ class EncryptionRouteTestCase(unittest.TestCase):
 
     # -- consent flow --------------------------------------------------------
 
+    def _phase(self) -> str:
+        return asyncio.run(encryption_flow.get_phase())
+
     def test_consent_flow_generate_verify_encrypt(self):
         self._onboard()
         # A plaintext secret exists to be sealed by the flow.
         _set_key(None)
         save_settings(Settings(sonarr_api_key="sonarr-secret", trakt_client_id="pub"))
+        self.assertEqual(self._phase(), encryption_flow.PHASE_NONE)
 
-        status = self.client.get("/api/admin/encryption").json()
-        self.assertEqual(status["phase"], encryption_flow.PHASE_NONE)
-
-        enable = self.client.post("/api/admin/encryption/enable", json={"generate": True}).json()
-        self.assertTrue(enable["restart_required"])
-        self.assertTrue(secrets_box.key_is_valid(enable["key"]))
-        self.assertEqual(enable["phase"], encryption_flow.PHASE_PENDING_KEY)
+        enable = self.client.post("/admin/encryption/enable", json={"generate": True})
+        self.assertEqual(enable.status_code, 200, enable.text)
+        key = re.search(r'id="encryptionKey" readonly value="([^"]+)"', enable.text).group(1)
+        self.assertTrue(secrets_box.key_is_valid(key))
+        self.assertEqual(self._phase(), encryption_flow.PHASE_PENDING_KEY)
 
         # Operator saves the revealed key to the environment and restarts.
-        _set_key(enable["key"])
-        verify = self.client.post("/api/admin/encryption/verify", json={}).json()
-        self.assertTrue(verify["detected"])
-        self.assertEqual(verify["phase"], encryption_flow.PHASE_PENDING_ENCRYPT)
+        _set_key(key)
+        self.assertEqual(self.client.post("/admin/encryption/verify", json={}).status_code, 200)
+        self.assertEqual(self._phase(), encryption_flow.PHASE_PENDING_ENCRYPT)
 
-        encrypt = self.client.post("/api/admin/encryption/encrypt", json={}).json()
-        self.assertTrue(encrypt["ok"])
-        self.assertEqual(encrypt["phase"], encryption_flow.PHASE_ENCRYPTED)
+        encrypt = self.client.post("/admin/encryption/encrypt", json={})
+        self.assertIn("Secrets encrypted at rest", encrypt.text)
+        self.assertEqual(self._phase(), encryption_flow.PHASE_ENCRYPTED)
 
         raw = asyncio.run(db.fetch_value(
             "SELECT value FROM app_secrets WHERE name = 'sonarr_api_key'"))
@@ -105,9 +107,9 @@ class EncryptionRouteTestCase(unittest.TestCase):
 
     def test_opt_out_records_the_phase(self):
         self._onboard()
-        resp = self.client.post("/api/admin/encryption/opt-out", json={})
+        resp = self.client.post("/admin/encryption/opt-out", json={})
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["phase"], encryption_flow.PHASE_OPTED_OUT)
+        self.assertEqual(self._phase(), encryption_flow.PHASE_OPTED_OUT)
 
     # -- key-mismatch gate + recovery ---------------------------------------
 
@@ -130,7 +132,7 @@ class EncryptionRouteTestCase(unittest.TestCase):
         self.assertIn(RESET_CONFIRM_PHRASE, page.text)
 
         # The ordinary admin API is refused while unhealthy.
-        gated = self.client.get("/api/settings")
+        gated = self.client.get("/settings/fragments/panel")
         self.assertEqual(gated.status_code, 503)
         self.assertEqual(gated.json()["reason"], "key_mismatch")
 
@@ -248,7 +250,7 @@ class EncryptionRouteTestCase(unittest.TestCase):
         self.assertIsNone(asyncio.run(db.fetch_value(
             "SELECT value FROM app_secrets WHERE name = 'sonarr_api_key'")))
         # And the app is reachable again.
-        self.assertEqual(self.client.get("/api/settings").status_code, 200)
+        self.assertEqual(self.client.get("/settings/fragments/panel").status_code, 200)
 
     def test_reset_refused_when_key_is_healthy(self):
         self._onboard()
@@ -269,12 +271,14 @@ class EncryptionRouteTestCase(unittest.TestCase):
         self.assertEqual(asyncio.run(encryption_flow.refresh_health()),
                          encryption_flow.KEY_MISSING)
 
-        blocked = self.client.post("/api/settings", json={"sonarr_api_key": "new-key"})
-        self.assertEqual(blocked.status_code, 409)
-        self.assertEqual(blocked.json()["reason"], "key_unhealthy")
+        blocked = self.client.post("/settings", json={"sonarr_api_key": "new-key"})
+        # Drawn beside the Save button at 200 — a statused refusal is never swapped.
+        self.assertEqual(blocked.status_code, 200)
+        self.assertIn("Encryption is unhealthy", blocked.text)
+        self.assertIn(RECOVERY_PATH, blocked.text)
 
-        allowed = self.client.post("/api/settings", json={"pagination_limit": 250})
-        self.assertEqual(allowed.status_code, 200, allowed.text)
+        allowed = self.client.post("/settings", json={"pagination_limit": "250"})
+        self.assertEqual(allowed.status_code, 204, allowed.text)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,24 @@
+{# WHICH SERVICES FILL THE LINK, and only ever a narrowing of the owner's own
+   calendar. TICKS, because a selection is a SET: a control that could name only
+   one service would have to be redrawn the day a third is registered. Nothing
+   ticked writes no source at all, which is a share page's standing behaviour.
+
+   DRAWN FOR THE CALENDAR THE LINK OPENS ON, not the one behind the panel, and
+   redrawn out of band when the panel's own Calendar option moves — a calendar a
+   service does not publish cannot be filled by it, so its tick goes. Hidden when
+   fewer than two services could fill that calendar, by
+   app/calendar/resolve.py's `answering_services` rule, which is the same rule
+   that empties the toolbar's control. #}
+<div class="field" id="shareSources"{% if oob %} hx-swap-oob="true"{% endif %}{% if not share_sources %} hidden{% endif %}>
+    <span class="field-label">Sources</span>
+    <div class="source-ticks">
+        {% for choice in share_sources %}
+        <label class="source-tick">
+            <input type="checkbox" name="{{ choice.name }}" value="1" autocomplete="off"{% if choice.ticked %} checked{% endif %}>
+            <span>{{ choice.label }}</span>
+        </label>
+        {% endfor %}
+    </div>
+    <span class="hint">Tick none and the link opens on whatever your own calendar shows. Ticking can
+        only narrow that, never widen it.</span>
+</div>

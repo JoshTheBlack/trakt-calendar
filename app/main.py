@@ -323,7 +323,6 @@ app.include_router(ranker_routes.router)
 app.include_router(calendar_routes.router)
 app.include_router(distrakt_routes.router)
 app.include_router(settings_routes.router)
-app.include_router(integrations_routes.router)
 
 # The two routes below are registered through this, which requires an access
 # level and refuses to register one without it.

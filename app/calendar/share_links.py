@@ -19,11 +19,21 @@ from urllib.parse import urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import share_code
-from .. import auth, db
+from .. import auth, db, route_params
 from ..endpoints import ENDPOINTS
 from ..sources import prefs as source_prefs
 
 PREFERRED_KINDS = ("token", "username", "slug")
+
+# THE ONLY PLACE THE THREE KINDS ARE NAMED FOR PEOPLE, beside the tuple that names
+# them for code. Two surfaces offer the choice — the calendar's Share panel and the
+# tracker's announcement post — and each used to carry its own wording of the same
+# three options.
+KIND_LABELS = {
+    "token": "Private link",
+    "username": "Username link",
+    "slug": "Custom link",
+}
 
 # The view vocabulary a public share page understands, kept here rather than in
 # app/calendar/share_routes.py so the link BUILDER and the page's own param resolver
@@ -266,6 +276,57 @@ async def set_link_view(user_id: int, view: dict | None) -> str | None:
     payload = json.dumps(view) if view else None
     await db.execute("UPDATE share_links SET link_view_json = ? WHERE user_id = ?", (payload, user_id))
     return None
+
+
+# A Sources tick in the Share panel posts under this prefix plus the service's
+# name — one flat field per service, the calendar chips' shape, because json-enc
+# turns a repeated name into a list only when there is more than one of it.
+SOURCE_TICK_PREFIX = "source:"
+
+
+def source_tick_name(source: str) -> str:
+    """The form field one Sources tick posts under."""
+    return f"{SOURCE_TICK_PREFIX}{source}"
+
+
+def view_from_form(form: dict, offered: list[str]) -> dict | None:
+    """The view a submitted Share panel describes, or None for "use my current
+    display" — a bare link.
+
+    THE FORM WRITES THE WHOLE VIEW, so what it does not say is not in it: an
+    unticked service is simply not ticked, and there is no companion field to
+    keep absent from meaning "leave alone".
+
+    NOTHING TICKED MEANS "MY SOURCES" — the link carries no `source` and the page
+    resolves the owner's own preference. Several ticked are spelled the way every
+    other part of the app spells a set of services
+    (app/sources/prefs.py's `canonical_selection`).
+
+    A TICK FOR A SERVICE THE LINK'S CALENDAR CANNOT USE IS DROPPED. `offered` is
+    the caller's answer for the calendar this form names, and switching a link to
+    a calendar a service does not publish means that service can no longer fill
+    it; carrying the tick invisibly would leave the link saying something the
+    panel had stopped showing.
+
+    A MONTH PINS ITS YEAR; NO MONTH PINS NOTHING, whatever the year select says.
+
+    Every other value is passed through as typed for `link_view_error` to judge,
+    so a bad one is refused in a sentence rather than quietly corrected here.
+    """
+    def said(name: str) -> str:
+        return str(route_params.last_value(form.get(name)) or "").strip()
+
+    if said("mode") != "custom":
+        return None
+    view = {key: said(key) for key in ("endpoint", "tz", "card", "packing") if said(key)}
+    view["hidenw"] = "1" if route_params.ticked(form.get("hidenw")) else "0"
+    ticked = [name for name in offered if route_params.ticked(form.get(source_tick_name(name)))]
+    if ticked:
+        view["source"] = source_prefs.canonical_selection(source_prefs.SEPARATOR.join(ticked))
+    if month := said("month"):
+        view["month"] = month
+        view["year"] = said("year")
+    return view
 
 
 def _form_path(row, kind: str, username: str | None) -> str | None:

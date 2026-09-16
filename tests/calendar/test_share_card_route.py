@@ -64,7 +64,7 @@ class ShareCardTestCase(AppTestCase):
         self.addCleanup(warm.stop)
         self.user_id = self.make_user("cardowner", calendar_approved=True)
         self.sign_in_as(self.user_id)
-        self.token = self.client.get("/api/me/share").json()["token"]
+        self.token = asyncio.run(share_links.get_or_create(self.user_id))["token"]
         self.client.cookies.clear()
         self.seed([self.an_entry("Test Show", 15, tmdb=789)])
 

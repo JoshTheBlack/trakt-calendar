@@ -1,0 +1,327 @@
+{# THE SETTINGS PANEL — the whole overlay, already open, drawn with every value in
+   it. Fetched from the site menu every time it opens (app/settings_routes.py says
+   why it is never drawn into a page) and swapped into the slot _nav.html keeps
+   for administrators, so it opens from any page.
+
+   `data-modal-discard`: CLOSING IT REMOVES IT. It was drawn for one opening, and
+   the next opening fetches it again — so nothing it was doing outlives it, the
+   Trakt pairing's poll included (static/js/ui.js's closeModal).
+
+   THE TABS ARE RADIOS AND THE STYLESHEET DRAWS THEM, as the Filters panel's are:
+   no script switches a panel, and a radiogroup brings arrow-key navigation with
+   it. They sit OUTSIDE the form and carry no `form`, so the tab you were on is
+   never posted as a setting.
+
+   ONE SAVE WRITES EVERY TAB, because these settings are interdependent — a base
+   URL without the Trakt credentials it builds a redirect for is half a change —
+   and a per-tab save would invite leaving one behind.
+
+   EVERY HINT IS A SENTENCE THE SERVER WROTE. Where one depends on a choice still
+   being made in this form — the cookie policy against the scheme the browser is
+   on, the pair of registration switches — every sentence it could be is drawn and
+   `:has()` on the selects decides which shows (style.css, beside .stab). #}
+{% import '_settings_fields.html' as settings_fields with context %}
+{% import '_filter_chip.html' as filter_chips %}
+{% set settings_tabs = [('server', '🖥️ Server'), ('trakt', '🎟️ Trakt'), ('simkl', '🟡 Simkl'),
+                        ('calendar', '📅 Calendar'), ('integrations', '🔌 Integrations')] %}
+<div id="settingsModal" class="modal-overlay open" data-modal-discard>
+    <div class="modal settings-modal">
+        <div class="modal-head">
+            <h2>⚙️ Settings</h2>
+            <button type="button" class="modal-close" data-modal-close="settingsModal">&times;</button>
+        </div>
+        {# EMPTY, AND EVERY FIELD NAMES IT — _settings_fields.html says why.
+           `novalidate` because a field the browser refuses on a tab that is not
+           showing cannot be focused, and the submit then fails with nothing on
+           screen; config.apply_form refuses the same values in a sentence.
+           `hx-boost="false"` because htmx boosts every form under a boosted
+           <body>, and this one has nowhere to navigate. #}
+        <form id="settingsForm" hx-post="/settings" hx-json-enc hx-boost="false" novalidate
+              hx-target="#settingsNotice" hx-swap="innerHTML"></form>
+
+        {% for key, _ in settings_tabs %}
+        <input type="radio" name="settings_tab" id="stab_{{ key }}" class="stab-radio"
+               autocomplete="off"{% if loop.first %} checked{% endif %}>
+        {% endfor %}
+        <div class="stabs" role="tablist" aria-label="Settings sections">
+            {% for key, tab_label in settings_tabs %}
+            <label class="stab" for="stab_{{ key }}" data-tab="{{ key }}">{{ tab_label }}</label>
+            {% endfor %}
+        </div>
+
+        <div class="modal-body">
+            {% include '_settings_reconnect.html' %}
+
+            {# ---------------------------- Server ---------------------------- #}
+            <div class="stab-panel" data-tab-panel="server" role="tabpanel">
+                <div class="field">
+                    <label for="s_public_base_url">Public base URL</label>
+                    <input type="text" id="s_public_base_url" name="public_base_url" form="settingsForm"
+                           value="{{ settings.public_base_url }}" placeholder="https://shows.example.com"
+                           autocomplete="off" spellcheck="false">
+                    <span class="hint">The origin people reach this app on — no path, no trailing slash.
+                        Required for "Log in with Trakt", and used for every link the app generates.</span>
+                    {# The PUBLIC_BASE_URL environment variable WINS over this field,
+                       because the lockout it rescues is a saved value that no longer
+                       matches where the operator is browsing. Winning silently would
+                       move the trap, so while it is set the field says so — and shows
+                       the value in force, so saving it makes the rescue permanent. #}
+                    {% if server.base_url_overridden %}
+                    <span class="hint warn">The PUBLIC_BASE_URL environment variable is set and it overrides
+                        this field. Save the value you want here, then remove the variable and restart —
+                        until you do, anything saved here has no effect.</span>
+                    {% endif %}
+                </div>
+                <div class="field">
+                    <label for="s_trusted_proxy_ips">Trusted proxy addresses</label>
+                    <input type="text" id="s_trusted_proxy_ips" name="trusted_proxy_ips" form="settingsForm"
+                           value="{{ settings.trusted_proxy_ips }}" placeholder="127.0.0.1/32"
+                           autocomplete="off" spellcheck="false">
+                    <span class="hint{% if server.forwarded_ignored %} warn{% endif %}">Comma-separated CIDRs whose
+                        X-Forwarded-For this app will honor. This request came from {{ server.peer }}.
+                        {%- if server.forwarded_ignored %} Forwarded headers ARE arriving but are being ignored,
+                        so every user currently looks like {{ server.peer }} — add it here.{% endif %}</span>
+                </div>
+                {# Editable, but the save refuses the one choice that would lock the
+                   operator out: "always" while the browser is genuinely on http://.
+                   The warning below is drawn from the same reading of the browser's
+                   own scheme, so it and the refusal cannot disagree. #}
+                <div class="field">
+                    <label for="s_cookie_secure">Session cookie security</label>
+                    <select id="s_cookie_secure" name="cookie_secure" form="settingsForm" autocomplete="off">
+                        {% for value, text in [('always', 'Always — mark Secure (any HTTPS, incl. behind a reverse proxy)'),
+                                               ('auto', 'Auto — detect per request'),
+                                               ('never', 'Never — plain-HTTP LAN only')] %}
+                        <option value="{{ value }}"{% if (settings.cookie_secure or 'always') | lower == value %} selected{% endif %}>{{ text }}</option>
+                        {% endfor %}
+                    </select>
+                    <span class="hint" data-cookie-hint="base">The session cookie's Secure flag. "Always" is right
+                        for any HTTPS deployment, including behind a TLS-terminating proxy where the app itself
+                        sees plain HTTP.</span>
+                    {% if server.browser_scheme == 'https' %}
+                    <span class="hint warn" data-cookie-hint="never">You reached this page over https:// but
+                        cookies are set to "never" — they are going out without the Secure flag. Choose
+                        "Always".</span>
+                    {% elif server.browser_scheme == 'http' %}
+                    <span class="hint warn" data-cookie-hint="always">You reached this page over http://. Saving
+                        "Always" would make the session cookie Secure and your browser would discard it,
+                        locking you out — this is refused. Serve over https:// (a reverse proxy counts), or
+                        choose Auto or Never.</span>
+                    {% endif %}
+                </div>
+
+                {# The two settings that persist to data/settings.json rather than the
+                   database, so an operator locked out of this screen can still
+                   hand-edit them. Off by default: with no invite required, anyone
+                   who can reach the instance can make an account — which still
+                   lands unapproved, so this opens the waiting room, not the data. #}
+                <div class="field">
+                    <label for="s_allow_open_registration">Account registration</label>
+                    <select id="s_allow_open_registration" name="allow_open_registration" form="settingsForm"
+                            autocomplete="off">
+                        <option value="false"{% if not settings.allow_open_registration %} selected{% endif %}>Invite only — an administrator mints a link</option>
+                        <option value="true"{% if settings.allow_open_registration %} selected{% endif %}>Open — anyone who can reach this instance can sign up</option>
+                    </select>
+                    <span class="hint" data-registration-hint="closed">Whether /register accepts a sign-up without
+                        an invite token. New accounts still arrive unapproved and need an administrator before
+                        they can reach anything.</span>
+                    <span class="hint warn" data-registration-hint="open">Anyone who can reach this instance will
+                        be able to create an account without an invite. They arrive unapproved and can see
+                        nothing until an administrator approves them.</span>
+                    <span class="hint warn" data-registration-hint="open-auto">Anyone who can reach this instance
+                        can create an account AND will have calendar access immediately, with no administrator
+                        involved. Only do this on an instance you are happy to have open.</span>
+                </div>
+                {# A SEPARATE switch from the one above, on purpose. Who may create an
+                   account and who may see the data are two different decisions, and
+                   folding the second into the first would mean opening sign-ups
+                   silently opened the calendar. It is the PAIR that is worth a
+                   warning, which is why both fields' sentences read both selects. #}
+                <div class="field">
+                    <label for="s_auto_approve_calendar">New accounts</label>
+                    <select id="s_auto_approve_calendar" name="auto_approve_calendar" form="settingsForm"
+                            autocomplete="off">
+                        <option value="false"{% if not settings.auto_approve_calendar %} selected{% endif %}>Await approval — an administrator approves each one</option>
+                        <option value="true"{% if settings.auto_approve_calendar %} selected{% endif %}>Approved automatically — calendar access on sign-up</option>
+                    </select>
+                    <span class="hint" data-approval-hint="base">Whether a new account gets calendar access
+                        immediately. Rankings and everything else stay manual grants either way.</span>
+                    <span class="hint warn" data-approval-hint="open-auto">Combined with open registration, this
+                        hands calendar access to anyone who signs up.</span>
+                </div>
+
+                {% include '_encryption_panel.html' %}
+            </div>
+
+            {# ---------------------------- Trakt ----------------------------- #}
+            <div class="stab-panel" data-tab-panel="trakt" role="tabpanel">
+                {{ settings_fields.text('trakt_client_id', 'Trakt Client ID', settings.trakt_client_id,
+                                        hint='From trakt.tv/oauth/applications') }}
+                {{ settings_fields.secret('trakt_client_secret', 'Trakt Client Secret',
+                                          'Same page as the Client ID — needed to obtain and refresh the access token below.') }}
+                {{ settings_fields.secret('trakt_access_token', 'Trakt Access Token') }}
+                {% include '_settings_token.html' %}
+                {# The single most common setup mistake is registering the ORIGIN on
+                   the Trakt application instead of this exact callback path, which
+                   Trakt rejects with a bare "invalid_redirect". #}
+                {% if trakt_redirect_uri %}
+                {{ settings_fields.copyable('s_trakt_redirect_uri', 'Trakt redirect URI', trakt_redirect_uri,
+                                            "Paste this exactly into your Trakt application's Redirect URI field — the whole path, not just the site address.") }}
+                {% endif %}
+                <div class="auth-box">
+                    {% include '_settings_device.html' %}
+                    <div class="hint">Device pairing — needs no redirect URI, so it still works if the
+                        registered one is wrong. This authorizes the app-wide connection used for calendar
+                        data, not any one person's login.</div>
+                </div>
+            </div>
+
+            {# ---------------------------- Simkl ----------------------------- #}
+            {# Simkl's calendar files are public — no id, no token — so these
+               credentials are only about the parts that belong to a PERSON: signing
+               in with Simkl, and reading your own library. #}
+            <div class="stab-panel" data-tab-panel="simkl" role="tabpanel">
+                <p class="hint">A developer application at
+                    <a href="https://simkl.com/settings/developer/" target="_blank" rel="noopener">simkl.com/settings/developer</a>
+                    — free, and approved on the spot.</p>
+                {{ settings_fields.text('simkl_client_id', 'Simkl Client ID', settings.simkl_client_id,
+                                        hint='From your Simkl developer application.') }}
+                {{ settings_fields.secret('simkl_client_secret', 'Simkl Client Secret',
+                                          'Same page as the Client ID — it is what the sign-in exchange is authenticated with.') }}
+                {% if simkl_redirect_uri %}
+                {{ settings_fields.copyable('s_simkl_redirect_uri', 'Simkl redirect URI', simkl_redirect_uri,
+                                            "Paste this exactly into your Simkl application's Redirect URI field — the whole path, not just the site address.") }}
+                {% endif %}
+                {# Simkl issues no refresh token: the value stands until the user
+                   revokes the application on Simkl's side. #}
+                {{ settings_fields.secret('simkl_access_token', 'Simkl Access Token',
+                                          'The instance-wide token, for anything read with nobody signed in. It does not expire, and there is nothing to refresh — if Simkl starts refusing it, authorize the application again.') }}
+                {{ settings_fields.checkbox('simkl_public_calendar_enabled', 'Include Simkl results on the calendar',
+                                            settings.simkl_public_calendar_enabled,
+                                            'On by default, and it applies whether or not the credentials above are filled in. Simkl\'s calendar files sit on a public CDN and need none of them, so this instance reads them even with this tab left blank — turn this off if you would rather it never asked. It does not affect the watch tracker, which reads each person\'s own Simkl account through their own link.') }}
+            </div>
+
+            {# --------------------------- Calendar ---------------------------- #}
+            <div class="stab-panel" data-tab-panel="calendar" role="tabpanel">
+                <p class="hint">Defaults for accounts created from here on, and the caching every account's
+                    calendar is served from. Each person's own view controls and 🎚️ Filters override the
+                    defaults for them.</p>
+                <div class="two-col">
+                    <div class="field">
+                        <label for="s_timezone">Timezone</label>
+                        <select id="s_timezone" name="timezone" form="settingsForm" autocomplete="off">
+                            {% for tzgroup in timezone_groups %}
+                            <optgroup label="{{ tzgroup.group }}">
+                                {% for tz in tzgroup['options'] %}
+                                <option value="{{ tz.value }}"{% if tz.selected %} selected{% endif %}>{{ tz.label }}</option>
+                                {% endfor %}
+                            </optgroup>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="s_endpoint">Default endpoint</label>
+                        <select id="s_endpoint" name="endpoint" form="settingsForm" autocomplete="off">
+                            {% for ep in endpoints %}
+                            <option value="{{ ep.key }}"{% if ep.key == settings.endpoint %} selected{% endif %}>{{ ep.label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="settings-section">🚧 Content floor <span class="hint">(instance-wide, applied before caching)</span></div>
+                <p class="hint"><strong>These pre-filter the shared calendar cache at fetch time, so they remove
+                    content for EVERY user</strong> — on top of whatever each person sets in their own 🎚️
+                    Filters. A show excluded here never enters the cache at all, so no per-account filter can
+                    bring it back. Leave blank to filter nothing at this layer.</p>
+                <div class="two-col">
+                    {{ settings_fields.text('genres', 'Genres', settings.genres, 'drama, -reality',
+                                            'Comma-separated genre slugs; prefix one with - to exclude it.') }}
+                    {{ settings_fields.text('countries', 'Countries', settings.countries, 'us, gb, -jp',
+                                            'Comma-separated 2-letter ISO codes, with the same - to exclude.') }}
+                </div>
+                {# THE FILTERS PANEL'S OWN CHIPS, spelled and read back by
+                   app/calendar/vocab.py — so the instance floor and a viewer's filter
+                   store the same spec for the same presses, and nothing in the
+                   browser knows what a spec looks like. #}
+                <div class="field">
+                    <span class="ffield-label">Certifications</span>
+                    {{ filter_chips.legend() }}
+                    <p class="hint">Shows and movies use different rating systems, so each has its own row.
+                        Leave every chip grey to filter nothing.</p>
+                </div>
+                <div class="two-col">
+                    <div class="field">
+                        <span class="field-label">Show certifications <span class="hint">(TV Parental Guidelines)</span></span>
+                        <div class="fchips">
+                            {% for state in floor_chips.show_certifications %}{{ filter_chips.chip(state, 'show_certifications', loop.index, id_prefix='floor-chip', form='settingsForm') }}{% endfor %}
+                        </div>
+                    </div>
+                    <div class="field">
+                        <span class="field-label">Movie certifications <span class="hint">(MPA film ratings)</span></span>
+                        <div class="fchips">
+                            {% for state in floor_chips.movie_certifications %}{{ filter_chips.chip(state, 'movie_certifications', loop.index, id_prefix='floor-chip', form='settingsForm') }}{% endfor %}
+                        </div>
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="s_network_filter">Networks</label>
+                    <textarea id="s_network_filter" name="network_filter" form="settingsForm" spellcheck="false"
+                              placeholder="HBO, Netflix, BBC One">{{ settings.network_filter | join(', ') }}</textarea>
+                    <span class="hint">Comma-separated network names, matched exactly as Trakt spells them
+                        &mdash; capitals included, because <code>tvN</code> and <code>TVN</code> are two different
+                        networks. Put a <code>-</code> in front of a name to exclude it instead
+                        (<code>-Netflix</code>). Blank means every network is cached.</span>
+                </div>
+                <div class="two-col">
+                    {{ settings_fields.number('pagination_limit') }}
+                    {{ settings_fields.number('cache_ttl_minutes') }}
+                </div>
+                <div class="two-col">
+                    {{ settings_fields.number('calendar_cache_ttl_minutes',
+                                              'How long a week of calendar data is reused before refetching, for the months people are actually looking at. Months well in the past are held longer automatically — their source files have stopped changing — so this number does not spend requests re-reading last year.') }}
+                    {{ settings_fields.number('api_cache_max_bytes',
+                                              'Total budget for cached API responses. Past this, the least-recently-stored entries are evicted.') }}
+                </div>
+                <div class="two-col">
+                    {{ settings_fields.number('poster_cache_max_bytes',
+                                              'Total budget for cached poster images — the rankings board\'s tiles and the pictures share links unfurl into both draw from it. Shared across every user on this instance. Past this, the least-recently-used posters are evicted.') }}
+                </div>
+                {{ settings_fields.checkbox('hide_not_watching', 'Hide not-watching by default',
+                                            settings.hide_not_watching) }}
+            </div>
+
+            {# ------------------------- Integrations -------------------------- #}
+            <div class="stab-panel" data-tab-panel="integrations" role="tabpanel">
+                <div class="settings-section">📺 Sonarr <span class="hint">(add-to-library button on shows)</span></div>
+                <div class="two-col">
+                    {{ settings_fields.text('sonarr_url', 'Sonarr URL', settings.sonarr_url, 'http://localhost:8989') }}
+                    {{ settings_fields.secret('sonarr_api_key', 'Sonarr API key') }}
+                </div>
+                {% with arr_service = arr.sonarr %}{% include '_settings_arr.html' %}{% endwith %}
+
+                <div class="settings-section">🎬 Radarr <span class="hint">(add-to-library button on movies)</span></div>
+                <div class="two-col">
+                    {{ settings_fields.text('radarr_url', 'Radarr URL', settings.radarr_url, 'http://localhost:7878') }}
+                    {{ settings_fields.secret('radarr_api_key', 'Radarr API key') }}
+                </div>
+                {% with arr_service = arr.radarr %}{% include '_settings_arr.html' %}{% endwith %}
+
+                <div class="settings-section">🎟️ Seerr <span class="hint">(request button — Overseerr / Jellyseerr lineage)</span></div>
+                <div class="two-col">
+                    {{ settings_fields.text('seer_url', 'Seerr URL', settings.seer_url, 'http://localhost:5055') }}
+                    {{ settings_fields.secret('seer_api_key', 'Seerr API key') }}
+                </div>
+
+                <div class="settings-section">🖼️ TMDB <span class="hint">(network logos for Discord emoji art)</span></div>
+                <div class="two-col">
+                    {{ settings_fields.secret('tmdb_api_key', 'TMDB API key') }}
+                </div>
+            </div>
+        </div>
+        <div class="modal-foot">
+            <p id="settingsNotice" class="settings-notice" role="alert"></p>
+            <button type="button" class="btn-ghost" data-modal-close="settingsModal">Cancel</button>
+            <button type="submit" class="btn-primary" form="settingsForm">Save &amp; reload</button>
+        </div>
+    </div>
+</div>

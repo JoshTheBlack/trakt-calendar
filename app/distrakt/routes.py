@@ -1741,11 +1741,11 @@ async def _post_link_choices(user_id: int) -> dict:
     available = payload["available"]
     return {
         "usable": not payload["base_url_missing"] and any(available.values()),
-        "kinds": [(kind, label) for kind, label in LINK_KIND_LABELS.items()
+        "kinds": [(kind, label) for kind, label in share_links.KIND_LABELS.items()
                   if available.get(kind)],
         "kind": payload["kind"] or "",
         "endpoint": payload["endpoint"] or "",
-        "preferred_label": LINK_KIND_LABELS.get(payload["preferred_kind"],
+        "preferred_label": share_links.KIND_LABELS.get(payload["preferred_kind"],
                                                 payload["preferred_kind"]),
     }
 
@@ -3200,17 +3200,6 @@ async def api_distrakt_restore(request: Request):
     months = await distrakt_store.list_months(user_id)
     return _and_the_month(_restore_answer(
         request, f"Restored {len(months)} month(s).", ok=True))
-
-
-# THE ONLY PLACE THE SHARE-LINK KINDS ARE NAMED FOR PEOPLE.
-# app/calendar/share_links.PREFERRED_KINDS names the same three for code; this is
-# the announcement post's selector, and the labels used to live in the browser
-# where nothing could hold the two lists to each other.
-LINK_KIND_LABELS = {
-    "token": "Private link",
-    "username": "Username link",
-    "slug": "Custom link",
-}
 
 
 async def _share_link_payload(user_id: int) -> dict:

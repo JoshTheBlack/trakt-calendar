@@ -1556,13 +1556,6 @@ def _share_payload(row, username: str | None, settings) -> dict:
     }
 
 
-@guard.get("/api/me/share", AuthLevel.CALENDAR_APPROVED)
-async def get_share(request: Request):
-    user = await auth.current_user(request)
-    row = await share_links.get_or_create(user.user_id)
-    return JSONResponse(_share_payload(row, user.username, load_settings()))
-
-
 @guard.post("/api/me/share/enabled", AuthLevel.CALENDAR_APPROVED)
 async def post_share_enabled(request: Request):
     user = await auth.current_user(request)
@@ -1570,23 +1563,6 @@ async def post_share_enabled(request: Request):
     if data.get("kind") not in share_links.PREFERRED_KINDS:
         return JSONResponse({"ok": False, "error": "Expected {kind, enabled}"}, status_code=400)
     await share_links.set_enabled(user.user_id, data["kind"], bool(data.get("enabled")))
-    row = await share_links.get(user.user_id)
-    return JSONResponse(_share_payload(row, user.username, load_settings()))
-
-
-@guard.post("/api/me/share/active", AuthLevel.CALENDAR_APPROVED)
-async def post_share_active(request: Request):
-    """Publish exactly one of the three link forms and retire the other two.
-
-    What the Share panel's single dropdown writes. The granular
-    /enabled + /preferred pair is still there for a caller that wants several
-    forms live at once; this is the one-link-at-a-time shape the UI presents.
-    """
-    user = await auth.current_user(request)
-    data = await authz.json_body(request)
-    if data.get("kind") not in share_links.PREFERRED_KINDS:
-        return JSONResponse({"ok": False, "error": "Expected {kind}"}, status_code=400)
-    await share_links.set_active_kind(user.user_id, data["kind"])
     row = await share_links.get(user.user_id)
     return JSONResponse(_share_payload(row, user.username, load_settings()))
 
@@ -1602,56 +1578,164 @@ async def post_share_preferred(request: Request):
     return JSONResponse(_share_payload(row, user.username, load_settings()))
 
 
-@guard.post("/api/me/share/slug", AuthLevel.CALENDAR_APPROVED)
-async def post_share_slug(request: Request):
-    user = await auth.current_user(request)
-    data = await authz.json_body(request)
-    if "slug" not in data:
-        return JSONResponse({"ok": False, "error": "Expected {slug}"}, status_code=400)
-    err = await share_links.set_custom_slug(user.user_id, data.get("slug"))
-    if err:
-        return JSONResponse({"ok": False, "error": err}, status_code=400)
-    row = await share_links.get(user.user_id)
-    return JSONResponse(_share_payload(row, user.username, load_settings()))
+# ---------------------------------------------------------------------------
+# the Share panel, drawn by the server
+# ---------------------------------------------------------------------------
+#
+# A FRAGMENT EVERY MUTATION ANSWERS. The panel is fetched when 🔗 Share is
+# pressed, and every control in it posts itself: the kind and Rotate are answered
+# with the link box, a custom name with its own status line (and the link box out
+# of band once it has saved), and the display options with the link box — plus the
+# Sources ticks when the link's Calendar option moved. It used to be an empty
+# dialog that a script filled from a JSON read and redrew from each JSON answer,
+# rebuilding its ticks from a per-calendar map the calendar page shipped for no
+# other reason.
+#
+# A REFUSAL IS DRAWN AT 200, beside the control that asked. A non-200 is never
+# swapped (static/js/boost.js's `noSwap`).
+
+SHARE_PANEL_TEMPLATE = "_share_panel.html"
+SHARE_LINK_TEMPLATE = "_share_link.html"
+SHARE_SLUG_TEMPLATE = "_share_slug_answer.html"
+SHARE_VIEW_TEMPLATE = "_share_view_answer.html"
 
 
-@guard.get("/api/me/share/slug-check", AuthLevel.CALENDAR_APPROVED)
-async def get_share_slug_check(request: Request):
-    """Live availability for the slug field, called as the owner types."""
-    user = await auth.current_user(request)
-    slug = (request.query_params.get("slug") or "").strip()
-    if not slug:
-        return JSONResponse({"ok": True, "available": False, "error": "Enter a slug."})
-    err = await share_links.slug_error(slug, exclude_user_id=user.user_id)
-    return JSONResponse({"ok": True, "available": err is None, "error": err})
+def share_source_choices(endpoint, settings) -> list[dict]:
+    """The Share panel's Sources control for a link that opens on `endpoint`: one
+    TICK per service the link may be narrowed to, with the field it posts under.
+    An empty list means the panel draws nothing, by
+    app/calendar/resolve.py's `answering_services` rule rather than by a second
+    count of the same thing, so the panel and the toolbar disappear together.
 
+    TICKS RATHER THAN A LIST OF ANSWERS, because a source selection is a SET — the
+    shape the 🎚️ Filters panel draws for the stored version of this question, and
+    the one that survives a service being registered.
 
-@guard.post("/api/me/share/view", AuthLevel.CALENDAR_APPROVED)
-async def post_share_view(request: Request):
-    """Set (or clear) the display options the generated link carries.
-
-    `{"view": null}` hands out a bare link, so whoever opens it sees the owner's
-    current display. `{"view": {...}}` pins those options into the URL instead.
-    Either way nothing about the owner's own calendar changes — this writes the
-    link and only the link.
+    NOTHING TICKED MEANS "MY SOURCES", and there is no "every service" tick to
+    draw: a link narrows the owner's calendar and can never widen it (see
+    `_narrowed_prefs`), so "all of them" and "none of them" are one outcome.
     """
+    return [{"value": name, "label": label, "name": share_links.source_tick_name(name)}
+            for name, label in calendar_resolve.answering_services(endpoint, settings)]
+
+
+async def _share_context(user, settings, **extra) -> dict:
+    """Everything the Share panel draws, from this account's share row.
+
+    THE DISPLAY OPTIONS OPEN ON WHAT THE LINK SAYS, and on the share page's own
+    fallbacks where it says nothing — the owner-default columns a bare link
+    resolves through — so choosing "custom" starts from the link its owner already
+    had rather than from some unrelated default.
+
+    THE YEARS: the one before this and the three after, plus a pinned year outside
+    that range, so a link pinned long ago still shows its own year rather than
+    snapping to one the owner never picked.
+    """
+    row = await share_links.get_or_create(user.user_id)
+    base = _public_base(settings)
+    stored = share_links.link_view(row)
+    view = stored or {}
+    endpoint = get_endpoint(view.get("endpoint") or row["endpoint"] or settings.endpoint)
+    ticked = source_prefs.named_sources(view.get("source") or "") or frozenset()
+    today = clock.today()
+    pinned = int(view["year"]) if view.get("year") else None
+    kind = row["preferred_kind"]
+    return {
+        "share_kind": kind,
+        "share_kinds": list(share_links.KIND_LABELS.items()),
+        "share_url": share_links.generated_urls(row, user.username, base)[kind],
+        "share_base_missing": not base,
+        "share_is_admin": user.is_admin,
+        "share_slug": row["custom_slug"] or "",
+        "share_custom": stored is not None,
+        "share_view": {
+            "endpoint": endpoint.key,
+            "card": view.get("card") or row["card_style"] or settings.card_style,
+            "packing": view.get("packing") or row["day_packing"] or settings.day_packing,
+            "hidenw": view.get("hidenw", "1" if row["hide_not_watching"] else "0") == "1",
+            "month": view.get("month", ""),
+            "year": str(pinned or today.year),
+        },
+        "share_endpoints": endpoint_choices(),
+        "share_timezones": build_timezone_options(
+            view.get("tz") or row["timezone"] or user.timezone or settings.timezone),
+        "share_sources": [dict(choice, ticked=choice["value"] in ticked)
+                          for choice in share_source_choices(endpoint, settings)],
+        "share_months": [(number, _calendar.month_name[number]) for number in range(1, 13)],
+        "share_years": sorted({*range(today.year - 1, today.year + 4), *([pinned] if pinned else [])}),
+        "share_message": "",
+        "share_error": "",
+        **extra,
+    }
+
+
+async def _share_answer(request: Request, template: str, user, **extra):
+    context = await _share_context(user, load_settings(), **extra)
+    return templates.TemplateResponse(request, template, {"request": request, **context})
+
+
+@guard.get("/calendar/fragments/share", AuthLevel.CALENDAR_APPROVED)
+async def share_panel(request: Request):
+    """The whole Share overlay, already open, drawn from this account's links."""
+    return await _share_answer(request, SHARE_PANEL_TEMPLATE, await auth.current_user(request))
+
+
+@guard.post("/calendar/share/kind", AuthLevel.CALENDAR_APPROVED)
+async def share_kind(request: Request):
+    """Choose which of the three links the panel hands out. All three keep
+    answering — share_links.set_active_kind says why that is deliberate."""
     user = await auth.current_user(request)
     data = await authz.json_body(request)
-    if "view" not in data:
-        return JSONResponse({"ok": False, "error": "Expected {view}"}, status_code=400)
-    view = data["view"]
-    if view is not None and not isinstance(view, dict):
-        return JSONResponse({"ok": False, "error": "Expected {view}"}, status_code=400)
-    err = await share_links.set_link_view(user.user_id, view)
-    if err:
-        return JSONResponse({"ok": False, "error": err}, status_code=400)
-    row = await share_links.get(user.user_id)
-    return JSONResponse(_share_payload(row, user.username, load_settings()))
+    kind = route_params.last_value(data.get("kind"))
+    if kind not in share_links.PREFERRED_KINDS:
+        return await _share_answer(request, SHARE_LINK_TEMPLATE, user,
+                                   share_error="That is not a kind of link.")
+    await share_links.set_active_kind(user.user_id, kind)
+    return await _share_answer(request, SHARE_LINK_TEMPLATE, user)
 
 
-@guard.post("/api/me/share/rotate", AuthLevel.CALENDAR_APPROVED)
-async def post_share_rotate(request: Request):
+@guard.post("/calendar/share/rotate", AuthLevel.CALENDAR_APPROVED)
+async def share_rotate(request: Request):
+    """Issue a new token link. The old one stops answering at once."""
     user = await auth.current_user(request)
     await share_links.rotate_token(user.user_id)
-    row = await share_links.get(user.user_id)
-    return JSONResponse(_share_payload(row, user.username, load_settings()))
+    return await _share_answer(request, SHARE_LINK_TEMPLATE, user,
+                               share_message="A new link is live, and the old one has stopped working.")
+
+
+@guard.post("/calendar/share/slug", AuthLevel.CALENDAR_APPROVED)
+async def share_slug(request: Request):
+    """Check a custom name and, if it is free, save it — one request for what used
+    to be a check followed by a save. An empty box writes nothing."""
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+    slug = str(route_params.last_value(data.get("slug")) or "").strip()
+    if not slug:
+        return await _share_answer(request, SHARE_SLUG_TEMPLATE, user,
+                                   share_slug_status="", share_slug_ok=False)
+    error = await share_links.set_custom_slug(user.user_id, slug)
+    return await _share_answer(request, SHARE_SLUG_TEMPLATE, user,
+                               share_slug_status=error or "Saved.", share_slug_ok=error is None)
+
+
+@guard.post("/calendar/share/view", AuthLevel.CALENDAR_APPROVED)
+async def share_view(request: Request):
+    """Set, or clear, the display options the generated link carries.
+
+    This writes the LINK and only the link: the owner's own calendar and the share
+    page's fallback defaults are untouched (share_links.set_link_view).
+
+    WHICH SERVICES THE FORM MAY TICK is asked of the calendar the form NAMES, not
+    the one stored, because the Calendar option may be the control that just moved
+    — and the ticks are redrawn exactly when it did."""
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+    settings = load_settings()
+    before = share_links.link_view(await share_links.get_or_create(user.user_id)) or {}
+    named = ENDPOINTS.get(str(route_params.last_value(data.get("endpoint")) or ""))
+    offered = [choice["value"] for choice in share_source_choices(named, settings)] if named else []
+    view = share_links.view_from_form(data, offered)
+    error = await share_links.set_link_view(user.user_id, view)
+    moved = view is not None and view.get("endpoint") != before.get("endpoint")
+    return await _share_answer(request, SHARE_VIEW_TEMPLATE, user,
+                               share_view_error=error or "", share_sources_moved=moved and not error)

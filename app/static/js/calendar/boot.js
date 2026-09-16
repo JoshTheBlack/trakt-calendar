@@ -21,7 +21,6 @@
 // OUT of this function.
 function initCalendarPage() {
     readPageContext();
-    initCertPickers();
     initDistraktNav();
     initBuildTap();
     readViewData();

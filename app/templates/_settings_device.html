@@ -1,0 +1,55 @@
+{# TRAKT DEVICE PAIRING: a code waiting to be approved, or the button that asks for
+   one. The pairing itself lives on the server (app/settings_routes.py says where
+   and for how long), so this block holds nothing but what a person reads.
+
+   THE BLOCK POLLS ITSELF AND STOPS ITSELF. While a code is waiting, a hidden
+   element asks /settings/trakt/device/poll every `interval` seconds and is
+   answered with this block again. Any answer that is not "still waiting" is drawn
+   WITHOUT that element, and htmx clears an `every` trigger whose element has left
+   the page — so the end of a flow and the end of its polling are one event, with
+   no timer anywhere to forget to clear.
+
+   THE START BUTTON IS GONE WHILE A CODE IS WAITING. Pressing it again used to ask
+   for a FRESH code, which silently invalidated the one somebody had just copied —
+   a trap, because it looks exactly like the thing you press to open the page you
+   paste the code into.
+
+   AN AUTHORIZATION CHANGES THREE OTHER PARTS OF THE TAB, which ride this answer
+   out of band: the token line, the access token's field (now stored), and the
+   reconnect notice. #}
+{% import '_settings_fields.html' as settings_fields with context %}
+<div id="deviceAuth" class="device-auth-block">
+    {% if pairing %}
+    <div class="device-auth">
+        <div class="device-auth-code">
+            <input type="text" id="deviceCode" readonly value="{{ pairing.user_code }}"
+                   aria-label="Trakt pairing code">
+            <button type="button" class="btn-ghost small" data-copy="#deviceCode">Copy</button>
+        </div>
+        <div class="device-auth-actions">
+            <a class="btn-ghost small" href="{{ pairing.verification_url }}" target="_blank"
+               rel="noopener" hx-boost="false">Open trakt.tv to enter it ↗</a>
+            <button type="button" class="btn-ghost small"
+                    hx-post="/settings/trakt/device/cancel" hx-json-enc
+                    hx-target="#deviceAuth" hx-swap="outerHTML">Cancel</button>
+        </div>
+        <p class="hint">Copy the code, open trakt.tv, and enter it there. Waiting for approval…</p>
+        <span hidden hx-post="/settings/trakt/device/poll" hx-json-enc
+              hx-trigger="every {{ pairing.interval }}s"
+              hx-target="#deviceAuth" hx-swap="outerHTML"></span>
+    </div>
+    {% else %}
+    <button type="button" class="btn-ghost small"
+            hx-post="/settings/trakt/device/start" hx-json-enc
+            hx-include="#s_trakt_client_id, #s_trakt_client_secret"
+            hx-target="#deviceAuth" hx-swap="outerHTML">🔑 Authorize with Trakt</button>
+    {% endif %}
+    {% if device_message %}<p class="hint {{ 'ok' if device_ok else 'err' }}" role="status">{{ device_message }}</p>{% endif %}
+</div>
+{% if authorized %}
+{% with oob = true %}
+{% include '_settings_token.html' %}
+{% include '_settings_reconnect.html' %}
+{% endwith %}
+{{ settings_fields.secret('trakt_access_token', 'Trakt Access Token', oob=true) }}
+{% endif %}

@@ -218,7 +218,6 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         deferred=True),
 
     # --- into auth. auth is a layer: every feature may depend on it ---------
-    (INTEGRATIONS, AUTH): Edge("adding a title to a library is admin-only"),
     (CALENDAR, AUTH): Edge("the calendar is per-viewer, and share links are per-owner"),
     (DISTRAKT, AUTH): Edge("a tracker month belongs to one signed-in person"),
     (RANKER, AUTH): Edge("a board belongs to one signed-in person"),
@@ -252,7 +251,13 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "has to know which of the three services is alive"),
     (SETTINGS, INTEGRATIONS): Edge(
         "saving settings invalidates the cached library so the add-buttons stop "
-        "showing marks from the old configuration"),
+        "showing marks from the old configuration, and the panel's profile and "
+        "folder <select>s are drawn from what arr.py asks the service"),
+    (SETTINGS, CALENDAR): Edge(
+        "the content floor's certification rows are the Filters panel's chips, "
+        "drawn and read back by calendar/vocab.py — so the instance floor and a "
+        "viewer's filter store byte-identical specs for the same presses, and the "
+        "spec format has one owner"),
     (DISTRAKT, SOURCES): Edge(
         "which services back the tracker for an account is that account's stated "
         "preference, so the sync asks the preference store before it asks any "

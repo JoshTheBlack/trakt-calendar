@@ -24,7 +24,7 @@ import httpx
 
 from app import auth, db
 from app.auth import routes as auth_routes, trakt as trakt_auth, trakt_routes
-from app.config import Settings, public_base_url_error, save_settings
+from app.config import Settings, load_settings, public_base_url_error, save_settings
 from app.main import app
 from tests.support import AppTestCase, ORIGIN
 
@@ -793,11 +793,12 @@ class PublicBaseUrlTests(TraktOAuthTestCase):
 
     def test_the_settings_endpoint_refuses_an_invalid_base_url(self):
         self.sign_in_as(self.admin_id)
-        resp = self.client.post("/api/settings",
+        resp = self.client.post("/settings",
                                 json={"public_base_url": "https://shows.example.com/app"})
-        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("origin only", resp.text)
         # Nothing was written: the stored value is still the valid one.
-        self.assertEqual(self.client.get("/api/settings").json()["public_base_url"], ORIGIN)
+        self.assertEqual(load_settings().public_base_url, ORIGIN)
 
     def test_a_hand_edited_trailing_slash_is_normalized(self):
         self.assertEqual(
@@ -813,22 +814,21 @@ class PublicBaseUrlTests(TraktOAuthTestCase):
         self.sign_in_as(self.admin_id)
         # The client's own Origin (https://testserver) now disagrees with the
         # configured one, and that is what a mutating request is judged against.
-        resp = self.client.post("/api/settings", json={})
+        resp = self.client.post("/settings", json={})
         self.assertEqual(resp.status_code, 403)
         self.assertEqual(resp.json()["reason"], "cross_origin")
 
-        resp = self.client.post("/api/settings", json={},
+        resp = self.client.post("/settings", json={},
                                 headers={"Origin": "https://real.example.com"})
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 204)
         self.assertTrue(hasattr(Settings(), "public_base_url"))
         self.assertIsNotNone(authz.expected_origin)
 
-    def test_the_settings_response_reports_the_redirect_uri_to_register(self):
+    def test_the_settings_panel_shows_the_redirect_uri_to_register(self):
         self.sign_in_as(self.admin_id)
-        data = self.client.get("/api/settings").json()
-        self.assertTrue(data["trakt_login_configured"])
-        self.assertEqual(data["trakt_redirect_uri"], f"{ORIGIN}/auth/trakt/callback")
-        self.assertFalse(data["trakt_reconnect_notice"])
+        body = self.client.get("/settings/fragments/panel").text
+        self.assertIn(f'value="{ORIGIN}/auth/trakt/callback"', body)
+        self.assertIn('id="traktReconnect" class="field" hidden', body)
 
 
 class ReconnectNoticeTests(TraktOAuthTestCase):
@@ -838,13 +838,20 @@ class ReconnectNoticeTests(TraktOAuthTestCase):
         # so every test here needs one saved.
         save_settings(_settings(trakt_access_token="app-wide-token"))
 
+    def notice_shown(self) -> bool:
+        """Whether the Settings panel draws the reconnect notice, which is always
+        in the markup and hidden when there is nothing to ask."""
+        body = self.client.get("/settings/fragments/panel").text
+        self.assertIn('id="traktReconnect"', body)
+        return 'id="traktReconnect" class="field" hidden' not in body
+
     def test_the_notice_is_surfaced_and_cleared_by_an_admin_linking(self):
         asyncio.run(db.set_meta(auth_routes.TRAKT_RECONNECT_NOTICE, "1"))
         self.sign_in_as(self.admin_id)
-        self.assertTrue(self.client.get("/api/settings").json()["trakt_reconnect_notice"])
+        self.assertTrue(self.notice_shown())
 
         self.callback(self.start("/auth/trakt/link"))
-        self.assertFalse(self.client.get("/api/settings").json()["trakt_reconnect_notice"])
+        self.assertFalse(self.notice_shown())
 
     def test_a_non_admin_linking_leaves_the_notice_up(self):
         asyncio.run(db.set_meta(auth_routes.TRAKT_RECONNECT_NOTICE, "1"))
@@ -860,9 +867,11 @@ class ReconnectNoticeTests(TraktOAuthTestCase):
         self.sign_in_as(self.admin_id)
         with patch.object(trakt_auth, "fetch_account",
                           return_value={"id": TRAKT_ID, "name": "Josh"}):
-            resp = self.client.post("/api/auth/trakt/adopt", json={})
+            resp = self.client.post("/settings/trakt/adopt", json={})
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertFalse(self.client.get("/api/settings").json()["trakt_reconnect_notice"])
+        # The answer is the notice itself, taken down.
+        self.assertIn('id="traktReconnect" class="field" hidden', resp.text)
+        self.assertFalse(self.notice_shown())
 
     def test_adoption_blocked_by_another_login_says_which_one(self):
         """The failure that re-authorizing can never fix. Reporting it is the
@@ -876,20 +885,21 @@ class ReconnectNoticeTests(TraktOAuthTestCase):
         self.sign_in_as(self.admin_id)
         with patch.object(trakt_auth, "fetch_account",
                           return_value={"id": TRAKT_ID, "name": "Josh"}):
-            resp = self.client.post("/api/auth/trakt/adopt", json={})
-        self.assertEqual(resp.status_code, 409, resp.text)
-        self.assertIn("squatter", resp.json()["error"])
+            resp = self.client.post("/settings/trakt/adopt", json={})
+        # Drawn where the notice is, at 200: a refusal statused 409 is never swapped.
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIn("squatter", resp.text)
         # And it is still up, because this login is still unlinked.
-        self.assertTrue(self.client.get("/api/settings").json()["trakt_reconnect_notice"])
+        self.assertTrue(self.notice_shown())
 
     def test_a_token_trakt_will_not_resolve_reports_that_instead(self):
         asyncio.run(db.set_meta(auth_routes.TRAKT_RECONNECT_NOTICE, "1"))
         self.sign_in_as(self.admin_id)
         with patch.object(trakt_auth, "fetch_account",
                           side_effect=trakt_auth.AccountLookupError("HTTP 401")):
-            resp = self.client.post("/api/auth/trakt/adopt", json={})
-        self.assertEqual(resp.status_code, 409, resp.text)
-        self.assertIn("HTTP 401", resp.json()["error"])
+            resp = self.client.post("/settings/trakt/adopt", json={})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIn("HTTP 401", resp.text)
 
 
 class ProviderButtonTests(TraktOAuthTestCase):

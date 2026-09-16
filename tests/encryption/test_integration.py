@@ -363,33 +363,20 @@ class NeedsResealTests(EncryptionIntegrationTestCase):
         self.assertEqual(asyncio.run(trakt_routes.access_token_for_user(user_id)),
                          "fresh-plaintext-token")
 
-    def test_status_endpoint_reports_needs_reseal(self):
-        from fastapi.testclient import TestClient
-        from app.main import app
+    def test_the_panel_state_reports_needs_reseal(self):
+        """What the Settings panel's encryption section is drawn from, asked
+        directly: a row written in the clear after the ratchet is caught."""
+        from app.auth import encryption_routes
 
         _set_key(KEY)
         save_settings(Settings(sonarr_api_key="secret"))
         asyncio.run(encryption_flow.encrypt_now())
+        self.assertFalse(asyncio.run(encryption_routes.panel_state())["needs_reseal"])
 
-        client = TestClient(app, base_url="https://testserver",
-                            headers={"Origin": "https://testserver"})
-        try:
-            resp = client.post("/onboarding", json={
-                "username": "josh", "password": "hunter2hunter2",
-                "password_confirm": "hunter2hunter2",
-            })
-            self.assertEqual(resp.status_code, 200, resp.text)
-            status = client.get("/api/admin/encryption").json()
-            self.assertFalse(status["needs_reseal"])
-
-            _set_key(None)
-            save_settings(Settings(radarr_api_key="a-fresh-radarr-key"))
-            _set_key(KEY)
-            status = client.get("/api/admin/encryption").json()
-            self.assertTrue(status["needs_reseal"])
-        finally:
-            client.close()
-
+        _set_key(None)
+        save_settings(Settings(radarr_api_key="a-fresh-radarr-key"))
+        _set_key(KEY)
+        self.assertTrue(asyncio.run(encryption_routes.panel_state())["needs_reseal"])
 
 if __name__ == "__main__":
     unittest.main()

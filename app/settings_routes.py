@@ -1,12 +1,24 @@
-"""The admin Settings screen's API, and the Trakt app-wide token it manages.
+"""The admin Settings panel, and the Trakt app-wide token it manages.
 
 Two halves that belong together because the second is what the first writes:
 
-  /api/settings              read back the instance's configuration (never a
-                             credential) and save a partial update to it.
-  /api/auth/device/*         Trakt's OAuth device-code flow — the break-glass
-  /api/auth/refresh          path that seeds client_secret and refresh_token,
-  /api/auth/trakt/adopt      and links the resulting token to an administrator.
+  /settings/fragments/panel  the panel itself, drawn with every value in it and
+  /settings                  saved through config.apply_form, the one writer.
+  /settings/arr-options      Sonarr/Radarr profiles and folders as <option>s.
+  /settings/trakt/*          Trakt's OAuth device-code flow — the break-glass
+                             path that seeds client_secret and refresh_token — a
+                             manual refresh, and linking the token to an
+                             administrator.
+
+EVERY ANSWER HERE IS MARKUP. The panel used to be an empty form that a script
+filled in from a JSON read, sent back as a JSON write, and decorated with hints
+it composed itself; each of those was a second statement of something this
+module or app/config.py already knew. The panel is now fetched every time it
+opens — never drawn into a page — because each opening must re-read which
+secrets are set, and every action answers with the part of it that changed.
+
+A REFUSAL IS DRAWN AT 200. A non-200 is never swapped (static/js/boost.js's
+`noSwap`), so a sentence answered with 400 would read as a press that did nothing.
 
 The token renewal the heartbeat performs (maybe_refresh_trakt_token) lives here
 too rather than in the bootstrap module, because it writes exactly the same
@@ -16,35 +28,56 @@ one place that knows how to store a token pair.
 
 The per-user "Log in with Trakt" redirect flow is a different thing entirely and
 lives in app/auth/trakt_routes.py; this module only ever touches the ONE app-wide
-connection stored in settings.json.
+connection stored in settings.
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import Response
 
-from . import auth, authz, config, db
+from . import auth, authz, cache, config, db, route_params, secrets_box
 from .auth import encryption_flow, encryption_routes
 from .auth import routes as auth_routes, simkl as simkl_auth, trakt as trakt_auth, trakt_routes
-from .integrations import routes as integrations_routes
 from .auth import AuthLevel
-from .config import (
-    SECRET_FIELDS,
-    Settings,
-    apply_update,
-    load_settings,
-    public_base_url_error,
-    save_settings,
-)
+from .calendar import vocab
+from .config import SECRET_FIELDS, Settings, load_settings, save_settings
+from .endpoints import endpoint_choices
+from .integrations import arr, routes as integrations_routes
+from .templating import templates
+from .timezones import build_options as build_timezone_options
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 guard = authz.Guard(router)
+
+PANEL_TEMPLATE = "_settings_panel.html"
+NOTICE_TEMPLATE = "_settings_notice.html"
+ARR_TEMPLATE = "_settings_arr.html"
+DEVICE_TEMPLATE = "_settings_device.html"
+TOKEN_TEMPLATE = "_settings_token.html"
+RECONNECT_TEMPLATE = "_settings_reconnect.html"
+
+# The content floor's certification rows are the Filters panel's chips, spelled
+# and read back by app/calendar/vocab.py, so a floor spec is byte-identical to a
+# spec a viewer's own filter would have written.
+FLOOR_CHIP_FIELDS = (vocab.SHOW_CERTIFICATIONS, vocab.MOVIE_CERTIFICATIONS)
+
+ARR_KINDS = ("sonarr", "radarr")
+
+# One sentence for both places a credential write is refused while the at-rest key
+# is unhealthy, because it is one refusal: encryption_flow.secret_writes_blocked.
+_KEY_UNHEALTHY = (
+    "Encryption is unhealthy, so saving a credential is blocked to avoid overwriting "
+    "a value the correct key could still recover. Restore the original "
+    f"{secrets_box.ENV_VAR}, or run the recovery reset first."
+)
 
 
 async def _apply_new_trakt_token(settings: Settings, token: dict) -> Settings:
@@ -84,67 +117,157 @@ async def maybe_refresh_trakt_token() -> None:
     logger.info("Trakt token auto-refreshed (next expiry %s)", settings.trakt_token_expires_at)
 
 
-@guard.get("/api/settings", AuthLevel.ADMIN)
-async def get_settings(request: Request):
-    """Configuration for the Settings screen, WITHOUT any credential in it.
+# ---------------------------------------------------------------------------
+# what the panel says about the instance
+# ---------------------------------------------------------------------------
 
-    Credentials are write-only over this API: the response carries a flag per
-    secret saying whether one is stored, never the value. This route used to hand
-    the Trakt access token, the Trakt client secret, the TMDB key, and every
-    Sonarr/Radarr/Seerr API key to whoever asked for it.
+def token_status(settings: Settings, now: float | None = None) -> str:
+    """The sentence under the access token: when it runs out, or that it has.
+
+    A DAY, IN UTC, spelled by the server. The browser used to compose this from the
+    raw timestamp in its own locale, which made the one fact on the Trakt tab that
+    the server holds the only one the server did not say.
     """
+    expires = settings.trakt_token_expires_at
+    if not expires:
+        return ""
+    when = datetime.fromtimestamp(expires, tz=timezone.utc)
+    day = f"{when.day} {when:%B %Y}"
+    if expires < (time.time() if now is None else now):
+        return f"Token expired {day} — it refreshes automatically, or press “Refresh token now”."
+    return f"Token valid until {day} (it refreshes automatically once it expires)."
+
+
+async def _reconnect_notice(admin) -> bool:
+    """Whether to ask this administrator to link the instance's Trakt token.
+
+    DERIVED, not just read back: the stored flag records that first-run setup
+    could not resolve the token, but what the notice actually asks for is a linked
+    Trakt identity, and this caller either has one or does not. Trusting the flag
+    alone left the prompt up after somebody linked by a route that forgot to clear
+    it — a sticky "do this thing" that stayed after the thing was done.
+    """
+    return bool(await db.get_meta(auth_routes.TRAKT_RECONNECT_NOTICE, "")) and not (
+        admin and admin.has_trakt_identity)
+
+
+def _redirect_uri(module, settings: Settings) -> str:
+    """The exact callback to register with a service, or "" before a base URL
+    exists to build it from. Trakt and Simkl both compare it byte for byte, so
+    the panel shows the value rather than describing how to build it."""
+    return module.redirect_uri(settings.public_base_url) if settings.public_base_url else ""
+
+
+def _server_facts(request: Request, settings: Settings) -> dict:
+    """What the Server tab's hints are written from.
+
+    `peer` is the IMMEDIATE peer — the reverse proxy on a real deployment — which
+    is what `trusted_proxy_ips` has to cover, so the operator reads the answer off
+    the screen instead of guessing their container network. Forwarded headers
+    arriving from a peer that is NOT trusted is the misconfiguration worth naming:
+    every user collapses onto one address for rate limiting and the session list.
+
+    `browser_scheme` is the scheme the BROWSER is on, read from its own headers
+    (auth.browser_scheme) — the same reading the save route refuses a self-locking
+    cookie policy on, so the warning and the refusal cannot disagree. None when the
+    browser did not say, and then no warning is drawn rather than a guessed one.
+    """
+    forwarded = any(h in request.headers for h in ("x-forwarded-for", "x-real-ip", "forwarded"))
+    return {
+        "peer": (request.client.host if request.client else "") or "unknown",
+        "forwarded_ignored": forwarded and not auth.peer_is_trusted_proxy(request, settings),
+        "base_url_overridden": bool(config.public_base_url_override()),
+        "browser_scheme": auth.browser_scheme(request),
+    }
+
+
+def _arr_choices(kind: str, settings: Settings, *, profiles: list[dict] | None = None,
+                 folders: list[dict] | None = None, chosen_profile: object = None,
+                 chosen_folder: object = None, message: str = "", ok: bool = False) -> dict:
+    """One service's profile and folder <option>s, and the line under them.
+
+    BEFORE ANYTHING IS LOADED the saved choice is the only option, so a panel that
+    has not asked the service yet still shows — and saves — what is stored rather
+    than a blank that would write a zero. AFTER, the service's own lists, with the
+    choice the form was holding still selected where the service still offers it.
+    """
+    profile = str(chosen_profile if chosen_profile not in (None, "")
+                  else getattr(settings, f"{kind}_quality_profile_id") or "")
+    folder = str(chosen_folder if chosen_folder not in (None, "")
+                 else getattr(settings, f"{kind}_root_folder") or "")
+    if profiles is None:
+        profiles = [{"id": profile, "name": f"Profile #{profile}"}] if profile not in ("", "0") else []
+    if folders is None:
+        folders = [{"path": folder}] if folder else []
+    return {
+        "kind": kind,
+        "label": integrations_routes.LIBRARY_NAMES[kind],
+        "profiles": [{"value": str(p["id"]), "label": p["name"], "selected": str(p["id"]) == profile}
+                     for p in profiles],
+        "folders": [{"value": f["path"], "label": f["path"], "selected": f["path"] == folder}
+                    for f in folders],
+        "message": message,
+        "ok": ok,
+    }
+
+
+async def _trakt_context(settings: Settings, admin, *, linked: bool = False,
+                         reconnect_error: str | None = None,
+                         token_message: str = "", token_ok: bool = False) -> dict:
+    """The Trakt tab's three live parts — the reconnect notice, the token line and
+    the access token's own field — which every Trakt action may change at once."""
+    return {
+        "reconnect_shown": not linked and await _reconnect_notice(admin),
+        "reconnect_error": reconnect_error,
+        "token_status": token_status(settings),
+        "token_message": token_message,
+        "token_ok": token_ok,
+        "secrets": config.secret_inputs(settings),
+    }
+
+
+async def _panel_context(request: Request) -> dict:
     settings = load_settings()
-    peer = (request.client.host if request.client else "") or ""
     admin = await auth.current_user(request)
-    return JSONResponse({
-        **settings.redacted(),
-        # What `trusted_proxy_ips` has to cover, shown beside that field so the
-        # operator can read the answer off the screen instead of guessing their
-        # container network. This is the IMMEDIATE peer — the reverse proxy on a
-        # real deployment — not the forwarded client address.
-        "detected_peer_ip": peer,
-        # Whether forwarded headers are actually arriving AND being honored. The
-        # two disagreeing is the misconfiguration worth surfacing: headers
-        # present but the peer untrusted means every user is collapsed onto one
-        # address for rate limiting and the session list.
-        "forwarded_headers_present": any(
-            h in request.headers for h in ("x-forwarded-for", "x-real-ip", "forwarded")
-        ),
-        "peer_is_trusted_proxy": auth.peer_is_trusted_proxy(request, settings),
-        # Raised at first-run setup when the Trakt token already in settings.json
-        # could not be resolved to an account, so the Settings screen can prompt
-        # the administrator to reconnect.
-        #
-        # DERIVED, not just read back: the stored flag records that setup failed,
-        # but what the notice actually asks for is a linked Trakt identity, and
-        # this caller either has one or does not. Trusting the flag alone left the
-        # prompt up after somebody linked by a route that forgot to clear it —
-        # a sticky "do this thing" that stayed after the thing was done.
-        "trakt_reconnect_notice": bool(
-            await db.get_meta(auth_routes.TRAKT_RECONNECT_NOTICE, "")
-        ) and not (admin and admin.has_trakt_identity),
-        # Whether the per-user "Log in with Trakt" button can be offered at all.
-        "trakt_login_configured": settings.trakt_login_configured,
-        # Whether the PUBLIC_BASE_URL environment variable is in force. It BEATS
-        # the saved base URL (see config.PUBLIC_BASE_URL_ENV), so without this the
-        # administrator would have no way to tell why a value they just saved is
-        # not the one the app is using. Not a credential — it says only that a
-        # variable is set, and the value it carries is the origin every visitor
-        # already types into their address bar.
-        "public_base_url_overridden": bool(config.public_base_url_override()),
-        "trakt_redirect_uri": (
-            trakt_auth.redirect_uri(settings.public_base_url)
-            if settings.public_base_url else ""
-        ),
-        # Simkl byte-matches its redirect URI too, and unlike Trakt it offers no
-        # device-code fallback for an operator who registers the wrong one — so
-        # showing the exact value is the only remedy there is.
-        "simkl_login_configured": settings.simkl_login_configured,
-        "simkl_redirect_uri": (
-            simkl_auth.redirect_uri(settings.public_base_url)
-            if settings.public_base_url else ""
-        ),
+    return {
+        "request": request,
+        "settings": settings,
+        "numbers": config.number_inputs(settings),
+        "server": _server_facts(request, settings),
+        "trakt_redirect_uri": _redirect_uri(trakt_auth, settings),
+        "simkl_redirect_uri": _redirect_uri(simkl_auth, settings),
+        **await _trakt_context(settings, admin),
+        "pairing": await _pairing(admin.user_id),
+        "device_message": "",
+        "device_ok": False,
+        "authorized": False,
+        "encryption": await encryption_routes.panel_state(),
+        "encryption_reveal": None,
+        "encryption_error": None,
+        "timezone_groups": build_timezone_options(settings.timezone),
+        "endpoints": endpoint_choices(),
+        "floor_chips": {field: vocab.chips_for(field, getattr(settings, field))
+                        for field in FLOOR_CHIP_FIELDS},
+        "arr": {kind: _arr_choices(kind, settings) for kind in ARR_KINDS},
+    }
+
+
+def _notice(request: Request, message: str, *, recovery: bool = False):
+    """A refusal of the whole save, drawn beside the Save button."""
+    return templates.TemplateResponse(request, NOTICE_TEMPLATE, {
+        "request": request, "settings_notice": message,
+        "recovery_url": encryption_routes.RECOVERY_PATH if recovery else None,
     })
+
+
+@guard.get("/settings/fragments/panel", AuthLevel.ADMIN)
+async def settings_panel(request: Request):
+    """The whole Settings overlay, already open, with every value drawn in.
+
+    NO CREDENTIAL IS EVER DRAWN — not masked, not its length. A credential field
+    says whether one is stored and offers to clear it; what is typed replaces it
+    and an empty field leaves it alone (config.apply_form)."""
+    return templates.TemplateResponse(request, PANEL_TEMPLATE, await _panel_context(request))
 
 
 _COOKIE_SECURE_MODES = ("always", "auto", "never")
@@ -179,103 +302,268 @@ def _cookie_secure_error(settings, request: Request) -> str | None:
     return None
 
 
-@guard.post("/api/settings", AuthLevel.ADMIN)
-async def post_settings(request: Request):
-    """Save a partial settings update.
+@guard.post("/settings", AuthLevel.ADMIN)
+async def save_settings_form(request: Request):
+    """Save the Settings form, then reload the page it was opened from.
 
-    A secret that is absent or blank keeps its stored value, and an explicit null
-    clears it — see config.apply_update. That is what lets the Settings screen
-    render its credential inputs empty (it cannot read them back) without the
-    first save wiping every credential the instance has.
+    THE TYPES ARE config.apply_form'S, and nothing here coerces a field. What this
+    route adds is only what needs the REQUEST: the certification chips turned into
+    the spec vocab.py spells, the cookie policy judged against the browser's own
+    scheme, and the refusal to write a credential while the at-rest key is
+    unhealthy — asked of what the save would actually CHANGE, so a form that
+    touches no secret still saves its ordinary settings.
+
+    A RELOAD, NOT A REDRAW: timezone, default endpoint and hide-not-watching change
+    the page behind the panel, which is what reloading after a save was always for.
     """
     data = await authz.json_body(request)
-    # A credential save while the key is missing or wrong would seal a fresh value
-    # over ciphertext the original key could still recover. Refuse it loudly and send
-    # the admin to recovery, rather than let it silently overwrite. A save that only
-    # touches non-secret settings is fine — those are never sealed — so this checks
-    # for a real secret change (a new value or an explicit clear), not a blank field.
-    changes_secret = any(
-        name in data and (data[name] is None or str(data[name]).strip())
-        for name in SECRET_FIELDS
-    )
+    current = load_settings()
+    try:
+        settings = config.apply_form(current, {**data, **vocab.specs_from_form(data)})
+    except config.SettingsFormError as exc:
+        return _notice(request, str(exc))
+    changes_secret = any(getattr(settings, name) != getattr(current, name) for name in SECRET_FIELDS)
     if changes_secret and encryption_flow.secret_writes_blocked():
-        return JSONResponse({
-            "ok": False,
-            "reason": "key_unhealthy",
-            "error": (
-                "Encryption is unhealthy, so saving a credential is blocked to avoid "
-                "overwriting a value the correct key could still recover. Restore the "
-                "original ENCRYPTION_KEY, or run the recovery reset first."
-            ),
-            "recovery_url": encryption_routes.RECOVERY_PATH,
-        }, status_code=409)
-    settings = apply_update(load_settings(), data)
-    # Rejected on save rather than on use: a base URL with a path or a trailing
-    # slash builds a redirect URI that no longer matches the one registered on
-    # the Trakt application, and Trakt compares the two exactly — so the failure
-    # would otherwise surface much later as an unreadable error mid-sign-in.
-    if err := public_base_url_error(settings.public_base_url):
-        return JSONResponse({"ok": False, "error": err}, status_code=400)
-    if "cookie_secure" in data and (err := _cookie_secure_error(settings, request)):
-        return JSONResponse({"ok": False, "error": err}, status_code=400)
-    # The one save path allowed to remove a credential. apply_update above has
-    # already resolved what the administrator meant — absent and blank keep the
-    # stored value, an explicit null empties the field — so a blank secret on
-    # this object is a decision rather than a gap, which is what save_settings
-    # otherwise (correctly) refuses to assume.
+        return _notice(request, _KEY_UNHEALTHY, recovery=True)
+    if "cookie_secure" in data and (error := _cookie_secure_error(settings, request)):
+        return _notice(request, error)
+    # The one save path allowed to remove a credential. apply_form has already
+    # resolved what the administrator meant — an empty field keeps the stored
+    # value, a ticked clear empties it — so a blank secret on this object is a
+    # decision rather than a gap, which is what save_settings otherwise
+    # (correctly) refuses to assume.
     save_settings(settings, clear_unset_secrets=True)
-    # Re-check Sonarr/Radarr/Seerr immediately so buttons reflect the new config right away,
-    # and invalidate the library cache so the next fetch re-pulls with the new credentials
-    # (rather than serving the stale/empty cache until the TTL expires or a restart).
+    # Re-check Sonarr/Radarr/Seerr immediately so buttons reflect the new config
+    # right away, and invalidate the library cache so the next fetch re-pulls with
+    # the new credentials rather than serving the stale cache until it expires.
     await integrations_routes.refresh_integration_health()
     integrations_routes.invalidate_library_cache()
-    return JSONResponse({"ok": True, "settings": settings.redacted()})
+    # 204 rather than an empty 200: htmx acts on this header before it decides
+    # anything about swapping — the same answer the rankings board gives with
+    # HX-Location.
+    return Response(status_code=204, headers={"HX-Refresh": "true"})
 
 
-@guard.post("/api/auth/device/start", AuthLevel.ADMIN)
-async def auth_device_start(request: Request):
-    """Begin Trakt's OAuth device-code flow. Accepts an in-progress (unsaved)
-    client_id from the Settings form, falling back to the saved one — same
-    pattern as /api/integrations/options for Sonarr/Radarr."""
+@guard.post("/settings/arr-options", AuthLevel.ADMIN)
+async def arr_options(request: Request):
+    """One service's quality profiles and root folders, drawn as the <select>s.
+
+    EACH HALF FALLS BACK ON ITS OWN. The form sends the URL as typed and the API
+    key as typed — which is usually nothing, because a stored key is never drawn
+    back — and a blank one is filled from what is saved. It used to fall back
+    only when EITHER was blank, and then for both: a new URL typed beside a saved
+    key was silently replaced by the old URL, and the options loaded were the old
+    server's."""
     data = await authz.json_body(request)
+    kind = route_params.last_value(data.get("kind"))
+    if kind not in ARR_KINDS:
+        return _notice(request, "Unknown service.")
     settings = load_settings()
-    client_id = (data.get("client_id") or "").strip() or settings.trakt_client_id
+    saved_url, saved_key = arr.credentials(kind, settings)
+    url = str(route_params.last_value(data.get(f"{kind}_url")) or "").strip() or saved_url
+    key = str(route_params.last_value(data.get(f"{kind}_api_key")) or "").strip() or saved_key
+    chosen = {"chosen_profile": route_params.last_value(data.get(f"{kind}_quality_profile_id")),
+              "chosen_folder": route_params.last_value(data.get(f"{kind}_root_folder"))}
+    label = integrations_routes.LIBRARY_NAMES[kind]
+    if not (url and key):
+        return _arr(request, _arr_choices(
+            kind, settings, **chosen, message=f"Enter the {label} URL and API key first."))
+    try:
+        options = await arr.fetch_options(kind, url, key)
+    # The four things an unreachable or wrong-service instance actually raises:
+    # a transport failure, a body that is not JSON, and — when the URL turns out
+    # to be some other web app answering 200 with JSON of its own — a profile
+    # list whose entries have neither the keys nor the shape Sonarr's do.
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        return _arr(request, _arr_choices(
+            kind, settings, **chosen,
+            message=f"Couldn't reach {label} at {url} — check the URL and API key."))
+    return _arr(request, _arr_choices(
+        kind, settings, profiles=options["profiles"], folders=options["folders"], **chosen,
+        message=f"{label} options loaded.", ok=True))
+
+
+def _arr(request: Request, choices: dict):
+    return templates.TemplateResponse(request, ARR_TEMPLATE, {"request": request, "arr_service": choices})
+
+
+# ---------------------------------------------------------------------------
+# Trakt's device-code flow, held on the server
+# ---------------------------------------------------------------------------
+#
+# THE PAGE HOLDS NOTHING. It used to keep the device code AND the client secret
+# typed into the form in script memory and re-send both on every poll. The pairing
+# now lives in the shared cache's key/value store (app/cache.py), one entry per
+# administrator, and the panel's pairing block polls itself with nothing in its
+# body: the route reads the pairing back. No migration, because a pairing is a
+# ten-minute handshake rather than a record.
+#
+# IT EXPIRES WITH THE CODE. The entry is written with the code's own `expires_in`
+# as its lifetime, and a read past `expires_at` deletes it and answers as though
+# nothing were waiting. It is deleted outright the moment the flow ends any other
+# way — approved, denied, cancelled — because the sweep's grace period would
+# otherwise keep a finished handshake for months.
+#
+# ITS SECRETS ARE SEALED. The device code and a client secret typed for this flow
+# are credentials, so they are stored through secrets_box.seal exactly as
+# app_secrets are: `enc:v1:` ciphertext while encryption is on, and never read
+# back into markup. A client secret left blank is not stored at all — the saved
+# one is read at poll time.
+
+
+def _pairing_key(user_id: int) -> str:
+    return f"settings:trakt-device-pairing:{user_id}"
+
+
+@dataclasses.dataclass(frozen=True)
+class Pairing:
+    """A device code waiting to be approved, as the routes use it (opened)."""
+    user_code: str
+    verification_url: str
+    interval: int
+    expires_at: int
+    client_id: str
+    device_code: str
+    client_secret: str  # "" when the saved client secret is the one to use
+
+    @property
+    def seconds_left(self) -> int:
+        return max(0, int(self.expires_at - time.time()))
+
+
+# Where a pairing code is entered when Trakt does not say. Also what is drawn in
+# place of a verification address that is not https: it is rendered as a link an
+# administrator presses, and a `javascript:` or plain-http address from an answer
+# is not something this page should offer to open.
+_TRAKT_ACTIVATE = "https://trakt.tv/activate"
+
+
+async def _remember_pairing(user_id: int, code: dict, client_id: str, typed_secret: str) -> None:
+    expires_in = max(int(code.get("expires_in") or 600), 1)
+    verification_url = str(code.get("verification_url") or "")
+    pairing = Pairing(
+        user_code=str(code.get("user_code") or ""),
+        verification_url=verification_url if verification_url.startswith("https://") else _TRAKT_ACTIVATE,
+        # Never faster than Trakt asks, and never faster than five seconds.
+        interval=max(int(code.get("interval") or 5), 5),
+        expires_at=int(time.time()) + expires_in,
+        client_id=client_id,
+        device_code=str(code["device_code"]),
+        client_secret=typed_secret,
+    )
+    stored = dataclasses.asdict(pairing)
+    stored["device_code"] = secrets_box.seal(pairing.device_code)
+    stored["client_secret"] = secrets_box.seal(typed_secret) if typed_secret else ""
+    await cache.set(_pairing_key(user_id), stored, retain_seconds=expires_in)
+
+
+async def _forget_pairing(user_id: int) -> None:
+    await cache.delete(_pairing_key(user_id))
+
+
+async def _pairing(user_id: int) -> Pairing | None:
+    """The pairing waiting for this administrator, or None.
+
+    Anything that cannot be a live pairing is forgotten on the way past: an
+    expired code, an entry that no longer reads as one, and a sealed value the
+    configured key cannot open — the flow simply has to be started again, which
+    costs a code rather than a credential."""
+    stored = await cache.get_stale(_pairing_key(user_id))
+    if not isinstance(stored, dict):
+        return None
+    try:
+        pairing = Pairing(**{
+            **stored,
+            "device_code": secrets_box.open_(stored["device_code"]) or "",
+            "client_secret": secrets_box.open_(stored["client_secret"]) or "",
+        })
+    except (TypeError, KeyError, secrets_box.SealedButWrongKey):
+        pairing = None
+    if pairing is None or not pairing.device_code or pairing.seconds_left <= 0:
+        await _forget_pairing(user_id)
+        return None
+    return pairing
+
+
+async def _device(request: Request, admin, *, pairing: Pairing | None = None,
+                  message: str = "", ok: bool = False, authorized: bool = False,
+                  linked: bool = False, link_error: str | None = None):
+    """The pairing block: waiting on a code (and polling itself), or not.
+
+    AN AUTHORIZATION CHANGES THREE OTHER PARTS OF THE TAB, and they ride the same
+    answer out of band: the token line, the access token's field (now stored) and
+    the reconnect notice, which a successful link takes down."""
+    settings = load_settings()
+    return templates.TemplateResponse(request, DEVICE_TEMPLATE, {
+        "request": request,
+        "pairing": pairing,
+        "device_message": message,
+        "device_ok": ok,
+        "authorized": authorized,
+        **await _trakt_context(settings, admin, linked=linked, reconnect_error=link_error),
+    })
+
+
+@guard.post("/settings/trakt/device/start", AuthLevel.ADMIN)
+async def device_start(request: Request):
+    """Ask Trakt for a pairing code and hold it server-side.
+
+    Takes the client id and secret as typed into the panel, each falling back to
+    the saved one, so an operator can authorize before saving. REFUSED WHILE THE
+    AT-REST KEY IS UNHEALTHY: the token this flow ends by storing is a credential,
+    and save_settings would silently leave it unwritten — an authorization that
+    appears to work and stores nothing."""
+    data = await authz.json_body(request)
+    admin = await auth.current_user(request)
+    settings = load_settings()
+    client_id = str(route_params.last_value(data.get("trakt_client_id")) or "").strip() \
+        or settings.trakt_client_id
+    typed_secret = str(route_params.last_value(data.get("trakt_client_secret")) or "").strip()
     if not client_id:
-        return JSONResponse({"ok": False, "error": "Enter a Trakt Client ID first."}, status_code=400)
+        return await _device(request, admin, message="Enter your Trakt Client ID first.")
+    if not (typed_secret or settings.trakt_client_secret):
+        return await _device(request, admin, message="Enter your Trakt Client Secret first.")
+    if encryption_flow.secret_writes_blocked():
+        return await _device(request, admin, message=_KEY_UNHEALTHY)
     try:
         code = await trakt_auth.request_device_code(client_id)
-    except httpx.HTTPError as exc:
-        return JSONResponse({"ok": False, "error": f"Could not start device authorization: {exc}"}, status_code=502)
-    return JSONResponse({"ok": True, **code})
+        await _remember_pairing(admin.user_id, code, client_id, typed_secret)
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        return await _device(request, admin, message=f"Could not start device authorization: {exc}")
+    return await _device(request, admin, pairing=await _pairing(admin.user_id))
 
 
-@guard.post("/api/auth/device/poll", AuthLevel.ADMIN)
-async def auth_device_poll(request: Request):
-    """Check whether the user has approved the device code yet. On success,
-    persists client_id/client_secret + the new token pair to settings.json so
-    the background auto-refresh (heartbeat) can pick it up without the user
-    separately clicking "Save & reload" on the main Settings form."""
-    data = await authz.json_body(request)
+@guard.post("/settings/trakt/device/poll", AuthLevel.ADMIN)
+async def device_poll(request: Request):
+    """Ask Trakt whether the waiting code has been approved yet.
+
+    THE ANSWER DECIDES WHETHER THE PAGE ASKS AGAIN. A pairing still waiting is
+    drawn with its poller; every other answer is drawn without one, which is the
+    whole of how polling stops. A transport failure keeps waiting — a hiccup is not
+    a refusal — while anything Trakt actually answered with ends the flow."""
+    admin = await auth.current_user(request)
+    pairing = await _pairing(admin.user_id)
+    if pairing is None:
+        return await _device(request, admin, message=(
+            "That code is no longer waiting — start again if you still need to authorize."))
     settings = load_settings()
-    client_id = (data.get("client_id") or "").strip() or settings.trakt_client_id
-    client_secret = (data.get("client_secret") or "").strip() or settings.trakt_client_secret
-    device_code = data.get("device_code")
-    if not (client_id and client_secret and device_code):
-        return JSONResponse({"ok": False, "error": "Missing client_id, client_secret, or device_code."}, status_code=400)
+    client_secret = pairing.client_secret or settings.trakt_client_secret
     try:
-        token = await trakt_auth.poll_device_token(client_id, client_secret, device_code)
-    except trakt_auth.DevicePending:
-        return JSONResponse({"ok": True, "status": "pending"})
-    except trakt_auth.DeviceSlowDown:
-        return JSONResponse({"ok": True, "status": "slow_down"})
-    except trakt_auth.DeviceExpired as exc:
-        return JSONResponse({"ok": False, "status": "expired", "error": str(exc)}, status_code=410)
-    except trakt_auth.DeviceDenied as exc:
-        return JSONResponse({"ok": False, "status": "denied", "error": str(exc)}, status_code=409)
+        token = await trakt_auth.poll_device_token(pairing.client_id, client_secret, pairing.device_code)
+    except (trakt_auth.DevicePending, trakt_auth.DeviceSlowDown):
+        return await _device(request, admin, pairing=pairing)
+    except (trakt_auth.DeviceExpired, trakt_auth.DeviceDenied) as exc:
+        await _forget_pairing(admin.user_id)
+        return await _device(request, admin, message=str(exc))
+    except httpx.TransportError:
+        return await _device(request, admin, pairing=pairing,
+                             message="Trakt did not answer — still waiting.")
     except httpx.HTTPError as exc:
-        return JSONResponse({"ok": False, "status": "error", "error": f"Trakt error: {exc}"}, status_code=502)
+        await _forget_pairing(admin.user_id)
+        return await _device(request, admin, message=f"Trakt error: {exc}")
 
-    settings.trakt_client_id = client_id
+    await _forget_pairing(admin.user_id)
+    settings.trakt_client_id = pairing.client_id
     settings.trakt_client_secret = client_secret
     settings = await _apply_new_trakt_token(settings, token)
     await integrations_routes.refresh_integration_health()
@@ -283,55 +571,70 @@ async def auth_device_poll(request: Request):
     # ever be to resolve it to an account and link it to the administrator who
     # just authorized it. Without this the app-wide token renews while
     # `linked_identities` stays empty — which leaves the "reconnect your Trakt
-    # account" notice up with nothing in the UI able to clear it, and leaves the
-    # tracker refusing this account for want of a linked identity.
-    admin = await auth.current_user(request)
+    # account" notice up with nothing able to clear it, and leaves the tracker
+    # refusing this account for want of a linked identity.
     linked, link_error = await trakt_routes.adopt_app_token(admin.user_id, settings)
-    # The token itself is not echoed back. It is already saved, so sending it to
-    # the browser would put a Trakt bearer token in page memory for no purpose.
-    return JSONResponse({
-        "ok": True,
-        "status": "authorized",
-        "expires_at": settings.trakt_token_expires_at,
-        # Lets the Settings screen take the reconnect notice down without a reload.
-        "trakt_linked": linked,
-        # And, when it can't, say so on the spot. A successful authorization that
-        # silently failed to link is the exact state that leaves the reconnect
-        # notice up looking like it ignored what was just done.
-        "trakt_link_error": link_error,
-    })
+    if linked:
+        message = "✅ Authorized, and linked to your account."
+    elif link_error:
+        # Said on the spot: an authorization that "worked" yet left the notice up
+        # is the state that reads as the app ignoring what was just done.
+        message = f"✅ Authorized, but not linked to your login: {link_error}"
+    else:
+        message = "✅ Authorized! The access token has been saved."
+    return await _device(request, admin, message=message, ok=True, authorized=True,
+                         linked=linked, link_error=link_error)
 
 
-@guard.post("/api/auth/trakt/adopt", AuthLevel.ADMIN)
-async def auth_trakt_adopt(request: Request):
+@guard.post("/settings/trakt/device/cancel", AuthLevel.ADMIN)
+async def device_cancel(request: Request):
+    """Abandon the waiting code. Nothing is asked of Trakt: the code simply stops
+    being polled and expires on its own side."""
+    admin = await auth.current_user(request)
+    await _forget_pairing(admin.user_id)
+    return await _device(request, admin, message="Authorization cancelled.")
+
+
+@guard.post("/settings/trakt/adopt", AuthLevel.ADMIN)
+async def trakt_adopt(request: Request):
     """Retry linking the saved app-wide Trakt token to the calling administrator.
 
-    The reconnect notice asks for exactly this, and until now the only thing that
-    performed it was a fresh device authorization — so an adoption that failed
-    for a reason re-authorizing does not fix (the Trakt account already belonging
-    to another login here) left the notice up no matter how many times the
-    operator re-ran the flow. This is the same operation on its own, with the
-    reason reported.
+    The reconnect notice asks for exactly this, and until it existed the only
+    thing that performed it was a fresh device authorization — so an adoption that
+    failed for a reason re-authorizing does not fix (the Trakt account already
+    belonging to another login here) left the notice up no matter how many times
+    the operator re-ran the flow. This is the same operation on its own, with the
+    reason drawn where the notice is.
     """
     admin = await auth.current_user(request)
     linked, link_error = await trakt_routes.adopt_app_token(admin.user_id, load_settings())
-    if not linked:
-        return JSONResponse({"ok": False, "error": link_error}, status_code=409)
-    return JSONResponse({"ok": True})
+    return templates.TemplateResponse(request, RECONNECT_TEMPLATE, {
+        "request": request,
+        "reconnect_shown": not linked,
+        "reconnect_error": None if linked else link_error,
+    })
 
 
-@guard.post("/api/auth/refresh", AuthLevel.ADMIN)
-async def auth_refresh():
-    """Manual "refresh now" button — uses whatever is already saved (the
+@guard.post("/settings/trakt/refresh", AuthLevel.ADMIN)
+async def trakt_refresh(request: Request):
+    """The manual "refresh now" button — uses whatever is already saved (the
     device-auth flow is what actually seeds client_secret/refresh_token)."""
     settings = load_settings()
     if not (settings.trakt_client_id and settings.trakt_client_secret and settings.trakt_refresh_token):
-        return JSONResponse({"ok": False, "error": "Not authorized yet — use 'Authorize with Trakt' first."}, status_code=400)
+        return _token(request, settings,
+                      "Not authorized yet — use “Authorize with Trakt” first.", ok=False)
     try:
         token = await trakt_auth.refresh_access_token(
             settings.trakt_client_id, settings.trakt_client_secret, settings.trakt_refresh_token,
         )
     except (httpx.HTTPError, trakt_auth.TraktRateLimitError) as exc:
-        return JSONResponse({"ok": False, "error": f"Refresh failed: {exc}"}, status_code=502)
+        return _token(request, settings, f"Refresh failed: {exc}", ok=False)
     settings = await _apply_new_trakt_token(settings, token)
-    return JSONResponse({"ok": True, "expires_at": settings.trakt_token_expires_at})
+    return _token(request, settings, "Trakt token refreshed.", ok=True)
+
+
+def _token(request: Request, settings: Settings, message: str, *, ok: bool):
+    return templates.TemplateResponse(request, TOKEN_TEMPLATE, {
+        "request": request, "token_status": token_status(settings),
+        "token_message": message, "token_ok": ok,
+    })

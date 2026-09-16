@@ -112,17 +112,19 @@ class HandEditedSettingsFileTests(SettingsFileTestCase):
 
 
 class SecretClearingTests(SettingsFileTestCase):
-    """The behaviour that must survive the fix: an operator emptying a credential
-    on the Settings screen still unsets it."""
+    """The behaviour that must survive the fix: an operator clearing a credential
+    on the Settings panel still unsets it."""
+
+    PANEL = "/settings/fragments/panel"
 
     def setUp(self):
         super().setUp()
         self.store_credentials()
         self.sign_in_as(self.make_user("admin_user", is_admin=True, calendar_approved=True))
 
-    def test_an_explicit_null_from_the_settings_screen_clears_one_secret(self):
-        resp = self.client.post("/api/settings", json={"trakt_access_token": None})
-        self.assertEqual(resp.status_code, 200, resp.text)
+    def test_a_ticked_clear_box_on_the_settings_panel_clears_one_secret(self):
+        resp = self.client.post("/settings", json={"clear:trakt_access_token": "1"})
+        self.assertEqual(resp.status_code, 204, resp.text)
         stored = load_settings()
         self.assertEqual(stored.trakt_access_token, "")
         # Only the one that was asked for: the others were not in the payload.
@@ -130,23 +132,23 @@ class SecretClearingTests(SettingsFileTestCase):
         self.assertEqual(stored.sonarr_api_key, STORED_SECRETS["sonarr_api_key"])
 
     def test_a_cleared_secret_leaves_no_row_behind(self):
-        """`secrets_set` is derived from the value, so a row holding "" would
-        report the credential as still set."""
-        self.client.post("/api/settings", json={"trakt_access_token": None})
-        payload = self.client.get("/api/settings").json()
-        self.assertIs(payload["secrets_set"]["trakt_access_token"], False)
-        self.assertIs(payload["secrets_set"]["trakt_client_secret"], True)
+        """Whether a credential is set is derived from the value, so a row holding
+        "" would report the credential as still set."""
+        self.client.post("/settings", json={"clear:trakt_access_token": "1"})
+        body = self.client.get(self.PANEL).text
+        self.assertNotIn('name="clear:trakt_access_token"', body)
+        self.assertIn('name="clear:trakt_client_secret"', body)
 
     def test_a_blank_field_still_means_leave_it_alone(self):
-        resp = self.client.post("/api/settings", json={"trakt_access_token": ""})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        resp = self.client.post("/settings", json={"trakt_access_token": ""})
+        self.assertEqual(resp.status_code, 204, resp.text)
         self.assertEqual(load_settings().trakt_access_token,
                          STORED_SECRETS["trakt_access_token"])
 
-    def test_the_settings_endpoint_still_returns_no_credential_values(self):
-        """Credentials are write-only over this API — only a flag saying whether
-        each one has a value."""
-        body = self.client.get("/api/settings").text
+    def test_the_settings_panel_still_draws_no_credential_values(self):
+        """Credentials are write-only — the panel says whether each one has a
+        value and never what it is."""
+        body = self.client.get(self.PANEL).text
         for value in STORED_SECRETS.values():
             self.assertNotIn(value, body)
 
@@ -274,8 +276,8 @@ class PublicBaseUrlOverrideTests(SettingsFileTestCase):
         variable, and the instance runs on what they saved."""
         self.sign_in_as(self.make_user("admin_user", is_admin=True, calendar_approved=True))
         with self.with_env(ORIGIN):
-            resp = self.client.post("/api/settings", json={"public_base_url": ORIGIN})
-            self.assertEqual(resp.status_code, 200, resp.text)
+            resp = self.client.post("/settings", json={"public_base_url": ORIGIN})
+            self.assertEqual(resp.status_code, 204, resp.text)
         self.assertEqual(load_settings().public_base_url, ORIGIN)
 
 
@@ -311,25 +313,28 @@ class PublicBaseUrlOverrideIsAnnouncedTests(SettingsFileTestCase):
             config.warn_if_public_base_url_overridden()
         warned.assert_not_called()
 
-    def test_the_settings_screen_is_told_the_environment_is_overriding_the_field(self):
+    OVERRIDDEN = "PUBLIC_BASE_URL environment variable is set and it overrides"
+
+    def test_the_settings_panel_is_told_the_environment_is_overriding_the_field(self):
+        """And it shows the value IN FORCE, so saving it is how the rescue is made
+        permanent before the variable is dropped."""
         self.sign_in_as(self.make_user("admin_user", is_admin=True, calendar_approved=True))
         with self.with_env(ORIGIN):
-            payload = self.client.get("/api/settings").json()
-        self.assertIs(payload["public_base_url_overridden"], True)
-        self.assertEqual(payload["public_base_url"], ORIGIN)
+            body = self.client.get("/settings/fragments/panel").text
+        self.assertIn(self.OVERRIDDEN, body)
+        self.assertIn(f'value="{ORIGIN}"', body)
 
-    def test_the_flag_is_false_with_no_variable_set(self):
+    def test_nothing_is_said_with_no_variable_set(self):
         self.sign_in_as(self.make_user("admin_user", is_admin=True, calendar_approved=True))
-        payload = self.client.get("/api/settings").json()
-        self.assertIs(payload["public_base_url_overridden"], False)
+        self.assertNotIn(self.OVERRIDDEN, self.client.get("/settings/fragments/panel").text)
 
-    def test_the_flag_adds_no_credential_to_the_response(self):
-        """The one route that must never leak a value: widening it by a boolean is
-        fine, widening it by anything else is not."""
+    def test_the_sentence_adds_no_credential_to_the_panel(self):
+        """The one surface that must never leak a value: widening it by a
+        sentence is fine, widening it by anything else is not."""
         save_settings(Settings(public_base_url=WRONG_STORED_URL, **STORED_SECRETS))
         self.sign_in_as(self.make_user("admin_user", is_admin=True, calendar_approved=True))
         with self.with_env(ORIGIN):
-            body = self.client.get("/api/settings").text
+            body = self.client.get("/settings/fragments/panel").text
         for value in STORED_SECRETS.values():
             self.assertNotIn(value, body)
 

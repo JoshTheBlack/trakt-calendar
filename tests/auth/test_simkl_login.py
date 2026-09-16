@@ -668,14 +668,14 @@ class ProviderButtonTests(SimklOAuthTestCase):
         self.assertIn('data-unlink="simkl"', body)
         self.assertNotIn('href="/auth/simkl/link"', body)
 
-    def test_the_settings_response_reports_the_redirect_uri_to_register(self):
+    def test_the_settings_panel_shows_the_redirect_uri_to_register(self):
         """Simkl compares the registered redirect URI byte for byte and offers no
         device-code fallback for an operator who gets it wrong, so the exact
         value has to be readable off the screen."""
         self.sign_in_as(self.admin_id)
-        data = self.client.get("/api/settings").json()
-        self.assertTrue(data["simkl_login_configured"])
-        self.assertEqual(data["simkl_redirect_uri"], f"{ORIGIN}/auth/simkl/callback")
+        body = self.client.get("/settings/fragments/panel").text
+        self.assertIn(f'value="{ORIGIN}/auth/simkl/callback"', body)
+        self.assertIn('data-copy="#s_simkl_redirect_uri"', body)
 
     def test_the_registration_page_carries_the_invite_into_the_provider_flow(self):
         self.sign_out()

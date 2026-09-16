@@ -1,0 +1,23 @@
+{# ABOVE THE TABS, NOT INSIDE THE TRAKT ONE: this is an alert about the instance's
+   state, and an alert that only shows on the tab you happen to be standing on is
+   an alert you can miss. Two ways out, because they fail differently — "Link it"
+   retries the saved token and SAYS why if it can't, while the OAuth link is the
+   way through when the token is the problem.
+
+   ALWAYS IN THE PANEL, hidden when there is nothing to ask, so that the answer to
+   "Link it" and an authorization's out-of-band copy both have an element to
+   replace. #}
+<div id="traktReconnect" class="field"{% if oob %} hx-swap-oob="true"{% endif %}{% if not reconnect_shown %} hidden{% endif %}>
+    <p class="auth-notice">
+        This instance's saved Trakt token isn't linked to your login yet, so anything that
+        reads your own Trakt history can't run.
+    </p>
+    <div class="auth-notice-actions">
+        <button type="button" class="btn-ghost small"
+                hx-post="/settings/trakt/adopt" hx-json-enc
+                hx-target="#traktReconnect" hx-swap="outerHTML">🔗 Link it to my account</button>
+        {# Leaves the app — see the same link on the sign-in page. #}
+        <a class="btn-ghost small" href="/auth/trakt/link" hx-boost="false">Reconnect with Trakt</a>
+    </div>
+    {% if reconnect_error %}<span class="hint warn" role="alert">{{ reconnect_error }}</span>{% endif %}
+</div>

@@ -731,6 +731,17 @@ class InstanceFloorTests(CacheTestCase):
             "title": "Excluded", "certification": "R", "ids": {"slug": "excluded-r", "trakt": 2}}}
         self.assertEqual(await self._fill(movies, [kept, excluded]), {"kept-pg"})
 
+    async def test_a_network_excluded_by_settings_never_survives_the_fetch(self):
+        """The floor's fourth field, held to the same promise as the other three:
+        it is judged on the RECORD's network, which survives normalization, so a
+        floored network never reaches storage either."""
+        self.settings.network_filter = ["-Netflix"]
+        kept = _entry("kept-hbo", "2026-07-06T12:00:00Z")
+        kept["show"]["network"] = "HBO"
+        excluded = _entry("excluded-netflix", "2026-07-06T12:00:00Z")
+        excluded["show"]["network"] = "Netflix"
+        self.assertEqual(await self._fill(SHOWS, [kept, excluded]), {"kept-hbo"})
+
     async def test_floor_excluded_shows_stay_excluded_once_the_window_is_stored(self):
         """The end-to-end promise: a floor-excluded show is absent from the
         CACHED window a later read_month() call sees, not merely filtered out on
@@ -749,6 +760,132 @@ class InstanceFloorTests(CacheTestCase):
         window, _ = await calendar_cache.read_cached_window(SHOWS.key, date(2026, 7, 6))
         cached_slugs = {g["by_source"]["trakt"]["id"] for g in window.groups}
         self.assertEqual(cached_slugs, {"kept-drama"})
+
+
+class InstanceFloorAtReadTests(CacheTestCase):
+    """The other half of the floor, and the half an operator actually sees: a
+    window ALREADY STORED when they change their mind.
+
+    The fill's floor (above) is a HARD, pre-cache exclusion and that is what
+    makes "no per-account filter can bring it back" true — but the fill was the
+    only moment it acted, so tightening the floor did nothing to a month already
+    cached until its TTL ran out. Reported from a real instance: the certification
+    chips were set and the calendar did not move. It is applied at READ as well
+    now, before the viewer's own specs, which is the shape the instance's
+    "include Simkl results" switch already has for the same reason
+    (SimklCalendarSwitchAtReadTests) — one decision taken for every viewer may
+    narrow the shared rows, while a viewer's own may not.
+    """
+
+    WINDOW = date(2026, 7, 6)
+    DAY = date(2026, 7, 7)
+    AIR = "2026-07-07T12:00:00Z"
+
+    def settings_with(self, **floor):
+        return Settings(trakt_client_id="cid", **floor)
+
+    async def _store(self, records, *, now=1000):
+        await calendar_cache.store_window(
+            SHOWS.key, self.WINDOW, records, 600, now, sources=["trakt"], asked=["trakt"])
+
+    async def _store_entries(self, entries, *, now=1000):
+        await self._store(calendar_records(entries, SHOWS), now=now)
+
+    async def _read(self, settings, *, now=1000, **specs):
+        grouped, meta = await calendar_cache.assemble_range(
+            SHOWS, settings, tz=ZoneInfo("UTC"), start_date=self.DAY, end_date=self.DAY,
+            now=now, allow_fetch=False, **specs)
+        return sorted(i.id for g in grouped for i in g["items"]), meta
+
+    def _two_genres(self):
+        return [_entry("drama-one", self.AIR, genres=["drama"]),
+                _entry("anime-one", self.AIR, genres=["anime"])]
+
+    async def test_tightening_the_floor_reaches_a_window_already_stored(self):
+        """The reported defect: the floor was set and the stored month kept
+        showing what it excluded."""
+        await self._store_entries(self._two_genres())
+        ids, _meta = await self._read(self.settings_with())
+        self.assertEqual(ids, ["anime-one", "drama-one"])
+        ids, _meta = await self._read(self.settings_with(genres="-anime"))
+        self.assertEqual(ids, ["drama-one"])
+
+    async def test_a_certification_floor_reaches_one_too(self):
+        """The dimension the chips write, and the one that was reported."""
+        mature = _entry("mature-one", self.AIR)
+        mature["show"]["certification"] = "TV-MA"
+        mild = _entry("mild-one", self.AIR)
+        mild["show"]["certification"] = "TV-14"
+        await self._store_entries([mature, mild])
+        ids, _meta = await self._read(self.settings_with(show_certifications="-tv-ma"))
+        self.assertEqual(ids, ["mild-one"])
+
+    async def test_the_movie_field_is_not_read_for_a_show_calendar(self):
+        """The two vocabularies do not overlap, so the wrong one would either
+        match nothing or match by accident."""
+        mature = _entry("mature-one", self.AIR)
+        mature["show"]["certification"] = "TV-MA"
+        await self._store_entries([mature])
+        ids, _meta = await self._read(self.settings_with(movie_certifications="-tv-ma"))
+        self.assertEqual(ids, ["mature-one"])
+
+    async def test_loosening_it_brings_the_title_back_without_a_refetch(self):
+        """Nothing is rewritten by a floor change — the rows are untouched — so
+        undoing an exclusion shows the title again from the same window."""
+        await self._store_entries(self._two_genres())
+        ids, _meta = await self._read(self.settings_with(genres="-anime"))
+        self.assertEqual(ids, ["drama-one"])
+        ids, _meta = await self._read(self.settings_with())
+        self.assertEqual(ids, ["anime-one", "drama-one"])
+        window, _ = await calendar_cache.read_cached_window(SHOWS.key, self.WINDOW)
+        self.assertEqual({g["by_source"]["trakt"]["id"] for g in window.groups},
+                         {"anime-one", "drama-one"})
+
+    async def test_the_floor_is_not_counted_as_this_viewer_s_own_filtering(self):
+        """`meta['filtered']` is what the page offers a viewer a way back from,
+        and nobody can undo the operator's floor from a filters panel."""
+        await self._store_entries(self._two_genres())
+        _ids, meta = await self._read(self.settings_with(genres="-anime"))
+        self.assertEqual(meta["filtered"], 0)
+        _ids, meta = await self._read(self.settings_with(), genres="-anime")
+        self.assertEqual(meta["filtered"], 1)
+
+    async def test_the_viewer_narrows_what_the_floor_left(self):
+        """Two answers to one question, applied in turn: the floor first, then
+        this viewer's own — neither merged into the other."""
+        await self._store_entries(self._two_genres() + [_entry("doc-one", self.AIR, genres=["documentary"])])
+        ids, _meta = await self._read(self.settings_with(genres="-anime"), genres="-documentary")
+        self.assertEqual(ids, ["drama-one"])
+
+    async def test_a_record_enrichment_has_not_answered_for_survives_the_read_floor(self):
+        """The fill's floor judges what it is given; a read cannot, or a title
+        whose genres are simply not known yet would be hidden for something
+        nobody has established about it (app/calendar/enrich.py's rule). The
+        stored row is untouched, so it is judged the moment enrichment lands."""
+        unenriched = base.Record(
+            source=base.Source.SIMKL, media="show", id="not-yet",
+            ids={"simkl": "not-yet", "tmdb": 8210},
+            detail_url="https://simkl.test/not-yet", title="Not Yet",
+            air_ts=datetime(2026, 7, 7, 12, tzinfo=timezone.utc).timestamp(),
+            season=1, episode_number=1, episode_label="S01E01", enriched=False)
+        await self._store(calendar_records([_entry("drama-one", self.AIR, genres=["drama"])], SHOWS)
+                          + [unenriched])
+        ids, _meta = await self._read(self.settings_with(genres="-anime"))
+        self.assertEqual(ids, ["drama-one", "not-yet"])
+
+    async def test_the_operators_network_list_narrows_a_stored_window(self):
+        """The floor's fourth field, which reached only the public share pages:
+        a network exists on a rendered item, so this is the only place it can be
+        applied at all."""
+        hbo = _entry("hbo-one", self.AIR)
+        hbo["show"]["network"] = "HBO"
+        other = _entry("other-one", self.AIR)
+        other["show"]["network"] = "Netflix"
+        await self._store_entries([hbo, other])
+        ids, _meta = await self._read(self.settings_with(network_filter=["HBO"]))
+        self.assertEqual(ids, ["hbo-one"])
+        _ids, meta = await self._read(self.settings_with(network_filter=["HBO"]))
+        self.assertEqual(meta["filtered"], 0)
 
 
 class WindowOverrunTests(CacheTestCase):

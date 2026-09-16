@@ -192,6 +192,12 @@ function closeModal(id) {
     modal.querySelectorAll('video, audio').forEach(media => {
         try { media.pause(); } catch (e) { /* a detached element cannot pause */ }
     });
+    // AN OVERLAY THE SERVER DREW FOR ONE OPENING GOES WHEN IT CLOSES
+    // (`data-modal-discard`: Settings, Share). The next opening fetches it again,
+    // so there is nothing to keep — and removing it is what stops anything it was
+    // doing: an htmx `every` poll clears itself only once its element has left
+    // the page, and a hidden overlay has not.
+    if (modal.hasAttribute('data-modal-discard')) modal.remove();
 }
 
 // EVERY OVERLAY THAT IS OPEN, CLOSED PROPERLY. Driven off the class rather than a

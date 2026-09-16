@@ -1,0 +1,148 @@
+{# THE AT-REST ENCRYPTION SECTION, drawn from app/auth/encryption_routes.py's
+   `panel_state()` — the flow's own reading of the phase, the key's health and the
+   stored rows — and redrawn whole by every action it offers.
+
+   WHICH STATE WINS, IN ORDER, and the order is the flow's rules rather than this
+   template's taste:
+     - A KEY THAT IS MISSING OR WRONG outranks everything, because nothing else on
+       offer is safe while it is: a re-save would overwrite values the right key
+       could still recover. The way out is the recovery page.
+     - `phase` IS A ONE-WAY RATCHET. Once a backfill has run it reads `encrypted`
+       for ever, even when something written since (a relink while the key was
+       unavailable) is stored in the clear — so `needs_reseal`, read off the rows,
+       is asked before the ratchet is believed.
+     - A VALID KEY IN THE ENVIRONMENT means there is nothing to restart for.
+     - A PENDING PHASE WITHOUT ONE is waiting for the operator's restart.
+     - Everything else is the first offer.
+
+   THE HEADING SAYS THE STATE, not the feature. "Secret encryption at rest" read as
+   true whether or not anything was encrypted, which is backwards for a security
+   control — so the plaintext case cannot be mistaken for the encrypted one.
+
+   A GENERATED KEY IS DRAWN ONLY IN THE ANSWER THAT GENERATED IT
+   (`encryption_reveal`), and nothing stores it, so no later answer can draw it
+   again. #}
+{% import '_confirm.html' as confirm_box %}
+{% set state = encryption %}
+{% set env = state.env_var %}
+
+{% macro enc_action(path, label, vals=none) %}
+<button type="button" class="btn-ghost small"
+        hx-post="/admin/encryption/{{ path }}" hx-json-enc
+        {% if vals %}hx-vals='{{ vals | tojson }}'{% endif %}
+        hx-target="#encryptionPanel" hx-swap="outerHTML">{{ label }}</button>
+{% endmacro %}
+
+{% macro encrypt_now() %}
+{% call confirm_box.ask('encrypt-secrets',
+        'Encrypt every stored secret and linked token now? Make sure you have saved the key first.',
+        'Encrypt secrets now', danger=true) %}
+<button type="button" class="btn-primary small"
+        hx-post="/admin/encryption/encrypt" hx-json-enc
+        hx-target="#encryptionPanel" hx-swap="outerHTML">Encrypt</button>
+{% endcall %}
+{% endmacro %}
+
+<div id="encryptionPanel" class="encryption-panel">
+    {% if state.health == 'key_mismatch' %}
+    <div class="settings-section enc-plain">⚠️ Secrets encrypted under a different key</div>
+    {% elif state.health == 'key_missing' %}
+    <div class="settings-section enc-plain">⚠️ Secrets encrypted, key missing</div>
+    {% elif state.phase == 'encrypted' and state.needs_reseal %}
+    <div class="settings-section enc-plain">⚠️ Some secrets are unencrypted</div>
+    {% elif state.phase == 'encrypted' %}
+    <div class="settings-section enc-encrypted">🔒 Secrets encrypted at rest</div>
+    {% else %}
+    <div class="settings-section enc-plain">⚠️ Secrets are stored in plaintext</div>
+    {% endif %}
+
+    <div class="field">
+    {% if encryption_reveal %}
+        {% if encryption_reveal.key %}
+        <p class="hint"><strong>Save this key now — it is shown once and never again.</strong>
+            If you lose it, the encrypted secrets are unrecoverable.</p>
+        <div class="share-link-box">
+            <input type="text" id="encryptionKey" readonly value="{{ encryption_reveal.key }}"
+                   aria-label="The generated encryption key">
+            <button type="button" class="btn-ghost small" data-copy="#encryptionKey">Copy</button>
+        </div>
+        {% else %}
+        {% set key_command = 'python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"' %}
+        <p class="hint">Generate a key with:</p>
+        <div class="share-link-box">
+            <input type="text" id="encryptionKeyCommand" readonly value="{{ key_command }}"
+                   aria-label="A command that generates a key">
+            <button type="button" class="btn-ghost small" data-copy="#encryptionKeyCommand">Copy</button>
+        </div>
+        {% endif %}
+        <p class="hint">Set it as <code>{{ env }}</code> in your environment (env file, Docker
+            <code>-e</code>, or compose <code>environment:</code>) and restart the app. Then:</p>
+        <div class="auth-notice-actions">
+            {{ enc_action('verify', '↻ I’ve set the key and restarted — check') }}
+            {{ enc_action('opt-out', 'Not now') }}
+        </div>
+
+    {% elif state.health in ('key_missing', 'key_mismatch') %}
+        {% if state.health == 'key_missing' %}
+        <p class="hint">⚠️ Secrets are encrypted, but <code>{{ env }}</code> is not set — they are
+            unreadable but intact. Restore the key and restart. Do <strong>not</strong> re-save
+            credentials or re-link while it is missing: that overwrites the encrypted values.</p>
+        {% else %}
+        <p class="hint">⚠️ The key in <code>{{ env }}</code> does not open the stored secrets.
+            Put the original key back and restart, or recover.</p>
+        {% endif %}
+        <div class="auth-notice-actions">
+            {# A real button rather than prose with a link in it: a bare <a> renders
+               as unstyled text under the global reset, and this is the one way out. #}
+            <a class="btn-ghost small" href="/admin/encryption/recovery">Lost the key for good? Recover here →</a>
+        </div>
+
+    {% elif state.phase == 'encrypted' and state.needs_reseal %}
+        <p class="hint">Everything was sealed once, but at least one secret or linked token was
+            written since — most likely while <code>{{ env }}</code> was briefly unavailable — and
+            is stored in the clear right now. Encrypt again to seal just that value; anything
+            already sealed is left untouched.</p>
+        <div class="auth-notice-actions">{{ encrypt_now() }}</div>
+
+    {% elif state.phase == 'encrypted' %}
+        <p class="hint">🔒 Stored secrets are encrypted at rest.</p>
+
+    {% elif state.key_valid %}
+        {% if state.phase == 'opted_out' %}
+        {# Already declined once with this key present, so this is the resting
+           state — one action, rather than repeating the same "Not now" offer that
+           looked like it had done nothing. #}
+        <p class="hint">Not encrypted. A valid key is set in <code>{{ env }}</code> — turn
+            encryption on whenever you’re ready.</p>
+        <div class="auth-notice-actions">{{ encrypt_now() }}</div>
+        {% else %}
+        <p class="hint">A valid key is set in <code>{{ env }}</code>. Encrypt the stored secrets
+            now — no restart needed.</p>
+        <div class="auth-notice-actions">
+            {{ encrypt_now() }}
+            {% if state.phase != 'pending_encrypt' %}{{ enc_action('opt-out', 'Not now') }}{% endif %}
+        </div>
+        {% endif %}
+
+    {% elif state.phase in ('pending_key', 'pending_encrypt') %}
+        <p class="hint">Waiting for the key. Set <code>{{ env }}</code> in your environment (env,
+            Docker, or compose) and restart the app, then check again.</p>
+        <div class="auth-notice-actions">
+            {{ enc_action('verify', '↻ Check for the key') }}
+            {{ enc_action('opt-out', 'Not now') }}
+        </div>
+
+    {% else %}
+        <p class="hint">Encrypt the stored credentials and linked tokens so a leaked database file
+            (a backup or snapshot) does not hand them over. The key lives in your environment,
+            never in the database. <strong>You must save the key and never lose it</strong> —
+            losing it means re-linking Trakt and re-entering every API key.</p>
+        <div class="auth-notice-actions">
+            {{ enc_action('enable', 'Generate a key for me', vals={'generate': true}) }}
+            {{ enc_action('enable', 'I’ll set my own key', vals={'generate': false}) }}
+            {% if state.phase == 'none' %}{{ enc_action('opt-out', 'Not now') }}{% endif %}
+        </div>
+    {% endif %}
+    {% if encryption_error %}<p class="hint err" role="alert">{{ encryption_error }}</p>{% endif %}
+    </div>
+</div>

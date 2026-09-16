@@ -19,19 +19,15 @@ import logging
 import time
 from typing import Any, Mapping, NamedTuple
 
-import httpx
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
-
 from . import arr, seer
-from .. import authz, perftrace
-from ..auth import AuthLevel
+from .. import perftrace
 from ..config import load_settings
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
-guard = authz.Guard(router)
+# NO ROUTER. The last route this module served — a service's profiles and folders
+# for the Settings panel — is the panel's own now (app/settings_routes.py), and an
+# empty router mounted into the app is an undeclared route to the audit.
 
 # In-memory Sonarr/Radarr health, refreshed by a background heartbeat + on save.
 INTEGRATION_HEALTH: dict[str, dict] = {
@@ -253,29 +249,9 @@ class LibraryView:
 # those routes lost their only caller and went with the poll.
 
 
-@guard.post("/api/integrations/options", AuthLevel.ADMIN)
-async def integrations_options(request: Request):
-    """Quality profiles + root folders for the Settings dropdowns. Accepts the URL +
-    API key from the (possibly unsaved) form, falling back to saved settings."""
-    data = await authz.json_body(request)
-    kind = data.get("kind")
-    if kind not in ("sonarr", "radarr"):
-        return JSONResponse({"ok": False, "error": "Unknown service"}, status_code=400)
-    url = (data.get("url") or "").strip()
-    key = (data.get("api_key") or "").strip()
-    if not (url and key):  # fall back to what's already saved
-        url, key = arr.credentials(kind, load_settings())
-    if not (url and key):
-        return JSONResponse({"ok": False, "error": "Enter the URL and API key first."}, status_code=400)
-    try:
-        opts = await arr.fetch_options(kind, url, key)
-    # The four things an unreachable or wrong-service instance actually raises:
-    # a transport failure, a body that is not JSON, and — when the URL turns out
-    # to be some other web app answering 200 with JSON of its own — a profile
-    # list whose entries have neither the keys nor the shape Sonarr's do.
-    except (httpx.HTTPError, ValueError, KeyError, TypeError):
-        return JSONResponse({"ok": False, "error": f"Couldn't reach {kind.title()} at {url} — check the URL and API key."}, status_code=502)
-    return JSONResponse({"ok": True, **opts})
+# NOR DOES ONE HAND OUT A SERVICE'S PROFILES AND FOLDERS. Those are the Settings
+# panel's <select>s, and the panel's own route draws them (app/settings_routes.py's
+# `arr_options`) from `arr.fetch_options`, which is still this package's.
 
 
 # NO ROUTE HERE ADDS A TITLE EITHER, and the reason is the same shape as the one

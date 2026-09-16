@@ -176,6 +176,24 @@ async def set(key: str, value, retain_seconds: int | None = RETAIN_SECONDS) -> N
         pass
 
 
+async def delete(key: str) -> None:
+    """Remove `key` now. Best-effort, like `set`.
+
+    FOR A VALUE THAT MUST NOT OUTLIVE THE MOMENT IT DESCRIBES. Everything else in
+    this table is a copy of somebody else's answer, and leaving it for the sweep
+    costs nothing but bytes. A short-lived handshake is different: once it has
+    ended its row describes nothing, and the sweep's grace period would keep it
+    for months.
+    """
+    def _work(conn: db.Connection) -> None:
+        conn.execute("DELETE FROM api_cache WHERE cache_key = ?", (key,))
+
+    try:
+        await db.run(_work)
+    except db.DatabaseError:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # conditional-GET validators for the files a source publishes
 # ---------------------------------------------------------------------------

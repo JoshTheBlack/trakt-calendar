@@ -6,8 +6,8 @@ EVERY ROUTE DECLARES EXACTLY ONE ACCESS LEVEL, at the point it is registered:
 
     guard = Guard(app)            # or Guard(some_router)
 
-    @guard.get("/api/settings", AuthLevel.ADMIN)
-    async def get_settings(...): ...
+    @guard.get("/settings/fragments/panel", AuthLevel.ADMIN)
+    async def settings_panel(...): ...
 
     @guard.post("/api/state", AuthLevel.CALENDAR_APPROVED)
     async def post_state(...): ...
