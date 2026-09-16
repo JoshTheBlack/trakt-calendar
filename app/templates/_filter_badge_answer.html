@@ -1,0 +1,18 @@
+{# WHAT A BADGE PRESS IS ANSWERED WITH: what is now STORED about that token, for
+   every card showing it, plus the sentence.
+
+   IT IS ONE EMPTY ELEMENT. The three buttons do not change and neither does the
+   badge's face — only what this viewer has said about the token does, and
+   _filter_badge.html's `mark` is the whole of that. Addressed out of band rather
+   than swapped, which is the shape a library add uses (_library_answer.html) and
+   for the same reason: one genre is on a dozen cards and one press is a statement
+   about all of them, so the badge that was pressed is not special and nothing
+   here names it.
+
+   A REFUSAL ANSWERS WITH THE SAME MARKUP, which costs nothing now that the
+   controls are buttons: the browser recorded no press of its own, so the badge is
+   whatever the server last said and a refusal simply says it again. #}
+{% import '_filter_badge.html' as fb with context %}
+{% import '_toast.html' as toasts %}
+{{ fb.mark(dimension, token, media, oob=true) }}
+{{ toasts.flash(message, ok) }}

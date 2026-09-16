@@ -467,7 +467,7 @@ class AddAllAddsTheWholeMonthTests(_LibraryTestCase):
         filtered = _entry("dramatic", "Dramatic Show", "2026-07-16T21:00:00Z")
         filtered["show"]["ids"]["tvdb"] = 999
         filtered["show"]["genres"] = ["drama"]
-        self.client.post("/api/me/filters",
+        self.client.post("/calendar/filters",
                          json={vocab.field_name(vocab.TV_GENRES, "drama"): "exclude"})
         with self._month(filtered):
             self.client.post(self.URL, json={"commit": True})

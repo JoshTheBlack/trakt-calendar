@@ -1,0 +1,17 @@
+{# WHAT A SAVED FILTER ANSWERS WITH: the calendar, redrawn.
+
+   THE SWAP IS THE MONTH AND EVERYTHING ELSE RIDES OUT OF BAND, because a filter
+   decides exactly one region plus two marks in the toolbar above it. This used to
+   be `window.location.reload()` — the same rebuild of the same month, plus a
+   round trip for the shell, the stylesheet, the fonts and eight scripts, and a
+   scroll position thrown away.
+
+   THE PANEL CLOSES BY LEAVING THE PAGE. Its slot is emptied here rather than by
+   anything being told to close it, which is the same act `data-modal-discard`
+   performs on a dismissal — so a save and an Escape leave the page in the same
+   state, and the next opening asks the server for what is now stored. #}
+{% import '_calendar_marks.html' as marks with context %}
+{% include "_calendar_body.html" %}
+{{ marks.meta(oob=true) }}
+{{ marks.button(oob=true) }}
+<div id="filtersSlot" hx-swap-oob="innerHTML"></div>

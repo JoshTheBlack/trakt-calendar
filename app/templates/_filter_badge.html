@@ -1,16 +1,57 @@
-{# A card badge that offers to filter on itself.
+{# A card badge that offers to filter on itself, and says what it is already
+   filtering.
 
    THE DISCLOSURE IS <details>, NOT SCRIPT. Opening and closing, the keyboard, the
-   focus behaviour and the ARIA are the browser's, which is why this is markup and
-   a stylesheet rather than a widget: the only JavaScript left in the feature is
-   the part that cannot be declarative (writing the preference, which must be an
-   application/json request — see app/authz.py's request_shape_guard).
+   focus behaviour and the ARIA are the browser's. ONE OFFER OPEN AT A TIME is the
+   browser's too: every badge on the page shares one `name`, which is HTML's own
+   exclusive-accordion grouping and does exactly what a capture listener for the
+   `toggle` event used to do here.
 
-   THE CHOICE IS A RADIO PAIR, so the browser holds it and the stylesheet can see
-   it: `details:has(:checked)` is what colours the badge, with no state kept
-   anywhere else and nothing to keep in step. The name carries the dimension and
-   the token so two badges for the same token on different cards are ONE group and
-   cannot disagree.
+   THE CHOICE IS THE SERVER'S AND ONE EMPTY ELEMENT SAYS SO. `data-mode` on
+   `.fmark` carries what is stored, and `:has()` colours the badge and underlines
+   the chosen button from it; the three controls are plain buttons that post
+   themselves. One press sends one fact —
+   which dimension, which token, which way — and the MERGE is the server's,
+   because what a spec is (the leading '-', which dimensions fold case, that
+   networks are a list) is app/calendar/filter.py's, and restating any of it here
+   would be that format written twice in two languages.
+
+   IT WAS A RADIO GROUP AND THAT COULD NOT WORK, which is worth writing down
+   because it looked right for a long time. All three radios shared a name built
+   from the dimension and the token, so two badges for the same genre on two cards
+   were ONE group — and a group holds ONE checked radio in the whole document. The
+   moment the server started drawing the stored answer onto every badge, the
+   browser kept the last one and silently unchecked the rest: MEASURED, two drama
+   badges, one coloured. Making the name unique per badge is not available either,
+   because the answer that redraws them all would hand them one name again. A
+   button has no group to belong to, so the state can simply be what the server
+   last said it was.
+
+   THE ANSWER IS ONE EMPTY ELEMENT, addressed out of band by the key the badge
+   already carries, so a genre pressed on one card is marked on the twelve other
+   cards showing it — the shape a library add already uses
+   (_library_answer.html). Nothing else has to be redrawn: the three buttons do
+   not change, and neither does the face.
+
+   THE MARK LIVES INSIDE THE <summary>, AND THAT PLACEMENT IS A MEASURED DEFENCE
+   RATHER THAN TIDINESS. It was inside the offer first, which reads better and
+   does not work: a closed <details> hides its content, and FIREFOX 155 DOES NOT
+   RE-RESOLVE AN ANCESTOR'S `:has()` WHEN AN ELEMENT INSIDE THAT HIDDEN CONTENT
+   IS REPLACED. Measured, two cards showing one genre: the DOM matched on both
+   (`el.matches(':has(…)')` was true) and only the badge whose offer was OPEN
+   changed colour; opening the other made it catch up. Chromium 153 got both
+   right, which is exactly the shape this codebase does not ship — so the mark
+   moved to the one element a closed <details> still renders.
+
+   IT IS ALSO WHY THE FACE NEVER MOVES. Replacing the whole badge would mean the
+   answer drawing the network mark's logo, whose address carries the TMDB id of
+   the card it is on, and one answer cannot draw the faces of a dozen different
+   cards. An empty element carries no face at all.
+
+   `mode` IS DRAWN FROM STORAGE ON EVERY RENDER, so a reload and an answer agree.
+   Before that it was drawn blank and lit only by the press, which meant a badge
+   said "filtered out" until the next reload and then stopped saying it while the
+   filter went on applying.
 
    `token` IS WHAT THE FILTER MATCHES, WHICH IS NOT ALWAYS WHAT THE BADGE SAYS. A
    genre reads "Game Show" and matches as "game-show"; a network's case is
@@ -24,22 +65,29 @@
    positioning onto the wrapper — so the caller says so and the stylesheet puts
    the wrapper where the badge used to be. Everything else is an ordinary chip in
    a row and passes nothing. #}
-{% macro badge(dimension, token, label, classes='', wrap='') %}
-<details class="filter-badge {{ wrap }}" data-filter="{{ dimension }}" data-token="{{ token }}">
-    <summary class="{{ classes }}" title="Filter on {{ label }}">{{ caller() }}</summary>
+{# WHAT THIS VIEWER HAS ALREADY SAID ABOUT THIS TOKEN. Empty, zero-width, and the
+   only thing a press changes — the header says why it sits inside the summary
+   rather than beside the buttons it describes. The selector it is addressed by
+   holds no space, because htmx splits `hx-swap-oob` into style and selector only
+   when the value has none: measured, a descendant selector matched nothing at all
+   and swapped nothing, silently. #}
+{% macro mark(dimension, token, media, oob=false) %}
+{%- set key = badge_modes.key(dimension, token) -%}
+<i class="fmark" data-fkey="{{ key }}" aria-hidden="true"
+   data-mode="{{ badge_modes.mode(dimension, token, media) }}"
+   {%- if oob %} hx-swap-oob="outerHTML:.fmark[data-fkey='{{ key }}']"{% endif %}></i>
+{%- endmacro %}
+
+{% macro badge(dimension, token, label, media, classes='', wrap='') %}
+<details class="filter-badge {{ wrap }}" name="filter-badge"
+         data-filter="{{ dimension }}" data-token="{{ token }}">
+    <summary class="{{ classes }}" title="Filter on {{ label }}">{{- mark(dimension, token, media) }}{{ caller() }}</summary>
     <div class="filter-offer">
-        <label class="filter-offer-btn out">
-            <input type="radio" name="fb:{{ dimension }}:{{ token }}" value="exclude">
-            <span>Filter out</span>
-        </label>
-        <label class="filter-offer-btn in">
-            <input type="radio" name="fb:{{ dimension }}:{{ token }}" value="include">
-            <span>Only this</span>
-        </label>
-        <label class="filter-offer-btn undo">
-            <input type="radio" name="fb:{{ dimension }}:{{ token }}" value="" checked>
-            <span>Undo</span>
-        </label>
+        {% for value, text, look in (('exclude', 'Filter out', 'out'), ('include', 'Only this', 'in'), ('', 'Undo', 'undo')) %}
+        <button type="button" class="filter-offer-btn {{ look }}"
+                hx-post="/calendar/filters/badge" hx-json-enc hx-swap="none"
+                hx-vals='{{ {"dimension": dimension, "token": token, "media": media|string, "mode": value} | tojson }}'>{{ text }}</button>
+        {% endfor %}
     </div>
 </details>
 {% endmacro %}

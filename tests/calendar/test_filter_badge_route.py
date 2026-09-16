@@ -14,6 +14,7 @@ another language.
 from __future__ import annotations
 
 import asyncio
+import re
 import unittest
 
 from app import auth, db
@@ -80,7 +81,7 @@ class TheBadgeRouteTests(AppTestCase):
         self.sign_in_as(self.user_id)
 
     def press(self, **body):
-        return self.client.post("/api/me/filters/badge", json=body)
+        return self.client.post("/calendar/filters/badge", json=body)
 
     def prefs(self) -> dict:
         return asyncio.run(auth.get_user_prefs(self.user_id))
@@ -157,17 +158,56 @@ class TheBadgeRouteTests(AppTestCase):
         resp = self.press(dimension="genre", token="  ", mode="exclude")
         self.assertEqual(resp.status_code, 400, resp.text)
 
-    def test_it_answers_with_what_it_stored(self):
-        """So a caller never has to read the field back to know where it landed."""
-        body = self.press(dimension="genre", token="reality", mode="exclude").json()
-        self.assertEqual(body["field"], "tv_genres")
-        self.assertEqual(body["value"], "-reality")
+    def test_it_answers_with_the_offer_drawn_from_storage(self):
+        """ADDRESSED AT EVERY BADGE FOR THIS TOKEN, not at the one pressed: a
+        genre is on a dozen cards and one press is a statement about all of them,
+        which is the shape a library add already uses."""
+        html = self.press(dimension="genre", token="reality", mode="exclude").text
+        self.assertIn(
+            "hx-swap-oob=\"outerHTML:.fmark[data-fkey='genre.reality']\"", html)
+        self.assertIn('data-mode="exclude"', html)
+        self.assertIn("Filtering out reality", html)
+
+    def test_a_refusal_answers_with_the_offer_drawn_AS_STORED(self):
+        """The radio had already recorded the press by the time the route ran, so
+        the only way a card can stop claiming a filter nobody stored is for the
+        server to say what IS stored — which it does whether it wrote or not."""
+        self.press(dimension="genre", token="reality", mode="exclude")
+        resp = self.press(dimension="genre", token="reality", mode="maybe")
+        self.assertEqual(resp.status_code, 400, resp.text)
+        # Still excluded, because the refusal changed nothing and said so.
+        self.assertIn('data-mode="exclude"', resp.text)
+        self.assertEqual(self.prefs()["tv_genres"], "-reality")
+
+    def test_the_month_is_not_rebuilt_and_the_sentence_says_so(self):
+        """Filtering is applied while a month is assembled, so a press lands on
+        the next read. Rebuilding a whole month for a one-token edit somebody is
+        likely to follow with another is what this refuses to spend."""
+        html = self.press(dimension="genre", token="reality", mode="exclude").text
+        self.assertIn("applies on next load", html)
+        self.assertNotIn("calendarBody", html)
 
     def test_it_needs_a_session(self):
         self.client.cookies.clear()
         self.assertNotEqual(
             self.press(dimension="genre", token="drama", mode="exclude").status_code,
             200)
+
+
+    def test_the_answer_addresses_a_badge_by_a_key_a_selector_can_hold(self):
+        """A network name is free catalogue text. An apostrophe in one would turn
+        the CSS selector the answer is addressed with into a broken selector, so
+        the key is percent-encoded and the readable pair stays beside it."""
+        html = self.press(dimension="network", token="Paddy's Bar TV", mode="exclude").text
+        self.assertIn("data-fkey=\"network.Paddy%27s%20Bar%20TV\"", html)
+        self.assertIn(
+            "hx-swap-oob=\"outerHTML:.fmark"
+            "[data-fkey='network.Paddy%27s%20Bar%20TV']\"", html)
+        # NO SPACE IN THE SELECTOR, and it is not cosmetic: htmx splits
+        # hx-swap-oob into style and selector only when the value has none.
+        oob = re.search(r'hx-swap-oob="([^"]*)"', html).group(1)
+        self.assertNotIn(" ", oob)
+        self.assertEqual(self.prefs()["network_filter"], ["-Paddy's Bar TV"])
 
 
 if __name__ == "__main__":  # pragma: no cover

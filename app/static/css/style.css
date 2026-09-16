@@ -271,7 +271,14 @@ html.has-distrakt #distraktNav { display: flex; }
    one thing to learn instead of two. The link inherits it so the whole row
    reads as one statement rather than a number with a control stuck on. */
 .stats-row.stats-filtered, .stats-row.stats-filtered strong { color: #f87171; }
-.stats-row.stats-filtered a { color: inherit; text-decoration: underline dotted; }
+/* A BUTTON, NOT AN ANCHOR: it opens the filters panel rather than going
+   anywhere, and it used to be an `href="#"` with the navigation cancelled by
+   script. Styled back to reading as a link, which is what a press on a sentence
+   should look like. */
+.stats-row.stats-filtered .link-btn {
+    color: inherit; text-decoration: underline dotted; cursor: pointer;
+    background: none; border: none; padding: 0; font: inherit;
+}
 /* The direction of the change, decided server-side and carried as a class so the
    line arrives coloured rather than being tinted by script after paint. */
 .delta-msg.up { color: #34d399; }
@@ -777,19 +784,41 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 .filter-offer-btn {
     border: 1px solid var(--card-border); border-radius: 999px;
     padding: 2px 9px; font-size: 0.7rem; cursor: pointer; color: var(--text);
+    background: none; font-family: inherit; line-height: inherit;
 }
-.filter-offer-btn input { position: absolute; opacity: 0; pointer-events: none; }
 .filter-offer-btn.out { border-color: #e5484d; color: #ff9ea1; }
 .filter-offer-btn.in { border-color: #30a46c; color: #8fe3b4; }
 .filter-offer-btn.undo { color: var(--text-dim); }
 .filter-offer-btn:hover { filter: brightness(1.3); }
-.filter-offer-btn:has(:checked) { filter: brightness(1.5); text-decoration: underline; }
+.filter-badge:has(.fmark[data-mode="exclude"]) .filter-offer-btn.out,
+.filter-badge:has(.fmark[data-mode="include"]) .filter-offer-btn.in {
+    filter: brightness(1.5); text-decoration: underline;
+}
 
-/* The chosen state, read straight off the radio. */
-.filter-badge:has(input[value="exclude"]:checked) > summary { border-color: #e5484d; color: #ff9ea1; }
-.filter-badge:has(input[value="include"]:checked) > summary { border-color: #30a46c; color: #8fe3b4; }
-.filter-badge.at-poster:has(input[value="exclude"]:checked) > summary { outline: 2px solid #e5484d; }
-.filter-badge.at-poster:has(input[value="include"]:checked) > summary { outline: 2px solid #30a46c; }
+/* THE CHOSEN STATE IS THE SERVER'S, read off one empty element the answer
+   replaces. Two shapes were tried before this one and both are worth keeping
+   written down, because each looked right:
+
+   A CHECKED RADIO could not hold it. All three radios shared a name built from
+   the dimension and the token, so every badge for one genre was a single group --
+   and a group holds ONE checked radio in the whole document. The moment the
+   server began drawing the stored answer onto every card, the browser kept the
+   last one and unchecked the rest.
+
+   AN ATTRIBUTE ON THE OFFER could not hold it either, and that one is a browser
+   difference: a closed <details> hides its content, and Firefox 155 does not
+   re-resolve an ancestor's `:has()` when an element inside that hidden content is
+   replaced. Measured on two cards showing one genre -- the DOM matched on both,
+   only the open one changed colour, and Chromium 153 got both right.
+
+   So the mark sits inside the <summary>, which a closed <details> still renders,
+   and it is zero-width rather than `display: none` for the same reason the offer
+   failed: a box the engine renders is a box it restyles. */
+.fmark { display: inline-block; width: 0; height: 0; overflow: hidden; }
+.filter-badge:has(.fmark[data-mode="exclude"]) > summary { border-color: #e5484d; color: #ff9ea1; }
+.filter-badge:has(.fmark[data-mode="include"]) > summary { border-color: #30a46c; color: #8fe3b4; }
+.filter-badge.at-poster:has(.fmark[data-mode="exclude"]) > summary { outline: 2px solid #e5484d; }
+.filter-badge.at-poster:has(.fmark[data-mode="include"]) > summary { outline: 2px solid #30a46c; }
 
 /* Only present while something is waiting, so a viewer who never presses a badge
    never sees it. */
@@ -881,14 +910,17 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 /* A keyboard focus lands on the hidden radio, so the visible tab has to show it. */
 #ftab_show:focus-visible ~ .ftabs .ftab-show,
 #ftab_movie:focus-visible ~ .ftabs .ftab-movie { outline: 2px solid var(--gold); outline-offset: -2px; }
+#filterFields { display: flex; flex-direction: column; }
 .ftab-panel { display: none; flex-direction: column; }
 #ftab_show:checked ~ .modal-body .ftab-panel-show,
 #ftab_movie:checked ~ .modal-body .ftab-panel-movie { display: flex; }
-/* The footer's button names the tab it clears, and the stylesheet keeps the two
-   in step so no script has to. */
+/* ONE CLEAR BUTTON PER TAB, and the stylesheet shows whichever matches the open
+   one, so no script has to keep a button naming the right tab -- and neither
+   button has to read which tab is showing, because the one that can be pressed
+   is the answer. */
 .fclear-show, .fclear-movie { display: none; }
 #ftab_show:checked ~ .modal-foot .fclear-show,
-#ftab_movie:checked ~ .modal-foot .fclear-movie { display: inline; }
+#ftab_movie:checked ~ .modal-foot .fclear-movie { display: inline-block; }
 
 /* One dimension. Hairlines rather than nested cards: the panel is one surface,
    and a border on every block flattens the hierarchy instead of building it. */
@@ -925,6 +957,10 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 .fswatch.on { background: #30a46c; border-color: #30a46c; }
 .fswatch.off { background: #e5484d; border-color: #e5484d; }
 
+/* The legend and the chips are swapped together when a typed token is added, so
+   they share a wrapper -- which carries .ffield's own column gap so that having
+   one changes nothing about how the field is laid out. */
+.fchip-group { display: flex; flex-direction: column; gap: 10px; }
 .fchips { display: flex; flex-wrap: wrap; gap: 6px; }
 /* THE RADIOS ARE THE KEYBOARD CONTROL and are hidden rather than removed: a
    radiogroup already does arrow-key cycling and labelling properly, so they stay

@@ -237,7 +237,8 @@ def _answering_services_for_media(media, settings) -> list[tuple[str, str]]:
     return list(seen.items()) if len(seen) > 1 else []
 
 
-def _source_toggles(media, settings, saved: source_prefs.SourcePrefs) -> list[dict]:
+def _source_toggles(media, settings, saved: source_prefs.SourcePrefs,
+                    showing: set[str] | None = None) -> list[dict]:
     """One tab's service switches, each independently on or off.
 
     INDEPENDENT BOXES RATHER THAN A "BOTH / TRAKT / SIMKL" PICKER, and the
@@ -246,13 +247,25 @@ def _source_toggles(media, settings, saved: source_prefs.SourcePrefs) -> list[di
     re-offered, while a box per service simply grows one more. It is also what
     keeps `auto` expressible -- every box ticked is "whatever there is, now and
     later" rather than a named set of the two that happened to exist.
+
+    `showing` IS WHAT THE PANEL IS CURRENTLY HOLDING, when the panel is being
+    drawn again mid-edit. It is read as a plain set rather than through
+    SourcePrefs because one state the panel can be in cannot be stored at all:
+    every box unticked. Only the SAVE refuses that, so a redraw has to be able to
+    show it -- otherwise pressing Clear would silently tick a service back on.
     """
     for_media = saved.for_media(media)
-    return [{"source": name, "label": label, "on": for_media.admits_calendar(name)}
+    # THE FIELD NAME COMES WITH THE SWITCH, spelled by app/calendar/vocab.py like
+    # every other name this panel posts under, so the template never composes one.
+    return [{"source": name, "label": label,
+             "on": (name in showing if showing is not None
+                    else for_media.admits_calendar(name)),
+             "name": vocab.source_field_name(media, name)}
             for name, label in _answering_services_for_media(media, settings)]
 
 
-def _filter_panel(prefs: dict, saved: source_prefs.SourcePrefs, settings, endpoint) -> dict:
+def _filter_panel(prefs: dict, saved: source_prefs.SourcePrefs, settings, endpoint,
+                  showing_sources: dict | None = None) -> dict:
     """Everything the filters panel draws, resolved server-side.
 
     THE CHIPS ARE MARKUP THE SERVER BUILDS, not a vocabulary string a script
@@ -264,7 +277,13 @@ def _filter_panel(prefs: dict, saved: source_prefs.SourcePrefs, settings, endpoi
 
     THE TAB THAT OPENS IS THE MEDIUM IN FRONT OF THE VIEWER, which is a Jinja
     conditional on this value rather than a boot script, because it is decided
-    once when the page is built and never changes while it is open.
+    once when the panel is drawn and never changes while it is open.
+
+    `prefs` IS NOT ALWAYS THE STORED ROW. Adding a typed chip and pressing Clear
+    both draw the panel again from what it is CURRENTLY holding, which is the
+    stored row with the unsaved edits laid over it (`_prefs_showing`) -- so there
+    is one renderer for a panel rather than one for its first draw and another
+    for every redraw.
 
     WHAT IS NOT HERE IS THE PROSE. Labels, hints and the per-field notes are the
     template's, so a wording change is a template change; this answers only what
@@ -276,18 +295,12 @@ def _filter_panel(prefs: dict, saved: source_prefs.SourcePrefs, settings, endpoi
         "paused": bool(prefs["filters_paused"]),
         "chips": {field: vocab.chips_for(field, prefs.get(field))
                   for field in vocab.FIELDS},
-        # The name a chip added by typing will post under, minus its token. The
-        # panel's one piece of client-side markup -- a chip cloned from a
-        # <template> when somebody names something the vocabulary does not --
-        # appends the token to this, so the FORMAT of a field name stays
-        # app/calendar/vocab.py's and is never spelled in JavaScript.
-        "name_prefix": {field: vocab.field_name(field, "") for field in vocab.FIELDS},
-        # Whether a token typed into a field is the same token as one already
-        # drawn when only the case differs. The browser has to know, because it
-        # is the one deciding whether to add a chip or light an existing one —
-        # and it must not decide by guessing which dimension it is looking at.
-        "case_sensitive": {field: field in vocab.CASE_SENSITIVE_FIELDS
-                           for field in vocab.FIELDS},
+        # "THIS DIMENSION WAS ON THE PANEL", one hidden field per dimension.
+        # Without it a dimension that draws no chip -- networks, for an account
+        # that has never named one -- would be missing from the payload, and the
+        # save could not tell it from a dimension the panel never showed. See
+        # app/calendar/vocab.py's `presence_name`.
+        "presence": {field: vocab.presence_name(field) for field in vocab.FIELDS},
         # PER TAB, so the tab a viewer is NOT on can say what it is holding.
         # Counted in tokens rather than dimensions: "3" means three things are
         # being filtered, where a dimension count would say "1" for somebody who
@@ -297,8 +310,10 @@ def _filter_panel(prefs: dict, saved: source_prefs.SourcePrefs, settings, endpoi
             "movie": vocab.count_set(prefs, vocab.MOVIE_FIELDS),
         },
         "sources": {
-            "show": _source_toggles(Media.SHOW, settings, saved),
-            "movie": _source_toggles(Media.MOVIE, settings, saved),
+            "show": _source_toggles(Media.SHOW, settings, saved,
+                                    (showing_sources or {}).get(Media.SHOW)),
+            "movie": _source_toggles(Media.MOVIE, settings, saved,
+                                     (showing_sources or {}).get(Media.MOVIE)),
         },
     }
 
@@ -533,6 +548,13 @@ def _view_preferences(prefs: dict, settings) -> dict:
         # aren't there, which is indistinguishable from Trakt not listing them.
         "filters_active": _filters_active(prefs),
         "filters_summary": _filters_summary(prefs),
+        # THE THIRD STATE. "Nothing set" and "set but switched off" both draw a
+        # calendar with everything on it, and if they looked alike a viewer would
+        # forget their filters existed — so the button asks this as well as
+        # `filters_active` and draws one of three looks. It used to come from the
+        # filters panel's own context, which the page no longer carries: the
+        # panel is a fragment now and the toolbar has to know this without it.
+        "filters_paused": bool(prefs["filters_paused"]),
     }
 
 
@@ -608,16 +630,29 @@ async def home(request: Request):
         request, "pick.html", _picker_context(request, settings, year, endpoint, user))
 
 
-@guard.get("/calendar", AuthLevel.CALENDAR_APPROVED)
-async def calendar_page(request: Request):
-    """The calendar SHELL: the header, the stats bar, the jump-to strip, the
-    modals — and the first few days of cards inline. Every day after those is
-    announced as a placeholder that fetches itself from /calendar/day when the
-    viewer reaches it, so the browser has a usable page long before a whole month
-    of cards exists, and a day nobody scrolls to is never built at all."""
-    settings = load_settings()
-    user = await auth.current_user(request)
-    prefs = await auth.get_user_prefs(user.user_id)
+def _calendar_query(request: Request) -> str:
+    """The calendar's own query string, ready to append to another address.
+
+    THREE PLACES CARRY IT AND THEY ARE ONE FACT: the toolbar button that asks for
+    the filters panel, the panel's save, and the Add-all control beside them. The
+    save ANSWERS WITH THE MONTH REDRAWN, so without it a filter saved while
+    looking at October came back holding whichever month today falls in — the
+    route would have had nothing to read the month off but the clock.
+    """
+    return f"?{request.url.query}" if request.url.query else ""
+
+
+async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
+    """Everything the calendar BODY is drawn from: the month's cards, every number
+    stated about them, and the marks and buttons each card carries.
+
+    ONE ASSEMBLY, TWO DRAWERS. The page renders it inside the shell, and a filters
+    save renders it again on its own and swaps it in — so a calendar a save
+    answers with cannot come from a different reading of the month than the page
+    would have shown. That is also what lets the filters panel stop reloading:
+    what a filter changes IS this region, plus the two marks the toolbar carries,
+    and nothing else on the page.
+    """
     today = clock.today()
     year = route_params.valid_year(request.query_params.get("year"), today.year)
     endpoint = _requested_endpoint(request, prefs, settings)
@@ -646,10 +681,6 @@ async def calendar_page(request: Request):
     # more than one that ticks, and it costs the page less than asking for it
     # would.
     backlog_titles, backlog_seasons = await calendar_enrich.backlog()
-    # THE SAVED PREFERENCE, not `source_selection` above — that one carries the
-    # `?source=` override, and the panel must offer to make permanent what this
-    # account actually stated rather than what it is looking at right now.
-    saved_sources = await source_prefs.load(user.user_id)
 
     _count_visible(month_view.grouped, month_view.not_watching_keys)
 
@@ -708,29 +739,15 @@ async def calendar_page(request: Request):
                 endpoint.key, date.fromisoformat(group["date"]),
                 source=request.query_params.get("source"), new=new_token)
 
-    context = {
+    return {
         "request": request,
         "settings": settings,
         "view": view,
         "endpoint": endpoint,
-        "endpoints": endpoint_choices(),
-        # The toolbar's source control. Built from the query string, applying to
-        # this view alone, and storing nothing — see _source_choices. Empty when
-        # fewer than two services could fill this calendar, and the template
-        # draws nothing at all rather than an inert control.
-        "source_choices": _source_choices(
-            endpoint, request.query_params.get("source"), settings),
-        # THE WHOLE FILTERS PANEL, resolved here rather than assembled by script
-        # once it opens. It carries the stored source answer the toolbar control
-        # above is a temporary override of — built from the SAVED preference and
-        # never from `?source=`, so a look at one service does not leave the
-        # panel offering to make that permanent.
-        "filter_panel": _filter_panel(prefs, saved_sources, settings, endpoint),
-        "viewer_timezone_groups": build_timezone_options(tz.key),
+        "tz": tz,
         "year": year,
         "month": month,
-        "month_label": _calendar.month_name[month],
-        "nav": route_params.adjacent_months(year, month),
+        "calendar_query": _calendar_query(request),
         # WHICH CARD A JUMP IS AIMED AT, so that card can carry the anchor rather
         # than a script hunting for it after the fact. The template tests identity
         # against it rather than comparing keys over again — see above.
@@ -754,6 +771,12 @@ async def calendar_page(request: Request):
         # somebody who has none — a chip that looks pressable and does nothing is
         # worse than one that never offered.
         "can_filter": True,
+        # WHAT EACH BADGE IS ALREADY SET TO, parsed once for the whole render
+        # rather than per card. Drawn from storage so a reload and the answer to
+        # a press agree — the badge used to be drawn blank whatever was stored,
+        # so it claimed a filter until the next load and then stopped claiming it
+        # while the filter went on applying.
+        "badge_modes": vocab.BadgeModes(prefs),
         "new_ids": month_view.new_ids,
         "stats": {"total": month_view.total, "watching": month_view.watching,
                   "not_watching": month_view.not_watching_count},
@@ -789,6 +812,40 @@ async def calendar_page(request: Request):
         "coverage_gap": month_view.coverage_gap,
         "switch_url": month_view.switch_url,
         "generated": datetime.now().strftime("%H:%M"),
+        # THE ADD-TO-LIBRARY BUTTONS' STATE, drawn onto every card — see
+        # `_library`.
+        "library": _library(user, settings),
+        # How many cards the shell is actually turning into HTML, for the render
+        # span the caller opens around it.
+        "inline_cards": sum(len(group["items"]) for group in month_view.grouped
+                            if group["inline"]),
+    }
+
+
+@guard.get("/calendar", AuthLevel.CALENDAR_APPROVED)
+async def calendar_page(request: Request):
+    """The calendar SHELL: the header, the stats bar, the jump-to strip, the
+    modals — and the first few days of cards inline. Every day after those is
+    announced as a placeholder that fetches itself from /calendar/day when the
+    viewer reaches it, so the browser has a usable page long before a whole month
+    of cards exists, and a day nobody scrolls to is never built at all."""
+    settings = load_settings()
+    user = await auth.current_user(request)
+    prefs = await auth.get_user_prefs(user.user_id)
+    month = await _month_context(request, user, settings, prefs)
+    endpoint, tz = month["endpoint"], month["tz"]
+    context = {
+        **month,
+        "endpoints": endpoint_choices(),
+        # The toolbar's source control. Built from the query string, applying to
+        # this view alone, and storing nothing — see _source_choices. Empty when
+        # fewer than two services could fill this calendar, and the template
+        # draws nothing at all rather than an inert control.
+        "source_choices": _source_choices(
+            endpoint, request.query_params.get("source"), settings),
+        "viewer_timezone_groups": build_timezone_options(tz.key),
+        "month_label": _calendar.month_name[month["month"]],
+        "nav": route_params.adjacent_months(month["year"], month["month"]),
         # is_admin, calendar_available, ranker_available, version, build
         # for the shared header.
         **chrome.page_context(user),
@@ -799,18 +856,13 @@ async def calendar_page(request: Request):
         # something to be allowed into. Note this gates the REVEAL, not the menu
         # item — see _nav.html.
         "distrakt_available": bool(user and user.distrakt_approved and user.has_tracker_identity),
-        # THE ADD-TO-LIBRARY BUTTONS' STATE, drawn onto every card — see
-        # `_library`.
-        "library": _library(user, settings),
     }
     # Jinja renders eagerly when the response is built, so this span is the cost of
     # turning the shell's cards into HTML — the other half of the server's blocking
     # time before the browser gets anything. It is now bounded by the inline day
     # count rather than growing with the whole month.
-    with span("calendar.render", cards=sum(len(g["items"]) for g in month_view.grouped
-                                           if g["inline"])):
-        response = templates.TemplateResponse(request, "index.html", context)
-    return response
+    with span("calendar.render", cards=month["inline_cards"]):
+        return templates.TemplateResponse(request, "index.html", context)
 
 
 _YMD = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -1058,8 +1110,10 @@ async def calendar_day(request: Request):
                            request.query_params.get("new") or "")
     context = {
         "request": request, "not_watching": not_watching,
-        # Same as the shell's — a day that arrives late offers the same badges.
+        # Same as the shell's — a day that arrives late offers the same badges,
+        # carrying the same stored answers (vocab.BadgeModes).
         "can_filter": True,
+        "badge_modes": vocab.BadgeModes(prefs),
         # The shell's is-new answer, for the cards on this day — see the docstring.
         "new_ids": new,
         "settings": settings, "is_admin": bool(user and user.is_admin),
@@ -1846,10 +1900,224 @@ async def post_me_prefs(request: Request):
     return JSONResponse({"ok": True})
 
 
-@guard.post("/api/me/filters", AuthLevel.CALENDAR_APPROVED)
-async def post_me_filters(request: Request):
-    """Save one tab of the filters panel: its chips, its services, and the
-    master switch.
+def _source_selection_from_form(data: dict, settings,
+                                saved: source_prefs.SourcePrefs
+                                ) -> tuple[source_prefs.SourcePrefs, str | None]:
+    """The source preference this panel payload states, and the refusal if it
+    states one that cannot be honoured.
+
+    NOTHING IS WRITTEN HERE. The save needs the answer BEFORE it writes anything
+    -- unticking every service is the one thing the panel can ask for and not
+    get, and refusing it first leaves the panel exactly as the viewer left it
+    rather than half-saved -- and the Clear button needs the same answer only to
+    draw the switches back. One function, two readers.
+
+    AN ACCOUNT WITH NO ROW HAS NO OPINION, and saving one it did not ask for
+    would undo that: `load` answers with the defaults rather than creating
+    anything, so the caller writes only when the selection actually moved.
+    """
+    chosen_prefs = saved
+    for media in (Media.SHOW, Media.MOVIE):
+        chosen = vocab.sources_from_form(data, media)
+        # AN INSTANCE WITH NOTHING TO CHOOSE BETWEEN DRAWS NO CONTROL, so a
+        # payload naming services on such a calendar is not a viewer's doing and
+        # is ignored rather than refused.
+        available = {name for name, _ in _answering_services_for_media(media, settings)}
+        if chosen is None or not available:
+            continue
+        if unknown := chosen - available:
+            return saved, f"This app has no calendar source called {sorted(unknown)[0]!r}."
+        if not chosen:
+            return saved, "At least one service has to be showing."
+        # EVERY SERVICE TICKED IS `auto`, NOT A NAMED SET, and the difference
+        # outlives this request: `auto` means "whatever there is, now and later",
+        # so an instance that registers a third service starts showing it, where
+        # a named set is a choice made from the menu that existed at the time.
+        selection = (source_prefs.AUTO if chosen == available
+                     else source_prefs.SEPARATOR.join(sorted(chosen)))
+        field = ("movie_calendar_source" if media is Media.MOVIE else "calendar_source")
+        if getattr(chosen_prefs, field) != selection:
+            chosen_prefs = dataclasses.replace(chosen_prefs, **{field: selection})
+    return chosen_prefs, None
+
+
+def _normalized_specs(data: dict) -> dict:
+    """The chip answers in this payload, as the shapes the columns store.
+
+    THROUGH THE SAME NORMALIZERS EVERY OTHER WRITER USES, so a spec assembled
+    from chips is stored in the shape a badge press and the old text fields both
+    produced. `movie_release_types` is the one with a vocabulary narrow enough to
+    validate, and it is dropped here rather than at read for the reason its own
+    normalizer states.
+    """
+    specs = dict(vocab.specs_from_form(data))
+    for field, value in list(specs.items()):
+        if field == vocab.NETWORK_FILTER:
+            specs[field] = _network_list(value)
+        elif field == vocab.MOVIE_RELEASE_TYPES:
+            specs[field] = _release_type_spec(value)
+        else:
+            specs[field] = _filter_spec(value)
+    return specs
+
+
+def _prefs_showing(data: dict, prefs: dict, *, cleared: tuple[str, ...] = ()) -> dict:
+    """This viewer's stored preferences with what the PANEL is currently holding
+    laid over them.
+
+    WHAT MAKES THE PANEL ONE RENDERER RATHER THAN TWO. `_filter_panel` draws from
+    a preferences dict; opening the panel hands it the stored one, and adding a
+    typed token or pressing Clear hands it this -- the stored one with the
+    unsaved edits on top. So a chip the server appends and a chip the panel
+    opened with are the same markup from the same code, and nothing has to
+    describe a half-edited panel in a second language.
+
+    NOTHING IS SAVED BY EITHER. `cleared` zeroes the dimensions of one medium,
+    which is what Clear does and why it does not write: closing the panel after
+    pressing it leaves the stored filters alone, the same bargain every other
+    field in these modals makes.
+    """
+    showing = {**prefs, **_normalized_specs(data)}
+    for field in cleared:
+        showing[field] = [] if field in vocab.LIST_FIELDS else ""
+    if "filters_on" in data:
+        showing["filters_paused"] = not route_params.ticked(data["filters_on"])
+    return showing
+
+
+def _panel_context(request: Request, settings, prefs: dict,
+                   saved: source_prefs.SourcePrefs, showing: dict | None = None) -> dict:
+    """The context the filters panel template is rendered from.
+
+    `showing` carries the service ticks the panel is holding, when it is being
+    drawn again mid-edit; None means "draw the stored ones", which is what
+    opening it does.
+    """
+    endpoint = _requested_endpoint(request, prefs, settings)
+    return {"request": request, "settings": settings, "endpoint": endpoint,
+            # Handed on to the save, which answers with the month redrawn — see
+            # `_calendar_query`. The panel is asked for with the calendar's own
+            # query string, so this is that string travelling one more hop.
+            "calendar_query": _calendar_query(request),
+            "filter_panel": _filter_panel(prefs, saved, settings, endpoint, showing)}
+
+
+def _sources_showing(data: dict) -> dict:
+    """The service ticks a mid-edit payload states, per medium — see
+    `_source_toggles`. A medium the payload does not mention comes back None,
+    which means "draw what is stored"."""
+    return {media: vocab.sources_from_form(data, media)
+            for media in (Media.SHOW, Media.MOVIE)}
+
+
+@guard.get("/calendar/fragments/filters", AuthLevel.CALENDAR_APPROVED)
+async def filters_panel_fragment(request: Request):
+    """The filters panel, drawn open, with every chip already carrying its answer.
+
+    A FRAGMENT RATHER THAN MARKUP THE PAGE CARRIES, which is a reversal worth
+    stating: the panel used to ship with the calendar so that opening it cost
+    nothing. What that bought was one request; what it cost was every way the
+    panel could be left describing something other than what is stored -- a chip
+    added by typing and abandoned, a cycle nobody saved, the counts on the tab
+    beside the one just written. Asked for on every opening, the panel IS the
+    server's answer about the stored state and there is no second copy to keep in
+    step. It is discarded when it closes (`data-modal-discard` in static/js/ui.js),
+    so Cancel is the element leaving the page rather than a form being reset.
+    """
+    user = await auth.current_user(request)
+    prefs = await auth.get_user_prefs(user.user_id)
+    settings = load_settings()
+    # THE SAVED PREFERENCE, not the `?source=` override the toolbar may be
+    # showing: the panel offers to make permanent what this account actually
+    # stated rather than what it happens to be looking at right now.
+    saved = await source_prefs.load(user.user_id)
+    return templates.TemplateResponse(request, "_filters_panel.html",
+                                      _panel_context(request, settings, prefs, saved))
+
+
+@guard.post("/calendar/filters/chip", AuthLevel.CALENDAR_APPROVED)
+async def add_filter_chip(request: Request):
+    """Draw a chip for a token the vocabulary does not name.
+
+    THE SERVER SPELLS IT BECAUSE THE SERVER OWNS EVERY RULE IN IT. The field
+    name, the positional ids three labels point `for` at, whether two spellings
+    are one token (networks keep their case, everything else folds), that a colon
+    would produce a name reading as a different field, and that a comma-separated
+    paste is several tokens -- all of that was written a second time in
+    JavaScript, and all of it is app/calendar/vocab.py's.
+
+    IT STORES NOTHING. The chip joins the panel set to "only this", and Save is
+    what writes it -- somebody who went to the trouble of typing a name is naming
+    something they want, and it is one press from the other answer either way.
+
+    THE WHOLE PANEL IS THE ANSWER and the browser takes the one field out of it
+    (`hx-select`). That is what keeps each field's prose in the template beside
+    the field it explains rather than in a table here: there is one renderer for
+    a field, and it is the one the panel itself uses.
+    """
+    user = await auth.current_user(request)
+    prefs = await auth.get_user_prefs(user.user_id)
+    settings = load_settings()
+    saved = await source_prefs.load(user.user_id)
+    data = await authz.json_body(request)
+    field = str(route_params.last_value(data.get("field")) or "")
+    if field not in vocab.FIELDS:
+        return authz.error("Not a filter this panel offers")
+
+    showing = _prefs_showing(data, prefs)
+    is_list = field in vocab.LIST_FIELDS
+    spec = showing.get(field)
+    for raw in str(route_params.last_value(data.get("token")) or "").split(","):
+        token = raw.strip()
+        # A colon would produce a field name that reads as a different field, so
+        # it is dropped rather than misfiled. Silently, because the panel comes
+        # back drawn: a chip that did not appear is the answer, and the box still
+        # holds nothing anybody has lost.
+        if not vocab.addable(token):
+            continue
+        spec = calendar_filter.merge_token(spec, token, vocab.INCLUDE, is_list=is_list)
+    showing[field] = _network_list(spec) if is_list else _filter_spec(spec)
+    return templates.TemplateResponse(request, "_filters_panel.html",
+                                      _panel_context(request, settings, showing, saved,
+                                                     _sources_showing(data)))
+
+
+@guard.post("/calendar/filters/clear", AuthLevel.CALENDAR_APPROVED)
+async def clear_filters(request: Request):
+    """Set one medium's chips back to grey, WITHOUT saving.
+
+    ONE TAB ONLY, and the same bargain every other field in these modals makes:
+    clear then close and the stored filters are untouched. Services are
+    deliberately left alone -- an unticked service is a NARROWING, and clearing
+    it would mean switching every service back on, which is the one state the
+    save refuses and reads as the button working backwards.
+
+    IT IS A REQUEST BECAUSE THE PANEL IS THE SERVER'S. Doing it in the browser
+    meant knowing which inputs a chip is made of and which of the two tabs is
+    showing, and both of those are this module's answers. The medium comes from
+    the button pressed rather than from reading the tab, because the panel draws
+    one button per medium and the stylesheet shows whichever matches the open tab
+    -- so there is nothing to read.
+    """
+    user = await auth.current_user(request)
+    prefs = await auth.get_user_prefs(user.user_id)
+    settings = load_settings()
+    saved = await source_prefs.load(user.user_id)
+    data = await authz.json_body(request)
+    medium = str(route_params.last_value(data.get("medium")) or "")
+    if medium not in ("show", "movie"):
+        return authz.error("Not a medium this panel has a tab for")
+    cleared = vocab.MOVIE_FIELDS if medium == "movie" else vocab.TV_FIELDS
+    showing = _prefs_showing(data, prefs, cleared=cleared)
+    return templates.TemplateResponse(request, "_filters_panel.html",
+                                      _panel_context(request, settings, showing, saved,
+                                                     _sources_showing(data)))
+
+
+@guard.post("/calendar/filters", AuthLevel.CALENDAR_APPROVED)
+async def post_filters(request: Request):
+    """Save the filters panel -- its chips, its services and the master switch --
+    and answer with the calendar redrawn.
 
     ONE ROUTE FOR A PANEL THAT WAS TWO REQUESTS. The narrowing and the service
     selection live in different tables and used to be posted separately, in a
@@ -1864,74 +2132,48 @@ async def post_me_filters(request: Request):
     byte-identical to one a card badge writes.
 
     ONLY THE DIMENSIONS THE PAYLOAD MENTIONS ARE WRITTEN, which is what makes a
-    per-tab save safe: the TV tab posts every TV chip, including the ones set to
-    nothing, so clearing works -- and mentions no film chip at all, so the other
-    tab is left exactly as it was.
+    per-tab save safe: the panel posts every chip of both tabs, including the
+    ones set to nothing, so clearing works. A dimension it draws with no chips at
+    all -- networks, for an account that has never named one -- says so with its
+    own marker (vocab.presence_name), so "shown and empty" and "never shown" stay
+    different statements rather than one silence.
 
     THE PAUSE IS A FIELD LIKE ANY OTHER on the same form, so switching filters
     off and editing them in the same visit is one save. It is stored rather than
     held for the session because "show me everything for a bit" is a state
     somebody wants to still be in tomorrow, and every read path asks it before
     applying anything (app/calendar/vocab.py's `active_specs`).
+
+    IT ANSWERS WITH THE MONTH REDRAWN rather than telling the page to reload.
+    Filtering is applied while a month is assembled, so the calendar behind the
+    panel is genuinely stale the moment this returns -- but the old answer was
+    `window.location.reload()`, which is this same rebuild plus a round trip for
+    the shell, the stylesheet, the fonts and eight scripts. The two marks that
+    depend on the filters and live OUTSIDE that region -- the toolbar's Filters
+    button and the month's total beside it -- ride along out of band, and the
+    panel closes by having its slot emptied the same way.
     """
     user = await auth.current_user(request)
     data = await authz.json_body(request)
-
-    # SERVICES FIRST, BECAUSE THIS IS THE HALF THAT CAN REFUSE. Unticking every
-    # service is the one thing the panel can ask for and not get, and refusing it
-    # before anything is written leaves the panel exactly as the viewer left it
-    # rather than half-saved.
-    saved_sources = await source_prefs.load(user.user_id)
     settings = load_settings()
-    # AN ACCOUNT WITH NO ROW HAS NO OPINION, and saving one it did not ask for
-    # would undo that: `load` answers with the defaults rather than creating
-    # anything, which is what keeps the table free for the majority of accounts
-    # that will never state a source preference. So the write below happens only
-    # if this save actually changed the selection.
-    stated = False
-    for key, media in (("sources_show", Media.SHOW), ("sources_movie", Media.MOVIE)):
-        if key not in data:
-            continue
-        available = {name for name, _ in _answering_services_for_media(media, settings)}
-        chosen = {name.strip() for name in str(data[key] or "").split(",") if name.strip()}
-        # AN INSTANCE WITH NOTHING TO CHOOSE BETWEEN DRAWS NO CONTROL, so a
-        # payload naming services on such a calendar is not a viewer's doing and
-        # is ignored rather than refused.
-        if not available:
-            continue
-        if unknown := chosen - available:
-            return authz.error(f"This app has no calendar source called {sorted(unknown)[0]!r}.")
-        if not chosen:
-            return authz.error("At least one service has to be showing.")
-        # EVERY SERVICE TICKED IS `auto`, NOT A NAMED SET, and the difference
-        # outlives this request: `auto` means "whatever there is, now and later",
-        # so an instance that registers a third service starts showing it, where
-        # a named set is a choice made from the menu that existed at the time.
-        selection = (source_prefs.AUTO if chosen == available
-                     else source_prefs.SEPARATOR.join(sorted(chosen)))
-        field = ("movie_calendar_source" if media is Media.MOVIE else "calendar_source")
-        if getattr(saved_sources, field) != selection:
-            saved_sources = dataclasses.replace(saved_sources, **{field: selection})
-            stated = True
-    if stated:
-        try:
-            await source_prefs.save(saved_sources)
-        except ValueError as exc:
-            return authz.error(str(exc))
 
-    updates: dict = dict(vocab.specs_from_form(data))
-    # THROUGH THE SAME NORMALIZERS EVERY OTHER WRITER USES, so a spec assembled
-    # from chips is stored in the shape a badge press and the old text fields
-    # both produced. `movie_release_types` is the one with a vocabulary narrow
-    # enough to validate, and it is dropped here rather than at read for the
-    # reason its own normalizer states.
-    for field, value in list(updates.items()):
-        if field == vocab.NETWORK_FILTER:
-            updates[field] = _network_list(value)
-        elif field == vocab.MOVIE_RELEASE_TYPES:
-            updates[field] = _release_type_spec(value)
-        else:
-            updates[field] = _filter_spec(value)
+    # SERVICES FIRST, BECAUSE THIS IS THE HALF THAT CAN REFUSE. Refusing before
+    # anything is written leaves the panel exactly as the viewer left it rather
+    # than half-saved -- and the refusal is retargeted at the panel's own notice
+    # line, so a sentence never replaces the calendar behind it.
+    saved_sources = await source_prefs.load(user.user_id)
+    chosen_sources, refusal = _source_selection_from_form(data, settings, saved_sources)
+    if refusal is None and chosen_sources != saved_sources:
+        try:
+            await source_prefs.save(chosen_sources)
+        except ValueError as exc:
+            refusal = str(exc)
+    if refusal is not None:
+        return templates.TemplateResponse(
+            request, "_filters_notice.html", {"request": request, "error": refusal},
+            headers={"HX-Retarget": "#filtersNotice", "HX-Reswap": "innerHTML"})
+
+    updates: dict = _normalized_specs(data)
     # THE SWITCH IS SENT THE WAY IT READS AND STORED THE WAY IT DEFAULTS, and
     # this line is the whole of the difference. On the panel it says "Filters
     # are on", because a switch that lights up when the thing it names is
@@ -1941,7 +2183,7 @@ async def post_me_filters(request: Request):
     # Inverted once, here, rather than drawing the control backwards to match a
     # column name.
     if "filters_on" in data:
-        updates["filters_paused"] = not bool(data["filters_on"])
+        updates["filters_paused"] = not route_params.ticked(data["filters_on"])
     if updates:
         await auth.update_user_prefs(user.user_id, **updates)
         # Mirrored into share_links exactly as the badge route does -- that
@@ -1952,79 +2194,84 @@ async def post_me_filters(request: Request):
         if await share_links.get(user.user_id) is not None:
             await share_links.update_owner_defaults(
                 user.user_id, **{k: v for k, v in updates.items() if k != "filters_paused"})
-    return JSONResponse({"ok": True})
+
+    prefs = await auth.get_user_prefs(user.user_id)
+    month = await _month_context(request, user, settings, prefs)
+    with span("calendar.render", cards=month["inline_cards"]):
+        return templates.TemplateResponse(request, "_filters_answer.html", month)
 
 
-# Which stored preference each badge dimension writes into, given the media of
-# the card it was pressed on. EVERY DIMENSION NEEDS THE MEDIA NOW, where once
-# only certification did: a genre excluded from a card in the film calendar is a
-# statement about films, and writing it into the show calendar's genres is
-# exactly the conflation the split exists to end.
-_BADGE_FIELDS = {
-    "genre": lambda media: (
-        vocab.MOVIE_GENRES if media == "movie" else vocab.TV_GENRES),
-    "country": lambda media: (
-        vocab.MOVIE_COUNTRIES if media == "movie" else vocab.TV_COUNTRIES),
-    # A film has no network at all, so a network badge can only have been pressed
-    # on a show card and there is one field it can mean.
-    "network": lambda media: vocab.NETWORK_FILTER,
-    "certification": lambda media: (
-        vocab.MOVIE_CERTIFICATIONS if media == "movie" else vocab.SHOW_CERTIFICATIONS),
-}
-_BADGE_MODES = ("include", "exclude", "")
-
-
-@guard.post("/api/me/filters/badge", AuthLevel.CALENDAR_APPROVED)
-async def post_me_filter_badge(request: Request):
-    """Add one token to one of this viewer's filter dimensions — the offer a
+@guard.post("/calendar/filters/badge", AuthLevel.CALENDAR_APPROVED)
+async def post_filter_badge(request: Request):
+    """Add one token to one of this viewer's filter dimensions -- the offer a
     card's own badge makes.
 
-    ITS OWN ROUTE RATHER THAN /api/me/prefs, because it is a different verb. That
-    one REPLACES whichever fields it is handed, which is what a modal holding
-    every value wants; this one changes a single token inside one field and must
-    leave the rest of that field alone. Sending the whole spec from a badge would
-    mean the client reading the current one first and merging it, which is a race
-    and, worse, a second statement of the spec format in another language.
+    ITS OWN ROUTE RATHER THAN THE PANEL'S SAVE, because it is a different verb.
+    That one REPLACES whichever dimensions it is handed, which is what a panel
+    holding every value wants; this one changes a single token inside one field
+    and must leave the rest of that field alone. Sending the whole spec from a
+    badge would mean the browser reading the current one first and merging it,
+    which is a race and, worse, a second statement of the spec format in another
+    language.
 
     THE MERGE HAPPENS HERE FOR THAT REASON. app/calendar/filter.py owns what a
-    spec IS — the leading '-', which dimensions fold case, that networks are a
-    list — and `merge_token` is written beside the parsers that read it. The
+    spec IS -- the leading '-', which dimensions fold case, that networks are a
+    list -- and `merge_token` is written beside the parsers that read it. The
     browser sends a dimension, a token and a verdict; it knows nothing about
     specs and cannot drift from them.
 
-    IT DOES NOT RE-RENDER ANYTHING. Filtering is applied server-side while a month
-    is assembled, so a change lands on the next read — the next month, or a
-    refresh. Answering with the month would mean rebuilding it on every press,
-    and answering with a rendered fragment would put a second copy of the
-    calendar's own assembly behind this route. The page says so instead.
+    IT ANSWERS WITH THE OFFER REDRAWN FROM STORAGE, for every card showing that
+    token at once, plus the sentence. So a refusal comes back drawn as stored
+    rather than as pressed -- the radio had already recorded the press by the
+    time this ran, and a badge left claiming a filter nobody stored is exactly
+    the failure this shape removes.
+
+    IT DOES NOT RE-RENDER THE MONTH. Filtering is applied while a month is
+    assembled, so a change lands on the next read -- the next month, or a
+    refresh. Rebuilding a month on every badge press would spend a whole
+    assembly on a one-token edit somebody is likely to follow with another, and
+    the sentence says so rather than leaving anybody to wonder why the card they
+    just filtered is still in front of them.
     """
     user = await auth.current_user(request)
     data = await authz.json_body(request)
-    dimension = str(data.get("dimension") or "")
-    resolve = _BADGE_FIELDS.get(dimension)
-    if resolve is None:
-        return authz.error("Not a filterable dimension")
-    token = str(data.get("token") or "").strip()
-    if not token:
-        return authz.error("Missing token")
-    mode = str(data.get("mode") or "")
-    if mode not in _BADGE_MODES:
-        return authz.error("Mode must be include, exclude, or empty to remove")
-
-    field = resolve(str(data.get("media") or ""))
+    dimension = str(route_params.last_value(data.get("dimension")) or "")
+    media = str(route_params.last_value(data.get("media")) or "")
+    token = str(route_params.last_value(data.get("token")) or "").strip()
+    mode = str(route_params.last_value(data.get("mode")) or "")
+    field = vocab.badge_field(dimension, media)
     prefs = await auth.get_user_prefs(user.user_id)
+
+    def answer(message: str, ok: bool, status: int = 200):
+        """The offer as STORED, whatever happened -- see the docstring."""
+        return templates.TemplateResponse(
+            request, "_filter_badge_answer.html",
+            {"request": request, "dimension": dimension, "token": token, "media": media,
+             "badge_modes": vocab.BadgeModes(prefs), "message": message, "ok": ok},
+            status_code=status)
+
+    if field is None:
+        return answer("That isn't something this calendar filters on.", False, 400)
+    if not token:
+        return answer("There is nothing on that badge to filter on.", False, 400)
+    if mode not in vocab.MODES:
+        return answer("That isn't one of the three answers a badge offers.", False, 400)
+
     is_list = field in vocab.LIST_FIELDS
     merged = calendar_filter.merge_token(prefs.get(field), token, mode, is_list=is_list)
-    # THROUGH THE SAME NORMALIZERS THE MODAL'S OWN SAVE USES, so a spec written by
-    # a badge and one typed into the modal cannot come out in different shapes.
+    # THROUGH THE SAME NORMALIZERS THE PANEL'S OWN SAVE USES, so a spec written by
+    # a badge and one saved from the panel cannot come out in different shapes.
     merged = _network_list(merged) if is_list else _filter_spec(merged)
     await auth.update_user_prefs(user.user_id, **{field: merged})
-    # Mirrored into share_links exactly as post_me_prefs does — that table's
+    # Mirrored into share_links exactly as post_me_prefs does -- that table's
     # owner-default columns are seeded from user_prefs and have no editor of
-    # their own, and a badge press is as much an edit as the modal's save.
+    # their own, and a badge press is as much an edit as the panel's save.
     if await share_links.get(user.user_id) is not None:
         await share_links.update_owner_defaults(user.user_id, **{field: merged})
-    return JSONResponse({"ok": True, "field": field, "value": merged})
+    prefs = {**prefs, field: merged}
+    said = {vocab.EXCLUDE: f"Filtering out {token}",
+            vocab.INCLUDE: f"Showing only {token}"}
+    return answer(f"{said.get(mode, f'{token} filter removed')} — applies on next load", True)
 
 
 @guard.post("/api/me/timezone", AuthLevel.CALENDAR_APPROVED)

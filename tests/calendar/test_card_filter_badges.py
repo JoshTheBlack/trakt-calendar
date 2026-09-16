@@ -17,6 +17,7 @@ import re
 import unittest
 from zoneinfo import ZoneInfo
 
+from app.calendar import vocab
 from app.config import Settings
 from app.providers.base import Record, Source, render
 from app.templating import templates
@@ -39,10 +40,14 @@ def _item(**overrides):
     return render(Record(**values), UTC)
 
 
-def _html(can_filter=True, **overrides) -> str:
+def _html(can_filter=True, prefs=None, **overrides) -> str:
+    """One card's markup. `prefs` is what this viewer has already filtered on, so
+    the badges can be asked whether they draw the STORED answer -- the card and
+    the answer to a press are drawn by the same macro from the same lookup."""
     return templates.env.get_template("_card.html").render(
         item=_item(**overrides), not_watching=set(), new_ids=set(),
-        is_admin=False, settings=Settings(), can_filter=can_filter)
+        is_admin=False, settings=Settings(), can_filter=can_filter,
+        badge_modes=vocab.BadgeModes(prefs or {}))
 
 
 def _tokens(html: str, dimension: str) -> list[str]:
@@ -148,6 +153,92 @@ class ACardMissingAFieldOffersNothingForItTests(unittest.TestCase):
 
     def test_no_genres_means_no_genre_badges(self):
         self.assertEqual(_tokens(_html(genres=[]), "genre"), [])
+
+
+
+class ABadgeDrawsWhatIsStoredTests(unittest.TestCase):
+    """THE CARD AND THE ANSWER TO A PRESS ARE ONE MACRO. Both draw the offer from
+    `vocab.BadgeModes`, so a badge cannot say "filtered out" until the next reload
+    and then stop saying it while the filter goes on applying -- which is what it
+    did while the browser lit the radio and the server drew every badge blank."""
+
+    def _checked(self, html: str, dimension: str, token: str) -> str | None:
+        """What one badge's offer says is stored, off its own attribute."""
+        offer = re.search(
+            r'data-filter="%s" data-token="%s".*?</details>' % (dimension, re.escape(token)),
+            html, re.S)
+        self.assertIsNotNone(offer, f"no {dimension} badge for {token!r}")
+        mode = re.search(r'<i class="fmark"[^>]*data-mode="([^"]*)"', offer.group(0))
+        return mode.group(1) if mode else None
+
+    def test_nothing_stored_draws_the_undo_answer(self):
+        html = _html()
+        self.assertEqual(self._checked(html, "genre", "drama"), "")
+
+    def test_an_excluded_genre_draws_itself_excluded(self):
+        html = _html(prefs={"tv_genres": "-drama"})
+        self.assertEqual(self._checked(html, "genre", "drama"), "exclude")
+        # And only that one: the other genre on the same card is untouched.
+        self.assertEqual(self._checked(html, "genre", "game-show"), "")
+
+    def test_a_film_cards_badge_reads_the_film_column(self):
+        """A genre excluded from a show must not draw a film card's badge, or the
+        card would claim a filter that will never act on it."""
+        stored = {"tv_genres": "-drama", "movie_genres": ""}
+        self.assertEqual(
+            self._checked(_html(prefs=stored, media="movie"), "genre", "drama"), "")
+        self.assertEqual(
+            self._checked(_html(prefs=stored), "genre", "drama"), "exclude")
+
+    def test_a_network_is_matched_with_its_case_kept(self):
+        """tvN and TVN are a Korean broadcaster and a Polish one, and the badge
+        folds exactly the way parse_network_spec does."""
+        self.assertEqual(
+            self._checked(_html(prefs={"network_filter": ["-TVN"]}), "network", "tvN"), "")
+        self.assertEqual(
+            self._checked(_html(prefs={"network_filter": ["-tvN"]}), "network", "tvN"),
+            "exclude")
+
+    def test_a_genre_stored_in_another_case_still_lights_its_badge(self):
+        """parse_spec lowercases, so a spec holding "Drama" is the same answer as
+        one holding "drama" and the badge has to agree with the filter."""
+        self.assertEqual(self._checked(_html(prefs={"tv_genres": "Drama"}), "genre", "drama"),
+                         "include")
+
+    def test_every_badge_posts_the_dimension_the_token_and_the_media(self):
+        """One press sends one fact, and the MERGE is the server's -- nothing in
+        the browser knows what a spec is."""
+        html = _html()
+        self.assertIn('hx-post="/calendar/filters/badge"', html)
+        self.assertIn('"dimension": "genre"', html)
+        self.assertIn('"media": "show"', html)
+        self.assertIn('"token": "game-show"', html)
+
+    def test_one_offer_open_at_a_time_is_the_browsers_own_grouping(self):
+        """Every badge shares one `name`, which is HTML's exclusive-accordion
+        rule and does what a capture listener for `toggle` used to."""
+        self.assertEqual(_html().count('name="filter-badge"'),
+                         _html().count("<details class=\"filter-badge"))
+
+    def test_the_offer_holds_no_grouped_control_of_its_own(self):
+        """A radio group could not hold this state and the reason is written in
+        _filter_badge.html: every badge for one genre shared a name, and a name
+        holds ONE checked radio in the whole document. Buttons belong to no
+        group, so twelve cards can all say what is stored."""
+        html = _html(prefs={"tv_genres": "-drama"})
+        self.assertNotIn('type="radio"', html.split('class="meta-row"')[-1])
+        self.assertIn('<button type="button" class="filter-offer-btn out"', html)
+
+    def test_the_mark_is_inside_the_summary_a_closed_details_still_renders(self):
+        """Firefox will not re-resolve an ancestor's `:has()` from an element
+        inside a CLOSED <details>, so what a press replaces has to be somewhere
+        the engine is still rendering. _filter_badge.html has the measurement."""
+        html = _html(prefs={"tv_genres": "-drama"})
+        summary = re.search(
+            r'data-filter="genre" data-token="drama".*?<summary[^>]*>(.*?)</summary>',
+            html, re.S)
+        self.assertIsNotNone(summary)
+        self.assertIn('<i class="fmark"', summary.group(1))
 
 
 if __name__ == "__main__":  # pragma: no cover

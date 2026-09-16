@@ -149,7 +149,16 @@
                 <button type="button" data-modal-open="changelogModal"
                         hx-get="/api/changelog" hx-target="#changelogBody"
                         hx-swap="innerHTML">📜 What's new</button>
-                <button type="button" onclick="signOut()">🚪 Sign out</button>
+                {# SIGN-OUT POSTS ITSELF and the SERVER says where to go next.
+                   `hx-json-enc` is what makes it an application/json request,
+                   which is the only shape a mutating route here accepts
+                   (app/authz.py's request_shape_guard); the body is ignored and
+                   the SESSION ROW is what is invalidated, so a page left open in
+                   another tab is signed out too. The answer carries HX-Redirect
+                   rather than a redirect status, because a 303 would be followed
+                   by the request and swapped into the page instead of navigating.
+                   `hx-swap="none"` because there is nothing to put anywhere. #}
+                <button type="button" hx-post="/logout" hx-json-enc hx-swap="none">🚪 Sign out</button>
             </div>
         </details>
     </div>

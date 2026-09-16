@@ -577,6 +577,19 @@ async def login(request: Request):
 
 @guard.post("/logout", AuthLevel.PUBLIC)
 async def logout(request: Request):
+    """End the session and send the browser to the sign-in page.
+
+    THE SESSION ROW IS WHAT IS INVALIDATED, not the cookie: `revoke_session` is a
+    hard delete, so a copy of the cookie kept anywhere else stops working at the
+    same moment (app/auth/sessions.py). Clearing the cookie is the tidy-up, not
+    the mechanism.
+
+    ANSWERED WITH `HX-Redirect` RATHER THAN A REDIRECT STATUS. The control is a
+    button that posts itself, and htmx FOLLOWS a 303 and swaps what it finds — so
+    a redirect status would put the sign-in page inside the menu instead of
+    navigating to it. The header says "go here", which is the one thing a page
+    being signed out of actually wants. 204 because there is nothing to swap.
+    """
     # Signing someone out is a state change, so it is held to the same JSON-only
     # rule as every other mutating endpoint. The body itself is ignored.
     await authz.json_body(request)
@@ -584,7 +597,7 @@ async def logout(request: Request):
     session_id = auth.read_session_cookie(request, settings)
     if session_id:
         await auth.revoke_session(session_id)
-    response = JSONResponse({"ok": True, "redirect": "/login"})
+    response = Response(status_code=204, headers={"HX-Redirect": "/login"})
     auth.clear_session_cookie(response, settings, request)
     return response
 

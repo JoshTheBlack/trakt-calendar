@@ -955,7 +955,7 @@ class SiteHeaderTests(RegressionTestCase):
                 _, head = self.header(path)
                 self.assertIn("nav-menu", head)
                 self.assertIn('href="/me"', head)
-                self.assertIn("signOut()", head)
+                self.assertIn('hx-post="/logout"', head)
 
     def test_admin_only_appears_for_admins(self):
         for path in self.PAGES:

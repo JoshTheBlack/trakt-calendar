@@ -28,13 +28,6 @@
    that never offered one. The server resolves it from the session — see the
    context key of the same name — and it gates the REVEAL, not the menu item. #}
 <div id="pageMeta" hidden data-page="calendar" data-body-class="{{ body_class }}"{% if distrakt_available %} data-distrakt="1"{% endif %}></div>
-<div id="pageData" hidden data-month="{{ month }}" data-year="{{ year }}" data-endpoint="{{ endpoint.key }}" data-total="{{ total }}"></div>
-{# What the page knows about itself that the client still needs after paint: the
-   month's per-show card counts (so a toggle can move the stat tiles without
-   counting cards it may not be holding), the current split, this viewer's marks,
-   and the ids this load decided were new — as DATA, not only as classes, so a
-   render that ships days separately can mark them from the same one answer. #}
-<script id="calendarViewData" type="application/json">{{ view_data | tojson }}</script>
 
 {# The two eye icons, defined ONCE and referenced by every card's <use>. They are
    NOT the same drawing: closed is the open eye plus the diagonal strike. #}
@@ -50,6 +43,9 @@
 {# Aliased `site_nav`, not `nav`: this page's own context already binds `nav` to
    the previous/next month numbers. #}
 {% import '_nav.html' as site_nav %}
+{# The two toolbar marks a filters save has to correct, drawn from one place by
+   the page and by that save's answer alike — see _calendar_marks.html. #}
+{% import '_calendar_marks.html' as marks with context %}
 
 {% macro hero_lead() %}
         <div class="month-nav">
@@ -196,30 +192,14 @@
                    distrakt_href='/distrakt?year=' ~ year,
                    calendar_available=calendar_available,
                    ranker_available=ranker_available, is_admin=is_admin) %}
-        <span class="hero-meta" title="{{ endpoint.description }}">📊 {{ total }} · 🕒 {{ generated }}</span>
+        {{ marks.meta() }}
         {# BESIDE THE FILTER RATHER THAN BEHIND THE MENU, because the two answer
            opposite halves of one question: the filter decides what a month
            shows, and this finds where a title is when the month on screen is not
            the one it is on. #}
         <button type="button" id="searchBtn" class="pill-btn" onclick="openCalendarSearch()"
                 title="Find a title on your calendar">🔍 Search</button>
-        {# In the bar rather than behind the ☰ menu, and lit while a filter is
-           set. A filter REMOVES shows, so a calendar quietly missing something
-           has to carry the reason on its face — buried one click away, the only
-           evidence was the absence itself.
-
-           THREE STATES, NOT TWO, and the third is why this is worth spelling
-           out. "Nothing set" and "set but switched off" both show a calendar
-           with everything on it, and if they looked alike a viewer would forget
-           their filters existed — so a paused panel gets its own look rather
-           than falling back to the plain one. #}
-        {% set filters_off = view.filters_active and filter_panel.paused %}
-        <button type="button" id="filtersBtn"
-                class="pill-btn{% if view.filters_active and not filter_panel.paused %} active{% endif %}{% if filters_off %} paused{% endif %}"
-                onclick="openFilters()"
-                title="{% if filters_off %}Your filters are switched off — this calendar is showing everything{% elif view.filters_active %}Filtering this calendar by {{ view.filters_summary }}{% else %}Filter this calendar by genre, country, or network{% endif %}">
-            🎚️ {% if filters_off %}Filters off{% elif view.filters_active %}Filtered{% else %}Filters{% endif %}
-        </button>
+        {{ marks.button() }}
         <button type="button" id="hideToggle" class="pill-btn{% if view.hide_not_watching %} active{% endif %}" onclick="toggleHideNotWatching()" title="Toggle hiding not-watching items">
             <span id="hideToggleLabel">{% if view.hide_not_watching %}🚫 Hiding{% else %}👁️ Showing all{% endif %}</span>
         </button>
@@ -236,139 +216,7 @@
                 hx-target="#shareSlot" hx-swap="innerHTML">🔗 Share</button>
 {% endcall %}
 
-{# Every number here is the server's, computed over the whole month before the
-   page was sent. The client only moves them when the viewer toggles something. #}
-<div id="statsBar" class="stats-bar">
-    <div style="width: 100%;">
-        <div class="stats-row"><span>📺 Total:</span><strong id="statTotal">{{ stats.total }}</strong></div>
-        <span id="deltaMsg" class="delta-msg {{ delta.kind }}">{{ delta.text }}</span>
-    </div>
-    <hr class="stats-divider">
-    <div class="stats-row"><span>👀 Watching:</span><strong id="statWatching">{{ stats.watching }}</strong></div>
-    <div class="stats-row"><span>🚫 Not Watching:</span><strong id="statNotWatching">{{ stats.not_watching }}</strong></div>
-    {# WHAT THIS VIEWER'S OWN FILTERS TOOK OUT OF THIS MONTH — every dimension,
-       on every calendar. A filter REMOVES titles rather than moving them: a film
-       out only in Brazil does not match a filter asking for American releases at
-       all, and a show whose genre you excluded is simply not there. Either can
-       empty a month completely, which is exactly the state that reads as a
-       broken calendar if the page says nothing.
-
-       IT COUNTS ONLY WHAT THE READER CAN UNDO. The instance-wide content floor
-       removes titles too, and so does the rule that keeps films off a series
-       calendar; neither is this viewer's to change, and counting them here would
-       point somebody at a panel that cannot bring the title back.
-
-       It sits here rather than in a banner above the grid because it is a COUNT
-       ABOUT THIS MONTH, which is what every other line in this card is; a banner
-       made the filters look like an error, and pushed the calendar down the page
-       to say it.
-
-       RED, ON THE SAME RULE AS A FALLING TOTAL. `.delta-msg.down` is what this
-       calendar already uses for "there is less here than you might expect", and a
-       second colour for a second kind of absence would be a second thing to
-       learn. Clicking it opens the filter that caused it. #}
-    {% if filtered %}
-    <div class="stats-row stats-filtered" title="Cards your own filters removed from this month — click to open them">
-        <span>🎚️ <a href="#" onclick="openFilters(); return false;">Filtered:</a></span>
-        <strong id="statFiltered">{{ filtered }}</strong>
-    </div>
-    {% endif %}
-    {# THE BACKGROUND DRAINS' REMAINING WORK, instance-wide and not this month's.
-       Both drains log only what they just DID, so "filled 121 episodes across 25
-       seasons" every minute reads the same whether 26 seasons remain or twenty
-       thousand — and a drain looping on work it had already finished is a bug
-       this calendar has shipped twice, both times found by somebody watching the
-       log and guessing. A number that COUNTS DOWN is what tells the two apart.
-
-       NOT LIVE, deliberately. These change on the heartbeat's clock, not the
-       viewer's, so polling them would spend a request a minute to animate a
-       number nobody is waiting on. A refresh is the right resolution.
-
-       Absent at zero rather than shown as "0": the lines DISAPPEARING is the
-       signal that everything has settled, which is the state a reader is
-       actually looking for. #}
-    {% if backlog_titles or backlog_seasons %}
-    <hr class="stats-divider">
-    {% if backlog_titles %}
-    <div class="stats-row" title="Stored titles whose genres, network and certification are still being looked up. Instance-wide, not just this month.">
-        <span>⏳ Unenriched:</span><strong id="statBacklogTitles">{{ backlog_titles }}</strong>
-    </div>
-    {% endif %}
-    {% if backlog_seasons %}
-    <div class="stats-row" title="Seasons still owed a per-episode lookup, for episode titles, runtimes and ratings. Instance-wide, not just this month.">
-        <span>📼 Seasons owed:</span><strong id="statBacklogSeasons">{{ backlog_seasons }}</strong>
-    </div>
-    {% endif %}
-    {% endif %}
-    <div id="historyLog" class="history-log">
-        {% if history %}<strong>History:</strong>
-        {% for entry in history %}
-        <div class="history-row"><span>{{ entry.label }} {{ entry.time }}</span><span>{{ entry.count }} items</span></div>
-        {% endfor %}
-        {% endif %}
-    </div>
-</div>
-
-{# Jump-to strip: one chip per day of the month, pinned under the header. A day
-   this viewer will see nothing of — empty, or entirely not-watching while hiding
-   is on — has no section to scroll to, so its chip is inert rather than a link
-   that goes nowhere. data-date is how calendar/layout.js re-greys one when a
-   toggle empties its day without a reload. #}
-{# The band that brings the strip back once it has tucked away. A SIBLING of the
-   strip rather than something inside it, because the tucked strip is transformed
-   and a transformed element becomes the containing block for its fixed-position
-   descendants — a catcher inside it would slide off-screen along with it. #}
-<div class="day-chips-peek" aria-hidden="true"></div>
-<nav class="day-chips" aria-label="Jump to a day">
-    {# One partial per chip, shared with a day that arrives late, which draws its
-       own chip again once it has read what this viewer sees of it.
-       _day_chip.html says why a chip with items always stays an anchor. #}
-    {% for chip in day_chips %}{% include "_day_chip.html" %}{% endfor %}
-</nav>
-
-{% if error %}
-{# A coverage gap (a stated single calendar source that doesn't reach
-   this month) is not a failure — it renders the same banner shape so it is
-   never mistaken for a blank calendar, but offers the other source's view
-   instead of a bare warning triangle. #}
-<div class="{{ 'warning-banner' if coverage_gap else 'error-banner' }}">⚠️ {{ error }}{% if coverage_gap and switch_url %} <a href="{{ switch_url }}">Show it anyway</a>{% endif %}</div>
-{% elif partial %}
-<div class="warning-banner">⚠️ Some calendar data couldn't be loaded — showing what we have.</div>
-{% endif %}
-{# Quiet on purpose, and separate from the warning above: nothing is wrong. A
-   title one service listed but has not been looked up yet has no genres,
-   country or certification to judge, so this month's filters let it through
-   rather than removing it on values nobody has. The number falls to zero by
-   itself as the background catalogue read catches up, and a reload shows the
-   new answer — so this says which cards are provisional rather than asking for
-   anything to be done. #}
-{% if unenriched %}
-<div class="hint enrichment-note">⏳ {{ unenriched }} item{{ '' if unenriched == 1 else 's' }} here
-  {{ 'is' if unenriched == 1 else 'are' }} still being looked up, so your filters
-  haven't been applied to {{ 'it' if unenriched == 1 else 'them' }} yet.</div>
-{% endif %}
-
-{# THE MONTH, IN DATE ORDER, drawn from ONE list. A day is either rendered with
-   its cards or announced as a placeholder that pulls them in when the viewer
-   reaches it — so first paint costs a handful of cards instead of a month of
-   them, and a day nobody scrolls to is never built at all.
-
-   WHICH IT IS, IS A FLAG ON THE DAY rather than which list it came from, and that
-   is the whole reason there is one loop here. The days drawn with their cards are
-   NOT a prefix: a jump into the 28th ships that day too (calendar/routes.py), and
-   with two lists it was appended after the fifth — so the month read 1, 2, 3, 4,
-   5, 28, then 6 onwards. #}
-<main>
-    {% if not days and not error %}
-    <div class="empty-state">
-        <div class="emoji">🕵️</div>
-        <div>No items matched your filters for this range.</div>
-    </div>
-    {% endif %}
-    {% for group in days %}{% if group.inline %}{% include "_day_block.html" %}
-    {% else %}{% include "_day_skeleton.html" %}{% endif %}
-    {% endfor %}
-</main>
+{% include "_calendar_body.html" %}
 
 {% with note = 'Idea & design by great_vc — Python rebuild' %}{% include "_footer.html" %}{% endwith %}
 
@@ -456,218 +304,12 @@
     </div>
 </div>
 
-{# WHAT THIS VIEWER'S CALENDAR CONTAINS. Applied per viewer at read time against
-   one shared cache (app/calendar/filter.py), which is what lets two people
-   filter the same cached month differently.
 
-   TWO TABS OVER TWO SETS OF STORED VALUES, not one set shown twice. Somebody who
-   never wants a reality SHOW usually still wants documentary films, and while
-   the two questions shared one answer neither could be answered properly. The
-   columns are app/db.py's migration 38; which of them belongs to which medium is
-   app/calendar/vocab.py's TV_FIELDS/MOVIE_FIELDS.
-
-   THE TABS ARE RADIOS AND THE STYLESHEET DRAWS THEM. No script switches a panel,
-   nothing has to be re-bound when the modal opens, and the tab that opens is
-   whichever radio the server rendered `checked` — the medium of the calendar
-   behind the panel. Both radios sit before the tab strip AND before the bodies,
-   so one sibling selector can reach either.
-
-   EVERY CONTROL IS A REAL NAMED INPUT IN ONE REAL FORM. The panel needs no
-   hydration request when it opens (its values are already in it), Cancel is the
-   form's own reset, and the save serializes the form rather than reading fields
-   out by id. #}
-{% import '_filter_fields.html' as ff with context %}
-<div id="filtersModal" class="modal-overlay">
-    <div class="modal filters-modal" id="filtersPanel">
-        <div class="modal-head">
-            <h2>🎚️ Filters</h2>
-            <button type="button" class="modal-close" onclick="closeFilters()">&times;</button>
-        </div>
-        <form id="filtersForm" onsubmit="return saveFilters(event)" hx-boost="false">
-
-            {# THE MASTER SWITCH, above the tabs because it governs both. Nothing
-               is copied aside and nothing is restored: the answers stay where
-               they are and every read path asks this one value before applying
-               them, so turning filters back on cannot have lost one. A share
-               link deliberately ignores it — app/calendar/vocab.py's
-               `active_specs` is where that is argued. #}
-            {# THE SWITCH READS THE WAY EVERY OTHER SWITCH DOES: on means the
-               thing is happening. It is stored the other way round — the column
-               is `filters_paused`, because "nobody has paused anything" is the
-               state every account starts in and a default of false is what
-               makes that true — so the FIELD is inverted once, on the way in
-               (see post_me_filters), rather than the control being drawn
-               backwards to match a column name. #}
-            <label class="filter-power">
-                <span class="filter-power-copy">
-                    <strong>Filters</strong>
-                    <span class="filter-power-on">On. Turn them off to see everything for a while — nothing is forgotten.</span>
-                    <span class="filter-power-off">Off. Your calendar is showing everything, and nothing below has been cleared.</span>
-                </span>
-                <input type="checkbox" id="f_filters_on" name="filters_on" autocomplete="off"
-                       {% if not filter_panel.paused %}checked{% endif %}>
-                <span class="fswitch"><span class="fswitch-knob"></span></span>
-            </label>
-
-            <input type="radio" name="filters_tab" id="ftab_show" class="ftab-radio" autocomplete="off"
-                   {% if filter_panel.media != 'movie' %}checked{% endif %}>
-            <input type="radio" name="filters_tab" id="ftab_movie" class="ftab-radio" autocomplete="off"
-                   {% if filter_panel.media == 'movie' %}checked{% endif %}>
-            <div class="ftabs">
-                <label class="ftab ftab-show" for="ftab_show">📺 TV{% if filter_panel.counts.show %}<span class="ftab-count">{{ filter_panel.counts.show }}</span>{% endif %}</label>
-                <label class="ftab ftab-movie" for="ftab_movie">🎬 Movies{% if filter_panel.counts.movie %}<span class="ftab-count">{{ filter_panel.counts.movie }}</span>{% endif %}</label>
-            </div>
-
-            <div class="modal-body">
-                {# ---------------- TV ---------------- #}
-                <div class="ftab-panel ftab-panel-show">
-                    {% if filter_panel.sources.show %}
-                    <div class="ffield">
-                        <div class="ffield-head">
-                            <span class="ffield-label">Services</span>
-                            {% call ff.info() %}Which services list your TV calendar. Each is its own
-                                switch, so a service added to this app later arrives switched on for
-                                anyone who had them all on. It narrows like everything else on this
-                                tab: nothing is fetched or stored differently, and it lands on your
-                                next page load. Your movie calendar keeps its own answer.{% endcall %}
-                        </div>
-                        {# THE BOX AND ITS FACE ARE SIBLINGS rather than a label
-                           wrapping the box, so the stylesheet can ask the GROUP
-                           whether a second service is ticked — which is what
-                           greys and deadens the last one still on. See .fsources
-                           in style.css; it used to be two functions in
-                           calendar/filters.js, one of which ran on an event a
-                           boosted arrival never fires. #}
-                        <div class="fsources">
-                            {% for choice in filter_panel.sources.show %}
-                            <input type="checkbox" id="fsrc-show-{{ loop.index }}"
-                                   name="sources_show" value="{{ choice.source }}"
-                                   autocomplete="off"{% if choice.on %} checked{% endif %}>
-                            <label class="fsource" for="fsrc-show-{{ loop.index }}">{{ choice.label }}</label>
-                            {% endfor %}
-                        </div>
-                        <p class="hint">At least one has to stay on.</p>
-                    </div>
-                    {% endif %}
-
-                    {% call ff.field('tv_genres', 'Genres', 'Another genre, then Enter…') %}
-                        Press a chip once to keep <em>only</em> that genre, again to filter it out,
-                        again to stop filtering on it. A show is kept if it carries any genre you
-                        asked for and none you excluded. This happens here rather than at Trakt, so
-                        it works on any account — the Settings screen still carries a VIP caveat,
-                        and it is about the fields Trakt is asked for directly.
-                    {% endcall %}
-                    {% call ff.field('tv_countries', 'Countries', 'Another country code, then Enter…') %}
-                        Where a show was <em>made</em>. Two-letter ISO codes; the box takes any of
-                        them, including the ones with no chip here.
-                    {% endcall %}
-                    {% call ff.field('network_filter', 'Networks', 'Network name, then Enter…') %}
-                        Matched exactly as the service spells it, capitals included — one week of
-                        this calendar carried both <code>TVN</code> and <code>tvN</code>, a Polish
-                        broadcaster and a Korean one, so folding the case would merge two networks
-                        that are not the same network. No chips are offered because there are
-                        thousands of them: pressing a network's badge on a card is the quick way in.
-                    {% endcall %}
-                    {% call ff.field('show_certifications', 'Ratings') %}
-                        TV ratings only — films have their own on the Movies tab, because TV
-                        Parental Guidelines and MPA ratings are separate vocabularies.
-                        <code>NR</code> covers anything the service gave no rating.
-                    {% endcall %}
-                </div>
-
-                {# ---------------- MOVIES ---------------- #}
-                <div class="ftab-panel ftab-panel-movie">
-                    {% if filter_panel.sources.movie %}
-                    <div class="ffield">
-                        <div class="ffield-head">
-                            <span class="ffield-label">Services</span>
-                            {% call ff.info() %}Which services list your movie calendar, answered
-                                separately from TV — one service's film calendar is every release in
-                                every market, measured at 1314 titles in one real August against the
-                                other's 25, and that is a preference worth stating once per medium.{% endcall %}
-                        </div>
-                        <div class="fsources">
-                            {% for choice in filter_panel.sources.movie %}
-                            <input type="checkbox" id="fsrc-movie-{{ loop.index }}"
-                                   name="sources_movie" value="{{ choice.source }}"
-                                   autocomplete="off"{% if choice.on %} checked{% endif %}>
-                            <label class="fsource" for="fsrc-movie-{{ loop.index }}">{{ choice.label }}</label>
-                            {% endfor %}
-                        </div>
-                        <p class="hint">At least one has to stay on.</p>
-                    </div>
-                    {% endif %}
-
-                    {% call ff.field('movie_genres', 'Genres', 'Another genre, then Enter…') %}
-                        Separate from the TV tab's genres: excluding <em>reality</em> from your shows
-                        no longer touches your films. Same three states — press to keep only, again
-                        to filter out, again to stop filtering.
-                    {% endcall %}
-                    {% call ff.field('movie_countries', 'Countries', 'Another country code, then Enter…') %}
-                        Where a film was <em>made</em>. Not the same question as release markets
-                        below, which is where it is being <em>shown</em> — a Brazilian film opening
-                        in America matches one and not the other.
-                    {% endcall %}
-                    {% call ff.field('movie_certifications', 'Ratings') %}
-                        Film ratings. <code>NR</code> covers anything the service left unrated.
-                    {% endcall %}
-                    {% call ff.field('movie_release_countries', 'Release markets', 'Another market, then Enter…') %}
-                        Where a film is being <em>released</em>, which is what makes a global film
-                        calendar readable at all — one service lists every release in every market,
-                        over a thousand titles in a busy month. A film with no release in any market
-                        you keep is <strong>removed</strong> rather than moved to another date; the
-                        calendar says how many, so a month this empties can be undone.
-                    {% endcall %}
-                    {% call ff.field('movie_release_types', 'Release formats') %}
-                        A market and a format are matched <strong>together</strong>: US plus
-                        Theatrical means a film in American cinemas, not one that premiered elsewhere
-                        and opened in cinemas somewhere else.
-                    {% endcall %}
-                </div>
-            </div>
-
-            <div class="modal-foot">
-                {# CLEARS THE VISIBLE TAB and says which one, rather than leaving
-                   somebody to find out by pressing it. Both labels are drawn and
-                   the stylesheet shows whichever matches the open tab, so no
-                   script keeps the button in step with the tabs. #}
-                <button type="button" class="btn-ghost fclear" onclick="clearFilters(event)">
-                    <span class="fclear-show">Clear TV filters</span>
-                    <span class="fclear-movie">Clear movie filters</span>
-                </button>
-                <button type="submit" class="btn-primary">Save &amp; reload</button>
-            </div>
-        </form>
-
-        {# THE ONE PIECE OF MARKUP THE CLIENT BUILDS, and it is authored here so
-           that it is still markup an editor and a grep can see. Adding a token
-           the vocabulary does not name clones this and fills in the name, the ids
-           and the text; the NAME FORMAT comes from the input's own
-           data-name-prefix, which the server spelled, so nothing in JavaScript
-           knows how a filter field is named.
-
-           THE ids ARE THE ONE THING THE CLONE HAS TO FINISH. Three labels pointing
-           `for` at the next radio is what makes a chip cycle without script
-           (_filter_chip.html), and `for` matches an id — which a clone cannot
-           inherit, because an id is unique per document. So the clone is given
-           one, from a counter, and the shape stays identical to the chips the
-           server drew. #}
-        <template id="fchipTemplate">
-            <span class="fchip" role="radiogroup">
-                <input type="radio" value="" autocomplete="off">
-                <label class="fchip-face" aria-hidden="true"></label>
-                <input type="radio" value="include" autocomplete="off" checked>
-                <label class="fchip-face" aria-hidden="true"></label>
-                <input type="radio" value="exclude" autocomplete="off">
-                <label class="fchip-face" aria-hidden="true"></label>
-            </span>
-        </template>
-    </div>
-</div>
-
-{# WHERE THE SHARE PANEL LANDS. Empty until 🔗 Share asks: the panel is the
-   server's answer (app/calendar/share_routes.py), and it removes itself when it
-   closes. #}
+{# WHERE THE FILTERS AND SHARE PANELS LAND. Empty until 🎚️ Filters or 🔗 Share
+   asks: each panel is the server's answer, drawn already open, and each removes
+   itself when it closes. A saved filter empties the filters slot out of band,
+   which is how the panel closes without a script being told to close it. #}
+<div id="filtersSlot"></div>
 <div id="shareSlot"></div>
 
 {% include "_details_modal.html" %}

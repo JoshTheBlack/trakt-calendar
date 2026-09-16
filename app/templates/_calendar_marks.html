@@ -1,0 +1,49 @@
+{# THE TWO MARKS A FILTER CHANGES THAT DO NOT LIVE IN THE CALENDAR BODY.
+
+   Everything else a filter decides is inside #calendarBody and is swapped whole
+   (_calendar_body.html). These two sit in the toolbar, above it: the month's own
+   total and the Filters button's three states. So they travel with a save OUT OF
+   BAND, addressed by their ids, and they are macros rather than markup in the
+   page because the page and the save's answer must draw them from one place —
+   two copies of "what does a paused filter look like" is exactly the drift this
+   whole conversion removes. #}
+
+{# `oob` is what makes the same macro serve both: the page draws it in place, the
+   answer draws it addressed at itself. #}
+{% macro meta(oob=false) %}
+<span class="hero-meta" id="calendarMeta" title="{{ endpoint.description }}"
+      {%- if oob %} hx-swap-oob="true"{% endif %}>📊 {{ total }} · 🕒 {{ generated }}</span>
+{% endmacro %}
+
+{# In the bar rather than behind the ☰ menu, and lit while a filter is set. A
+   filter REMOVES shows, so a calendar quietly missing something has to carry the
+   reason on its face — buried one click away, the only evidence was the absence
+   itself.
+
+   THREE STATES, NOT TWO, and the third is why this is worth spelling out.
+   "Nothing set" and "set but switched off" both show a calendar with everything
+   on it, and if they looked alike a viewer would forget their filters existed —
+   so a paused panel gets its own look rather than falling back to the plain one.
+
+   THE PANEL IS FETCHED ON EVERY PRESS, not `once`, for the reason the Settings
+   entry in _nav.html is: each opening must re-read what is stored, and an answer
+   that failed has to be retryable rather than leaving an empty slot for ever.
+
+   THE CALENDAR'S OWN QUERY STRING RIDES WITH IT, and it is load-bearing twice
+   over: it decides which tab opens (the medium of the calendar behind the panel),
+   and the panel hands it on to the SAVE — which answers with the month redrawn
+   and would otherwise redraw whichever month today falls in. MEASURED: without
+   it, saving a filter while looking at October replaced October with September.
+   It is the same thing the Add-all control carries for the same reason
+   (_add_all.html). #}
+{% macro button(oob=false) %}
+{%- set paused = view.filters_active and view.filters_paused -%}
+<button type="button" id="filtersBtn"
+        class="pill-btn{% if view.filters_active and not view.filters_paused %} active{% endif %}{% if paused %} paused{% endif %}"
+        {%- if oob %} hx-swap-oob="true"{% endif %}
+        hx-get="/calendar/fragments/filters{{ calendar_query }}"
+        hx-target="#filtersSlot" hx-swap="innerHTML"
+        title="{% if paused %}Your filters are switched off — this calendar is showing everything{% elif view.filters_active %}Filtering this calendar by {{ view.filters_summary }}{% else %}Filter this calendar by genre, country, or network{% endif %}">
+    🎚️ {% if paused %}Filters off{% elif view.filters_active %}Filtered{% else %}Filters{% endif %}
+</button>
+{% endmacro %}

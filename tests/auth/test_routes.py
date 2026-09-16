@@ -197,7 +197,13 @@ class SignInTests(RouteTestCase):
         # Setup left a session of its own behind, so signing out must delete
         # exactly this one rather than everything the account has.
         before = asyncio.run(db.fetch_value("SELECT COUNT(*) FROM sessions"))
-        self.assertEqual(self.client.post("/logout", json={}).status_code, 200)
+        # THE SESSION ROW IS WHAT IS INVALIDATED, and the answer is a header
+        # telling the browser where to go rather than a body to swap: the control
+        # is a button that posts itself, and htmx follows a redirect STATUS and
+        # swaps what it finds, which would put the sign-in page inside the menu.
+        out = self.client.post("/logout", json={})
+        self.assertEqual(out.status_code, 204)
+        self.assertEqual(out.headers["HX-Redirect"], "/login")
         self.assertEqual(asyncio.run(db.fetch_value("SELECT COUNT(*) FROM sessions")),
                          before - 1)
         self.assertEqual(self.client.get("/me").status_code, 401)

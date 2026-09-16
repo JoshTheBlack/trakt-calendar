@@ -86,6 +86,18 @@ class CalendarRouteTestCase(unittest.TestCase):
         save_settings(_configured_settings())
         self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
 
+    def serving_month(self, entries=()):
+        """Hold the calendar fetch still for the life of the test.
+
+        NEEDED BY EVERY TEST THAT SAVES A FILTER, which is new: the save answers
+        with the month redrawn rather than telling the browser to reload, so it
+        assembles a month the way the page does. A subclass that already patches
+        the fetch for its own entries does not call this.
+        """
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch(list(entries)))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def tearDown(self):
         self.client.close()
         db.close_thread_connection()
@@ -302,7 +314,7 @@ class ViewerFilterTests(CalendarRouteTestCase):
         for field, tokens in fields.items():
             for token, mode in tokens.items():
                 payload[vocab.field_name(field, token)] = mode
-        return self.client.post("/api/me/filters", json=payload)
+        return self.client.post("/calendar/filters", json=payload)
 
     def test_a_new_account_starts_with_no_filters_at_all(self):
         """A filter removes shows without ever saying one exists, so it is not
@@ -451,13 +463,13 @@ class ViewerFilterTests(CalendarRouteTestCase):
         self.set_filters(tv_genres={"comedy": "exclude"})
         self.assertNotIn("The Comedy", self.client.get("/?year=2026&month=7").text)
 
-        self.client.post("/api/me/filters", json={"filters_on": False})
+        self.client.post("/calendar/filters", json={"filters_on": "0"})
         page = self.client.get("/?year=2026&month=7").text
         self.assertIn("The Comedy", page)
         self.assertEqual(asyncio.run(auth.get_user_prefs(self.user1))["tv_genres"],
                          "-comedy")
 
-        self.client.post("/api/me/filters", json={"filters_on": True})
+        self.client.post("/calendar/filters", json={"filters_on": "1"})
         self.assertNotIn("The Comedy", self.client.get("/?year=2026&month=7").text)
 
     def test_the_month_says_how_many_cards_the_filters_removed(self):
@@ -505,7 +517,7 @@ class ViewerFilterTests(CalendarRouteTestCase):
         would forget their filters existed."""
         self.sign_in_as(self.user1)
         self.set_filters(tv_genres={"comedy": "exclude"})
-        self.client.post("/api/me/filters", json={"filters_on": False})
+        self.client.post("/calendar/filters", json={"filters_on": "0"})
         page = self.client.get("/?year=2026&month=7").text
         self.assertIn("pill-btn paused", page)
         self.assertIn("Filters off", page)
@@ -514,7 +526,7 @@ class ViewerFilterTests(CalendarRouteTestCase):
         self.client.cookies.clear()
         self.assertEqual(self.client.get("/api/me/prefs").status_code, 401)
         self.assertEqual(
-            self.client.post("/api/me/filters", json={"filters_on": False}).status_code,
+            self.client.post("/calendar/filters", json={"filters_on": "0"}).status_code,
             401)
 
 
@@ -1713,7 +1725,7 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         self.assertEqual(resp.text.strip(), "")
 
     def _exclude_drama(self):
-        return self.client.post("/api/me/filters", json={
+        return self.client.post("/calendar/filters", json={
             vocab.field_name(vocab.TV_GENRES, "drama"): "exclude"})
 
     def test_it_applies_this_viewers_saved_filters(self):

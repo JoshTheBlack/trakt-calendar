@@ -1,0 +1,161 @@
+{# THE WHOLE OF WHAT THIS VIEWER'S FILTERS DECIDE, in one element.
+
+   A FILTERS SAVE SWAPS EXACTLY THIS, because a filter changes the cards, the
+   numbers stated about them, the jump strip's per-day counts and the two notes
+   above the grid — and every one of them is a claim about the SAME assembly. One
+   element means they cannot arrive from different readings of the month, and it
+   is why the panel no longer answers by reloading the page.
+
+   THE TWO FACTS THE CLIENT STILL READS TRAVEL INSIDE IT. #pageData carries the
+   month's total and #calendarViewData its per-show counts; calendar/view.js reads
+   both to keep the tiles honest through a mark made without a reload, and a swap
+   that left them outside would leave that bookkeeping describing the month that
+   was just replaced. #}
+<div id="calendarBody">
+<div id="pageData" hidden data-month="{{ month }}" data-year="{{ year }}" data-endpoint="{{ endpoint.key }}" data-total="{{ total }}"></div>
+{# What the page knows about itself that the client still needs after paint: the
+   month's per-show card counts (so a toggle can move the stat tiles without
+   counting cards it may not be holding), the current split, this viewer's marks,
+   and the ids this load decided were new — as DATA, not only as classes, so a
+   render that ships days separately can mark them from the same one answer. #}
+<script id="calendarViewData" type="application/json">{{ view_data | tojson }}</script>
+{# Every number here is the server's, computed over the whole month before the
+   page was sent. The client only moves them when the viewer toggles something. #}
+<div id="statsBar" class="stats-bar">
+    <div style="width: 100%;">
+        <div class="stats-row"><span>📺 Total:</span><strong id="statTotal">{{ stats.total }}</strong></div>
+        <span id="deltaMsg" class="delta-msg {{ delta.kind }}">{{ delta.text }}</span>
+    </div>
+    <hr class="stats-divider">
+    <div class="stats-row"><span>👀 Watching:</span><strong id="statWatching">{{ stats.watching }}</strong></div>
+    <div class="stats-row"><span>🚫 Not Watching:</span><strong id="statNotWatching">{{ stats.not_watching }}</strong></div>
+    {# WHAT THIS VIEWER'S OWN FILTERS TOOK OUT OF THIS MONTH — every dimension,
+       on every calendar. A filter REMOVES titles rather than moving them: a film
+       out only in Brazil does not match a filter asking for American releases at
+       all, and a show whose genre you excluded is simply not there. Either can
+       empty a month completely, which is exactly the state that reads as a
+       broken calendar if the page says nothing.
+
+       IT COUNTS ONLY WHAT THE READER CAN UNDO. The instance-wide content floor
+       removes titles too, and so does the rule that keeps films off a series
+       calendar; neither is this viewer's to change, and counting them here would
+       point somebody at a panel that cannot bring the title back.
+
+       It sits here rather than in a banner above the grid because it is a COUNT
+       ABOUT THIS MONTH, which is what every other line in this card is; a banner
+       made the filters look like an error, and pushed the calendar down the page
+       to say it.
+
+       RED, ON THE SAME RULE AS A FALLING TOTAL. `.delta-msg.down` is what this
+       calendar already uses for "there is less here than you might expect", and a
+       second colour for a second kind of absence would be a second thing to
+       learn. Clicking it opens the filter that caused it. #}
+    {% if filtered %}
+    <div class="stats-row stats-filtered" title="Cards your own filters removed from this month — click to open them">
+        {# ASKS FOR THE PANEL EXACTLY AS THE TOOLBAR BUTTON DOES. A button rather
+           than an anchor to nowhere: it opens something, it does not navigate,
+           and an `href="#"` cancelled by script was both of those claims at
+           once. #}
+        <span>🎚️ <button type="button" class="link-btn"
+                hx-get="/calendar/fragments/filters{{ calendar_query }}"
+                hx-target="#filtersSlot" hx-swap="innerHTML">Filtered:</button></span>
+        <strong id="statFiltered">{{ filtered }}</strong>
+    </div>
+    {% endif %}
+    {# THE BACKGROUND DRAINS' REMAINING WORK, instance-wide and not this month's.
+       Both drains log only what they just DID, so "filled 121 episodes across 25
+       seasons" every minute reads the same whether 26 seasons remain or twenty
+       thousand — and a drain looping on work it had already finished is a bug
+       this calendar has shipped twice, both times found by somebody watching the
+       log and guessing. A number that COUNTS DOWN is what tells the two apart.
+
+       NOT LIVE, deliberately. These change on the heartbeat's clock, not the
+       viewer's, so polling them would spend a request a minute to animate a
+       number nobody is waiting on. A refresh is the right resolution.
+
+       Absent at zero rather than shown as "0": the lines DISAPPEARING is the
+       signal that everything has settled, which is the state a reader is
+       actually looking for. #}
+    {% if backlog_titles or backlog_seasons %}
+    <hr class="stats-divider">
+    {% if backlog_titles %}
+    <div class="stats-row" title="Stored titles whose genres, network and certification are still being looked up. Instance-wide, not just this month.">
+        <span>⏳ Unenriched:</span><strong id="statBacklogTitles">{{ backlog_titles }}</strong>
+    </div>
+    {% endif %}
+    {% if backlog_seasons %}
+    <div class="stats-row" title="Seasons still owed a per-episode lookup, for episode titles, runtimes and ratings. Instance-wide, not just this month.">
+        <span>📼 Seasons owed:</span><strong id="statBacklogSeasons">{{ backlog_seasons }}</strong>
+    </div>
+    {% endif %}
+    {% endif %}
+    <div id="historyLog" class="history-log">
+        {% if history %}<strong>History:</strong>
+        {% for entry in history %}
+        <div class="history-row"><span>{{ entry.label }} {{ entry.time }}</span><span>{{ entry.count }} items</span></div>
+        {% endfor %}
+        {% endif %}
+    </div>
+</div>
+
+{# Jump-to strip: one chip per day of the month, pinned under the header. A day
+   this viewer will see nothing of — empty, or entirely not-watching while hiding
+   is on — has no section to scroll to, so its chip is inert rather than a link
+   that goes nowhere. data-date is how calendar/layout.js re-greys one when a
+   toggle empties its day without a reload. #}
+{# The band that brings the strip back once it has tucked away. A SIBLING of the
+   strip rather than something inside it, because the tucked strip is transformed
+   and a transformed element becomes the containing block for its fixed-position
+   descendants — a catcher inside it would slide off-screen along with it. #}
+<div class="day-chips-peek" aria-hidden="true"></div>
+<nav class="day-chips" aria-label="Jump to a day">
+    {# One partial per chip, shared with a day that arrives late, which draws its
+       own chip again once it has read what this viewer sees of it.
+       _day_chip.html says why a chip with items always stays an anchor. #}
+    {% for chip in day_chips %}{% include "_day_chip.html" %}{% endfor %}
+</nav>
+
+{% if error %}
+{# A coverage gap (a stated single calendar source that doesn't reach
+   this month) is not a failure — it renders the same banner shape so it is
+   never mistaken for a blank calendar, but offers the other source's view
+   instead of a bare warning triangle. #}
+<div class="{{ 'warning-banner' if coverage_gap else 'error-banner' }}">⚠️ {{ error }}{% if coverage_gap and switch_url %} <a href="{{ switch_url }}">Show it anyway</a>{% endif %}</div>
+{% elif partial %}
+<div class="warning-banner">⚠️ Some calendar data couldn't be loaded — showing what we have.</div>
+{% endif %}
+{# Quiet on purpose, and separate from the warning above: nothing is wrong. A
+   title one service listed but has not been looked up yet has no genres,
+   country or certification to judge, so this month's filters let it through
+   rather than removing it on values nobody has. The number falls to zero by
+   itself as the background catalogue read catches up, and a reload shows the
+   new answer — so this says which cards are provisional rather than asking for
+   anything to be done. #}
+{% if unenriched %}
+<div class="hint enrichment-note">⏳ {{ unenriched }} item{{ '' if unenriched == 1 else 's' }} here
+  {{ 'is' if unenriched == 1 else 'are' }} still being looked up, so your filters
+  haven't been applied to {{ 'it' if unenriched == 1 else 'them' }} yet.</div>
+{% endif %}
+
+{# THE MONTH, IN DATE ORDER, drawn from ONE list. A day is either rendered with
+   its cards or announced as a placeholder that pulls them in when the viewer
+   reaches it — so first paint costs a handful of cards instead of a month of
+   them, and a day nobody scrolls to is never built at all.
+
+   WHICH IT IS, IS A FLAG ON THE DAY rather than which list it came from, and that
+   is the whole reason there is one loop here. The days drawn with their cards are
+   NOT a prefix: a jump into the 28th ships that day too (calendar/routes.py), and
+   with two lists it was appended after the fifth — so the month read 1, 2, 3, 4,
+   5, 28, then 6 onwards. #}
+<main>
+    {% if not days and not error %}
+    <div class="empty-state">
+        <div class="emoji">🕵️</div>
+        <div>No items matched your filters for this range.</div>
+    </div>
+    {% endif %}
+    {% for group in days %}{% if group.inline %}{% include "_day_block.html" %}
+    {% else %}{% include "_day_skeleton.html" %}{% endif %}
+    {% endfor %}
+</main>
+</div>

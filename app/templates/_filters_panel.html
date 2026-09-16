@@ -1,0 +1,259 @@
+{# WHAT THIS VIEWER'S CALENDAR CONTAINS. Applied per viewer at read time against
+   one shared cache (app/calendar/filter.py), which is what lets two people
+   filter the same cached month differently.
+
+   TWO TABS OVER TWO SETS OF STORED VALUES, not one set shown twice. Somebody who
+   never wants a reality SHOW usually still wants documentary films, and while
+   the two questions shared one answer neither could be answered properly. The
+   columns are app/db.py's migration 38; which of them belongs to which medium is
+   app/calendar/vocab.py's TV_FIELDS/MOVIE_FIELDS.
+
+   THE TABS ARE RADIOS AND THE STYLESHEET DRAWS THEM. No script switches a panel,
+   nothing has to be re-bound when the modal opens, and the tab that opens is
+   whichever radio the server rendered `checked` — the medium of the calendar
+   behind the panel. Both radios sit before the tab strip AND before the bodies,
+   so one sibling selector can reach either.
+
+   THE PANEL IS AN ANSWER, NOT MARKUP THE PAGE CARRIES, and it is drawn already
+   open. It used to ship with the calendar so that opening it cost nothing; what
+   that bought was one request, and what it cost was every way the panel could be
+   left describing something other than what is stored — a typed chip abandoned, a
+   cycle nobody saved, the counts on the tab beside the one just written. Asked
+   for on every opening, it IS the stored state, and `data-modal-discard`
+   (static/js/ui.js) takes it off the page when it closes, so Cancel is the
+   element leaving rather than a form being reset by a script that had to know
+   which inputs a chip is made of.
+
+   EVERY CONTROL IS A REAL NAMED INPUT AND THE FORM IS EMPTY. Each field names it
+   with `form="filtersForm"` instead of sitting inside it, for the reason
+   _filter_fields.html gives: the add boxes are NOT fields of this form, and a
+   text input inside a form submits it on Enter — where Enter here means "add this
+   token", not "save everything". It also keeps every request made from inside
+   the panel carrying only what it is about. #}
+{% import '_filter_fields.html' as ff with context %}
+<div id="filtersModal" class="modal-overlay open" data-modal-discard>
+    <div class="modal filters-modal" id="filtersPanel">
+        <div class="modal-head">
+            <h2>🎚️ Filters</h2>
+            <button type="button" class="modal-close" data-modal-close="filtersModal">&times;</button>
+        </div>
+        {# THE SAVE IS THE FORM AND THE FORM IS EMPTY. `hx-json-enc` is what makes
+           it an application/json request, which is the only shape a mutating
+           route in this app accepts (app/authz.py's request_shape_guard) — the
+           form element is a container for named values and the REQUEST is
+           unchanged. `hx-boost="false"` because htmx boosts every form under a
+           boosted <body> and this one has nowhere to navigate.
+           IT ANSWERS WITH THE CALENDAR REDRAWN, which is why it carries the
+           calendar's own query string: the answer is built the way the page was,
+           and without it a save made while looking at October came back holding
+           whichever month today falls in. A refusal is retargeted at the notice
+           below by the route, so a sentence never replaces the month. #}
+        <form id="filtersForm" hx-post="/calendar/filters{{ calendar_query }}"
+              hx-json-enc hx-boost="false"
+              hx-target="#calendarBody" hx-swap="outerHTML"></form>
+
+            {# THE MASTER SWITCH, above the tabs because it governs both. Nothing
+               is copied aside and nothing is restored: the answers stay where
+               they are and every read path asks this one value before applying
+               them, so turning filters back on cannot have lost one. A share
+               link deliberately ignores it — app/calendar/vocab.py's
+               `active_specs` is where that is argued. #}
+            {# THE SWITCH READS THE WAY EVERY OTHER SWITCH DOES: on means the
+               thing is happening. It is stored the other way round — the column
+               is `filters_paused`, because "nobody has paused anything" is the
+               state every account starts in and a default of false is what
+               makes that true — so the FIELD is inverted once, on the way in
+               (see post_me_filters), rather than the control being drawn
+               backwards to match a column name. #}
+            <label class="filter-power">
+                <span class="filter-power-copy">
+                    <strong>Filters</strong>
+                    <span class="filter-power-on">On. Turn them off to see everything for a while — nothing is forgotten.</span>
+                    <span class="filter-power-off">Off. Your calendar is showing everything, and nothing below has been cleared.</span>
+                </span>
+                {# THE HIDDEN COMPANION IS WHAT MAKES "off" SAYABLE. An unticked
+                   box sends nothing at all, and absent means LEAVE ALONE to the
+                   save — so the companion posts "0" under the same name, the
+                   ticked box overrides it, and the route reads the last one
+                   (app/route_params.py's last_value). Without it, switching
+                   filters off would be a state the panel could not express and
+                   the browser had to patch by hand. #}
+                <input type="hidden" name="filters_on" value="0" form="filtersForm">
+                <input type="checkbox" id="f_filters_on" name="filters_on" value="1"
+                       form="filtersForm" autocomplete="off"
+                       {% if not filter_panel.paused %}checked{% endif %}>
+                <span class="fswitch"><span class="fswitch-knob"></span></span>
+            </label>
+
+            <input type="radio" name="filters_tab" id="ftab_show" class="ftab-radio" autocomplete="off"
+                   {% if filter_panel.media != 'movie' %}checked{% endif %}>
+            <input type="radio" name="filters_tab" id="ftab_movie" class="ftab-radio" autocomplete="off"
+                   {% if filter_panel.media == 'movie' %}checked{% endif %}>
+            <div class="ftabs">
+                <label class="ftab ftab-show" for="ftab_show">📺 TV{% if filter_panel.counts.show %}<span class="ftab-count">{{ filter_panel.counts.show }}</span>{% endif %}</label>
+                <label class="ftab ftab-movie" for="ftab_movie">🎬 Movies{% if filter_panel.counts.movie %}<span class="ftab-count">{{ filter_panel.counts.movie }}</span>{% endif %}</label>
+            </div>
+
+            <div class="modal-body">
+                {# WHAT CLEAR REPLACES, and nothing else. The tab radios and the
+                   master switch sit OUTSIDE it, so a clear cannot move the tab
+                   somebody is on or switch their filters back on — it swaps the
+                   fields alone, drawn by the server from what the panel was
+                   holding. #}
+                <div id="filterFields">
+                {# ---------------- TV ---------------- #}
+                <div class="ftab-panel ftab-panel-show">
+                    {% if filter_panel.sources.show %}
+                    <div class="ffield">
+                        <div class="ffield-head">
+                            <span class="ffield-label">Services</span>
+                            {% call ff.info() %}Which services list your TV calendar. Each is its own
+                                switch, so a service added to this app later arrives switched on for
+                                anyone who had them all on. It narrows like everything else on this
+                                tab: nothing is fetched or stored differently, and it lands on your
+                                next page load. Your movie calendar keeps its own answer.{% endcall %}
+                        </div>
+                        {# THE BOX AND ITS FACE ARE SIBLINGS rather than a label
+                           wrapping the box, so the stylesheet can ask the GROUP
+                           whether a second service is ticked — which is what
+                           greys and deadens the last one still on. See .fsources
+                           in style.css; it used to be two functions in a script,
+                           one of which ran on an event a boosted arrival never
+                           fires. #}
+                        {# ONE FIELD PER SERVICE, each with a hidden companion, and
+                           neither is cosmetic. One field carrying a joined list
+                           would be several values under one name, which the JSON
+                           encoding turns into an ARRAY — the one payload shape
+                           this app deliberately never depends on
+                           (app/calendar/vocab.py's docstring). And an unticked
+                           box sends nothing, so without the companion "every
+                           service off" would reach the save as silence instead of
+                           as the refusable answer it is. #}
+                        <div class="fsources">
+                            {% for choice in filter_panel.sources.show %}
+                            <input type="hidden" name="{{ choice.name }}" value="0" form="filtersForm">
+                            <input type="checkbox" id="fsrc-show-{{ loop.index }}"
+                                   name="{{ choice.name }}" value="1" form="filtersForm"
+                                   autocomplete="off"{% if choice.on %} checked{% endif %}>
+                            <label class="fsource" for="fsrc-show-{{ loop.index }}">{{ choice.label }}</label>
+                            {% endfor %}
+                        </div>
+                        <p class="hint">At least one has to stay on.</p>
+                    </div>
+                    {% endif %}
+
+                    {% call ff.field('tv_genres', 'Genres', 'Another genre, then Enter…') %}
+                        Press a chip once to keep <em>only</em> that genre, again to filter it out,
+                        again to stop filtering on it. A show is kept if it carries any genre you
+                        asked for and none you excluded. This happens here rather than at Trakt, so
+                        it works on any account — the Settings screen still carries a VIP caveat,
+                        and it is about the fields Trakt is asked for directly.
+                    {% endcall %}
+                    {% call ff.field('tv_countries', 'Countries', 'Another country code, then Enter…') %}
+                        Where a show was <em>made</em>. Two-letter ISO codes; the box takes any of
+                        them, including the ones with no chip here.
+                    {% endcall %}
+                    {% call ff.field('network_filter', 'Networks', 'Network name, then Enter…') %}
+                        Matched exactly as the service spells it, capitals included — one week of
+                        this calendar carried both <code>TVN</code> and <code>tvN</code>, a Polish
+                        broadcaster and a Korean one, so folding the case would merge two networks
+                        that are not the same network. No chips are offered because there are
+                        thousands of them: pressing a network's badge on a card is the quick way in.
+                    {% endcall %}
+                    {% call ff.field('show_certifications', 'Ratings') %}
+                        TV ratings only — films have their own on the Movies tab, because TV
+                        Parental Guidelines and MPA ratings are separate vocabularies.
+                        <code>NR</code> covers anything the service gave no rating.
+                    {% endcall %}
+                </div>
+
+                {# ---------------- MOVIES ---------------- #}
+                <div class="ftab-panel ftab-panel-movie">
+                    {% if filter_panel.sources.movie %}
+                    <div class="ffield">
+                        <div class="ffield-head">
+                            <span class="ffield-label">Services</span>
+                            {% call ff.info() %}Which services list your movie calendar, answered
+                                separately from TV — one service's film calendar is every release in
+                                every market, measured at 1314 titles in one real August against the
+                                other's 25, and that is a preference worth stating once per medium.{% endcall %}
+                        </div>
+                        {# ONE FIELD PER SERVICE, each with a hidden companion, and
+                           neither is cosmetic. One field carrying a joined list
+                           would be several values under one name, which the JSON
+                           encoding turns into an ARRAY — the one payload shape
+                           this app deliberately never depends on
+                           (app/calendar/vocab.py's docstring). And an unticked
+                           box sends nothing, so without the companion "every
+                           service off" would reach the save as silence instead of
+                           as the refusable answer it is. #}
+                        <div class="fsources">
+                            {% for choice in filter_panel.sources.movie %}
+                            <input type="hidden" name="{{ choice.name }}" value="0" form="filtersForm">
+                            <input type="checkbox" id="fsrc-movie-{{ loop.index }}"
+                                   name="{{ choice.name }}" value="1" form="filtersForm"
+                                   autocomplete="off"{% if choice.on %} checked{% endif %}>
+                            <label class="fsource" for="fsrc-movie-{{ loop.index }}">{{ choice.label }}</label>
+                            {% endfor %}
+                        </div>
+                        <p class="hint">At least one has to stay on.</p>
+                    </div>
+                    {% endif %}
+
+                    {% call ff.field('movie_genres', 'Genres', 'Another genre, then Enter…') %}
+                        Separate from the TV tab's genres: excluding <em>reality</em> from your shows
+                        no longer touches your films. Same three states — press to keep only, again
+                        to filter out, again to stop filtering.
+                    {% endcall %}
+                    {% call ff.field('movie_countries', 'Countries', 'Another country code, then Enter…') %}
+                        Where a film was <em>made</em>. Not the same question as release markets
+                        below, which is where it is being <em>shown</em> — a Brazilian film opening
+                        in America matches one and not the other.
+                    {% endcall %}
+                    {% call ff.field('movie_certifications', 'Ratings') %}
+                        Film ratings. <code>NR</code> covers anything the service left unrated.
+                    {% endcall %}
+                    {% call ff.field('movie_release_countries', 'Release markets', 'Another market, then Enter…') %}
+                        Where a film is being <em>released</em>, which is what makes a global film
+                        calendar readable at all — one service lists every release in every market,
+                        over a thousand titles in a busy month. A film with no release in any market
+                        you keep is <strong>removed</strong> rather than moved to another date; the
+                        calendar says how many, so a month this empties can be undone.
+                    {% endcall %}
+                    {% call ff.field('movie_release_types', 'Release formats') %}
+                        A market and a format are matched <strong>together</strong>: US plus
+                        Theatrical means a film in American cinemas, not one that premiered elsewhere
+                        and opened in cinemas somewhere else.
+                    {% endcall %}
+                </div>
+                </div>
+            </div>
+
+            <div class="modal-foot">
+                {# WHERE A REFUSAL LANDS, beside Save rather than as a toast that
+                   scrolls away. The route retargets here rather than at the
+                   calendar, so a sentence never replaces the month behind the
+                   panel — the same shape the Settings panel's save uses. #}
+                <p id="filtersNotice" class="settings-notice" role="alert"></p>
+                {# CLEARS THE VISIBLE TAB and says which one, rather than leaving
+                   somebody to find out by pressing it. ONE BUTTON PER MEDIUM and
+                   the stylesheet shows whichever matches the open tab, which is
+                   also why neither has to read the tab: the button pressed IS the
+                   answer, so `medium` is a value on it rather than something the
+                   route works out.
+                   IT DOES NOT SAVE. The answer is the fields drawn again from
+                   what the panel is holding with one tab zeroed, so closing after
+                   pressing it leaves the stored filters exactly as they were. #}
+                {% for medium, label in (('show', 'Clear TV filters'), ('movie', 'Clear movie filters')) %}
+                <button type="button" class="btn-ghost fclear fclear-{{ medium }}"
+                        hx-post="/calendar/filters/clear" hx-json-enc
+                        hx-vals='{{ {"medium": medium} | tojson }}'
+                        hx-include="#filterFields"
+                        hx-target="#filterFields" hx-swap="outerHTML"
+                        hx-select="#filterFields">{{ label }}</button>
+                {% endfor %}
+                <button type="submit" form="filtersForm" class="btn-primary">Save</button>
+            </div>
+
+    </div>
+</div>

@@ -36,7 +36,9 @@ answer a viewer has given without the vocabulary having to be exhaustive.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import quote
 
+from .. import route_params
 from ..providers.base import Media
 from . import filter as calendar_filter
 
@@ -59,14 +61,12 @@ MOVIE_RELEASE_TYPES = "movie_release_types"
 # once here so no caller has to remember it.
 LIST_FIELDS = frozenset({NETWORK_FILTER})
 
-# The dimensions whose CASE is part of the token. Deliberately a second set even
-# though it holds the same one field today: these two facts change for different
-# reasons. Networks are a list because the column stores JSON; networks are
-# case-sensitive because a single week of this calendar carried both 'TVN' and
-# 'tvN' — a Polish broadcaster and a Korean one — and filter.py's
-# parse_network_spec matches them exactly for that reason. A dimension could
-# easily acquire one property without the other.
-CASE_SENSITIVE_FIELDS = frozenset({NETWORK_FILTER})
+# THERE IS NO "WHICH DIMENSIONS FOLD CASE" SET HERE, and the empty space is the
+# statement. There was one, for the browser: the panel had to tell a script
+# whether a typed token was the same token as one already drawn when only the case
+# differed. The server draws that chip now, and it answers the question by calling
+# filter.py's own parsers — which is where folding is decided, beside the matching
+# they have to agree with.
 
 # The three answers a chip can carry, and the empty one is a real answer: it is
 # what "clear this" posts, and a field left out of the payload entirely would be
@@ -207,6 +207,26 @@ MOVIE_FIELDS = (MOVIE_GENRES, MOVIE_COUNTRIES, MOVIE_CERTIFICATIONS,
 _PREFIX = "chip"
 _SEPARATOR = ":"
 
+# The other two things the panel's payload says, each with a prefix of its own so
+# one parser per shape can tell them apart without guessing.
+#
+# `field:<pref column>` IS "THIS DIMENSION WAS ON THE PANEL", and it is what makes
+# "absent means leave alone" a rule the markup keeps rather than one that happens
+# to hold. A dimension whose vocabulary is empty and whose stored spec is empty --
+# networks, for an account that has never named one -- draws no chip at all, so
+# without this marker the payload would not mention it and the writer could not
+# tell "shown and empty" from "on a tab nobody opened". The marker costs one
+# hidden input per dimension and turns that into something a test can assert.
+#
+# `source:<medium>:<service>` IS ONE SERVICE SWITCH. One field per service rather
+# than one field carrying a joined list, because the panel posts as JSON and the
+# encoder turns a name that appears twice into an ARRAY -- the one shape this
+# app's form payloads deliberately never rely on (see this module's docstring).
+# Each box has a hidden companion of the same name, so an unticked service says
+# "0" instead of saying nothing.
+_PRESENT_PREFIX = "field"
+_SOURCE_PREFIX = "source"
+
 
 def field_name(field: str, token: str) -> str:
     """The form-field name one chip posts under.
@@ -220,6 +240,17 @@ def field_name(field: str, token: str) -> str:
     if _SEPARATOR in token:
         raise ValueError(f"a filter token may not contain {_SEPARATOR!r}: {token!r}")
     return f"{_PREFIX}{_SEPARATOR}{field}{_SEPARATOR}{token}"
+
+
+def addable(token: str) -> bool:
+    """Whether a token can be carried by a field name at all.
+
+    The one thing a token cannot contain is the separator, and the reason is
+    `field_name`'s: it would produce a name that reads as a different field. Asked
+    as a question rather than caught as an exception because the panel asks it of
+    every token in a pasted list and drops the ones it cannot carry.
+    """
+    return bool(token) and _SEPARATOR not in token
 
 
 def parse_field_name(name: str) -> tuple[str, str] | None:
@@ -237,6 +268,58 @@ def parse_field_name(name: str) -> tuple[str, str] | None:
     if field not in FIELDS or not token:
         return None
     return field, token
+
+
+def presence_name(field: str) -> str:
+    """The form-field name that says "this dimension was on the panel"."""
+    return f"{_PRESENT_PREFIX}{_SEPARATOR}{field}"
+
+
+def parse_presence_name(name: str) -> str | None:
+    """The pref column a presence marker names, or None for anything else."""
+    parts = str(name or "").split(_SEPARATOR)
+    if len(parts) != 2 or parts[0] != _PRESENT_PREFIX or parts[1] not in FIELDS:
+        return None
+    return parts[1]
+
+
+def source_field_name(media: Media, source: str) -> str:
+    """The form-field name one service switch posts under.
+
+    The MEDIUM is in the name because the two tabs answer separately -- one
+    service's film calendar is every release in every market and the other's is
+    twenty-five titles, so which services fill a calendar is a question worth
+    asking once per medium.
+    """
+    return f"{_SOURCE_PREFIX}{_SEPARATOR}{media}{_SEPARATOR}{source}"
+
+
+def sources_from_form(data: dict, media: Media) -> set[str] | None:
+    """Which services this payload leaves switched on for `media`.
+
+    None means the panel did not offer the control at all -- an instance with
+    fewer than two services that could fill the medium draws nothing, and a
+    payload that mentions no switch is not a viewer's answer. An EMPTY SET is a
+    real answer and a refusable one: it is every box unticked, which the route
+    turns down rather than storing.
+
+    A ticked box and its hidden companion share a name, so the value can arrive
+    as a list; `route_params.ticked` reads the last entry, which is the box
+    overriding its companion.
+    """
+    prefix = f"{_SOURCE_PREFIX}{_SEPARATOR}{media}{_SEPARATOR}"
+    chosen: set[str] = set()
+    mentioned = False
+    for name, value in data.items():
+        if not str(name).startswith(prefix):
+            continue
+        source = str(name)[len(prefix):].strip()
+        if not source:
+            continue
+        mentioned = True
+        if route_params.ticked(value):
+            chosen.add(source)
+    return chosen if mentioned else None
 
 
 @dataclass(frozen=True)
@@ -320,6 +403,12 @@ def specs_from_form(data: dict) -> dict[str, object]:
     viewer cleared arrives as a field with an empty value and is written empty,
     while a dimension on the tab they never opened is absent and left alone.
 
+    A DIMENSION CAN BE MENTIONED WITHOUT A SINGLE CHIP, which is why the presence
+    marker exists: networks offer no vocabulary, so an account that has never
+    named one draws an empty field and would otherwise be indistinguishable from
+    a tab nobody opened. `field:<column>` says the panel showed it; the field is
+    then written, empty unless a chip fills it.
+
     BUILT WITH filter.py's OWN MERGE, one token at a time, starting from empty.
     That is slower than joining strings and it is the point: the leading '-', the
     case rules and the list-versus-string difference stay stated in exactly one
@@ -327,6 +416,10 @@ def specs_from_form(data: dict) -> dict[str, object]:
     would have written.
     """
     out: dict[str, object] = {}
+    for name in data:
+        field = parse_presence_name(name)
+        if field is not None:
+            out.setdefault(field, [] if field in LIST_FIELDS else "")
     for name, value in data.items():
         parsed = parse_field_name(name)
         if parsed is None:
@@ -342,6 +435,94 @@ def specs_from_form(data: dict) -> dict[str, object]:
             continue
         out[field] = calendar_filter.merge_token(out[field], token, mode, is_list=is_list)
     return out
+
+
+# ---- What a card's own badges write into ----
+
+# The dimension a badge names, and the pref column it writes for each medium. It
+# lives here rather than in the route because TWO things now ask it: the route
+# that stores a press, and the card that draws the badge already carrying what is
+# stored. A dimension named in one of those and not the other is a badge that
+# saves somewhere it never reads back from.
+#
+# EVERY DIMENSION NEEDS THE MEDIUM, where once only certification did: a genre
+# excluded from a film card is a statement about films, and writing it into the
+# show calendar's genres is the conflation the two tabs exist to end. A film has
+# no network at all, so a network badge can only have been pressed on a show card
+# and there is one column it can mean.
+BADGE_FIELDS: dict[str, dict[str, str]] = {
+    "genre": {"movie": MOVIE_GENRES, "show": TV_GENRES},
+    "country": {"movie": MOVIE_COUNTRIES, "show": TV_COUNTRIES},
+    "network": {"movie": NETWORK_FILTER, "show": NETWORK_FILTER},
+    "certification": {"movie": MOVIE_CERTIFICATIONS, "show": SHOW_CERTIFICATIONS},
+}
+
+
+def badge_key(dimension: str, token: str) -> str:
+    """A selector-safe name for one badge, which is what an ANSWER addresses.
+
+    A SECOND SPELLING OF THE SAME FACT, DERIVED, and the reason is the one
+    `data-library-id` already carries on a library button: the badge also states
+    its dimension and its matching token in the clear, because those are what a
+    reader and a test want to see, but neither can be put inside a CSS attribute
+    selector. A network name is free catalogue text — an apostrophe, a bracket or
+    a backslash in one would turn the selector the answer is addressed with into
+    a broken selector or a different one. Percent-encoded, every token comes out
+    of the unreserved set, and one function spells the key on the badge and on
+    the answer that replaces it.
+    """
+    return f"{quote(str(dimension), safe='')}.{quote(str(token), safe='')}"
+
+
+def badge_field(dimension: str, media) -> str | None:
+    """The pref column a badge press writes, or None for a dimension this app
+    does not filter on. A card also draws a language and a weekday, and storing
+    either would be a preference that could never act."""
+    columns = BADGE_FIELDS.get(str(dimension or ""))
+    if columns is None:
+        return None
+    return columns["movie" if str(media or "") == "movie" else "show"]
+
+
+class BadgeModes:
+    """How each of this viewer's filter dimensions is currently set, in the form
+    a card badge asks the question.
+
+    BUILT ONCE PER RENDER, because a month draws thousands of badges and each
+    would otherwise re-parse the same spec. The parsers are `filter.py`'s own, so
+    a badge drawn as "filtered out" and a month that removed the title are
+    reading one answer — and the badge a press is ANSWERED with is drawn by this
+    same class, so the card and the answer cannot disagree.
+    """
+
+    def __init__(self, prefs: dict) -> None:
+        self._modes: dict[str, dict[str, str]] = {}
+        for field in {column for columns in BADGE_FIELDS.values()
+                      for column in columns.values()}:
+            is_list = field in LIST_FIELDS
+            includes, excludes = (
+                calendar_filter.parse_network_spec(prefs.get(field) or ())
+                if is_list else calendar_filter.parse_spec(str(prefs.get(field) or ""))
+            )
+            # Folded exactly the way the matching parser folds, or a genre stored
+            # as "Drama" would leave the card's "drama" badge looking unset.
+            fold = (lambda token: token) if is_list else (lambda token: token.lower())
+            self._modes[field] = {
+                **{fold(token): INCLUDE for token in includes},
+                **{fold(token): EXCLUDE for token in excludes},
+            }
+
+    def mode(self, dimension: str, token: str, media) -> str:
+        field = badge_field(dimension, media)
+        if field is None:
+            return IGNORED
+        key = token if field in LIST_FIELDS else str(token).lower()
+        return self._modes.get(field, {}).get(key, IGNORED)
+
+    # Reached through here rather than as a template global because every
+    # template that draws a badge already has this object and nothing else needs
+    # it. Both are the server's answers ABOUT a badge.
+    key = staticmethod(badge_key)
 
 
 # ---- What a medium's filters actually are, at read time ----

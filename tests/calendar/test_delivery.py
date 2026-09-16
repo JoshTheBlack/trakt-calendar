@@ -211,15 +211,16 @@ class BoostedNavigationMarkupTests(unittest.TestCase):
         prev_i = html.index("month-nav-btn prev")
         self.assertNotIn("hx-boost", html[prev_i - 80: prev_i + 80])
 
-    def test_the_js_handled_form_opts_out_of_boosting(self):
-        """Filters is submitted by JS and writes over the API. htmx boosts every
-        form under a boosted <body>, so it has to say no — otherwise a save turns
-        into an attempted navigation. (The settings modal's form does the same;
-        it is admin-only, so this viewer's page does not carry it — both are
-        covered at the template level by tests/kernel/test_page_head.py.)"""
+    def test_a_writing_form_opts_out_of_boosting(self):
+        """htmx boosts every form under a boosted <body>, so a form that WRITES
+        has to say no — otherwise a save turns into an attempted navigation. The
+        filters panel is a fragment and not on this page, so the one left here is
+        the search box; both are covered at the template level by
+        tests/kernel/test_page_head.py."""
         html = self._page()
-        i = html.index('id="filtersForm"')
-        self.assertIn('hx-boost="false"', html[i - 40: i + 140])
+        i = html.index('hx-get="/calendar/search"')
+        self.assertIn('hx-boost="false"', html[i - 120: i + 40])
+        self.assertNotIn('id="filtersForm"', html)
 
     def test_endpoint_switcher_is_a_boosted_get_form(self):
         html = self._page()

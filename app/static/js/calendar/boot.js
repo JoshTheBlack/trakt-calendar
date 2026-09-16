@@ -7,10 +7,10 @@
 // so everything it calls has to be declared already.
 
 // NOTHING HERE LISTENS FOR ESCAPE. static/js/ui.js closes every open overlay on
-// Escape through closeModal, and the Settings panel's handshake polling stops
-// through the close hook calendar/settings.js registers — so a listener of this
-// file's own stopping it too would be a second statement of one rule, and the
-// polling cannot outlive the panel it runs in.
+// Escape through closeModal, and a panel the server drew for one opening removes
+// itself when it closes (`data-modal-discard`) — so a listener of this file's own
+// would be a second statement of one rule, and nothing a panel was doing can
+// outlive the panel.
 
 // ---- One idempotent page init, run on first load AND after every boosted swap ----
 // hx-boost swaps the <body>'s children in place without re-running this script, so
@@ -66,14 +66,27 @@ function applyViewStateTo(root) {
 // load whichever of this page's scripts the session has not run yet, and only
 // then is there an init to call — so it calls the one registered below, on the
 // cold load and on every arrival alike.
-// What is left here is the CONTENT swap, which only brings one day's cards and
-// must NOT re-run the init (see applyViewStateTo). A day block replaces its own
-// placeholder, so what has to be walked is what the swap PRODUCED rather than
-// what it was aimed at; static/js/boost.js's swappedContent answers that for
-// every swap style at once, and answers null for a whole-page arrival.
+//
+// WHAT IS LEFT HERE IS THE CONTENT SWAP, AND THERE ARE TWO KINDS. A day block
+// replaces its own placeholder and brings one day's cards, so it must NOT re-run
+// the init: doing so would re-read the page's embedded numbers and throw away
+// the tiles' in-session counts (see applyViewStateTo). A FILTERS SAVE replaces
+// the whole of #calendarBody, and then re-running the init is exactly right —
+// the embedded numbers it re-reads are the NEW month's, and the counts it would
+// be preserving describe the month that was just replaced. So the two are told
+// apart by what arrived, which is the only thing that distinguishes them.
+//
+// Either way what has to be walked is what the swap PRODUCED rather than what it
+// was aimed at; static/js/boost.js's swappedContent answers that for every swap
+// style at once, and answers null for a whole-page arrival.
 document.addEventListener('htmx:after:swap', (evt) => {
     const swapped = swappedContent(evt);
-    if (swapped) applyViewStateTo(swapped);
+    if (!swapped) return;
+    if (swapped.id === 'calendarBody' || swapped.querySelector?.('#calendarBody')) {
+        initCalendarPage();
+        return;
+    }
+    applyViewStateTo(swapped);
 });
 
 registerPage('calendar', initCalendarPage);

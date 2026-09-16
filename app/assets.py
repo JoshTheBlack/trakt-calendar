@@ -76,14 +76,16 @@ PAGE_SCRIPTS = {
         "static/js/calendar/view.js",
         "static/js/calendar/layout.js",
         "static/js/calendar/source-swap.js",
-        "static/js/calendar/filters.js",
         "static/js/calendar/search.js",
-        "static/js/calendar/badge-filters.js",
-        # NO SETTINGS OR SHARE SCRIPT, ON THIS PAGE OR ANY OTHER. Both panels are
-        # fragments the server draws and every control in them posts itself; the
-        # Settings panel opens from the site menu on every page an administrator
-        # reaches, and what it still asks of a browser — copying a value and
-        # closing an overlay — is ui.js's, which every page with a header loads.
+        # NO SETTINGS, SHARE OR FILTERS SCRIPT, ON THIS PAGE OR ANY OTHER. All
+        # three panels are fragments the server draws and every control in them
+        # posts itself; the Settings panel opens from the site menu on every page
+        # an administrator reaches, and what any of them still asks of a browser —
+        # copying a value and closing an overlay — is ui.js's, which every page
+        # with a header loads. NO BADGE SCRIPT EITHER: a card's filter offer is a
+        # <details> in a named exclusive group with three radios that post
+        # themselves, so opening, closing, keeping one offer open at a time and
+        # storing the answer are all the browser's or the server's.
         "static/js/calendar/easter-egg.js",
         "static/js/calendar/boot.js",
     ),
