@@ -49,15 +49,27 @@ class SettingsSurfaceTestCase(AppTestCase):
 
 
 class SelfServiceCredentialsTests(SettingsSurfaceTestCase):
-    """Claiming a username and setting a password without an administrator."""
+    """Claiming a username and setting a password without an administrator.
+
+    Both forms answer with the credentials section, a refusal drawn in its line
+    at 200 — a statused refusal is never swapped."""
+
+    def _refusal(self, resp) -> str:
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return re.search(r'<p class="auth-error[^"]*" role="alert">(.*?)</p>', resp.text, re.S).group(1)
 
     def test_an_oauth_only_account_can_claim_a_username(self):
         user_id = self._make_user(None, password=None, calendar_approved=True)
         self._link_trakt(user_id, provider_user_id=4141)
         self.sign_in_as(user_id)
-        resp = self.client.post("/api/me/username", json={"username": "claimed"})
+        resp = self.client.post("/me/username", json={"username": "claimed"})
         self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIn("Username saved.", resp.text)
         self.assertEqual(asyncio.run(auth.get_user(user_id))["username"], "claimed")
+        # The form is gone, and the names and the heading beside it follow out of band.
+        self.assertNotIn('id="newUsername"', resp.text)
+        self.assertRegex(resp.text, r'id="accountNames" hx-swap-oob="outerHTML"')
+        self.assertRegex(resp.text, r'<h1 id="accountHeading" hx-swap-oob="outerHTML">claimed</h1>')
 
     def test_changing_an_existing_username_is_not_self_service(self):
         """A username is a public identifier — it is what /u/<name> links are
@@ -65,8 +77,8 @@ class SelfServiceCredentialsTests(SettingsSurfaceTestCase):
         free the old name for someone else."""
         user_id = self._make_user("settled", calendar_approved=True)
         self.sign_in_as(user_id)
-        resp = self.client.post("/api/me/username", json={"username": "different"})
-        self.assertEqual(resp.status_code, 409)
+        resp = self.client.post("/me/username", json={"username": "different"})
+        self.assertIn("You already have a username", self._refusal(resp))
         self.assertEqual(asyncio.run(auth.get_user(user_id))["username"], "settled")
 
     def test_a_taken_or_reserved_username_is_refused(self):
@@ -76,8 +88,9 @@ class SelfServiceCredentialsTests(SettingsSurfaceTestCase):
         self.sign_in_as(user_id)
         for name in ("taken_name", "admin", "!!"):
             with self.subTest(name=name):
-                self.assertEqual(
-                    self.client.post("/api/me/username", json={"username": name}).status_code, 400)
+                resp = self.client.post("/me/username", json={"username": name})
+                self.assertTrue(self._refusal(resp))
+        self.assertIsNone(asyncio.run(auth.get_user(user_id))["username"])
 
     def test_a_username_may_not_collide_with_someone_elses_slug(self):
         """The cross-namespace rule holds on this path too, not just on
@@ -89,8 +102,9 @@ class SelfServiceCredentialsTests(SettingsSurfaceTestCase):
         user_id = self._make_user(None, password=None, calendar_approved=True)
         self._link_trakt(user_id, provider_user_id=4343)
         self.sign_in_as(user_id)
-        self.assertEqual(
-            self.client.post("/api/me/username", json={"username": "wanted-name"}).status_code, 400)
+        self.assertTrue(self._refusal(
+            self.client.post("/me/username", json={"username": "wanted-name"})))
+        self.assertIsNone(asyncio.run(auth.get_user(user_id))["username"])
 
     def test_an_oauth_only_account_can_set_a_first_password(self):
         """No current password is asked for, because there is none — the live
@@ -99,41 +113,63 @@ class SelfServiceCredentialsTests(SettingsSurfaceTestCase):
         user_id = self._make_user(None, password=None, calendar_approved=True)
         self._link_trakt(user_id, provider_user_id=4444)
         self.sign_in_as(user_id)
-        resp = self.client.post("/api/me/password", json={
+        resp = self.client.post("/me/password", json={
             "password": "brand-new-secret", "password_confirm": "brand-new-secret"})
         self.assertEqual(resp.status_code, 200, resp.text)
         stored = asyncio.run(auth.get_user(user_id))["password_hash"]
         self.assertTrue(asyncio.run(auth.verify_password(stored, "brand-new-secret")).ok)
+        # The section is drawn for an account that now HAS a password.
+        self.assertIn('id="currentPassword"', resp.text)
 
     def test_changing_a_password_requires_the_current_one(self):
         user_id = self._make_user("haspw", calendar_approved=True)
         self.sign_in_as(user_id)
-        resp = self.client.post("/api/me/password", json={
+        resp = self.client.post("/me/password", json={
             "current_password": "wrong-one-entirely",
             "password": "replacement-secret", "password_confirm": "replacement-secret"})
-        self.assertEqual(resp.status_code, 403)
+        self.assertIn("isn", self._refusal(resp))
         stored = asyncio.run(auth.get_user(user_id))["password_hash"]
         self.assertTrue(asyncio.run(auth.verify_password(stored, "hunter2hunter2")).ok)
 
     def test_the_right_current_password_changes_it(self):
         user_id = self._make_user("haspw2", calendar_approved=True)
         self.sign_in_as(user_id)
-        resp = self.client.post("/api/me/password", json={
+        resp = self.client.post("/me/password", json={
             "current_password": "hunter2hunter2",
             "password": "replacement-secret", "password_confirm": "replacement-secret"})
         self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIn("Password saved.", resp.text)
         stored = asyncio.run(auth.get_user(user_id))["password_hash"]
         self.assertTrue(asyncio.run(auth.verify_password(stored, "replacement-secret")).ok)
 
     def test_a_mismatch_or_a_short_password_is_refused(self):
         user_id = self._make_user("haspw3", calendar_approved=True)
         self.sign_in_as(user_id)
-        for body in ({"password": "long-enough-here", "password_confirm": "something-else"},
-                     {"password": "short", "password_confirm": "short"}):
+        for body, sentence in (
+                ({"password": "long-enough-here", "password_confirm": "something-else"},
+                 "The two passwords don&#39;t match."),
+                ({"password": "short", "password_confirm": "short"},
+                 f"Use at least {auth.MIN_PASSWORD_LENGTH} characters.")):
             with self.subTest(body=body):
-                resp = self.client.post("/api/me/password",
+                resp = self.client.post("/me/password",
                                         json={"current_password": "hunter2hunter2", **body})
-                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(self._refusal(resp), sentence)
+        stored = asyncio.run(auth.get_user(user_id))["password_hash"]
+        self.assertTrue(asyncio.run(auth.verify_password(stored, "hunter2hunter2")).ok)
+
+    def test_the_current_password_check_stays_rate_limited(self):
+        """A guess-checking oracle, throttled on the shared per-address counter —
+        and still throttled now that its refusal is a sentence."""
+        user_id = self._make_user("guessed", calendar_approved=True)
+        self.sign_in_as(user_id)
+        for _ in range(auth.LOGIN_IP_MAX_ATTEMPTS):
+            asyncio.run(auth.record_attempt("ip", "testclient", False))
+        resp = self.client.post("/me/password", json={
+            "current_password": "hunter2hunter2",
+            "password": "replacement-secret", "password_confirm": "replacement-secret"})
+        self.assertEqual(self._refusal(resp), "Too many attempts. Try again later.")
+        stored = asyncio.run(auth.get_user(user_id))["password_hash"]
+        self.assertTrue(asyncio.run(auth.verify_password(stored, "hunter2hunter2")).ok)
 
     def test_a_password_change_evicts_other_sessions_but_not_this_one(self):
         """A change after a compromise has to actually remove the other party,
@@ -143,7 +179,7 @@ class SelfServiceCredentialsTests(SettingsSurfaceTestCase):
         elsewhere = asyncio.run(auth.create_session(user_id))
         self.sign_in_as(user_id)
 
-        resp = self.client.post("/api/me/password", json={
+        resp = self.client.post("/me/password", json={
             "current_password": "hunter2hunter2",
             "password": "replacement-secret", "password_confirm": "replacement-secret"})
         self.assertEqual(resp.status_code, 200, resp.text)
@@ -154,21 +190,21 @@ class SelfServiceCredentialsTests(SettingsSurfaceTestCase):
 
     def test_both_routes_need_a_session(self):
         self.client.cookies.clear()
-        self.assertEqual(self.client.post("/api/me/username", json={"username": "x"}).status_code, 401)
-        self.assertEqual(self.client.post("/api/me/password", json={"password": "y"}).status_code, 401)
+        self.assertEqual(self.client.post("/me/username", json={"username": "x"}).status_code, 401)
+        self.assertEqual(self.client.post("/me/password", json={"password": "y"}).status_code, 401)
 
     def test_the_account_page_offers_the_forms_that_apply(self):
         oauth_only = self._make_user(None, password=None, calendar_approved=True)
         self._link_trakt(oauth_only, provider_user_id=4545)
         self.sign_in_as(oauth_only)
         body = self.client.get("/me").text
-        self.assertIn('id="usernameForm"', body)
+        self.assertIn('hx-post="/me/username"', body)
         self.assertIn("Set a password", body)
         self.assertNotIn('id="currentPassword"', body)
 
         self.sign_in_as(self._make_user("named", calendar_approved=True))
         body = self.client.get("/me").text
-        self.assertNotIn('id="usernameForm"', body)
+        self.assertNotIn('hx-post="/me/username"', body)
         self.assertIn('id="currentPassword"', body)
 
 
@@ -467,8 +503,9 @@ class TokenRevocationOnUnlinkTests(SettingsSurfaceTestCase):
         self._link_trakt(victim, provider_user_id=5151, token="victim-token")
         self.sign_in_as(self.admin_id)
         resp = self.client.post(
-            f"/api/admin/users/{victim}/identities/unlink", json={"provider": "trakt"})
+            f"/admin/users/{victim}/identities/unlink", json={"provider": "trakt"})
         self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIn("Unlinked Trakt.", resp.text)
         self.assertEqual(self.revoked, ["victim-token"])
 
     def test_an_admin_unlink_that_asks_for_confirmation_revokes_nothing_yet(self):
@@ -479,14 +516,14 @@ class TokenRevocationOnUnlinkTests(SettingsSurfaceTestCase):
         self._link_trakt(orphan, provider_user_id=5252, token="orphan-token")
         self.sign_in_as(self.admin_id)
         resp = self.client.post(
-            f"/api/admin/users/{orphan}/identities/unlink", json={"provider": "trakt"})
-        self.assertEqual(resp.status_code, 409)
+            f"/admin/users/{orphan}/identities/unlink", json={"provider": "trakt"})
+        self.assertIn("Unlink anyway", resp.text)
         self.assertEqual(self.revoked, [])
         self.assertEqual(len(asyncio.run(auth.list_identities(orphan))), 1)
 
         forced = self.client.post(
-            f"/api/admin/users/{orphan}/identities/unlink",
-            json={"provider": "trakt", "force": True})
+            f"/admin/users/{orphan}/identities/unlink",
+            json={"provider": "trakt", "force": "1"})
         self.assertEqual(forced.status_code, 200, forced.text)
         self.assertEqual(self.revoked, ["orphan-token"])
 
@@ -495,8 +532,9 @@ class TokenRevocationOnUnlinkTests(SettingsSurfaceTestCase):
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=user_id, provider="plex", provider_user_id=6161, access_token="p")))
         self.sign_in_as(user_id)
-        resp = self.client.post("/api/me/identities/unlink", json={"provider": "plex"})
+        resp = self.client.post("/me/identities/unlink", json={"provider": "plex"})
         self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(asyncio.run(auth.list_identities(user_id)), [])
         self.assertEqual(self.revoked, [])
 
     def test_without_configured_credentials_it_says_so_rather_than_calling(self):
@@ -507,10 +545,13 @@ class TokenRevocationOnUnlinkTests(SettingsSurfaceTestCase):
         user_id = self._make_user("uncfg", calendar_approved=True)
         self._link_trakt(user_id, provider_user_id=7171, token="stranded")
         self.sign_in_as(user_id)
-        resp = self.client.post("/api/me/identities/unlink", json={"provider": "trakt"})
+        resp = self.client.post("/me/identities/unlink", json={"provider": "trakt"})
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(self.revoked, [])
-        self.assertIn("trakt.tv", resp.json()["warning"])
+        # Said beside the rows, since only the account holder can finish it.
+        identities = resp.text.split('id="accountIdentities"', 1)[1]
+        line = re.search(r'<p class="auth-error[^"]*" role="alert">(.*?)</p>', identities, re.S).group(1)
+        self.assertIn("trakt.tv", line)
 
 
 if __name__ == "__main__":

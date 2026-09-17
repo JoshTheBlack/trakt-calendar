@@ -155,6 +155,39 @@ def clear_session_cookie(
 
 
 # ---------------------------------------------------------------------------
+# whether this browser keeps the cookie sign-in will issue
+# ---------------------------------------------------------------------------
+# A MEASUREMENT, NOT AN INFERENCE. The sign-in page used to compare the policy
+# against `location.protocol` in the browser, which is a guess about what the
+# browser will do with a Secure cookie — and a wrong one on the loopback: measured
+# in Firefox 155 and Chromium, both KEEP a Secure cookie over http://127.0.0.1 and
+# http://localhost, and both drop it over plain http to any other host. The sign-in page sets a harmless cookie under exactly the session
+# cookie's policy, and a request made from that page afterwards either carries it
+# or does not. The browser's own answer, asked after the fact, cannot disagree with
+# what it will do with the real one.
+COOKIE_PROBE = "tns_cookie_probe"
+COOKIE_PROBE_SECONDS = 10 * 60
+
+
+def set_cookie_probe(response: Response, settings: Settings, request: Request | None = None) -> None:
+    """Offer the browser a cookie carrying the session cookie's Secure policy."""
+    response.set_cookie(
+        key=COOKIE_PROBE, value="1", max_age=COOKIE_PROBE_SECONDS, path="/",
+        httponly=True, samesite="lax", secure=use_secure_cookie(settings, request),
+    )
+
+
+def session_cookie_would_be_dropped(request: Request, settings: Settings) -> bool:
+    """Whether a Secure session cookie is about to be discarded by this browser.
+
+    Only a Secure policy can be refused this way, so any other policy answers no
+    without looking — which also means a browser blocking cookies outright is not
+    reported under the words this answer is drawn with. Called from a request the
+    sign-in page itself makes, after the page's own response offered the probe."""
+    return use_secure_cookie(settings, request) and COOKIE_PROBE not in request.cookies
+
+
+# ---------------------------------------------------------------------------
 # client IP
 # ---------------------------------------------------------------------------
 

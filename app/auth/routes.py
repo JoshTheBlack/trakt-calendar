@@ -18,9 +18,16 @@ Three things here carry real weight and must survive any future restyling:
     that browsers send with no preflight, so accepting one would leave these
     endpoints defended by SameSite alone. The rule itself is enforced for every
     mutating route at once, in app/authz.py's request_shape_guard, rather than
-    here — this note says what the constraint MEANS for these pages: everything
-    here posts JSON via fetch, there is no HTML form POST anywhere in this app,
-    and none may be added.
+    here — this note says what the constraint MEANS for these pages: every form
+    here posts itself through htmx's json-enc, never as a native form post, and
+    none may be added.
+
+EVERY FORM ON THESE PAGES IS ANSWERED WITH MARKUP. A refusal is a sentence drawn
+where the form shows it, at 200, because a non-200 is never swapped
+(static/js/boost.js's `noSwap`) — so the sentence a person needs would otherwise be
+a press that did nothing. A success that changes which page somebody should be on
+is `204` with `HX-Redirect`: a redirect STATUS would be followed by the request and
+the page it found swapped into the form.
 
 Registration is gated by an invite unless the operator has turned that off,
 and every sign-in / registration failure is throttled per username and per IP
@@ -34,13 +41,13 @@ import logging
 from urllib.parse import quote
 
 import anyio.to_thread
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi import APIRouter, Request
+from fastapi.responses import FileResponse, RedirectResponse, Response
 
 # `auth` is the package this module lives in, reached through the parent so the
 # routes read the public surface app/auth/__init__.py exposes rather than
 # knowing which submodule each name is defined in.
-from .. import auth, authz, chrome, db, providers, secrets_box
+from .. import auth, authz, chrome, db, providers, route_params, secrets_box
 from ..config import Settings, load_settings, save_settings
 from ..media import user_images
 from ..templating import templates
@@ -71,6 +78,23 @@ INVALID_INVITE = "This invite link is not valid. Ask your admin for a new one."
 # app_meta key, set when setup could not adopt the Trakt token already in
 # settings.json, so the Settings screen can prompt for a reconnect.
 TRAKT_RECONNECT_NOTICE = "trakt_reconnect_notice"
+
+
+def refused(request: Request, message: str) -> Response:
+    """A form's refusal, as the sentence its error line shows.
+
+    One template for every form on the signed-out pages and the account page, so
+    what a refusal IS — escaped text, nothing else — is stated once. The form
+    names where it lands (`hx-target`), which keeps this knowing nothing about any
+    page's layout."""
+    return templates.TemplateResponse(request, "_form_refusal.html", {
+        "request": request, "message": message})
+
+
+def go_to(target: str) -> Response:
+    """Send the browser to `target` as a real navigation — see the module
+    docstring for why this is a header and not a redirect status."""
+    return Response(status_code=204, headers={"HX-Redirect": target})
 
 
 def _source_prefs():
@@ -120,13 +144,13 @@ async def onboarding_create(request: Request):
     confirm = str(data.get("password_confirm") or "")
 
     if err := auth.identifier_error(username):
-        return authz.error(err)
+        return refused(request, err)
     if len(password) < auth.MIN_PASSWORD_LENGTH:
-        return authz.error(f"Password must be at least {auth.MIN_PASSWORD_LENGTH} characters.")
+        return refused(request, f"Password must be at least {auth.MIN_PASSWORD_LENGTH} characters.")
     if password != confirm:
-        return authz.error("The two passwords don't match.")
+        return refused(request, "The two passwords don't match.")
     if await auth.any_users_exist():
-        return authz.error("This instance has already been set up.", 409)
+        return refused(request, ALREADY_SET_UP)
 
     settings = load_settings()
     # Both of these happen before the transaction opens: neither 200ms of Argon2
@@ -165,11 +189,11 @@ async def onboarding_create(request: Request):
     try:
         user_id = await db.transaction(_create)
     except _AlreadySetUp:
-        return authz.error("This instance has already been set up.", 409)
+        return refused(request, ALREADY_SET_UP)
     except db.IntegrityError:
         # The unique index on the bootstrap flag caught a simultaneous request
         # that got past the count check. Same answer either way.
-        return authz.error("This instance has already been set up.", 409)
+        return refused(request, ALREADY_SET_UP)
 
     if settings.trakt_access_token.strip() and not trakt_identity:
         await db.set_meta(TRAKT_RECONNECT_NOTICE, "1")
@@ -185,13 +209,13 @@ async def onboarding_create(request: Request):
         user_agent=request.headers.get("user-agent"),
         ip_address=auth.client_ip(request, settings),
     )
-    response = JSONResponse({
-        "ok": True,
-        "redirect": "/",
-        "trakt_adopted": bool(trakt_identity),
-    })
+    response = go_to("/")
     auth.set_session_cookie(response, session_id, settings, request)
     return response
+
+
+# Said the same way whether the count check or the unique index caught it.
+ALREADY_SET_UP = "This instance has already been set up."
 
 
 class _AlreadySetUp(Exception):
@@ -350,11 +374,11 @@ async def register(request: Request):
     invite_required = not settings.allow_open_registration
 
     if await auth.registration_rate_limited(ip, token):
-        return authz.error("Too many attempts from this address. Try again later.", 429)
+        return refused(request, "Too many attempts from this address. Try again later.")
 
-    async def _fail(message: str, status: int = 400) -> JSONResponse:
+    async def _fail(message: str) -> Response:
         await auth.record_registration_attempt(ip, token, False)
-        return authz.error(message, status)
+        return refused(request, message)
 
     invite = await auth.find_invite_by_token(token) if token else None
     if invite_required and not auth.invite_is_usable(invite):
@@ -416,7 +440,7 @@ async def register(request: Request):
     session_id = await auth.create_session(
         user_id, user_agent=request.headers.get("user-agent"), ip_address=ip,
     )
-    response = JSONResponse({"ok": True, "redirect": "/" if calendar_approved else "/me"})
+    response = go_to("/" if calendar_approved else "/me")
     auth.set_session_cookie(response, session_id, settings, request)
     return response
 
@@ -456,7 +480,7 @@ async def login_page(request: Request):
     if not await auth.any_users_exist():
         return RedirectResponse("/onboarding", status_code=303)
     settings, key_mismatch = _settings_even_if_sealed()
-    return templates.TemplateResponse(request, "auth_login.html", {
+    response = templates.TemplateResponse(request, "auth_login.html", {
         "request": request,
         # Sign in with Trakt cannot work while a secret is sealed under the wrong
         # key — the code exchange authenticates with the client secret, which is one
@@ -469,14 +493,34 @@ async def login_page(request: Request):
         # with a client secret that will not open under the wrong key, so the
         # button is off exactly when Trakt's is and for the same reason.
         "simkl_login_configured": settings.simkl_login_configured,
-        # Whether the cookie a successful sign-in issues will carry `Secure`. The
-        # page compares it against the protocol the browser is really on: if this
-        # is true over plain http:// the cookie is dropped on arrival and sign-in
-        # silently does nothing, which otherwise looks exactly like a wrong
-        # password. Onboarding resolves this correctly on its own, so reaching
-        # here means the deployment moved or settings.json was edited by hand.
-        "cookie_is_secure": auth.use_secure_cookie(settings, request),
         **_og_context(settings, "/login"),
+    })
+    # The page asks, once it has loaded, whether this cookie came back — see
+    # login_cookie_check below.
+    auth.set_cookie_probe(response, settings, request)
+    return response
+
+
+@guard.get("/login/cookie-check", AuthLevel.PUBLIC)
+async def login_cookie_check(request: Request):
+    """Whether the cookie a successful sign-in issues will survive in this browser.
+
+    If the policy makes it `Secure` and the browser is on plain http://, the cookie
+    is dropped on arrival and sign-in silently does nothing — which otherwise looks
+    exactly like a wrong password. Onboarding resolves the policy correctly on its
+    own, so a warning here means the deployment moved or settings.json was edited
+    by hand.
+
+    ASKED BY THE PAGE, NOT DRAWN WITH IT, because the answer is what the browser
+    did with the cookie the page's own response offered, and only a request made
+    after that response can carry it back (app/auth/cookies.py says why this beats
+    reading the protocol in the browser). Reachable while the at-rest key is wrong,
+    like /login itself: an administrator locked out of recovery by a cookie the
+    browser refuses is exactly who needs this sentence."""
+    settings = load_settings(open_secrets=False)
+    return templates.TemplateResponse(request, "_cookie_warning.html", {
+        "request": request,
+        "dropped": auth.session_cookie_would_be_dropped(request, settings),
     })
 
 
@@ -537,7 +581,7 @@ async def login(request: Request):
             auth.LOGIN_WINDOW_SECONDS // 60,
         )
         await auth.burn_dummy_verify(password)
-        return authz.error(INVALID_CREDENTIALS, 401)
+        return refused(request, INVALID_CREDENTIALS)
 
     user = await auth.find_user_by_username(username) if username else None
     if user is None:
@@ -545,13 +589,13 @@ async def login(request: Request):
         if username_key:
             await auth.record_attempt("username", username_key, False)
         await auth.record_attempt("ip", ip, False)
-        return authz.error(INVALID_CREDENTIALS, 401)
+        return refused(request, INVALID_CREDENTIALS)
 
     result = await auth.verify_password(user["password_hash"], password)
     if not result.ok or user["is_disabled"]:
         await auth.record_attempt("username", username_key, False)
         await auth.record_attempt("ip", ip, False)
-        return authz.error(INVALID_CREDENTIALS, 401)
+        return refused(request, INVALID_CREDENTIALS)
     if result.new_hash:
         # The hashing library's defaults have moved on since this hash was
         # written; upgrade it now that we have the plaintext to do it with.
@@ -567,10 +611,7 @@ async def login(request: Request):
     session_id = await auth.create_session(
         int(user["id"]), user_agent=request.headers.get("user-agent"), ip_address=ip,
     )
-    response = JSONResponse({
-        "ok": True,
-        "redirect": "/" if user["calendar_approved"] else "/me",
-    })
+    response = go_to("/" if user["calendar_approved"] else "/me")
     auth.set_session_cookie(response, session_id, settings, request)
     return response
 
@@ -609,25 +650,60 @@ async def me_page(request: Request):
     calendar_approved lands here from /login and stays here whenever they try
     to reach a gated route."""
     user = await auth.require_session(request)
+    return templates.TemplateResponse(
+        request, "auth_me.html", await _account_context(request, user.session_id))
+
+
+# ---------------------------------------------------------------------------
+# the account page's sections
+# ---------------------------------------------------------------------------
+# EVERY CONTROL ON THE ACCOUNT PAGE POSTS ITSELF AND IS ANSWERED WITH ITS SECTION,
+# drawn from the same context the page is. The page used to be a 309-line script
+# over a dozen JSON routes: each answer either reloaded the page or patched a few
+# elements by hand — a heading here, a badge's class there, arrow buttons rebuilt
+# with insertAdjacentHTML — which is a second statement of what the page draws,
+# and one that went stale whenever the template moved on.
+#
+# ONE CONTEXT, BUILT ONCE PER ANSWER. A section is a slice of the page, so it reads
+# the page's own dictionary rather than a narrower one of its own: a section and
+# the page it sits in cannot disagree about, say, whether unlinking is allowed.
+# Built AFTER the write, from a fresh reading of the session, so what an answer
+# draws is what is stored.
+#
+# A REFUSAL IS A SENTENCE IN THE SECTION, at 200. A non-200 is never swapped, so a
+# statused refusal would be a press that did nothing.
+
+ACCOUNT_SECTIONS = {
+    "avatar": "_account_avatar.html",
+    "names": "_account_names.html",
+    "identities": "_account_identities.html",
+    "tracker_order": "_account_order.html",
+    "metadata_order": "_account_order.html",
+    "sharing": "_account_sharing.html",
+    "retired": "_account_retired.html",
+    "credentials": "_account_credentials.html",
+}
+
+
+async def _account_context(request: Request, session_id: str, **notes) -> dict:
+    """Everything the account page draws, for the page and for every section.
+
+    `notes` are the sentences an action leaves in its section — `<section>_message`
+    and, where a success is worth saying, `<section>_ok`."""
+    user = await auth.validate_session(session_id)
+    if user is None:
+        # The session this answer was for has just been ended — a password change
+        # replaces it, and the caller passes the new one. Anything else reaching
+        # here is a session revoked mid-request, which is a sign-in problem.
+        raise auth.AuthError(401, "login_required", "Sign in to continue.")
     settings = load_settings()
     identities = await auth.list_identities(user.user_id)
     linked = {row["provider"]: row["display_name"] for row in identities}
     account = await auth.get_user(user.user_id)
-    # The tracker services this account has actually linked, in the app's declared
-    # order, which is what `tracker_order` reorders and what decides whether there
-    # is a choice to offer at all.
-    linked_trackers = [str(source) for source in providers.registered()
-                       if str(source) in providers.tracker_sources() and str(source) in linked]
-    tracker_prefs = await _source_prefs().load(user.user_id)
-    # THE SERVICES THAT DESCRIBE TITLES, which is not the same list as the linked
-    # trackers above: a calendar is read with the instance's own credentials or
-    # with none at all, so every source this instance can fill a calendar from
-    # describes titles for every account. Asked through the registry's own
-    # function so that an operator switching one off empties this control by the
-    # same rule that empties the calendar.
-    describing = [str(p.source) for p in providers.calendar_sources(settings=settings)]
+    orders = await _account_orders(user.user_id, linked, settings)
+    tracker_prefs = orders.prefs
     prefs = await auth.get_user_prefs(user.user_id)
-    return templates.TemplateResponse(request, "auth_me.html", {
+    return {
         "request": request,
         # is_admin, calendar_available, ranker_available, version, build
         # for the shared header.
@@ -663,42 +739,7 @@ async def me_page(request: Request):
         "tracker_services_missing": [
             provider.label for source, provider in providers.registered().items()
             if str(source) in providers.tracker_sources() and str(source) not in linked],
-        # WHICH LINKED TRACKER DECIDES, in the order it is currently asked in.
-        # Only the ones this account has LINKED, because the choice is between
-        # services that actually answer — a service with no identity here decides
-        # nothing, and offering it would be offering a preference with no effect.
-        # Empty when fewer than two are linked, which is what hides the control:
-        # there is no order to state when one service answers.
-        #
-        # ORDERED THROUGH THE SAME FUNCTION THE TRACKER DECIDES WITH
-        # (prefs.tracker_order) rather than by reading the stored list here. A
-        # screen with its own reading of the preference could disagree with the
-        # one acting on it, and the viewer would have no way to tell which of the
-        # two was lying.
-        "tracker_priority": [
-            {"source": name, "label": providers.registered()[name].label}
-            for name in tracker_prefs.tracker_order(linked_trackers)
-        ] if len(linked_trackers) > 1 else [],
-        # WHOSE DESCRIPTION OF A TITLE A VIEWER READS, when two services describe
-        # the same one differently. The tracker's order above answers a different
-        # argument with the same shape — that one picks whose COUNT decides a
-        # season, this one whose overview, poster and network a card shows.
-        #
-        # NOT NARROWED TO WHAT IS LINKED, and this is where it differs sharply
-        # from the list above it. A calendar is read with the instance's own
-        # credentials or with none at all, so every registered calendar source
-        # describes titles for every account whether they have linked it or not
-        # — narrowing this to links would hide the choice from exactly the people
-        # who have one to make.
-        #
-        # ORDERED THROUGH THE SAME FUNCTION THE CALENDAR RESOLVES WITH
-        # (prefs.source_order), for the reason the tracker's list is: a screen
-        # with its own reading of the preference could disagree with the code
-        # acting on it, and a viewer would have no way to tell which was lying.
-        "metadata_order": [
-            {"source": name, "label": providers.registered()[name].label}
-            for name in tracker_prefs.source_order(describing)
-        ] if len(describing) > 1 else [],
+        "orders": {"tracker_order": orders.tracker, "metadata_order": orders.metadata},
         # WHOSE STORED NUMBERS STILL COUNT — every tracker service, linked or not.
         #
         # DELIBERATELY NOT NARROWED TO THE LINKED ONES, and narrowing it would
@@ -742,10 +783,9 @@ async def me_page(request: Request):
         # images are served `private, max-age=86400`, which is right for a file
         # that rarely changes and wrong for the moment it does: the URL is
         # identical either side of a change, so a browser that has one cached
-        # goes on drawing it for a day. The upload path already worked around
-        # this by cache-busting in JavaScript; carrying the file's mtime in the
-        # template fixes it for every path at once — upload, adopt, refresh —
-        # rather than each call site remembering.
+        # goes on drawing it for a day. Carrying the file's mtime in the template
+        # fixes it for every path at once — upload, adopt, refresh — rather than
+        # each call site remembering.
         "avatar_version": user_images.picture_version(
             user_images.avatar_path(user.user_id)),
         # WHICH SERVICES HAVE GIVEN US A PICTURE, and which one (if any) the
@@ -771,22 +811,87 @@ async def me_page(request: Request):
         "avatar_fetchable": [
             name for name in user_images.PROVIDER_SLOTS if name in linked
         ],
-    })
+        **notes,
+    }
 
 
-@guard.post("/api/me/identities/unlink", AuthLevel.SESSION)
+@dataclasses.dataclass(frozen=True)
+class _Orders:
+    """The two "which service leads" lists the page offers, as it shows them."""
+    prefs: object
+    tracker: list[dict]
+    metadata: list[dict]
+
+
+async def _account_orders(user_id: int, linked: dict, settings: Settings) -> _Orders:
+    """Which linked tracker decides, and whose description of a title is read, each
+    in the order it is currently asked in.
+
+    WHICH LINKED TRACKER DECIDES: only the ones this account has LINKED, because
+    the choice is between services that actually answer — a service with no
+    identity here decides nothing, and offering it would be offering a preference
+    with no effect. Empty when fewer than two are linked, which is what hides the
+    control: there is no order to state when one service answers.
+
+    WHOSE DESCRIPTION IS READ: NOT narrowed to what is linked, and this is where the
+    two differ sharply. A calendar is read with the instance's own credentials or
+    with none at all, so every source this instance can fill a calendar from
+    describes titles for every account — asked through the registry's own function,
+    so an operator switching one off empties this control by the same rule that
+    empties the calendar.
+
+    BOTH ARE ORDERED THROUGH THE FUNCTION THAT ACTS ON THEM (prefs.tracker_order,
+    prefs.source_order) rather than by reading the stored lists here. A screen with
+    its own reading of a preference could disagree with the code acting on it, and
+    a viewer would have no way to tell which was lying. The same lists are what a
+    move reorders (move_account_order), so a press moves what the viewer saw.
+    """
+    source_prefs = await _source_prefs().load(user_id)
+    linked_trackers = [str(source) for source in providers.registered()
+                       if str(source) in providers.tracker_sources() and str(source) in linked]
+    describing = [str(p.source) for p in providers.calendar_sources(settings=settings)]
+
+    def entries(names: list[str]) -> list[dict]:
+        return [{"source": name, "label": providers.registered()[name].label} for name in names]
+
+    return _Orders(
+        prefs=source_prefs,
+        tracker=entries(source_prefs.tracker_order(linked_trackers))
+        if len(linked_trackers) > 1 else [],
+        metadata=entries(source_prefs.source_order(describing)) if len(describing) > 1 else [],
+    )
+
+
+async def _section(request: Request, session_id: str, section: str, **notes) -> Response:
+    """One section of the account page, drawn from the page's own context."""
+    context = await _account_context(request, session_id, **notes)
+    context["section"] = section
+    return templates.TemplateResponse(request, ACCOUNT_SECTIONS[section], context)
+
+
+async def _card(request: Request, session_id: str, **notes) -> Response:
+    """The whole account card, for an action that changes what several sections
+    offer — unlinking a service reaches the orders, the retired list, the tracker
+    notice and whether unlinking is still allowed at all."""
+    return templates.TemplateResponse(
+        request, "_account_card.html", await _account_context(request, session_id, **notes))
+
+
+@guard.post("/me/identities/unlink", AuthLevel.SESSION)
 async def unlink_identity(request: Request):
     """Detach a linked provider account from the signed-in account.
 
     Refused when it would leave the account with no way to sign in at all —
     there is no self-service recovery from that, and an administrator has to
     undo it by hand.
+
+    Answered with the whole card: see _card for why one section is not enough.
     """
     user = await auth.require_session(request)
     data = await authz.json_body(request)
     provider = str(data.get("provider") or "").strip().lower()
     if provider not in ("trakt", "plex", "simkl"):
-        return authz.error("Unknown provider.")
+        return await _card(request, user.session_id, link_message="Unknown provider.")
     # Imported here rather than at module scope: trakt_routes.py reads this
     # module's message constants, so the dependency only runs one way at import
     # time.
@@ -805,80 +910,72 @@ async def unlink_identity(request: Request):
     try:
         removed = await auth.unlink_identity(user.user_id, provider)
     except auth.LastLoginMethod:
-        return authz.error(
+        return await _card(request, user.session_id, link_message=(
             "That's the only way you can sign in. Link another account first, or "
-            "ask an administrator.", 409,
-        )
+            "ask an administrator."))
     if not removed:
-        return authz.error("That account isn't linked.", 404)
+        return await _card(request, user.session_id, link_message="That account isn't linked.")
+    # The unlink succeeded either way; a warning is about the part only the user
+    # can finish, on the provider's own site, so it is said beside the rows.
     warning = await trakt_routes.revoke_token_value(token)
-    return JSONResponse({"ok": True, "redirect": "/me", "warning": warning})
+    return await _card(request, user.session_id, link_message=warning or "",
+                       link_ok=not warning)
 
 
-@guard.post("/api/me/tracker-order", AuthLevel.SESSION)
-async def set_own_tracker_order(request: Request):
-    """State which linked tracker decides, when more than one answers for a season.
+@guard.post("/me/order/{kind}", AuthLevel.SESSION)
+async def move_account_order(kind: str, request: Request):
+    """Move one service a place up or down in one of the two "which service leads"
+    lists, and answer with that list.
+
+    A MOVE, NOT THE WHOLE LIST FROM THE BROWSER. The page used to reorder its own
+    DOM and post back what it read out of it; the server now takes the list it
+    drew (_account_orders), moves the named service, and saves the result — so the
+    order a press starts from is the stored one, not whatever another tab's page
+    was left showing.
 
     THE ORDER IS STORED WHOLE rather than as "promote this one", because that is
     what it means: with a third service registered, "Simkl first" says nothing
     about the other two. `source_prefs.save` is what refuses a name this app has
     never heard of and one named twice.
 
-    NOT NARROWED TO WHAT IS LINKED TODAY, deliberately, and this is the whole
-    reason the preference is worth storing rather than derived. Somebody who
-    unlinks Trakt for a month has not stopped preferring it; dropping it from the
-    stored order on the way in would silently rewrite their choice into one they
-    never made, and re-linking would come back in registry order. What is linked
-    decides who is ASKED (watch_history.tracker_ports); this decides who leads
-    among those that answer.
+    WHICH LINKED TRACKER DECIDES is not narrowed to what is linked TODAY when it is
+    stored — somebody who unlinks Trakt for a month has not stopped preferring it —
+    but the list this page offers is the linked services, and a press reorders
+    what was offered. What is linked decides who is ASKED
+    (watch_history.tracker_ports); this decides who leads among those that answer.
+
+    WHOSE DESCRIPTION IS READ is a reordering and never a filter: whether a service
+    appears on this account's calendar at all is stated in the calendar's own
+    filters panel.
     """
     user = await auth.require_session(request)
     data = await authz.json_body(request)
-    order = data.get("order")
-    if not isinstance(order, list):
-        return authz.error("An order must be a list of service names.")
-    source_prefs = _source_prefs()
-    prefs = await source_prefs.load(user.user_id)
+    field = {"tracker_order": "tracker_priority", "metadata_order": "metadata_order"}.get(kind)
+    if field is None:
+        return await _section(request, user.session_id, "tracker_order",
+                              order_message="There is no such list.", order_kind="tracker_order")
+    identities = await auth.list_identities(user.user_id)
+    linked = {row["provider"]: row["display_name"] for row in identities}
+    orders = await _account_orders(user.user_id, linked, load_settings())
+    names = [entry["source"] for entry in
+             (orders.tracker if kind == "tracker_order" else orders.metadata)]
+    source = str(data.get("source") or "")
+    step = {"up": -1, "down": 1}.get(str(data.get("direction") or ""))
+    if source not in names or step is None or not 0 <= names.index(source) + step < len(names):
+        return await _section(request, user.session_id, kind, order_kind=kind,
+                              order_message="That service cannot move that way.")
+    at = names.index(source)
+    names[at], names[at + step] = names[at + step], names[at]
     try:
-        saved = await source_prefs.save(dataclasses.replace(
-            prefs, tracker_priority=[str(name) for name in order]))
+        await _source_prefs().save(dataclasses.replace(orders.prefs, **{field: names}))
     except ValueError as exc:
-        return authz.error(str(exc))
-    return JSONResponse({"ok": True, "order": list(saved.tracker_priority)})
+        return await _section(request, user.session_id, kind, order_kind=kind,
+                              order_message=str(exc))
+    return await _section(request, user.session_id, kind, order_kind=kind,
+                          order_moved=f"{source}-{data.get('direction')}")
 
 
-@guard.post("/api/me/metadata-order", AuthLevel.SESSION)
-async def set_own_metadata_order(request: Request):
-    """State whose description of a title this account reads, when two services
-    describe the same one differently.
-
-    THE SAME SHAPE AS THE TRACKER ORDER BESIDE IT and deliberately so: stored
-    whole rather than as "promote this one", because with a third service
-    registered "Simkl first" says nothing about the other two. `source_prefs.save`
-    refuses a name this app has never heard of and one named twice.
-
-    IT IS A REORDERING AND NEVER A FILTER. Whether a service appears on this
-    account's calendar at all is a different question, stated in the calendar's
-    own filters panel; this only decides who leads among the ones that do. A
-    viewer who prefers a service that did not describe some title still sees the
-    title.
-    """
-    user = await auth.require_session(request)
-    data = await authz.json_body(request)
-    order = data.get("order")
-    if not isinstance(order, list):
-        return authz.error("An order must be a list of service names.")
-    source_prefs = _source_prefs()
-    prefs = await source_prefs.load(user.user_id)
-    try:
-        saved = await source_prefs.save(dataclasses.replace(
-            prefs, metadata_order=[str(name) for name in order]))
-    except ValueError as exc:
-        return authz.error(str(exc))
-    return JSONResponse({"ok": True, "order": list(saved.metadata_order)})
-
-
-@guard.post("/api/me/tracker-retired", AuthLevel.SESSION)
+@guard.post("/me/tracker-retired", AuthLevel.SESSION)
 async def set_own_retired_trackers(request: Request):
     """State which services' stored numbers this account no longer counts.
 
@@ -888,9 +985,12 @@ async def set_own_retired_trackers(request: Request):
     and an account that had genuinely migrated read as permanently degraded. This
     is how somebody says "I have moved off that one".
 
-    THE WHOLE LIST IS STORED, like the order beside it and for the same reason:
-    "retire this one" says nothing about the others, and a screen sending the
-    complete answer cannot leave a service in a state nobody chose.
+    THE WHOLE SET IS THE ANSWER, like the order beside it and for the same reason:
+    "retire this one" says nothing about the others. The list is a form of one box
+    per service, `counted:<service>`, each with a hidden "0" before it so an
+    unticked box is still MENTIONED — a service the body does not name at all is
+    refused rather than read as retired, because that is a page that did not draw
+    it, not a person who unticked it.
 
     NOT NARROWED TO WHAT IS LINKED TODAY, also like the order: retiring a service
     and then re-linking it is a real sequence, and dropping the name on the way in
@@ -906,21 +1006,29 @@ async def set_own_retired_trackers(request: Request):
     """
     user = await auth.require_session(request)
     data = await authz.json_body(request)
-    retired = data.get("retired")
-    if not isinstance(retired, list):
-        return authz.error("Retired services must be a list of service names.")
+    prefix = "counted:"
+    mentioned = {key[len(prefix):]: value for key, value in data.items() if key.startswith(prefix)}
+    trackers = [str(source) for source in providers.registered()
+                if str(source) in providers.tracker_sources()]
+    unknown = sorted(set(mentioned) - set(trackers))
+    missing = [name for name in trackers if name not in mentioned]
+    if unknown or missing:
+        return await _section(request, user.session_id, "retired", retired_message=(
+            f"Unknown service: {', '.join(unknown)}." if unknown
+            else "Every service has to be stated. Reload the page and try again."))
     source_prefs = _source_prefs()
     prefs = await source_prefs.load(user.user_id)
     try:
-        saved = await source_prefs.save(dataclasses.replace(
-            prefs, tracker_retired=[str(name) for name in retired]))
+        await source_prefs.save(dataclasses.replace(
+            prefs, tracker_retired=[name for name in trackers
+                                    if not route_params.ticked(mentioned[name])]))
     except ValueError as exc:
-        return authz.error(str(exc))
-    return JSONResponse({"ok": True, "retired": list(saved.tracker_retired)})
+        return await _section(request, user.session_id, "retired", retired_message=str(exc))
+    return await _section(request, user.session_id, "retired")
 
 
-@guard.post("/api/me/share-watch-history", AuthLevel.SESSION)
-async def api_me_share_watch_history(request: Request):
+@guard.post("/me/share-watch-history", AuthLevel.SESSION)
+async def set_share_watch_history(request: Request):
     """Turn the watch marks on this account's shared calendars on or off.
 
     ACCOUNT-WIDE AND RETROACTIVE, which is the whole reason it is not beside the
@@ -934,17 +1042,26 @@ async def api_me_share_watch_history(request: Request):
     NO PER-LINK OVERRIDE IS OFFERED and that is deliberate rather than unfinished:
     two switches would mean a link that still published the history after the
     account said not to, which is the failure this exists to make impossible.
+
+    ONLY THE BOX'S OWN TWO SPELLINGS ARE ACCEPTED — its hidden "0" and its "1" —
+    so a value that merely happens to read as truthy cannot decide whether a
+    viewing history is published. SAID ON SUCCESS AS WELL, because this writes
+    something the viewer cannot see the effect of from here.
     """
     user = await auth.require_session(request)
     data = await authz.json_body(request)
-    enabled = data.get("enabled")
-    if not isinstance(enabled, bool):
-        return authz.error("enabled must be true or false.")
+    value = route_params.last_value(data.get("enabled"))
+    if value not in ("0", "1"):
+        return await _section(request, user.session_id, "sharing",
+                              sharing_message="That has to be on or off.")
+    enabled = value == "1"
     await auth.update_user_prefs(user.user_id, share_watch_history=enabled)
-    return JSONResponse({"ok": True, "enabled": enabled})
+    return await _section(request, user.session_id, "sharing", sharing_ok=True, sharing_message=(
+        "Shared calendars will show your watched episodes." if enabled
+        else "Shared calendars will no longer show your watched episodes."))
 
 
-@guard.post("/api/me/username", AuthLevel.SESSION)
+@guard.post("/me/username", AuthLevel.SESSION)
 async def set_own_username(request: Request):
     """Claim a username for an account that has none.
 
@@ -955,25 +1072,31 @@ async def set_own_username(request: Request):
     from — and handing it over silently would break every link already shared and
     free the old name for somebody else to claim. That path stays with an
     administrator, who has the retired-identifier machinery to do it safely.
+
+    Answered with the credentials section, and the heading and the names beside it
+    out of band — the heading falls back to a username, and the names row shows it.
     """
     user = await auth.require_session(request)
+    data = await authz.json_body(request)
     account = await auth.get_user(user.user_id)
     if account and account["username"]:
-        return authz.error("You already have a username. An administrator can change it.", 409)
-    data = await authz.json_body(request)
+        return await _section(request, user.session_id, "credentials", credentials_message=(
+            "You already have a username. An administrator can change it."))
     username = str(data.get("username") or "").strip().lower()
     if err := await auth.username_availability_error(username):
-        return authz.error(err)
+        return await _section(request, user.session_id, "credentials", credentials_message=err)
     try:
         await auth.admin_set_username(user.user_id, username)
     except db.IntegrityError:
         # Lost a race between the availability check and this write; the UNIQUE
         # column is the real arbiter, exactly as registration treats it.
-        return authz.error("That username is taken.")
-    return JSONResponse({"ok": True, "username": username})
+        return await _section(request, user.session_id, "credentials",
+                              credentials_message="That username is taken.")
+    return await _section(request, user.session_id, "credentials", names_changed=True,
+                          credentials_ok=True, credentials_message="Username saved.")
 
 
-@guard.post("/api/me/display-name", AuthLevel.SESSION)
+@guard.post("/me/display-name", AuthLevel.SESSION)
 async def set_own_display_name(request: Request):
     """Set or clear the signed-in account's display name.
 
@@ -984,20 +1107,19 @@ async def set_own_display_name(request: Request):
     off, so changing it costs nothing and needs no administrator.
 
     Sending an empty value clears it, and the account goes back to being shown
-    by its username.
+    by its username. The answer is drawn from what was STORED, whitespace
+    collapsed, so what is on screen is what was actually saved.
     """
     user = await auth.require_session(request)
     data = await authz.json_body(request)
     raw = data.get("display_name")
     if err := auth.display_name_error(raw):
-        return authz.error(err)
-    stored = await auth.set_display_name(user.user_id, raw)
-    # Echo the NORMALIZED form, not what was sent: the client should show what
-    # was actually stored once the collapsing of whitespace has been applied.
-    return JSONResponse({"ok": True, "display_name": stored})
+        return await _section(request, user.session_id, "names", names_message=err)
+    await auth.set_display_name(user.user_id, raw)
+    return await _section(request, user.session_id, "names", names_changed=True)
 
 
-@guard.post("/api/me/password", AuthLevel.SESSION)
+@guard.post("/me/password", AuthLevel.SESSION)
 async def set_own_password(request: Request):
     """Set or change the signed-in account's password.
 
@@ -1009,7 +1131,8 @@ async def set_own_password(request: Request):
     Setting a password revokes every session the account holds, so a
     password-change after a compromise actually evicts the other party. The
     caller is then re-issued a fresh session, since signing the person out of the
-    tab they just used would read as a failure.
+    tab they just used would read as a failure — and the section is drawn from
+    that new session, the only one left.
     """
     user = await auth.require_session(request)
     settings = load_settings()
@@ -1020,7 +1143,8 @@ async def set_own_password(request: Request):
     # locking them out over a neighbour's typos is pure harm.
     if await auth.check_lockout("ip", ip, max_attempts=auth.LOGIN_IP_MAX_ATTEMPTS,
                                 window_seconds=auth.LOGIN_WINDOW_SECONDS):
-        return authz.error("Too many attempts. Try again later.", 429)
+        return await _section(request, user.session_id, "credentials",
+                              credentials_message="Too many attempts. Try again later.")
 
     data = await authz.json_body(request)
     account = await auth.get_user(user.user_id)
@@ -1029,13 +1153,16 @@ async def set_own_password(request: Request):
         result = await auth.verify_password(stored_hash, str(data.get("current_password") or ""))
         if not result.ok:
             await auth.record_attempt("ip", ip, False)
-            return authz.error("That isn't your current password.", 403)
+            return await _section(request, user.session_id, "credentials",
+                                  credentials_message="That isn't your current password.")
 
     password = str(data.get("password") or "")
     if password != str(data.get("password_confirm") or ""):
-        return authz.error("The two passwords don't match.")
+        return await _section(request, user.session_id, "credentials",
+                              credentials_message="The two passwords don't match.")
     if len(password) < auth.MIN_PASSWORD_LENGTH:
-        return authz.error(f"Use at least {auth.MIN_PASSWORD_LENGTH} characters.")
+        return await _section(request, user.session_id, "credentials", credentials_message=(
+            f"Use at least {auth.MIN_PASSWORD_LENGTH} characters."))
 
     await auth.clear_attempts("ip", ip)
     await auth.set_password(user.user_id, password)
@@ -1044,7 +1171,9 @@ async def set_own_password(request: Request):
         user_agent=request.headers.get("user-agent"),
         ip_address=ip,
     )
-    response = JSONResponse({"ok": True})
+    response = await _section(request, session_id, "credentials", credentials_ok=True,
+                              credentials_message="Password saved. Every other session "
+                                                  "on this account has been signed out.")
     auth.set_session_cookie(response, session_id, settings, request)
     return response
 
@@ -1057,8 +1186,13 @@ async def set_own_password(request: Request):
 _PRIVATE_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 
 
-@guard.post("/api/me/avatar", AuthLevel.SESSION)
+@guard.post("/me/avatar", AuthLevel.SESSION)
 async def upload_avatar(request: Request):
+    """Replace this account's avatar with an uploaded picture.
+
+    The file arrives as a base64 field of a JSON body, read by static/js/ui.js's
+    `data-file-into` — the same reader the saved-picture library and both restores
+    use, because the shape guard admits application/json alone."""
     user = await auth.require_session(request)
     # An image is the one body whose ceiling this route knows, so it says so
     # here: the refusal then reads as the image rule at every size, rather than
@@ -1068,16 +1202,16 @@ async def upload_avatar(request: Request):
     try:
         await user_images.save_avatar(user.user_id, str(data.get("image_b64") or ""))
     except user_images.ValidationError as exc:
-        return authz.error(str(exc))
-    return JSONResponse({"ok": True})
+        return await _section(request, user.session_id, "avatar", avatar_message=str(exc))
+    return await _section(request, user.session_id, "avatar")
 
 
-@guard.delete("/api/me/avatar", AuthLevel.SESSION)
+@guard.post("/me/avatar/remove", AuthLevel.SESSION)
 async def remove_avatar(request: Request):
     user = await auth.require_session(request)
     await authz.json_body(request)
     user_images.delete_avatar(user.user_id)
-    return JSONResponse({"ok": True})
+    return await _section(request, user.session_id, "avatar")
 
 
 @guard.get("/api/me/avatar", AuthLevel.SESSION)
@@ -1108,7 +1242,7 @@ async def get_avatar(request: Request):
 # A slot is one connected service's copy of that account's picture. The routes
 # below never take a provider name into a path themselves —
 # user_images.provider_avatar_path refuses anything outside its closed set, and
-# these check membership first so the refusal is a 400 rather than a 500.
+# these check membership first so the refusal is a sentence rather than a 500.
 
 
 def _known_source(value: object) -> str | None:
@@ -1148,7 +1282,7 @@ async def get_avatar_source(request: Request, source: str):
     return Response(content=resized, media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
 
 
-@guard.post("/api/me/avatar/source", AuthLevel.SESSION)
+@guard.post("/me/avatar/use", AuthLevel.SESSION)
 async def use_avatar_source(request: Request):
     """Make one source's picture this account's avatar.
 
@@ -1160,20 +1294,22 @@ async def use_avatar_source(request: Request):
     data = await authz.json_body(request)
     name = _known_source(data.get("source"))
     if name is None:
-        return authz.error("Unknown picture.")
+        return await _section(request, user.session_id, "avatar", avatar_message="Unknown picture.")
     if not user_images.adopt_avatar_source(user.user_id, name, only_if_missing=False):
-        return authz.error("There is no saved picture of that kind.")
-    return JSONResponse({"ok": True})
+        return await _section(request, user.session_id, "avatar",
+                              avatar_message="There is no saved picture of that kind.")
+    return await _section(request, user.session_id, "avatar")
 
 
-@guard.post("/api/me/avatar/source/refresh", AuthLevel.SESSION)
+@guard.post("/me/avatar/refresh", AuthLevel.SESSION)
 async def refresh_provider_avatar(request: Request):
     """Ask the service for its current picture again and refill the slot.
 
     THE ONLY WAY A SLOT IS EVER RE-FETCHED, which is what makes "no refetch on an
     ordinary sign-in" affordable rather than a limitation: a picture that almost
     never changes is not worth an outbound fetch on every login, and a person who
-    has just changed theirs has somewhere to press.
+    has just changed theirs has somewhere to press. The identities list's "Get
+    picture" is this same request, pressed beside a service rather than a picture.
 
     THE AVATAR IS NOT TOUCHED unless it was already a copy of this slot. Somebody
     refreshing a service's picture means "update that picture", not "make it my
@@ -1182,32 +1318,33 @@ async def refresh_provider_avatar(request: Request):
     """
     user = await auth.require_session(request)
     data = await authz.json_body(request)
-    name = _known_slot(data.get("source") or data.get("provider"))
+    name = _known_slot(data.get("source"))
     if name is None:
-        return authz.error("Unknown service.")
+        return await _section(request, user.session_id, "avatar", avatar_message="Unknown service.")
     was_adopted = user_images.avatar_source_is_adopted(user.user_id, name)
     url = await provider_avatars.current_url(user.user_id, name)
     raw = await provider_avatars.fetch(name, url)
     if raw is None:
-        return authz.error("That service did not give us a picture to use.")
+        return await _section(request, user.session_id, "avatar",
+                              avatar_message="That service did not give us a picture to use.")
     try:
         await user_images.save_provider_avatar(user.user_id, name, raw)
     except user_images.ValidationError as exc:
-        return authz.error(str(exc))
+        return await _section(request, user.session_id, "avatar", avatar_message=str(exc))
     if was_adopted:
         user_images.adopt_avatar_source(user.user_id, name, only_if_missing=False)
-    return JSONResponse({"ok": True, "adopted": was_adopted})
+    return await _section(request, user.session_id, "avatar")
 
 
-@guard.delete("/api/me/avatar/source", AuthLevel.SESSION)
+@guard.post("/me/avatar/forget", AuthLevel.SESSION)
 async def remove_avatar_source(request: Request):
     user = await auth.require_session(request)
     data = await authz.json_body(request)
     name = _known_source(data.get("source"))
     if name is None:
-        return authz.error("Unknown picture.")
+        return await _section(request, user.session_id, "avatar", avatar_message="Unknown picture.")
     user_images.delete_avatar_source(user.user_id, name)
-    return JSONResponse({"ok": True})
+    return await _section(request, user.session_id, "avatar")
 
 
 # ---------------------------------------------------------------------------
@@ -1299,43 +1436,3 @@ async def get_saved_image(image_uid: str, request: Request):
         return Response(status_code=404)
     return FileResponse(user_images.image_path(user.user_id, image_uid),
                         media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
-
-
-# ---------------------------------------------------------------------------
-# admin: issue an invite
-# ---------------------------------------------------------------------------
-# One endpoint — enough to mint a token and exercise registration end to end.
-# The full issue/list/revoke admin screen is built separately on top of the
-# functions in app.auth (create_invite, list_invites, revoke_invite).
-
-@guard.post("/api/admin/invites", AuthLevel.ADMIN)
-async def admin_create_invite(request: Request):
-    admin = await auth.current_user(request)
-    data = await authz.json_body(request)
-    label = str(data.get("label") or "").strip() or None
-
-    max_uses = data.get("max_uses")
-    try:
-        max_uses = int(max_uses) if max_uses is not None else None
-    except (TypeError, ValueError):
-        return authz.error("max_uses must be a whole number.")
-    if max_uses is not None and max_uses < 1:
-        return authz.error("max_uses must be at least 1.")
-
-    expires_at = None
-    expires_in_hours = data.get("expires_in_hours")
-    if expires_in_hours is not None:
-        try:
-            hours = float(expires_in_hours)
-        except (TypeError, ValueError):
-            return authz.error("expires_in_hours must be a number.")
-        if hours <= 0:
-            return authz.error("expires_in_hours must be positive.")
-        expires_at = db.now() + int(hours * 3600)
-
-    invite = await auth.create_invite(
-        created_by=admin.user_id, label=label, expires_at=expires_at, max_uses=max_uses,
-        grants_calendar_on_accept=bool(data.get("grants_calendar_on_accept", True)),
-        grants_ranker_on_accept=bool(data.get("grants_ranker_on_accept", True)),
-    )
-    return JSONResponse({"ok": True, **invite})

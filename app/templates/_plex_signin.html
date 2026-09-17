@@ -1,0 +1,33 @@
+{# SIGN IN WITH PLEX: the button that starts it, and the place its answers land.
+   Used by the sign-in, registration and account pages.
+
+   PLEX HAS NO CALLBACK. Its own page approves a PIN, and this app only learns of it
+   by asking — so the flow is a start, a popup on plex.tv, and a poll. What each of
+   those is:
+
+   THE START IS THE BUTTON'S OWN REQUEST. It asks plex.tv for a PIN, records a
+   handshake row keyed on a fresh `state`, pins that row to this browser with an
+   HttpOnly cookie, and answers with the waiting block (_plex_flow.html).
+
+   THE POPUP IS THE ONE THING SCRIPT DOES, and static/js/plex-auth.js says why it
+   cannot be anything else: a browser opens a window only inside the click that
+   asked for it, and the address to point it at arrives after that click is over.
+   The button carries `data-plex-popup`, naming the hidden field the script writes
+   "blocked" into when the browser refused the window — so the server can say so and
+   offer the page as a link, which a browser never blocks.
+
+   THE POLL IS A FORM THAT POSTS ITSELF every two seconds, in the waiting block, and
+   stops when the block is replaced. #}
+{% macro button(label, start_url, face='auth-provider-btn ready') %}
+<button type="button" class="{{ face }}" id="plexBtn"
+        data-plex-popup="#plexPopupBlocked"
+        hx-get="{{ start_url }}" hx-include="#plexPopupBlocked"
+        hx-target="#plexFlow" hx-swap="innerHTML">{{ label }}</button>
+<input type="hidden" id="plexPopupBlocked" name="popup" value="">
+{% endmacro %}
+
+{# Where the flow's answers are drawn: the waiting line and its poll, or the reason
+   it stopped. Empty until the button is pressed. #}
+{% macro slot() %}
+<div id="plexFlow" class="plex-flow"></div>
+{% endmacro %}

@@ -1,0 +1,12 @@
+{# THE SIGN-IN PAGE'S COOKIE WARNING, answered by GET /login/cookie-check once the
+   page has loaded. Drawn only when the browser has already discarded a cookie
+   carrying the session cookie's Secure policy — app/auth/cookies.py says why that
+   is asked of the browser rather than worked out from the address bar. #}
+{% if dropped %}
+<p class="auth-notice" id="cookieWarning" role="alert">
+  This instance issues secure session cookies, but your browser discarded one just
+  now &mdash; it reached this page over http://, so sign-in will not stick. Set
+  <code>"cookie_secure"</code> to <code>"never"</code> in data/settings.json, or
+  reach this instance over https://.
+</p>
+{% endif %}

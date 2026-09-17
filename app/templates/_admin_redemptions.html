@@ -1,0 +1,15 @@
+{# WHO HAS REDEEMED ONE INVITE, newest first — the account's current username
+   where it still has one (the account may since have been deleted; the
+   redemption still records that it happened), when, and from where. #}
+{% if redemptions %}
+<ul class="admin-redemption-list">
+  {% for r in redemptions %}
+  {% set t = when(r.redeemed_at) %}
+  <li>{{ r.username or ('account #' ~ r.user_id) }}
+    {%- if t %} — <time datetime="{{ t.iso }}" title="{{ t.exact }}">{{ t.short }}</time>{% endif %}
+    {%- if r.ip_address %} — {{ r.ip_address }}{% endif %}</li>
+  {% endfor %}
+</ul>
+{% else %}
+<span class="auth-hint">No redemptions yet.</span>
+{% endif %}

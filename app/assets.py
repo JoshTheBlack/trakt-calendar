@@ -134,6 +134,10 @@ PAGE_SCRIPTS = {
     ),
     "admin": ("static/js/ui.js", "static/js/nav.js"),
     "account": ("static/js/ui.js", "static/js/nav.js", "static/js/plex-auth.js"),
+    # ui.js for `data-copy` alone: a generated key is copied into an environment
+    # file, and only a browser can write the clipboard. Everything else on the page
+    # posts itself.
+    "recovery": ("static/js/ui.js",),
     # ui.js for its URL-state select resync alone: this page's endpoint
     # picker acts on `change` and is restored by the bfcache exactly like
     # the calendar's, and leaving one copy of that bug unfixed is how the

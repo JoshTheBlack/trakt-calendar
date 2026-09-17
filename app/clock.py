@@ -48,7 +48,8 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,32 @@ def today() -> date:
     that parameter; this is what they should default to.
     """
     return override() or date.today()
+
+
+def first_zone(*names: str | None) -> ZoneInfo:
+    """The first of `names` that is a usable timezone, else UTC.
+
+    Every page that shows a time in somebody's own zone asks the same question in
+    the same shape — theirs, then a fallback, then the instance's — and a name can
+    be stale (a settings.json value predating a tzdata rename) or blank. An unusable
+    one is skipped rather than raised, because a wrong zone on a timestamp is a
+    smaller failure than a page that will not render."""
+    for name in names:
+        if not name:
+            continue
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            continue
+    return ZoneInfo("UTC")
+
+
+def moment(timestamp: int | float | None, zone: ZoneInfo) -> datetime | None:
+    """A stored Unix timestamp as a time in `zone`, or None for a timestamp that
+    was never recorded (stored as NULL or 0)."""
+    if not timestamp:
+        return None
+    return datetime.fromtimestamp(timestamp, zone)
 
 
 def warn_if_overridden() -> None:

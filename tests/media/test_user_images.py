@@ -315,7 +315,7 @@ class AccountDeletionCleanupTests(unittest.TestCase):
         resp = self.client.post("/onboarding", json={
             "username": username, "password": password, "password_confirm": password,
         })
-        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.status_code, 204, resp.text)
         return asyncio.run(auth.find_user_by_username(username))["id"]
 
     def test_deleting_account_removes_the_user_data_directory(self):
@@ -370,7 +370,7 @@ class RouteTests(unittest.TestCase):
             "username": "routeadmin", "password": "hunter2hunter2",
             "password_confirm": "hunter2hunter2",
         })
-        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.status_code, 204, resp.text)
 
     def tearDown(self):
         self.client.close()
@@ -378,14 +378,21 @@ class RouteTests(unittest.TestCase):
 
     def test_signed_out_request_is_refused(self):
         anon = TestClient(app, base_url="https://testserver", headers={"Origin": "https://testserver"})
-        resp = anon.post("/api/me/avatar", json={"image_b64": _b64(_png_bytes())})
+        resp = anon.post("/me/avatar", json={"image_b64": _b64(_png_bytes())})
         self.assertIn(resp.status_code, (401, 303))
         anon.close()
 
-    def test_upload_view_and_delete_round_trip(self):
-        resp = self.client.post("/api/me/avatar", json={"image_b64": _data_url(_png_bytes())})
+    def avatar_error(self, resp) -> str:
+        """The sentence beside the Upload button, which is where a refusal is drawn."""
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertTrue(resp.json()["ok"])
+        return re.search(r'id="avatarError" role="alert">(.*?)</span>', resp.text, re.S).group(1)
+
+    def test_upload_view_and_delete_round_trip(self):
+        resp = self.client.post("/me/avatar", json={"image_b64": _data_url(_png_bytes())})
+        self.assertEqual(self.avatar_error(resp), "")
+        # The section is drawn with the picture and the confirmation that removes it.
+        self.assertIn("/api/me/avatar?size=96&amp;v=", resp.text)
+        self.assertIn('id="confirm-avatar-remove"', resp.text)
 
         resp = self.client.get("/api/me/avatar")
         self.assertEqual(resp.status_code, 200)
@@ -398,22 +405,35 @@ class RouteTests(unittest.TestCase):
         with Image.open(BytesIO(resp.content)) as img:
             self.assertEqual(img.size, (64, 64))
 
-        resp = self.client.request("DELETE", "/api/me/avatar", json={})
+        resp = self.client.post("/me/avatar/remove", json={})
         self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIn("avatar-placeholder", resp.text)
+        self.assertNotIn('id="confirm-avatar-remove"', resp.text)
         self.assertEqual(self.client.get("/api/me/avatar").status_code, 404)
 
     def test_a_non_image_upload_is_refused_with_a_readable_message(self):
-        resp = self.client.post("/api/me/avatar", json={"image_b64": _b64(b"definitely not an image")})
-        self.assertEqual(resp.status_code, 400)
-        data = resp.json()
-        self.assertFalse(data["ok"])
-        self.assertTrue(data["error"])
+        resp = self.client.post("/me/avatar", json={"image_b64": _b64(b"definitely not an image")})
+        self.assertTrue(self.avatar_error(resp))
+        self.assertFalse(user_images.has_avatar(
+            asyncio.run(auth.find_user_by_username("routeadmin"))["id"]))
 
     def test_a_huge_upload_is_refused_not_a_500(self):
         raw = os.urandom(user_images.MAX_UPLOAD_BYTES + 1)
-        resp = self.client.post("/api/me/avatar", json={"image_b64": _b64(raw)})
-        self.assertEqual(resp.status_code, 400)
-        self.assertTrue(resp.json()["error"])
+        resp = self.client.post("/me/avatar", json={"image_b64": _b64(raw)})
+        self.assertTrue(self.avatar_error(resp))
+
+    def test_the_upload_is_the_shared_file_reader_and_posts_when_it_has_read(self):
+        """No near-copy of the reader: the input names ui.js's `data-file-into`,
+        and the upload form posts on the event that reader fires once the field is
+        filled."""
+        page = self.client.get("/me").text
+        section = page.split('id="accountAvatar"', 1)[1].split('id="imageLibrary"', 1)[0]
+        self.assertRegex(section, r'<input type="file"[^>]*data-file-into="#avatarData"[^>]*data-file-as="base64"')
+        self.assertRegex(section, r'<form hidden[^>]*hx-post="/me/avatar" hx-json-enc hx-trigger="file-read"')
+        self.assertIn('name="image_b64" id="avatarData"', section)
+        from app import assets
+        reader = (assets.BASE_DIR / "static/js/ui.js").read_text(encoding="utf-8")
+        self.assertIn("new Event('file-read', { bubbles: true })", reader)
 
     # THE SAVED-PICTURE LIBRARY IS MARKUP, so these ask what it drew rather than
     # what a JSON list held. What each action answers with is the whole list —

@@ -1,0 +1,36 @@
+{# THE TWO NAMES, together, because the whole point of having both is that they
+   differ: one is what you sign in with, the other is what people see. Shown next
+   to each other so it is obvious which is which.
+
+   The display name's form answers with this section drawn from what was STORED —
+   whitespace collapsed — and the heading out of band, since the heading is the
+   same name. A username claimed from the credentials section redraws this one out
+   of band too (`names_oob`), because this is where the username row is. #}
+<div class="auth-list" id="accountNames"{% if names_oob %} hx-swap-oob="outerHTML"{% endif %}>
+  <div class="row">
+    <span class="label">Username</span>
+    <span class="auth-badge off">{{ user.username or "Not set" }}</span>
+  </div>
+  <div class="row">
+    <span class="label">Display name</span>
+    <span class="auth-badge {{ 'ok' if user.display_name else 'off' }}">
+      {{ user.display_name or "Using your username" }}
+    </span>
+  </div>
+  <form class="auth-inline-form" hx-post="/me/display-name" hx-json-enc hx-boost="false"
+        hx-target="#accountNames" hx-swap="outerHTML">
+    <label for="newDisplayName">Change your display name</label>
+    {# Capitals and spaces are the reason this field exists, so nothing here
+       lowercases or strips them. Left empty, it clears the name and the
+       account goes back to being shown by its username. #}
+    <input type="text" id="newDisplayName" name="display_name"
+           value="{{ user.display_name or '' }}"
+           maxlength="{{ display_name_max }}" autocomplete="nickname"
+           placeholder="{{ user.username or 'Your name' }}">
+    <button class="btn-ghost tiny" type="submit">Save</button>
+  </form>
+  <p class="auth-sub">Shown on your account and used by default on ranker exports.
+    Leave it empty to go back to your username.</p>
+  <p class="auth-error" role="alert">{{ names_message }}</p>
+</div>
+{% if names_changed %}{% with oob = true %}{% include '_account_heading.html' %}{% endwith %}{% endif %}

@@ -1388,9 +1388,10 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 
 .btn-primary.small { padding: 7px 14px; font-size: 0.78rem; }
 
-/* Inline confirm (nav.js confirmInline): replaces native confirm() dialogs. A
-   small popover anchored under the triggering button via JS, independent of
-   that button's own layout. */
+/* Inline confirm (ui.js confirmInline): a small popover anchored under the
+   triggering button via JS, independent of that button's own layout. One caller
+   is left — deleting a rankings tier; every other confirmation is
+   templates/_confirm.html. */
 .inline-confirm {
     /* Above .modal-overlay (10000): the settings modal is the most common place
        this appears, and a popover pinned behind it would be invisible there. */
@@ -1771,6 +1772,30 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
     display: flex; align-items: center; justify-content: center;
     font-size: 1.1rem;
 }
+/* A FILE CHOOSER DRAWN AS A BUTTON, with no script to click it: the label opens
+   the picker, and the input inside it is kept in the page — 1px, transparent —
+   rather than `hidden`, because a hidden input cannot take focus and the keyboard
+   would have no way to reach it. The label wears the focus ring the input has. */
+.file-pick { position: relative; cursor: pointer; }
+.file-pick input[type="file"] {
+    position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden;
+}
+.file-pick:has(input:focus-visible) { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+/* A form's answer line when the answer was that it worked. The same line a refusal
+   is drawn in, so a sentence never moves depending on which it was. */
+.auth-error.is-ok { color: var(--green); }
+
+/* The recovery page's typed confirmation and the Plex sign-in's waiting line. */
+.recovery-confirm { display: flex; flex-direction: column; gap: 8px; }
+.recovery-confirm label { font-size: 0.85rem; color: var(--text-dim); line-height: 1.5; }
+.recovery-confirm input {
+    padding: 8px 10px; font-size: 0.85rem; background: var(--bg-input, rgba(255,255,255,0.04));
+    border: 1px solid var(--card-border); border-radius: 8px; color: var(--text);
+}
+.plex-flow:empty { display: none; }
+.plex-waiting { margin-top: 0; }
+.plex-waiting a { color: var(--accent-blue); }
 
 /* Header images: a picture, the name it goes by, and the way to get rid of it,
    in one card each. Wrapping rather than scrolling — there are at most five. */
@@ -1880,6 +1905,30 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
 /* Timestamps are the other width hog: three columns of full locale strings. */
 .admin-table td.ts { font-variant-numeric: tabular-nums; color: var(--text-dim); }
 .admin-empty { color: var(--text-faint); font-size: 0.82rem; }
+/* A CONFIRMATION IN THIS TABLE OPENS IN THE FLOW of its actions cell rather than
+   floating below the button. The table scrolls sideways inside .admin-table-wrap,
+   and a scroller clips what overflows it in both directions — so the floating box
+   templates/_confirm.html draws everywhere else would be cut off on the last rows.
+   Growing the row is the cost, and in an admin table it is the right one. */
+.admin-table .confirm { flex-direction: column; align-items: flex-start; }
+.admin-table .confirm-ask { position: static; margin-top: 4px; max-width: 320px; box-shadow: none; }
+.admin-ask-form { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.admin-ask-form input {
+    flex: 1 1 140px; min-width: 0; padding: 5px 8px; font-size: 0.78rem;
+    background: var(--bg-input, rgba(255,255,255,0.04)); border: 1px solid var(--card-border);
+    border-radius: 8px; color: var(--text);
+}
+/* What one answer has to say that a sentence cannot hold: a temporary password to
+   copy, or the second question an orphaning unlink asks. */
+.admin-reveal { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 0.82rem; }
+.admin-reveal input {
+    flex: 0 1 260px; min-width: 0; padding: 5px 8px; font-family: monospace;
+    background: var(--bg-input, rgba(255,255,255,0.04)); border: 1px solid var(--card-border);
+    border-radius: 8px; color: var(--text);
+}
+.admin-redemptions summary { list-style: none; cursor: pointer; }
+.admin-redemptions summary::-webkit-details-marker { display: none; }
+.admin-redemption-list { margin: 6px 0 0; padding-left: 18px; font-size: 0.78rem; color: var(--text-dim); }
 .admin-inline-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
 .admin-inline-form .field { min-width: 140px; }
 .admin-msg { font-size: 0.8rem; min-height: 1.1em; }

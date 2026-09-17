@@ -37,10 +37,12 @@ from .admin import (CannotDeleteSelf, LastAdmin, UserNotFound, WIPE_DATA_TABLES,
                     list_sessions, list_users_overview, release_retired_identifier,
                     set_admin, set_calendar_approved, set_disabled, set_distrakt_approved,
                     set_ranker_approved, wipe_user_data)
-from .cookies import (COOKIE_NAME, COOKIE_NAME_SECURE, browser_scheme, clear_session_cookie,
+from .cookies import (COOKIE_NAME, COOKIE_NAME_SECURE, COOKIE_PROBE, browser_scheme,
+                      clear_session_cookie,
                       client_ip, detect_cookie_secure, parse_trusted_networks,
                       peer_is_trusted_proxy, read_session_cookie, request_is_https,
-                      session_cookie_name, set_session_cookie, use_secure_cookie)
+                      session_cookie_name, session_cookie_would_be_dropped, set_cookie_probe,
+                      set_session_cookie, use_secure_cookie)
 from .handshakes import (HANDSHAKE_COOKIE, HANDSHAKE_COOKIE_SECURE, HANDSHAKE_REJECTED,
                          HANDSHAKE_TTL_SECONDS, HandshakeError, clear_handshake_cookie,
                          consume_handshake, create_handshake, handshake_cookie_matches,
@@ -76,7 +78,7 @@ from .users import (DISPLAY_NAME_MAX, IDENTIFIER_RE, MIN_PASSWORD_LENGTH, RESERV
 
 __all__ = [
     "ATTEMPT_RETENTION_SECONDS", "AccountUnavailable", "AuthError", "AuthLevel",
-    "COOKIE_NAME", "COOKIE_NAME_SECURE", "CannotDeleteSelf", "CurrentUser",
+    "COOKIE_NAME", "COOKIE_NAME_SECURE", "COOKIE_PROBE", "CannotDeleteSelf", "CurrentUser",
     "DEPENDENCY_FOR_LEVEL", "DISPLAY_NAME_MAX",
     "HANDSHAKE_COOKIE", "HANDSHAKE_COOKIE_SECURE", "HANDSHAKE_MAX_ATTEMPTS",
     "HANDSHAKE_REJECTED", "HANDSHAKE_TTL_SECONDS", "HANDSHAKE_WINDOW_SECONDS",
@@ -105,8 +107,9 @@ __all__ = [
     "release_retired_identifier",
     "request_is_https", "require_admin", "require_calendar", "require_distrakt",
     "require_ranker", "require_session", "revoke_invite", "revoke_session",
-    "revoke_user_session", "revoke_user_sessions", "session_cookie_name", "set_admin",
-    "set_calendar_approved", "set_disabled", "set_display_name", "set_distrakt_approved",
+    "revoke_user_session", "revoke_user_sessions", "session_cookie_name",
+    "session_cookie_would_be_dropped", "set_admin", "set_calendar_approved",
+    "set_cookie_probe", "set_disabled", "set_display_name", "set_distrakt_approved",
     "set_handshake_cookie", "set_password", "set_ranker_approved", "set_session_cookie",
     "set_user_timezone", "store_identity_tokens", "sweep_expired_sessions",
     "sweep_login_attempts", "unlink_identity", "update_password_hash", "update_user_prefs",

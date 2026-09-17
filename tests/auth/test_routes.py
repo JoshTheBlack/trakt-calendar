@@ -1,9 +1,12 @@
-"""Unit tests for first-run setup and sign-in (app/auth/routes.py).
+"""Unit tests for first-run setup, sign-in and the account page's own controls
+(app/auth/routes.py).
 
-The UI these routes render is placeholder and will be replaced, but three things
-they do are not: the first-run race guard, the upgrade path for an instance that
-already has data (adopting the Trakt token from settings.json, seeding view
-preferences), and the JSON-only body rule. Those are what this file pins down.
+Three things these routes do carry the weight: the first-run race guard, the
+upgrade path for an instance that already has data (adopting the Trakt token from
+settings.json, seeding view preferences), and the JSON-only body rule. Those are
+what this file pins down, together with the shape every form on these pages is
+answered in: a refusal is a sentence drawn at 200, and a success that changes
+which page somebody should be on is 204 with HX-Redirect.
 
 No network — the Trakt account lookup is mocked.
 """
@@ -11,19 +14,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from markupsafe import escape
 
 from app import auth, config, db
 from app.sources import prefs as source_prefs
 from app.auth import routes as auth_routes
 from app.config import Settings, load_settings, save_settings
 from app.main import app
-from tests.support import TMP, migrated_db
+from tests.support import migrated_db
 
 TRAKT_ACCOUNT_ID = 424242
 
@@ -54,12 +59,27 @@ class RouteTestCase(unittest.TestCase):
             "password_confirm": password if confirm is None else confirm,
         })
 
+    def sign_in(self, username="josh", password="hunter2hunter2"):
+        return self.client.post("/login", json={"username": username, "password": password})
+
+    # -- the two answers a form on these pages can get -------------------------
+
+    def assertGoesTo(self, resp, target: str):
+        """A success: no body to swap, and a header telling the browser where to go."""
+        self.assertEqual(resp.status_code, 204, resp.text)
+        self.assertEqual(resp.headers.get("HX-Redirect"), target)
+
+    def assertRefused(self, resp, message: str | None = None):
+        """A refusal: drawn at 200, going nowhere, saying why."""
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertNotIn("HX-Redirect", resp.headers)
+        if message is not None:
+            self.assertEqual(resp.text.strip(), message)
+
 
 class FirstRunTests(RouteTestCase):
     def test_creates_the_first_administrator_and_signs_them_in(self):
-        resp = self.setup_account()
-        self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertTrue(resp.json()["ok"])
+        self.assertGoesTo(self.setup_account(), "/")
 
         user = asyncio.run(auth.find_user_by_username("josh"))
         self.assertTrue(user["is_admin"])
@@ -75,9 +95,8 @@ class FirstRunTests(RouteTestCase):
         """The application-level half of the race guard. The database-level half
         (the partial unique index that catches genuinely simultaneous requests)
         is covered in tests/kernel/test_db.py."""
-        self.assertEqual(self.setup_account().status_code, 200)
-        resp = self.setup_account(username="mallory")
-        self.assertEqual(resp.status_code, 409)
+        self.assertGoesTo(self.setup_account(), "/")
+        self.assertRefused(self.setup_account(username="mallory"), auth_routes.ALREADY_SET_UP)
         self.assertEqual(asyncio.run(db.fetch_value("SELECT COUNT(*) FROM users")), 1)
 
     def test_page_redirects_once_an_account_exists(self):
@@ -86,11 +105,15 @@ class FirstRunTests(RouteTestCase):
         self.assertEqual(resp.status_code, 303)
         self.assertEqual(resp.headers["location"], "/login")
 
-    def test_validation(self):
-        self.assertEqual(self.setup_account(username="a").status_code, 400)      # too short
-        self.assertEqual(self.setup_account(username="admin").status_code, 400)  # reserved
-        self.assertEqual(self.setup_account(password="short").status_code, 400)
-        self.assertEqual(self.setup_account(confirm="different-password").status_code, 400)
+    def test_a_bad_value_is_drawn_rather_than_statused(self):
+        for label, attempt in (("too short", {"username": "a"}),
+                               ("reserved", {"username": "admin"}),
+                               ("short password", {"password": "short"}),
+                               ("mismatch", {"confirm": "different-password"})):
+            with self.subTest(label):
+                self.assertRefused(self.setup_account(**attempt))
+        self.assertRefused(self.setup_account(password="short"),
+                           f"Password must be at least {auth.MIN_PASSWORD_LENGTH} characters.")
         self.assertEqual(asyncio.run(db.fetch_value("SELECT COUNT(*) FROM users")), 0)
 
     def test_form_encoded_body_is_rejected(self):
@@ -101,6 +124,14 @@ class FirstRunTests(RouteTestCase):
         self.assertEqual(resp.status_code, 415)
         self.assertEqual(self.client.post("/login", data={"username": "a"}).status_code, 415)
         self.assertEqual(self.client.post("/logout", data={}).status_code, 415)
+        self.assertEqual(self.client.post("/register", data={"username": "a"}).status_code, 415)
+
+    def test_a_body_that_is_not_an_object_is_refused(self):
+        # With an account in place, so the first-run gate lets /register through.
+        self.setup_account()
+        for path in ("/onboarding", "/login", "/register"):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.post(path, json=["josh"]).status_code, 400)
 
 
 class UpgradePathTests(RouteTestCase):
@@ -126,8 +157,7 @@ class UpgradePathTests(RouteTestCase):
                                trakt_refresh_token="ref", trakt_token_expires_at=1800000000))
         with patch.object(auth_routes, "_fetch_trakt_identity",
                           return_value={"id": TRAKT_ACCOUNT_ID, "name": "Josh"}):
-            resp = self.setup_account()
-        self.assertTrue(resp.json()["trakt_adopted"])
+            self.assertGoesTo(self.setup_account(), "/")
         identity = asyncio.run(db.fetch_one("SELECT * FROM linked_identities"))
         # Keyed on the immutable numeric account id, never the username or slug.
         self.assertEqual(identity["provider"], "trakt")
@@ -141,9 +171,7 @@ class UpgradePathTests(RouteTestCase):
         identity row keyed on a guess."""
         save_settings(Settings(trakt_client_id="cid", trakt_access_token="tok"))
         with patch.object(auth_routes, "_fetch_trakt_identity", return_value=None):
-            resp = self.setup_account()
-        self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertFalse(resp.json()["trakt_adopted"])
+            self.assertGoesTo(self.setup_account(), "/")
         self.assertEqual(asyncio.run(db.fetch_value(
             "SELECT COUNT(*) FROM linked_identities")), 0)
         # ...and Settings gets a notice to prompt a reconnect.
@@ -178,9 +206,9 @@ class UpgradePathTests(RouteTestCase):
                 return _Resp()
 
         with patch("app.auth.trakt.httpx.AsyncClient", return_value=_Client()):
-            resp = self.setup_account()
-        self.assertEqual(resp.status_code, 200)
-        self.assertFalse(resp.json()["trakt_adopted"])
+            self.assertGoesTo(self.setup_account(), "/")
+        self.assertEqual(asyncio.run(db.fetch_value(
+            "SELECT COUNT(*) FROM linked_identities")), 0)
 
 
 class SignInTests(RouteTestCase):
@@ -188,9 +216,7 @@ class SignInTests(RouteTestCase):
         self.setup_account()
         self.client.cookies.clear()
 
-        resp = self.client.post("/login", json={"username": "josh", "password": "hunter2hunter2"})
-        self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(resp.json()["redirect"], "/")
+        self.assertGoesTo(self.sign_in(), "/")
         self.assertIn(auth.COOKIE_NAME_SECURE, self.client.cookies)
         self.assertEqual(self.client.get("/me").status_code, 200)
 
@@ -209,32 +235,31 @@ class SignInTests(RouteTestCase):
         self.assertEqual(self.client.get("/me").status_code, 401)
 
     def test_failures_are_indistinguishable(self):
-        """Unknown username, wrong password, and disabled account must return the
-        same status and the same message, or the response becomes a way to test
+        """Unknown username, wrong password, and disabled account must answer with
+        the same status and the same sentence, or the answer becomes a way to test
         whether an account exists."""
         self.setup_account()
-        unknown = self.client.post("/login", json={"username": "nobody", "password": "x" * 12})
-        wrong = self.client.post("/login", json={"username": "josh", "password": "x" * 12})
+        self.client.cookies.clear()
+        unknown = self.sign_in("nobody", "x" * 12)
+        wrong = self.sign_in("josh", "x" * 12)
         asyncio.run(db.execute("UPDATE users SET is_disabled = 1"))
-        disabled = self.client.post("/login",
-                                    json={"username": "josh", "password": "hunter2hunter2"})
+        disabled = self.sign_in()
         for resp in (unknown, wrong, disabled):
-            self.assertEqual(resp.status_code, 401)
-            self.assertEqual(resp.json()["error"], auth_routes.INVALID_CREDENTIALS)
+            self.assertRefused(resp, auth_routes.INVALID_CREDENTIALS)
+        self.assertEqual(len({unknown.text, wrong.text, disabled.text}), 1)
+        self.assertNotIn(auth.COOKIE_NAME_SECURE, self.client.cookies)
 
     def test_sign_in_is_case_insensitive(self):
         self.setup_account()
         self.client.cookies.clear()
-        resp = self.client.post("/login", json={"username": "JOSH", "password": "hunter2hunter2"})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertGoesTo(self.sign_in("JOSH"), "/")
 
     def test_unapproved_user_lands_on_the_account_page(self):
         self.setup_account()
         asyncio.run(auth.create_user(username="bob", password="hunter2hunter2",
                                      settings=Settings()))
         self.client.cookies.clear()
-        resp = self.client.post("/login", json={"username": "bob", "password": "hunter2hunter2"})
-        self.assertEqual(resp.json()["redirect"], "/me")
+        self.assertGoesTo(self.sign_in("bob"), "/me")
         self.assertIn("awaiting admin approval", self.client.get("/me").text)
 
     def test_sign_in_page_redirects_to_setup_on_a_fresh_instance(self):
@@ -244,6 +269,63 @@ class SignInTests(RouteTestCase):
 
     def test_me_requires_a_session(self):
         self.assertEqual(self.client.get("/me").status_code, 401)
+
+    def test_the_sign_in_pages_are_forms_that_post_themselves(self):
+        """No script of their own: Enter, the refusal line and the redirect are the
+        form's and htmx's."""
+        self.setup_account()
+        self.client.cookies.clear()
+        invite = asyncio.run(auth.create_invite(
+            created_by=asyncio.run(auth.find_user_by_username("josh"))["id"]))
+        for path, action in (("/login", "/login"),
+                             (f"/register?invite={invite['token']}", "/register")):
+            with self.subTest(path=path):
+                page = self.client.get(path).text
+                self.assertNotIn("<script>", page)
+                form = re.search(r'<form class="auth-form"[^>]*>', page).group(0)
+                self.assertIn(f'hx-post="{action}"', form)
+                self.assertIn("hx-json-enc", form)
+                self.assertIn('hx-boost="false"', form)
+                self.assertIn('name="username"', page)
+                self.assertIn('name="password"', page)
+
+
+class CookieWarningTests(RouteTestCase):
+    """GET /login/cookie-check: whether the browser kept a cookie carrying the
+    session cookie's Secure policy. The page offers the cookie; the check asks
+    afterwards whether it came back."""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_account()
+        self.client.cookies.clear()
+
+    def test_a_browser_that_keeps_the_cookie_is_told_nothing(self):
+        self.client.get("/login")
+        self.assertIn(auth.COOKIE_PROBE, self.client.cookies)
+        self.assertEqual(self.client.get("/login/cookie-check").text.strip(), "")
+
+    def test_a_browser_that_dropped_it_is_warned(self):
+        """The test client keeps a Secure cookie over any scheme, so the browser
+        refusing it is the jar being cleared between the page and the check —
+        which is exactly what the check sees from a browser on plain http://."""
+        page = self.client.get("/login")
+        self.assertIn("secure", page.headers["set-cookie"].lower())
+        self.client.cookies.clear()
+        warning = self.client.get("/login/cookie-check").text
+        self.assertIn('id="cookieWarning"', warning)
+        self.assertIn("cookie_secure", warning)
+
+    def test_a_policy_that_is_not_secure_is_never_warned_about(self):
+        settings = load_settings()
+        settings.cookie_secure = "never"
+        save_settings(settings)
+        self.assertEqual(self.client.get("/login/cookie-check").text.strip(), "")
+
+    def test_the_page_asks_rather_than_guessing_from_the_address_bar(self):
+        page = self.client.get("/login").text
+        self.assertIn('hx-get="/login/cookie-check"', page)
+        self.assertNotIn("location.protocol", page)
 
 
 class OnboardingConcurrencyTests(RouteTestCase):
@@ -264,7 +346,7 @@ class OnboardingConcurrencyTests(RouteTestCase):
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(attempt, ["josh", "mallory"]))
 
-        self.assertEqual(sorted(r.status_code for r in results), [200, 409])
+        self.assertEqual(sorted(r.status_code for r in results), [200, 204])
         self.assertEqual(asyncio.run(db.fetch_value("SELECT COUNT(*) FROM users")), 1)
 
 
@@ -275,14 +357,13 @@ class LoginRateLimitTests(RouteTestCase):
         self.client.cookies.clear()
 
     def _fail(self, username="josh", password="wrong-password-here"):
-        return self.client.post("/login", json={"username": username, "password": password})
+        return self.sign_in(username, password)
 
     def test_locks_out_after_five_failures_even_with_the_right_password(self):
         for _ in range(auth.LOGIN_MAX_ATTEMPTS):
-            self.assertEqual(self._fail().status_code, 401)
-        locked = self._fail(password="hunter2hunter2")
-        self.assertEqual(locked.status_code, 401)
-        self.assertEqual(locked.json()["error"], auth_routes.INVALID_CREDENTIALS)
+            self.assertRefused(self._fail(), auth_routes.INVALID_CREDENTIALS)
+        self.assertRefused(self._fail(password="hunter2hunter2"), auth_routes.INVALID_CREDENTIALS)
+        self.assertNotIn(auth.COOKIE_NAME_SECURE, self.client.cookies)
 
     def test_lockout_is_not_an_enumeration_oracle(self):
         """A lockout must be indistinguishable — status, body, AND timing class —
@@ -295,7 +376,7 @@ class LoginRateLimitTests(RouteTestCase):
         locked_real_account = self._fail(username="josh", password="hunter2hunter2")
         locked_unknown_account = self._fail(username="nobody-at-all", password="x" * 12)
         self.assertEqual(locked_real_account.status_code, locked_unknown_account.status_code)
-        self.assertEqual(locked_real_account.json(), locked_unknown_account.json())
+        self.assertEqual(locked_real_account.text, locked_unknown_account.text)
 
     def test_lockout_expires(self):
         stale = db.now() - auth.LOGIN_WINDOW_SECONDS - 5
@@ -304,8 +385,7 @@ class LoginRateLimitTests(RouteTestCase):
         self.assertFalse(asyncio.run(auth.is_locked_out(
             "username", "josh",
             max_attempts=auth.LOGIN_MAX_ATTEMPTS, window_seconds=auth.LOGIN_WINDOW_SECONDS)))
-        resp = self.client.post("/login", json={"username": "josh", "password": "hunter2hunter2"})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertGoesTo(self.sign_in(), "/")
 
     def test_username_and_ip_lockouts_are_counted_independently(self):
         for _ in range(auth.LOGIN_MAX_ATTEMPTS):
@@ -324,8 +404,7 @@ class LoginRateLimitTests(RouteTestCase):
     def test_successful_login_clears_the_username_counter(self):
         for _ in range(auth.LOGIN_MAX_ATTEMPTS - 1):
             self._fail()
-        ok = self.client.post("/login", json={"username": "josh", "password": "hunter2hunter2"})
-        self.assertEqual(ok.status_code, 200, ok.text)
+        self.assertGoesTo(self.sign_in(), "/")
         remaining = asyncio.run(db.fetch_value(
             "SELECT COUNT(*) FROM login_attempts WHERE key_type = 'username' AND key_value = 'josh'"))
         self.assertEqual(remaining, 0)
@@ -344,30 +423,33 @@ class RegistrationTests(RouteTestCase):
         return asyncio.run(auth.create_invite(created_by=self._admin_id(), **kw))
 
     def _register(self, token: str, username: str, password: str = "hunter2hunter2"):
-        suffix = f"?invite={token}" if token else ""
-        return self.client.post(f"/register{suffix}", json={
-            "username": username, "password": password, "password_confirm": password,
+        """As the registration form posts it: the invite rides in the body."""
+        return self.client.post("/register", json={
+            "invite": token, "username": username,
+            "password": password, "password_confirm": password,
         })
 
     def test_an_invite_is_required_on_every_registration_path(self):
-        resp = self._register("", "newbie")
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(resp.json()["error"], auth_routes.INVALID_INVITE)
+        self.assertRefused(self._register("", "newbie"), auth_routes.INVALID_INVITE)
         self.assertIsNone(asyncio.run(auth.find_user_by_username("newbie")))
+
+    def test_an_invite_in_the_query_string_still_counts(self):
+        invite = self._make_invite()
+        resp = self.client.post(f"/register?invite={invite['token']}", json={
+            "username": "linkuser", "password": "hunter2hunter2",
+            "password_confirm": "hunter2hunter2"})
+        self.assertGoesTo(resp, "/")
 
     def test_a_default_invite_grants_calendar_but_never_distrakt(self):
         invite = self._make_invite()
-        resp = self._register(invite["token"], "newbie")
-        self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(resp.json()["redirect"], "/")
+        self.assertGoesTo(self._register(invite["token"], "newbie"), "/")
         user = asyncio.run(auth.find_user_by_username("newbie"))
         self.assertTrue(user["calendar_approved"])
         self.assertFalse(user["distrakt_approved"])
 
     def test_an_invite_without_the_calendar_grant_lands_on_the_account_page(self):
         invite = self._make_invite(grants_calendar_on_accept=False)
-        resp = self._register(invite["token"], "newbie")
-        self.assertEqual(resp.json()["redirect"], "/me")
+        self.assertGoesTo(self._register(invite["token"], "newbie"), "/me")
         user = asyncio.run(auth.find_user_by_username("newbie"))
         self.assertFalse(user["calendar_approved"])
         self.assertFalse(user["distrakt_approved"])
@@ -377,43 +459,48 @@ class RegistrationTests(RouteTestCase):
         asyncio.run(auth.revoke_invite(revoked["id"]))
         expired = self._make_invite(expires_at=db.now() - 10)
         exhausted = self._make_invite(max_uses=1)
-        self.assertEqual(self._register(exhausted["token"], "user-zero").status_code, 200)
+        self.assertGoesTo(self._register(exhausted["token"], "user-zero"), "/")
+        self.client.cookies.clear()
 
         bodies = set()
-        statuses = set()
         for token in (revoked["token"], expired["token"], exhausted["token"], "not-a-real-token", ""):
             resp = self._register(token, f"race-{token or 'blank'}")
-            statuses.add(resp.status_code)
+            self.assertRefused(resp)
             bodies.add(resp.text)
-        self.assertEqual(statuses, {400})
         self.assertEqual(len(bodies), 1)
 
     def test_quota_and_expiry_are_enforced(self):
         exhausted = self._make_invite(max_uses=1)
-        self.assertEqual(self._register(exhausted["token"], "user-a").status_code, 200)
-        second = self._register(exhausted["token"], "user-b")
-        self.assertEqual(second.status_code, 400)
+        self.assertGoesTo(self._register(exhausted["token"], "user-a"), "/")
+        self.client.cookies.clear()
+        self.assertRefused(self._register(exhausted["token"], "user-b"), auth_routes.INVALID_INVITE)
         self.assertIsNone(asyncio.run(auth.find_user_by_username("user-b")))
 
         expired = self._make_invite(expires_at=db.now() - 1)
-        resp = self._register(expired["token"], "user-c")
-        self.assertEqual(resp.status_code, 400)
+        self.assertRefused(self._register(expired["token"], "user-c"), auth_routes.INVALID_INVITE)
         self.assertIsNone(asyncio.run(auth.find_user_by_username("user-c")))
 
     def test_a_taken_username_is_revealed(self):
         """The one accepted enumeration exception — unrelated to invite validity,
         which never reveals anything."""
         invite = self._make_invite()
-        resp = self._register(invite["token"], "josh")
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(resp.json()["error"], "That username is taken.")
+        self.assertRefused(self._register(invite["token"], "josh"), "That username is taken.")
+
+    def test_registration_stays_rate_limited(self):
+        """The throttle answers in a sentence now, and it is still a throttle: the
+        attempt after the limit is refused even with a usable invite."""
+        invite = self._make_invite()
+        for i in range(auth.REGISTER_MAX_ATTEMPTS):
+            self._register("not-a-real-token", f"spray-{i}")
+        self.assertRefused(self._register(invite["token"], "real-user"),
+                           "Too many attempts from this address. Try again later.")
+        self.assertIsNone(asyncio.run(auth.find_user_by_username("real-user")))
 
     def test_open_registration_bypasses_the_invite_requirement(self):
         settings = load_settings()
         settings.allow_open_registration = True
         save_settings(settings)
-        resp = self._register("", "openuser")
-        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertGoesTo(self._register("", "openuser"), "/me")
         user = asyncio.run(auth.find_user_by_username("openuser"))
         # Still not calendar-approved: approval gating stays in effect even when
         # the invite requirement is off.
@@ -429,20 +516,33 @@ class RegistrationTests(RouteTestCase):
         invite = self._make_invite()
         resp = self.client.get(f"/register?invite={invite['token']}")
         self.assertIn("Create your account", resp.text)
+        self.assertIn(f'name="invite" value="{invite["token"]}"', resp.text)
 
 
-class DisplayNameTests(RouteTestCase):
+class AccountTestCase(RouteTestCase):
+    """Signed in as the bootstrap administrator "josh"."""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_account()
+
+    def user_id(self, username="josh") -> int:
+        return int(asyncio.run(auth.find_user_by_username(username))["id"])
+
+    def link(self, provider: str, provider_user_id: int) -> None:
+        asyncio.run(db.transaction(lambda conn: auth.insert_linked_identity(
+            conn, user_id=self.user_id(), provider=provider,
+            provider_user_id=provider_user_id)))
+
+
+class DisplayNameTests(AccountTestCase):
     """A display name is a LABEL, not an identifier. The username stays the
     lowercase, unique, case-insensitive thing you sign in with and that share
     links are built from; this is the free-text thing you are called on screen.
     The two must not become each other."""
 
-    def setUp(self):
-        super().setUp()
-        self.setup_account()  # bootstrap admin "josh", already signed in
-
     def _set(self, value):
-        return self.client.post("/api/me/display-name", json={"display_name": value})
+        return self.client.post("/me/display-name", json={"display_name": value})
 
     def _stored(self):
         return asyncio.run(auth.find_user_by_username("josh"))["display_name"]
@@ -462,22 +562,30 @@ class DisplayNameTests(RouteTestCase):
 
     def test_surrounding_and_repeated_whitespace_is_collapsed(self):
         """Two names that are indistinguishable on screen must not be stored as
-        different strings."""
+        different strings — and the answer draws what was STORED."""
         resp = self._set("  Josh   Black  ")
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["display_name"], "Josh Black")
+        self.assertIn('value="Josh Black"', resp.text)
         self.assertEqual(self._stored(), "Josh Black")
+
+    def test_the_answer_redraws_the_heading_out_of_band(self):
+        resp = self._set("Josh Black")
+        self.assertIn('id="accountNames"', resp.text)
+        self.assertRegex(resp.text, r'<h1 id="accountHeading" hx-swap-oob="outerHTML">Josh Black</h1>')
 
     def test_an_empty_value_clears_it(self):
         self._set("Josh Black")
         resp = self._set("")
         self.assertEqual(resp.status_code, 200)
-        self.assertIsNone(resp.json()["display_name"])
+        self.assertIn("Using your username", resp.text)
         self.assertIsNone(self._stored())
 
     def test_it_is_length_capped(self):
         resp = self._set("x" * (auth.DISPLAY_NAME_MAX + 1))
-        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(escape(auth.display_name_error("x" * (auth.DISPLAY_NAME_MAX + 1))),
+                      resp.text)
+        self.assertNotIn("hx-swap-oob", resp.text)
         self.assertIsNone(self._stored())
 
     def test_control_and_bidi_characters_are_refused(self):
@@ -492,12 +600,14 @@ class DisplayNameTests(RouteTestCase):
                            ("word joiner", "Josh\u2060Black"),
                            ("BOM", "Josh\ufeffBlack")):
             with self.subTest(character=label):
-                self.assertEqual(self._set(bad).status_code, 400)
+                resp = self._set(bad)
+                self.assertEqual(resp.status_code, 200)
+                self.assertIn(escape(auth.display_name_error(bad)), resp.text)
                 self.assertIsNone(self._stored())
 
     def test_a_newline_is_collapsed_rather_than_refused(self):
         """Unlike the invisibles above. A newline is ordinary whitespace to the
-        normalizer, so it becomes a space \u2014 and what matters is the property that
+        normalizer, so it becomes a space — and what matters is the property that
         the STORED value can never contain one, not that the request is refused.
         """
         self.assertEqual(self._set("Josh\nBlack").status_code, 200)
@@ -510,7 +620,7 @@ class DisplayNameTests(RouteTestCase):
                                      settings=Settings(), calendar_approved=True))
         self._set("Josh Black")
         self.client.cookies.clear()
-        self.client.post("/login", json={"username": "bob", "password": "hunter2hunter2"})
+        self.sign_in("bob")
         self.assertEqual(self._set("Josh Black").status_code, 200)
         self.assertEqual(
             asyncio.run(auth.find_user_by_username("bob"))["display_name"], "Josh Black")
@@ -519,13 +629,9 @@ class DisplayNameTests(RouteTestCase):
         self._set("Josh Black")
         self.client.cookies.clear()
         # The display name is not a login identifier...
-        self.assertEqual(
-            self.client.post("/login", json={"username": "Josh Black",
-                                             "password": "hunter2hunter2"}).status_code, 401)
+        self.assertRefused(self.sign_in("Josh Black"), auth_routes.INVALID_CREDENTIALS)
         # ...and the username still is.
-        self.assertEqual(
-            self.client.post("/login", json={"username": "josh",
-                                             "password": "hunter2hunter2"}).status_code, 200)
+        self.assertGoesTo(self.sign_in(), "/")
 
     def test_the_account_page_shows_both_names(self):
         self._set("Josh Black")
@@ -537,8 +643,7 @@ class DisplayNameTests(RouteTestCase):
         """The account card's own <h1>, not the shared header's — that one says
         "Account" on every page and is a different element entirely."""
         body = self.client.get("/me").text
-        card = body.split('class="auth-card"', 1)[1]
-        return card.split("<h1>", 1)[1].split("</h1>", 1)[0].strip()
+        return re.search(r'<h1 id="accountHeading">(.*?)</h1>', body, re.S).group(1).strip()
 
     def test_the_display_name_is_the_account_page_heading(self):
         self._set("Josh Black")
@@ -595,18 +700,14 @@ class OpenRegistrationSettingTests(RouteTestCase):
     def test_turning_it_on_actually_opens_registration(self):
         """The setting is only worth a control if it reaches the gate."""
         self.client.cookies.clear()
-        self.assertEqual(
-            self.client.post("/register", json={
-                "username": "walkup", "password": "hunter2hunter2",
-                "password_confirm": "hunter2hunter2"}).status_code, 400)
+        walkup = {"username": "walkup", "password": "hunter2hunter2",
+                  "password_confirm": "hunter2hunter2"}
+        self.assertRefused(self.client.post("/register", json=walkup), auth_routes.INVALID_INVITE)
 
-        self.client.post("/login", json={"username": "josh", "password": "hunter2hunter2"})
+        self.sign_in()
         self._save(True)
         self.client.cookies.clear()
-        resp = self.client.post("/register", json={
-            "username": "walkup", "password": "hunter2hunter2",
-            "password_confirm": "hunter2hunter2"})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertGoesTo(self.client.post("/register", json=walkup), "/me")
         # Open to signing up is NOT open to the data: approval is still required.
         self.assertFalse(
             asyncio.run(auth.find_user_by_username("walkup"))["calendar_approved"])
@@ -615,7 +716,7 @@ class OpenRegistrationSettingTests(RouteTestCase):
         asyncio.run(auth.create_user(username="bob", password="hunter2hunter2",
                                      settings=Settings(), calendar_approved=True))
         self.client.cookies.clear()
-        self.client.post("/login", json={"username": "bob", "password": "hunter2hunter2"})
+        self.sign_in("bob")
         self.assertEqual(self._save(True).status_code, 403)
         self.assertFalse(load_settings().allow_open_registration)
 
@@ -637,9 +738,9 @@ class AutoApproveSettingTests(RouteTestCase):
         self.assertEqual(resp.status_code, 204, resp.text)
         self.client.cookies.clear()
 
-    def _register(self, username):
+    def _register(self, username, invite=""):
         return self.client.post("/register", json={
-            "username": username, "password": "hunter2hunter2",
+            "invite": invite, "username": username, "password": "hunter2hunter2",
             "password_confirm": "hunter2hunter2"})
 
     def _approved(self, username):
@@ -652,25 +753,23 @@ class AutoApproveSettingTests(RouteTestCase):
         """The reason it is a separate switch: opening sign-ups must not
         silently open the calendar."""
         self._configure(open_reg=True, auto=False)
-        self.assertEqual(self._register("waiting").status_code, 200)
+        self.assertGoesTo(self._register("waiting"), "/me")
         self.assertFalse(self._approved("waiting"))
 
     def test_open_registration_with_auto_approve_grants_the_calendar(self):
         self._configure(open_reg=True, auto=True)
-        self.assertEqual(self._register("welcomed").status_code, 200)
+        self.assertGoesTo(self._register("welcomed"), "/")
         self.assertTrue(self._approved("welcomed"))
 
     def test_it_applies_to_invite_sign_ups_too(self):
         """So it is also the way to approve on accept regardless of what a
         particular invite happened to grant."""
-        invite = self.client.post("/api/admin/invites", json={
-            "grants_calendar_on_accept": False}).json()
+        self.client.post("/admin/invites", json={
+            "grants_calendar_on_accept": "0", "grants_ranker_on_accept": "0"})
+        token = asyncio.run(auth.list_invites())[0]["token"]
         self.client.post("/settings", json={"auto_approve_calendar": "true"})
         self.client.cookies.clear()
-        resp = self.client.post(f"/register?invite={invite['token']}", json={
-            "username": "invited", "password": "hunter2hunter2",
-            "password_confirm": "hunter2hunter2"})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertGoesTo(self._register("invited", token), "/")
         self.assertTrue(self._approved("invited"))
 
     def test_it_does_not_hand_out_the_other_grants(self):
@@ -684,46 +783,8 @@ class AutoApproveSettingTests(RouteTestCase):
         self.assertFalse(row["is_admin"])
 
 
-class AdminInviteEndpointTests(RouteTestCase):
-    def setUp(self):
-        super().setUp()
-        self.setup_account()  # bootstrap admin "josh", already signed in
-
-    def test_admin_can_mint_an_invite(self):
-        resp = self.client.post("/api/admin/invites", json={"label": "friend"})
-        self.assertEqual(resp.status_code, 200, resp.text)
-        data = resp.json()
-        self.assertTrue(data["ok"])
-        self.assertTrue(data["token"])
-        invite = asyncio.run(auth.find_invite_by_token(data["token"]))
-        self.assertEqual(invite["label"], "friend")
-        self.assertTrue(invite["grants_calendar_on_accept"])
-        self.assertIsNone(invite["max_uses"])
-        self.assertIsNone(invite["expires_at"])
-
-    def test_a_minted_invite_actually_registers_someone(self):
-        token = self.client.post("/api/admin/invites", json={}).json()["token"]
-        self.client.cookies.clear()
-        resp = self.client.post(f"/register?invite={token}", json={
-            "username": "invitee", "password": "hunter2hunter2", "password_confirm": "hunter2hunter2",
-        })
-        self.assertEqual(resp.status_code, 200, resp.text)
-
-    def test_non_admin_cannot_mint_an_invite(self):
-        asyncio.run(auth.create_user(username="bob", password="hunter2hunter2",
-                                     settings=Settings(), calendar_approved=True))
-        self.client.cookies.clear()
-        self.client.post("/login", json={"username": "bob", "password": "hunter2hunter2"})
-        resp = self.client.post("/api/admin/invites", json={})
-        self.assertEqual(resp.status_code, 403)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-class RetiringATrackersHistoryTests(RouteTestCase):
-    """POST /api/me/tracker-retired — "I have moved off that service".
+class RetiringATrackersHistoryTests(AccountTestCase):
+    """POST /me/tracker-retired — "I have moved off that service".
 
     THE EXIT FROM A STATE THAT HAD NONE. Unlinking stops a service being ASKED and
     always did; it could not stop the numbers it had already contributed from
@@ -736,102 +797,140 @@ class RetiringATrackersHistoryTests(RouteTestCase):
     own method — each with its own unit tests passing.
     """
 
-    def setUp(self):
-        super().setUp()
-        self.setup_account()
-
-    def _post(self, retired):
-        return self.client.post("/api/me/tracker-retired", json={"retired": retired})
+    def _post(self, **counted):
+        """As the form posts: every service mentioned, a ticked box as the list
+        its hidden companion and the box make."""
+        body = {f"counted:{name}": ["0", "1"] if on else "0"
+                for name, on in {"trakt": True, "simkl": True, **counted}.items()}
+        return self.client.post("/me/tracker-retired", json=body)
 
     def _stored(self):
-        user = asyncio.run(auth.find_user_by_username("josh"))
-        return asyncio.run(source_prefs.load(user["id"]))
+        return asyncio.run(source_prefs.load(self.user_id()))
 
     def test_a_service_can_be_retired_and_reads_back(self):
-        resp = self._post(["trakt"])
+        resp = self._post(trakt=False)
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["retired"], ["trakt"])
+        self.assertNotRegex(resp.text, r'id="counted-trakt"[^>]*checked')
+        self.assertRegex(resp.text, r'id="counted-simkl"[^>]*checked')
         self.assertFalse(self._stored().counts_tracker("trakt"))
 
     def test_it_can_be_undone(self):
         """The whole difference between this and deleting the numbers: switching
         one back on has to put it straight back, which is only possible because
         nothing was thrown away."""
-        self._post(["trakt"])
-        self.assertEqual(self._post([]).json()["retired"], [])
+        self._post(trakt=False)
+        self._post()
         self.assertTrue(self._stored().counts_tracker("trakt"))
 
     def test_the_whole_set_is_what_is_stored(self):
-        """"Retire this one" says nothing about the others, so the screen sends
-        the complete answer and a service left out of it is counted again."""
-        self._post(["trakt", "simkl"])
-        self._post(["simkl"])
+        """"Retire this one" says nothing about the others, so the form sends the
+        complete answer and a service ticked again is counted again."""
+        self._post(trakt=False, simkl=False)
+        self._post(simkl=False)
         stored = self._stored()
         self.assertTrue(stored.counts_tracker("trakt"))
         self.assertFalse(stored.counts_tracker("simkl"))
 
     def test_an_unknown_service_is_refused_rather_than_dropped(self):
-        """A name this app has never heard of is a bug in the screen; swallowing
+        """A name this app has never heard of is a bug in the page; swallowing
         it would leave the viewer looking at a switch that stored nothing."""
-        resp = self._post(["letterboxd"])
-        self.assertEqual(resp.status_code, 400)
+        resp = self._post(letterboxd=False)
+        self.assertIn("Unknown service: letterboxd.", resp.text)
         self.assertEqual(self._stored().tracker_retired, [])
 
-    def test_something_that_is_not_a_list_is_refused(self):
-        self.assertEqual(self.client.post(
-            "/api/me/tracker-retired", json={"retired": "trakt"}).status_code, 400)
+    def test_a_service_the_body_does_not_mention_is_not_read_as_retired(self):
+        """An absent box is a page that did not draw it, not a person who
+        unticked it — the hidden "0" is what an unticked box sends."""
+        resp = self.client.post("/me/tracker-retired", json={"counted:trakt": "0"})
+        self.assertIn("Every service has to be stated", resp.text)
+        self.assertEqual(self._stored().tracker_retired, [])
 
     def test_it_needs_a_session(self):
         """Somebody else's preferences are not a thing an anonymous request may
         state. The guard is the route's, not this test's — this pins that it is
         actually on it."""
         self.client.cookies.clear()
-        self.assertIn(self._post(["trakt"]).status_code, (401, 403))
+        self.assertIn(self._post(trakt=False).status_code, (401, 403))
 
     def test_the_account_page_offers_a_switch_per_tracker(self):
         """Rendered even for a service that is NOT linked, which is the row every
         viewer comes looking for: the service somebody wants to retire is almost
         always one they have already unlinked."""
         body = self.client.get("/me").text
-        self.assertIn("trackerRetiredList", body)
-        self.assertIn('data-source="trakt"', body)
-        self.assertIn('data-source="simkl"', body)
+        self.assertIn('id="trackerRetired"', body)
+        self.assertIn('name="counted:trakt"', body)
+        self.assertIn('name="counted:simkl"', body)
 
 
-class StatingWhichTrackerDecidesTests(RouteTestCase):
-    """POST /api/me/tracker-order — the sibling control, which had no route-level
-    coverage at all. Added here because the two are edited from one screen, stored
-    in one row and written by one verb: a save that forgot either column would
-    silently discard whichever the viewer was not editing at the time."""
+class StatingWhichTrackerDecidesTests(AccountTestCase):
+    """POST /me/order/<kind> — a press moves one service a place, and the server
+    saves the list it drew. The two lists are edited from one screen and stored in
+    one row: a save that forgot either column would silently discard whichever the
+    viewer was not editing at the time."""
 
     def setUp(self):
         super().setUp()
-        self.setup_account()
+        # The tracker order is offered only with more than one tracker linked.
+        self.link("trakt", 1)
+        self.link("simkl", 2)
 
     def _stored(self):
-        user = asyncio.run(auth.find_user_by_username("josh"))
-        return asyncio.run(source_prefs.load(user["id"]))
+        return asyncio.run(source_prefs.load(self.user_id()))
 
-    def test_an_order_is_stored_and_reads_back(self):
-        resp = self.client.post("/api/me/tracker-order",
-                                json={"order": ["simkl", "trakt"]})
+    def _move(self, source, direction, kind="tracker_order"):
+        return self.client.post(f"/me/order/{kind}",
+                                json={"source": source, "direction": direction})
+
+    def test_a_move_is_stored_and_answered_with_the_list(self):
+        resp = self._move("simkl", "up")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(self._stored().tracker_priority, ["simkl", "trakt"])
+        items = re.findall(r'data-source="(\w+)"', resp.text)
+        self.assertEqual(items, ["simkl", "trakt"])
+
+    def test_the_first_row_has_no_up_arrow_and_the_last_no_down(self):
+        resp = self._move("simkl", "up")
+        self.assertNotIn('id="tracker_order-simkl-up"', resp.text)
+        self.assertNotIn('id="tracker_order-trakt-down"', resp.text)
+        self.assertIn('id="tracker_order-simkl-down"', resp.text)
+
+    def test_the_moved_row_keeps_focus_on_the_arrow_it_still_has(self):
+        resp = self._move("simkl", "up")
+        self.assertRegex(resp.text, r'id="tracker_order-simkl-down"[^>]*autofocus')
 
     def test_it_does_not_disturb_a_retired_service(self):
-        self.client.post("/api/me/tracker-retired", json={"retired": ["trakt"]})
-        self.client.post("/api/me/tracker-order", json={"order": ["simkl", "trakt"]})
+        self.client.post("/me/tracker-retired", json={
+            "counted:trakt": "0", "counted:simkl": ["0", "1"]})
+        self._move("simkl", "up")
         stored = self._stored()
         self.assertEqual(stored.tracker_priority, ["simkl", "trakt"])
         self.assertFalse(stored.counts_tracker("trakt"))
 
-    def test_an_unknown_service_is_refused(self):
-        self.assertEqual(self.client.post(
-            "/api/me/tracker-order", json={"order": ["letterboxd"]}).status_code, 400)
+    def test_a_move_that_cannot_happen_is_drawn_and_stores_nothing(self):
+        for source, direction in (("trakt", "up"), ("letterboxd", "down"), ("simkl", "sideways")):
+            with self.subTest(source=source, direction=direction):
+                resp = self._move(source, direction)
+                self.assertEqual(resp.status_code, 200)
+                self.assertIn("cannot move that way", resp.text)
+        self.assertEqual(self._stored().tracker_priority, [])
+
+    def test_the_metadata_order_is_the_same_control_over_its_own_column(self):
+        settings = load_settings()
+        settings.simkl_public_calendar_enabled = True
+        save_settings(settings)
+        page = self.client.get("/me").text
+        names = re.findall(r'id="metadata_order-(\w+)-(?:up|down)"', page)
+        if len(set(names)) < 2:
+            self.skipTest("this instance offers one describing service")
+        last = re.findall(r'<ol class="tracker-priority-list">(.*?)</ol>', page, re.S)[1]
+        second = re.findall(r'data-source="(\w+)"', last)[1]
+        self._move(second, "up", kind="metadata_order")
+        self.assertEqual(self._stored().metadata_order[0], second)
+        self.assertEqual(self._stored().tracker_priority, [])
 
 
-class PublishingWatchMarksOnASharedCalendarTests(RouteTestCase):
-    """POST /api/me/share-watch-history — the one switch over a public fact.
+class PublishingWatchMarksOnASharedCalendarTests(AccountTestCase):
+    """POST /me/share-watch-history — the one switch over a public fact.
 
     IT IS THE ACCOUNT'S ANSWER, NOT A LINK'S, and that is what this file can
     prove: the value is stored against the user, so every link that account has
@@ -839,52 +938,51 @@ class PublishingWatchMarksOnASharedCalendarTests(RouteTestCase):
     and not beside the per-link view options in the Share panel — somebody who
     changes their mind about publishing a viewing history needs it to reach the
     links they shared months ago, not just the next one.
-
-    Tested over HTTP because that is the only thing that proves the control is
-    WIRED, which is the lesson the retired-services tests above record.
     """
 
-    def setUp(self):
-        super().setUp()
-        self.setup_account()
-
     def _stored(self) -> bool:
-        user = asyncio.run(auth.find_user_by_username("josh"))
-        return bool(asyncio.run(auth.get_user_prefs(user["id"]))["share_watch_history"])
+        return bool(asyncio.run(auth.get_user_prefs(self.user_id()))["share_watch_history"])
+
+    def _post(self, enabled):
+        return self.client.post("/me/share-watch-history", json={"enabled": enabled})
 
     def test_it_starts_on(self):
         """ON BY DEFAULT, which is only defensible because it can be turned off
         in the same change that turned it on."""
         self.assertTrue(self._stored())
 
-    def test_turning_it_off_is_stored(self):
-        resp = self.client.post("/api/me/share-watch-history", json={"enabled": False})
+    def test_turning_it_off_is_stored_and_said(self):
+        resp = self._post("0")
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertFalse(self._stored())
+        self.assertIn("will no longer show your watched episodes", resp.text)
+        self.assertIn('hx-swap-oob="beforeend"', resp.text)
 
     def test_turning_it_back_on_is_stored(self):
-        self.client.post("/api/me/share-watch-history", json={"enabled": False})
-        self.client.post("/api/me/share-watch-history", json={"enabled": True})
+        self._post("0")
+        self._post(["0", "1"])
         self.assertTrue(self._stored())
 
-    def test_it_refuses_anything_that_is_not_a_boolean(self):
-        """A string that happens to be truthy must not decide whether a viewing
-        history is published."""
-        for value in ("false", 0, None, "yes"):
+    def test_it_refuses_anything_but_the_boxs_own_two_spellings(self):
+        """A value that happens to read as truthy must not decide whether a
+        viewing history is published."""
+        self._post("0")
+        for value in ("true", "yes", "on", 1, True, None, ""):
             with self.subTest(value=value):
-                resp = self.client.post(
-                    "/api/me/share-watch-history", json={"enabled": value})
-                self.assertEqual(resp.status_code, 400, resp.text)
-        self.assertTrue(self._stored())
+                resp = self._post(value)
+                self.assertEqual(resp.status_code, 200, resp.text)
+                self.assertIn("has to be on or off", resp.text)
+        self.assertFalse(self._stored())
 
     def test_it_needs_a_session(self):
         self.client.cookies.clear()
-        resp = self.client.post("/api/me/share-watch-history", json={"enabled": False})
-        self.assertIn(resp.status_code, (401, 403))
+        self.assertIn(self._post("0").status_code, (401, 403))
 
     def test_the_account_page_draws_the_switch_in_its_stored_state(self):
-        self.assertIn('id="shareWatchHistoryBox"', self.client.get("/me").text)
-        self.client.post("/api/me/share-watch-history", json={"enabled": False})
-        page = self.client.get("/me").text
-        box = page[page.index('id="shareWatchHistoryBox"'):][:200]
-        self.assertNotIn("checked", box)
+        self.assertRegex(self.client.get("/me").text, r'id="shareWatchHistoryBox"[^>]*checked')
+        self._post("0")
+        self.assertNotRegex(self.client.get("/me").text, r'id="shareWatchHistoryBox"[^>]*checked')
+
+
+if __name__ == "__main__":
+    unittest.main()

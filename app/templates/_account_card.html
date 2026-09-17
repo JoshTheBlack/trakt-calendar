@@ -1,0 +1,92 @@
+{# THE ACCOUNT CARD, whole. Drawn by /me and by the one action that changes what
+   several of its sections offer — unlinking a service reaches the orders, the
+   retired list, the tracker notice and whether unlinking is still allowed. Every
+   other action answers only its own section, each of which is its own template
+   included below. #}
+<div class="auth-card" id="accountCard">
+  {% include '_account_heading.html' %}
+
+  {% if not user.calendar_approved %}
+  <p class="auth-notice"><strong>Your account is awaiting admin approval.</strong>
+    You'll be able to open the calendar once an administrator approves it.</p>
+  {% endif %}
+
+  {# Only ever shown to someone who already HAS the tracker grant, so it
+     discloses nothing to anyone else. For them it is the missing half of the
+     gate, and without it the tracker just silently refuses with no way to work
+     out why. #}
+  {# The services are named from the registry rather than written in, because
+     more than one of them can supply a watch history now and this notice
+     appears only while NONE of them is connected — so naming one of them
+     would tell somebody to link a service they may have chosen against. #}
+  {% if user.distrakt_approved and not user.has_tracker_identity %}
+  <p class="auth-notice"><strong>Connect {{ tracker_services_missing | join(' or ') }}
+    to finish setting up distrakt.</strong>
+    It reads your own watch history with your own token, so it has nothing to read
+    until one of the accounts below is connected.</p>
+  {% endif %}
+
+  {% include '_account_avatar.html' %}
+
+  {# RANKER IMAGES. The pictures an exported poster grid can carry at its top
+     instead of the profile picture. They live here rather than only inside the
+     export dialog because they belong to the account, not to one export: this
+     is where you can see what you have, tell them apart by name, and get rid
+     of one. Deliberately unexplained on screen — the thumbnails say what they
+     are, and the export dialog is where the choice is actually made. #}
+  {% include "_user_images.html" %}
+
+  {% include '_account_names.html' %}
+
+  <div class="auth-list">
+    <div class="row">
+      <span class="label">Calendar access</span>
+      <span class="auth-badge {{ 'ok' if user.calendar_approved else 'pending' }}">
+        {{ "Approved" if user.calendar_approved else "Pending" }}
+      </span>
+    </div>
+    {# Rendered either way, unlike the two rows below: the ranker is a normal
+       visible feature, so an account that hasn't been granted it yet is better
+       told that this is where the answer will appear than left wondering why
+       a link it saw mentioned refuses. #}
+    <div class="row">
+      <span class="label">Rankings access</span>
+      <span class="auth-badge {{ 'ok' if user.ranker_approved else 'pending' }}">
+        {{ "Approved" if user.ranker_approved else "Pending" }}
+      </span>
+    </div>
+    {# Both rows are rendered ONLY when the answer is yes. distrakt is an
+       easter egg — telling someone it exists and they can't have it is worse
+       than not mentioning it, and "Not granted" is exactly that disclosure.
+       "Administrator: No" is the same shape of non-information for everybody
+       who isn't one. #}
+    {% if user.distrakt_approved %}
+    <div class="row">
+      <span class="label">distrakt access</span>
+      <span class="auth-badge ok">Approved</span>
+    </div>
+    {% endif %}
+    {% if user.is_admin %}
+    <div class="row">
+      <span class="label">Administrator</span>
+      <span class="auth-badge ok">Yes</span>
+    </div>
+    {% endif %}
+    <div class="row">
+      <span class="label">Timezone</span>
+      <span class="auth-badge off">{{ user.timezone or "Instance default" }}</span>
+    </div>
+  </div>
+
+  {% include '_account_identities.html' %}
+
+  {% with order_kind = 'tracker_order' %}{% include '_account_order.html' %}{% endwith %}
+  {% with order_kind = 'metadata_order' %}{% include '_account_order.html' %}{% endwith %}
+
+  {% include '_account_sharing.html' %}
+  {% include '_account_retired.html' %}
+  {% include '_account_credentials.html' %}
+
+  {# Both actions that used to sit here — open the calendar, sign out — are in
+     the header now, where they are on every other page too. #}
+</div>

@@ -1,0 +1,279 @@
+{% import '_confirm.html' as confirm_box %}
+{# THE ADMIN SCREEN'S BODY: accounts, invites and retired identifiers. Drawn by
+   GET /admin and by every action on it, with the action's sentence in the section
+   it came from (`notice`).
+
+   `hx-target` IS DECLARED HERE ONCE and inherited by every control inside, so every
+   post lands back on this element. The one read inside it — an invite's
+   redemptions — names its own target.
+
+   EVERY "ARE YOU SURE" IS _confirm.html, and the two questions that were
+   window.prompt() — a temporary password and a typed name — are forms inside the
+   same confirmation box. In this table the box is drawn IN THE FLOW of the actions
+   cell rather than floating beside the button (style.css, `.admin-table .confirm-ask`):
+   the table scrolls sideways inside its wrapper, and a floating box on the last
+   rows would be cut off by that scroller. #}
+{% macro notice_for(section) %}
+{%- if notice.section == section and notice.message %}
+<p class="admin-msg {{ 'ok' if notice.ok else 'error' }}" role="{{ 'status' if notice.ok else 'alert' }}">{{ notice.message }}</p>
+{%- else %}
+<p class="admin-msg"></p>
+{%- endif %}
+{% endmacro %}
+
+{# A timestamp cell: the short spelling, the exact instant as the tooltip. #}
+{% macro ts(timestamp, empty='—') %}
+{%- set t = when(timestamp) %}
+<td class="ts">{% if t %}<time datetime="{{ t.iso }}" title="{{ t.exact }}">{{ t.short }}</time>{% else %}{{ empty }}{% endif %}</td>
+{%- endmacro %}
+
+{# A button that posts `vals` to `path`. `vals` is always a small dict of our own
+   strings — a grant name, "0"/"1", a provider — so tojson is the whole escaping. #}
+{% macro post(path, label, vals={}, face='btn-ghost tiny') %}
+<button type="button" class="{{ face }}" hx-post="{{ path }}" hx-json-enc
+        {%- if vals %} hx-vals='{{ vals | tojson }}'{% endif %}>{{ label }}</button>
+{%- endmacro %}
+
+<div class="admin-shell" id="adminShell" hx-target="#adminShell" hx-swap="outerHTML">
+
+  <section class="admin-section">
+    <div class="admin-section-head"><h2>Accounts</h2></div>
+    {{ notice_for('users') }}
+    {% if temporary_password %}
+    {# THE ONE SECRET THIS PAGE EVER DRAWS, in the answer to the reset that made it
+       and nowhere else — app/auth/admin_routes.py's admin_reset_password says why. #}
+    <div class="admin-reveal" role="status">
+      <span>Temporary password:</span>
+      <input type="text" id="temporaryPassword" readonly autocomplete="off"
+             value="{{ temporary_password.password }}" aria-label="Temporary password">
+      <button type="button" class="btn-ghost tiny" data-copy="#temporaryPassword">Copy</button>
+    </div>
+    {% endif %}
+    {% if orphan %}
+    {# The second question, drawn by the answer to the first: the account-page
+       unlink refuses this outright, and an administrator may go through with it
+       only by pressing this. Doing nothing is the way to say no. #}
+    <div class="admin-reveal" role="alert">
+      <span>Unlink it anyway?</span>
+      {{ post('/admin/users/' ~ orphan.user_id ~ '/identities/unlink', 'Unlink anyway',
+              {"provider": orphan.provider, "force": "1"}, face='btn-ghost tiny btn-danger') }}
+    </div>
+    {% endif %}
+    <div class="admin-table-wrap">
+      <table class="admin-table">
+        <thead>
+          <tr>
+            <th>Account</th><th>Linked</th><th>Calendar</th><th>Distrakt</th><th>Rankings</th><th>Admin</th>
+            <th>Status</th><th>Created</th><th>Last login</th><th>Last active</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for u in users %}
+          {% set base = '/admin/users/' ~ u.id %}
+          <tr>
+            <td>{{ u.display_name }}{% if u.is_bootstrap %} <span class="auth-badge off">bootstrap</span>{% endif %}</td>
+            <td class="badge-row"><div class="badge-group">
+              {% for p in u.providers %}<span class="auth-badge off">{{ p }}</span>{% endfor %}
+              {% if not u.providers %}&mdash;{% endif %}
+            </div></td>
+            <td><span class="auth-badge {{ 'ok' if u.calendar_approved else 'pending' }}">{{ 'Yes' if u.calendar_approved else 'No' }}</span></td>
+            <td><span class="auth-badge {{ 'ok' if u.distrakt_approved else 'off' }}">{{ 'Yes' if u.distrakt_approved else 'No' }}</span></td>
+            <td><span class="auth-badge {{ 'ok' if u.ranker_approved else 'off' }}">{{ 'Yes' if u.ranker_approved else 'No' }}</span></td>
+            <td><span class="auth-badge {{ 'ok' if u.is_admin else 'off' }}">{{ 'Yes' if u.is_admin else 'No' }}</span></td>
+            <td><span class="auth-badge {{ 'off' if u.is_disabled else 'ok' }}">{{ 'Disabled' if u.is_disabled else 'Active' }}</span></td>
+            {{ ts(u.created_at) }}
+            {{ ts(u.last_login_at) }}
+            {{ ts(u.last_session_at) }}
+            <td class="actions"><div class="action-group">
+              {% for grant, flag, noun in (('calendar', u.calendar_approved, 'calendar'),
+                                           ('distrakt', u.distrakt_approved, 'distrakt'),
+                                           ('ranker', u.ranker_approved, 'rankings')) %}
+              {{ post(base ~ '/approval', ('Revoke ' if flag else 'Approve ') ~ noun,
+                      {"grant": grant, "value": "0" if flag else "1"}) }}
+              {% endfor %}
+
+              {# Promoting asks nothing; taking administrator access away asks
+                 first, as it always did. #}
+              {% if u.is_admin %}
+              {% call confirm_box.ask('demote-' ~ u.id, 'Remove administrator access from this account?',
+                                      'Demote', danger=true, face='btn-ghost tiny') %}
+              {{ post(base ~ '/admin', 'Demote', {"value": "0"}, face='btn-primary small') }}
+              {% endcall %}
+              {% else %}
+              {{ post(base ~ '/admin', 'Promote', {"value": "1"}) }}
+              {% endif %}
+
+              {# Disabling signs the account out everywhere, so it asks; re-enabling
+                 does not. #}
+              {% if u.is_disabled %}
+              {{ post(base ~ '/disabled', 'Re-enable', {"value": "0"}) }}
+              {% else %}
+              {% call confirm_box.ask('disable-' ~ u.id,
+                                      'Disable this account? It will be signed out everywhere and unable to sign back in until re-enabled.',
+                                      'Disable', danger=true, face='btn-ghost tiny') %}
+              {{ post(base ~ '/disabled', 'Disable', {"value": "1"}, face='btn-primary small') }}
+              {% endcall %}
+              {% endif %}
+
+              {# Both fields are optional: a blank password is generated, and the
+                 username field exists only for an account that has none — without
+                 one a password has nothing to sign in against. #}
+              {% call confirm_box.ask('password-' ~ u.id,
+                                      'Set a temporary password. Every session on the account is signed out.',
+                                      'Reset password', face='btn-ghost tiny') %}
+              <form class="admin-ask-form" hx-post="{{ base }}/password" hx-json-enc hx-boost="false">
+                {% if not u.username %}
+                <input type="text" name="username" autocomplete="off" spellcheck="false"
+                       placeholder="Username (optional)" aria-label="Username for this account">
+                {% endif %}
+                <input type="text" name="password" autocomplete="off" spellcheck="false"
+                       placeholder="Blank to generate one" aria-label="Temporary password">
+                <button type="submit" class="btn-primary small">Reset</button>
+              </form>
+              {% endcall %}
+
+              {% call confirm_box.ask('sessions-' ~ u.id, 'Log this account out everywhere?',
+                                      'Log out everywhere', danger=true, face='btn-ghost tiny') %}
+              {{ post(base ~ '/sessions/revoke-all', 'Log out', face='btn-primary small') }}
+              {% endcall %}
+
+              {% for provider in ('trakt', 'plex') if provider in u.providers %}
+              {% call confirm_box.ask('unlink-' ~ provider ~ '-' ~ u.id,
+                                      'Unlink ' ~ provider.title() ~ ' from this account?',
+                                      'Unlink ' ~ provider.title(), danger=true, face='btn-ghost tiny') %}
+              {{ post(base ~ '/identities/unlink', 'Unlink', {"provider": provider}, face='btn-primary small') }}
+              {% endcall %}
+              {% endfor %}
+
+              {% call confirm_box.ask('wipe-' ~ u.id,
+                                      "Wipe this account's calendar and distrakt data and disable it? The account, its identities, and its username stay intact — this can be undone by re-enabling it.",
+                                      'Wipe data', danger=true, face='btn-ghost tiny') %}
+              {{ post(base ~ '/wipe', 'Wipe', face='btn-primary small') }}
+              {% endcall %}
+
+              {% if u.id != me.user_id %}
+              {# Deleting is permanent, so the account's own name is typed back —
+                 exactly what the Account column shows. The route compares it. #}
+              {% call confirm_box.ask('delete-' ~ u.id,
+                                      'This permanently deletes the account. Type "' ~ u.display_name ~ '" to confirm.',
+                                      'Delete', danger=true, face='btn-ghost tiny btn-danger') %}
+              <form class="admin-ask-form" hx-post="{{ base }}/delete" hx-json-enc hx-boost="false">
+                <input type="text" name="confirm_username" required autocomplete="off" spellcheck="false"
+                       aria-label="Type the account's name to confirm">
+                <button type="submit" class="btn-primary small">Delete</button>
+              </form>
+              {% endcall %}
+              {% endif %}
+            </div></td>
+          </tr>
+          {% endfor %}
+          {% if not users %}
+          <tr><td colspan="11" class="admin-empty">No accounts.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="admin-section">
+    <div class="admin-section-head"><h2>Invites</h2></div>
+    {# The grants are boxes with a hidden "0" before each, so an unticked one is
+       sent rather than left out. Blank numbers mean "no limit". #}
+    <form class="admin-inline-form" hx-post="/admin/invites" hx-json-enc hx-boost="false">
+      <div class="field"><label for="inviteLabel">Label</label><input type="text" id="inviteLabel" name="label" placeholder="optional"></div>
+      <div class="field"><label for="inviteUses">Max uses</label><input type="number" id="inviteUses" name="max_uses" min="1" placeholder="unlimited"></div>
+      <div class="field"><label for="inviteHours">Expires (hours)</label><input type="number" id="inviteHours" name="expires_in_hours" min="1" step="any" placeholder="never"></div>
+      <div class="field checkbox">
+        <input type="hidden" name="grants_calendar_on_accept" value="0">
+        <input type="checkbox" name="grants_calendar_on_accept" value="1" id="grantsCalendar" checked>
+        <label for="grantsCalendar">Grants calendar on accept</label>
+      </div>
+      <div class="field checkbox">
+        <input type="hidden" name="grants_ranker_on_accept" value="0">
+        <input type="checkbox" name="grants_ranker_on_accept" value="1" id="grantsRanker" checked>
+        <label for="grantsRanker">Grants rankings on accept</label>
+      </div>
+      <button type="submit" class="btn-ghost small">Issue invite</button>
+    </form>
+    {{ notice_for('invites') }}
+    <div class="admin-table-wrap">
+      <table class="admin-table">
+        <thead><tr><th>Label</th><th>Status</th><th>Uses</th><th>Grants calendar</th><th>Grants rankings</th><th>Created</th><th>Expires</th><th>Actions</th></tr></thead>
+        <tbody>
+          {% for inv in invites %}
+          <tr>
+            <td>{{ inv.label or '—' }}</td>
+            <td><span class="auth-badge {{ 'off' if inv.revoked else 'ok' }}">{{ 'Revoked' if inv.revoked else 'Active' }}</span></td>
+            <td>{{ inv.used_count }}{% if inv.max_uses %} / {{ inv.max_uses }}{% endif %}</td>
+            <td>{{ 'Yes' if inv.grants_calendar_on_accept else 'No' }}</td>
+            <td>{{ 'Yes' if inv.grants_ranker_on_accept else 'No' }}</td>
+            {{ ts(inv.created_at) }}
+            {{ ts(inv.expires_at, empty='Never') }}
+            <td class="actions"><div class="action-group">
+              {# The link is spelled by the server, from the same base URL every
+                 other link this instance hands out is built from. #}
+              <input type="hidden" id="invite-link-{{ inv.id }}"
+                     value="{{ invite_base }}/register?invite={{ inv.token | urlencode }}">
+              <button type="button" class="btn-ghost tiny" data-copy="#invite-link-{{ inv.id }}">Copy link</button>
+              {# Asked for the first time the row is opened, and kept. It was an
+                 alert() listing the same lines. The request sits on the <details>
+                 itself because `toggle` fires there and does not bubble — measured
+                 in Firefox: a listener on the inner element through
+                 `from:closest details` never fired. #}
+              <details class="admin-redemptions"
+                       hx-get="/admin/fragments/invites/{{ inv.id }}/redemptions"
+                       hx-trigger="toggle once" hx-target="find .admin-redemption-body"
+                       hx-swap="innerHTML">
+                <summary class="btn-ghost tiny">Redemptions ({{ inv.redemption_count }})</summary>
+                <div class="admin-redemption-body"><span class="auth-hint">Loading…</span></div>
+              </details>
+              {% if not inv.revoked %}
+              {% call confirm_box.ask('revoke-invite-' ~ inv.id,
+                                      'Revoke this invite? Anyone holding the link will no longer be able to use it.',
+                                      'Revoke', danger=true, face='btn-ghost tiny btn-danger') %}
+              {{ post('/admin/invites/' ~ inv.id ~ '/revoke', 'Revoke', face='btn-primary small') }}
+              {% endcall %}
+              {% endif %}
+            </div></td>
+          </tr>
+          {% endfor %}
+          {% if not invites %}
+          <tr><td colspan="8" class="admin-empty">No invites yet.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="admin-section">
+    <h2>Retired identifiers</h2>
+    <p class="auth-sub">Blocked from reuse by default so a re-registration can't silently inherit a link that was already shared. Releasing one makes it claimable again, by anyone.</p>
+    {{ notice_for('retired') }}
+    <div class="admin-table-wrap">
+      <table class="admin-table">
+        <thead><tr><th>Kind</th><th>Value</th><th>Retired</th><th>Actions</th></tr></thead>
+        <tbody>
+          {% for r in retired %}
+          <tr>
+            <td>{{ r.kind }}</td>
+            <td>{{ r.value }}</td>
+            {{ ts(r.retired_at) }}
+            <td class="actions"><div class="action-group">
+              {% if r.kind != 'token' %}
+              {% call confirm_box.ask('release-' ~ loop.index,
+                                      'Release "' ~ r.value ~ '"? It becomes claimable again by anyone, including on any link already shared under it.',
+                                      'Release', danger=true, face='btn-ghost tiny') %}
+              {{ post('/admin/retired/release', 'Release', {"kind": r.kind, "value": r.value}, face='btn-primary small') }}
+              {% endcall %}
+              {% else %}&mdash;{% endif %}
+            </div></td>
+          </tr>
+          {% endfor %}
+          {% if not retired %}
+          <tr><td colspan="4" class="admin-empty">Nothing retired.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>

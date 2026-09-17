@@ -30,7 +30,7 @@
  * time it is needed and never again.
  */
 
-/* FOUR DEFAULTS TURNED BACK, and one behaviour this file no longer has to ask
+/* FIVE DEFAULTS TURNED BACK, and one behaviour this file no longer has to ask
  * for. Each flag below restores the behaviour the app's markup and routes were
  * written against; each is an exact-parity setting rather than a position, and
  * each becomes deletable once the markup it protects says the same thing for
@@ -67,8 +67,9 @@ htmx.config.implicitInheritance = true;
 // route here answers 200 with a rendered gap when it has nothing — a failure is
 // something the server draws, not something the browser infers from a status —
 // so a non-200 reaching the swap is by definition a response no template here
-// wrote. The head's htmx:response:error handler turns the boosted case into a
-// real navigation; this is what stops the swap it would race.
+// wrote. A boosted navigation that fails never reaches this at all: the server
+// answers it with HX-Redirect to the same address (app/main.py), which htmx acts on
+// before the status is looked at.
 htmx.config.noSwap = [204, 304, '4xx', '5xx'];
 
 // NO CLOCK ON A REQUEST. htmx now aborts one after sixty seconds. Filling a
@@ -87,6 +88,17 @@ htmx.config.defaultTimeout = 0;
 // have nothing to put in, which would leave "Loading more…" on screen for a pool
 // that has no more.
 htmx.config.allowEmptySwapAfterOOB = true;
+
+// NO SETTLE STEP. Before a swap htmx copies the OLD element's attributes onto every
+// element in the answer that shares an id with one on the page, and puts the new
+// ones back a tick later — so a CSS transition can run between the two. Nothing
+// in this app's stylesheet transitions on that, and on a form field it is a
+// defect: MEASURED in Firefox and Chromium, a display-name field redrawn with the
+// name the server stored came back with the right `value` attribute and an EMPTY
+// value on screen, and the same shape would blank a revealed key or a temporary
+// password the second time one is drawn. A delay of nought skips the copy
+// entirely; the answer is inserted exactly as the server wrote it.
+htmx.config.defaultSettleDelay = 0;
 
 // Which scripts each page needs, in load order, as URLs with their cache-busting
 // token already on them. Rendered by the head macro from the one list in

@@ -58,6 +58,17 @@ class RegressionTestCase(AppTestCase):
     def login(self, username="josh", password=PASSWORD):
         return self.client.post("/login", json={"username": username, "password": password})
 
+    def assertSignedIn(self, resp):
+        """A sign-in that worked: nothing to swap, and the browser sent on."""
+        self.assertEqual(resp.status_code, 204, resp.text)
+        self.assertIn("HX-Redirect", resp.headers)
+
+    def assertRefused(self, resp):
+        """A sign-in that did not: the one sentence every failure draws, at 200."""
+        from app.auth import routes as auth_routes
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.text.strip(), auth_routes.INVALID_CREDENTIALS)
+
     def fail_login(self, times, username="josh"):
         for _ in range(times):
             self.login(username, "wrong-password")
@@ -90,7 +101,7 @@ class LockoutDoesNotSelfPerpetuateTests(RegressionTestCase):
         self.fail_login(auth.LOGIN_MAX_ATTEMPTS)
         locked = self.login("josh", PASSWORD)  # the RIGHT password, while locked
         self.assertEqual(locked.status_code, wrong.status_code)
-        self.assertEqual(locked.json(), wrong.json())
+        self.assertEqual(locked.text, wrong.text)
 
     def test_lockout_expires_and_the_counter_starts_over(self):
         """Once the window has passed, the next single mistake must not re-lock
@@ -103,9 +114,9 @@ class LockoutDoesNotSelfPerpetuateTests(RegressionTestCase):
         self.assertFalse(asyncio.run(auth.check_lockout("username", "josh", **LOCK)))
         self.assertEqual(self.failures("username", "josh"), 0)
         # So one fresh failure leaves the account usable rather than re-locked.
-        self.assertEqual(self.login("josh", "wrong-password").status_code, 401)
+        self.assertRefused(self.login("josh", "wrong-password"))
         self.assertFalse(asyncio.run(auth.check_lockout("username", "josh", **LOCK)))
-        self.assertEqual(self.login().status_code, 200)
+        self.assertSignedIn(self.login())
 
     def test_check_lockout_does_not_clear_a_counter_below_the_threshold(self):
         """Only a LAPSED lockout resets. Ordinary failures inside the window keep
@@ -127,7 +138,7 @@ class SharedProxyIpCounterTests(RegressionTestCase):
         self.make_user()
         self.fail_login(auth.LOGIN_MAX_ATTEMPTS - 1)
         self.assertGreater(self.failures("ip", "testclient"), 0)
-        self.assertEqual(self.login().status_code, 200)
+        self.assertSignedIn(self.login())
         self.assertEqual(self.failures("ip", "testclient"), 0)
         self.assertEqual(self.failures("username", "josh"), 0)
 
@@ -138,11 +149,11 @@ class SharedProxyIpCounterTests(RegressionTestCase):
         self.make_user("josh")
         self.make_user("alice")
         self.fail_login(auth.LOGIN_MAX_ATTEMPTS - 1, username="josh")
-        self.assertEqual(self.login("alice").status_code, 200)
+        self.assertSignedIn(self.login("alice"))
         # Alice's success cleared the shared key, so josh's next mistake is his
         # first, not his fifth.
-        self.assertEqual(self.login("josh", "wrong-password").status_code, 401)
-        self.assertEqual(self.login("alice").status_code, 200)
+        self.assertRefused(self.login("josh", "wrong-password"))
+        self.assertSignedIn(self.login("alice"))
 
 
 class ProxyDiagnosticsTests(RegressionTestCase):
@@ -261,7 +272,9 @@ class HandshakeStartThrottleTests(RegressionTestCase):
             for _ in range(auth.HANDSHAKE_MAX_ATTEMPTS):
                 self.assertEqual(self.client.get("/auth/plex/start").status_code, 200)
             blocked = self.client.get("/auth/plex/start")
-        self.assertEqual(blocked.status_code, 429)
+        self.assertEqual(blocked.status_code, 200)
+        self.assertIn("Too many sign-in attempts", blocked.text)
+        self.assertNotIn('hx-post="/auth/plex/poll"', blocked.text)
         # And the limit is applied BEFORE the outbound call, not after it.
         self.assertEqual(pin.call_count, auth.HANDSHAKE_MAX_ATTEMPTS)
 
@@ -302,13 +315,13 @@ class CookiePolicyDetectionTests(RegressionTestCase):
 
     def test_a_browser_on_https_gets_secure_cookies(self):
         resp = self.onboard("https://shows.example.com", "https://shows.example.com")
-        self.assertTrue(resp.json()["ok"])
+        self.assertEqual(resp.status_code, 204, resp.text)
         self.assertEqual(load_settings().cookie_secure, "always")
         self.assertIn("__Host-tns_session", resp.headers.get("set-cookie", ""))
 
     def test_a_browser_on_plain_http_gets_a_usable_cookie(self):
         resp = self.onboard("http://localhost:8000", "http://localhost:8000")
-        self.assertTrue(resp.json()["ok"])
+        self.assertEqual(resp.status_code, 204, resp.text)
         self.assertEqual(load_settings().cookie_secure, "never")
         cookie = resp.headers.get("set-cookie", "")
         self.assertIn("tns_session", cookie)
@@ -330,7 +343,7 @@ class CookiePolicyDetectionTests(RegressionTestCase):
             resp = client.post("/onboarding", json=self.ONBOARD)
         finally:
             client.close()
-        self.assertTrue(resp.json()["ok"])
+        self.assertEqual(resp.status_code, 204, resp.text)
         self.assertEqual(load_settings().cookie_secure, "always")
         self.assertIn("Secure", resp.headers.get("set-cookie", ""))
 
@@ -343,7 +356,7 @@ class CookiePolicyDetectionTests(RegressionTestCase):
             resp = client.post("/onboarding", json=self.ONBOARD)
         finally:
             client.close()
-        self.assertTrue(resp.json()["ok"])
+        self.assertEqual(resp.status_code, 204, resp.text)
         self.assertEqual(load_settings().cookie_secure, "always")
 
     def test_the_first_cookie_already_carries_the_resolved_policy(self):
@@ -397,7 +410,7 @@ class FreshProxiedInstallCanOnboardTests(RegressionTestCase):
     def test_onboarding_succeeds_behind_an_unconfigured_proxy(self):
         client = self.proxied_client()
         try:
-            self.assertTrue(client.post("/onboarding", json=self.ONBOARD).json()["ok"])
+            self.assertEqual(client.post("/onboarding", json=self.ONBOARD).status_code, 204)
         finally:
             client.close()
 
@@ -452,17 +465,22 @@ class CookieMismatchWarningTests(RegressionTestCase):
     moved or settings.json was hand-edited. Either way it must not present as a
     wrong password."""
 
-    def test_login_page_carries_the_effective_cookie_policy(self):
+    def test_a_secure_cookie_the_browser_dropped_is_reported(self):
         self.make_user()
         save_settings(Settings(cookie_secure="always"))
         body = self.client.get("/login").text
-        self.assertIn("cookieWarning", body)
-        self.assertIn("const cookieIsSecure = true", body)
+        self.assertIn('hx-get="/login/cookie-check"', body)
+        # The browser kept the page's probe: nothing to say.
+        self.assertNotIn("cookieWarning", self.client.get("/login/cookie-check").text)
+        # It did not: the warning, before anybody types a password.
+        self.client.cookies.clear()
+        self.assertIn("cookieWarning", self.client.get("/login/cookie-check").text)
 
-    def test_login_page_reports_a_non_secure_policy_too(self):
+    def test_a_non_secure_policy_is_never_reported(self):
         self.make_user()
         save_settings(Settings(cookie_secure="never"))
-        self.assertIn("const cookieIsSecure = false", self.client.get("/login").text)
+        self.client.cookies.clear()
+        self.assertNotIn("cookieWarning", self.client.get("/login/cookie-check").text)
 
     def test_the_settings_panel_draws_the_policy(self):
         """The Settings panel warns when cookie_secure disagrees with the scheme
@@ -1017,13 +1035,13 @@ class SharedAddressLockoutTests(RegressionTestCase):
         self.make_user("test")
         # Well past the per-username limit for `test`.
         self.fail_login(auth.LOGIN_MAX_ATTEMPTS + 3, username="test")
-        self.assertEqual(self.login("test").status_code, 401)   # that account IS locked
-        self.assertEqual(self.login("josh").status_code, 200)   # this one is not
+        self.assertRefused(self.login("test"))    # that account IS locked
+        self.assertSignedIn(self.login("josh"))   # this one is not
 
     def test_the_per_username_limit_still_bites(self):
         self.make_user("josh")
         self.fail_login(auth.LOGIN_MAX_ATTEMPTS)
-        self.assertEqual(self.login().status_code, 401)
+        self.assertRefused(self.login())
 
     def test_the_address_limit_still_exists_for_spraying(self):
         """Raising the threshold must not remove it: many usernames tried from one
@@ -1035,7 +1053,7 @@ class SharedAddressLockoutTests(RegressionTestCase):
             "ip", "testclient",
             max_attempts=auth.LOGIN_IP_MAX_ATTEMPTS, window_seconds=auth.LOGIN_WINDOW_SECONDS,
         )))
-        self.assertEqual(self.login().status_code, 401)
+        self.assertRefused(self.login())
 
     def test_a_lockout_is_logged_even_though_the_response_cannot_say_so(self):
         """Without this the operator sees "login is broken" and no explanation —
@@ -1319,7 +1337,7 @@ class SharedBodyGuardTests(RegressionTestCase):
         self.login()
 
     def test_malformed_json_is_refused_everywhere(self):
-        for path in ("/api/admin/invites", "/api/state", "/settings"):
+        for path in ("/admin/invites", "/api/state", "/settings"):
             resp = self.client.post(path, content=b"{not json",
                                     headers={"Content-Type": "application/json"})
             self.assertEqual(resp.status_code, 400, path)
@@ -1327,7 +1345,7 @@ class SharedBodyGuardTests(RegressionTestCase):
     def test_a_body_that_is_not_an_object_is_refused_everywhere(self):
         """A route reads its body with .get(); a list or a string has no .get,
         and the copies that returned {} or None for one only moved the failure."""
-        for path in ("/api/admin/invites", "/api/state", "/settings"):
+        for path in ("/admin/invites", "/api/state", "/settings"):
             resp = self.client.post(path, json=[1, 2, 3])
             self.assertEqual(resp.status_code, 400, path)
 
@@ -1341,7 +1359,7 @@ class SharedBodyGuardTests(RegressionTestCase):
         self.assertEqual(resp.status_code, 413)
 
     def test_the_cap_leaves_room_for_an_image_upload(self):
-        """/api/me/avatar and /api/me/images carry an image as base64 in the JSON
+        """/me/avatar and /me/images carry an image as base64 in the JSON
         body, and user_images allows 4 MB DECODED — about 5.6 MB encoded. A cap
         below that would refuse every ordinary upload with a 413 that says
         nothing about images."""
@@ -1359,10 +1377,10 @@ class SharedBodyGuardTests(RegressionTestCase):
         request is too large". The two image routes carry their own ceiling, so
         the wording no longer changes with the size of the file."""
         pad = b"x" * user_images.MAX_UPLOAD_BODY_BYTES
-        # `/me/images` rather than `/api/me/images`: the saved-picture library is
-        # markup the server draws now, so the route that takes an upload is the
-        # one the library's own form posts to. Its ceiling is the same one.
-        for path in ("/api/me/avatar", "/me/images"):
+        # The routes the account page's own forms post to: the profile picture
+        # and the saved-picture library are both markup the server draws now.
+        # Their ceiling is the same one.
+        for path in ("/me/avatar", "/me/images"):
             with self.subTest(path=path):
                 resp = self.client.post(
                     path, content=b'{"image_b64": "' + pad + b'"}',

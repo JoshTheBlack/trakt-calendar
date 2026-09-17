@@ -219,6 +219,18 @@
 
 <audio id="lobby_audio" src="/static/audio/lobby.mp3" loop preload="none"></audio>
 
+{# THE ONE SCRIPT ON THIS PAGE IS THE MUSIC, NOT THE ANIMATION. The parade is an
+   animated PNG tiled by the stylesheet and the button's nudge is a CSS keyframe;
+   neither has ever been script.
+
+   WHY THE MUSIC STAYS SCRIPT, MEASURED IN FIREFOX 155 AND CHROMIUM (Playwright
+   1.63), 2026-09-16. Markup could replace it only with two things together: a
+   button that plays and pauses an <audio> (an invoker `command="play-pause"`), and
+   a stylesheet that can tell whether it is playing (`:playing` / `:paused`) to draw
+   the button's state. Chromium honours the command and supports neither selector;
+   Firefox supports both selectors and ignores the command. A replacement that works
+   in one browser only is not shipped, and the browser's own <audio controls> would
+   put its chrome over the stage. Revisit when one engine has both. #}
 <script>
 (function () {
   var audio = document.getElementById("lobby_audio");

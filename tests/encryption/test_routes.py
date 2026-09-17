@@ -20,7 +20,7 @@ import unittest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
-from app import config, db, secrets_box
+from app import auth, config, db, secrets_box
 from app.auth import encryption_flow
 from app.config import Settings, save_settings
 from app.auth.encryption_routes import RECOVERY_PATH, RESET_CONFIRM_PHRASE
@@ -64,7 +64,7 @@ class EncryptionRouteTestCase(unittest.TestCase):
             "username": "josh", "password": "hunter2hunter2",
             "password_confirm": "hunter2hunter2",
         })
-        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.status_code, 204, resp.text)
 
     def _encrypt_under(self, key: str, *, sonarr="sonarr-secret"):
         """Seed a plaintext secret and turn encryption on under `key`, as an instance
@@ -180,26 +180,41 @@ class EncryptionRouteTestCase(unittest.TestCase):
         page = self.client.get(RECOVERY_PATH, headers=HTML)
         self.assertEqual(page.status_code, 200)
         self.assertIn("Generate a new key", page.text)
+        self.assertIn('hx-post="/admin/encryption/recovery/generate-key"', page.text)
+        # No key is drawn by the page itself — only an answer to the button is.
+        self.assertNotIn('id="genKeyValue"', page.text)
         # The mismatch door's typed-confirm reset control is not offered here —
         # there is nothing to reset yet until a (new) key is actually in the
-        # environment. (The JS constant for that phrase is still embedded either
-        # way — it's inert unless the reset button it belongs to also exists.)
+        # environment.
         self.assertNotIn("Discard unrecoverable secrets and reset", page.text)
+        # Nothing on the page is script of its own.
+        self.assertNotIn("<script>\n(function", page.text)
+        self.assertNotIn("prompt(", page.text)
 
-    def test_generate_key_for_a_missing_key_is_stateless(self):
+    def _generated_key(self, resp) -> str:
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return re.search(r'id="genKeyValue" readonly value="([^"]+)"', resp.text).group(1)
+
+    def test_generate_key_for_a_missing_key_is_stateless_and_shown_once(self):
         self._onboard()
         self._encrypt_under(KEY)
         _set_key(None)
         asyncio.run(encryption_flow.refresh_health())
 
-        resp = self.client.post("/api/admin/encryption/recovery/generate-key", json={})
-        self.assertEqual(resp.status_code, 200, resp.text)
-        key1 = resp.json()["key"]
+        resp = self.client.post("/admin/encryption/recovery/generate-key", json={})
+        key1 = self._generated_key(resp)
         self.assertTrue(secrets_box.key_is_valid(key1))
-        # Calling it again is harmless and gives a fresh key — nothing is stored
-        # server-side until the admin saves one to their own environment.
-        key2 = self.client.post("/api/admin/encryption/recovery/generate-key", json={}).json()["key"]
+        self.assertEqual(resp.headers["Cache-Control"], "no-store")
+        self.assertIn("Generate a different key", resp.text)
+        # Calling it again gives a FRESH key rather than this one again, and the
+        # page never draws one — so a key that has left the screen cannot come
+        # back to it. Nothing is stored server-side.
+        key2 = self._generated_key(
+            self.client.post("/admin/encryption/recovery/generate-key", json={}))
         self.assertNotEqual(key1, key2)
+        page = self.client.get(RECOVERY_PATH, headers=HTML).text
+        self.assertNotIn(key1, page)
+        self.assertNotIn(key2, page)
         self.assertEqual(asyncio.run(encryption_flow.get_phase()), encryption_flow.PHASE_ENCRYPTED)
 
     def test_setting_the_generated_key_and_restarting_lands_on_the_ordinary_mismatch_door(self):
@@ -209,7 +224,8 @@ class EncryptionRouteTestCase(unittest.TestCase):
         self._onboard()
         self._encrypt_under(KEY)
         _set_key(None)
-        new_key = self.client.post("/api/admin/encryption/recovery/generate-key", json={}).json()["key"]
+        new_key = self._generated_key(
+            self.client.post("/admin/encryption/recovery/generate-key", json={}))
 
         _set_key(new_key)  # "restart" with the freshly generated key saved
         self.assertEqual(asyncio.run(encryption_flow.refresh_health()),
@@ -217,9 +233,10 @@ class EncryptionRouteTestCase(unittest.TestCase):
         page = self.client.get(RECOVERY_PATH, headers=HTML)
         self.assertIn(RESET_CONFIRM_PHRASE, page.text)
 
-        reset = self.client.post("/api/admin/encryption/recovery/reset",
+        reset = self.client.post("/admin/encryption/recovery/reset",
                                  json={"confirm": RESET_CONFIRM_PHRASE})
-        self.assertEqual(reset.status_code, 200, reset.text)
+        self.assertEqual(reset.status_code, 204, reset.text)
+        self.assertEqual(reset.headers["HX-Redirect"], "/")
         self.assertEqual(encryption_flow.health(), encryption_flow.HEALTHY)
 
     def test_recovery_reset_requires_the_typed_phrase(self):
@@ -228,12 +245,26 @@ class EncryptionRouteTestCase(unittest.TestCase):
         _set_key(OTHER_KEY)
         asyncio.run(encryption_flow.refresh_health())
 
-        wrong = self.client.post("/api/admin/encryption/recovery/reset",
+        wrong = self.client.post("/admin/encryption/recovery/reset",
                                  json={"confirm": "nope"})
-        self.assertEqual(wrong.status_code, 400)
+        # Drawn beside the form at 200, and nothing changed.
+        self.assertEqual(wrong.status_code, 200)
+        self.assertIn("Nothing was changed.", wrong.text)
+        self.assertNotIn("HX-Redirect", wrong.headers)
         self.assertEqual(asyncio.run(encryption_flow.get_phase()),
                          encryption_flow.PHASE_ENCRYPTED)  # unchanged
         self.assertEqual(encryption_flow.health(), encryption_flow.KEY_MISMATCH)
+
+    def test_the_reset_is_a_form_carrying_the_phrase_field(self):
+        self._onboard()
+        self._encrypt_under(KEY)
+        _set_key(OTHER_KEY)
+        asyncio.run(encryption_flow.refresh_health())
+        page = self.client.get(RECOVERY_PATH, headers=HTML).text
+        form = re.search(r'<form class="recovery-confirm"[^>]*>', page).group(0)
+        self.assertIn('hx-post="/admin/encryption/recovery/reset"', form)
+        self.assertIn("hx-json-enc", form)
+        self.assertIn('name="confirm" required', page)
 
     def test_recovery_reset_door_clears_unrecoverable_and_heals(self):
         self._onboard()
@@ -241,10 +272,9 @@ class EncryptionRouteTestCase(unittest.TestCase):
         _set_key(OTHER_KEY)
         asyncio.run(encryption_flow.refresh_health())
 
-        reset = self.client.post("/api/admin/encryption/recovery/reset",
+        reset = self.client.post("/admin/encryption/recovery/reset",
                                  json={"confirm": RESET_CONFIRM_PHRASE})
-        self.assertEqual(reset.status_code, 200, reset.text)
-        self.assertTrue(reset.json()["ok"])
+        self.assertEqual(reset.status_code, 204, reset.text)
         # Healed under the current key; the unrecoverable secret is gone.
         self.assertEqual(encryption_flow.health(), encryption_flow.HEALTHY)
         self.assertIsNone(asyncio.run(db.fetch_value(
@@ -256,9 +286,33 @@ class EncryptionRouteTestCase(unittest.TestCase):
         self._onboard()
         self._encrypt_under(KEY)
         asyncio.run(encryption_flow.refresh_health())  # healthy under KEY
-        resp = self.client.post("/api/admin/encryption/recovery/reset",
+        resp = self.client.post("/admin/encryption/recovery/reset",
                                 json={"confirm": RESET_CONFIRM_PHRASE})
-        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("nothing to reset", resp.text)
+        self.assertEqual(asyncio.run(encryption_flow.get_phase()), encryption_flow.PHASE_ENCRYPTED)
+
+    def test_both_recovery_actions_stay_administrator_only_and_json_only(self):
+        """The page is PUBLIC so it can be reached while the key is wrong; its two
+        actions are not, however they are drawn."""
+        self._onboard()
+        self._encrypt_under(KEY)
+        _set_key(OTHER_KEY)
+        asyncio.run(encryption_flow.refresh_health())
+        for path, body in (("/admin/encryption/recovery/generate-key", {}),
+                           ("/admin/encryption/recovery/reset", {"confirm": RESET_CONFIRM_PHRASE})):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.post(path, data=body).status_code, 415)
+                self.assertEqual(self.client.post(path, json=["x"]).status_code, 400)
+        asyncio.run(auth.create_user(username="member", password="hunter2hunter2",
+                                     settings=Settings(), calendar_approved=True))
+        self.client.cookies.clear()
+        self.client.post("/login", json={"username": "member", "password": "hunter2hunter2"})
+        for path, body in (("/admin/encryption/recovery/generate-key", {}),
+                           ("/admin/encryption/recovery/reset", {"confirm": RESET_CONFIRM_PHRASE})):
+            with self.subTest(path=path, who="member"):
+                self.assertEqual(self.client.post(path, json=body).status_code, 403)
+        self.assertEqual(encryption_flow.health(), encryption_flow.KEY_MISMATCH)
 
     # -- the unhealthy-write guard on the admin save -------------------------
 

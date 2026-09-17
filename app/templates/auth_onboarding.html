@@ -2,6 +2,7 @@
 <html lang="en">
 {% import '_head.html' as page with context %}
 {{ page.head('Set up', nav_head=false) }}
+{% import '_sign_in_form.html' as sign_in %}
 {%- set body_class %}auth-page{% endset %}
 <body class="{{ body_class }}" hx-boost="true">
 {# What a boosted arrival cannot work out for itself. A swap replaces the body's
@@ -23,65 +24,21 @@
     <p class="auth-notice">Your existing Trakt connection will be linked to this account automatically.</p>
     {% endif %}
 
-    <div class="auth-form">
+    {% call sign_in.form('/onboarding', 'Create account') %}
       <div class="field">
         <label for="username">Username</label>
-        <input id="username" type="text" autocomplete="username" autofocus>
+        <input id="username" name="username" type="text" autocomplete="username" autofocus>
       </div>
       <div class="field">
         <label for="password">Password</label>
-        <input id="password" type="password" autocomplete="new-password">
+        <input id="password" name="password" type="password" autocomplete="new-password">
       </div>
       <div class="field">
         <label for="confirm">Confirm password</label>
-        <input id="confirm" type="password" autocomplete="new-password">
+        <input id="confirm" name="password_confirm" type="password" autocomplete="new-password">
       </div>
-      <p class="auth-error" id="error" role="alert"></p>
-      <button class="btn-primary" id="submit" type="button">Create account</button>
-    </div>
+    {% endcall %}
   </div>
 </div>
-
-<script>
-// Wrapped, because a boosted navigation back to this page re-executes this
-// script in the same document: at top level its `const`s would be
-// redeclarations and the whole script would fail to parse, leaving the page's
-// controls bound to nothing. Inside a function each arrival gets its own
-// bindings, which is what the fresh DOM needs anyway.
-(function () {
-const err = document.getElementById('error');
-async function submit() {
-  err.textContent = '';
-  const btn = document.getElementById('submit');
-  btn.disabled = true;
-  try {
-    const resp = await fetch('/onboarding', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        username: document.getElementById('username').value,
-        password: document.getElementById('password').value,
-        password_confirm: document.getElementById('confirm').value,
-      }),
-    });
-    const data = await resp.json().catch(() => ({}));
-    if (resp.ok && data.ok) { window.location = data.redirect || '/'; return; }
-    err.textContent = data.error || data.detail || 'Something went wrong.';
-  } catch (e) {
-    err.textContent = 'Could not reach the server.';
-  }
-  btn.disabled = false;
-}
-document.getElementById('submit').addEventListener('click', submit);
-// On `document`, which a boosted navigation does not replace — only <body> is
-// swapped — so arriving here a second time would stack a second Enter handler
-// and submit twice. The previous one is removed by name first. The name is
-// shared with the other auth pages on purpose: moving between two of them has
-// to clear the one the page being left installed.
-document.removeEventListener('keydown', window.__authEnterHandler);
-window.__authEnterHandler = (e) => { if (e.key === 'Enter') submit(); };
-document.addEventListener('keydown', window.__authEnterHandler);
-})();
-</script>
 </body>
 </html>

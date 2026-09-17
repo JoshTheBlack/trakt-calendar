@@ -21,6 +21,7 @@ No network: the code exchange and the account lookup are patched.
 from __future__ import annotations
 
 import asyncio
+import re
 import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -622,29 +623,37 @@ class PerUserTokenTests(SimklOAuthTestCase):
 
 
 class UnlinkTests(SimklOAuthTestCase):
+    """Answered with the account card at 200; the sentence, if any, sits under the
+    linked services."""
+
+    def said(self, resp) -> str:
+        self.assertEqual(resp.status_code, 200, resp.text)
+        identities = resp.text.split('id="accountIdentities"', 1)[1]
+        return re.search(r'<p class="auth-error[^"]*" role="\w+">(.*?)</p>', identities, re.S).group(1)
+
+    def unlink(self):
+        return self.client.post("/me/identities/unlink", json={"provider": "simkl"})
+
     def test_a_linked_simkl_account_can_be_unlinked(self):
         user = self.make_user("linker", calendar_approved=True)
         self.sign_in_as(user)
         self.callback(self.start("/auth/simkl/link"))
-        resp = self.client.post("/api/me/identities/unlink", json={"provider": "simkl"})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        resp = self.unlink()
         self.assertEqual(self.identities(), [])
         # Simkl documents no revocation endpoint, so there is nothing this app
         # could have failed to do and nothing to warn about.
-        self.assertIsNone(resp.json()["warning"])
+        self.assertEqual(self.said(resp), "")
 
     def test_the_last_login_method_cannot_be_unlinked(self):
         self.sign_out()
         self.callback(self.start(invite=self.mint_invite()))
-        resp = self.client.post("/api/me/identities/unlink", json={"provider": "simkl"})
-        self.assertEqual(resp.status_code, 409)
+        self.assertIn("only way you can sign in", self.said(self.unlink()))
         self.assertEqual(len(self.identities()), 1)
 
-    def test_unlinking_something_that_is_not_linked_is_a_404(self):
+    def test_unlinking_something_that_is_not_linked_is_refused(self):
         user = self.make_user("plain", calendar_approved=True)
         self.sign_in_as(user)
-        resp = self.client.post("/api/me/identities/unlink", json={"provider": "simkl"})
-        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(self.said(self.unlink()), "That account isn&#39;t linked.")
 
 
 class ProviderButtonTests(SimklOAuthTestCase):
@@ -665,7 +674,7 @@ class ProviderButtonTests(SimklOAuthTestCase):
         self.assertIn('href="/auth/simkl/link"', self.client.get("/me").text)
         self.callback(self.start("/auth/simkl/link"))
         body = self.client.get("/me").text
-        self.assertIn('data-unlink="simkl"', body)
+        self.assertIn('id="confirm-unlink-simkl"', body)
         self.assertNotIn('href="/auth/simkl/link"', body)
 
     def test_the_settings_panel_shows_the_redirect_uri_to_register(self):

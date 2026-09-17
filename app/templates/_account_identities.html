@@ -1,0 +1,62 @@
+{% import '_confirm.html' as confirm_box %}
+{% import '_plex_signin.html' as plex %}
+{# THE SERVICES THIS ACCOUNT SIGNS IN WITH, one row each: linked with its name,
+   or the way to connect it, or who can make connecting possible.
+
+   UNLINKING ANSWERS WITH THE WHOLE CARD (hx-target #accountCard), because it
+   changes what four other parts of the page offer — the orders, the retired list,
+   the tracker notice, and whether unlinking is still allowed at all. It asks first,
+   through _confirm.html. A warning that the service still holds a grant is said
+   here, beside the rows, since only the account holder can clear it on the
+   service's own site.
+
+   "GET PICTURE" ANSWERS WITH THE PICTURE SECTION, which is where its result shows. #}
+{% macro service_row(provider, label, login_configured, link_path) %}
+<div class="row">
+  <span class="label">{{ label }}</span>
+  {% if provider in linked %}
+  <span class="auth-badge ok">{{ linked.get(provider) or "Linked" }}</span>
+  {# FETCH THIS SERVICE'S PICTURE WITHOUT DISCONNECTING FIRST. A picture
+     arrives on its own when an account registers with a service or links
+     one, so an account linked before any of that existed has a connection
+     and no picture — and the only way to get one was to unlink and link
+     again, which is a destructive action standing in for "fetch that,
+     please". It is also the way to pick up a picture you have just changed
+     on the service's own site. #}
+  <span class="row-actions">
+    {% if provider in avatar_fetchable %}
+    <button class="btn-ghost tiny" type="button" hx-post="/me/avatar/refresh" hx-json-enc
+            hx-vals='{{ {"source": provider} | tojson }}'
+            hx-target="#accountAvatar" hx-swap="outerHTML"
+            title="Use this account's picture">Get picture</button>
+    {% endif %}
+    {% if can_unlink %}
+    {% call confirm_box.ask('unlink-' ~ provider, 'Unlink your ' ~ label ~ ' account from this login?',
+                            'Unlink', danger=true, face='btn-ghost tiny') %}
+    <button type="button" class="btn-primary small" hx-post="/me/identities/unlink" hx-json-enc
+            hx-vals='{{ {"provider": provider} | tojson }}'
+            hx-target="#accountCard" hx-swap="outerHTML">Unlink</button>
+    {% endcall %}
+    {% endif %}
+  </span>
+  {% elif link_path is none %}
+  {{ plex.button('Connect', '/auth/plex/link', face='btn-ghost tiny') }}
+  {% elif login_configured %}
+  {# Leaves the app — see the same link on the sign-in page. #}
+  <a class="btn-ghost tiny" href="{{ link_path }}" hx-boost="false">Connect</a>
+  {% else %}
+  {# Not a dead end: say who can fix it, so this doesn't read as "linking
+     is broken". Only an administrator can, and only they are told how. #}
+  <span class="auth-badge off" title="{{ ('Set the ' ~ label ~ ' client ID, client secret, and public base URL in Settings.') if user.is_admin else ('An administrator has to finish setting up ' ~ label ~ ' sign-in on this instance.') }}">Unavailable</span>
+  {% endif %}
+</div>
+{% endmacro %}
+<div class="auth-list" id="accountIdentities">
+  {{ service_row('trakt', 'Trakt', trakt_login_configured, '/auth/trakt/link') }}
+  {{ service_row('simkl', 'Simkl', simkl_login_configured, '/auth/simkl/link') }}
+  {# Plex needs no registration of its own on this instance, so it is always
+     offered — as the popup flow rather than a link (_plex_signin.html). #}
+  {{ service_row('plex', 'Plex', true, none) }}
+  {{ plex.slot() }}
+  <p class="auth-error{{ ' is-ok' if link_ok }}" role="{{ 'status' if link_ok else 'alert' }}">{{ link_message }}</p>
+</div>

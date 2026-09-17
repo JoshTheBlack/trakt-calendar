@@ -331,6 +331,51 @@ guard = authz.Guard(app)
 # from anyone's data.
 authz.declare_mount(app, "/static", AuthLevel.PUBLIC)
 authz.install(app)
+
+
+@app.middleware("http")
+async def boosted_failure_becomes_a_navigation(request: Request, call_next):
+    """A link or form that fails while boosted is answered by going there for real.
+
+    htmx is configured not to swap a 4xx or 5xx (static/js/boost.js says why), so
+    with every link boosted a click that lands on an error page would do nothing
+    and read as ignored. The fix is a real navigation to the same address, which
+    renders that page in full with its own <head> — the error pages are the ones
+    that cannot count on the stylesheet the previous page loaded.
+
+    THE SERVER SAYS SO, WITH `HX-Redirect`, and that replaced a listener in every
+    page's <head>. htmx reads the header BEFORE it looks at the status or the body
+    (read in the vendored source: the redirect step runs first and ends the request
+    there), so nothing is swapped and — the part the listener existed to get right —
+    nothing is parsed. htmx parses a response's <head> into a detached document to
+    read its title, and measured in Firefox that poisons the inline stylesheet the
+    error pages carry: the navigation afterwards draws the page with no artwork and
+    no webfonts. The listener prevented that by overwriting a field of htmx's own
+    request context, which a later htmx could rename without a word; a header htmx
+    documents is not that.
+
+    BOOSTED REQUESTS ONLY, by `HX-Boosted`, which htmx sets on exactly those: a day
+    fragment or a pool page that fails must not take the whole page down with it.
+    The navigation it causes is not boosted, so it cannot loop.
+
+    AN EXCEPTION IS A FAILURE TOO. The listener saw a 500 as a status; here an
+    unhandled exception has not become one yet, so it is logged with its traceback
+    and answered the same way — the navigation asks again, unboosted, and gets the
+    ordinary 500.
+    """
+    if request.headers.get("hx-boosted") != "true":
+        return await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception("A boosted request to %s failed; sending the browser there directly.",
+                         request.url.path)
+        return Response(status_code=204, headers={"HX-Redirect": str(request.url)})
+    if response.status_code >= 400:
+        return Response(status_code=204, headers={"HX-Redirect": str(request.url)})
+    return response
+
+
 # LAST, and therefore outermost: what it reports has to be the time the client
 # actually waited, which includes the gates authz just installed and the gzip of
 # the response below them.

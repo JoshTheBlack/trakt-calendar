@@ -213,8 +213,11 @@ class AccountPageAndExportSurfaceTests(AppTestCase):
         URL either side of the change is identical. The version token is what
         makes the reload ask for something the browser has not got."""
         before = self.client.get("/me").text
-        resp = self.client.post("/api/me/avatar/source", json={"source": "plex"})
+        resp = self.client.post("/me/avatar/use", json={"source": "plex"})
         self.assertEqual(resp.status_code, 200)
+        # The answer is the picture section, already asking for the new picture.
+        self.assertIn('id="accountAvatar"', resp.text)
+        self.assertRegex(resp.text, r"/api/me/avatar\?size=96&amp;v=\d+")
         after = self.client.get("/me").text
 
         self.assertIn("/api/me/avatar?size=96", after)
@@ -226,8 +229,10 @@ class AccountPageAndExportSurfaceTests(AppTestCase):
     def test_an_unknown_slot_is_refused_rather_than_joined_to_a_path(self):
         for bad in ("../../etc/passwd", "unknown", ""):
             with self.subTest(bad=bad):
-                resp = self.client.post("/api/me/avatar/source", json={"source": bad})
-                self.assertEqual(resp.status_code, 400)
+                resp = self.client.post("/me/avatar/use", json={"source": bad})
+                self.assertEqual(resp.status_code, 200)
+                self.assertIn("Unknown picture.", resp.text)
+        self.assertFalse(user_images.has_avatar(self.user_id))
 
     def test_the_export_picker_offers_the_service_pictures_that_exist(self):
         """THE OTHER DEFECT: the server accepted a provider header spec and
@@ -393,11 +398,12 @@ class ThePickerOffersEveryPictureTests(AppTestCase):
         mine = user_images.avatar_path(self.user_id).read_bytes()
         asyncio.run(user_images.save_provider_avatar(self.user_id, "plex", BLUE))
 
-        self.client.post("/api/me/avatar/source", json={"source": "plex"})
+        self.client.post("/me/avatar/use", json={"source": "plex"})
         self.assertNotEqual(user_images.avatar_path(self.user_id).read_bytes(), mine)
 
-        resp = self.client.post("/api/me/avatar/source", json={"source": "uploaded"})
+        resp = self.client.post("/me/avatar/use", json={"source": "uploaded"})
         self.assertEqual(resp.status_code, 200)
+        self.assertRegex(resp.text, r'provider-avatar is-adopted"\s+data-source="uploaded"')
         self.assertEqual(user_images.avatar_path(self.user_id).read_bytes(), mine)
         # And the service's picture is still there to go back to.
         self.assertIn("plex", user_images.list_avatar_sources(self.user_id))
@@ -406,9 +412,21 @@ class ThePickerOffersEveryPictureTests(AppTestCase):
         """Refresh means "ask them again" and the account's own upload has
         nobody to ask, so that route takes services only."""
         asyncio.run(user_images.save_avatar(self.user_id, _b64(RED)))
-        resp = self.client.post("/api/me/avatar/source/refresh",
-                                json={"source": "uploaded"})
-        self.assertEqual(resp.status_code, 400)
+        with patch.object(provider_avatars, "fetch", AsyncMock()) as fetch:
+            resp = self.client.post("/me/avatar/refresh", json={"source": "uploaded"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Unknown service.", resp.text)
+        fetch.assert_not_awaited()
+
+    def test_forgetting_a_picture_asks_first_and_then_forgets_it(self):
+        asyncio.run(user_images.save_provider_avatar(self.user_id, "plex", BLUE))
+        page = self.client.get("/me").text
+        self.assertIn('id="confirm-avatar-forget-plex"', page)
+        self.assertIn("Forget the Plex picture?", page)
+        resp = self.client.post("/me/avatar/forget", json={"source": "plex"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn('data-source="plex"', resp.text)
+        self.assertEqual(user_images.list_avatar_sources(self.user_id), [])
 
     def test_a_linked_service_can_be_asked_for_its_picture_without_relinking(self):
         """An account linked before pictures were ever fetched has a connection
@@ -417,7 +435,7 @@ class ThePickerOffersEveryPictureTests(AppTestCase):
         with patch.object(provider_avatars, "current_url",
                           AsyncMock(return_value="https://media.trakt.tv/a.png")), \
              patch.object(provider_avatars, "fetch", AsyncMock(return_value=RED)):
-            resp = self.client.post("/api/me/avatar/source/refresh",
-                                    json={"source": "trakt"})
+            resp = self.client.post("/me/avatar/refresh", json={"source": "trakt"})
         self.assertEqual(resp.status_code, 200)
+        self.assertIn('data-source="trakt"', resp.text)
         self.assertEqual(user_images.list_avatar_sources(self.user_id), ["trakt"])

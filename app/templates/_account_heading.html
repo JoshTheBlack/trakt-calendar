@@ -1,0 +1,9 @@
+{# The chosen name leads, falling back to the username and then to a generic
+   label for an account that has neither yet (one made through Plex or Trakt
+   before claiming a username). The username itself is still on the page, in
+   its own row — this heading is what you call yourself, not what you sign in
+   as, and both are worth being able to see.
+
+   Its own template because two answers redraw it out of band: a display name
+   saved, and a username claimed. `oob` is theirs to pass. #}
+<h1 id="accountHeading"{% if oob %} hx-swap-oob="outerHTML"{% endif %}>{{ user.display_name or user.username or "Your account" }}</h1>

@@ -1,0 +1,77 @@
+{# ONE "WHICH SERVICE LEADS" LIST: `order_kind` is `tracker_order` (which linked
+   tracker decides a season) or `metadata_order` (whose description of a title you
+   read). The same control over two preferences, so one template.
+
+   WHICH LINKED TRACKER DECIDES. Shown only when more than one is linked, because
+   with one service answering there is no order to state and the control could
+   only confuse. It is a REORDERING and never a switch: a season only one of them
+   knows about still counts, whichever is first — which is why the hint says "when
+   both know about a season" rather than promising the loser is ignored.
+
+   WHOSE DESCRIPTION OF A TITLE YOU READ. Shown only when more than one service can
+   describe one, for the same reason. It sits beside the tracker's order because
+   they are the same shape of question — two services disagree, which one leads —
+   and deliberately not merged with it, because they settle different arguments and
+   somebody can reasonably answer them differently.
+
+   A PRESS IS A MOVE THE SERVER MAKES, answered with this list. There is no drag:
+   the arrows were always the whole control, because dragging is not reachable from
+   a keyboard and this is a preference, not a game. What the page's script did
+   around them — moving the row in the DOM, rebuilding every row's arrows with
+   insertAdjacentHTML so the first could not move up, reading the order back out of
+   the DOM and posting it — is the server's now, which also means a press starts
+   from the stored order rather than from whatever another tab left on screen.
+
+   THE PRESSED ARROW KEEPS FOCUS where it still exists. Each arrow has an id, and
+   the one that moved is drawn `autofocus`, which htmx honours in swapped content;
+   when a row reaches the end and loses that arrow, its other one takes focus. #}
+{% set entries = orders[order_kind] %}
+{% set section_id = 'trackerPriority' if order_kind == 'tracker_order' else 'metadataOrder' %}
+{% if entries %}
+<div class="auth-list" id="{{ section_id }}">
+  <div class="row">
+    <span class="label">{{ "Which service decides" if order_kind == 'tracker_order' else "Which service describes titles" }}</span>
+    <div class="row-main">
+      <ol class="tracker-priority-list">
+        {% for entry in entries %}
+        {% set first, last = loop.first, loop.last %}
+        {# Which arrow takes focus: the one pressed, or — when this row has just
+           reached the end that arrow pointed at — the one it has left. #}
+        {% if order_moved == entry.source ~ '-up' %}
+        {% set focus = 'down' if first else 'up' %}
+        {% elif order_moved == entry.source ~ '-down' %}
+        {% set focus = 'up' if last else 'down' %}
+        {% else %}
+        {% set focus = none %}
+        {% endif %}
+        <li class="tracker-priority-item" data-source="{{ entry.source }}">
+          <span class="tracker-priority-name">{{ entry.label }}</span>
+          {# The first row cannot move up and the last cannot move down, so those
+             buttons are omitted rather than rendered dead. #}
+          {% for direction, arrow, shown in (('up', '↑', not first), ('down', '↓', not last)) %}
+          {% if shown %}
+          <button class="btn-ghost tiny" type="button" id="{{ order_kind }}-{{ entry.source }}-{{ direction }}"
+                  hx-post="/me/order/{{ order_kind }}" hx-json-enc
+                  hx-vals='{{ {"source": entry.source, "direction": direction} | tojson }}'
+                  hx-target="#{{ section_id }}" hx-swap="outerHTML"
+                  {%- if focus == direction %} autofocus{% endif %}
+                  aria-label="Move {{ entry.label }} {{ direction }}">{{ arrow }}</button>
+          {% endif %}
+          {% endfor %}
+        </li>
+        {% endfor %}
+      </ol>
+      {% if order_kind == 'tracker_order' %}
+      <p class="auth-sub">When both know about a season, the one at the top decides
+        whether you have finished it. A season only one of them has still counts.</p>
+      {% else %}
+      <p class="auth-sub">When two services describe the same show differently — its
+        poster, overview, network or rating — the one at the top wins. A detail only
+        one of them has is still shown, whichever order this is in. Which services
+        appear at all is set in the calendar's 🎚️ Filters.</p>
+      {% endif %}
+      <span class="auth-error" role="alert">{{ order_message }}</span>
+    </div>
+  </div>
+</div>
+{% endif %}

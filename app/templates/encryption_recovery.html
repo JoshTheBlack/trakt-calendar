@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 {% import '_head.html' as page with context %}
-{{ page.head('Encryption recovery', nav_head=false) }}
+{{ page.head('Encryption recovery', scripts=assets.scripts('recovery'), nav_head=false) }}
 {%- set body_class %}auth-page{% endset %}
 <body class="{{ body_class }}" hx-boost="true">
 {# What a boosted arrival cannot work out for itself. A swap replaces the body's
@@ -9,7 +9,7 @@
    keeps its scripts — see static/js/boost.js, which reads this and applies both.
    Inside the body deliberately: it has to travel with the swap, and it has to
    survive a Back, which htmx serves from its own cache with no request at all. #}
-<div id="pageMeta" hidden data-body-class="{{ body_class }}"></div>
+<div id="pageMeta" hidden data-page="recovery" data-body-class="{{ body_class }}"></div>
 <div class="auth-shell">
   <img class="auth-logo" src="/static/images/distrakkl-wordmark.svg" alt="{{ product }}">
   <div class="auth-card">
@@ -59,11 +59,7 @@
         below), then you re-enter the API keys in Settings and each user re-links
         Trakt. Only do this once you are certain the original key is not coming back.
       </p>
-      <div id="genKeyReveal" hidden></div>
-      <p class="auth-error" id="genKeyError" role="alert"></p>
-      <button class="btn-ghost recovery-reset" id="genKey" type="button">
-        Generate a new key
-      </button>
+      {% include '_recovery_key.html' %}
     </div>
 
     {% else %}
@@ -87,136 +83,36 @@
         are kept; only the unreadable tokens are cleared. Values that DO open under the
         current key are left untouched.
       </p>
-      <p class="auth-error" id="error" role="alert"></p>
-      <button class="btn-primary recovery-reset" id="reset" type="button">
-        Discard unrecoverable secrets and reset
-      </button>
+      {# THE TYPED PHRASE IS A FIELD, and the route checks it — a prompt() asked
+         the same question in a box the page could not style, and compared the
+         answer in the browser before the route compared it again. A mismatch is
+         drawn beside the button and nothing is changed; a completed reset
+         navigates to the calendar, which is reachable again at once. #}
+      <form class="recovery-confirm" hx-post="/admin/encryption/recovery/reset" hx-json-enc
+            hx-boost="false" hx-target="find .auth-error" hx-swap="innerHTML"
+            hx-disable="find button[type=submit]">
+        <label for="resetConfirm">This permanently discards every secret the current key
+          cannot open, and cannot be undone. Type <strong>{{ confirm_phrase }}</strong> to
+          confirm.</label>
+        <input type="text" id="resetConfirm" name="confirm" required autocomplete="off"
+               spellcheck="false" placeholder="{{ confirm_phrase }}">
+        <p class="auth-error" role="alert"></p>
+        <button class="btn-primary recovery-reset" type="submit">
+          Discard unrecoverable secrets and reset
+        </button>
+      </form>
     </div>
 
     {% endif %}
 
     <p class="auth-sub recovery-signout">
-      {# Not boosted: the handler below turns this into a JSON POST, and htmx
-         boosts every link under a boosted <body> without noticing that a
-         click handler already claimed it. #}
-      <a href="/logout" id="signout" hx-boost="false">Sign out</a>
+      {# The same control as the site menu's: a button posting itself, answered
+         with HX-Redirect to the sign-in page. It replaced a link to a GET that
+         does not exist, which a script intercepted and turned into this POST. #}
+      <button type="button" class="btn-ghost small" hx-post="/logout" hx-json-enc
+              hx-swap="none">Sign out</button>
     </p>
   </div>
 </div>
-
-{% if is_admin %}
-<script>
-// Wrapped, because a boosted navigation back to this page re-executes this
-// script in the same document: at top level its `const`s would be
-// redeclarations and the whole script would fail to parse, leaving the reset
-// and key-generation buttons bound to nothing.
-(function () {
-const CONFIRM_PHRASE = {{ confirm_phrase | tojson }};
-
-// Present only in the KEY_MISMATCH door — a lost-and-replaced key is already an
-// ordinary reset target, so this button does not exist in the KEY_MISSING case.
-const resetBtn = document.getElementById('reset');
-if (resetBtn) {
-  const err = document.getElementById('error');
-
-  async function runReset() {
-    err.textContent = '';
-    const typed = prompt(
-      'This permanently discards every secret the current key cannot open, and cannot ' +
-      'be undone. Type "' + CONFIRM_PHRASE + '" to confirm:');
-    if (typed === null) return;
-    if (typed.trim().toLowerCase() !== CONFIRM_PHRASE) {
-      err.textContent = 'That did not match — nothing was changed.';
-      return;
-    }
-    resetBtn.disabled = true;
-    try {
-      const resp = await fetch('/api/admin/encryption/recovery/reset', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({confirm: typed.trim()}),
-      });
-      const data = await resp.json().catch(() => ({}));
-      if (resp.ok && data.ok) { window.location = '/'; return; }
-      err.textContent = data.error || 'The reset could not be completed.';
-    } catch (e) {
-      err.textContent = 'Could not reach the server.';
-    }
-    resetBtn.disabled = false;
-  }
-
-  resetBtn.addEventListener('click', runReset);
-}
-
-// Present only in the KEY_MISSING door — generates a key the admin has never
-// had before, for when the original is gone for good. Stateless on the server
-// (nothing is written until the admin saves it to their own environment and
-// restarts), so revealing it more than once is harmless.
-const genKeyBtn = document.getElementById('genKey');
-if (genKeyBtn) {
-  const genErr = document.getElementById('genKeyError');
-  const reveal = document.getElementById('genKeyReveal');
-
-  genKeyBtn.addEventListener('click', async () => {
-    genErr.textContent = '';
-    genKeyBtn.disabled = true;
-    try {
-      const resp = await fetch('/api/admin/encryption/recovery/generate-key', {
-        method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
-      });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok || !data.ok) {
-        genErr.textContent = data.error || 'Could not generate a key.';
-        genKeyBtn.disabled = false;
-        return;
-      }
-      reveal.innerHTML =
-        '<p><strong>Save this key now — it is shown once and never again.</strong></p>' +
-        '<div class="share-link-box"><input type="text" id="genKeyValue" readonly value="' +
-        data.key.replace(/"/g, '&quot;') + '"><button type="button" class="btn-ghost small" ' +
-        'id="genKeyCopy">Copy</button></div>' +
-        '<p>Set it as <code>{{ env_var }}</code> in your environment (env file, Docker ' +
-        '<code>-e</code>, or compose <code>environment:</code>) and restart the app.</p>';
-      reveal.hidden = false;
-      document.getElementById('genKeyCopy').addEventListener('click', () => {
-        const input = document.getElementById('genKeyValue');
-        input.select();
-        try { navigator.clipboard.writeText(input.value); } catch (_) { document.execCommand('copy'); }
-      });
-      genKeyBtn.textContent = 'Generate a different key';
-      genKeyBtn.disabled = false;
-    } catch (e) {
-      genErr.textContent = 'Could not reach the server.';
-      genKeyBtn.disabled = false;
-    }
-  });
-}
-
-// Sign-out is a JSON-only POST like everywhere else, so the plain link is wired up
-// to fire it rather than navigating to a GET that does not exist.
-document.getElementById('signout').addEventListener('click', async (e) => {
-  e.preventDefault();
-  try {
-    await fetch('/logout', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
-    });
-  } catch (_) { /* fall through to the redirect regardless */ }
-  window.location = '/login';
-});
-})();
-</script>
-{% else %}
-<script>
-document.getElementById('signout').addEventListener('click', async (e) => {
-  e.preventDefault();
-  try {
-    await fetch('/logout', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
-    });
-  } catch (_) { /* fall through */ }
-  window.location = '/login';
-});
-</script>
-{% endif %}
 </body>
 </html>

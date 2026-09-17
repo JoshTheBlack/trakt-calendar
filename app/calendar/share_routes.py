@@ -167,14 +167,8 @@ def _resolve_source(params: _Params) -> str | None:
 def _resolve_owner_tz(share_row, settings) -> ZoneInfo:
     """The owner's default timezone: their share-specific override if they set
     one, else their account's own saved timezone, else the app-wide default."""
-    for name in (share_row["timezone"], share_row["owner_account_timezone"], settings.timezone, "UTC"):
-        if not name:
-            continue
-        try:
-            return ZoneInfo(name)
-        except (ZoneInfoNotFoundError, ValueError):
-            continue
-    return ZoneInfo("UTC")
+    return clock.first_zone(share_row["timezone"], share_row["owner_account_timezone"],
+                            settings.timezone)
 
 
 def _resolve_tz(params: _Params, share_row, settings) -> ZoneInfo:

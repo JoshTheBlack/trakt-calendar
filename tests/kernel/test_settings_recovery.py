@@ -95,7 +95,7 @@ class HandEditedSettingsFileTests(SettingsFileTestCase):
         self.make_user("someone", calendar_approved=True)
         resp = self.client.post("/login", json={"username": "someone",
                                                 "password": PASSWORD})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.status_code, 204, resp.text)
         self.assert_credentials_intact()
 
     def test_the_hand_edited_value_still_reaches_the_database_and_leaves_the_file(self):
@@ -248,7 +248,7 @@ class PublicBaseUrlOverrideTests(SettingsFileTestCase):
 
         with self.with_env(ORIGIN):
             allowed = self.client.post("/login", json=credentials)
-        self.assertEqual(allowed.status_code, 200, allowed.text)
+        self.assertEqual(allowed.status_code, 204, allowed.text)
 
     def test_the_environment_wins_over_a_stored_value(self):
         with self.with_env("https://shows.example.com"):

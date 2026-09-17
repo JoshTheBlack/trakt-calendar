@@ -1,0 +1,30 @@
+{# A KEY FOR AN INSTANCE WHOSE ORIGINAL IS LOST, answered by POST
+   /admin/encryption/recovery/generate-key into #recoveryGenerate.
+
+   THIS ANSWER IS THE ONLY PLACE THE KEY EVER IS. The route stores nothing, the
+   recovery page draws no key when it loads, and pressing the button again answers a
+   different key — so a key that has left the screen cannot be put back on it, which
+   is the whole of what "shown once" means. The copy button is ui.js's `data-copy`,
+   the one part only a browser can do.
+
+   The button stays under the key, relabelled, so generating another is the same
+   press rather than a reload. #}
+<div id="recoveryGenerate">
+  {% if key %}
+  <div class="recovery-key">
+    <p><strong>Save this key now — it is shown once and never again.</strong></p>
+    <div class="share-link-box">
+      <input type="text" id="genKeyValue" readonly value="{{ key }}"
+             aria-label="The new encryption key" autocomplete="off">
+      <button type="button" class="btn-ghost small" data-copy="#genKeyValue">Copy</button>
+    </div>
+    <p>Set it as <code>{{ env_var }}</code> in your environment (env file, Docker
+      <code>-e</code>, or compose <code>environment:</code>) and restart the app.</p>
+  </div>
+  {% endif %}
+  <button class="btn-ghost recovery-reset" type="button"
+          hx-post="/admin/encryption/recovery/generate-key" hx-json-enc
+          hx-target="#recoveryGenerate" hx-swap="outerHTML">
+    {{ "Generate a different key" if key else "Generate a new key" }}
+  </button>
+</div>

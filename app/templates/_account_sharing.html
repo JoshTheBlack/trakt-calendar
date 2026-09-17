@@ -1,0 +1,39 @@
+{% import '_toast.html' as toast %}
+{# WHAT A SHARED CALENDAR SAYS ABOUT YOUR VIEWING.
+
+   ON THIS PAGE RATHER THAN IN THE SHARE PANEL, and the difference is not
+   cosmetic: every option in that panel is a view option a link may override,
+   and this one decides whether a viewing history is published at all. It is
+   one answer for the account, so turning it off reaches links handed out
+   months ago — which is what somebody changing their mind actually needs.
+
+   ON BY DEFAULT, with the switch shipping in the same change that turned it
+   on. A default nobody can change is the part that would be hard to take
+   back.
+
+   THE BOX POSTS ITS FORM ON CHANGE, with a hidden "0" before it so an unticked box
+   still says so, and the answer is this section drawn from what was STORED — a
+   refused save leaves the box as it was, because the server never wrote the other
+   state. A saved change is also said as a toast: it changes what links handed out
+   months ago publish, which nothing on this page shows. #}
+<div class="auth-list" id="shareWatchHistory">
+  <div class="row">
+    <span class="label">Shared calendars</span>
+    <div class="row-main">
+      <form hx-post="/me/share-watch-history" hx-json-enc hx-boost="false" hx-trigger="change"
+            hx-target="#shareWatchHistory" hx-swap="outerHTML">
+        <label>
+          <input type="hidden" name="enabled" value="0">
+          <input type="checkbox" id="shareWatchHistoryBox" name="enabled" value="1"
+                 autocomplete="off"{% if share_watch_history %} checked{% endif %}>
+          <span>Show which episodes you have watched</span>
+        </label>
+      </form>
+      <p class="auth-sub">Anyone holding one of your links sees the same
+        watched marks your own calendar shows. Turning this off applies to
+        every link you have already shared, straight away.</p>
+      <span class="auth-error" role="alert">{% if not sharing_ok %}{{ sharing_message }}{% endif %}</span>
+    </div>
+  </div>
+</div>
+{% if sharing_ok %}{{ toast.flash(sharing_message) }}{% endif %}

@@ -99,7 +99,15 @@ async def request_pin(client_id: str) -> dict:
     linked, rather than the weaker four-digit code meant for TV-style manual
     entry — this flow reads the token straight off the poll response instead.
     """
-    resp = await POOL.client().post(PINS_URL, headers=_headers(client_id), data={"strong": "true"})
+    # A transport failure is a PinError like any other. Measured in the browser
+    # pass: a pooled connection dropped by the far end raised httpx.ReadError out of
+    # here, the start answered 500, and a 500 is never drawn — so pressing the Plex
+    # button did nothing at all instead of saying sign-in was unavailable.
+    try:
+        resp = await POOL.client().post(PINS_URL, headers=_headers(client_id),
+                                        data={"strong": "true"})
+    except httpx.HTTPError as exc:
+        raise PinError(f"plex.tv PIN request failed: {type(exc).__name__}") from exc
     if resp.status_code not in (200, 201):
         raise PinError(f"plex.tv PIN request returned HTTP {resp.status_code}.")
     try:
@@ -138,7 +146,12 @@ async def poll_pin(pin_id: int, client_id: str) -> str | None:
     lifetime there is independent of this app's handshake row, and either can
     lapse first.
     """
-    resp = await POOL.client().get(f"{PINS_URL}/{pin_id}", headers=_headers(client_id))
+    # For the reason request_pin gives: a transport failure answered as a 500 is a
+    # poll whose flow is never told it ended.
+    try:
+        resp = await POOL.client().get(f"{PINS_URL}/{pin_id}", headers=_headers(client_id))
+    except httpx.HTTPError as exc:
+        raise PinError(f"plex.tv PIN status failed: {type(exc).__name__}") from exc
     if resp.status_code == 404:
         raise PinError("This sign-in code is no longer valid.")
     if resp.status_code != 200:

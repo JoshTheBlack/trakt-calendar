@@ -235,8 +235,8 @@ class AdminToggleTests(RankerTestCase):
         target = self.make_user("target", calendar_approved=True)
         self.sign_in_as(self.admin_id)
         for approved in (True, False, True):
-            resp = self.client.post(f"/api/admin/users/{target}/approval",
-                                    json={"ranker": approved})
+            resp = self.client.post(f"/admin/users/{target}/approval",
+                                    json={"grant": "ranker", "value": "1" if approved else "0"})
             self.assertEqual(resp.status_code, 200)
             self.assertEqual(
                 self.value("SELECT ranker_approved FROM users WHERE id = ?", (target,)),
@@ -247,14 +247,15 @@ class AdminToggleTests(RankerTestCase):
         the others."""
         target = self.make_user("independent", calendar_approved=True, distrakt_approved=True)
         self.sign_in_as(self.admin_id)
-        self.client.post(f"/api/admin/users/{target}/approval", json={"ranker": True})
+        self.client.post(f"/admin/users/{target}/approval", json={"grant": "ranker", "value": "1"})
         row = asyncio.run(auth.get_user(target))
         self.assertEqual((row["calendar_approved"], row["distrakt_approved"]), (1, 1))
 
     def test_a_non_admin_cannot_grant_it(self):
         target = self.make_user("victim", calendar_approved=True)
         self.sign_in_as(self.ranker_user("not_an_admin"))
-        resp = self.client.post(f"/api/admin/users/{target}/approval", json={"ranker": True})
+        resp = self.client.post(f"/admin/users/{target}/approval",
+                                json={"grant": "ranker", "value": "1"})
         self.assertEqual(resp.status_code, 403)
         self.assertEqual(
             self.value("SELECT ranker_approved FROM users WHERE id = ?", (target,)), 0)
@@ -275,14 +276,14 @@ class InviteGrantTests(RankerTestCase):
 
     def test_an_invite_with_the_flag_produces_an_approved_account(self):
         resp = self._register("invited_yes", self._invite(grants_ranker_on_accept=True))
-        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.status_code, 204, resp.text)
         self.assertEqual(
             self.value("SELECT ranker_approved FROM users WHERE username = ?",
                        ("invited_yes",)), 1)
 
     def test_an_invite_without_it_does_not(self):
         resp = self._register("invited_no", self._invite(grants_ranker_on_accept=False))
-        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.status_code, 204, resp.text)
         self.assertEqual(
             self.value("SELECT ranker_approved FROM users WHERE username = ?",
                        ("invited_no",)), 0)
@@ -298,15 +299,19 @@ class InviteGrantTests(RankerTestCase):
             self.value("SELECT ranker_approved FROM users WHERE username = ?",
                        ("legacy_invitee",)), 0)
 
-    def test_the_api_defaults_the_flag_on(self):
+    def test_the_form_defaults_the_flag_on(self):
         """The checkbox ships checked, so an issuer who does not think about it
         gets the same behaviour the calendar's flag already has."""
         self.sign_in_as(self.admin_id)
-        resp = self.client.post("/api/admin/invites", json={"label": "default"})
+        page = self.client.get("/admin").text
+        self.assertRegex(page, r'<input type="checkbox" name="grants_ranker_on_accept"[^>]*checked')
+        # What that form posts untouched: the box's value after its companion.
+        resp = self.client.post("/admin/invites", json={
+            "label": "default", "grants_ranker_on_accept": ["0", "1"]})
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(
-            self.value("SELECT grants_ranker_on_accept FROM invites WHERE id = ?",
-                       (resp.json()["id"],)), 1)
+            self.value("SELECT grants_ranker_on_accept FROM invites WHERE label = ?",
+                       ("default",)), 1)
 
 
 class BoardTests(RankerTestCase):

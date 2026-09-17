@@ -102,14 +102,7 @@ def _resolve_viewer_tz(user, settings) -> ZoneInfo:
     """The viewer's saved timezone, falling back to the app-wide default and then
     UTC if either name turns out to be unusable (e.g. a stale settings.json value
     predating a tzdata rename)."""
-    for name in (user.timezone, settings.timezone, "UTC"):
-        if not name:
-            continue
-        try:
-            return ZoneInfo(name)
-        except (ZoneInfoNotFoundError, ValueError):
-            continue
-    return ZoneInfo("UTC")
+    return clock.first_zone(user.timezone, settings.timezone)
 
 
 def _count_visible(grouped: list[dict], not_watching: set[str]) -> None:

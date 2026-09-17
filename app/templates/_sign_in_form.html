@@ -1,0 +1,29 @@
+{# THE SIGNED-OUT PAGES' ONE FORM SHAPE: sign-in, registration and first-run
+   setup. The caller draws the fields; this draws everything they share.
+
+   A REAL <form>, SUBMITTED BY THE BROWSER, which is what deleted three copies of a
+   script: Enter submits a form on its own (the shared `window.__authEnterHandler`
+   existed to stop a boosted return from stacking a second one), `required` and
+   `minlength` are checked before anything is sent, and a password manager recognises
+   the fields. htmx posts it through json-enc, because the shape guard admits
+   application/json only.
+
+   THE ANSWER IS ONE OF TWO THINGS. A refusal is the sentence drawn into the error
+   line (`hx-target`), at 200 — unknown username, wrong password, a lockout and a
+   disabled account all draw the same one, so the page is no more an oracle than the
+   status used to be. A success is `204` with `HX-Redirect`, which navigates the
+   whole window: a signed-in page has different scripts in its <head> than this one,
+   and a navigation is what loads them.
+
+   `hx-disable` HOLDS THE SUBMIT BUTTON while the request is out, which is what the
+   script's `btn.disabled` did, with nothing to put back if the request fails.
+   `hx-boost="false"` because htmx boosts every form under a boosted <body>, and
+   this one is not a navigation. #}
+{% macro form(action, submit_label) %}
+<form class="auth-form" hx-post="{{ action }}" hx-json-enc hx-boost="false"
+      hx-target="find .auth-error" hx-swap="innerHTML" hx-disable="find button[type=submit]">
+  {{ caller() }}
+  <p class="auth-error" role="alert"></p>
+  <button class="btn-primary" type="submit">{{ submit_label }}</button>
+</form>
+{% endmacro %}

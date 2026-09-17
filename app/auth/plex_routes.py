@@ -3,12 +3,27 @@
 Three entry points, no callback:
 
   GET  /auth/plex/start   public. Requests a PIN, begins a SIGN-IN (or, with an
-                           invite, a registration), and hands the browser a
-                           popup URL plus the `state` to poll with.
+                           invite, a registration), and answers with the waiting
+                           block: the popup's address and the poll that follows it.
   GET  /auth/plex/link    signed in. Same, but begins a LINK of a Plex account
                            onto the account already in session.
-  POST /auth/plex/poll    public. A same-origin fetch the page repeats every
-                           couple of seconds until the popup has been approved.
+  POST /auth/plex/poll    public. A form in that block posts itself every couple of
+                           seconds until the PIN has been approved.
+
+EVERY ANSWER IS MARKUP, templates/_plex_flow.html. A poll that finds the PIN still
+waiting answers 204, which htmx swaps nowhere, so the form that asked asks again.
+Every answer that ends the flow — a refusal, an upstream failure, running out of
+time — is drawn in its place at 200, which removes the form and with it the poll.
+Signing in is `204` with `HX-Redirect`, a navigation of the whole window.
+
+WHERE THE FLOW'S STATE LIVES, because a sign-in has no session to key it to: the
+handshake row this module already wrote, named by its `state` — 256 random bits
+from secrets.token_urlsafe, never reused — and pinned to the browser that started
+it by an HttpOnly cookie holding the same value. The waiting block carries `state`
+back as a form field, exactly as the script that used to poll carried it in a
+variable. That makes it no weaker than it was: the cookie cannot be read by the
+page or sent by anyone else's browser, the refusal below is unchanged in every
+case, and a link handshake is still bound to the session that asked.
 
 Plex has no redirect/callback the way Trakt does — the popup approves the PIN
 entirely on plex.tv's own page, and this app only ever learns about it by
@@ -31,15 +46,17 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Request
+from fastapi.responses import Response
 
-from .. import auth, authz
+from .. import auth, authz, db
 from ..config import load_settings
+from ..templating import templates
 # `plex` is the flow's client; bound as plex_auth to keep it distinct from the
 # Plex-shaped names in this module.
 from . import plex as plex_auth
 from . import provider_login
+from . import routes as auth_routes
 from .levels import AuthLevel
 
 logger = logging.getLogger(__name__)
@@ -62,9 +79,35 @@ KEY_UNHEALTHY = (
     "administrator needs to restore ENCRYPTION_KEY before linking can continue."
 )
 
+TIMED_OUT = ("Timed out waiting for Plex. Press the Plex button again to start over.")
+
+# How often the waiting block asks. Long enough not to lean on plex.tv while
+# somebody finds the window and signs in; short enough that approving feels like
+# it did something.
+POLL_INTERVAL_SECONDS = 2
+
+# How long a flow is waited on before the page says so. Counted from the
+# handshake row's own `created_at`, so it is the same answer however many polls,
+# tabs or reloads there have been — the script this replaced counted from when
+# ITS timer started, which a second press restarted. Shorter than the handshake's
+# ten-minute life, which is a ceiling on replaying a `state`, not a wait anybody
+# should sit through.
+WAIT_SECONDS = 3 * 60
+
+
+def _drawn(request: Request, **context) -> Response:
+    """The flow block (templates/_plex_flow.html), with this answer's context."""
+    return templates.TemplateResponse(request, "_plex_flow.html", {
+        "request": request, "waiting": False, **context})
+
+
+def _stopped(request: Request, message: str) -> Response:
+    """An answer that ends the flow: the reason, drawn where the poll was."""
+    return _drawn(request, message=message)
+
 
 async def _begin(request: Request, *, purpose: str, session_id: str | None = None,
-                 invite_token: str | None = None) -> JSONResponse:
+                 invite_token: str | None = None) -> Response:
     """Request a PIN and record a handshake carrying it, before the browser ever
     leaves this app.
 
@@ -75,25 +118,31 @@ async def _begin(request: Request, *, purpose: str, session_id: str | None = Non
     Throttled per address ahead of that, because this is the one unauthenticated
     path that spends an outbound call to plex.tv and writes a row: without a
     limit it is a free way to make this instance hammer a third party.
+
+    `popup=blocked` is the page telling us the browser refused the window. The
+    flow starts regardless — the link in the answer is a way to approve the PIN
+    that no browser blocks, and the poll does not care which window approved it.
     """
     if await auth.handshake_start_limited(request):
-        return authz.error(TOO_MANY_STARTS, 429)
+        return _stopped(request, TOO_MANY_STARTS)
     client_id = await plex_auth.ensure_client_identifier()
     try:
         pin = await plex_auth.request_pin(client_id)
     except plex_auth.PinError as exc:
         logger.warning("Plex PIN request failed: %s", exc)
-        return authz.error(NOT_CONFIGURED, 503)
+        return _stopped(request, NOT_CONFIGURED)
 
     state = await auth.create_handshake(
         provider=PROVIDER, purpose=purpose, session_id=session_id,
         invite_token=invite_token or None, plex_pin_id=str(pin["id"]),
     )
-    response = JSONResponse({
-        "ok": True,
-        "state": state,
-        "popup_url": plex_auth.popup_url(client_id, pin["code"]),
-    })
+    response = _drawn(
+        request, waiting=True, state=state, interval=POLL_INTERVAL_SECONDS,
+        popup_url=plex_auth.popup_url(client_id, pin["code"]),
+        popup_blocked=request.query_params.get("popup") == "blocked",
+    )
+    # The answer names a handshake, so no cache along the way may keep a copy.
+    response.headers["Cache-Control"] = "no-store"
     # Pins the handshake to this browser as well as to this row, so a poll
     # arriving from anywhere else is refused before the row is even read.
     auth.set_handshake_cookie(response, state, load_settings(), request)
@@ -140,7 +189,7 @@ async def plex_poll(request: Request):
     state = str(data.get("state") or "").strip()
 
     if not auth.handshake_cookie_matches(request, settings, state):
-        return authz.error(auth.HANDSHAKE_REJECTED, 400)
+        return _stopped(request, auth.HANDSHAKE_REJECTED)
 
     current = await auth.current_user(request)
     try:
@@ -148,23 +197,29 @@ async def plex_poll(request: Request):
             state, provider=PROVIDER, session_id=current.session_id if current else None,
         )
     except auth.HandshakeError:
-        return authz.error(auth.HANDSHAKE_REJECTED, 400)
+        return _stopped(request, auth.HANDSHAKE_REJECTED)
+
+    # AFTER the binding checks, so how long somebody else's flow has been waiting
+    # is not something a refused poll can learn.
+    if db.now() - int(row["created_at"]) > WAIT_SECONDS:
+        return _stopped(request, TIMED_OUT)
 
     client_id = await plex_auth.ensure_client_identifier()
     try:
         auth_token = await plex_auth.poll_pin(int(row["plex_pin_id"]), client_id)
     except plex_auth.PinError as exc:
         logger.warning("Plex PIN poll failed: %s", exc)
-        return authz.error(UPSTREAM_FAILED, 502)
+        return _stopped(request, UPSTREAM_FAILED)
 
     if auth_token is None:
-        return JSONResponse({"ok": True, "status": "pending"})
+        # Nothing to draw: the block asking stays as it is and asks again.
+        return Response(status_code=204)
 
     try:
         account = await plex_auth.fetch_account(auth_token, client_id)
     except plex_auth.AccountLookupError as exc:
         logger.warning("Plex account lookup failed: %s", type(exc).__name__)
-        return authz.error(UPSTREAM_FAILED, 502)
+        return _stopped(request, UPSTREAM_FAILED)
 
     try:
         handshake = await auth.consume_handshake(
@@ -173,7 +228,7 @@ async def plex_poll(request: Request):
     except auth.HandshakeError:
         # Expired, or another poll already finished this one — a real race, not
         # an attack, but there is nothing left to complete here either way.
-        return authz.error(auth.HANDSHAKE_REJECTED, 400)
+        return _stopped(request, auth.HANDSHAKE_REJECTED)
 
     identity = auth.ProviderIdentity(
         provider=PROVIDER,
@@ -191,50 +246,37 @@ async def plex_poll(request: Request):
     return await _finish_login(request, settings, identity, handshake)
 
 
-def _refusal_json(refusal: provider_login.Refusal) -> JSONResponse:
-    """Render a shared refusal as this medium's error body.
-
-    The encryption one carries a machine-readable `reason` on top of the prose,
-    because it is the single refusal here the page can DO something about —
-    it points an administrator at a fixable instance-level state rather than at
-    anything about this account. The others deliberately look alike to a client.
-    """
-    if refusal.kind == provider_login.KEY_UNHEALTHY:
-        return authz.error(refusal.message, refusal.status, reason="key_unhealthy")
-    return authz.error(refusal.message, refusal.status)
-
-
 async def _finish_link(request: Request, settings, identity: auth.ProviderIdentity, current):
-    """Render provider_login's link completion as this flow's JSON answer.
+    """Render provider_login's link completion as this flow's answer.
 
     The policy — who may link what, and the refusals — is in
     app/auth/provider_login.py, shared with Trakt. What is left here is the
-    medium: a poll is answered by an XHR, not by a navigation.
+    medium: a refusal is drawn where the poll was, and a link navigates.
     """
     outcome = await provider_login.complete_provider_link(
         identity=identity, current=current,
         already_linked=ALREADY_LINKED, key_unhealthy=KEY_UNHEALTHY,
     )
     if isinstance(outcome, provider_login.Refusal):
-        return _refusal_json(outcome)
-    response = JSONResponse({"ok": True, "redirect": outcome.redirect_target})
+        return _stopped(request, outcome.message)
+    response = auth_routes.go_to(outcome.redirect_target)
     auth.clear_handshake_cookie(response, settings, request)
     return response
 
 
 async def _finish_login(request: Request, settings, identity: auth.ProviderIdentity, handshake):
-    """Render provider_login's sign-in completion as this flow's JSON answer.
+    """Render provider_login's sign-in completion as this flow's answer.
 
-    The browser navigates itself using `redirect` — there is no 303 to follow,
-    because the caller here is a fetch inside a page that is already open.
+    `HX-Redirect` rather than a 303: the caller is a request from a page that is
+    already open, and a redirect status would be followed and swapped into it.
     """
     outcome = await provider_login.complete_provider_login(
         identity=identity, handshake=handshake, request=request, settings=settings,
         already_linked=ALREADY_LINKED,
     )
     if isinstance(outcome, provider_login.Refusal):
-        return _refusal_json(outcome)
-    response = JSONResponse({"ok": True, "redirect": outcome.redirect_target})
+        return _stopped(request, outcome.message)
+    response = auth_routes.go_to(outcome.redirect_target)
     provider_login.attach_session(response, outcome, settings, request)
     return response
 

@@ -10,8 +10,8 @@ app/auth. Two things here are load-bearing and must survive any restyling:
     ADMIN dependency here would bounce a signed-in non-admin to /me — which is also
     gated back to here — into a redirect loop. So it resolves the viewer itself:
     anonymous -> sign in, non-admin -> a plain 'ask an administrator' page, admin ->
-    the two recovery doors. The destructive reset endpoint stays ADMIN, because it
-    is a fetch() call that returns a status a loop cannot form around.
+    the two recovery doors. Its two ACTIONS stay ADMIN, because each is a request a
+    control on that page makes, answered in place, which a loop cannot form around.
 
   - The reset is destructive and reuses the type-to-confirm pattern the admin
     account-delete uses: the caller must echo an exact phrase back, checked
@@ -22,8 +22,8 @@ from __future__ import annotations
 import logging
 import os
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi import APIRouter, Request
+from fastapi.responses import RedirectResponse, Response
 
 # `auth` is this module's OWN package, read through the package object one level
 # up: auth.current_user is the surface app/auth/__init__.py exists to present, and
@@ -198,8 +198,8 @@ async def recovery_page(request: Request):
     return templates.TemplateResponse(request, "encryption_recovery.html", context)
 
 
-@guard.post("/api/admin/encryption/recovery/generate-key", AuthLevel.ADMIN)
-async def recovery_generate_key():
+@guard.post("/admin/encryption/recovery/generate-key", AuthLevel.ADMIN)
+async def recovery_generate_key(request: Request):
     """A freshly generated key for an admin who has lost the original entirely.
 
     Stateless and side-effect-free — same generate_key() the enable flow's
@@ -208,24 +208,42 @@ async def recovery_generate_key():
     That restart is what turns KEY_MISSING into an ordinary KEY_MISMATCH (the
     new key does not decrypt the old canary), at which point the reset below
     is how the admin actually discards what the lost key made unrecoverable.
+
+    SHOWN ONCE, AND THAT IS WHAT THE MARKUP GUARANTEES. The key is in this answer
+    and nowhere else: it is never stored, the page draws no key when it loads, and
+    pressing again answers a DIFFERENT key rather than this one again — so nothing
+    can put a key back on screen once it has left it.
     """
-    return JSONResponse({"ok": True, "key": encryption_flow.generate_key()})
+    await authz.json_body(request)
+    response = _recovery_answer(request, "_recovery_key.html",
+                                key=encryption_flow.generate_key(),
+                                env_var=secrets_box.ENV_VAR)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
-@guard.post("/api/admin/encryption/recovery/reset", AuthLevel.ADMIN)
+@guard.post("/admin/encryption/recovery/reset", AuthLevel.ADMIN)
 async def recovery_reset(request: Request):
     """The typed-confirmation destructive reset — the recovery path taken when the
     original key is truly gone (the other path is simply restoring it, which needs no
     endpoint). Only meaningful while the key is actually wrong; refused otherwise so
-    it can never blank a healthy instance's values by mistake."""
-    if encryption_flow.health() != encryption_flow.KEY_MISMATCH:
-        return authz.error(
-            "There is nothing to reset — the current key matches the stored secrets.",
-            409,
-        )
+    it can never blank a healthy instance's values by mistake.
+
+    A refusal is drawn beside the form; a completed reset navigates to the calendar,
+    which is reachable again the moment the unreadable values are gone."""
     data = await authz.json_body(request)
+    if encryption_flow.health() != encryption_flow.KEY_MISMATCH:
+        return _recovery_answer(request, "_form_refusal.html", message=NOTHING_TO_RESET)
     typed = str(data.get("confirm") or "").strip().lower()
     if typed != RESET_CONFIRM_PHRASE:
-        return authz.error(f'Type "{RESET_CONFIRM_PHRASE}" exactly to confirm the reset.')
-    result = await encryption_flow.destructive_reset()
-    return JSONResponse({"ok": True, **result})
+        return _recovery_answer(request, "_form_refusal.html", message=(
+            f'Type "{RESET_CONFIRM_PHRASE}" exactly to confirm the reset. Nothing was changed.'))
+    await encryption_flow.destructive_reset()
+    return Response(status_code=204, headers={"HX-Redirect": "/"})
+
+
+NOTHING_TO_RESET = "There is nothing to reset — the current key matches the stored secrets."
+
+
+def _recovery_answer(request: Request, template: str, **context):
+    return templates.TemplateResponse(request, template, {"request": request, **context})

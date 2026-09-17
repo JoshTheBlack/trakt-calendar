@@ -24,16 +24,30 @@
        are deliberately absent — nothing rendered here reacts to them. #}
     {% import '_nav.html' as site_nav %}
     {% macro hero_controls() %}
-            <div class="control" title="{{ endpoint.description }}">
+            {# A GET FORM ASKING FOR THIS PAGE AGAIN, which is all the script it
+               replaced did: it built `/?endpoint=…&year=…` and navigated. It stays
+               on the picker rather than jumping into a month — this page is where
+               you choose one, so switching the calendar type must not also choose
+               it — and it carries no `month`, because "/" reads one as a request
+               for that calendar and redirects into it.
+
+               htmx boosts a form on `submit` only, so a boosted form cannot act on
+               a select's `change`. This one opts out of boosting and says the same
+               thing itself: ask on change, draw the answer as the page, and put it
+               in the address bar. With no htmx at all it is still a GET form. #}
+            <form class="control" action="/" method="get" title="{{ endpoint.description }}"
+                  hx-boost="false" hx-get="/" hx-trigger="change" hx-target="body"
+                  hx-push-url="true">
+                <input type="hidden" name="year" value="{{ year }}">
                 <label for="endpointSelect">📡</label>
                 {# See index.html: a restored value overriding the rendered
                    `selected` is unreachable on a select that acts on `change`. #}
-                <select id="endpointSelect" autocomplete="off" data-url-state onchange="switchPickEndpoint(this.value)">
+                <select id="endpointSelect" name="endpoint" autocomplete="off" data-url-state>
                     {% for ep in endpoints %}
                     <option value="{{ ep.key }}"{% if ep.key == endpoint.key %} selected{% endif %}>{{ ep.label }}</option>
                     {% endfor %}
                 </select>
-            </div>
+            </form>
     {% endmacro %}
     {% call site_nav.navbar(controls=hero_controls,
                             calendar_available=calendar_available,
@@ -73,19 +87,6 @@
             </div>
         </div>
     </div>
-<script>
-    // Stays on the picker rather than jumping into a month: this page is where
-    // you choose one, so switching the calendar type must not also choose it.
-    // Carrying the existing query forward is why `month` is dropped explicitly —
-    // "/" reads one as a request for that calendar and redirects into it.
-    function switchPickEndpoint(key) {
-        const params = new URLSearchParams(window.location.search);
-        params.delete('month');
-        params.set('endpoint', key);
-        params.set('year', '{{ year }}');
-        window.location = '/?' + params.toString();
-    }
-</script>
 {% include "_footer.html" %}
 </body>
 </html>

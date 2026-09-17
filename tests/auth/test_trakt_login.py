@@ -14,6 +14,7 @@ No network: the code exchange and the account lookup are patched.
 from __future__ import annotations
 
 import asyncio
+import re
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
@@ -699,7 +700,10 @@ class RefreshSerializationTests(TraktOAuthTestCase):
 
 class UnlinkTests(TraktOAuthTestCase):
     """Unlinking now also asks Trakt to forget the authorization, so every test
-    here patches that call — without it they reach the real api.trakt.tv."""
+    here patches that call — without it they reach the real api.trakt.tv.
+
+    The answer is the whole account card at 200 (unlinking changes several of its
+    sections), with any sentence in the line under the linked services."""
 
     def setUp(self):
         super().setUp()
@@ -712,15 +716,26 @@ class UnlinkTests(TraktOAuthTestCase):
         self.revoke_mock = patcher.start()
         self.addCleanup(patcher.stop)
 
+    def unlink(self, provider="trakt"):
+        return self.client.post("/me/identities/unlink", json={"provider": provider})
+
+    def said(self, resp) -> str:
+        """The sentence under the linked services."""
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIn('id="accountCard"', resp.text)
+        identities = resp.text.split('id="accountIdentities"', 1)[1]
+        return re.search(r'<p class="auth-error[^"]*" role="\w+">(.*?)</p>', identities, re.S).group(1)
+
     def test_unlinking_revokes_the_token_at_trakt(self):
         user = self.make_user("revoker", calendar_approved=True)
         self.sign_in_as(user)
         self.callback(self.start("/auth/trakt/link"))
         stored = self.identities()[0]["access_token"]
-        resp = self.client.post("/api/me/identities/unlink", json={"provider": "trakt"})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        resp = self.unlink()
+        self.assertEqual(self.said(resp), "")
         self.assertEqual(self.revoked, [stored])
-        self.assertIsNone(resp.json()["warning"])
+        # The card redrawn without the row's unlink and with its Connect back.
+        self.assertIn('href="/auth/trakt/link"', resp.text)
 
     def test_a_refused_unlink_does_not_revoke_the_token(self):
         """The account keeps the identity, so the token it holds has to keep
@@ -728,8 +743,7 @@ class UnlinkTests(TraktOAuthTestCase):
         pointing at a dead credential."""
         self.sign_out()
         self.callback(self.start(invite=self.mint_invite()))
-        resp = self.client.post("/api/me/identities/unlink", json={"provider": "trakt"})
-        self.assertEqual(resp.status_code, 409)
+        self.assertIn("only way you can sign in", self.said(self.unlink()))
         self.assertEqual(self.revoked, [])
         self.assertEqual(len(self.identities()), 1)
 
@@ -741,17 +755,15 @@ class UnlinkTests(TraktOAuthTestCase):
         self.sign_in_as(user)
         self.callback(self.start("/auth/trakt/link"))
         self.revoke_mock.side_effect = httpx.HTTPError("down")
-        resp = self.client.post("/api/me/identities/unlink", json={"provider": "trakt"})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        resp = self.unlink()
         self.assertEqual(self.identities(), [])
-        self.assertIn("trakt.tv", resp.json()["warning"])
+        self.assertIn("trakt.tv", self.said(resp))
 
     def test_a_user_with_a_password_can_unlink(self):
         user = self.make_user("linker", calendar_approved=True)
         self.sign_in_as(user)
         self.callback(self.start("/auth/trakt/link"))
-        resp = self.client.post("/api/me/identities/unlink", json={"provider": "trakt"})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(self.said(self.unlink()), "")
         self.assertEqual(self.identities(), [])
 
     def test_the_last_login_method_cannot_be_unlinked(self):
@@ -759,26 +771,30 @@ class UnlinkTests(TraktOAuthTestCase):
         by anybody, including its owner, and there is no self-service way back."""
         self.sign_out()
         self.callback(self.start(invite=self.mint_invite()))
-        resp = self.client.post("/api/me/identities/unlink", json={"provider": "trakt"})
-        self.assertEqual(resp.status_code, 409)
+        self.assertIn("only way you can sign in", self.said(self.unlink()))
         self.assertEqual(len(self.identities()), 1)
 
-    def test_unlinking_something_that_is_not_linked_is_a_404(self):
+    def test_unlinking_something_that_is_not_linked_is_refused(self):
         user = self.make_user("plain", calendar_approved=True)
         self.sign_in_as(user)
-        resp = self.client.post("/api/me/identities/unlink", json={"provider": "plex"})
-        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(self.said(self.unlink("plex")), "That account isn&#39;t linked.")
 
     def test_an_unknown_provider_is_rejected(self):
         user = self.make_user("plain", calendar_approved=True)
         self.sign_in_as(user)
-        resp = self.client.post("/api/me/identities/unlink", json={"provider": "netflix"})
-        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.said(self.unlink("netflix")), "Unknown provider.")
 
     def test_unlink_requires_a_session(self):
         self.sign_out()
-        resp = self.client.post("/api/me/identities/unlink", json={"provider": "trakt"})
-        self.assertEqual(resp.status_code, 401)
+        self.assertEqual(self.unlink().status_code, 401)
+
+    def test_unlink_refuses_a_form_encoded_body(self):
+        user = self.make_user("formpost", calendar_approved=True)
+        self.sign_in_as(user)
+        self.callback(self.start("/auth/trakt/link"))
+        resp = self.client.post("/me/identities/unlink", data={"provider": "trakt"})
+        self.assertEqual(resp.status_code, 415)
+        self.assertEqual(len(self.identities()), 1)
 
 
 class PublicBaseUrlTests(TraktOAuthTestCase):
@@ -920,13 +936,14 @@ class ProviderButtonTests(TraktOAuthTestCase):
         self.assertIn('href="/auth/trakt/link"', self.client.get("/me").text)
         self.callback(self.start("/auth/trakt/link"))
         body = self.client.get("/me").text
-        self.assertIn('data-unlink="trakt"', body)
+        self.assertIn('id="confirm-unlink-trakt"', body)
+        self.assertIn('hx-vals=\'{"provider": "trakt"}\'', body)
         self.assertNotIn('href="/auth/trakt/link"', body)
 
     def test_an_oauth_only_account_is_not_offered_an_unlink_it_cannot_use(self):
         self.sign_out()
         self.callback(self.start(invite=self.mint_invite()))
-        self.assertNotIn('data-unlink="trakt"', self.client.get("/me").text)
+        self.assertNotIn('id="confirm-unlink-trakt"', self.client.get("/me").text)
 
     def test_the_registration_page_carries_the_invite_into_the_provider_flow(self):
         self.sign_out()

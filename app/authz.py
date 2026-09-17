@@ -118,7 +118,7 @@ def declare(func: Callable, level: AuthLevel) -> Callable:
 
 # The ceiling on a JSON body, in bytes. Sized by the largest LEGITIMATE payload
 # the app sends, which is NOT a ranker board save (1000 titles, comfortably under
-# a megabyte) but an IMAGE: /api/me/avatar and /api/me/images carry the file as
+# a megabyte) but an IMAGE: /me/avatar and /me/images carry the file as
 # base64 inside the JSON, and user_images.MAX_UPLOAD_BYTES allows 4 MB DECODED,
 # which is ~5.6 MB once base64 has added its third. A cap below that would refuse
 # every ordinary upload with a 413 that says nothing about images, and the real
@@ -487,11 +487,12 @@ def _install_first_run_gate(app: FastAPI) -> None:
 
 
 # Reachable while the encryption key is wrong, when everything else is gated to the
-# recovery screen: the recovery page and its API, sign-in (so an admin whose session
-# lapsed can get back in), the health probe, and static assets. The recovery page
-# resolves the viewer itself, so it is reachable signed-out to send them to /login.
-KEY_MISMATCH_PATHS = ("/healthz", "/login", "/logout")
-KEY_MISMATCH_PREFIXES = ("/static/", "/admin/encryption/", "/api/admin/encryption/")
+# recovery screen: the recovery page and its actions, sign-in (so an admin whose
+# session lapsed can get back in) with the cookie check its page asks for, the
+# health probe, and static assets. The recovery page resolves the viewer itself, so
+# it is reachable signed-out to send them to /login.
+KEY_MISMATCH_PATHS = ("/healthz", "/login", "/login/cookie-check", "/logout")
+KEY_MISMATCH_PREFIXES = ("/static/", "/admin/encryption/")
 
 
 def _install_key_mismatch_gate(app: FastAPI) -> None:

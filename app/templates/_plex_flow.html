@@ -1,0 +1,43 @@
+{# ONE PLEX SIGN-IN IN FLIGHT, or the reason it stopped. Drawn into #plexFlow
+   (_plex_signin.html) by the start and by any poll answer that ends the flow.
+
+   WHILE IT WAITS, A FORM POSTS ITSELF EVERY TWO SECONDS, carrying the handshake's
+   `state`. A poll that finds the PIN still unapproved answers 204, which htmx
+   swaps nowhere, so this block stays exactly as it is and the same form asks
+   again. Every other answer is drawn here, replacing the form — and htmx clears an
+   `every` trigger whose element has left the page, so the end of the flow and the
+   end of its polling are one event with no timer anywhere to forget.
+
+   `state` IN THE MARKUP IS NOT A CREDENTIAL, and this is the reason it may be
+   here. It names a handshake row; it signs nobody in. Every poll is refused unless
+   the browser ALSO holds the HttpOnly cookie carrying the same value, which no
+   script and no other browser can read or send, and a link handshake is further
+   bound to the session that started it (app/auth/handshakes.py). It is 256 random
+   bits, lives ten minutes, is single-use, and was in the page's own memory before
+   this markup existed — the script that polled held it in a variable. The answer
+   carrying it is `no-store`, and a boosted Back re-asks the server rather than
+   restoring a snapshot, so it is not kept anywhere a later visitor could read it.
+
+   THE LINK IS THE WAY ROUND EVERY FAILURE OF THE POPUP. A blocked window, one
+   opened behind this one, or one an extension stopped from loading all leave
+   somebody with nothing to press; a link they click is a navigation the browser
+   never blocks, and the poll does not care which window approved the PIN. The
+   script aims the popup at this same address (`data-plex-popup-url`), so the two
+   cannot disagree. #}
+{% if waiting %}
+<p class="auth-sub plex-waiting" role="status">
+  {%- if popup_blocked %}
+  Your browser blocked the Plex sign-in window. Allow pop-ups for this site, or
+  {%- else %}
+  Approve the sign-in in the Plex window. If it didn&rsquo;t appear, or you closed it,
+  {%- endif %}
+  <a href="{{ popup_url }}" target="plex-auth" rel="noopener" hx-boost="false"
+     data-plex-popup-url>open the Plex sign-in page</a>.
+</p>
+<form hidden hx-boost="false" hx-post="/auth/plex/poll" hx-json-enc
+      hx-trigger="every {{ interval }}s" hx-target="#plexFlow" hx-swap="innerHTML">
+  <input type="hidden" name="state" value="{{ state }}">
+</form>
+{% else %}
+<p class="auth-error" role="alert">{{ message }}</p>
+{% endif %}

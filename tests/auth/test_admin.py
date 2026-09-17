@@ -17,9 +17,11 @@ Two things carry the most weight here and get the most direct coverage:
 from __future__ import annotations
 
 import asyncio
+import re
 import unittest
 
 from fastapi.testclient import TestClient
+from markupsafe import escape
 
 from app import auth, db
 from app.main import app
@@ -33,7 +35,7 @@ class AdminTestCase(AppTestCase):
         resp = self.client.post("/onboarding", json={
             "username": username, "password": password, "password_confirm": password,
         })
-        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.status_code, 204, resp.text)
         return asyncio.run(auth.find_user_by_username(username))["id"]
 
     def make_user(self, username="member", *, calendar_approved=False,
@@ -45,7 +47,17 @@ class AdminTestCase(AppTestCase):
 
     def login_as(self, client: TestClient, username: str, password: str = "hunter2hunter2"):
         resp = client.post("/login", json={"username": username, "password": password})
+        self.assertEqual(resp.status_code, 204, resp.text)
+
+    def assertDrawnIn(self, resp, section: str, message: str):
+        """An admin action's answer: the whole body redrawn at 200, with the
+        sentence in the section the action came from."""
         self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIn('id="adminShell"', resp.text)
+        self.assertIn(str(escape(message)), resp.text)
+        heading = {"users": "Accounts", "invites": "Invites", "retired": "Retired identifiers"}[section]
+        after_heading = resp.text.split(f"<h2>{heading}</h2>", 1)[1]
+        self.assertLess(after_heading.index(str(escape(message))), after_heading.index("<table"))
 
 
 # ---------------------------------------------------------------------------
@@ -167,16 +179,25 @@ class GuardTests(AdminTestCase):
         self.login_as(self.client, "admin1")
         admin_id = asyncio.run(auth.find_user_by_username("admin1"))["id"]
 
-        resp = self.client.post(f"/api/admin/users/{admin_id}/admin", json={"is_admin": False})
-        self.assertEqual(resp.status_code, 409)
+        resp = self.client.post(f"/admin/users/{admin_id}/admin", json={"value": "0"})
+        self.assertDrawnIn(resp, "users", "The last remaining administrator can't be demoted.")
 
-        resp = self.client.post(f"/api/admin/users/{admin_id}/disabled", json={"disabled": True})
-        self.assertEqual(resp.status_code, 409)
+        resp = self.client.post(f"/admin/users/{admin_id}/disabled", json={"value": "1"})
+        self.assertDrawnIn(resp, "users", "The last remaining administrator can't be disabled.")
 
-        resp = self.client.post(f"/api/admin/users/{admin_id}/delete",
+        resp = self.client.post(f"/admin/users/{admin_id}/delete",
                                 json={"confirm_username": "admin1"})
-        self.assertEqual(resp.status_code, 409)
-        self.assertFalse(resp.json()["ok"])
+        self.assertDrawnIn(resp, "users", "You can't delete your own account.")
+        row = asyncio.run(auth.get_user(admin_id))
+        self.assertTrue(row["is_admin"])
+        self.assertFalse(row["is_disabled"])
+
+    def test_the_page_draws_no_delete_for_yourself(self):
+        admin_id = self.make_admin()
+        self.make_user("someone-else")
+        page = self.client.get("/admin").text
+        self.assertNotIn(f'hx-post="/admin/users/{admin_id}/delete"', page)
+        self.assertIn('/delete"', page)
 
 
 # ---------------------------------------------------------------------------
@@ -192,9 +213,13 @@ class RetiredIdentifierTests(AdminTestCase):
         self.assertIsNotNone(asyncio.run(auth.username_availability_error("reclaimable")))
 
         self.login_as(self.client, "admin1")
-        resp = self.client.post("/api/admin/retired/release",
+        page = self.client.get("/admin").text
+        # Asked first, through the markup confirmation, and the sentence names it.
+        self.assertIn('Release &#34;reclaimable&#34;?', page)
+        resp = self.client.post("/admin/retired/release",
                                 json={"kind": "username", "value": "reclaimable"})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertDrawnIn(resp, "retired", "Released reclaimable.")
+        self.assertIn("Nothing retired.", resp.text)
 
         self.assertFalse(asyncio.run(auth.identifier_is_retired("username", "reclaimable")))
         self.assertIsNone(asyncio.run(auth.username_availability_error("reclaimable")))
@@ -207,12 +232,14 @@ class RetiredIdentifierTests(AdminTestCase):
         with self.assertRaises(ValueError):
             asyncio.run(auth.release_retired_identifier("token", "abc123"))
 
-    def test_releasing_an_unknown_identifier_via_the_route_is_404(self):
+    def test_releasing_an_unknown_identifier_is_drawn_as_a_refusal(self):
         self.make_admin()
         self.login_as(self.client, "admin1")
-        resp = self.client.post("/api/admin/retired/release",
+        resp = self.client.post("/admin/retired/release",
                                 json={"kind": "username", "value": "never-existed"})
-        self.assertEqual(resp.status_code, 404)
+        self.assertDrawnIn(resp, "retired", "That identifier isn't retired.")
+        resp = self.client.post("/admin/retired/release", json={"kind": "token", "value": "abc"})
+        self.assertDrawnIn(resp, "retired", "Only usernames and slugs can be released.")
 
 
 # ---------------------------------------------------------------------------
@@ -287,39 +314,65 @@ class InviteAdminTests(AdminTestCase):
         revoked_row = asyncio.run(auth.find_invite_by_token(revocable["token"]))
         self.assertFalse(auth.invite_is_usable(revoked_row))
 
-    def test_route_lists_and_revokes_and_shows_redemptions(self):
+    def test_the_form_issues_lists_revokes_and_shows_redemptions(self):
         admin_id = self.make_admin()
         self.login_as(self.client, "admin1")
 
-        resp = self.client.post("/api/admin/invites", json={"label": "friends"})
-        self.assertEqual(resp.status_code, 200, resp.text)
-        invite_id, token = resp.json()["id"], resp.json()["token"]
-
-        listing = self.client.get("/api/admin/invites")
-        self.assertEqual(listing.status_code, 200)
-        labels = [i["label"] for i in listing.json()["invites"]]
-        self.assertIn("friends", labels)
-
-        row = asyncio.run(auth.find_invite_by_token(token))
+        # As the page's form posts: blank numbers, and each box after its "0".
+        resp = self.client.post("/admin/invites", json={
+            "label": "friends", "max_uses": "", "expires_in_hours": "",
+            "grants_calendar_on_accept": ["0", "1"], "grants_ranker_on_accept": "0"})
+        self.assertDrawnIn(resp, "invites", "Invite issued. Copy its link below.")
+        row = asyncio.run(auth.list_invites())[0]
+        invite_id, token = row["id"], row["token"]
+        self.assertEqual(row["label"], "friends")
+        self.assertIsNone(row["max_uses"])
+        self.assertIsNone(row["expires_at"])
+        self.assertTrue(row["grants_calendar_on_accept"])
+        self.assertFalse(row["grants_ranker_on_accept"])
+        # The copyable link is spelled by the server.
+        self.assertIn(f'value="https://testserver/register?invite={token}"', resp.text)
 
         def _redeem(conn):
-            auth.redeem_invite(conn, invite=row, user_id=admin_id)
+            auth.redeem_invite(conn, invite=asyncio.run(auth.find_invite_by_token(token)),
+                               user_id=admin_id)
         asyncio.run(db.transaction(_redeem))
 
-        redemptions = self.client.get(f"/api/admin/invites/{invite_id}/redemptions")
+        redemptions = self.client.get(f"/admin/fragments/invites/{invite_id}/redemptions")
         self.assertEqual(redemptions.status_code, 200)
-        self.assertEqual(len(redemptions.json()["redemptions"]), 1)
-        self.assertEqual(redemptions.json()["redemptions"][0]["username"], "admin1")
+        self.assertEqual(redemptions.text.count("<li>"), 1)
+        self.assertIn("admin1", redemptions.text)
 
-        revoke = self.client.post(f"/api/admin/invites/{invite_id}/revoke", json={})
-        self.assertEqual(revoke.status_code, 200)
+        revoke = self.client.post(f"/admin/invites/{invite_id}/revoke", json={})
+        self.assertDrawnIn(revoke, "invites", "Invite revoked.")
         self.assertTrue(asyncio.run(auth.find_invite_by_token(token))["revoked"])
 
-        again = self.client.post(f"/api/admin/invites/{invite_id}/revoke", json={})
-        self.assertEqual(again.status_code, 200)  # idempotent, not an error
+        again = self.client.post(f"/admin/invites/{invite_id}/revoke", json={})
+        self.assertDrawnIn(again, "invites", "Invite revoked.")  # idempotent, not an error
 
-        missing = self.client.post("/api/admin/invites/999999/revoke", json={})
-        self.assertEqual(missing.status_code, 404)
+        missing = self.client.post("/admin/invites/999999/revoke", json={})
+        self.assertDrawnIn(missing, "invites", "No such invite.")
+
+    def test_an_invite_number_that_is_not_one_is_drawn_and_issues_nothing(self):
+        self.make_admin()
+        self.login_as(self.client, "admin1")
+        for field, value, sentence in (("max_uses", "lots", "Max uses must be a number."),
+                                       ("max_uses", "0", "Max uses must be more than nought."),
+                                       ("expires_in_hours", "-2",
+                                        "Expires (hours) must be more than nought.")):
+            with self.subTest(field=field, value=value):
+                resp = self.client.post("/admin/invites", json={field: value})
+                self.assertDrawnIn(resp, "invites", sentence)
+        self.assertEqual(asyncio.run(auth.list_invites()), [])
+
+    def test_a_limited_invite_keeps_its_limits(self):
+        self.make_admin()
+        self.login_as(self.client, "admin1")
+        before = db.now()
+        self.client.post("/admin/invites", json={"max_uses": "3", "expires_in_hours": "1.5"})
+        row = asyncio.run(auth.list_invites())[0]
+        self.assertEqual(row["max_uses"], 3)
+        self.assertAlmostEqual(row["expires_at"] - before, 5400, delta=5)
 
 
 # ---------------------------------------------------------------------------
@@ -337,10 +390,10 @@ class PasswordResetTests(AdminTestCase):
         )
 
         self.login_as(self.client, "admin1")
-        resp = self.client.post(f"/api/admin/users/{victim_id}/password", json={"password": "brand-new-pass1"})
-        self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(resp.json()["password"], "brand-new-pass1")
-        self.assertFalse(resp.json()["generated"])
+        resp = self.client.post(f"/admin/users/{victim_id}/password", json={"password": "brand-new-pass1"})
+        self.assertDrawnIn(resp, "users", "Every session on that account has been signed out.")
+        self.assertRegex(resp.text, r'id="temporaryPassword"[^>]*value="brand-new-pass1"')
+        self.assertEqual(resp.headers["Cache-Control"], "no-store")
 
         self.assertEqual(
             asyncio.run(db.fetch_value("SELECT COUNT(*) FROM sessions WHERE user_id = ?", (victim_id,))), 0,
@@ -351,14 +404,30 @@ class PasswordResetTests(AdminTestCase):
         verified = asyncio.run(auth.verify_password(user["password_hash"], "brand-new-pass1"))
         self.assertTrue(verified.ok)
 
-    def test_a_generated_password_is_returned_once(self):
+    def test_a_generated_password_is_drawn_once(self):
         self.make_admin()
         victim_id = self.make_user("autogen")
         self.login_as(self.client, "admin1")
-        resp = self.client.post(f"/api/admin/users/{victim_id}/password", json={})
+        resp = self.client.post(f"/admin/users/{victim_id}/password", json={"password": ""})
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertTrue(resp.json()["generated"])
-        self.assertGreaterEqual(len(resp.json()["password"]), auth.MIN_PASSWORD_LENGTH)
+        password = re.search(r'id="temporaryPassword"[^>]*value="([^"]+)"', resp.text).group(1)
+        self.assertGreaterEqual(len(password), auth.MIN_PASSWORD_LENGTH)
+        verified = asyncio.run(auth.verify_password(
+            asyncio.run(auth.get_user(victim_id))["password_hash"], password))
+        self.assertTrue(verified.ok)
+        # Nothing else ever draws it again.
+        self.assertNotIn(password, self.client.get("/admin").text)
+
+    def test_a_short_password_is_refused_and_changes_nothing(self):
+        self.make_admin()
+        victim_id = self.make_user("keepme", calendar_approved=True)
+        self.login_as(self.client, "admin1")
+        before = asyncio.run(auth.get_user(victim_id))["password_hash"]
+        resp = self.client.post(f"/admin/users/{victim_id}/password", json={"password": "short"})
+        self.assertDrawnIn(resp, "users",
+                           f"Password must be at least {auth.MIN_PASSWORD_LENGTH} characters.")
+        self.assertNotIn('id="temporaryPassword"', resp.text)
+        self.assertEqual(asyncio.run(auth.get_user(victim_id))["password_hash"], before)
 
     def test_reset_can_also_set_a_username_for_an_oauth_only_account(self):
         admin_id = self.make_admin()
@@ -371,8 +440,12 @@ class PasswordResetTests(AdminTestCase):
         asyncio.run(db.transaction(_link))
 
         self.login_as(self.client, "admin1")
+        # The form offers the username field for exactly this account.
+        page = self.client.get("/admin").text
+        form = page.split(f'hx-post="/admin/users/{oauth_only_id}/password"', 1)[1].split("</form>")[0]
+        self.assertIn('name="username"', form)
         resp = self.client.post(
-            f"/api/admin/users/{oauth_only_id}/password",
+            f"/admin/users/{oauth_only_id}/password",
             json={"username": "newname", "password": "a-real-password1"},
         )
         self.assertEqual(resp.status_code, 200, resp.text)
@@ -398,10 +471,13 @@ class AdminUnlinkTests(AdminTestCase):
 
         self.login_as(self.client, "admin1")
         resp = self.client.post(
-            f"/api/admin/users/{oauth_only_id}/identities/unlink", json={"provider": "trakt"},
+            f"/admin/users/{oauth_only_id}/identities/unlink", json={"provider": "trakt"},
         )
-        self.assertEqual(resp.status_code, 409)
-        self.assertTrue(resp.json()["orphan_warning"])
+        self.assertDrawnIn(resp, "users", "This is that account's only way to sign in.")
+        # The answer asks the second question, and pressing it is what sends force.
+        self.assertIn("Unlink anyway", resp.text)
+        self.assertIn(f'hx-post="/admin/users/{oauth_only_id}/identities/unlink"', resp.text)
+        self.assertIn('&#34;force&#34;: &#34;1&#34;', resp.text.replace('"force": "1"', '&#34;force&#34;: &#34;1&#34;'))
         self.assertEqual(len(asyncio.run(auth.list_identities(oauth_only_id))), 1)
 
     def test_forcing_the_unlink_orphans_the_account_deliberately(self):
@@ -416,10 +492,11 @@ class AdminUnlinkTests(AdminTestCase):
 
         self.login_as(self.client, "admin1")
         resp = self.client.post(
-            f"/api/admin/users/{oauth_only_id}/identities/unlink",
-            json={"provider": "trakt", "force": True},
+            f"/admin/users/{oauth_only_id}/identities/unlink",
+            json={"provider": "trakt", "force": "1"},
         )
         self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertNotIn("Unlink anyway", resp.text)
         self.assertEqual(len(asyncio.run(auth.list_identities(oauth_only_id))), 0)
 
 
@@ -433,16 +510,36 @@ class ApprovalAndListingTests(AdminTestCase):
         member_id = self.make_user("member1")
         self.login_as(self.client, "admin1")
 
-        resp = self.client.post(f"/api/admin/users/{member_id}/approval", json={"calendar": True})
+        resp = self.client.post(f"/admin/users/{member_id}/approval",
+                                json={"grant": "calendar", "value": "1"})
         self.assertEqual(resp.status_code, 200)
+        self.assertIn("Revoke calendar", resp.text)
         user = asyncio.run(auth.get_user(member_id))
         self.assertTrue(user["calendar_approved"])
         self.assertFalse(user["distrakt_approved"])
 
-        resp = self.client.post(f"/api/admin/users/{member_id}/approval", json={"distrakt": True})
+        resp = self.client.post(f"/admin/users/{member_id}/approval",
+                                json={"grant": "distrakt", "value": "1"})
         self.assertEqual(resp.status_code, 200)
         user = asyncio.run(auth.get_user(member_id))
         self.assertTrue(user["distrakt_approved"])
+
+        resp = self.client.post(f"/admin/users/{member_id}/approval",
+                                json={"grant": "is_admin", "value": "1"})
+        self.assertDrawnIn(resp, "users", "There is no such approval.")
+        self.assertFalse(asyncio.run(auth.get_user(member_id))["is_admin"])
+
+    def test_times_are_spelled_by_the_server_in_the_administrators_zone(self):
+        admin_id = self.make_admin()
+        asyncio.run(db.execute("UPDATE users SET timezone = 'Asia/Tokyo', created_at = 0 "
+                               "WHERE id = ?", (admin_id,)))
+        member = self.make_user("dated")
+        asyncio.run(db.execute("UPDATE users SET created_at = 1767225600 WHERE id = ?", (member,)))
+        page = self.client.get("/admin").text
+        # 2026-01-01 00:00 UTC is 09:00 in Tokyo.
+        self.assertIn('title="2026-01-01 09:00:00 JST">Jan 1 2026, 09:00</time>', page)
+        self.assertNotIn("data-ts", page)
+        self.assertNotIn("DateTimeFormat", page)
 
     def test_account_list_shows_display_name_providers_and_activity(self):
         self.make_admin()
@@ -457,14 +554,72 @@ class ApprovalAndListingTests(AdminTestCase):
 
     def test_non_admin_gets_403_from_every_admin_route(self):
         self.make_admin()
-        self.make_user("plain", calendar_approved=True)
+        target = self.make_user("plain", calendar_approved=True)
         self.login_as(self.client, "plain", password="memberpass1")
         for method, path in [
             ("get", "/admin"), ("get", "/api/admin/users"),
             ("get", "/api/admin/invites"), ("get", "/api/admin/retired"),
+            ("get", "/admin/fragments/invites/1/redemptions"),
         ]:
             resp = getattr(self.client, method)(path)
             self.assertIn(resp.status_code, (401, 403), f"{method} {path}")
+        for path in ADMIN_POSTS(target):
+            with self.subTest(path=path):
+                resp = self.client.post(path, json={"value": "1", "grant": "calendar",
+                                                    "provider": "trakt", "kind": "username"})
+                self.assertEqual(resp.status_code, 403)
+        self.assertFalse(asyncio.run(auth.get_user(target))["is_admin"])
+
+
+def ADMIN_POSTS(user_id: int) -> tuple[str, ...]:
+    """Every write the admin page makes, for the refusals every one of them owes."""
+    base = f"/admin/users/{user_id}"
+    return (f"{base}/approval", f"{base}/admin", f"{base}/disabled", f"{base}/password",
+            f"{base}/wipe", f"{base}/delete", f"{base}/sessions/revoke-all",
+            f"{base}/identities/unlink", "/admin/invites", "/admin/invites/1/revoke",
+            "/admin/retired/release")
+
+
+class AdminRefusalTests(AdminTestCase):
+    """Each write refused once for each way it can be: a body that is not JSON, a
+    body that is not an object, and nobody signed in. The fourth — a caller who is
+    not an administrator — is ApprovalAndListingTests' table above."""
+
+    def setUp(self):
+        super().setUp()
+        self.make_admin()
+        self.target = self.make_user("target")
+
+    def test_a_form_encoded_body_is_refused_before_routing(self):
+        for path in ADMIN_POSTS(self.target):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.post(path, data={"value": "1"}).status_code, 415)
+
+    def test_a_body_that_is_not_an_object_is_refused(self):
+        for path in ADMIN_POSTS(self.target):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.post(path, json=["1"]).status_code, 400)
+        self.assertFalse(asyncio.run(auth.get_user(self.target))["is_admin"])
+
+    def test_no_session_is_refused(self):
+        self.client.cookies.clear()
+        for path in ADMIN_POSTS(self.target):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.post(path, json={}).status_code, 401)
+
+    def test_every_control_that_writes_carries_the_encoder_and_asks_where_it_should(self):
+        self.make_user("second-admin", is_admin=True)
+        page = self.client.get("/admin").text
+        for element in re.findall(r"<(?:form|button)\b[^>]*hx-post[^>]*>", page):
+            with self.subTest(element=element[:80]):
+                self.assertIn("hx-json-enc", element)
+        # The destructive ones are behind the markup confirmation.
+        for question in ("Remove administrator access from this account?",
+                         "Disable this account?", "Log this account out everywhere?",
+                         "Wipe this account", "This permanently deletes the account."):
+            with self.subTest(question=question):
+                self.assertIn(question, page)
+        self.assertNotIn("confirmInline", page)
 
 
 if __name__ == "__main__":

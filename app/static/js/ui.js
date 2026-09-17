@@ -74,12 +74,13 @@ function toast(message, ok) {
     setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 4200);
 }
 
-// Replaces native confirm() dialogs everywhere in the app. Anchors a small
-// "are you sure" popover under whichever button triggered it (position: fixed,
-// so it works the same whether that button sits in a tight pill row, a table
-// row, or a settings panel — no per-caller layout to get right) and animates it
-// in instead of blocking the page with a browser-native dialog. Dismissed by
-// Cancel, by clicking outside it, by scrolling, or by Escape.
+// An "are you sure" popover anchored under whichever button triggered it
+// (position: fixed, measured from the button) instead of a browser-native
+// dialog. Dismissed by Cancel, by clicking outside it, by scrolling, or by Escape.
+//
+// ONE CALLER IS LEFT: deleting a tier on the rankings board
+// (static/js/ranker/tiers.js). Every other confirmation in the app is markup —
+// templates/_confirm.html — so when that one moves, this function goes with it.
 function confirmInline(trigger, message, onConfirm, opts) {
     if (!trigger) return;
     const existing = document.querySelector('.inline-confirm');
@@ -403,6 +404,13 @@ document.addEventListener('click', (e) => {
 // `data-file-count="<key>:<noun>,…"` summarizes a JSON document the same way for
 // every caller: the named top-level arrays are counted, entries sharing a noun
 // are added together, and the sentence is one sentence rather than one per page.
+//
+// THE FIELD ANNOUNCES IT WAS FILLED, with a `file-read` event that bubbles, so a
+// form that should post the moment a file is chosen says so in its own markup
+// (`hx-trigger="file-read"`) — the account's profile picture is one. A form that
+// waits for a typed confirmation simply does not listen. Its own event rather than
+// `change`: the file input's `change` has already bubbled through the form by then,
+// before the read finished, and a form listening for it would post an empty field.
 async function readChosenFile(input) {
     const into = document.querySelector(input.dataset.fileInto);
     const status = input.dataset.fileStatus
@@ -425,6 +433,7 @@ async function readChosenFile(input) {
         namer.value = file.name.replace(/\.[^.]+$/, '').slice(0, namer.maxLength || 40);
     }
     if (status) status.textContent = asBase64 ? '' : describeDocument(text, input.dataset.fileCount);
+    if (into) into.dispatchEvent(new Event('file-read', { bubbles: true }));
 }
 
 function fileAsBase64(file) {
