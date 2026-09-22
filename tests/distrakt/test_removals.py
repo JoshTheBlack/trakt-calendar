@@ -210,6 +210,45 @@ class MarkingWhatAServiceNoLongerListsTests(DistraktTestCase):
         self.assertEqual(await removals.check(SETTINGS, self.user_id, Source.SIMKL, port), 0)
 
 
+class APassThatMarksMostOfATrackerSaysSoTests(DistraktTestCase):
+    """`_may_believe` refuses a listing that names NOT ONE of the viewer's
+    titles. It cannot refuse one that names a few, and deliberately does not try:
+    a threshold high enough to catch a broken read would refuse a viewer who
+    genuinely emptied their library, and refuse it again on every pass.
+
+    SO THE LOUD CASE IS REPORTED RATHER THAN REFUSED, and this is what makes the
+    difference findable. A bucket nobody asked about marked two thirds of a live
+    tracker and left nothing in the log to read — which is how `plantowatch` went
+    unnoticed (simkl/sync.py's LIBRARY_STATUSES).
+    """
+
+    async def _rows(self, n, simkl_from=500):
+        for i in range(n):
+            await distrakt.add_user_record(self.user_id, a_record(
+                tmdb=900 + i, season=1, kind=distrakt.RecordKind.KEEPUP,
+                ids={"tmdb": 900 + i, "simkl": simkl_from + i}))
+
+    async def test_marking_most_of_them_is_warned_about_and_still_done(self):
+        await self._rows(4)
+        # One of the four is still listed, so the answer is believable.
+        port = _Port({500: "still-here"})
+        with self.assertLogs("app.distrakt.removals", level="WARNING") as caught:
+            changed = await removals.check(SETTINGS, self.user_id, Source.SIMKL, port)
+        self.assertEqual(changed, 3)
+        said = " ".join(caught.output)
+        self.assertIn("names only 1 of the 4", said)
+        self.assertIn("every bucket", said)
+
+    async def test_an_ordinary_pass_says_nothing(self):
+        """The warning has to be rare or it is noise. Three of four still listed
+        is an ordinary removal and gets no line."""
+        await self._rows(4)
+        port = _Port({500: "a", 501: "b", 502: "c"})
+        with self.assertNoLogs("app.distrakt.removals", level="WARNING"):
+            self.assertEqual(
+                await removals.check(SETTINGS, self.user_id, Source.SIMKL, port), 1)
+
+
 class TheMarkSurvivesAnOrdinaryWriteTests(DistraktTestCase):
     """The mark is written by the removal check alone. Every other write of a user
     record is a counts refresh built from a roster that carries no opinion about

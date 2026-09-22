@@ -837,18 +837,26 @@ class LibraryIdsTests(unittest.IsolatedAsyncioTestCase):
     interesting cases are all about when it must refuse to answer at all.
     """
 
+    # ONE READ PER (catalogue, bucket), COMPUTED RATHER THAN WRITTEN OUT. These
+    # tests padded with a literal count, which meant adding a bucket made them
+    # fail for arithmetic rather than for the thing they assert.
+    CALLS = len(sync.LIBRARY_TYPES) * len(sync.LIBRARY_STATUSES)
+    MOVIES_AT = (len(sync.LIBRARY_TYPES) - 1) * len(sync.LIBRARY_STATUSES)
+
     async def _ids(self, answers):
-        spy = _cached_get(*answers)
+        """`answers` in call order, padded with empty buckets to the full sweep."""
+        padded = list(answers) + [{}] * (self.CALLS - len(answers))
+        spy = _cached_get(*padded)
         with patch("app.providers.simkl.transport.cached_get", new=spy):
             return await sync.fetch_library_ids(SETTINGS), spy
 
     async def test_it_reads_both_the_show_and_the_movie_shapes(self):
         """Measured live: a show bucket sends `{"show": {"ids": ...}}` and a movie
         bucket `{"movie": {...}}`, under a key named for the catalogue."""
-        answers = [{"shows": [{"show": {"ids": {"simkl": 2519, "slug": "chuck"}}}]}]
-        answers += [{}] * 7
-        answers += [{"movies": [{"movie": {"ids": {"simkl": 53084, "slug": "ab"}}}]}]
-        answers += [{}] * 3
+        answers = [{}] * self.CALLS
+        answers[0] = {"shows": [{"show": {"ids": {"simkl": 2519, "slug": "chuck"}}}]}
+        answers[self.MOVIES_AT] = {
+            "movies": [{"movie": {"ids": {"simkl": 53084, "slug": "ab"}}}]}
         ids, _ = await self._ids(answers)
         self.assertEqual(ids, {2519: "chuck", 53084: "ab"})
 
@@ -859,7 +867,7 @@ class LibraryIdsTests(unittest.IsolatedAsyncioTestCase):
         the database."""
         answers = [{"shows": [{"show": {"ids": {"simkl": 514,
                                                 "slug": "carniv%C3%A0le"}}}]}]
-        ids, _ = await self._ids(answers + [{}] * 11)
+        ids, _ = await self._ids(answers)
         self.assertEqual(ids, {514: "carnivàle"})
 
     async def test_one_unreadable_bucket_refuses_the_whole_answer(self):
@@ -870,7 +878,7 @@ class LibraryIdsTests(unittest.IsolatedAsyncioTestCase):
         to diff, so a failure means no check rather than a check on less."""
         answers = [{"shows": [{"show": {"ids": {"simkl": 1, "slug": "a"}}}]},
                    transport.SimklError("500 while reading the list")]
-        ids, _ = await self._ids(answers + [{}] * 10)
+        ids, _ = await self._ids(answers)
         self.assertIsNone(ids)
 
     async def test_a_credential_failure_is_raised_rather_than_reported_as_empty(self):
@@ -880,15 +888,58 @@ class LibraryIdsTests(unittest.IsolatedAsyncioTestCase):
         boom = transport.SimklError("Simkl rejected the credentials (401).")
         with patch.object(transport, "is_credential_failure", return_value=True):
             with self.assertRaises(transport.SimklError):
-                await self._ids([boom] + [{}] * 11)
+                await self._ids([boom])
 
     async def test_an_empty_library_is_an_answer_rather_than_a_refusal(self):
         """Every bucket read, every one of them empty. That is a viewer who holds
         nothing, and it is a real state the caller is entitled to act on — told
         apart from an unreadable one by being {} rather than None."""
-        ids, spy = await self._ids([{}] * 12)
+        ids, spy = await self._ids([])
         self.assertEqual(ids, {})
-        self.assertEqual(spy.await_count, 12)
+        self.assertEqual(spy.await_count, self.CALLS)
+
+    async def test_it_asks_for_every_bucket_a_library_keeps(self):
+        """THE BUG THIS EXISTS FOR, AND IT SHIPPED. This read asked only the
+        buckets a WATCH can be found in, which leaves out `plantowatch` — and a
+        title absent from this answer is reported to the caller as removed from
+        the library. On a live account 39 titles sat in that bucket, and 29 of the
+        33 rows the removal diff called missing were among them: nothing had been
+        removed, the listing had never been asked.
+
+        Asserted on the ADDRESSES requested rather than on a count, because a
+        count is what the tests here already checked and it passed throughout."""
+        _, spy = await self._ids([])
+        asked = {call.args[2] for call in spy.await_args_list}
+        for media in sync.LIBRARY_TYPES:
+            for status in sync.LIBRARY_STATUSES:
+                with self.subTest(bucket=f"{media}/{status}"):
+                    self.assertIn(f"sync/all-items/{media}/{status}", asked)
+
+    async def test_a_title_only_in_plan_to_watch_is_still_in_the_library(self):
+        """The whole claim in one case: the viewer holds it, has watched none of
+        it, and it must not read as gone."""
+        answers = [{}] * self.CALLS
+        answers[sync.LIBRARY_STATUSES.index("plantowatch")] = {
+            "shows": [{"show": {"ids": {"simkl": 4242, "slug": "the-abandons"}}}]}
+        ids, _ = await self._ids(answers)
+        self.assertEqual(ids, {4242: "the-abandons"})
+
+    def test_a_listing_bucket_is_not_a_watched_bucket(self):
+        """LIBRARY_STATUSES IS NOT WATCHED_STATUSES, and the difference is the
+        point. `plantowatch` belongs in a listing of what is HELD and must stay
+        out of the reads that ask what has been WATCHED — feeding them a bucket
+        with no watches in it is how a baseline learns that a viewer has seen
+        nothing of a title they own."""
+        self.assertNotIn("plantowatch", sync.WATCHED_STATUSES)
+        self.assertEqual(set(sync.LIBRARY_STATUSES) - set(sync.WATCHED_STATUSES),
+                         {"plantowatch"})
+
+    def test_an_unrecognised_bucket_is_never_asked_for(self):
+        """Simkl answers a status it does not know with the WHOLE library rather
+        than an error — measured: `shows/notinteresting` returned 1,045 distinct
+        ids against a library of 1,045 — so a listing that included one would
+        report that nothing is ever missing."""
+        self.assertNotIn("notinteresting", sync.LIBRARY_STATUSES)
 
     def test_the_registered_port_actually_offers_it(self):
         """THE CHECK IS GATED ON THIS METHOD BEING ON THE PORT, so a function
