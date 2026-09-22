@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 🏷️ [1.2.4] - 2026-09-22
+
+### 🥚
+- Something you had lined up but not yet started was being reported as taken away from you. One of them keeps those apart from the ones you have begun, and only half of that was ever being asked for — so a list you had been building read as a list somebody had emptied. All of it is asked for now. And when a great many go at once it says so plainly, which is the part that was missing: there was nothing to read while two thirds of it was being marked.
+
 ## 🏷️ [1.2.3] - 2026-09-09
 
 ### 🥚
