@@ -116,35 +116,52 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
 
     Returns the plan, which is also stored for `apply` to pick up:
         {"range": [start, end], "months": {"YYYY-MM": [record, ...]},
-         "movies": [...], "skipped": [...], "shows_seen": n, "seasons_seen": n}
+         "movies": [...], "replacing": {"YYYY-MM": n},
+         "shows_seen": n, "seasons_seen": n}
 
-    SEASONS AND FILMS ARE SCOPED DIFFERENTLY, on purpose.
+    EVERY MONTH IN THE RANGE IS SURVEYED, INCLUDING ONES THAT ALREADY HOLD
+    RECORDS. A month with contents used to be left out of the sweep entirely, on
+    the reasoning that it carried decisions — abandons, manual adds, a row taken
+    off by hand — that a rebuild would throw away. That reasoning was about
+    REBUILDING, and the write no longer rebuilds: apply() upserts record by
+    record, so a month keeps everything the plan does not mention. The skip was
+    the only thing standing between "this month has one wrong row on it" and
+    "this month can never be imported again", which is exactly the corner an
+    account with a bad month ends up in.
 
-    A month that already HOLDS SOMETHING is skipped for SEASONS: it carries
-    decisions — abandons, manual adds, a row taken off by hand — that watch
-    history knows nothing about, and rebuilding it from a sweep would throw them
-    away. An EMPTY month is not one of those. Emptying a month leaves its month
-    row behind, and judging by the row meant a month you had cleared out could
-    never be refilled; judging by its contents means clearing one is how you ask
-    for it to be built again.
+    WHAT IT WOULD REPLACE IS COUNTED AND REPORTED, per month. A viewer confirming
+    a merge is agreeing to overwrite as well as to add, and a summary that only
+    ever said "4 finished seasons" could not tell the two apart. `replacing`
+    counts the planned records that land on a record the month already holds at
+    the same address — same kind, same title, same season.
 
-    FILMS are collected across the WHOLE range regardless. They are per-play
-    watch history rather than a monthly verdict, so there is nothing about an
-    existing month for them to overwrite, and scoping them to the months being
-    written made the films in every other month unreachable: once the seasons
-    had been written the range had no writable months left, and re-running to
-    pick up films reported nothing to do. Films already recorded at the same
-    date or later are left out, so a second run offers only what is genuinely
-    missing.
+    NOTHING IS SURVEYED FOR THE CURRENT MONTH OR LATER. Everything this writes is
+    a season FINISHED inside the month, written onto a month marked closed, and
+    neither claim can be made about a month still running — the tracker is still
+    bucketing it. While months with contents were skipped this was true by
+    accident, because the month in progress always had something on it.
+
+    FILMS are collected across the WHOLE surveyed range. They are per-play watch
+    history rather than a monthly verdict, and scoping them to the months being
+    written made the films in every other month unreachable: once the seasons had
+    been written the range had no writable months left, and re-running to pick up
+    films reported nothing to do. Films already recorded at the same date or later
+    are left out, so a second run offers only what is genuinely missing.
+
+    SHAPED FOR A SELECTIVE IMPORT. The plan is a list of records per month and
+    apply() writes what it is given, so choosing which titles to import is a
+    filter over `months` between the two halves — no part of the write needs to
+    know it happened.
     """
     today = today or clock.today()
-    months = month_range(start_month, end_month)
+    # A month key compares as a string because both halves are zero-padded, which
+    # is the same property walk_settled's ordering leans on.
+    this_month = distrakt.month_key(today.year, today.month)
+    months = [m for m in month_range(start_month, end_month) if m < this_month]
     if not months:
         return _empty_plan(start_month, end_month)
 
-    existing = await distrakt.months_with_shows(user_id)
-    wanted = [m for m in months if m not in existing]
-    skipped = [m for m in months if m in existing]
+    wanted = list(months)
 
     # ONE paged history sweep for the whole range, read twice — once for the
     # seasons, once for the films.
@@ -204,15 +221,16 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
                 continue  # finished outside the range (or on a date Trakt cannot name)
             by_month[month_key].append(_completed_record(ident, season, total, detail))
 
+    written_months = {m: rows for m, rows in by_month.items() if rows}
     plan = {
         "range": [months[0], months[-1]],
-        "months": {m: rows for m, rows in by_month.items() if rows},
+        "months": written_months,
         "movies": films,
         # Reported, not dropped: a run that found six films and wrote none of
         # them because it already had them must SAY that, or it reads exactly
         # like a run that could not see them at all.
         "movies_known": films_known,
-        "skipped": skipped,
+        "replacing": await _replacements(user_id, written_months),
         "shows_seen": len(show_ids),
         "seasons_seen": seasons_seen,
     }
@@ -262,12 +280,17 @@ def summarize(plan: dict) -> dict:
                 "movie_count": len(by_month.get(key) or []),
                 "movie_titles": sorted(by_month.get(key) or []),
                 "movie_known": known_by_month.get(key, 0),
+                # HOW MANY OF THAT COUNT ARE OVERWRITES. A merge asks the viewer
+                # to agree to two different things at once, and "4 finished" on
+                # its own cannot say that two of them will land on rows the month
+                # already has.
+                "replacing": int((plan.get("replacing") or {}).get(key, 0)),
             }
             for key in keys
         ],
         "movies": len(movies),
         "movies_known": len(known),
-        "skipped": plan.get("skipped") or [],
+        "replacing": sum((plan.get("replacing") or {}).values()),
         "shows_seen": plan.get("shows_seen") or 0,
         "seasons_seen": plan.get("seasons_seen") or 0,
         "total": sum(len(rows) for rows in months.values()),
@@ -280,6 +303,24 @@ async def apply(user_id: int, plan: dict | None = None) -> dict:
 
     Reads the plan the survey stored rather than taking one from the caller, so
     the only records that can be written are ones this module worked out itself.
+
+    RECORD BY RECORD, NEVER MONTH BY MONTH. Each planned record is upserted at
+    its own address, so a month ends up holding the union of what it held and
+    what the plan names: a record at the same address is overwritten, a record
+    the plan does not mention is left exactly where it is. This used to hand
+    save_month a whole doc, which replaces a month's records with the doc's —
+    and because that would have destroyed anything already on the month, the
+    only safe thing to do with a month that held records was to refuse it. The
+    refusal was the bug: a month with one wrong row on it could never be
+    imported again, by any route the app offers.
+
+    WHICH MEANS RE-RUNNING IT RE-ADDS WHAT YOU DELETED, and that is the intended
+    reading rather than an oversight. A backfill is an explicit act of taking
+    what a service says and putting it on a month; nothing records that a row was
+    removed on purpose, so nothing here can tell that apart from a row that was
+    never imported. Choosing which titles to take is what a selective import is
+    for — the plan is already a per-month list of records, so that filter goes
+    between the survey and this, and nothing below needs to know.
     """
     plan = plan or await cache.get(_plan_key(user_id), PLAN_TTL_SECONDS)
     if not plan or not isinstance(plan, dict):
@@ -299,22 +340,17 @@ async def apply(user_id: int, plan: dict | None = None) -> dict:
 
     written: list[str] = []
     show_count = 0
-    filled = await distrakt.months_with_shows(user_id)
     for month_key in sorted(months):
         rows = months[month_key] or []
         if not rows:
             continue
-        if month_key in filled:
-            continue  # filled since the survey ran — never overwrite real content
-        # An existing but EMPTY month is written into rather than replaced, so a
-        # month row that has been around a while keeps whatever else is on it.
-        doc = await distrakt.load_month(user_id, month_key) or distrakt.new_month_doc(month_key)
-        doc["shows"] = list(rows)
-        mstart, mend = watch_history.month_bounds(month_key)
-        doc["movies"] = watch_history.movies_in_range(state, mstart, mend)
-        doc["closed"] = True
-        doc["totals_refreshed_at"] = db.now()
-        await distrakt.save_month(user_id, doc)
+        for record in rows:
+            await distrakt.add_month_record(user_id, month_key, record)
+        await _record_films(user_id, month_key, state)
+        # Closed LAST and through its own verb, because closing is two columns on
+        # the month row: handing save_month a doc to close the month with would
+        # take the records just written back out again.
+        await distrakt.set_month_closed(user_id, month_key)
         written.append(month_key)
         show_count += len(rows)
 
@@ -329,10 +365,7 @@ async def apply(user_id: int, plan: dict | None = None) -> dict:
             doc = await distrakt.load_month(user_id, month_key)
             if doc is None or not doc.get("closed"):
                 continue  # an open month recomputes its films on every load
-            mstart, mend = watch_history.month_bounds(month_key)
-            films = watch_history.movies_in_range(state, mstart, mend)
-            if films != (doc.get("movies") or []):
-                await distrakt.set_month_movies(user_id, month_key, films)
+            if await _record_films(user_id, month_key, state):
                 refreshed += 1
 
     await cache.set(_plan_key(user_id), None)
@@ -352,7 +385,64 @@ class BackfillExpired(Exception):
 
 def _empty_plan(start_month: str, end_month: str) -> dict:
     return {"range": [start_month, end_month], "months": {}, "movies": [],
-            "skipped": [], "shows_seen": 0, "seasons_seen": 0}
+            "replacing": {}, "shows_seen": 0, "seasons_seen": 0}
+
+
+def _address(record: dict) -> tuple:
+    """What add_month_record would write this record OVER, if anything.
+
+    The same four things that address a stored row — kind, identity and season —
+    which is why this can be asked of a planned record and of a stored one with
+    the one function. A record that cannot be keyed is given a unique address of
+    its own so it matches nothing: it is about to be refused by the write anyway,
+    and quietly counting it as an overwrite would overstate what the viewer is
+    agreeing to.
+    """
+    try:
+        key = distrakt.record_key(record)
+    except Exception:
+        return (id(record),)
+    return (str(record.get("kind")), key.media, key.match_source, key.match_id,
+            int(record.get("season") or 0))
+
+
+async def _replacements(user_id: int, months: dict[str, list[dict]]) -> dict[str, int]:
+    """Per month, how many planned records land on one the month already holds.
+
+    One read per month with records in the plan, against the local database — the
+    survey either side of this spends hundreds of rate-limited provider calls, so
+    this is not the part worth being clever about.
+    """
+    out: dict[str, int] = {}
+    for month_key, rows in months.items():
+        if not rows:
+            continue
+        held = {_address(rec) for rec in await distrakt.month_records(user_id, month_key)}
+        count = sum(1 for rec in rows if _address(rec) in held)
+        if count:
+            out[month_key] = count
+    return out
+
+
+async def _record_films(user_id: int, month_key: str, state: dict) -> bool:
+    """Put the films watched during `month_key` onto its stored list, one at a
+    time. True if it wrote any.
+
+    ONE FILM AT A TIME rather than a list replacing the month's, for the reason
+    add_month_movie spells out: a closed month's film list is that month's own
+    record, and a write that re-derives the whole list from today's watch history
+    takes out every film the history no longer reports. Adding film by film means
+    a month gains what the sweep found and keeps what it already had.
+
+    THE CALLER ESTABLISHES THAT THE MONTH IS CLOSED, or is closing it in the same
+    breath — an open month recomputes its films on every load, and giving it a
+    stored list would freeze an answer it is supposed to keep working out.
+    """
+    mstart, mend = watch_history.month_bounds(month_key)
+    films = watch_history.movies_in_range(state, mstart, mend)
+    for film in films:
+        await distrakt.add_month_movie(user_id, month_key, film)
+    return bool(films)
 
 
 def _completed_record(ident: dict, season: int, total: int, detail: dict) -> dict:

@@ -119,6 +119,7 @@ from .store import (
     set_history_from,
     add_month_movie,
     remove_month_movie,
+    set_month_closed,
     set_month_movies,
     set_user_kind,
     stamp_refreshed,
@@ -151,6 +152,7 @@ __all__ = [
     "remove_season_everywhere", "remove_user_record", "restore_user_data",
     "row_to_record", "save_month", "set_came_back", "set_emoji_prefs",
     "set_history_from",
-    "add_month_movie", "remove_month_movie", "set_month_movies", "set_user_kind", "stamp_refreshed", "user_records",
+    "add_month_movie", "remove_month_movie", "set_month_closed", "set_month_movies",
+    "set_user_kind", "stamp_refreshed", "user_records",
     "walk_settled",
 ]

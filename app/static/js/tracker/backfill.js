@@ -68,6 +68,10 @@ function renderBackfillPlan(d) {
         // Said out loud rather than left out: a month whose films are all
         // already recorded looks identical to one where none could be found.
         if (m.movie_known) parts.push(`${m.movie_known} film${m.movie_known === 1 ? '' : 's'} already here`);
+        // A merge asks for two different things at once. "4 finished" alone
+        // cannot say that two of them will be written over rows this month
+        // already has, and overwriting is the half worth being warned about.
+        if (m.replacing) parts.push(`${m.replacing} replacing what's there`);
         return `
         <details class="distrakt-backfill-month">
             <summary><strong>${esc(m.month)}</strong> — ${parts.join(', ') || 'nothing'}</summary>
@@ -77,7 +81,7 @@ function renderBackfillPlan(d) {
     }).join('')
         + `<p class="distrakt-note">${months.length} month(s), ${d.total} finished season(s)`
         + (d.movies ? `, and ${d.movies} watched film(s)` : '')
-        + `.${(d.skipped || []).length ? ` Already tracked, left alone: ${d.skipped.join(', ')}.` : ''}</p>`
+        + `.${d.replacing ? ` ${d.replacing} of them replace a record already on its month; everything else there is left alone.` : ''}</p>`
         + `<button type="button" class="btn-ghost small" onclick="applyBackfill()">Write these months</button>`;
     out.hidden = false;
     setBackfillStatus('Nothing has been written yet.', true);

@@ -823,7 +823,8 @@ async def add_month_movie(user_id: int, month: str, movie: dict) -> bool:
     _month_movies means "no stored list", which for a closed month is simply a
     month that recorded no films — a frozen month with nothing in it is the
     ordinary case, not a reason to refuse. WHETHER THE MONTH IS CLOSED IS THE
-    CALLER'S to establish (routes._amend_closed_month_films): writing a list onto
+    CALLER'S to establish — routes._amend_closed_month_films has already read the
+    month, and backfill closes it in the same pass — because writing a list onto
     an OPEN month would give it a stored answer it is supposed to recompute.
     """
     held = await _month_movies(user_id, month) or []
@@ -863,6 +864,30 @@ async def set_month_movies(user_id: int, month: str, movies: list[dict]) -> None
     await db.execute(
         "UPDATE distrakt_months SET movies_json = ? WHERE user_id = ? AND month = ?",
         (json.dumps(list(movies or [])), user_id, _validate_month(month)),
+    )
+
+
+async def set_month_closed(user_id: int, month: str) -> None:
+    """Mark a month closed and stamp it refreshed, leaving its records and its
+    films exactly as they are.
+
+    The counterpart to add_month_record, and here for the same reason a film edit
+    stopped going through save_month: a caller that has just written records one
+    at a time must not then hand save_month a whole doc to close the month with,
+    because that deletes every record the month holds and re-inserts only the ones
+    the doc happens to carry. Closing is two columns on the month row.
+
+    The month row is created if it is missing, so closing a month does not depend
+    on whether anything has been written onto it yet.
+    """
+    month = _validate_month(month)
+    now = db.now()
+    await db.execute(
+        "INSERT INTO distrakt_months "
+        "(user_id, month, closed, totals_refreshed_at, movies_json, created_at) "
+        "VALUES (?, ?, 1, ?, NULL, ?) "
+        "ON CONFLICT(user_id, month) DO UPDATE SET closed = 1, totals_refreshed_at = ?",
+        (user_id, month, now, now, now),
     )
 
 
