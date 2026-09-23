@@ -16,6 +16,7 @@ No network. Each test runs against a throwaway SQLite file.
 from __future__ import annotations
 
 import unittest
+from zoneinfo import ZoneInfo
 from dataclasses import replace as dataclasses_replace
 from datetime import date
 from types import SimpleNamespace
@@ -857,7 +858,7 @@ class FinishingASeasonSettlesTheMonthItHappenedInTests(RolloverTestCase):
         show can never be settled by it."""
         state = {"shows": {_key(102): {"ids": _ids(102),
                                        "seasons": {"1": {"1": "2026-07-02T00:00:00Z"}}}}}
-        self.assertEqual(watch_history.season_completed_map(state),
+        self.assertEqual(watch_history.season_completed_map(state, ZoneInfo("UTC")),
                          {(_key(102), 1): "2026-07-02"})
 
         # 102's season has 8 episodes; one of them is watched.
@@ -866,7 +867,7 @@ class FinishingASeasonSettlesTheMonthItHappenedInTests(RolloverTestCase):
             shows = await distrakt.compute_live_shows(
                 self.user_id, records, SETTINGS,
                 watched_lookup={(_key(102), 1): 1},
-                completed_lookup=watch_history.season_completed_map(state),
+                completed_lookup=watch_history.season_completed_map(state, ZoneInfo("UTC")),
             )
         self.assertNotEqual(shows[0]["bucket"], "completed")
         self.assertEqual(shows[0]["completed_on"], "")

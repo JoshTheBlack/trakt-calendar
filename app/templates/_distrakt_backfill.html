@@ -20,16 +20,15 @@
     drift apart. -#}
 {%- macro line(month) -%}
 {%- set parts = [] -%}
-{#- SAID FIRST, BECAUSE IT CHANGES WHAT EVERY OTHER NUMBER ON THE ROW MEANS. A
-    tracked month is swept for films and NOT examined for seasons (see
-    backfill.survey), so "0 finished" on it is "not looked at" rather than "you
-    finished nothing" — and the difference is invisible in a count. -#}
-{%- if month.tracked %}{% set _ = parts.append('already tracked, seasons left alone') %}{% endif -%}
 {%- if month.count %}{% set _ = parts.append(month.count ~ ' finished') %}{% endif -%}
 {%- if month.movie_count %}{% set _ = parts.append(month.movie_count ~ ' film' ~ ('' if month.movie_count == 1 else 's')) %}{% endif -%}
 {#- Said out loud rather than left out: a month whose films are all already
     recorded looks identical to one where none could be found. -#}
 {%- if month.movie_known %}{% set _ = parts.append(month.movie_known ~ ' film' ~ ('' if month.movie_known == 1 else 's') ~ ' already here') %}{% endif -%}
+{#- HOW MANY OF THAT COUNT ARE OVERWRITES. Importing a month used to refuse any
+    month holding anything at all; it merges now, so the row has to say that part
+    of what it offers will land on records the month already has. -#}
+{%- if month.replacing %}{% set _ = parts.append(month.replacing ~ " replacing what's there") %}{% endif -%}
 <strong>{{ month.month }}</strong> &mdash; {{ parts | join(', ') or 'nothing' }}
 {%- endmacro -%}
 
@@ -38,9 +37,8 @@
     run at all when every month in the range is already tracked (see
     backfill.survey) — so a bare "0 season(s)" tells a reader who finished nine of
     them in that range that the sweep looked and found none. Three genuinely
-    different outcomes sit behind that zero and each says which it is; `skipped`
-    alone cannot tell them apart, because a range can hold a tracked month AND
-    months that were read, which is why the survey states `months_read`. -#}
+    different outcomes sit behind that zero and each says which it is, which is
+    why the survey states `months_read` rather than leaving it to be inferred. -#}
 {%- macro reach() -%}
 {%- if plan.seasons_seen %}The sweep read {{ plan.seasons_seen }} season(s).
 {%- elif not plan.months_read %}No month in that range was read for seasons: a
@@ -81,7 +79,9 @@ recorded.{% endif %}
 {%- if plan.to_write %}
 <p class="distrakt-note">{{ plan.to_write }} month(s) to write, {{ plan.total }} finished season(s)
     {%- if plan.movies %}, and {{ plan.movies }} watched film(s){% endif -%}
-    . Nothing has been written yet.</p>
+    .{% if plan.replacing %} {{ plan.replacing }} of them replace a record already
+    on its month; everything else there is left alone.{% endif %}
+    Nothing has been written yet.</p>
 <button type="button" class="btn-ghost small"
         hx-post="/api/distrakt/backfill/apply" hx-json-enc
         hx-target="#backfillResult" hx-swap="outerHTML">Write these months</button>
@@ -90,9 +90,7 @@ recorded.{% endif %}
     either is already tracked or holds only films this account already has, so
     "Write these months" would spend a confirmation on a no-op — and a button
     that appears to have done nothing reads as the feature being broken. -#}
-<p class="distrakt-note">Nothing to write. {{ reach() }}
-    {%- if plan.skipped %} To have a tracked month built from history again, empty
-    it first.{% endif %}</p>
+<p class="distrakt-note">Nothing to write. {{ reach() }}</p>
 {%- endif %}
 {%- endif %}
 {%- endif %}

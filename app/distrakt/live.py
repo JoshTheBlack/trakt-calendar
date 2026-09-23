@@ -748,7 +748,8 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
         # returns, so every reader of it agrees. See its own note for why that
         # is there and not here.
         watched_lookup = watch_history.watched_map(state)
-        completed_lookup = watch_history.season_completed_map(state)
+        completed_lookup = watch_history.season_completed_map(
+            state, watch_history.viewer_tz(settings))
         # PER SERVICE, unlike completed_lookup beside it, because the tooltip
         # names services and the two answer different questions — see
         # watch_history.season_dates_by_source.

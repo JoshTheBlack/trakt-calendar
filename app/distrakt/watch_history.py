@@ -121,6 +121,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import NamedTuple
 
 from . import counts, naming, removals, store
@@ -1180,7 +1181,56 @@ def restart_details(state: dict, key, season: int) -> dict:
     return {}
 
 
-def season_completed_map(state: dict) -> dict[tuple[str, int], str]:
+def viewer_tz(settings) -> ZoneInfo:
+    """The zone a play's timestamp is read in, falling back to UTC when the
+    configured name is unusable — a settings.json predating a tzdata rename must
+    not take the tracker down."""
+    for name in (getattr(settings, "timezone", None), "UTC"):
+        if not name:
+            continue
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            continue
+    return ZoneInfo("UTC")
+
+
+def local_day(when, tz: ZoneInfo) -> str:
+    """A play's 'YYYY-MM-DD' IN THE VIEWER'S OWN ZONE, or "" if unreadable.
+
+    THE ONE PLACE A TIMESTAMP BECOMES A DAY, and it exists because taking the
+    first ten characters of the string is wrong for everybody west of UTC. Every
+    service reports `watched_at` in UTC, so an episode watched at 22:24 on 31
+    August in New York arrives as 2026-09-01T02:24Z, and a truncated string files
+    it under September. MEASURED on a live account, and confirmed identically by
+    both services: two seasons finished at 22:24 and 23:59 on the last day of
+    August were recorded as September's. The window is four or five hours wide
+    every single day; it only becomes visible on the last one.
+
+    NOT clock.today()'s business. That answers "what day is it here" from the
+    process's own clock; this converts a moment somebody else recorded. Merging
+    them would give a different wrong answer in a deployment whose server sits in
+    neither zone.
+
+    A DATE WITH NO TIME IS TAKEN AS IT IS. Some services report a bare day, and
+    there is no hour in it to move — reading one as midnight UTC and shifting it
+    back would turn a stated day into the day before.
+    """
+    text = str(when or "").strip()
+    if not text:
+        return ""
+    if len(text) <= 10:
+        return text[:10]
+    try:
+        stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text[:10]
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(tz).date().isoformat()
+
+
+def season_completed_map(state: dict, tz: ZoneInfo) -> dict[tuple[str, int], str]:
     """{(item key, season): 'YYYY-MM-DD'} — the day the season's LAST episode was
     watched, which is the day it was finished.
 
@@ -1189,6 +1239,11 @@ def season_completed_map(state: dict) -> dict[tuple[str, int], str]:
     compute_live_shows, which only keeps this for a season it has just bucketed
     as completed). A season with no dated episodes is absent rather than dated
     ""; "I don't know when" and "finished on the epoch" must never be confused.
+
+    `tz` HAS NO DEFAULT, deliberately. This date decides which month a completed
+    season is recorded on, and a default would let a call site that never thought
+    about the question file somebody's late-evening viewing a month late — see
+    local_day for the measurement.
     """
     out: dict[tuple[str, int], str] = {}
     for key, entry in (state.get("shows") or {}).items():
@@ -1196,18 +1251,26 @@ def season_completed_map(state: dict) -> dict[tuple[str, int], str]:
             # THE LATEST DAY ANY SOURCE REPORTED. Which service saw the last
             # episode go by does not change the day it was seen, and a season
             # finished in July is July's whichever of them said so.
-            days = [str(w)[:10] for eps in slots.values() for w in eps.values() if w]
+            days = [d for eps in slots.values() for w in eps.values() if w
+                    for d in (local_day(w, tz),) if d]
             if days:
                 out[(key, int(season_s))] = max(days)
     return out
 
 
-def movies_in_range(state: dict, start_date: str, end_date: str) -> list[dict]:
+def movies_in_range(state: dict, start_date: str, end_date: str,
+                    tz: ZoneInfo) -> list[dict]:
     """Movies whose watched_at date falls within [start_date, end_date]
-    (YYYY-MM-DD, inclusive), as [{key, ids, title, year, watched_at}]."""
+    (YYYY-MM-DD, inclusive), as [{key, ids, title, year, watched_at}].
+
+    The bounds are the viewer's own days — month_bounds builds them straight off a
+    month key — so the play has to be read in the viewer's own zone to be compared
+    against them. A UTC day measured against a local range puts a film watched at
+    8pm on the last of the month into the next one; see local_day.
+    """
     out = []
     for key, m in (state.get("movies") or {}).items():
-        day = (m.get("watched_at") or "")[:10]
+        day = local_day(m.get("watched_at"), tz)
         if day and start_date <= day <= end_date:
             # The identity travels with it: the page needs something to name when
             # a film has to be removed, and the title is not an identifier.
@@ -1278,27 +1341,66 @@ async def load_state(user_id: int) -> dict:
     return await _load(user_id)
 
 
-async def record_movie_watches(user_id: int, movies: list[dict]) -> int:
+async def record_movie_watches(user_id: int, movies: list[dict], *,
+                               swept: bool = False) -> int:
     """Fold movie plays into the cache and save; returns how many were recorded.
 
     For the backfill: the routine sync only ever looks back to the start of the
     CURRENT month, so movies watched before tracking began are recorded nowhere,
-    and the ranker imports movies too. Uses the same fold as a normal sync, so a
-    movie already known keeps whichever play is later. A film naming no shared id
-    is skipped rather than filed under an invented one, and does not count.
+    and the ranker imports movies too. A film naming no shared id is skipped
+    rather than filed under an invented one, and does not count.
+
+    `swept` SAYS THESE PLAYS ARE A COMPLETE SWEEP rather than news to fold in, and
+    it is what lets a stored date be CORRECTED rather than only advanced. The
+    ordinary fold keeps whichever play is later, which is right for a sync that
+    sees a slice of history and must not erase what it did not look at — but it
+    makes the cache a ratchet: a play deleted or re-dated at the source can never
+    move the stored date back, so the app goes on believing a date that no service
+    reports any more.
+
+    MEASURED: a film watched on 23 August was swept up by a bad bulk import and
+    re-dated to 11 September. The import was undone at both services, both then
+    reported 23 August again, and the tracker went on filing the film under
+    September for ever — invisible on August, unreachable from anywhere, and
+    proof against every re-import.
+
+    A SWEEP STILL KEEPS THE LATEST PLAY IT SAW. It covers a span rather than a
+    moment, so a film watched twice inside it is held at the later of the two;
+    what is discarded is only the stored answer the sweep has just superseded.
     """
     if not movies:
         return 0
     state = await _load(user_id)
     recorded = 0
+    latest: dict[str, dict] = {}
     for movie in movies:
         ids = collect_ids(movie.get("ids") or {})
         key = resolve_key(Media.MOVIE, ids)
         if key is None:
             continue
-        _apply_movie(state, key, ids, movie.get("title"), movie.get("year"),
-                     movie.get("watched_at"))
         recorded += 1
+        if not swept:
+            _apply_movie(state, key, ids, movie.get("title"), movie.get("year"),
+                         movie.get("watched_at"))
+            continue
+        held = latest.get(str(key))
+        if held is None or str(movie.get("watched_at") or "") > str(held["when"] or ""):
+            latest[str(key)] = {"key": key, "ids": ids, "title": movie.get("title"),
+                                "year": movie.get("year"),
+                                "when": movie.get("watched_at")}
+    for entry in latest.values():
+        # Straight in, past the fold, because the sweep is the authority for the
+        # span it covered. The ids still MERGE with what was stored — a service
+        # that named the film by one id last time has not stopped knowing it.
+        movies_state = state.setdefault("movies", {})
+        prev = movies_state.get(str(entry["key"])) or {}
+        movies_state[str(entry["key"])] = {
+            "ids": {**prev.get("ids", {}), **collect_ids(entry["ids"] or {})},
+            "title": entry["title"] or prev.get("title") or "",
+            "year": entry["year"] if entry["year"] is not None else prev.get("year"),
+            "watched_at": entry["when"] or "",
+            "source": prev.get("source", _LEGACY_SOURCE),
+        }
     await _save(user_id, state)
     return recorded
 
@@ -1565,11 +1667,27 @@ async def _sync_one(settings, state: dict, source, port, plays: list, *,
     rebaseline = force or _removed_changed(stored, beacons)
 
     # THE SERVICE HAS SAID SOMETHING WAS TAKEN AWAY, so it is worth asking what it
-    # still holds. Only on a genuine removal beacon, never on `force`: a refresh
-    # is the viewer asking for fresher numbers, and nothing about pressing it says
-    # a title left the library. A source with no way to list its ids cheaply is
-    # not asked at all — the full re-baseline below is what covers it.
-    if (not force and _removed_changed(stored, beacons)
+    # still holds — AND SO IS THE VIEWER PRESSING REFRESH.
+    #
+    # THIS USED TO BE `not force`, on the reasoning that a refresh is somebody
+    # asking for fresher numbers and nothing about pressing it says a title left
+    # the library. That is true about the BEACON and wrong about the button. A
+    # mark is the one thing on this page a viewer cannot correct: it is not a
+    # control, it clears only when a service names the title again, and a
+    # `date_from` read never names a title that has not moved — so a mark made
+    # wrongly outlives every ordinary pass. The control that says "look again"
+    # was the one control that did not.
+    #
+    # WHAT THAT COST, MEASURED: a listing that had never asked for `plantowatch`
+    # marked 33 of 51 rows on a live account, and no amount of refreshing moved
+    # them, because the beacon had not shifted and never would. The listing bug is
+    # fixed (simkl/sync.py's LIBRARY_STATUSES) and this is what lets somebody
+    # holding the marks it already made get rid of them.
+    #
+    # IT IS A WHOLE LIBRARY READ, which is why it is not on every pass: the
+    # beacon is what keeps it off the ordinary ones. A source with no way to list
+    # its ids cheaply is not asked at all — the full re-baseline below covers it.
+    if ((force or _removed_changed(stored, beacons))
             and getattr(port, "fetch_library_ids", None) is not None):
         state.setdefault(_REMOVALS_OWED, [])
         if name not in state[_REMOVALS_OWED]:

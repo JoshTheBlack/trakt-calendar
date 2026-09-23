@@ -786,6 +786,72 @@ async def months_with_shows(user_id: int) -> set[str]:
     return {r["month"] for r in rows}
 
 
+async def _month_movies(user_id: int, month: str) -> list[dict] | None:
+    """The films a month has stored, or None when it has never snapshotted any.
+
+    None and [] are different answers: an OPEN month has no stored list at all and
+    recomputes its films on every load, while a closed month with an empty list is
+    a month that recorded no films. A caller that wrote [] over the first would
+    make an open month look settled.
+    """
+    row = await db.fetch_one(
+        "SELECT movies_json FROM distrakt_months WHERE user_id = ? AND month = ?",
+        (user_id, _validate_month(month)),
+    )
+    if row is None or row["movies_json"] is None:
+        return None
+    return list(json.loads(row["movies_json"]) or [])
+
+
+async def add_month_movie(user_id: int, month: str, movie: dict) -> bool:
+    """Put ONE film into a closed month's stored list. True if it wrote.
+
+    ONE FILM, NOT A RE-DERIVED LIST, and that distinction is the whole reason this
+    exists. A closed month's films used to be rebuilt from live watch history
+    whenever one was added or forgotten — so an edit to one film silently
+    replaced the month's whole record with whatever history happened to say at
+    that moment. MEASURED on a live account: a month holding three films, with
+    history reporting two for the same window, lost TWO of them when one was
+    forgotten. The snapshot is the month's own record (see
+    routes._closed_month_payload, which says exactly that), and a record is
+    amended rather than recomputed.
+
+    A film already in the list is REPLACED rather than doubled: it is held once
+    per identity carrying its latest play, which is the same rule watch history
+    itself keeps.
+
+    A MONTH THAT HAS NEVER SNAPSHOTTED ONE STARTS A LIST. `None` from
+    _month_movies means "no stored list", which for a closed month is simply a
+    month that recorded no films — a frozen month with nothing in it is the
+    ordinary case, not a reason to refuse. WHETHER THE MONTH IS CLOSED IS THE
+    CALLER'S to establish — routes._amend_closed_month_films has already read the
+    month, and backfill closes it in the same pass — because writing a list onto
+    an OPEN month would give it a stored answer it is supposed to recompute.
+    """
+    held = await _month_movies(user_id, month) or []
+    key = str(movie.get("key") or "")
+    rest = [m for m in held if str(m.get("key") or "") != key] if key else list(held)
+    await set_month_movies(user_id, month, [*rest, dict(movie)])
+    return True
+
+
+async def remove_month_movie(user_id: int, month: str, key) -> bool:
+    """Drop ONE film from a closed month's stored list. True if it removed one.
+
+    The counterpart to add_month_movie, and here for its reason: forgetting a film
+    must take that film out rather than re-derive the month from today's history.
+    """
+    held = await _month_movies(user_id, month)
+    if held is None:
+        return False
+    wanted = str(key)
+    left = [m for m in held if str(m.get("key") or "") != wanted]
+    if len(left) == len(held):
+        return False
+    await set_month_movies(user_id, month, left)
+    return True
+
+
 async def set_month_movies(user_id: int, month: str, movies: list[dict]) -> None:
     """Replace just the films a CLOSED month snapshotted, leaving its records and
     its closed flag alone.
@@ -799,6 +865,30 @@ async def set_month_movies(user_id: int, month: str, movies: list[dict]) -> None
     await db.execute(
         "UPDATE distrakt_months SET movies_json = ? WHERE user_id = ? AND month = ?",
         (json.dumps(list(movies or [])), user_id, _validate_month(month)),
+    )
+
+
+async def set_month_closed(user_id: int, month: str) -> None:
+    """Mark a month closed and stamp it refreshed, leaving its records and its
+    films exactly as they are.
+
+    The counterpart to add_month_record, and here for the same reason a film edit
+    stopped going through save_month: a caller that has just written records one
+    at a time must not then hand save_month a whole doc to close the month with,
+    because that deletes every record the month holds and re-inserts only the ones
+    the doc happens to carry. Closing is two columns on the month row.
+
+    The month row is created if it is missing, so closing a month does not depend
+    on whether anything has been written onto it yet.
+    """
+    month = _validate_month(month)
+    now = db.now()
+    await db.execute(
+        "INSERT INTO distrakt_months "
+        "(user_id, month, closed, totals_refreshed_at, movies_json, created_at) "
+        "VALUES (?, ?, 1, ?, NULL, ?) "
+        "ON CONFLICT(user_id, month) DO UPDATE SET closed = 1, totals_refreshed_at = ?",
+        (user_id, month, now, now, now),
     )
 
 
@@ -1244,11 +1334,12 @@ async def remove_season_everywhere(user_id: int, key: ItemKey, season: int) -> l
     """Delete one season from the viewer's list AND from every month that holds a
     record of it. Returns the months that actually held one, sorted.
 
-    The ✕ on a row, and the only thing that ever removes a record. It is deliberately
-    blunt: a season can hold a premiere record on one month, a verdict on another
-    and a row on the viewer's list all at once, so anything narrower would leave a
-    copy behind and the row would come straight back on the next load with the ✕
-    looking broken.
+    NOT WHAT THE ✕ DOES ANY MORE, and the docstring said it was for long enough to
+    be worth stating outright. A removal now reaches the month it was pressed on
+    and, on the month under way, the viewer's list — see routes.api_distrakt_remove
+    for why. This stayed because "forget this season entirely" is a real thing to
+    be able to ask for in one statement, and because the months it reports are
+    worth having; what it must not be read as is the behaviour of a button.
     """
     address = (user_id, key.media, key.match_source, key.match_id, int(season))
 
@@ -1263,6 +1354,37 @@ async def remove_season_everywhere(user_id: int, key: ItemKey, season: int) -> l
         return months
 
     return await db.transaction(_work)
+
+
+async def remove_season_from_month(user_id: int, month: str, key: ItemKey,
+                                   season: int) -> int:
+    """Delete one season's records from ONE month, of every kind. Returns how
+    many rows went.
+
+    THE MONTH-SCOPED COUNTERPART to remove_season_everywhere, and the difference
+    between them is the difference between a live row and a record. A season on
+    the month under way is a thing the viewer is tracking, held in as many places
+    as its life needs — a premiere record here, a roster row there — so taking it
+    off the tracker has to be blunt or the row comes back on the next load. A
+    season on a month that is OVER is a statement about what happened that month,
+    and the only thing removing it can mean is that the statement is wrong. The
+    other months are separate statements and are none of this one's business.
+
+    EVERY KIND ON THAT MONTH, THOUGH, because "off this month" has to be true
+    afterwards: a month draws its verdicts on the page and its premieres in the
+    first notice, so clearing one and leaving the other would take a title off the
+    list and leave it in the announcement.
+
+    The viewer's own list is untouched. What somebody is part-way through is a
+    fact about them and about no month at all, so a month's record going says
+    nothing about it.
+    """
+    result = await db.execute(
+        f"DELETE FROM distrakt_month_records {_SEASON_WHERE} AND month = ?",
+        (user_id, key.media, key.match_source, key.match_id, int(season),
+         _validate_month(month)),
+    )
+    return result.rowcount
 
 
 # ---------------------------------------------------------------------------

@@ -11,9 +11,11 @@ including the refusal (None) that a partially-read library produces.
 """
 from __future__ import annotations
 
+import inspect
 import unittest
 
 from app import distrakt
+from app.distrakt import watch_history
 from app.distrakt import lifecycle, removals, store
 from app.distrakt import routes as distrakt_routes
 from app.providers.base import ItemKey, Source
@@ -208,6 +210,94 @@ class MarkingWhatAServiceNoLongerListsTests(DistraktTestCase):
 
         self.assertEqual(await removals.check(SETTINGS, self.user_id, Source.SIMKL, port), 1)
         self.assertEqual(await removals.check(SETTINGS, self.user_id, Source.SIMKL, port), 0)
+
+
+class APassThatMarksMostOfATrackerSaysSoTests(DistraktTestCase):
+    """`_may_believe` refuses a listing that names NOT ONE of the viewer's
+    titles. It cannot refuse one that names a few, and deliberately does not try:
+    a threshold high enough to catch a broken read would refuse a viewer who
+    genuinely emptied their library, and refuse it again on every pass.
+
+    SO THE LOUD CASE IS REPORTED RATHER THAN REFUSED, and this is what makes the
+    difference findable. A bucket nobody asked about marked two thirds of a live
+    tracker and left nothing in the log to read — which is how `plantowatch` went
+    unnoticed (simkl/sync.py's LIBRARY_STATUSES).
+    """
+
+    async def _rows(self, n, simkl_from=500):
+        for i in range(n):
+            await distrakt.add_user_record(self.user_id, a_record(
+                tmdb=900 + i, season=1, kind=distrakt.RecordKind.KEEPUP,
+                ids={"tmdb": 900 + i, "simkl": simkl_from + i}))
+
+    async def test_marking_most_of_them_is_warned_about_and_still_done(self):
+        await self._rows(4)
+        # One of the four is still listed, so the answer is believable.
+        port = _Port({500: "still-here"})
+        with self.assertLogs("app.distrakt.removals", level="WARNING") as caught:
+            changed = await removals.check(SETTINGS, self.user_id, Source.SIMKL, port)
+        self.assertEqual(changed, 3)
+        said = " ".join(caught.output)
+        self.assertIn("names only 1 of the 4", said)
+        self.assertIn("every bucket", said)
+
+    async def test_an_ordinary_pass_says_nothing(self):
+        """The warning has to be rare or it is noise. Three of four still listed
+        is an ordinary removal and gets no line."""
+        await self._rows(4)
+        port = _Port({500: "a", 501: "b", 502: "c"})
+        with self.assertNoLogs("app.distrakt.removals", level="WARNING"):
+            self.assertEqual(
+                await removals.check(SETTINGS, self.user_id, Source.SIMKL, port), 1)
+
+
+class RefreshAsksWhatEachServiceStillHoldsTests(unittest.IsolatedAsyncioTestCase):
+    """PRESSING REFRESH RE-RUNS THE REMOVAL CHECK, and it used to be the one thing
+    refresh specifically did not do.
+
+    The check is expensive — a whole library listing — so ordinary passes are
+    gated on the service saying outright that something was removed. `force` was
+    excluded from that on the reasoning that pressing refresh says nothing about a
+    title having left. True of the beacon, wrong about the button: a mark is not a
+    control, it clears only when a service names the title again, and a bounded
+    read never names a title that has not moved. So a mark made wrongly outlived
+    every ordinary pass, and the control that says "look again" was the one
+    control that did not.
+    """
+
+    def _decide(self, *, force, removed_moved, can_list):
+        """The condition itself, which is where the decision lives. Driving the
+        whole sync would need a source whose port offers a cheap listing, and
+        Trakt's does not — so the test would be about Simkl's wiring rather than
+        about when a refresh asks."""
+        stored = {"ep_removed": "A", "mv_removed": "A"}
+        beacons = {"ep_removed": "B" if removed_moved else "A", "mv_removed": "A"}
+        port = object()
+        if can_list:
+            port = type("P", (), {"fetch_library_ids": lambda self, s: None})()
+        return ((force or watch_history._removed_changed(stored, beacons))
+                and getattr(port, "fetch_library_ids", None) is not None)
+
+    async def test_a_refresh_asks_even_though_no_beacon_moved(self):
+        self.assertTrue(self._decide(force=True, removed_moved=False, can_list=True))
+
+    async def test_an_ordinary_pass_still_waits_for_the_beacon(self):
+        """The gate has to keep doing its job or every page load pays for a whole
+        library listing."""
+        self.assertFalse(self._decide(force=False, removed_moved=False, can_list=True))
+        self.assertTrue(self._decide(force=False, removed_moved=True, can_list=True))
+
+    async def test_a_source_that_cannot_list_cheaply_is_never_asked(self):
+        """Including on a refresh: there is nothing to ask it FOR. The full
+        re-baseline is what covers such a source."""
+        self.assertFalse(self._decide(force=True, removed_moved=True, can_list=False))
+
+    def test_the_condition_under_test_is_the_one_that_ships(self):
+        """A hand-built copy of a condition is a test of the copy. This reads the
+        source and fails if the shipped line stops matching the shape above."""
+        source = inspect.getsource(watch_history._sync_one)
+        self.assertIn("(force or _removed_changed(stored, beacons))", source)
+        self.assertIn('getattr(port, "fetch_library_ids", None) is not None', source)
 
 
 class TheMarkSurvivesAnOrdinaryWriteTests(DistraktTestCase):

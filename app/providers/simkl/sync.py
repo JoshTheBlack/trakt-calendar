@@ -65,6 +65,24 @@ logger = logging.getLogger(__name__)
 # `plantowatch` is excluded because nothing in it has been watched.
 WATCHED_STATUSES = ("watching", "completed", "hold", "dropped")
 
+# THE BUCKETS A LIBRARY LISTING MUST COVER, WHICH IS NOT THE SAME QUESTION.
+# WATCHED_STATUSES above is about where a WATCH can be found, and `plantowatch`
+# is rightly missing from it: nothing in there has been watched. fetch_library_ids
+# asks something else — WHAT IS STILL IN THIS LIBRARY — and reads a title's
+# absence as the service having dropped it. A bucket it never asks about is
+# therefore every title in that bucket reported as removed.
+#
+# MEASURED ON A LIVE ACCOUNT, which is how this was found: 39 of that library's
+# titles sit in `plantowatch`, and 29 of the 33 rows the removal diff called
+# missing were in it. The viewer had not removed one of them; the listing had
+# never been asked.
+#
+# `notinteresting` IS NOT HERE AND MUST NOT BE ADDED. Simkl answers an
+# unrecognised status with the whole library rather than an error — measured:
+# `shows/notinteresting` returned 1,045 distinct ids against a real library of
+# 1,045 — so reading it would make every diff believe nothing is ever missing.
+LIBRARY_STATUSES = (*WATCHED_STATUSES, "plantowatch")
+
 # The one bucket whose items are NOT itemized, measured against a live account:
 # every title in `watching` carries a `seasons[]` block with an entry per episode
 # watched, and not one title in `completed` carries the key at all. A completed
@@ -828,6 +846,13 @@ async def fetch_library_ids(settings: Settings) -> dict[int, str] | None:
     filtered out for not having moved is exactly the title a diff would then
     report as removed. This is the one read in this module that must stay whole.
 
+    EVERY BUCKET, NOT THE WATCHED ONES (LIBRARY_STATUSES, not WATCHED_STATUSES).
+    "Where can a watch be found" and "what is still in this library" are different
+    questions, and this is the second: a title in `plantowatch` has been watched
+    nowhere and is still very much in the library, so leaving that bucket unasked
+    reported every title in it as removed. See LIBRARY_STATUSES for the numbers
+    that found it.
+
     NONE RATHER THAN A SHORT LIST WHEN ANY BUCKET FAILS, and the asymmetry with
     fetch_library is deliberate. There, a bucket that could not be read makes the
     answer PARTIAL and the caller folds in what it got — the missing bucket costs
@@ -850,7 +875,7 @@ async def fetch_library_ids(settings: Settings) -> dict[int, str] | None:
     ids: dict[int, str] = {}
     with span("simkl.library_ids") as sp:
         for media in LIBRARY_TYPES:
-            for status in WATCHED_STATUSES:
+            for status in LIBRARY_STATUSES:
                 params = {"extended": "simkl_ids_only"}
                 try:
                     document = await transport.cached_get(

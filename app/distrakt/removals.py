@@ -148,6 +148,27 @@ async def check(settings, user_id: int, source, port) -> int:
     for record in records:
         current.setdefault(str(store.record_key(record)),
                            set(record.get("missing_sources") or []))
+    # A PASS THAT MARKS MOST OF A TRACKER IS SAID OUT LOUD, EVEN WHEN IT IS
+    # BELIEVED. `_may_believe` refuses a listing that names NOT ONE of the
+    # viewer's titles; it cannot refuse one that names a few, and it should not
+    # try — a threshold high enough to catch a broken read would refuse a viewer
+    # who genuinely cleared out their library, and refuse it again on every pass,
+    # which is a worse failure than the marks it prevents.
+    # SO THIS REPORTS RATHER THAN REFUSES. A real removal of two thirds of a
+    # tracker in one pass is rare enough to be worth a line in the log; a bucket
+    # nobody asked about is not rare at all, and left the operator with a page of
+    # wrong marks and nothing to read. That is exactly how `plantowatch` went
+    # unnoticed — see simkl/sync.py's LIBRARY_STATUSES.
+    missing_now = sum(len(keys) for ident, keys in ours.items() if ident not in held)
+    total = sum(len(keys) for keys in ours.values())
+    if total and missing_now * 2 > total:
+        logger.warning(
+            "distrakt removals: %s's listing names only %d of the %d title(s) this "
+            "viewer holds there, so %d row(s) are about to be marked missing. That "
+            "is believable if they really were removed, and otherwise means this "
+            "listing is not covering every bucket the library keeps.",
+            name, total - missing_now, total, missing_now)
+
     changed = 0
     for service_id, keys in ours.items():
         gone = service_id not in held
