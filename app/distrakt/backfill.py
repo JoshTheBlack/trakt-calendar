@@ -437,12 +437,25 @@ async def _record_films(user_id: int, month_key: str, state: dict) -> bool:
     THE CALLER ESTABLISHES THAT THE MONTH IS CLOSED, or is closing it in the same
     breath — an open month recomputes its films on every load, and giving it a
     stored list would freeze an answer it is supposed to keep working out.
+
+    A FILM THE MONTH ALREADY HOLDS, IDENTICALLY, IS NOT WRITTEN AGAIN, and the
+    answer is what the caller counts as a month it brought up to date. Writing
+    every film every time would make a re-run report that it refreshed six months
+    it had not changed at all, in the one log line that says what it did.
     """
     mstart, mend = watch_history.month_bounds(month_key)
     films = watch_history.movies_in_range(state, mstart, mend)
+    if not films:
+        return False
+    doc = await distrakt.load_month(user_id, month_key) or {}
+    held = {str(m.get("key") or ""): m for m in (doc.get("movies") or [])}
+    wrote = False
     for film in films:
+        if held.get(str(film.get("key") or "")) == film:
+            continue
         await distrakt.add_month_movie(user_id, month_key, film)
-    return bool(films)
+        wrote = True
+    return wrote
 
 
 def _completed_record(ident: dict, season: int, total: int, detail: dict) -> dict:

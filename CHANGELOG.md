@@ -6,6 +6,7 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ### 🥚
 - Something you had lined up but not yet started was being reported as taken away from you. One of them keeps those apart from the ones you have begun, and only half of that was ever being asked for — so a list you had been building read as a list somebody had emptied. All of it is asked for now. And when a great many go at once it says so plainly, which is the part that was missing: there was nothing to read while two thirds of it was being marked.
+- A month that is over is a set of records you can edit one at a time, and this round makes that true in the four places it was not. Forgetting one film took the others with it, because the list was being worked out again from scratch instead of having one entry taken out of it. Filling a month in from your history refused any month that had anything on it at all, which is a fine rule until one wrong row makes a month impossible to fix — it now writes what it found over the entries for the same things, adds the ones that were not there, and leaves everything else alone, saying up front how many of each. And adding something to a month that has finished no longer asks whether you are starting over: you named the month, which is the answer. That last one used to depend on whether the month had been tidied away, so a month nobody had been around to tidy behaved like this one.
 
 ## 🏷️ [1.2.3] - 2026-09-09
 
