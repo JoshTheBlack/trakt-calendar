@@ -1549,31 +1549,29 @@ async def api_distrakt_set_emojis(request: Request):
 
 @guard.post("/api/distrakt/remove", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_remove(request: Request):
-    """The ✕ on a row, and the only thing that ever removes a record. WHAT IT
-    REMOVES DEPENDS ON WHERE THE ROW IS.
+    """The ✕ on a row: TAKE IT OFF THE MONTH IT IS ON, and off the viewer's list
+    as well when that month is the one under way.
 
-    ON THE MONTH UNDER WAY IT IS DELIBERATELY BLUNT, AND HAS TO BE. A season being
-    tracked is held in as many places as its life needs — a premiere record on the
-    month it began, a verdict on the month it settled, a row on the viewer's own
-    list — so anything narrower leaves a copy behind and the row comes straight
-    back on the next load with the ✕ looking broken. Off the tracker means off it.
+    WHICH IS THE WHOLE RULE, and it falls straight out of where things are stored.
+    A month holds premiere records and settled verdicts (store.MONTH_KINDS); the
+    viewer's list holds what they are part-way through and belongs to no month at
+    all (store.USER_KINDS). A row on screen is therefore one of the month's or one
+    of the list's, and the list's only ever appear on the month under way — so
+    those two are the only places a ✕ can need to reach.
 
-    ON A MONTH THAT IS OVER IT TAKES THE ROW OFF THAT MONTH AND NOTHING ELSE, and
-    that is what the button has always said: the page labels it "Remove from this
-    month" on a month it draws read-only. It did not do that. A season on a past
-    month is a STATEMENT about what happened that month, other months hold their
-    own separate statements, and the only thing removing one can mean is that that
-    statement is wrong.
+    IT USED TO REACH INTO EVERY MONTH AT ONCE, and that was the thinking that a
+    removal should also withdraw the announcement that you had meant to watch it.
+    The cost of that convenience was not local: MEASURED on a live account,
+    September was full of wrongly-dated completions, and cleaning them off
+    September took August — imported minutes earlier, correct, and never opened —
+    from six records to one. Every ✕ on September deleted August's record of the
+    same season. Tidying one month could destroy another's, which is the opposite
+    of what a record is for. Going back to the premiere month to remove it there
+    too is the cheaper price by a wide margin.
 
-    MEASURED, because the difference is not academic: an account whose September
-    had been filled with wrongly-dated completions cleaned them off September and
-    watched August — imported minutes earlier, correct, and never touched — drop
-    from six records to one. Every ✕ pressed on September deleted August's record
-    of the same season. A month rebuilt from history could be destroyed by tidying
-    a different month, which is the opposite of what a record is for.
-
-    The viewer's own list is untouched either way on a past month. What somebody is
-    part-way through is a fact about them and about no month at all.
+    A MONTH THAT IS OVER NEVER TOUCHES THE LIST. Its rows are verdicts, the list is
+    a fact about the person rather than about any month, and nothing drawn on a
+    past month came from it.
     """
     user_id = await _distrakt_user_id(request)
     data = await authz.json_body(request)
@@ -1585,30 +1583,19 @@ async def api_distrakt_remove(request: Request):
     except RequestError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     month_key = distrakt_store.month_key(year, month)
-    if distrakt_store.month_standing(month_key, today) is distrakt_store.MonthStanding.PAST:
-        # That month's own records and no others — see this route's docstring.
-        # Asked of the MONTH rather than of whether it was frozen, for the reason
-        # api_distrakt_add gives: a past month the rollover never reached is over
-        # just the same, and a removal is not the place to discover that.
-        if not await distrakt_store.remove_season_from_month(
-                user_id, month_key, key, season):
-            return JSONResponse({"ok": False, "error": "Show/season not found in that month"},
-                                status_code=404)
-        settings = await _distrakt_settings(user_id)
-        payload, status = await _distrakt_month_payload(user_id, year, month, settings)
-        return JSONResponse(payload, status_code=status)
-    # Whether anything anywhere knew about this season, read BEFORE the delete so
-    # there is still something to find. Below the past-month branch because that
-    # one has a cheaper answer of its own: this walks back over every month that
-    # ever settled anything, which is a lot of reading to do before deleting one
-    # row from one named month.
-    record = await lifecycle.find_season(user_id, key, season, month=month_key)
-    # The months that actually held a record of it. Read together with the search
-    # above because neither alone is the whole answer: a season on the viewer's
-    # list belongs to no month, and a season this month settled is on a month the
-    # search deliberately steps over.
-    cleared = await distrakt_store.remove_season_everywhere(user_id, key, season)
-    if record is None and not cleared:
+    # The named month's records, whatever kind they are, and no other month's.
+    # Asked of the MONTH rather than of whether it was frozen, for the reason
+    # api_distrakt_add gives: a past month the rollover never reached is over just
+    # the same, and a removal is not the place to discover that.
+    gone = await distrakt_store.remove_season_from_month(user_id, month_key, key, season)
+    if distrakt_store.month_standing(month_key, today) is distrakt_store.MonthStanding.CURRENT:
+        # AND THE VIEWER'S LIST, because the month under way is the one page that
+        # draws it. Not folded into the line above with `or`: the list has to be
+        # asked either way, or a row that lives ONLY there — a season being kept up
+        # with that this month never announced — would answer 404 and stay put.
+        dropped = await distrakt_store.remove_user_record(user_id, key, season)
+        gone = gone or dropped
+    if not gone:
         return JSONResponse({"ok": False, "error": "Show/season not found in that month"},
                             status_code=404)
 

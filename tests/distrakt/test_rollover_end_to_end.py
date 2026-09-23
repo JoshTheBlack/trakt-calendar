@@ -839,18 +839,38 @@ class ActingOnARowFromTheViewersOwnListTests(RolloverOverHttpTestCase):
         self.assertFalse(row["abandoned"], "it was given up on again by being looked at")
         self.assertIn(row["bucket"], ("cleanup", "keepup"))
 
-    def test_removing_it_takes_every_copy_so_it_does_not_come_back(self):
-        # Taking it off one place leaves the copy that put it on the page, and it
-        # returns on the next load with the ✕ looking broken.
+    def test_removing_it_on_the_month_under_way_takes_the_row_and_the_list(self):
+        """Both of the places a row on THIS month can come from, so it does not
+        return on the next load with the ✕ looking broken — and neither one is on
+        another month."""
         self.seed_the_closing_month()
         self.open_the_new_month()
         with fake_today(ON_THE_FIRST):
             self.post("/api/distrakt/remove", {
-                "year": 2026, "month": 8, "key": "show:tmdb:701", "season": 1})
+                "year": 2026, "month": OPENING_MONTH, "key": "show:tmdb:701", "season": 1})
             payload = self.get_month(OPENING)
-        self.assertNotIn(701, self.stored_ids(CLOSING))
         self.assertNotIn(701, self.listed_ids())
         self.assertNotIn(701, self.shown_ids(payload))
+        # WHAT JULY ANNOUNCED IS STILL WHAT JULY ANNOUNCED. The removal used to
+        # reach every month at once, so tidying the month on screen silently
+        # withdrew an earlier month's record of the same season — which is how an
+        # account cleaning up September destroyed the August it had just rebuilt.
+        self.assertIn(701, self.stored_ids(CLOSING),
+                      "removing from this month withdrew an earlier month's record")
+
+    def test_removing_it_on_a_past_month_leaves_the_viewers_own_list_alone(self):
+        """The other direction. A past month's rows are its verdicts and its
+        announcements; what somebody is part-way through is a fact about them and
+        about no month, so it is still theirs and still on the month under way."""
+        self.seed_the_closing_month()
+        self.open_the_new_month()
+        with fake_today(ON_THE_FIRST):
+            self.post("/api/distrakt/remove", {
+                "year": 2026, "month": CLOSING_MONTH, "key": "show:tmdb:701", "season": 1})
+            payload = self.get_month(OPENING)
+        self.assertNotIn(701, self.stored_ids(CLOSING))
+        self.assertIn(701, self.listed_ids())
+        self.assertIn(701, self.shown_ids(payload))
 
 
 class AMonthThatHasNotBegunHasNoWorkInHandTests(RolloverOverHttpTestCase):

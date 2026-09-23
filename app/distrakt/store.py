@@ -1333,11 +1333,12 @@ async def remove_season_everywhere(user_id: int, key: ItemKey, season: int) -> l
     """Delete one season from the viewer's list AND from every month that holds a
     record of it. Returns the months that actually held one, sorted.
 
-    The ✕ on a row, and the only thing that ever removes a record. It is deliberately
-    blunt: a season can hold a premiere record on one month, a verdict on another
-    and a row on the viewer's list all at once, so anything narrower would leave a
-    copy behind and the row would come straight back on the next load with the ✕
-    looking broken.
+    NOT WHAT THE ✕ DOES ANY MORE, and the docstring said it was for long enough to
+    be worth stating outright. A removal now reaches the month it was pressed on
+    and, on the month under way, the viewer's list — see routes.api_distrakt_remove
+    for why. This stayed because "forget this season entirely" is a real thing to
+    be able to ask for in one statement, and because the months it reports are
+    worth having; what it must not be read as is the behaviour of a button.
     """
     address = (user_id, key.media, key.match_source, key.match_id, int(season))
 
