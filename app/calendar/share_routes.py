@@ -49,7 +49,7 @@ from ..auth import AuthLevel
 from ..authz import Guard
 from ..config import load_settings
 from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, Endpoint, endpoint_choices, get_endpoint
-from ..media import posters, user_images
+from ..media import logos, posters, user_images
 from ..perftrace import span
 from ..providers import detail_source
 from ..providers.base import (Item, Media, Source, parse_item_key,
@@ -566,6 +566,14 @@ async def _render(request: Request, share_row) -> Response:
         # of one's own to add to, and a visitor here has none. Relying on the name
         # simply being absent would work and would say nothing.
         "can_filter": False,
+        # WHICH NETWORKS THIS INSTANCE HOLDS A TILE FOR. Same question the
+        # signed-in calendar asks, and it has to be asked here too or every
+        # network badge on a public page requests a logo that may not exist.
+        # `logos.tiled` WITHOUT the warm-up its sibling does: a share page makes
+        # no outbound call it is not forced to (see this module's own
+        # allow_fetch=False rule), so it draws the tiles that are there and
+        # leaves generating them to the owner's own calendar.
+        "logo_networks": logos.tiled(item.network for item in visible if item.network),
     }
     # Jinja renders SYNCHRONOUSLY on the event loop, and this template is one
     # block per airing — a busy month is a lot of string building with every other

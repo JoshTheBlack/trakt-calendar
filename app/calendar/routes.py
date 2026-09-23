@@ -715,6 +715,8 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
                 endpoint.key, date.fromisoformat(group["date"]),
                 source=request.query_params.get("source"), new=new_token)
 
+    logo_networks = await _logo_networks(
+        settings, [item for group in month_view.grouped for item in group["items"]])
     return {
         "request": request,
         "settings": settings,
@@ -790,6 +792,9 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
         # THE ADD-TO-LIBRARY BUTTONS' STATE, drawn onto every card — see
         # `_library`.
         "library": _library(user, settings),
+        # WHICH NETWORKS HAVE A LOGO, asked once here rather than once per
+        # card by the browser — see `_logo_networks`.
+        "logo_networks": logo_networks,
         # How many cards the shell is actually turning into HTML, for the render
         # span the caller opens around it.
         "inline_cards": sum(len(group["items"]) for group in month_view.grouped
@@ -860,6 +865,75 @@ def _month_date(value, year: int, month: int) -> date | None:
     if (parsed.year, parsed.month) != (year, month):
         return None
     return parsed
+
+
+# AT MOST ONE LOGO WARM-UP IN FLIGHT FOR THE WHOLE PROCESS. Every calendar
+# render can find missing tiles, and a busy instance would otherwise start a task
+# per request, all resolving the same networks against the same rate-limited API.
+# One at a time is enough: the work is idempotent and whatever this pass misses
+# the next render asks for again.
+_logo_warm_running = False
+
+
+def _warm_logos_later(settings, roster) -> None:
+    """Build the missing network tiles off the back of this request."""
+    global _logo_warm_running
+    if _logo_warm_running:
+        return
+    _logo_warm_running = True
+
+    async def _run():
+        global _logo_warm_running
+        try:
+            await logos.ensure_logos(settings, roster)
+        except Exception:
+            # Best-effort by design: a network whose tile cannot be built shows
+            # the emoji, which is exactly what it showed before. Never let it
+            # reach the request that scheduled it — that request has long since
+            # been answered.
+            logger.exception("network logo warm-up failed")
+        finally:
+            _logo_warm_running = False
+
+    asyncio.create_task(_run())
+
+
+async def _logo_networks(settings, items) -> set[str]:
+    """Which of these cards' networks this instance actually holds a tile for.
+
+    ONE QUESTION ANSWERED PER RESPONSE INSTEAD OF ONE REQUEST PER CARD. A network
+    badge is its logo where there is one and the viewer's emoji where there is
+    not, and the calendar used to settle that by pointing every badge at
+    /api/network-logo and handling the 404 in an `onerror`. Measured on a real
+    All Episodes September: 99 requests per load, every one of them a 404, all
+    competing with the day blocks and season lines for the browser's six
+    connections — to learn something the filesystem answers here for nothing.
+
+    THE TRACKER ALREADY DID IT THIS WAY and `logos.tiled` was written for it; the
+    calendar simply never adopted it. This is that function, with the warm-up the
+    same page needs in front of it.
+
+    WARMED FIRST, BECAUSE OTHERWISE NOTHING WOULD EVER GENERATE ONE. The 404 was
+    not only a fallback, it was also the trigger: /api/network-logo builds a
+    missing tile on demand. Asking `tiled` without warming would mean a network
+    the calendar alone shows never getting a logo at all. `ensure_logos` is a
+    path check per already-known network and does real work only for the
+    genuinely missing, which is what makes it safe on every load.
+    """
+    roster = {(item.network, item.ids.get("tmdb")) for item in items if item.network}
+    known = logos.tiled(network for network, _tmdb in roster)
+    # GENERATING THE MISSING ONES DOES NOT HAPPEN ON THIS REQUEST. Warming inline
+    # was the first shape and it cost the render 190ms warm and seven seconds
+    # cold, because a network nobody has resolved yet means a TMDB lookup and
+    # there can be a hundred of them on one month. The page draws the tiles that
+    # exist and asks for the rest to be built behind it, so a new network's logo
+    # appears on the next load rather than delaying this one — the same bargain
+    # the enrichment drain makes, and for the same reason.
+    missing = [(network, tmdb) for network, tmdb in roster
+               if network not in known and not logos.is_negative(network)]
+    if missing:
+        _warm_logos_later(settings, missing)
+    return known
 
 
 def _library(user, settings) -> integrations_routes.LibraryView | None:
@@ -1104,6 +1178,9 @@ async def calendar_day(request: Request):
         "retry_url": _day_url(endpoint.key, day, source=request.query_params.get("source"),
                               new=request.query_params.get("new") or ""),
         "partial": False,
+        # Replaced below once this day's items are known; the error path renders
+        # no cards, so an empty set is the right answer for it.
+        "logo_networks": set(),
     }
     try:
         with span("calendar.day", endpoint=endpoint.key, day=day.isoformat()) as sp:
@@ -1118,6 +1195,8 @@ async def calendar_day(request: Request):
         # shell used — a day fetched late must decide "is this marked" by exactly
         # the rule the shell's own blocks were drawn with.
         context["not_watching"] = meta["not_watching_keys"]
+        context["logo_networks"] = await _logo_networks(
+            settings, [item for group in grouped for item in group["items"]])
         # NOTHING LAYS THIS DAY OUT: it arrives with its cards, and how wide it is
         # and whether hide mode empties it are the stylesheet's questions about
         # those cards (style.css's `--cols`), asked the moment it lands and asked
@@ -1772,6 +1851,7 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
     chips = [_day_chip(date.fromisoformat(group["date"]), group["items"], marked,
                        prefs["hide_not_watching"])
              for group in grouped if group["date"] in days]
+    logo_networks = await _logo_networks(settings, items)
     return templates.TemplateResponse(request, "_marked_cards.html", {
         "chips": chips,
         "request": request, "items": items,
@@ -1779,6 +1859,9 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
         "can_filter": True, "badge_modes": vocab.BadgeModes(prefs),
         "settings": settings, "is_admin": bool(user and user.is_admin),
         "library": _library(user, settings),
+        # WHICH NETWORKS HAVE A LOGO, asked once here rather than once per
+        # card by the browser — see `_logo_networks`.
+        "logo_networks": logo_networks,
         "month": month, "year": year, "endpoint": endpoint,
         # THE ASSEMBLER'S OWN COUNTS, not a second tally of the same items: it
         # already translated this viewer's stored marks into mark keys to build

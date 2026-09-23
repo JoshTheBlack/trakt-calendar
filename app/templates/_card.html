@@ -168,8 +168,17 @@
             {{ 'SERIES PREMIERE' if item.season == 1 else 'RETURNING' }}</div>
         {% endif %}
         {% if item.runtime %}<div class="runtime-badge">⏱️ {{ item.runtime }}m</div>{% endif %}
-        {% if item.network %}{% set logo %}<img class="network-logo" src="/api/network-logo?name={{ item.network | urlencode }}&amp;tmdb={{ item.ids.get('tmdb') or '' }}" alt="" loading="lazy" onerror="this.closest('.network-badge').classList.add('no-logo')"><span class="network-fallback">📡 {{ item.network }}</span>{% endset %}
-        {% if can_filter %}{% call fb.badge('network', item.network, item.network, item.media, 'network-badge', 'at-poster') %}{{ logo }}{% endcall %}{% else %}<div class="network-badge" title="{{ item.network }}">{{ logo }}</div>{% endif %}{% endif %}
+        {# THE LOGO IS DRAWN ONLY WHERE THERE IS ONE, and `logo_networks` is how
+           this page knows — asked once per response by routes._logo_networks.
+           It used to be drawn for EVERY network and the miss handled by an
+           `onerror` on the <img>, which meant a request per network with no
+           logo on every load: 99 of them, all 404, on one real All Episodes
+           month, taking connections from the day blocks and season lines. The
+           badge without a logo carries the `no-logo` class the `onerror` used
+           to add, so the two look identical and the stylesheet needed no
+           change. #}
+        {% if item.network %}{% set has_logo = item.network in logo_networks %}{% set logo %}{% if has_logo %}<img class="network-logo" src="/api/network-logo?name={{ item.network | urlencode }}&amp;tmdb={{ item.ids.get('tmdb') or '' }}" alt="" loading="lazy">{% endif %}<span class="network-fallback">📡 {{ item.network }}</span>{% endset %}
+        {% if can_filter %}{% call fb.badge('network', item.network, item.network, item.media, 'network-badge' if has_logo else 'network-badge no-logo', 'at-poster') %}{{ logo }}{% endcall %}{% else %}<div class="network-badge{% if not has_logo %} no-logo{% endif %}" title="{{ item.network }}">{{ logo }}</div>{% endif %}{% endif %}
         {# Both eyes reference the <symbol>s defined once per page instead of
            repeating ~800 bytes of path data on every card; which one shows is a
            CSS consequence of the card's not-watching class. #}
