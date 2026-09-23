@@ -21,6 +21,13 @@ A REFUSAL IS DRAWN, AT 200, because a non-200 is never swapped (static/js/boost.
 `noSwap`) — so the sentence an administrator needs would otherwise be a press that
 did nothing.
 
+THERE ARE NO JSON READS HERE, and that is a deletion rather than an omission. The
+accounts, invites, retired identifiers and one account's sessions each had a GET
+under /api/admin, and one session could be revoked by id; the page draws the first
+three whole and signs an account out everywhere through a form, so nothing called
+any of them, and an authenticated route nobody calls is a surface with no caller
+exercising its refusals.
+
 THE ASKING IS MARKUP. Every confirmation is templates/_confirm.html, and the two
 questions that used to be window.prompt() — a temporary password, and typing an
 account's name to delete it — are small forms opened the same way.
@@ -30,7 +37,7 @@ from __future__ import annotations
 import secrets
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response
 
 from .. import auth, authz, chrome, clock, db, route_params
 from ..config import load_settings
@@ -119,11 +126,6 @@ async def admin_page(request: Request):
 # ---------------------------------------------------------------------------
 # accounts
 # ---------------------------------------------------------------------------
-
-@guard.get("/api/admin/users", AuthLevel.ADMIN)
-async def admin_list_users():
-    return JSONResponse({"ok": True, "users": await auth.list_users_overview()})
-
 
 # Which grant each approval switch writes. The keys are what the buttons post.
 APPROVALS = {
@@ -257,36 +259,6 @@ async def admin_delete_user(user_id: int, request: Request):
 # sessions
 # ---------------------------------------------------------------------------
 
-@guard.get("/api/admin/users/{user_id}/sessions", AuthLevel.ADMIN)
-async def admin_list_sessions(user_id: int):
-    rows = await auth.list_sessions(user_id)
-    return JSONResponse({"ok": True, "sessions": [
-        {
-            "id": row["id"], "created_at": row["created_at"],
-            "last_seen_at": row["last_seen_at"], "expires_at": row["expires_at"],
-            "user_agent": row["user_agent"], "ip_address": row["ip_address"],
-        }
-        for row in rows
-    ]})
-
-
-@guard.post("/api/admin/users/{user_id}/sessions/revoke", AuthLevel.ADMIN)
-async def admin_revoke_session(user_id: int, request: Request):
-    """Revoke ONE session belonging to this account.
-
-    Scoped to `user_id` rather than deleting whatever id was posted: the caller
-    is looking at one account's session list, and an id that isn't on it is a
-    stale row or a mistake, not an instruction to log somebody else out.
-    """
-    data = await authz.json_body(request)
-    session_id = str(data.get("session_id") or "")
-    if not session_id:
-        return authz.error("session_id is required.")
-    if not await auth.revoke_user_session(user_id, session_id):
-        return authz.error("That session isn't on this account.", 404)
-    return JSONResponse({"ok": True})
-
-
 @guard.post("/admin/users/{user_id}/sessions/revoke-all", AuthLevel.ADMIN)
 async def admin_revoke_all_sessions(user_id: int, request: Request):
     await authz.json_body(request)
@@ -333,24 +305,6 @@ async def admin_unlink_identity(user_id: int, request: Request):
 # ---------------------------------------------------------------------------
 # invites
 # ---------------------------------------------------------------------------
-
-@guard.get("/api/admin/invites", AuthLevel.ADMIN)
-async def admin_list_invites():
-    rows = await auth.list_invites()
-    return JSONResponse({"ok": True, "invites": [
-        {
-            "id": row["id"], "token": row["token"], "label": row["label"],
-            "created_by": row["created_by"], "created_at": row["created_at"],
-            "expires_at": row["expires_at"], "max_uses": row["max_uses"],
-            "used_count": row["used_count"], "revoked": bool(row["revoked"]),
-            "grants_calendar_on_accept": bool(row["grants_calendar_on_accept"]),
-            "grants_ranker_on_accept": bool(row["grants_ranker_on_accept"]),
-            "redemption_count": row["redemption_count"],
-            "usable": auth.invite_is_usable(row),
-        }
-        for row in rows
-    ]})
-
 
 @guard.post("/admin/invites", AuthLevel.ADMIN)
 async def admin_create_invite(request: Request):
@@ -419,15 +373,6 @@ async def admin_invite_redemptions(invite_id: int, request: Request):
 # ---------------------------------------------------------------------------
 # retired identifiers
 # ---------------------------------------------------------------------------
-
-@guard.get("/api/admin/retired", AuthLevel.ADMIN)
-async def admin_list_retired():
-    rows = await auth.list_retired_identifiers()
-    return JSONResponse({"ok": True, "retired": [
-        {"kind": row["kind"], "value": row["value"], "retired_at": row["retired_at"]}
-        for row in rows
-    ]})
-
 
 @guard.post("/admin/retired/release", AuthLevel.ADMIN)
 async def admin_release_retired(request: Request):

@@ -182,12 +182,6 @@ async def admin_set_username(user_id: int, username: str) -> None:
     )
 
 
-async def list_sessions(user_id: int):
-    return await db.fetch_all(
-        "SELECT * FROM sessions WHERE user_id = ? ORDER BY last_seen_at DESC", (user_id,),
-    )
-
-
 # Per-user tables cleared by wipe_user_data(), beyond the account row itself.
 # Each entry is (table_name, user_id_column); a later table that holds per-user
 # data appends its own entry here rather than teaching wipe_user_data a new

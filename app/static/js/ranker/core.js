@@ -70,14 +70,15 @@ function tierByUid(uid) { return (state.board.categories || []).find(c => c.uid 
 // ---------------------------------------------------------------------------
 // TWO CALLERS LEFT, and each is here on its own merits rather than because a
 // form could not have been used: the layout save (a nested ordered tree with a
-// version token, fired 800ms after a drag) and the tier delete whose undo
-// re-saves that tree.
+// version token, fired 800ms after a drag) and a search result dragged straight
+// into a tier (ranker/search.js), which lands where the pointer dropped it and so
+// needs a count back rather than a page.
 
 async function api(url, method, body) {
     const opts = { method: method || 'GET' };
     if (method && method !== 'GET') {
-        // Including DELETE: the middleware wants a JSON content type on every
-        // mutating request, so one that has nothing to say sends {}.
+        // The middleware wants a JSON content type on every mutating request,
+        // so one that has nothing to say sends {}.
         opts.headers = { 'Content-Type': 'application/json' };
         opts.body = JSON.stringify(body || {});
     }

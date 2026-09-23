@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from .admin import (CannotDeleteSelf, LastAdmin, UserNotFound, WIPE_DATA_TABLES,
                     admin_set_username, delete_user, display_name_for, list_retired_identifiers,
-                    list_sessions, list_users_overview, release_retired_identifier,
+                    list_users_overview, release_retired_identifier,
                     set_admin, set_calendar_approved, set_disabled, set_distrakt_approved,
                     set_ranker_approved, wipe_user_data)
 from .cookies import (COOKIE_NAME, COOKIE_NAME_SECURE, COOKIE_PROBE, browser_scheme,
@@ -68,7 +68,7 @@ from .passwords import VerifyResult, burn_dummy_verify, hash_password, verify_pa
 from .prefs import get_user_prefs, insert_user_prefs, set_user_timezone, update_user_prefs
 from .sessions import (SESSION_ABSOLUTE_SECONDS, SESSION_REFRESH_INTERVAL,
                        SESSION_SLIDING_SECONDS, CurrentUser, create_session, revoke_session,
-                       revoke_user_session, revoke_user_sessions, sweep_expired_sessions,
+                       revoke_user_sessions, sweep_expired_sessions,
                        validate_session)
 from .users import (DISPLAY_NAME_MAX, IDENTIFIER_RE, MIN_PASSWORD_LENGTH, RESERVED_IDENTIFIERS,
                     any_users_exist, create_user, display_name_error, find_user_by_username,
@@ -99,7 +99,7 @@ __all__ = [
     "identifier_error", "identifier_is_retired", "insert_linked_identity", "insert_user",
     "insert_user_prefs", "invite_is_usable", "is_locked_out", "link_provider_identity",
     "list_identities", "list_invite_redemptions", "list_invites", "list_retired_identifiers",
-    "list_sessions", "list_users_overview", "login_with_provider_identity", "mark_logged_in",
+    "list_users_overview", "login_with_provider_identity", "mark_logged_in",
     "normalize_display_name", "parse_trusted_networks", "peek_handshake",
     "peer_is_trusted_proxy", "rate_limited", "read_handshake_cookie", "read_session_cookie",
     "record_attempt", "record_registration_attempt", "redeem_invite",
@@ -107,7 +107,7 @@ __all__ = [
     "release_retired_identifier",
     "request_is_https", "require_admin", "require_calendar", "require_distrakt",
     "require_ranker", "require_session", "revoke_invite", "revoke_session",
-    "revoke_user_session", "revoke_user_sessions", "session_cookie_name",
+    "revoke_user_sessions", "session_cookie_name",
     "session_cookie_would_be_dropped", "set_admin", "set_calendar_approved",
     "set_cookie_probe", "set_disabled", "set_display_name", "set_distrakt_approved",
     "set_handshake_cookie", "set_password", "set_ranker_approved", "set_session_cookie",

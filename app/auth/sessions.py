@@ -194,16 +194,6 @@ async def revoke_session(session_id: str) -> None:
     await db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
 
 
-async def revoke_user_session(user_id: int, session_id: str) -> bool:
-    """Delete one session, but only if it belongs to `user_id`. False when it
-    doesn't exist or belongs to somebody else — so an admin screen showing one
-    account cannot act on another account's session by id."""
-    result = await db.execute(
-        "DELETE FROM sessions WHERE id = ? AND user_id = ?", (session_id, user_id),
-    )
-    return result.rowcount > 0
-
-
 async def revoke_user_sessions(user_id: int) -> int:
     """Log a user out everywhere. Returns how many sessions were deleted."""
     result = await db.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))

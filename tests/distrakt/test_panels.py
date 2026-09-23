@@ -102,7 +102,15 @@ class BackupPanelTests(TrackerPanelTestCase):
         today = date.today()
         self.page = f"/distrakt?year={today.year}&month={today.month}"
         self.year, self.month = today.year, today.month
-        self.list_url = f"/api/distrakt/list?year={self.year}&month={self.month}"
+
+    def _titles(self, user_id: int) -> list[str]:
+        """What `user_id`'s month holds, read from the store. The restore is what
+        these drive through a route; what it wrote is read where it was written,
+        by the account named, since the JSON list that used to answer this had no
+        caller on the page and is gone."""
+        doc = asyncio.run(distrakt_store.load_month(
+            user_id, distrakt_store.month_key(self.year, self.month)))
+        return [show["title"] for show in (doc or {}).get("shows", [])]
 
     def _add_show(self, user_id: int, title: str) -> None:
         """One record on the month the panels are being driven from — a settled
@@ -147,12 +155,11 @@ class BackupPanelTests(TrackerPanelTestCase):
 
         asyncio.run(distrakt_store.remove_season_everywhere(
             self.user_id, ItemKey("show", "tmdb", "11"), 1))
-        self.assertEqual(self.client.get(self.list_url).json()["shows"], [])
+        self.assertEqual(self._titles(self.user_id), [])
 
         resp = restore_backup(self.client, exported)
         self.assertEqual(resp.status_code, 200, resp.text)
-        listed = self.client.get(self.list_url).json()
-        self.assertEqual([s["title"] for s in listed["shows"]], ["Kept Show"])
+        self.assertEqual(self._titles(self.user_id), ["Kept Show"])
 
     def test_a_restore_lands_on_whoever_asked_not_whoever_exported(self):
         """The file names no owner the server will honour: it is restored to the
@@ -164,12 +171,8 @@ class BackupPanelTests(TrackerPanelTestCase):
         self.sign_in_as(other)
         resp = restore_backup(self.client, exported)
         self.assertEqual(resp.status_code, 200, resp.text)
-        landed = self.client.get(self.list_url).json()
-        self.assertEqual([s["title"] for s in landed["shows"]], ["Mine"])
-
-        self.sign_in_as(self.user_id)
-        still_there = self.client.get(self.list_url).json()
-        self.assertEqual([s["title"] for s in still_there["shows"]], ["Mine"])
+        self.assertEqual(self._titles(other), ["Mine"])
+        self.assertEqual(self._titles(self.user_id), ["Mine"])
 
 
 class ImportingAMonthTests(TrackerPanelTestCase):

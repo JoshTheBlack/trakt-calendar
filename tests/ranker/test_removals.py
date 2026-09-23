@@ -251,9 +251,10 @@ class TheHistoryAgesTests(_BoardTestCase):
         self.assertEqual(asyncio.run(ranker.sweep_removals()), 1)
         self.assertEqual(self.history(), [key("2")])
 
-    def test_the_sweep_is_one_range_delete_on_its_index(self):
-        """ix_tier_item_removals_sweep exists for exactly this statement, so the
-        statement the sweep actually issues is asked how SQLite will run it."""
+    def test_the_sweep_is_one_range_delete_on_each_tables_index(self):
+        """ix_tier_item_removals_sweep and ix_tier_category_removals_sweep exist
+        for exactly these statements, so the statements the sweep actually issues
+        are asked how SQLite will run them — one per history table."""
         issued = []
         real = db.execute
 
@@ -263,10 +264,15 @@ class TheHistoryAgesTests(_BoardTestCase):
 
         with mock.patch.object(db, "execute", recording):
             asyncio.run(ranker.sweep_removals())
-        statement, = issued
-        plan = asyncio.run(db.run(lambda conn: conn.execute(
-            "EXPLAIN QUERY PLAN " + statement, (0,)).fetchall()))
-        self.assertIn("ix_tier_item_removals_sweep", " ".join(str(row["detail"]) for row in plan))
+        plans = {
+            statement: " ".join(str(row["detail"]) for row in asyncio.run(db.run(
+                lambda conn, s=statement: conn.execute("EXPLAIN QUERY PLAN " + s, (0,)).fetchall())))
+            for statement in issued
+        }
+        self.assertEqual(len(plans), 2)
+        for index in ("ix_tier_item_removals_sweep", "ix_tier_category_removals_sweep"):
+            with self.subTest(index=index):
+                self.assertEqual(sum(index in plan for plan in plans.values()), 1)
 
     def test_deleting_the_board_takes_its_history_with_it(self):
         self.build(pool=("1",))

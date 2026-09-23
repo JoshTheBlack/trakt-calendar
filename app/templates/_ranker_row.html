@@ -105,7 +105,6 @@
         <div class="ranker-menu" id="move-{{ item.key }}" popover>
             {%- for tier in tiers %}
             <button type="button"
-                    {%- if tier.uid %} data-tier-choice="{{ tier.uid }}"{% endif %}
                     hx-post="/rankings/boards/{{ board_uid }}/items/move" hx-json-enc
                     hx-vals='{{ {("pick:" ~ item.key): "1", "tier": tier.uid} | tojson }}'
                     hx-target="body" hx-swap="innerHTML">{{ tier.label }}</button>

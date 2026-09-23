@@ -556,9 +556,11 @@ class ApprovalAndListingTests(AdminTestCase):
         self.make_admin()
         target = self.make_user("plain", calendar_approved=True)
         self.login_as(self.client, "plain", password="memberpass1")
+        # The two reads left. The page is where the accounts, the invites and the
+        # retired identifiers are drawn now — each had a JSON read of its own under
+        # /api/admin, which nothing called and which is gone.
         for method, path in [
-            ("get", "/admin"), ("get", "/api/admin/users"),
-            ("get", "/api/admin/invites"), ("get", "/api/admin/retired"),
+            ("get", "/admin"),
             ("get", "/admin/fragments/invites/1/redemptions"),
         ]:
             resp = getattr(self.client, method)(path)

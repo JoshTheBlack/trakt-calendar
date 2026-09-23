@@ -486,17 +486,6 @@ async def distrakt(request: Request):
     return templates.TemplateResponse(request, "distrakt.html", context)
 
 
-@guard.get("/api/distrakt/list", AuthLevel.DISTRAKT_APPROVED)
-async def api_distrakt_list(request: Request):
-    """Raw (unbucketed) shows stored for a month — the plain management list."""
-    user_id = await _distrakt_user_id(request)
-    today = clock.today()
-    year = route_params.valid_year(request.query_params.get("year"), today.year)
-    month = route_params.valid_month(request.query_params.get("month"), today.month)
-    doc = await distrakt_store.load_month(user_id, distrakt_store.month_key(year, month))
-    return JSONResponse({"ok": True, "month": distrakt_store.month_key(year, month), "shows": (doc or {}).get("shows", [])})
-
-
 def _empty_month_payload(month_key: str, emojis: dict, default_emoji: str,
                          standing: distrakt_store.MonthStanding,
                          readonly: bool = False, link_url: str | None = None,
@@ -1525,17 +1514,6 @@ async def api_distrakt_refresh(request: Request):
     return await _month_answer(
         request, user_id, year, month, settings, force_fresh=True,
         message="Past month (read-only)" if frozen else "Refreshed totals")
-
-
-@guard.get("/api/distrakt/months", AuthLevel.DISTRAKT_APPROVED)
-async def api_distrakt_months(request: Request):
-    """This user's tracked YYYY-MM months for the history nav, plus the real
-    current month (always navigable even before it has been initialized)."""
-    user_id = await _distrakt_user_id(request)
-    today = clock.today()
-    current = distrakt_store.month_key(today.year, today.month)
-    months = sorted(set(await distrakt_store.list_months(user_id)) | {current})
-    return JSONResponse({"ok": True, "months": months, "current": current})
 
 
 @guard.post("/api/distrakt/import", AuthLevel.DISTRAKT_APPROVED)

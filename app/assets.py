@@ -127,16 +127,15 @@ PAGE_SCRIPTS = {
         # WHAT IS LEFT IS THE POINTER AND THE FILE. The drag and its coalesced
         # save, the keyboard and modifier-key ways of moving a title, where a
         # menu opens, the preview's zoom and pan, and a download that has to be a
-        # POST. Every other action on this page — the boards, the tiers, the
-        # removal, the bulk move, the import, the seed, the export options and
-        # the backup restore — is markup that posts itself and is answered with
-        # the board redrawn, so five of this feature's files have no contents
-        # left at all.
+        # POST. Every other action on this page — the boards, the tiers and
+        # deleting one, the removal, both undos, the bulk move, the import, the
+        # seed, the export options and the backup restore — is markup that posts
+        # itself and is answered with the board redrawn, so six of this feature's
+        # files have no contents left at all.
         "static/js/ranker/core.js",
         "static/js/ranker/dnd.js",
         "static/js/ranker/save.js",
         "static/js/ranker/rows.js",
-        "static/js/ranker/tiers.js",
         "static/js/ranker/search.js",
         "static/js/ranker/selection.js",
         "static/js/ranker/export.js",

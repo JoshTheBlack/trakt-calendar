@@ -105,12 +105,14 @@ ACTIONS = (
     (f"/rankings/boards/{BOARD}/tiers/template", {}),
     (f"/rankings/boards/{BOARD}/tiers/tier-s/settings",
      {"label": "S", "rank_priority": "10", "colour": "#FF0000"}),
+    (f"/rankings/boards/{BOARD}/tiers/tier-s/delete", {}),
     (f"/rankings/boards/{BOARD}/items/remove", {"key": key("1")}),
     (f"/rankings/boards/{BOARD}/items/move", {f"pick:{key('1')}": "1", "tier": "tier-s"}),
     (f"/rankings/boards/{BOARD}/import", {"media": "show"}),
     (f"/rankings/boards/{BOARD}/seed", {}),
     (f"/rankings/boards/{BOARD}/header-image", {"image_b64": "", "name": "x"}),
     (f"/rankings/boards/{BOARD}/removals/restore", {"key": key("1")}),
+    (f"/rankings/boards/{BOARD}/removals/tier/restore", {"tier": "tier-s"}),
     ("/api/rankings/restore", {"payload": "{}", "ack": "REPLACE MY BOARDS"}),
 )
 

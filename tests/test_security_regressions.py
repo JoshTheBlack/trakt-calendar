@@ -200,35 +200,33 @@ class ProxyDiagnosticsTests(RegressionTestCase):
 
 
 class AdminSessionScopingTests(RegressionTestCase):
-    """An admin looking at one account's session list must not be able to act on
-    a different account's session by posting its id."""
+    """An admin acting on one account's sessions must not be able to reach a
+    different account's.
 
-    def test_revoking_another_accounts_session_is_refused(self):
-        admin_id = self.make_user("admin", is_admin=True)
-        victim_id = self.make_user("victim")
-        victim_session = asyncio.run(auth.create_session(victim_id))
-        self.login("admin")
+    The regression this class was written for was a revoke that took a session id
+    from the body: an id that was real but belonged to somebody else had to be
+    refused. That route had no caller and is gone, so the surface cannot come back
+    by accident — and what is left, signing one account out everywhere, is held
+    to the same rule by the account in its address."""
 
-        resp = self.client.post(
-            f"/api/admin/users/{admin_id}/sessions/revoke",
-            json={"session_id": victim_session},
-        )
-        self.assertEqual(resp.status_code, 404)
-        # Still alive: the id was real, it just wasn't on that account.
-        self.assertIsNotNone(asyncio.run(auth.validate_session(victim_session)))
+    def test_no_admin_route_takes_a_session_id_from_the_body(self):
+        paths = {str(getattr(route, "path", "")) for route in authz.iter_routes(app)}
+        self.assertNotIn("/api/admin/users/{user_id}/sessions/revoke", paths)
+        self.assertNotIn("/api/admin/users/{user_id}/sessions", paths)
 
-    def test_revoking_a_session_that_is_on_the_account_works(self):
-        victim_id = self.make_user("victim")
-        victim_session = asyncio.run(auth.create_session(victim_id))
+    def test_signing_one_account_out_leaves_every_other_account_signed_in(self):
         self.make_user("admin", is_admin=True)
+        victim_id = self.make_user("victim")
+        bystander_id = self.make_user("bystander")
+        victim_session = asyncio.run(auth.create_session(victim_id))
+        bystander_session = asyncio.run(auth.create_session(bystander_id))
         self.login("admin")
 
-        resp = self.client.post(
-            f"/api/admin/users/{victim_id}/sessions/revoke",
-            json={"session_id": victim_session},
-        )
-        self.assertTrue(resp.json()["ok"])
+        resp = self.client.post(f"/admin/users/{victim_id}/sessions/revoke-all", json={})
+        self.assertEqual(resp.status_code, 200)
         self.assertIsNone(asyncio.run(auth.validate_session(victim_session)))
+        # Still alive: nothing the request named belongs to this account.
+        self.assertIsNotNone(asyncio.run(auth.validate_session(bystander_session)))
 
 
 class ShareTokenComparisonTests(RegressionTestCase):

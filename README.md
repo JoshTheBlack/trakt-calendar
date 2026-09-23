@@ -501,7 +501,8 @@ app/
     prune.py          A hand-run pass over stored months (python -m), never
                        reached by the app itself
   ranker/
-    core.py           The board data layer: tiers, entries, ordering
+    core.py           The board data layer: tiers, entries, ordering, and what a
+                       board keeps of the titles and tiers taken off it
     routes.py         The rankings page and its board API
     sources.py        Where rankable titles come from
     imports.py        Seeding a board from what the viewer has finished

@@ -469,12 +469,14 @@ class LinkOutcomeTests(TraktOAuthTestCase):
 
     def test_linking_makes_distrakt_reachable_for_an_approved_user(self):
         """The Trakt half of the distrakt gate has never had a flow that
-        satisfies it until now."""
+        satisfies it until now. Probed through a tracker read that touches
+        neither the database nor the network, so the answer is the gate's."""
+        probe = "/distrakt/fragments/day-label"
         user = self.make_user("watcher", calendar_approved=True, distrakt_approved=True)
         self.sign_in_as(user)
-        self.assertEqual(self.client.get("/api/distrakt/months").status_code, 403)
+        self.assertEqual(self.client.get(probe).status_code, 403)
         self.callback(self.start("/auth/trakt/link"))
-        self.assertEqual(self.client.get("/api/distrakt/months").status_code, 200)
+        self.assertEqual(self.client.get(probe).status_code, 200)
 
     def test_a_fresh_link_is_refused_while_encryption_is_unhealthy(self):
         user = self.make_user("linker", calendar_approved=True)

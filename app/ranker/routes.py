@@ -296,6 +296,7 @@ async def _removals_context(user_id: int, board_uid: str) -> dict:
         # Each Restore button posts to its board, so the list has to know which.
         "board_uid": board_uid,
         "removal_cap": ranker.REMOVAL_HISTORY_PER_BOARD,
+        "tier_removal_cap": ranker.TIER_REMOVAL_HISTORY_PER_BOARD,
         "removal_days": ranker.REMOVAL_HISTORY_DAYS,
     }
 
@@ -336,7 +337,7 @@ async def rankings_page(request: Request):
 
 async def _rankings_response(request: Request, user, wanted: str | None, *,
                              notice: str = "", notice_ok: bool = True,
-                             removals_open: bool = False, undo_key: str = "",
+                             removals_open: bool = False, undo: dict | None = None,
                              open_tier: str = "", search: dict | None = None,
                              pool_first: str = ""):
     """The rankings page for the board `wanted`, or for the account's first.
@@ -352,10 +353,11 @@ async def _rankings_response(request: Request, user, wanted: str | None, *,
     `notice` is a sentence about what the request that drew this page did, and
     `notice_ok` whether it is good news or a refusal, which only decides its
     colour; `removals_open` draws the removal history already open.
-    `undo_key` names a title the toast should offer to put back — it draws an Undo
-    beside the sentence, and that Undo is the SAME button the removal history
-    carries, posting to the same route, so a title comes back one way however it
-    is asked for.
+    `undo` is what the toast should offer to put back, in the shape a removal
+    history entry has (`kind` plus the title's `key` or the tier's `uid`) — it
+    draws an Undo beside the sentence, and that Undo is the SAME button the
+    removal history carries (_ranker_undo.html), posting to the same route, so
+    a title or a tier comes back one way however it is asked for.
     `open_tier` is a tier this request put a title INTO, drawn open with its rows
     whatever the board's size says: a move answers with the page, so a closed
     destination would take the title out of the pool and show it landing nowhere.
@@ -423,7 +425,7 @@ async def _rankings_response(request: Request, user, wanted: str | None, *,
         "search": search or {"query": "", "media": "", "results": (), "held": frozenset()},
         "notice": notice,
         "notice_ok": notice_ok,
-        "undo_key": undo_key,
+        "undo": undo,
         "removals_open": removals_open,
         "restore_ack": RESTORE_ACK,
     }
@@ -889,6 +891,61 @@ async def save_tier_settings(board_uid: str, tier_uid: str, request: Request):
     return await _rankings_response(request, user, board_uid, notice=notice, notice_ok=ok)
 
 
+@guard.post("/rankings/boards/{board_uid}/tiers/{tier_uid}/delete",
+            AuthLevel.RANKER_APPROVED)
+async def delete_tier(board_uid: str, tier_uid: str, request: Request):
+    """Delete one tier, and offer to put it back.
+
+    Its titles RETURN TO THE POOL rather than going with it, so a mis-click costs
+    the arrangement of one tier and not the titles in it — and what that
+    arrangement was is kept in the board's removal history (ranker.delete_category),
+    so the Undo in the toast is the history's own Restore button, which outlives
+    the toast, the page and the tab.
+    """
+    user = await auth.current_user(request)
+    await authz.json_body(request)
+    undo = None
+    try:
+        returned = await ranker.delete_category(user.user_id, board_uid, tier_uid)
+        notice, ok = f"Tier deleted — its {_titles(returned)} went back to the pool.", True
+        undo = {"kind": "tier", "uid": tier_uid}
+    except ranker.RankerError as exc:
+        notice, ok = str(exc), False
+    return await _rankings_response(request, user, board_uid, notice=notice,
+                                    notice_ok=ok, undo=undo)
+
+
+def _titles(count: int) -> str:
+    return f"{count} title" if count == 1 else f"{count} titles"
+
+
+def _tier_restore_notice(result: ranker.TierRestore) -> str:
+    """What putting a tier back did, IN FULL — "Put back S with 8 of its 10
+    titles; 2 had been placed in other tiers since." A partial restore that read
+    as a whole one would be a silent loss, which is the one failure the tier
+    history exists to prevent, so every title the tier held is accounted for in
+    the sentence."""
+    name = result.label or "Untitled"
+    held = result.held
+    if result.already:
+        said = f"{name} was already on the board"
+        if held:
+            said += f"; {result.returned} of its {_titles(held)} are in it now"
+    elif not held:
+        said = f"Put back {name}"
+    elif result.returned == held:
+        said = f"Put back {name} with {'its' if held == 1 else 'all'} {_titles(held)}"
+    else:
+        said = f"Put back {name} with {result.returned} of its {_titles(held)}"
+    missing = []
+    if result.placed:
+        where = "another tier" if result.placed == 1 else "other tiers"
+        missing.append(f"{result.placed} had been placed in {where} since")
+    if result.removed:
+        missing.append(f"{result.removed} had been taken off the board since")
+    return "; ".join([said, *missing]) + "."
+
+
 @guard.post("/rankings/boards/{board_uid}/items/remove", AuthLevel.RANKER_APPROVED)
 async def remove_board_item(board_uid: str, request: Request):
     """Take one title off the board, and offer to put it back.
@@ -901,16 +958,16 @@ async def remove_board_item(board_uid: str, request: Request):
     user = await auth.current_user(request)
     data = await authz.json_body(request)
     key = str(data.get("key") or "")
-    undo_key = ""
+    undo = None
     try:
         removed = await ranker.remove_items(user.user_id, board_uid, [key])
         notice, ok = ("Removed from the board.", True) if removed else (
             "That title was not on this board.", False)
-        undo_key = key if removed else ""
+        undo = {"kind": "title", "key": key} if removed else None
     except ranker.RankerError as exc:
         notice, ok = str(exc), False
     return await _rankings_response(request, user, board_uid, notice=notice,
-                                    notice_ok=ok, undo_key=undo_key)
+                                    notice_ok=ok, undo=undo)
 
 
 # The prefix a bulk move names each chosen title with. ONE FIELD PER KEY, the
@@ -961,22 +1018,6 @@ async def get_board(board_uid: str, request: Request):
     except ranker.RankerError as exc:
         return _refusal(exc)
     return JSONResponse({"ok": True, "board": board})
-
-
-@guard.delete("/api/rankings/boards/{board_uid}/categories/{category_uid}",
-              AuthLevel.RANKER_APPROVED)
-async def remove_category(board_uid: str, category_uid: str, request: Request):
-    """Delete one tier. Its titles RETURN TO THE POOL rather than going with it,
-    so a mis-click costs the arrangement of one tier and not the titles in it —
-    which is also what makes undoing this a matter of re-creating the tier and
-    putting the same keys back."""
-    user = await auth.current_user(request)
-    await authz.json_body(request)
-    try:
-        returned = await ranker.delete_category(user.user_id, board_uid, category_uid)
-    except ranker.RankerError as exc:
-        return _refusal(exc)
-    return JSONResponse({"ok": True, "returned": returned})
 
 
 @guard.post("/api/rankings/boards/{board_uid}/save", AuthLevel.RANKER_APPROVED)
@@ -1297,6 +1338,33 @@ async def restore_board_item(board_uid: str, request: Request):
         notice, notice_ok = str(exc), False
     return await _rankings_response(request, user, board_uid, notice=notice,
                                     notice_ok=notice_ok, removals_open=True)
+
+
+@guard.post("/rankings/boards/{board_uid}/removals/tier/restore", AuthLevel.RANKER_APPROVED)
+async def restore_board_tier(board_uid: str, request: Request):
+    """Put a deleted tier back with the titles it can still have — see
+    ranker.restore_tier_removal for what that means in each case — and answer
+    with the board redrawn and a sentence saying exactly what came back.
+
+    A ROUTE OF ITS OWN rather than a second shape of the title restore's body,
+    because the two restore different records under different rules; one route
+    reading which kind it had been handed would be one function with two reasons
+    to change. Its answer is the title restore's for that route's reasons, with
+    the tier DRAWN OPEN for the reason a bulk move draws its destination open:
+    on a board large enough to draw its tiers closed, titles leaving the pool
+    would otherwise be seen landing nowhere.
+    """
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+    notice_ok, landed = True, ""
+    try:
+        result = await ranker.restore_tier_removal(user.user_id, board_uid, data.get("tier"))
+        notice, landed = _tier_restore_notice(result), str(data.get("tier"))
+    except ranker.RankerError as exc:
+        notice, notice_ok = str(exc), False
+    return await _rankings_response(request, user, board_uid, notice=notice,
+                                    notice_ok=notice_ok, removals_open=True,
+                                    open_tier=landed)
 
 
 @guard.get("/rankings/fragments/import-years", AuthLevel.RANKER_APPROVED)

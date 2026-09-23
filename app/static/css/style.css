@@ -1564,13 +1564,6 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 /* Toasts (Sonarr/Radarr add feedback) */
 #toastHost { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 10001; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
 .toast { padding: 11px 18px; border-radius: 10px; font-size: 0.85rem; font-weight: 600; color: #fff; box-shadow: 0 12px 32px rgba(0,0,0,0.55); opacity: 0; transform: translateY(12px); transition: opacity .25s ease, transform .25s ease; max-width: 92vw; text-align: center; }
-/* THE CLASS A SCRIPT ADDS AND TAKES AWAY, and static/js/ranker/tiers.js is the
-   only thing left that does: its deleted-tier Undo builds its own toast and times
-   its own removal, which is the last hand-rolled one in the app. Every other
-   toast — the server's and the ones static/js/ui.js raises — is `.is-flash`
-   below and needs no class written onto it at any point. This rule goes when
-   that file does. */
-.toast.show { opacity: 1; transform: translateY(0); }
 .toast.ok { background: linear-gradient(135deg, #1f7a4d, #22c55e); }
 .toast.err { background: linear-gradient(135deg, #8a2331, var(--crimson)); }
 /* A TOAST THE SERVER DREW, for a page that is itself the answer to what it reports
@@ -1580,8 +1573,8 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
    would still jolt nothing — but the first version of this notice sat in the pool
    column and shrank, and everything beneath it juddered upward as it went. */
 .toast.is-flash { animation: toast-flash 4.2s ease forwards; }
-/* AN OFFER RATHER THAN A REPORT — the rankings board's removal, which draws an
-   Undo beside its sentence. It stays twice as long because it is something to
+/* AN OFFER RATHER THAN A REPORT — the rankings board's removal of a title or a
+   tier, which draws an Undo beside its sentence. It stays twice as long because it is something to
    act on, and it takes pointer events back from the host (which has them off, so
    a toast never sits over what is underneath it). The nine seconds used to be a
    setTimeout in the browser. */

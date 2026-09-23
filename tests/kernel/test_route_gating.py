@@ -38,6 +38,11 @@ SECRET_VALUES = {name: f"SEKRIT-{name}-VALUE" for name in config.SECRET_FIELDS}
 # token/key field without redacting it a failure rather than an oversight.
 CREDENTIAL_NAME_RE = re.compile(r"secret|token|password|_key")
 
+# A DISTRAKT_APPROVED read that touches neither the database nor the network — it
+# spells one date — so a test of who the tracker's level admits is testing the
+# level and nothing behind it.
+TRACKER_PROBE = "/distrakt/fragments/day-label"
+
 
 def _request(*, host: str, origin: str | None = None, client: str = "127.0.0.1",
              forwarded_proto: str | None = None) -> Request:
@@ -176,8 +181,9 @@ class UnauthenticatedTests(GatingTestCase):
     def test_distrakt_level_is_refused(self):
         """Tested route by route rather than as a group: a gap here exposes one
         specific user's private watch history."""
-        for path in ("/distrakt", "/api/distrakt/list", "/distrakt/fragments/month",
-                     "/api/distrakt/months", "/distrakt/fragments/search",
+        for path in ("/distrakt", "/distrakt/fragments/month",
+                     "/distrakt/fragments/day-label", "/distrakt/fragments/details",
+                     "/distrakt/fragments/details/season", "/distrakt/fragments/search",
                      "/distrakt/fragments/seasons",
                      "/distrakt/fragments/search-movie"):
             with self.subTest(path=path):
@@ -232,23 +238,27 @@ class ApprovalTests(GatingTestCase):
 
     def test_distrakt_needs_a_linked_trakt_identity_as_well_as_approval(self):
         """distrakt reads the requesting user's own watch history through their
-        own Trakt token, so approval without a link has nothing to read."""
+        own Trakt token, so approval without a link has nothing to read.
+
+        Probed through the tracker's cheapest read — one sentence about a date,
+        no database and no network — because what is under test is the level it
+        is declared at, which every tracker route shares."""
         user_id = self._make_user("tracker", calendar_approved=True, distrakt_approved=True)
         self.sign_in_as(user_id)
-        resp = self.client.get("/api/distrakt/months")
+        resp = self.client.get(TRACKER_PROBE)
         self.assertEqual(resp.status_code, 403)
         self.assertEqual(resp.json()["reason"], "trakt_link_required")
 
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=user_id, provider="trakt", provider_user_id=99)))
-        self.assertEqual(self.client.get("/api/distrakt/months").status_code, 200)
+        self.assertEqual(self.client.get(TRACKER_PROBE).status_code, 200)
 
     def test_a_plex_link_does_not_satisfy_the_trakt_requirement(self):
         user_id = self._make_user("plexonly", distrakt_approved=True)
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=user_id, provider="plex", provider_user_id=7)))
         self.sign_in_as(user_id)
-        self.assertEqual(self.client.get("/api/distrakt/months").status_code, 403)
+        self.assertEqual(self.client.get(TRACKER_PROBE).status_code, 403)
 
     def test_admin_reaches_the_admin_routes(self):
         self.sign_in_as(self.admin_id)

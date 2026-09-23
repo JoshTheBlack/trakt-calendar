@@ -169,13 +169,16 @@ class GatingTests(RankerTestCase):
     GETS = ("/rankings", "/api/rankings/boards", "/api/rankings/boards/b1",
             "/rankings/fragments/export?board=b1", "/rankings/preview.webp?board=b1")
     # Every control on the page posts itself now, so the enumeration is of those:
-    # a board being made, renamed, cloned or deleted, a tier added or written, a
-    # title taken off or moved, and the layout a drag saves.
+    # a board being made, renamed, cloned or deleted, a tier added, written or
+    # deleted, a title taken off or moved, either kind put back, and the layout a
+    # drag saves.
     POSTS = ("/rankings/boards/new", "/rankings/boards/b1/rename",
              "/rankings/boards/b1/clone", "/rankings/boards/b1/delete",
              "/rankings/boards/b1/tiers/new", "/rankings/boards/b1/tiers/template",
-             "/rankings/boards/b1/tiers/t1/settings",
+             "/rankings/boards/b1/tiers/t1/settings", "/rankings/boards/b1/tiers/t1/delete",
              "/rankings/boards/b1/items/remove", "/rankings/boards/b1/items/move",
+             "/rankings/boards/b1/removals/restore",
+             "/rankings/boards/b1/removals/tier/restore",
              "/api/rankings/boards/b1/save")
 
     def _assert_all_refused(self, status: int, reason: str):
@@ -679,6 +682,7 @@ class CrossTenantTests(RankerTestCase):
         self.client.post("/rankings/boards/secret/tiers/template", json={})
         self.client.post("/rankings/boards/secret/tiers/top/settings",
                          json={"label": "Owned", "rank_priority": "9", "colour": "#FF0000"})
+        self.client.post("/rankings/boards/secret/tiers/top/delete", json={})
         self.assertVictimUntouched()
 
     def test_another_users_titles_cannot_be_removed_or_moved_through_a_route(self):

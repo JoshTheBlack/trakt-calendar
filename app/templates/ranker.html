@@ -123,17 +123,16 @@
    and faded by the stylesheet (`.toast.is-flash`). #toastHost is out of the
    page's flow, so a toast arriving and leaving moves nothing.
 
-   A REMOVAL'S TOAST CARRIES AN UNDO, AND IT IS THE REMOVAL HISTORY'S OWN BUTTON:
-   the same route, the same key, the same answer. The nine-second offer that used
-   to be built and timed in the browser is the stylesheet's animation now. #}
+   A REMOVAL'S TOAST CARRIES AN UNDO — a title taken off or a tier deleted — AND
+   IT IS THE REMOVAL HISTORY'S OWN BUTTON (_ranker_undo.html): the same route,
+   the same reference, the same answer. The nine-second offer that used to be
+   built and timed in the browser is the stylesheet's animation now. #}
 {% if notice %}
+{% import '_ranker_undo.html' as restore %}
 <div id="toastHost">
-    {%- if undo_key and board %}
+    {%- if undo and board %}
     {%- call toast_markup.line(notice, notice_ok, offer=true) %}
-        <button type="button" class="btn-ghost small"
-                hx-post="/rankings/boards/{{ board.uid }}/removals/restore"
-                hx-json-enc hx-vals='{{ {"key": undo_key} | tojson }}'
-                hx-trigger="click" hx-target="body" hx-swap="innerHTML">Undo</button>
+        {{ restore.button(board.uid, undo, "Undo") }}
     {%- endcall %}
     {%- else %}
     {{- toast_markup.line(notice, notice_ok) }}
@@ -291,7 +290,7 @@
                         <select id="exScope" name="scope">
                             <option value="global">All tiers, consolidated</option>
                             {%- for category in board.categories %}
-                            <option value="cat:{{ category.uid }}" data-tier-choice="{{ category.uid }}">Only: {{ category.label or "Untitled" }}</option>
+                            <option value="cat:{{ category.uid }}">Only: {{ category.label or "Untitled" }}</option>
                             {%- endfor %}
                         </select></div>
                     <div class="field"><label for="exScale">Size</label>

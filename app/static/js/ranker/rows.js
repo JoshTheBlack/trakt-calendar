@@ -70,26 +70,3 @@ function nudgeItem(button, delta) {
 // the chosen container, and scheduling the save afterwards. A pending drag is
 // still written first, and nothing had to be added for that — the move is a
 // POST, and ranker/save.js holds every non-GET behind the save already.
-
-// WHAT IS LEFT, AND IT BELONGS TO THE TIER DELETE. Deleting a tier sends its
-// titles to the pool by moving the elements that already exist, so it needs that
-// tier's rows actually on the page first; a tier nobody has opened has none.
-// ranker/tiers.js is its only caller, and this goes when that does.
-//
-// IT REUSES THE DISCLOSURE'S OWN REQUEST rather than fetching the same address a
-// second way: the address is on the summary, as markup, and htmx.ajax into the
-// same body is the same swap opening the tier would have done — which means
-// ranker/boot.js marks it loaded and binds it for dragging exactly as it does for
-// a tier opened by hand, and this has none of that to repeat.
-async function openTierBody(categoryUid) {
-    const details = document.querySelector('.ranker-tier[data-uid="' + CSS.escape(categoryUid) + '"]');
-    const body = document.getElementById('tierBody-' + categoryUid);
-    if (!body) return null;
-    if (details) details.open = true;
-    if (body.dataset.loaded === '1') return body;
-    const url = details && details.querySelector('summary').getAttribute('hx-get');
-    if (!url) return null;
-    await htmx.ajax('GET', url, { target: body, swap: 'innerHTML' });
-    if (body.dataset.loaded !== '1') { toast('Could not open that tier.', false); return null; }
-    return body;
-}

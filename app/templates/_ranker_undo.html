@@ -1,0 +1,29 @@
+{# THE ONE RESTORE BUTTON, for a removed title and for a deleted tier, wherever it
+   is offered: in the "Recently removed" list (_ranker_removed.html) and as the
+   Undo in the toast a removal answers with (ranker.html). One macro because they
+   are one button — the same route, the same reference, the same answer — so a
+   title or a tier comes back one way however it is asked for, and the two places
+   cannot drift into posting different things.
+
+   `entry` is a removal history entry as ranker/core.py's `fetch_removals` shapes
+   it, or the same shape built by the route that just removed something: `kind`,
+   plus the title's `key` or the tier's `uid`. Each kind posts to its own route,
+   because the two restore different records under different rules.
+
+   hx-post with hx-json-enc, because every write in this app has to arrive as
+   application/json, and the reference rides in hx-vals. hx-trigger is stated
+   rather than left to the default so no ancestor's trigger can ever be read as
+   this button's. The data attribute says which entry the button restores, so a
+   reader of the markup does not have to parse hx-vals to find out. #}
+{% macro button(board_uid, entry, text="Restore") -%}
+{%- if entry.kind == "tier" %}
+{%- set path, field, ref = "removals/tier/restore", "tier", entry.uid %}
+{%- else %}
+{%- set path, field, ref = "removals/restore", "key", entry.key %}
+{%- endif %}
+{%- set vals = {field: ref} -%}
+<button type="button" class="btn-ghost small" data-restore-{{ field }}="{{ ref }}"
+        hx-post="/rankings/boards/{{ board_uid }}/{{ path }}"
+        hx-json-enc hx-vals='{{ vals | tojson }}'
+        hx-trigger="click" hx-target="body" hx-swap="innerHTML">{{ text }}</button>
+{%- endmacro %}

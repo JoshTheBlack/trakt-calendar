@@ -3132,6 +3132,52 @@ MIGRATION_42 = """
 ALTER TABLE user_prefs ADD COLUMN share_watch_history INTEGER NOT NULL DEFAULT 1;
 """
 
+
+# ---------------------------------------------------------------------------
+# 43 — what a ranking board forgot of a TIER, kept long enough to be asked back
+# ---------------------------------------------------------------------------
+#
+# DELETING A TIER WAS THE ONE DESTRUCTIVE BOARD ACTION LEFT WITH ITS UNDO HELD IN
+# THE BROWSER: a snapshot in a script variable, offered for nine seconds, gone on
+# reload, invisible to a second tab and one level deep. What a delete loses is not
+# the titles — they fall to the pool — but the tier itself: its name, priority,
+# colour and isolation, and the ORDER its titles sat in.
+#
+# NOT tier_item_removals, whose row is ONE TITLE. A deleted tier is a different
+# record — the tier's settings plus the ordered list it held — restored under
+# different rules into a different table. One table holding both would have two
+# row shapes and two restore paths that never change together.
+#
+# THE SAME SHAPE AS migration 40's table otherwise: the facts a lookup needs as
+# columns, the record as JSON, an index for "this board, newest first" and one
+# for the age sweep.
+MIGRATION_43 = """
+CREATE TABLE tier_category_removals (
+    id            INTEGER PRIMARY KEY,
+    board_id      INTEGER NOT NULL
+                  REFERENCES tier_boards(id) ON DELETE CASCADE,
+    -- The CLIENT uid, never the integer id: a restore re-creates the SAME tier,
+    -- and a removed title's own history row names its tier by this uid, so a
+    -- title taken off the tier before it was deleted goes back into it.
+    category_uid  TEXT    NOT NULL,
+    -- How many tiers sat before it. Tiers are drawn by priority, so this only
+    -- breaks ties -- but a restore should not reshuffle two equal-priority tiers.
+    sort_order    INTEGER NOT NULL,
+    removed_at    INTEGER NOT NULL,
+    -- The tier's own settings as one record, so a setting added to
+    -- tier_categories later is carried across a delete with no edit here.
+    category_json TEXT    NOT NULL,
+    -- The item KEYS the tier held, IN RANK ORDER. Keys, not records: the titles
+    -- were not deleted -- they went to the pool -- so a restore MOVES the rows
+    -- that still exist rather than re-inserting copies of them.
+    items_json    TEXT    NOT NULL
+);
+CREATE INDEX ix_tier_category_removals_board
+    ON tier_category_removals(board_id, removed_at DESC);
+CREATE INDEX ix_tier_category_removals_sweep
+    ON tier_category_removals(removed_at);
+"""
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -3175,6 +3221,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (40, MIGRATION_40),
     (41, MIGRATION_41),
     (42, MIGRATION_42),
+    (43, MIGRATION_43),
 ]
 
 

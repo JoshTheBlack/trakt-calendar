@@ -133,7 +133,7 @@
             <select id="bulkTarget" name="tier" form="poolForm"
                     aria-label="Tier to move the selection into">
                 {%- for category in board.categories %}
-                <option value="{{ category.uid }}" data-tier-choice="{{ category.uid }}">{{ category.label or "Untitled" }}</option>
+                <option value="{{ category.uid }}">{{ category.label or "Untitled" }}</option>
                 {%- endfor %}
             </select>
             <button type="button" class="btn-ghost small" form="poolForm"
@@ -214,22 +214,20 @@
                         aria-label="Tier settings"
                         hx-get="/rankings/fragments/tier-settings?{{ {'board': board.uid, 'tier': category.uid} | urlencode }}"
                         hx-target="#tierSettings" hx-swap="outerHTML">⚙</button>
-                {# ASKING IS MARKUP, THE DELETE IS NOT, AND THE SPLIT IS EXACT.
-                   The question is templates/_confirm.html like every other one in
-                   the app — a checkbox, two labels and a stylesheet rule, with no
-                   request behind it. What it confirms is still script, and alone
-                   in this app in being so: a deleted tier's undo is held in the
-                   browser because a tier has no removal history on the server the
-                   way a removed TITLE does (static/js/ranker/tiers.js says so).
-                   The ask used to be script too — a popover measured against this
-                   button with getBoundingClientRect — and it was the last caller
-                   of that helper. #}
+                {# ASKING AND DELETING ARE BOTH MARKUP. The question is
+                   templates/_confirm.html like every other one in the app, and
+                   Delete posts itself and is answered with the board redrawn and
+                   a toast whose Undo is the removal history's own Restore button:
+                   what the tier was is kept on the server (ranker.delete_category),
+                   so it outlives the toast, a reload and the tab, and nothing on
+                   this side moves rows, strips menus or recounts. #}
                 {% call confirm_box.ask('tier-' ~ category.uid,
                                         'Delete this tier? Its titles go back to the pool.',
                                         '✕', title='Delete this tier',
                                         danger=true, face='ranker-act danger') %}
                 <button type="button" class="btn-primary small"
-                        onclick="deleteTier('{{ category.uid }}')">Delete</button>
+                        hx-post="/rankings/boards/{{ board.uid }}/tiers/{{ category.uid }}/delete"
+                        hx-json-enc hx-target="body" hx-swap="innerHTML">Delete</button>
                 {% endcall %}
             </span>
             </div>

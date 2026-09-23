@@ -36,7 +36,7 @@ RANKER_TEMPLATES = (
     "ranker.html", "_ranker_board_shell.html", "_ranker_pool_page.html",
     "_ranker_pool_rows.html", "_ranker_pool_sentinel.html",
     "_ranker_category_rows.html", "_ranker_row.html", "_ranker_failed.html",
-    "_ranker_removed.html", "_ranker_search_results.html",
+    "_ranker_removed.html", "_ranker_undo.html", "_ranker_search_results.html",
     "_ranker_tier_strip.html", "_ranker_tier_strips.html",
 )
 
@@ -316,18 +316,23 @@ class TierChoicesAreMarkupTests(FragmentTestCase):
         select = re.search(r'<select id="bulkTarget"[^>]*>(.*?)</select>', html, re.S).group(1)
         self.assertEqual(re.findall(r'<option value="([^"]*)"', select), ["tier-s"])
 
-    def test_every_tier_choice_is_marked_so_a_deleted_tier_can_take_its_choices_away(self):
+    def test_a_deleted_tier_takes_every_choice_naming_it_with_it(self):
         """The bulk-move list, the export dialog's scope, AND ONE PER ROW now
-        that every row carries its own menu. The count is asserted against the
-        rows drawn rather than as a constant, because a constant would pass or
-        fail on how many titles the fixture happens to have."""
-        self.board_with(pool=3, tiered=1)
-        html = self.client.get("/rankings").text
-        rows = html.count('class="ranker-item"')
+        that every row carries its own menu. A delete answers with the page
+        redrawn, so none of them has to be found and taken out by hand — they are
+        simply not drawn. The count before is asserted against the rows drawn
+        rather than as a constant, because a constant would pass or fail on how
+        many titles the fixture happens to have."""
+        board = self.board_with(pool=3, tiered=1)
+        before = self.client.get("/rankings").text
+        rows = before.count('class="ranker-item"')
         self.assertEqual(rows, 4)
-        self.assertEqual(html.count('data-tier-choice="tier-s"'), rows + 2)
-        tiers = (STATIC_DIR / "js" / "ranker" / "tiers.js").read_text(encoding="utf-8")
-        self.assertIn("[data-tier-choice=", tiers)
+        # A row's move names the title it moves as well, which is what tells it
+        # apart from the restore the delete's own answer offers for this tier.
+        choices = re.compile(r'value="(?:cat:)?tier-s"|"1", "tier": "tier-s"')
+        self.assertEqual(len(choices.findall(before)), rows + 2)
+        after = self.client.post(f"/rankings/boards/{board}/tiers/tier-s/delete", json={})
+        self.assertEqual(choices.findall(after.text), [])
 
     def test_no_script_moves_a_title_between_tiers(self):
         """Nothing opens the menu, places it, remembers which row it belongs to,
@@ -697,38 +702,49 @@ class FragmentGatingTests(FragmentTestCase):
 
 
 class CategoryDeleteRouteTests(FragmentTestCase):
-    """The endpoint the UI's undo-a-tier-deletion is built on. Its titles fall
-    back to the pool, which is what makes the undo a re-save rather than a
-    restore from somewhere."""
+    """The tier delete: a button posting itself, answered with the page. Its
+    titles fall back to the pool, and what the tier was goes into the board's
+    removal history, which is what the toast's Undo restores from."""
+
+    def delete(self, board: str, tier: str):
+        return self.client.post(f"/rankings/boards/{board}/tiers/{tier}/delete", json={})
 
     def test_deleting_a_tier_returns_its_titles_to_the_pool(self):
         board = self.board_with(tiered=3)
-        response = self.client.request(
-            "DELETE", f"/api/rankings/boards/{board}/categories/tier-s", json={})
+        response = self.delete(board, "tier-s")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["returned"], 3)
+        self.assertIn("Tier deleted — its 3 titles went back to the pool.", response.text)
         after = self.client.get(f"/api/rankings/boards/{board}").json()["board"]
         self.assertEqual(after["categories"], [])
         self.assertEqual(len(after["pool"]), 3)
 
     def test_an_unknown_tier_is_refused_without_touching_the_board(self):
         board = self.board_with(tiered=2)
-        response = self.client.request(
-            "DELETE", f"/api/rankings/boards/{board}/categories/ghost", json={})
-        self.assertEqual(response.status_code, 400)
+        response = self.delete(board, "ghost")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('class="toast err is-flash"', response.text)
+        self.assertIn("No tier", response.text)
         after = self.client.get(f"/api/rankings/boards/{board}").json()["board"]
         self.assertEqual(len(after["categories"][0]["items"]), 2)
 
     def test_another_account_cannot_delete_a_tier_and_the_rows_prove_it(self):
         board = self.board_with(tiered=2)
         self.sign_in_as(self.make_user("intruder", ranker_approved=True))
-        response = self.client.request(
-            "DELETE", f"/api/rankings/boards/{board}/categories/tier-s", json={})
-        self.assertEqual(response.status_code, 404)
+        self.delete(board, "tier-s")
         # Asserted on the database, not on the status: a route that refuses and
         # writes anyway is exactly what a status-only check misses.
         self.assertEqual(
             asyncio.run(db.fetch_value("SELECT COUNT(*) FROM tier_categories")), 1)
+        self.assertEqual(
+            asyncio.run(db.fetch_value("SELECT COUNT(*) FROM tier_category_removals")), 0)
+
+    def test_the_retired_json_delete_is_gone(self):
+        """The delete used to be a JSON route the page called and then patched
+        itself up after. Nothing calls it now, and an authenticated route nobody
+        calls is a surface with no caller exercising its refusals."""
+        self.assertNotIn(
+            "/api/rankings/boards/{board_uid}/categories/{category_uid}",
+            {str(getattr(r, "path", "")) for r in authz.iter_routes(app)})
 
 
 def png_bytes(colour=(200, 30, 30)) -> str:

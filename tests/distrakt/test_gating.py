@@ -42,9 +42,10 @@ from tests.support import AppTestCase, ORIGIN, tracker_month
 # should fail this file, not quietly drop out of it.
 DISTRAKT_GETS = (
     "/distrakt",
-    "/api/distrakt/list",
     "/distrakt/fragments/month",
-    "/api/distrakt/months",
+    "/distrakt/fragments/day-label",
+    "/distrakt/fragments/details",
+    "/distrakt/fragments/details/season",
     "/distrakt/fragments/search",
     "/distrakt/fragments/seasons",
     "/api/distrakt/export",
@@ -215,15 +216,18 @@ class AdmittedActorTests(DistraktTestCase):
             "kind": distrakt_routes.distrakt_store.RecordKind.SERIES_PREMIERE,
         }))
 
+        # Read through the export, the one read left that answers with the
+        # session's stored rows as they are — the JSON list of a month did too,
+        # had no caller on the page, and is gone.
+        def exported_titles() -> list[str]:
+            doc = self.client.get("/api/distrakt/export").json()
+            return [row["title"] for row in doc["distrakt_month_records"]]
+
         self.sign_in_as(other)
-        listed = self.client.get("/api/distrakt/list?year=2026&month=7").json()
-        self.assertEqual(listed["shows"], [])
-        exported = self.client.get("/api/distrakt/export").json()
-        self.assertEqual(exported["distrakt_month_records"], [])
+        self.assertEqual(exported_titles(), [])
 
         self.sign_in_as(owner)
-        listed = self.client.get("/api/distrakt/list?year=2026&month=7").json()
-        self.assertEqual([s["title"] for s in listed["shows"]], ["Secret Show"])
+        self.assertEqual(exported_titles(), ["Secret Show"])
 
 
 class RequestingUsersTokenTests(DistraktTestCase):

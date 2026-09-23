@@ -85,6 +85,17 @@ switch, both operator decisions taken once for every viewer, and both also
 applied at read so unticking is immediate over windows already stored. A
 PER-VIEWER preference reaching a fill is the bug this shape exists to prevent
 (`tests/calendar/test_resolve.py`'s `TwoViewersOneWindowTests`).
+THE READ PATH HOLDS A MEMO, AND ITS KEY IS WHERE "FILTERED AT READ" IS NOW KEPT
+OR BROKEN. `_assembled_span` in `app/calendar/cache.py` keeps the half of a span
+that does not depend on the viewer's marks, in process, served while a rebuild
+runs behind the reader and retired when its endpoint's rows are written — so a
+span built for one viewer is served to any later request whose key matches. That
+key is `_span_memo_key`'s, and its docstring says why each part is there: every
+per-viewer narrowing by name, `repr(prefs)`, the operator's floor and
+`instance_sources`, and `db.generation()`. Anything a viewer or `settings` decides
+on the read path belongs in it, and a key missing one does not fail loudly — it
+hands one reader somebody else's month. `tests/calendar/test_span_memo.py` holds
+the list against the fields a read actually uses.
 
 **A viewer's filters are per MEDIUM, and one function turns a medium into
 columns.** `app/calendar/vocab.py` owns it: `TV_FIELDS`/`MOVIE_FIELDS` say which
@@ -138,10 +149,51 @@ while artwork resolved TMDB-first regardless, so a link could advertise a
 different picture of a different-looking show. Poster tiles are now keyed on
 `(media, tmdb, SOURCE)` and resolved in the OWNER's own `field_order("poster")`,
 which is the identical question the calendar asks (`app/media/posters.py`). The
-card is also the one public path that may make an outbound call: it warms poster
-ARTWORK, bounded to what the grid draws and to a wall clock, for titles the
-calendar cache already holds. It never fetches the CALENDAR
-(`allow_fetch=False`), so an empty cached month stays an empty card.
+card is one of the TWO public paths that may make an outbound call (the details
+panel, below, is the other): it warms poster ARTWORK, bounded to what the grid
+draws and to a wall clock, for titles the calendar cache already holds. It never
+fetches the CALENDAR (`allow_fetch=False`), so an empty cached month stays an
+empty card.
+
+**There is one details panel, and one way of opening it.** `templates/_details.html`
+draws what a title is, rendered through `app/details_panel.py` — which names the
+context's keys once — for the calendar, the tracker, the share page and the
+rankings board; no surface builds that markup in script, and `_details_modal.html`
+is the one shell around it. Which service describes a title is one question on
+all four, answered by `app/providers/detail_source.py` (in the providers package,
+not the calendar, because four features ask it). Because one renderer draws every
+answer, `DetailPort`'s answer has ONE KEY SET whoever gives it, and
+`tests/providers/test_protocol_conformance.py`'s
+`EveryDetailPortAnswersTheSameKeysTests` asserts it — a Protocol checks methods,
+not return shapes. The browser's half is one delegated listener in
+`static/js/ui.js`: an element carrying `data-details-open` is an opener, and a
+control INSIDE an opener acts for itself rather than also opening the panel.
+
+**A public details request may cost an outbound call only for a title its link
+already shows.** `_describe_shared_title` in `app/calendar/share_routes.py` owns
+that promise and does the lookup itself, so there is no way to obtain permission
+and then ask about something else: it resolves the view through the same
+`resolve_view`, `_read_month` and `_visible_items` the page and the card use,
+narrows the request's ids to those the visible airings carry — medium and season
+included, since each is its own upstream call — BEFORE `detail_source.choose`, and
+takes the picture and the outbound links from the month's airing, never from the
+request. "Nothing describes this" and "this link does not show that" are one
+refusal, so a stranger cannot probe what the owner's calendar contains. It is not
+a flag a caller passes; a second public details route calls that function.
+
+**A calendar day that arrives late is drawn whole by the server.** `calendar_day`
+in `app/calendar/routes.py` renders it through the shell's own partials: whether a
+card is new comes from the SHELL's answer, filed once per load and named by a
+token on the day's own address (`_remember_new_marks` / `_new_marks`), because
+re-diffing from a fragment would read the shell's own commit and find nothing
+new; its chip is redrawn out of band (`_day_chip.html`); and its add-to-library
+buttons arrive in their state. The page keeps no marks of its own — a mark posts
+and its answer redraws every card for that title — so a day landing while a mark
+is in flight is drawn from whichever reached the database first, and the other's
+answer redraws it. The add-to-library rule lives in one place per question:
+`_library` (`app/calendar/routes.py`) for WHO gets the buttons, `LibraryView`
+(`app/integrations/routes.py`) for what state each is in, `add_title` beside it
+for the add itself.
 
 **Migrations are append-only, and migration 19 is the one recorded exception.**
 `app/db.py` owns the rule; this is the note it points at. 19 shipped classifying an
@@ -160,8 +212,8 @@ back carrying entries two months past its end. Windows are trimmed before
 storage; without the trim a month read shows the same airing several times.
 
 **JavaScript is for what ONLY JavaScript can do, and the floor is MEASURED.**
-As of the audit that ended this work the whole first-party surface is **765 code
-lines across 16 .js files, 25 lines of inline `<script>` and 11 inline `on*=`
+As of the audit that ended this work the whole first-party surface is **694 code
+lines across 15 .js files, 25 lines of inline `<script>` and 10 inline `on*=`
 handlers** — from 4,024 lines when the audit began, and from 1,213 / 26 / 30 at
 its last conversion. The WATCH TRACKER now loads no script of its own at all. Those three numbers are the point of this paragraph: they
 are what somebody adding a file is adding to, and a number that has drifted is a
@@ -279,15 +331,16 @@ written out, and that part is worth matching.
 ## Testing
 
 ```
-.venv/Scripts/python.exe -m pytest -q          # full suite, ~6.5 minutes
+.venv/Scripts/python.exe -m pytest -q          # full suite, ~8.5 minutes
 .venv/Scripts/python.exe -m pytest -q tests/calendar/test_cache.py
 ```
 
 **WHICH RUN A COMMIT NEEDS DEPENDS ON WHERE IT LANDS.** A commit on a BRANCH
 needs the targeted files — the ones covering what changed, plus whatever the
 change reaches into. A commit on MAIN, and any merge back into main, needs the
-FULL SUITE. The full run is ~6.5 minutes, which is cheap once at the point work
-becomes everybody's and expensive at every step of getting there; a branch is
+FULL SUITE. The full run is ~8.5 minutes (8m36s, measured 2026-09-23), which is
+cheap once at the point work becomes everybody's and expensive at every step of
+getting there; a branch is
 where the iterating happens, so the targeted run is what keeps it honest without
 making a commit something to put off.
 
