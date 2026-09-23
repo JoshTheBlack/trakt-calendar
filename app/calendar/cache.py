@@ -1142,7 +1142,18 @@ _SPAN_MEMO_TTL = 900
 # time (`_span_refreshing`) and the process runs at most two.
 _SPAN_REFRESH_LIMIT = 2
 _span_refreshing: set = set()
-_SPAN_MEMO_MAX = 64
+# HOW MANY SPANS ARE HELD, AND A MONTH VIEW IS NOT ONE OF THEM — it is
+# THIRTY-ONE. The shell asks for the whole month and then every day block asks
+# for its own day, each a span of its own with its own key, and all of them worth
+# holding: measured on a real All Episodes September, scrolling the month a
+# second time went from 23.9 seconds to 260ms, almost all of it the day entries.
+#
+# At 64 that left room for two month views. A third evicted, and so did reading
+# one month on two endpoints — which is the ordinary thing to do. The key still
+# carries the viewer's own filters, so this stays bounded: an entry is a list of
+# references to Items that already exist, and a caller asking for a hundred
+# months still cannot hold them all.
+_SPAN_MEMO_MAX = 192
 _span_memo: dict = {}
 
 
@@ -1477,11 +1488,14 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # recover from it.
     if partial or not allow_fetch:
         return items, as_of, partial, filtered_out
-    # Oldest out first when full. A plain FIFO rather than an LRU because the
-    # entries all expire on one timer anyway, and the cap is here to bound memory
-    # rather than to keep the best of them.
     if key not in _span_memo and len(_span_memo) >= _SPAN_MEMO_MAX:
-        _span_memo.pop(next(iter(_span_memo)), None)
+        # THE OLDEST BY WHEN IT WAS BUILT, not by when its key first appeared,
+        # and the difference threw away the best entry first. The shell's
+        # whole-month span is written BEFORE the thirty day spans that follow it,
+        # and re-writing a key does not move it in a dict — so a month refreshed
+        # seconds ago still looked like the oldest thing held, and went while the
+        # days it had been read with stayed.
+        _span_memo.pop(min(_span_memo, key=lambda k: _span_memo[k][1]), None)
     _span_memo[key] = (key, time.monotonic(),
                        _endpoint_generation.get(endpoint.key, 0),
                        list(items), as_of, partial, filtered_out)

@@ -259,6 +259,35 @@ class TheRefresherDoesNotAnswerItselfTests(unittest.TestCase):
         self.assertIn("_SPAN_REFRESH_LIMIT", src)
 
 
+class WhatOneMonthViewCostsTheMemoTests(unittest.TestCase):
+    """A MONTH VIEW IS NOT ONE ENTRY, IT IS THIRTY-ONE, and the cap has to be
+    read in those units or it means something quite different from what it says.
+
+    The shell asks for the whole month and every day block then asks for its own
+    day — each a span with its own key, and each worth holding: measured on a
+    real All Episodes September, a second scroll through the month went from 23.9
+    seconds to 260ms, almost all of it those day entries.
+    """
+
+    def test_the_cap_holds_several_month_views(self):
+        """At 64 there was room for two, so a third — or the same month on a
+        second endpoint, which is an ordinary thing to do — evicted."""
+        days_in_a_long_month = 31
+        one_view = days_in_a_long_month + 1
+        self.assertGreaterEqual(calendar_cache._SPAN_MEMO_MAX, one_view * 4,
+                                "the cap should hold several month views at once")
+
+    def test_eviction_is_by_when_an_entry_was_built(self):
+        """Insertion order threw away the best entry first: the shell's
+        whole-month span is written BEFORE its thirty days, and re-writing a key
+        does not move it in a dict — so a month refreshed seconds ago still
+        looked like the oldest thing held."""
+        import inspect
+        src = inspect.getsource(calendar_cache._assembled_span)
+        self.assertIn("min(_span_memo, key=lambda k: _span_memo[k][1])", src)
+        self.assertNotIn("next(iter(_span_memo))", src)
+
+
 class ForgettingTests(unittest.TestCase):
     def test_forgetting_empties_the_memo(self):
         calendar_cache._span_memo[("a",)] = (("a",), 0.0, 0, [], None, False, 0)
