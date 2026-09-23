@@ -97,6 +97,22 @@ def set_db_path(path: str | Path) -> None:
     _drop_local_connection()
 
 
+def generation() -> int:
+    """How many times this process has been pointed at a different database.
+
+    PUBLIC BECAUSE A CACHE HAS TO BE ABLE TO ASK. Anything holding a value
+    derived from the database has to be able to say WHICH database it came from,
+    or it answers for one out of another — which is what a per-process memo does
+    the moment `set_db_path` is called under it. Callers put this in their key
+    rather than registering a reset hook, so the staleness is impossible by
+    construction instead of depending on a callback having been wired up.
+
+    In a running instance this never moves. The suite swaps databases between
+    tests, which is where the hazard is real and where it was found.
+    """
+    return _generation
+
+
 def _drop_local_connection() -> None:
     conn = getattr(_local, "conn", None)
     if conn is not None:

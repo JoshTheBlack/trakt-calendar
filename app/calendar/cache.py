@@ -82,6 +82,7 @@ from __future__ import annotations
 import asyncio
 import calendar as _calendar
 import logging
+import time
 from datetime import date, datetime, timedelta, timezone
 from itertools import groupby
 from typing import NamedTuple
@@ -730,6 +731,11 @@ async def store_window(endpoint_key: str, start: date, records: list[Record],
         sources=sources, asked=(sources if asked is None else asked),
         unchanged=unchanged,
         now=now, stale_after=now + max(0, int(ttl_seconds)))
+    # THE ROWS A MEMOISED SPAN WAS ASSEMBLED FROM HAVE JUST MOVED. This is the
+    # one write that can change what any span holds, so it is the one place the
+    # memo has to be given up — otherwise a refilled month would go on being
+    # served from before the refill for the length of its TTL.
+    _forget_spans()
     return group_records(records)
 
 
@@ -1100,83 +1106,148 @@ async def visible_records(groups, endpoint, *, genres="", countries="",
     return kept, release_filtered + (len(records) - len(kept))
 
 
-async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
-                         start_date: date, end_date: date,
-                         genres: str = "", countries: str = "",
-                         show_certifications: str = "", movie_certifications: str = "",
-                         movie_release_countries: str = "", movie_release_types: str = "",
-                         network_filter=None, not_watching_ids: set[str] | None = None,
-                         allow_fetch: bool = True, now: int | None = None,
-                         prefs=None,
-                         ) -> tuple[list[dict], dict]:
-    """Assemble one viewer's calendar for the local day span [start_date, end_date].
 
-    The single place the cache is turned into view-ready days. It reads ONLY the
-    aligned windows that cover the span — not the whole month — normalizes ONLY
-    those entries into the viewer's tz, trims to [start_date, end_date], groups by
-    local day, and returns (grouped, meta). A whole-month read is just
-    assemble_range(first_of_month, last_of_month); a single day is
-    assemble_range(d, d).
 
-    The read path in order: figure the UTC window range covering the span ±1 day
-    (a viewer-local day can straddle two UTC windows, so the padding matters);
-    load every covering window CONCURRENTLY; RESOLVE each group to the one record
-    this viewer sees; apply the per-user genre/country/certification filter to
-    those records (before rendering, on the raw genre slugs); render the
-    survivors into the viewer's tz; trim to the LOCAL span; apply the network
-    filter; sort by air time; group by local day.
+# ---------------------------------------------------------------------------
+# the mark-independent half of a span, and the short memo over it
+# ---------------------------------------------------------------------------
 
-    RESOLUTION BEFORE FILTERING, RENDERING AFTER, and the order is not
-    interchangeable. A filter has to run against the values the viewer will
-    actually be shown, so it comes after resolution; and it matches genres on
-    their hyphenated slugs, so it comes before rendering, which is what
-    title-cases them.
+# HOW LONG A MEMOISED SPAN MAY BE SERVED, AND IT MUST STAY WELL UNDER THE
+# SHORTEST STALENESS TIER. Every write that can change a span clears the memo
+# outright (`_forget_spans`), so this bounds only the paths that write nothing a
+# clear can hook - a background enrichment landing between two reads, most of
+# all.
+#
+# IT IS ALSO WHAT MAKES SERVING A `allow_fetch=True` READ FROM THE MEMO SAFE.
+# The argument: an unexpired entry can only have been written by a read that
+# found nothing due for a refresh, or by one that refreshed, stored (clearing the
+# memo) and then wrote the post-fill answer. Either way nothing was due at the
+# moment it was written - and since the shortest tier in _STALENESS_TIERS is a
+# DAY, nothing can become due within five minutes either. Raise this past that
+# tier and a page load starts serving a month it should have refetched.
+_SPAN_MEMO_TTL = 300
+# Bounded because the key carries the viewer's own filters: a few accounts each
+# reading a few months is a few dozen entries, and a crawler asking for a
+# hundred months must not be able to hold them all.
+_SPAN_MEMO_MAX = 64
+_span_memo: dict = {}
 
-    `prefs` IS THIS VIEWER'S SOURCE SELECTION, AND IT IS READ ONLY HERE — never
-    on the way down to the fill. It reaches `resolve`, which drops a group no
-    admitted source describes and picks between the ones that do. The windows
-    underneath were filled by asking everybody, so two viewers who have chosen
-    differently read the very same rows and each sees their own answer out of
-    them; a selection cannot narrow what anybody else is served.
-    `prefs=None` means no account is asking (a public share page) and admits
-    everything the window holds — everything, that is, that `settings` still
-    admits: which services this INSTANCE puts on its calendar is the operator's
-    answer and applies to a share page and a signed-in viewer alike.
 
-    RESILIENT BUT LOUD on a window no source can supply. The windows load through
-    a single asyncio.gather; a window that raised (nothing cached AND the fetch
-    failed) is skipped so the rest of the span still renders, and meta['partial']
-    is set so the caller can say the data is incomplete. A window stored while one
-    source could not be read sets it too — that source's absence from the stored
-    `sources` means UNKNOWN, not "had nothing". Only a span where EVERY window
-    failed raises — there is genuinely nothing to show. (A public share read
-    passes allow_fetch=False, where a missing window returns empty rather than
-    raising, so it never trips the partial path.)
+def _forget_spans() -> None:
+    """Drop every memoised span.
 
-    `show_certifications`/`movie_certifications` are two separate specs (the two
-    vocabularies don't overlap); the one matching `endpoint.media` applies here.
+    Called by everything that writes what a span is assembled FROM - a stored
+    window, a drained enrichment - because a memo that outlives its source is the
+    whole risk this shape carries.
 
-    `movie_release_countries`/`movie_release_types` narrow a FILMS calendar to
-    the markets and formats this viewer cares about, and do nothing at all on a
-    show endpoint. They apply EARLIER than the other filters — over each group's
-    per-source records, before resolution picks between them — because the
-    release schedule belongs to whichever source published one and a group must
-    not lose a service's record to a rule about something else. See
-    filter.filter_release_groups.
-
-    `meta['filtered']` counts every card this viewer's filters removed, so a
-    page emptied by it can say which filter emptied it rather than reading as a
-    month with nothing in it.
-
-    `meta` carries: total, watching, not_watching (from not_watching_ids, if
-    given — otherwise every item counts as watching), show_ids (the span's full,
-    de-duped, air-ordered item-id list, which is what is-new diffs against and
-    must never be taken from a partially-rendered DOM), as_of (the oldest
-    contributing window's cached_at, or None), and partial.
-
-    The hide/card/day-packing view preferences remain the caller's to apply:
-    those are per-request view concerns, not part of the data model returned.
+    WHOLESALE RATHER THAN BY KEY, and that is deliberate. A key carries the
+    viewer's filters and the window that was written carries none of them, so
+    working out which entries a write could have changed would mean re-deriving
+    every key's span. The memo is small and a write is rare next to a read, so
+    throwing all of it away is cheaper than being clever and wrong.
     """
+    _span_memo.clear()
+
+
+def _span_memo_key(endpoint, settings, *, tz, start_date, end_date, genres,
+                   countries, show_certifications, movie_certifications,
+                   movie_release_countries, movie_release_types, network_filter,
+                   prefs) -> tuple:
+    """Everything that shapes a span EXCEPT the viewer's marks.
+
+    MARKS ARE THE ONE INPUT LEFT OUT, and leaving them out is the entire point:
+    they are applied after this, so a mark does not change what is memoised -
+    which is what lets the redraw that ANSWERS a mark hit the entry the page's
+    own read just filled. Putting them in the key would make every mark a miss,
+    and marking is the case this exists for.
+
+    EVERY PER-VIEWER NARROWING IS IN HERE BY NAME. The stored windows are shared
+    and viewer-independent; this is the first point at which one account's
+    answer differs from another's, so a key missing a dimension would serve one
+    viewer's filtered month to somebody who filtered differently. That is the
+    failure tests/calendar/test_resolve.py's TwoViewersOneWindowTests exists to
+    catch, and it is why `prefs` and the operator's own network list are both in
+    the key rather than assumed constant.
+    """
+    # THE OPERATOR'S HALF IS SPELLED OUT, NOT ASSUMED CONSTANT. The instance
+    # floor and the instance's source admission are applied at READ as well as at
+    # fill, precisely so that tightening or loosening either reaches windows
+    # already stored (see visible_records). A memo that left them out would
+    # defeat that promise for as long as its TTL, and the suite says so:
+    # test_cache.py's InstanceFloorAtReadTests change the floor between two reads
+    # and require the second to answer differently.
+    # ANYTHING ADDED TO THE READ PATH THAT `settings` DECIDES BELONGS HERE TOO.
+    # There is no way to make that automatic, so it is named in one place and
+    # test_span_memo.py holds the list against the fields a read actually uses.
+    floor = (settings.genres, settings.countries,
+             settings.show_certifications, settings.movie_certifications,
+             tuple(settings.network_filter or ()),
+             tuple(sorted(calendar_resolve.instance_sources(settings) or ())))
+    return (
+        # WHICH DATABASE THIS CAME FROM. A memo is per PROCESS and the rows are
+        # per FILE, so a process re-pointed at another database would otherwise
+        # serve the first one's calendar out of the second.
+        db.generation(),
+        endpoint.key, str(tz), start_date.isoformat(), end_date.isoformat(),
+        genres, countries, show_certifications, movie_certifications,
+        movie_release_countries, movie_release_types,
+        tuple(network_filter or ()), floor, repr(prefs),
+    )
+
+
+async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
+                          start_date: date, end_date: date, genres: str,
+                          countries: str, show_certifications: str,
+                          movie_certifications: str, movie_release_countries: str,
+                          movie_release_types: str, network_filter,
+                          allow_fetch: bool, now, prefs):
+    """One span's items in air order, with nothing about the reader's marks in
+    them: (items, as_of, partial, filtered_out).
+
+    SPLIT OUT OF `assemble_range` SO THAT IT CAN BE MEMOISED, and the split is
+    exactly where a viewer's marks first matter. Everything here - reading the
+    windows, resolving each group to the record this viewer sees, applying their
+    filters, rendering into their timezone - costs about two seconds on a busy
+    month (measured: 2,308 items over five windows, roughly half in
+    deserialising rows and half in resolving them). None of it depends on which
+    titles they are not watching, so redrawing a month because ONE mark changed
+    was paying for all of it a second time.
+
+    ONLY AN `allow_fetch=False` READ IS MEMOISED, OR SERVED FROM THE MEMO. Those
+    are the reads that redraw something already on screen - a mark's answer, a
+    view preference, a share page - where whatever is stored is by definition
+    what drew it. A read that may FILL is left alone in both directions: it is
+    the one that goes and gets new rows, and its answer is the fresh one
+    everybody else's memo is then cleared for.
+    """
+    key = _span_memo_key(
+        endpoint, settings, tz=tz, start_date=start_date, end_date=end_date,
+        genres=genres, countries=countries,
+        show_certifications=show_certifications,
+        movie_certifications=movie_certifications,
+        movie_release_countries=movie_release_countries,
+        movie_release_types=movie_release_types,
+        network_filter=network_filter, prefs=prefs)
+    # EVERY READ IS SERVED, INCLUDING ONE THAT MAY FILL. Serving only the cheap
+    # reads was the first shape here and it was half a fix: it made a mark
+    # instant and left OPENING the month exactly as slow as before, which is the
+    # read somebody actually waits on. Measured on a real September: 2,947ms to
+    # 20ms. See _SPAN_MEMO_TTL for why an unexpired entry cannot be hiding a
+    # refresh that was due, and the write below for why only a filling read may
+    # put one there.
+    hit = _span_memo.get(key)
+    if hit is not None:
+        if hit[0] > time.monotonic():
+            with span("calcache.memo_hit", items=len(hit[1])):
+                # THE LIST IS COPIED AND THE ITEMS ARE NOT. `grouped` is built
+                # fresh by the caller and a caller may write onto ITS dicts
+                # (routes._count_visible puts a per-viewer count on each day), so
+                # the structure has to be per-request. An Item is a value nothing
+                # in app/ ever assigns to, so sharing one is safe - and copying
+                # two thousand of them would give back what this saves.
+                return list(hit[1]), hit[2], hit[3], hit[4]
+        _span_memo.pop(key, None)
+
     utc_start, utc_end = _local_span_utc_range(tz, start_date, end_date)
     windows = aligned_windows(utc_start, utc_end)
 
@@ -1264,7 +1335,7 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
                 items.append(item)
         sp.set(items=len(items))
 
-    with span("calcache.group", items=len(items)):
+    with span("calcache.trim", items=len(items)):
         # THE OPERATOR'S NETWORK LIST IS THE FLOOR'S FOURTH FIELD, applied here
         # and nowhere else: a network only exists on a RENDERED item, so the
         # fill's floor cannot judge one and this is the only place it can. It
@@ -1287,6 +1358,129 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         # instant — and groupby below needs each day's items contiguous, or one
         # day arrives in two pieces and draws two headings for itself.
         items.sort(key=lambda i: (i.air_date, i.air_ts))
+
+    # ONLY A READ THAT WAS ALLOWED TO FILL MAY WRITE, AND THIS ASYMMETRY IS THE
+    # WHOLE CORRECTNESS OF THE MEMO.
+    #
+    # A `allow_fetch=False` read is not merely cheaper — it can be SHORT. A window
+    # with nothing stored returns EMPTY to it rather than raising (see
+    # load_window), so such a read can legitimately produce a month with days
+    # missing from it and no `partial` flag to say so. Memoising that would let
+    # the first mark, share view or view toggle on a month nobody has opened yet
+    # publish an under-filled span, which the next page load — the read that
+    # would have gone and FILLED it — would then be served instead of filling.
+    # Caught by tests/calendar/test_routes.py's DayLayoutTests, where marking a
+    # title before the page was ever read left every day block empty.
+    #
+    # So: a read that may fill WRITES and reads; a read that may not only READS.
+    # The page load populates, everything cheap rides on it, and nothing that
+    # could be short ever gets in.
+    #
+    # A PARTIAL READ IS NOT KEPT EITHER. `partial` means a window had nothing
+    # stored AND its fetch failed. Keeping that would turn one service being
+    # briefly unreachable into five minutes of a month that stays wrong however
+    # often it is reloaded — and a reload is exactly how somebody expects to
+    # recover from it.
+    if partial or not allow_fetch:
+        return items, as_of, partial, filtered_out
+    # Oldest out first when full. A plain FIFO rather than an LRU because the
+    # entries all expire on one timer anyway, and the cap is here to bound memory
+    # rather than to keep the best of them.
+    if len(_span_memo) >= _SPAN_MEMO_MAX:
+        _span_memo.pop(next(iter(_span_memo)), None)
+    _span_memo[key] = (time.monotonic() + _SPAN_MEMO_TTL,
+                       list(items), as_of, partial, filtered_out)
+    return items, as_of, partial, filtered_out
+
+
+async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
+                         start_date: date, end_date: date,
+                         genres: str = "", countries: str = "",
+                         show_certifications: str = "", movie_certifications: str = "",
+                         movie_release_countries: str = "", movie_release_types: str = "",
+                         network_filter=None, not_watching_ids: set[str] | None = None,
+                         allow_fetch: bool = True, now: int | None = None,
+                         prefs=None,
+                         ) -> tuple[list[dict], dict]:
+    """Assemble one viewer's calendar for the local day span [start_date, end_date].
+
+    The single place the cache is turned into view-ready days. It reads ONLY the
+    aligned windows that cover the span — not the whole month — normalizes ONLY
+    those entries into the viewer's tz, trims to [start_date, end_date], groups by
+    local day, and returns (grouped, meta). A whole-month read is just
+    assemble_range(first_of_month, last_of_month); a single day is
+    assemble_range(d, d).
+
+    The read path in order: figure the UTC window range covering the span ±1 day
+    (a viewer-local day can straddle two UTC windows, so the padding matters);
+    load every covering window CONCURRENTLY; RESOLVE each group to the one record
+    this viewer sees; apply the per-user genre/country/certification filter to
+    those records (before rendering, on the raw genre slugs); render the
+    survivors into the viewer's tz; trim to the LOCAL span; apply the network
+    filter; sort by air time; group by local day.
+
+    RESOLUTION BEFORE FILTERING, RENDERING AFTER, and the order is not
+    interchangeable. A filter has to run against the values the viewer will
+    actually be shown, so it comes after resolution; and it matches genres on
+    their hyphenated slugs, so it comes before rendering, which is what
+    title-cases them.
+
+    `prefs` IS THIS VIEWER'S SOURCE SELECTION, AND IT IS READ ONLY HERE — never
+    on the way down to the fill. It reaches `resolve`, which drops a group no
+    admitted source describes and picks between the ones that do. The windows
+    underneath were filled by asking everybody, so two viewers who have chosen
+    differently read the very same rows and each sees their own answer out of
+    them; a selection cannot narrow what anybody else is served.
+    `prefs=None` means no account is asking (a public share page) and admits
+    everything the window holds — everything, that is, that `settings` still
+    admits: which services this INSTANCE puts on its calendar is the operator's
+    answer and applies to a share page and a signed-in viewer alike.
+
+    RESILIENT BUT LOUD on a window no source can supply. The windows load through
+    a single asyncio.gather; a window that raised (nothing cached AND the fetch
+    failed) is skipped so the rest of the span still renders, and meta['partial']
+    is set so the caller can say the data is incomplete. A window stored while one
+    source could not be read sets it too — that source's absence from the stored
+    `sources` means UNKNOWN, not "had nothing". Only a span where EVERY window
+    failed raises — there is genuinely nothing to show. (A public share read
+    passes allow_fetch=False, where a missing window returns empty rather than
+    raising, so it never trips the partial path.)
+
+    `show_certifications`/`movie_certifications` are two separate specs (the two
+    vocabularies don't overlap); the one matching `endpoint.media` applies here.
+
+    `movie_release_countries`/`movie_release_types` narrow a FILMS calendar to
+    the markets and formats this viewer cares about, and do nothing at all on a
+    show endpoint. They apply EARLIER than the other filters — over each group's
+    per-source records, before resolution picks between them — because the
+    release schedule belongs to whichever source published one and a group must
+    not lose a service's record to a rule about something else. See
+    filter.filter_release_groups.
+
+    `meta['filtered']` counts every card this viewer's filters removed, so a
+    page emptied by it can say which filter emptied it rather than reading as a
+    month with nothing in it.
+
+    `meta` carries: total, watching, not_watching (from not_watching_ids, if
+    given — otherwise every item counts as watching), show_ids (the span's full,
+    de-duped, air-ordered item-id list, which is what is-new diffs against and
+    must never be taken from a partially-rendered DOM), as_of (the oldest
+    contributing window's cached_at, or None), and partial.
+
+    The hide/card/day-packing view preferences remain the caller's to apply:
+    those are per-request view concerns, not part of the data model returned.
+    """
+    items, as_of, partial, filtered_out = await _assembled_span(
+        endpoint, settings, tz=tz, start_date=start_date, end_date=end_date,
+        genres=genres, countries=countries,
+        show_certifications=show_certifications,
+        movie_certifications=movie_certifications,
+        movie_release_countries=movie_release_countries,
+        movie_release_types=movie_release_types,
+        network_filter=network_filter, allow_fetch=allow_fetch, now=now,
+        prefs=prefs)
+
+    with span("calcache.group", items=len(items)):
 
         grouped = [
             {"date": day,
