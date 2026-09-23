@@ -9,6 +9,7 @@ No network.
 """
 from __future__ import annotations
 
+import json
 import unittest
 
 from app import db
@@ -62,6 +63,72 @@ class NotWatchingDeltaTests(StateTestCase):
         other = await _make_user("other")
         await calendar_state.set_not_watching(self.user_id, "mine", True)
         self.assertEqual(await calendar_state.not_watching_list(other), [])
+
+
+class UnmarkingClearsLegacySpellingsTests(StateTestCase):
+    """A mark the READ accepts must be one the WRITE can clear.
+
+    `marked_by_ids` honours a mark stored under any of a title's slug
+    namespaces, because marks predate mark keys. Unmarking deleted the mark key
+    alone, so those marks could be read but never cleared: the card drew as
+    marked, the toggle deleted a row that was not there, and the redraw showed
+    it marked again. On one real account that was 909 of 1,038 marks.
+    """
+
+    async def _store_title(self, title_key: str, ids: dict) -> None:
+        """One calendar_titles row, which is where the spellings are read from."""
+        await db.execute(
+            "INSERT INTO calendar_titles (source, media, source_id, title_key, "
+            "title, title_fold, ids_json, fetched_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("simkl", "show", ids.get("simkl") or "1", title_key, "T", "t",
+             json.dumps(ids), db.now()),
+        )
+
+    async def test_a_mark_under_a_slug_is_cleared_by_the_mark_key(self):
+        key = "show:tmdb:321122"
+        await self._store_title(key, {"slug": "lovesick", "simkl": 3101847,
+                                      "tmdb": "321122"})
+        # The shape a mark made before mark keys existed is stored in.
+        await calendar_state.set_not_watching(self.user_id, "lovesick", True)
+        marks = await calendar_state.not_watching_ids(self.user_id)
+        self.assertTrue(calendar_state.marked_by_ids(
+            marks, mark_key=key, ids={"slug": "lovesick"}))
+
+        # The card can only send its mark key, and that has to be enough.
+        await calendar_state.set_not_watching(self.user_id, key, False)
+        marks = await calendar_state.not_watching_ids(self.user_id)
+        self.assertEqual(marks, set())
+        self.assertFalse(calendar_state.marked_by_ids(
+            marks, mark_key=key, ids={"slug": "lovesick"}))
+
+    async def test_a_spelling_two_titles_share_clears_both(self):
+        """Deliberate, not collateral: the stored mark was hiding both already.
+
+        `lovesick` is the slug of two different 2026 shows on one real account,
+        so the single row answered for both and the read cannot tell them apart.
+        Clearing it is what lets the next mark be written under a key that can.
+        """
+        a, b = "show:tmdb:321122", "show:tmdb:290234"
+        await self._store_title(a, {"slug": "lovesick", "simkl": 3101847})
+        await self._store_title(b, {"slug": "lovesick", "simkl": 3211409})
+        await calendar_state.set_not_watching(self.user_id, "lovesick", True)
+        await calendar_state.set_not_watching(self.user_id, a, False)
+        self.assertEqual(await calendar_state.not_watching_ids(self.user_id), set())
+
+    async def test_marking_writes_the_mark_key_alone(self):
+        """One new fact, one row — the asymmetry `set_not_watching` documents."""
+        key = "show:tmdb:321122"
+        await self._store_title(key, {"slug": "lovesick", "tvdbslug": "lovesick-477390"})
+        await calendar_state.set_not_watching(self.user_id, key, True)
+        self.assertEqual(await calendar_state.not_watching_ids(self.user_id), {key})
+
+    async def test_a_title_nothing_stores_still_unmarks_by_its_own_key(self):
+        """The 85 marks naming titles no calendar row can identify: there is
+        nothing to expand, and the mark key alone must still come out."""
+        key = "show:tmdb:999999"
+        await calendar_state.set_not_watching(self.user_id, key, True)
+        await calendar_state.set_not_watching(self.user_id, key, False)
+        self.assertEqual(await calendar_state.not_watching_ids(self.user_id), set())
 
 
 class WholeDocumentTests(StateTestCase):

@@ -63,9 +63,17 @@ def marked(marks, item) -> bool:
     same show, marked twice, under two services' spellings.
 
     So new marks are stored under `Item.mark_key`, which no preference moves, and
-    the legacy id is still honoured. The remaining 109 name titles nothing
+    the legacy id is still honoured. The remaining 85 name titles nothing
     currently stores, so they cannot be rewritten in advance — they are matched
-    here, and re-saved under the stable key the next time somebody toggles one.
+    here, and they go out through `spellings_of` when somebody unmarks one.
+
+    THIS PARAGRAPH USED TO CLAIM A LEGACY MARK WAS "re-saved under the stable key
+    the next time somebody toggles one", AND NOTHING DID THAT. The write deleted
+    the mark key alone, so every one of those 909 marks was permanently stuck on:
+    the card read as marked, the unmark named a row that did not exist, and the
+    redraw showed it still marked. It survived because the browser used to write
+    the class itself and only a reload disagreed. `set_not_watching` is the
+    mirror of this rule now, which is what makes the claim true.
 
     ONE IMPLEMENTATION, because this is a rule every surface has to agree on: the
     calendar grid, the day fragment, the stats card, the share page and the
@@ -182,20 +190,65 @@ async def load_state(user_id: int, endpoint: str, year: int, month: int) -> dict
 # writes — deltas (a single toggle) and whole-document (the drop-in for POST)
 # ---------------------------------------------------------------------------
 
+async def spellings_of(mark_key: str) -> set[str]:
+    """Every id a mark for this title may have been STORED under, including the
+    mark key itself.
+
+    THE MIRROR OF `marked_by_ids`, AND IT EXISTS BECAUSE A TOLERANT READ NEEDS A
+    TOLERANT WRITE. That function accepts a mark written in any of
+    `_LEGACY_ID_NAMESPACES`; unmarking used to delete the mark key alone, so a
+    show marked before mark keys existed read as marked, was asked to be
+    unmarked, and stayed marked forever — the DELETE named a row that was never
+    there. Measured on one real account: 909 of its 1,038 marks were in a legacy
+    spelling, which is the majority of every mark it held.
+
+    `Item.mark_key` IS `calendar_titles.title_key` — both are `resolve_key`'s
+    output for the same ids — so the stored row for the title is what knows which
+    spellings it has ever answered to, and no card has to carry them.
+
+    A SPELLING TWO TITLES SHARE UNMARKS BOTH, and that is the honest answer
+    rather than a flaw. 21 of that account's legacy marks are slugs naming more
+    than one title (`lovesick` is two different 2026 shows), so the single stored
+    mark was ALREADY hiding both — the read cannot tell them apart either. The
+    ambiguity is in the old data, and clearing it is what lets the next mark be
+    written under a key that has none.
+    """
+    rows = await db.fetch_all(
+        "SELECT ids_json FROM calendar_titles WHERE title_key = ?", (str(mark_key),))
+    found = {str(mark_key)}
+    for row in rows:
+        try:
+            ids = json.loads(row["ids_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        found.update(str(ids[name]) for name in _LEGACY_ID_NAMESPACES
+                     if ids.get(name) not in (None, ""))
+    return found
+
+
 async def set_not_watching(user_id: int, item_id: str, not_watching: bool) -> None:
     """Mark or unmark one show for this user, everywhere. A delta, so two open
-    tabs cannot lose each other's marks the way a whole-array save did."""
+    tabs cannot lose each other's marks the way a whole-array save did.
+
+    MARKING WRITES THE MARK KEY ALONE — the stable identity no viewer preference
+    moves — while UNMARKING clears every spelling the read would have accepted
+    (`spellings_of`). The asymmetry is the point: one new fact goes in under one
+    name, and an old fact goes out under all of the names it might be filed
+    under, so toggling a title off and on again leaves exactly one row.
+    """
     if not_watching:
         await db.execute(
             "INSERT INTO not_watching_shows (user_id, item_id, created_at) "
             "VALUES (?, ?, ?) ON CONFLICT(user_id, item_id) DO NOTHING",
             (user_id, str(item_id), db.now()),
         )
-    else:
-        await db.execute(
-            "DELETE FROM not_watching_shows WHERE user_id = ? AND item_id = ?",
-            (user_id, str(item_id)),
-        )
+        return
+    spellings = await spellings_of(item_id)
+    await db.execute(
+        "DELETE FROM not_watching_shows WHERE user_id = ? AND item_id IN "
+        f"({', '.join('?' * len(spellings))})",
+        (user_id, *sorted(spellings)),
+    )
 
 
 async def set_view_state(user_id: int, endpoint: str, year: int, month: int, *,
