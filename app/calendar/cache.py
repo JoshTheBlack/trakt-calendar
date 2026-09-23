@@ -1489,6 +1489,17 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     if partial or not allow_fetch:
         return items, as_of, partial, filtered_out
     if key not in _span_memo and len(_span_memo) >= _SPAN_MEMO_MAX:
+        # WHAT IS PAST THE HARD MAX GOES FIRST, and none of it would go otherwise:
+        # an entry is only ever dropped when somebody reads that exact key, so a
+        # month nobody returns to holds its Items until something evicts it.
+        # Measured on real data, one All Episodes month view is ~35MB of the 37MB
+        # five endpoints cost between them — so reclaiming the dead ones is worth
+        # more than any plausible raising of the cap.
+        dead = [k for k, v in _span_memo.items()
+                if time.monotonic() - v[1] >= _SPAN_MEMO_TTL]
+        for k in dead:
+            _span_memo.pop(k, None)
+    if key not in _span_memo and len(_span_memo) >= _SPAN_MEMO_MAX:
         # THE OLDEST BY WHEN IT WAS BUILT, not by when its key first appeared,
         # and the difference threw away the best entry first. The shell's
         # whole-month span is written BEFORE the thirty day spans that follow it,
