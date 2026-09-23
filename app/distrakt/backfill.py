@@ -154,6 +154,9 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
     know it happened.
     """
     today = today or clock.today()
+    # Every day this decides is the VIEWER's day, not UTC's — see
+    # watch_history.local_day for what reading a play's raw timestamp costs.
+    tz = watch_history.viewer_tz(settings)
     # A month key compares as a string because both halves are zero-padded, which
     # is the same property walk_settled's ordering leans on.
     this_month = distrakt.month_key(today.year, today.month)
@@ -179,7 +182,8 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
     source, port = ports[0]
     start_day = distrakt.month_first_day(months[0])
     events = await port.fetch_history(settings, start_at=start_day.isoformat())
-    films, films_known = await _split_films(user_id, port.movie_plays_from(events), set(months))
+    films, films_known = await _split_films(
+        user_id, port.movie_plays_from(events), set(months), tz)
 
     by_month: dict[str, list[dict]] = {m: [] for m in wanted}
     seasons_seen = 0
@@ -215,7 +219,9 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
             total = int(detail.get("total") or 0)
             if not total or len(episodes) < total:
                 continue  # not finished at all -> belongs to no month
-            finished_on = max((str(w)[:10] for w in episodes.values() if w), default="")
+            finished_on = max((d for w in episodes.values() if w
+                                for d in (watch_history.local_day(w, tz),) if d),
+                               default="")
             month_key = finished_on[:7]
             if not month_key or month_key not in wanted_set:
                 continue  # finished outside the range (or on a date Trakt cannot name)
@@ -240,7 +246,7 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
     return plan
 
 
-def summarize(plan: dict) -> dict:
+def summarize(plan: dict, tz) -> dict:
     """The plan as the confirmation dialog needs it: per month, how many seasons
     and which shows, with no roster records in it.
 
@@ -257,10 +263,11 @@ def summarize(plan: dict) -> dict:
 
     by_month: dict[str, list[str]] = {}
     for movie in movies:
-        by_month.setdefault(str(movie.get("watched_at") or "")[:7], []).append(_label(movie))
+        by_month.setdefault(watch_history.local_day(movie.get("watched_at"), tz)[:7],
+                            []).append(_label(movie))
     known_by_month: dict[str, int] = {}
     for movie in known:
-        key = str(movie.get("watched_at") or "")[:7]
+        key = watch_history.local_day(movie.get("watched_at"), tz)[:7]
         known_by_month[key] = known_by_month.get(key, 0) + 1
 
     # Films are listed month by month beside the seasons, not summed into one
@@ -297,7 +304,7 @@ def summarize(plan: dict) -> dict:
     }
 
 
-async def apply(user_id: int, plan: dict | None = None) -> dict:
+async def apply(user_id: int, settings, plan: dict | None = None) -> dict:
     """Write a surveyed plan: one closed month per entry, plus the movie plays
     the same sweep saw. Returns {"months": [...], "shows": n, "movies": n}.
 
@@ -322,6 +329,7 @@ async def apply(user_id: int, plan: dict | None = None) -> dict:
     for — the plan is already a per-month list of records, so that filter goes
     between the survey and this, and nothing below needs to know.
     """
+    tz = watch_history.viewer_tz(settings)
     plan = plan or await cache.get(_plan_key(user_id), PLAN_TTL_SECONDS)
     if not plan or not isinstance(plan, dict):
         raise BackfillExpired("Nothing surveyed to write — run the check again.")
@@ -346,7 +354,7 @@ async def apply(user_id: int, plan: dict | None = None) -> dict:
             continue
         for record in rows:
             await distrakt.add_month_record(user_id, month_key, record)
-        await _record_films(user_id, month_key, state)
+        await _record_films(user_id, month_key, state, tz)
         # Closed LAST and through its own verb, because closing is two columns on
         # the month row: handing save_month a doc to close the month with would
         # take the records just written back out again.
@@ -365,7 +373,7 @@ async def apply(user_id: int, plan: dict | None = None) -> dict:
             doc = await distrakt.load_month(user_id, month_key)
             if doc is None or not doc.get("closed"):
                 continue  # an open month recomputes its films on every load
-            if await _record_films(user_id, month_key, state):
+            if await _record_films(user_id, month_key, state, tz):
                 refreshed += 1
 
     await cache.set(_plan_key(user_id), None)
@@ -424,7 +432,7 @@ async def _replacements(user_id: int, months: dict[str, list[dict]]) -> dict[str
     return out
 
 
-async def _record_films(user_id: int, month_key: str, state: dict) -> bool:
+async def _record_films(user_id: int, month_key: str, state: dict, tz) -> bool:
     """Put the films watched during `month_key` onto its stored list, one at a
     time. True if it wrote any.
 
@@ -444,7 +452,7 @@ async def _record_films(user_id: int, month_key: str, state: dict) -> bool:
     it had not changed at all, in the one log line that says what it did.
     """
     mstart, mend = watch_history.month_bounds(month_key)
-    films = watch_history.movies_in_range(state, mstart, mend)
+    films = watch_history.movies_in_range(state, mstart, mend, tz)
     if not films:
         return False
     doc = await distrakt.load_month(user_id, month_key) or {}
@@ -531,7 +539,7 @@ async def _season_totals(settings, candidates: list[dict]) -> dict[tuple[str, in
 
 
 async def _split_films(user_id: int, plays: list[dict],
-                       months: set[str]) -> tuple[list[dict], list[dict]]:
+                       months: set[str], tz) -> tuple[list[dict], list[dict]]:
     """The films in the range, split into (not recorded yet, already recorded).
 
     Both halves are kept. Only the first is written, so a second run adds only
@@ -552,7 +560,7 @@ async def _split_films(user_id: int, plays: list[dict],
         # them straight from that table, and this sweep is the one thing that can
         # see them.
         key = resolve_key(Media.MOVIE, film.get("ids") or {})
-        if key is None or str(film["watched_at"])[:7] not in months:
+        if key is None or watch_history.local_day(film["watched_at"], tz)[:7] not in months:
             continue
         target = fresh if str(film["watched_at"]) > known.get(str(key), "") else seen
         target.append(film)

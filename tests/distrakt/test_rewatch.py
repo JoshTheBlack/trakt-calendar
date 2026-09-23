@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from zoneinfo import ZoneInfo
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, patch
 
@@ -190,11 +191,11 @@ class TheFloorFiltersTheHistoryTests(unittest.TestCase):
         Filtered, the only play that counts is September's."""
         state = _state(watched={**self.OLD_RUN, **self.NEW_RUN})
         self.assertEqual(
-            watch_history.season_completed_map(state)[(str(KEY), 1)], "2026-09-01")
+            watch_history.season_completed_map(state, ZoneInfo("UTC"))[(str(KEY), 1)], "2026-09-01")
         floored = watch_history.apply_history_floor(
             state, {(str(KEY), 1): "2026-08-01"})
         self.assertEqual(
-            watch_history.season_completed_map(floored)[(str(KEY), 1)], "2026-09-01")
+            watch_history.season_completed_map(floored, ZoneInfo("UTC"))[(str(KEY), 1)], "2026-09-01")
 
     def test_a_season_whose_every_play_predates_the_floor_reads_as_unstarted(self):
         state = _state(watched=self.OLD_RUN)
@@ -202,7 +203,7 @@ class TheFloorFiltersTheHistoryTests(unittest.TestCase):
             state, {(str(KEY), 1): "2026-08-01"})
         self.assertEqual(watch_history.watched_map(floored)[(str(KEY), 1)],
                          {"trakt": 0})
-        self.assertNotIn((str(KEY), 1), watch_history.season_completed_map(floored))
+        self.assertNotIn((str(KEY), 1), watch_history.season_completed_map(floored, ZoneInfo("UTC")))
 
     def test_an_undated_play_is_kept(self):
         """"Watched, day unknown" is ordinary in both services' history. A floor

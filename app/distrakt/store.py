@@ -1354,6 +1354,37 @@ async def remove_season_everywhere(user_id: int, key: ItemKey, season: int) -> l
     return await db.transaction(_work)
 
 
+async def remove_season_from_month(user_id: int, month: str, key: ItemKey,
+                                   season: int) -> int:
+    """Delete one season's records from ONE month, of every kind. Returns how
+    many rows went.
+
+    THE MONTH-SCOPED COUNTERPART to remove_season_everywhere, and the difference
+    between them is the difference between a live row and a record. A season on
+    the month under way is a thing the viewer is tracking, held in as many places
+    as its life needs — a premiere record here, a roster row there — so taking it
+    off the tracker has to be blunt or the row comes back on the next load. A
+    season on a month that is OVER is a statement about what happened that month,
+    and the only thing removing it can mean is that the statement is wrong. The
+    other months are separate statements and are none of this one's business.
+
+    EVERY KIND ON THAT MONTH, THOUGH, because "off this month" has to be true
+    afterwards: a month draws its verdicts on the page and its premieres in the
+    first notice, so clearing one and leaving the other would take a title off the
+    list and leave it in the announcement.
+
+    The viewer's own list is untouched. What somebody is part-way through is a
+    fact about them and about no month at all, so a month's record going says
+    nothing about it.
+    """
+    result = await db.execute(
+        f"DELETE FROM distrakt_month_records {_SEASON_WHERE} AND month = ?",
+        (user_id, key.media, key.match_source, key.match_id, int(season),
+         _validate_month(month)),
+    )
+    return result.rowcount
+
+
 # ---------------------------------------------------------------------------
 # an id a record did not have when it was written
 # ---------------------------------------------------------------------------

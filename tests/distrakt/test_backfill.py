@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from zoneinfo import ZoneInfo
 from datetime import date, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -200,7 +201,7 @@ class SurveyTests(BackfillTestCase):
         plan = await self._survey(events, progress, {(107, 1): {"total": 2}})
 
         self.assertEqual(plan["replacing"], {"2026-03": 1})
-        self.assertEqual(backfill.summarize(plan)["replacing"], 1)
+        self.assertEqual(backfill.summarize(plan, ZoneInfo("UTC"))["replacing"], 1)
 
     async def test_the_current_month_is_never_surveyed(self):
         """Everything this writes is a season finished inside a month, onto a
@@ -221,7 +222,7 @@ class SurveyTests(BackfillTestCase):
         progress = {106: {2: {1: "2026-04-02T00:00:00Z"}}}
         plan = await self._survey(events, progress, {(106, 2): {"total": 1}})
 
-        summary = backfill.summarize(plan)
+        summary = backfill.summarize(plan, ZoneInfo("UTC"))
         self.assertEqual(summary["months"], [{"month": "2026-04", "count": 1,
                                               "titles": ["Season Two S02"],
                                               "movie_count": 0, "movie_titles": [],
@@ -240,7 +241,7 @@ class ApplyTests(BackfillTestCase):
         await self._survey(events, progress,
                            {(201, 1): {"total": 2}, (202, 1): {"total": 1}})
 
-        written = await backfill.apply(self.user_id)
+        written = await backfill.apply(self.user_id, SETTINGS)
         self.assertEqual(written["months"], ["2026-02", "2026-05"])
 
         doc = await distrakt.load_month(self.user_id, "2026-02")
@@ -252,17 +253,17 @@ class ApplyTests(BackfillTestCase):
         events = [_ep_event(203, 1, 1, "2026-02-10T00:00:00Z")]
         progress = {203: {1: {1: "2026-02-10T00:00:00Z"}}}
         await self._survey(events, progress, {(203, 1): {"total": 1}})
-        await backfill.apply(self.user_id)
+        await backfill.apply(self.user_id, SETTINGS)
 
         with self.assertRaises(backfill.BackfillExpired):
-            await backfill.apply(self.user_id)
+            await backfill.apply(self.user_id, SETTINGS)
         doc = await distrakt.load_month(self.user_id, "2026-02")
         self.assertEqual(len(doc["shows"]), 1)
 
     async def test_applying_without_a_survey_refuses(self):
         """The survey is the only thing that can produce records to write."""
         with self.assertRaises(backfill.BackfillExpired):
-            await backfill.apply(self.user_id)
+            await backfill.apply(self.user_id, SETTINGS)
 
     async def test_the_movies_from_the_same_sweep_are_recorded(self):
         """The routine sync only looks back to the start of the current month, so
@@ -272,7 +273,7 @@ class ApplyTests(BackfillTestCase):
                   _mv_event(51, "Out Of Range", 2025, "2025-11-01T00:00:00Z")]
         progress = {204: {1: {1: "2026-02-10T00:00:00Z"}}}
         await self._survey(events, progress, {(204, 1): {"total": 1}})
-        await backfill.apply(self.user_id)
+        await backfill.apply(self.user_id, SETTINGS)
 
         state = await watch_history.load_state(self.user_id)
         self.assertEqual(list(state["movies"]), ["movie:tmdb:50"])
@@ -289,7 +290,7 @@ class ApplyTests(BackfillTestCase):
         plan = await self._survey(events, {}, {})
         self.assertEqual(plan["months"], {})
 
-        written = await backfill.apply(self.user_id)
+        written = await backfill.apply(self.user_id, SETTINGS)
         self.assertEqual(written["movies"], 1)
         state = await watch_history.load_state(self.user_id)
         self.assertEqual(list(state["movies"]), ["movie:tmdb:60"])
@@ -302,7 +303,7 @@ class ApplyTests(BackfillTestCase):
         progress = {207: {1: {1: "2026-02-10T00:00:00Z"}}}
         plan = await self._survey(events, progress, {(207, 1): {"total": 1}})
 
-        summary = backfill.summarize(plan)
+        summary = backfill.summarize(plan, ZoneInfo("UTC"))
         by_month = {m["month"]: m for m in summary["months"]}
         self.assertEqual(by_month["2026-02"]["movie_titles"], ["Feb Film (2026)"])
         self.assertEqual(by_month["2026-02"]["titles"], ["Feb Show S01"])
@@ -319,7 +320,7 @@ class ApplyTests(BackfillTestCase):
         events = [_ep_event(210, 1, 1, "2026-02-10T00:00:00Z", title="Feb Show")]
         progress = {210: {1: {1: "2026-02-10T00:00:00Z"}}}
         await self._survey(events, progress, {(210, 1): {"total": 1}})
-        await backfill.apply(self.user_id)
+        await backfill.apply(self.user_id, SETTINGS)
         self.assertEqual(await distrakt.list_months(self.user_id), ["2026-02"])
 
         # Same months, now all written. A film in one of them must still be seen.
@@ -330,7 +331,7 @@ class ApplyTests(BackfillTestCase):
         self.assertEqual(plan["replacing"], {"2026-02": 1})
         self.assertEqual([f["title"] for f in plan["movies"]], ["Late Film"])
 
-        written = await backfill.apply(self.user_id)
+        written = await backfill.apply(self.user_id, SETTINGS)
         self.assertEqual(written["movies"], 1)
         state = await watch_history.load_state(self.user_id)
         self.assertEqual(list(state["movies"]), ["movie:tmdb:70"])
@@ -339,7 +340,7 @@ class ApplyTests(BackfillTestCase):
         """A second run offers what is missing, not everything it can see."""
         events = [_mv_event(71, "Seen It", 2026, "2026-02-14T00:00:00Z")]
         await self._survey(events, {}, {})
-        await backfill.apply(self.user_id)
+        await backfill.apply(self.user_id, SETTINGS)
 
         plan = await self._survey(events, {}, {})
         self.assertEqual(plan["movies"], [])
@@ -351,13 +352,13 @@ class ApplyTests(BackfillTestCase):
         events = [_ep_event(211, 1, 1, "2026-02-10T00:00:00Z")]
         progress = {211: {1: {1: "2026-02-10T00:00:00Z"}}}
         await self._survey(events, progress, {(211, 1): {"total": 1}})
-        await backfill.apply(self.user_id)
+        await backfill.apply(self.user_id, SETTINGS)
         before = await distrakt.load_month(self.user_id, "2026-02")
         self.assertEqual(before.get("movies") or [], [])
 
         events.append(_mv_event(72, "Topped Up", 2026, "2026-02-20T00:00:00Z"))
         await self._survey(events, progress, {(211, 1): {"total": 1}})
-        await backfill.apply(self.user_id)
+        await backfill.apply(self.user_id, SETTINGS)
 
         after = await distrakt.load_month(self.user_id, "2026-02")
         self.assertEqual([m["title"] for m in after["movies"]], ["Topped Up"])
@@ -373,7 +374,7 @@ class ApplyTests(BackfillTestCase):
         events = [_ep_event(212, 1, 1, "2026-01-10T00:00:00Z", title="January Show")]
         progress = {212: {1: {1: "2026-01-10T00:00:00Z"}}}
         await self._survey(events, progress, {(212, 1): {"total": 1}})
-        await backfill.apply(self.user_id)
+        await backfill.apply(self.user_id, SETTINGS)
 
         await distrakt.remove_season_everywhere(
             self.user_id, ItemKey("show", "tmdb", "1112"), 1)
@@ -384,7 +385,7 @@ class ApplyTests(BackfillTestCase):
         self.assertEqual(plan["replacing"], {})
         self.assertEqual(list(plan["months"]), ["2026-01"])
 
-        await backfill.apply(self.user_id)
+        await backfill.apply(self.user_id, SETTINGS)
         again = await distrakt.load_month(self.user_id, "2026-01")
         self.assertEqual([s["ids"]["trakt"] for s in again["shows"]], [212])
         self.assertTrue(again["closed"])
@@ -402,7 +403,7 @@ class ApplyTests(BackfillTestCase):
         plan = await self._survey(events, progress, {(213, 1): {"total": 1}})
 
         self.assertEqual(list(plan["months"]), ["2026-01"])
-        await backfill.apply(self.user_id)
+        await backfill.apply(self.user_id, SETTINGS)
 
         doc = await distrakt.load_month(self.user_id, "2026-01")
         self.assertEqual(sorted(s["title"] for s in doc["shows"]),
@@ -420,7 +421,7 @@ class ApplyTests(BackfillTestCase):
         progress = {214: {1: {1: "2026-02-01T00:00:00Z", 2: "2026-02-05T00:00:00Z",
                               3: "2026-02-10T00:00:00Z"}}}
         await self._survey(events, progress, {(214, 1): {"total": 3}})
-        await backfill.apply(self.user_id)
+        await backfill.apply(self.user_id, SETTINGS)
 
         doc = await distrakt.load_month(self.user_id, "2026-02")
         self.assertEqual(len(doc["shows"]), 1)
@@ -439,7 +440,7 @@ class ApplyTests(BackfillTestCase):
             "ids": {"trakt": 999, "tmdb": 999, "slug": "first"}, "season": 1,
             "title": "Landed First", "kind": distrakt.RecordKind.SERIES_PREMIERE})
 
-        written = await backfill.apply(self.user_id)
+        written = await backfill.apply(self.user_id, SETTINGS)
         self.assertEqual(written["months"], ["2026-02"])
         doc = await distrakt.load_month(self.user_id, "2026-02")
         self.assertEqual(sorted(s["title"] for s in doc["shows"]),
@@ -567,6 +568,46 @@ class CorrectingAFrozenMonthTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, resp.text)
         doc = asyncio.run(distrakt.load_month(self.user_id, "2026-03"))
         self.assertEqual(doc["shows"], [])
+
+    def test_it_takes_the_row_off_THAT_month_and_no_other(self):
+        """MEASURED ON A LIVE ACCOUNT, and the reason this test exists. A month
+        rebuilt from watch history was correct, untouched, and six records long;
+        tidying wrongly-dated copies of those same seasons off a DIFFERENT month
+        took it down to one. Every ✕ was deleting the season from every month at
+        once, so cleaning up one month destroyed another's record of it.
+
+        A season on a past month is a statement about what happened that month.
+        Two months holding the same season are two separate statements, and
+        withdrawing one says nothing about the other."""
+        elsewhere = "2026-02"
+        asyncio.run(distrakt.add_month_record(self.user_id, elsewhere, {
+            "ids": {"trakt": 601, "tmdb": 601, "slug": "slug-601"},
+            "season": 1, "title": "Rewatched One Episode", "network": "Net",
+            "media": "show", "watched": 10, "total": 10,
+            "kind": distrakt.RecordKind.COMPLETED,
+        }))
+        asyncio.run(distrakt.set_month_closed(self.user_id, elsewhere))
+
+        self._remove()  # March
+
+        kept = asyncio.run(distrakt.load_month(self.user_id, elsewhere))
+        self.assertEqual([s["title"] for s in kept["shows"]], ["Rewatched One Episode"],
+                         "tidying one month deleted another month's record")
+        self.assertEqual(
+            asyncio.run(distrakt.load_month(self.user_id, "2026-03"))["shows"], [])
+
+    def test_it_leaves_the_viewers_own_list_alone(self):
+        """What somebody is part-way through is a fact about them and about no
+        month at all, so a past month's record going says nothing about it."""
+        asyncio.run(distrakt.add_user_record(self.user_id, {
+            "ids": {"trakt": 601, "tmdb": 601, "slug": "slug-601"},
+            "season": 1, "title": "Rewatched One Episode", "network": "Net",
+            "media": "show", "watched": 3, "total": 10,
+            "kind": distrakt.RecordKind.KEEPUP,
+        }))
+        self._remove()
+        self.assertIsNotNone(asyncio.run(distrakt.find_user_record(
+            self.user_id, ItemKey("show", "tmdb", "601"), 1)))
 
     def test_the_month_stays_closed(self):
         """Correcting what a month records must not reopen it to bucketing."""

@@ -187,7 +187,8 @@ async def freeze_month(user_id: int, doc: dict, settings) -> dict:
     # Snapshot the movies watched during this month so the frozen second notice
     # keeps its **Movies** section offline forever.
     mstart, mend = watch_history.month_bounds(doc["month"])
-    doc["movies"] = watch_history.movies_in_range(state, mstart, mend)
+    doc["movies"] = watch_history.movies_in_range(
+        state, mstart, mend, watch_history.viewer_tz(settings))
     doc["closed"] = True
     doc["totals_refreshed_at"] = db.now()
     await save_month(user_id, doc)

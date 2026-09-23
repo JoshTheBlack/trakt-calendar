@@ -121,6 +121,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import NamedTuple
 
 from . import counts, naming, removals, store
@@ -1180,7 +1181,56 @@ def restart_details(state: dict, key, season: int) -> dict:
     return {}
 
 
-def season_completed_map(state: dict) -> dict[tuple[str, int], str]:
+def viewer_tz(settings) -> ZoneInfo:
+    """The zone a play's timestamp is read in, falling back to UTC when the
+    configured name is unusable — a settings.json predating a tzdata rename must
+    not take the tracker down."""
+    for name in (getattr(settings, "timezone", None), "UTC"):
+        if not name:
+            continue
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            continue
+    return ZoneInfo("UTC")
+
+
+def local_day(when, tz: ZoneInfo) -> str:
+    """A play's 'YYYY-MM-DD' IN THE VIEWER'S OWN ZONE, or "" if unreadable.
+
+    THE ONE PLACE A TIMESTAMP BECOMES A DAY, and it exists because taking the
+    first ten characters of the string is wrong for everybody west of UTC. Every
+    service reports `watched_at` in UTC, so an episode watched at 22:24 on 31
+    August in New York arrives as 2026-09-01T02:24Z, and a truncated string files
+    it under September. MEASURED on a live account, and confirmed identically by
+    both services: two seasons finished at 22:24 and 23:59 on the last day of
+    August were recorded as September's. The window is four or five hours wide
+    every single day; it only becomes visible on the last one.
+
+    NOT clock.today()'s business. That answers "what day is it here" from the
+    process's own clock; this converts a moment somebody else recorded. Merging
+    them would give a different wrong answer in a deployment whose server sits in
+    neither zone.
+
+    A DATE WITH NO TIME IS TAKEN AS IT IS. Some services report a bare day, and
+    there is no hour in it to move — reading one as midnight UTC and shifting it
+    back would turn a stated day into the day before.
+    """
+    text = str(when or "").strip()
+    if not text:
+        return ""
+    if len(text) <= 10:
+        return text[:10]
+    try:
+        stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text[:10]
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(tz).date().isoformat()
+
+
+def season_completed_map(state: dict, tz: ZoneInfo) -> dict[tuple[str, int], str]:
     """{(item key, season): 'YYYY-MM-DD'} — the day the season's LAST episode was
     watched, which is the day it was finished.
 
@@ -1189,6 +1239,11 @@ def season_completed_map(state: dict) -> dict[tuple[str, int], str]:
     compute_live_shows, which only keeps this for a season it has just bucketed
     as completed). A season with no dated episodes is absent rather than dated
     ""; "I don't know when" and "finished on the epoch" must never be confused.
+
+    `tz` HAS NO DEFAULT, deliberately. This date decides which month a completed
+    season is recorded on, and a default would let a call site that never thought
+    about the question file somebody's late-evening viewing a month late — see
+    local_day for the measurement.
     """
     out: dict[tuple[str, int], str] = {}
     for key, entry in (state.get("shows") or {}).items():
@@ -1196,18 +1251,26 @@ def season_completed_map(state: dict) -> dict[tuple[str, int], str]:
             # THE LATEST DAY ANY SOURCE REPORTED. Which service saw the last
             # episode go by does not change the day it was seen, and a season
             # finished in July is July's whichever of them said so.
-            days = [str(w)[:10] for eps in slots.values() for w in eps.values() if w]
+            days = [d for eps in slots.values() for w in eps.values() if w
+                    for d in (local_day(w, tz),) if d]
             if days:
                 out[(key, int(season_s))] = max(days)
     return out
 
 
-def movies_in_range(state: dict, start_date: str, end_date: str) -> list[dict]:
+def movies_in_range(state: dict, start_date: str, end_date: str,
+                    tz: ZoneInfo) -> list[dict]:
     """Movies whose watched_at date falls within [start_date, end_date]
-    (YYYY-MM-DD, inclusive), as [{key, ids, title, year, watched_at}]."""
+    (YYYY-MM-DD, inclusive), as [{key, ids, title, year, watched_at}].
+
+    The bounds are the viewer's own days — month_bounds builds them straight off a
+    month key — so the play has to be read in the viewer's own zone to be compared
+    against them. A UTC day measured against a local range puts a film watched at
+    8pm on the last of the month into the next one; see local_day.
+    """
     out = []
     for key, m in (state.get("movies") or {}).items():
-        day = (m.get("watched_at") or "")[:10]
+        day = local_day(m.get("watched_at"), tz)
         if day and start_date <= day <= end_date:
             # The identity travels with it: the page needs something to name when
             # a film has to be removed, and the title is not an identifier.

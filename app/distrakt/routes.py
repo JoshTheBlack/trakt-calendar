@@ -210,7 +210,7 @@ async def _rewatch_question(user_id, settings, record, key, season: int, total,
         logger.warning("baseline_show failed for %s", key, exc_info=True)
     if not data.get("decided"):
         finished, offered, restart = await _completed_before_add(
-            user_id, key, season, total)
+            user_id, key, season, total, watch_history.viewer_tz(settings))
         if not finished:
             return None, ""
         return {
@@ -231,7 +231,7 @@ async def _rewatch_question(user_id, settings, record, key, season: int, total,
     if _valid_day(data.get("history_from")):
         return None, ""   # a floor IS the other answer
     already, _offered, _restart = await _completed_before_add(
-        user_id, key, season, total)
+        user_id, key, season, total, watch_history.viewer_tz(settings))
     return None, already
 
 
@@ -704,14 +704,16 @@ async def _sync_watch_history(settings, user_id: int, records: list[dict],
         watched_lookup = watch_history.watched_map(state)
         # When each season was finished, for the "Completed means completed THIS
         # month" rule compute_live_shows applies.
-        completed_lookup = watch_history.season_completed_map(state)
+        completed_lookup = watch_history.season_completed_map(
+            state, watch_history.viewer_tz(settings))
         # PER SERVICE, beside the one above and answering a different question:
         # that one is "when was this season finished", which has one answer; this
         # is "what does each service say", which is what a tooltip naming
         # services needs. See watch_history.season_dates_by_source.
         dates_lookup = watch_history.season_dates_by_source(state)
         mstart, mend = watch_history.month_bounds(month_key)
-        movies = watch_history.movies_in_range(state, mstart, mend)
+        movies = watch_history.movies_in_range(
+            state, mstart, mend, watch_history.viewer_tz(settings))
         plays = watch_history.episode_plays(state)
         # Which sources this pass could not read, so the page can say a number is
         # one service's alone rather than presenting it as what everybody agrees.
@@ -1547,13 +1549,31 @@ async def api_distrakt_set_emojis(request: Request):
 
 @guard.post("/api/distrakt/remove", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_remove(request: Request):
-    """Take a show+season off the tracker entirely — the ✕ on a row, and the only
-    thing that ever removes a record.
+    """The ✕ on a row, and the only thing that ever removes a record. WHAT IT
+    REMOVES DEPENDS ON WHERE THE ROW IS.
 
-    DELIBERATELY BLUNT, AND IT HAS TO BE. A season can hold a premiere record on
-    one month, a verdict on another and a row on the viewer's own list all at once,
-    so anything narrower leaves a copy behind and the row comes straight back on
-    the next load with the ✕ looking broken.
+    ON THE MONTH UNDER WAY IT IS DELIBERATELY BLUNT, AND HAS TO BE. A season being
+    tracked is held in as many places as its life needs — a premiere record on the
+    month it began, a verdict on the month it settled, a row on the viewer's own
+    list — so anything narrower leaves a copy behind and the row comes straight
+    back on the next load with the ✕ looking broken. Off the tracker means off it.
+
+    ON A MONTH THAT IS OVER IT TAKES THE ROW OFF THAT MONTH AND NOTHING ELSE, and
+    that is what the button has always said: the page labels it "Remove from this
+    month" on a month it draws read-only. It did not do that. A season on a past
+    month is a STATEMENT about what happened that month, other months hold their
+    own separate statements, and the only thing removing one can mean is that that
+    statement is wrong.
+
+    MEASURED, because the difference is not academic: an account whose September
+    had been filled with wrongly-dated completions cleaned them off September and
+    watched August — imported minutes earlier, correct, and never touched — drop
+    from six records to one. Every ✕ pressed on September deleted August's record
+    of the same season. A month rebuilt from history could be destroyed by tidying
+    a different month, which is the opposite of what a record is for.
+
+    The viewer's own list is untouched either way on a past month. What somebody is
+    part-way through is a fact about them and about no month at all.
     """
     user_id = await _distrakt_user_id(request)
     data = await authz.json_body(request)
@@ -1565,8 +1585,23 @@ async def api_distrakt_remove(request: Request):
     except RequestError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     month_key = distrakt_store.month_key(year, month)
-    # Read before removing: the ids a calendar mark would be written under live on
-    # the record that is about to go.
+    if distrakt_store.month_standing(month_key, today) is distrakt_store.MonthStanding.PAST:
+        # That month's own records and no others — see this route's docstring.
+        # Asked of the MONTH rather than of whether it was frozen, for the reason
+        # api_distrakt_add gives: a past month the rollover never reached is over
+        # just the same, and a removal is not the place to discover that.
+        if not await distrakt_store.remove_season_from_month(
+                user_id, month_key, key, season):
+            return JSONResponse({"ok": False, "error": "Show/season not found in that month"},
+                                status_code=404)
+        settings = await _distrakt_settings(user_id)
+        payload, status = await _distrakt_month_payload(user_id, year, month, settings)
+        return JSONResponse(payload, status_code=status)
+    # Whether anything anywhere knew about this season, read BEFORE the delete so
+    # there is still something to find. Below the past-month branch because that
+    # one has a cheaper answer of its own: this walks back over every month that
+    # ever settled anything, which is a lot of reading to do before deleting one
+    # row from one named month.
     record = await lifecycle.find_season(user_id, key, season, month=month_key)
     # The months that actually held a record of it. Read together with the search
     # above because neither alone is the whole answer: a season on the viewer's
@@ -1766,10 +1801,12 @@ async def api_distrakt_add_movie(request: Request):
     # The film this call just recorded, put on that month if it is closed. The
     # entry has the shape a snapshot holds because it comes from the same reader.
     filed = distrakt_store.month_key(watched_on.year, watched_on.month)
+    settings = await _distrakt_settings(user_id)
     state = await watch_history.load_state(user_id)
     mstart, mend = watch_history.month_bounds(filed)
     filed_key = str(resolve_key(Media.MOVIE, ids) or "")
-    added = next((m for m in watch_history.movies_in_range(state, mstart, mend)
+    added = next((m for m in watch_history.movies_in_range(
+                      state, mstart, mend, watch_history.viewer_tz(settings))
                   if str(m.get("key") or "") == filed_key), None)
     if added is not None:
         await _amend_closed_month_films(user_id, filed, add=added)
@@ -1777,8 +1814,7 @@ async def api_distrakt_add_movie(request: Request):
     today = clock.today()
     year = route_params.valid_year(data.get("year_view"), today.year)
     month = route_params.valid_month(data.get("month_view"), today.month)
-    payload, status = await _distrakt_month_payload(
-        user_id, year, month, await _distrakt_settings(user_id))
+    payload, status = await _distrakt_month_payload(user_id, year, month, settings)
     # A film has no season, and -1 is what the roster's own schema uses for
     # "this record is not about one" (see db.py's calendar_airings and
     # store._SEASON_WHERE). The page matches on both, so it needs the same
@@ -2135,7 +2171,7 @@ def _day_after(day: str) -> str:
 
 
 async def _completed_before_add(user_id: int, key, season: int,
-                                total) -> tuple[str, str, dict]:
+                                total, tz) -> tuple[str, str, dict]:
     """`(the day this season was finished, the day to offer a fresh run from,
     what the restart looks like)` — or `("", "", {})`, where "finished" means
     every episode of it and not merely some.
@@ -2186,7 +2222,7 @@ async def _completed_before_add(user_id: int, key, season: int,
     counts = watch_history.watched_map(state).get((str(key), season)) or {}
     if max(counts.values(), default=0) < needed:
         return "", "", {}
-    finished = watch_history.season_completed_map(state).get((str(key), season), "")
+    finished = watch_history.season_completed_map(state, tz).get((str(key), season), "")
     if not finished:
         return "", "", {}
     # THE RESTART ITSELF WHEN THE ORDER SHOWS ONE, and the day after the last
@@ -2339,7 +2375,8 @@ async def api_distrakt_backfill_survey(request: Request):
         return JSONResponse(
             {"ok": False, "error": f"Your watch history could not be read: {exc}"},
             status_code=502)
-    return JSONResponse({"ok": True, **backfill.summarize(plan)})
+    return JSONResponse({"ok": True,
+                         **backfill.summarize(plan, watch_history.viewer_tz(settings))})
 
 
 @guard.post("/api/distrakt/backfill/apply", AuthLevel.DISTRAKT_APPROVED)
@@ -2347,8 +2384,9 @@ async def api_distrakt_backfill_apply(request: Request):
     """Write the surveyed plan. Refuses if there isn't one — the survey is the
     only thing that can produce records, and it expires."""
     user_id = await _distrakt_user_id(request)
+    settings = await _distrakt_settings(user_id)
     try:
-        written = await backfill.apply(user_id)
+        written = await backfill.apply(user_id, settings)
     except backfill.BackfillExpired as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
     months = await distrakt_store.list_months(user_id)

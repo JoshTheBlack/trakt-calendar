@@ -223,7 +223,8 @@ async def _record_completions(user_id: int, settings) -> None:
         return
     state = await watch_history.sync_and_baseline(settings, user_id, listed)
     watched = watch_history.watched_map(state)
-    completed_on = watch_history.season_completed_map(state)
+    completed_on = watch_history.season_completed_map(
+        state, watch_history.viewer_tz(settings))
     # WHICH SERVICE DECIDES, ONCE FOR THE WHOLE DRAIN — the account's linked
     # trackers, most trusted first (watch_history.tracker_sources). The same
     # question the live pass asks, so a season settled here and one settled by

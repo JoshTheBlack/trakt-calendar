@@ -8,6 +8,7 @@ the three Trakt calls mocked, against a throwaway SQLite file. No network.
 from __future__ import annotations
 
 import unittest
+from zoneinfo import ZoneInfo
 from datetime import date, datetime as real_datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -192,13 +193,60 @@ class PureStateTests(unittest.TestCase):
             "1": {"1": "2026-07-02T00:00:00Z", "2": "2026-08-06T12:00:00Z"},
             "2": {"1": "", "2": ""},          # nothing dated -> no answer at all
         })}}
-        self.assertEqual(wh.season_completed_map(state), {(SHOW(101), 1): "2026-08-06"})
+        self.assertEqual(wh.season_completed_map(state, ZoneInfo("UTC")), {(SHOW(101), 1): "2026-08-06"})
 
     def test_season_completed_map_says_nothing_about_completeness(self):
         """It reports WHEN, not WHETHER: the episode total lives on the show
         record, so the caller decides (see compute_live_shows)."""
         state = {"shows": {SHOW(101): _show(101, {"1": {"1": "2026-08-06T00:00:00Z"}})}}
-        self.assertEqual(wh.season_completed_map(state), {(SHOW(101), 1): "2026-08-06"})
+        self.assertEqual(wh.season_completed_map(state, ZoneInfo("UTC")), {(SHOW(101), 1): "2026-08-06"})
+
+    def test_a_late_evening_finish_belongs_to_the_viewers_day(self):
+        """MEASURED ON A LIVE ACCOUNT, and the reason local_day exists. Two
+        seasons finished at 22:24 and 23:59 on 31 August in New York arrive from
+        both services as 1 September UTC, and a day taken off the front of that
+        string files a whole season onto the wrong month's record. The window is
+        four or five hours wide every day; it is only visible on the last one."""
+        state = {"shows": {SHOW(101): _show(101, {
+            "1": {"1": "2026-08-25T03:23:00Z", "2": "2026-09-01T02:24:00Z"},
+        })}}
+        self.assertEqual(
+            wh.season_completed_map(state, ZoneInfo("America/New_York")),
+            {(SHOW(101), 1): "2026-08-31"})
+        # The same plays read in UTC are September's, which is what makes this a
+        # question about the viewer rather than about the data.
+        self.assertEqual(wh.season_completed_map(state, ZoneInfo("UTC")),
+                         {(SHOW(101), 1): "2026-09-01"})
+
+    def test_a_day_with_no_time_in_it_is_taken_as_it_stands(self):
+        """Some services report a bare day. There is no hour in one to move, and
+        reading it as midnight UTC would shift it back to the day before."""
+        for name in ("America/New_York", "UTC", "Australia/Sydney"):
+            with self.subTest(tz=name):
+                self.assertEqual(wh.local_day("2026-08-31", ZoneInfo(name)), "2026-08-31")
+
+    def test_an_unreadable_timestamp_is_not_guessed_at(self):
+        self.assertEqual(wh.local_day("", ZoneInfo("UTC")), "")
+        self.assertEqual(wh.local_day(None, ZoneInfo("UTC")), "")
+
+    def test_the_zone_falls_back_rather_than_raising(self):
+        """A settings.json predating a tzdata rename must not take the tracker
+        down."""
+        self.assertEqual(str(wh.viewer_tz(SimpleNamespace(timezone="Mars/Olympus"))), "UTC")
+        self.assertEqual(str(wh.viewer_tz(SimpleNamespace(timezone=""))), "UTC")
+        self.assertEqual(str(wh.viewer_tz(SimpleNamespace(timezone="America/New_York"))),
+                         "America/New_York")
+
+    def test_a_late_evening_film_belongs_to_the_viewers_month(self):
+        """The same rule for films, because month_bounds builds its range out of a
+        month key in the viewer's own days."""
+        state = {"movies": {MOVIE(9): {"title": "Late", "year": 2026,
+                                       "watched_at": "2026-09-01T02:24:00Z"}}}
+        east = ZoneInfo("America/New_York")
+        self.assertEqual(
+            [m["title"] for m in wh.movies_in_range(state, *wh.month_bounds("2026-08"), east)],
+            ["Late"])
+        self.assertEqual(wh.movies_in_range(state, *wh.month_bounds("2026-09"), east), [])
 
     def test_movies_in_range(self):
         state = {"movies": {
@@ -206,7 +254,7 @@ class PureStateTests(unittest.TestCase):
             MOVIE(2): {"title": "Jun", "year": 2026, "watched_at": "2026-06-30T00:00:00Z"},
             MOVIE(3): {"title": "Aug", "year": 2026, "watched_at": "2026-08-01T00:00:00Z"},
         }}
-        got = {m["title"] for m in wh.movies_in_range(state, "2026-07-01", "2026-07-31")}
+        got = {m["title"] for m in wh.movies_in_range(state, "2026-07-01", "2026-07-31", ZoneInfo("UTC"))}
         self.assertEqual(got, {"Jul"})
 
     def test_a_film_in_range_carries_the_identity_the_page_needs_to_name_it(self):
@@ -214,7 +262,7 @@ class PureStateTests(unittest.TestCase):
         is not an identifier."""
         state = {"movies": {MOVIE(4): {"ids": {"trakt": 4, "tmdb": 4}, "title": "Jul",
                                        "year": 2026, "watched_at": "2026-07-15T00:00:00Z"}}}
-        film = wh.movies_in_range(state, "2026-07-01", "2026-07-31")[0]
+        film = wh.movies_in_range(state, "2026-07-01", "2026-07-31", ZoneInfo("UTC"))[0]
         self.assertEqual(film["key"], MOVIE(4))
         self.assertEqual(film["ids"], {"trakt": 4, "tmdb": 4})
 
@@ -293,7 +341,8 @@ class StorageRoundTripTests(WatchStateTestCase):
         bare list of numbers keeps its counts and simply has no dates."""
         self.assertEqual(wh.episode_watches([1, 2, 3]), {"1": "", "2": "", "3": ""})
         self.assertEqual(wh.season_completed_map(
-            {"shows": {SHOW(101): _show(101, {"1": wh.episode_watches([1, 2, 3])})}}), {})
+            {"shows": {SHOW(101): _show(101, {"1": wh.episode_watches([1, 2, 3])})}},
+            ZoneInfo("UTC")), {})
 
     async def test_a_title_with_nothing_watched_survives_the_round_trip(self):
         """The table holds one row per (season, service), so a title the viewer

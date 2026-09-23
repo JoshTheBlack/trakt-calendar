@@ -75,7 +75,7 @@ def lookup(dates: dict[tuple[str, int], str | None], *, fail: bool = False,
                 "completed": {f"show:tmdb:{m}|{s}": day
                               for (m, s), day in (finished_on or {}).items()}}
 
-    def season_completed_map(state):
+    def season_completed_map(state, tz):
         return {(key.split("|")[0], int(key.split("|")[1])): day
                 for key, day in (state.get("completed") or {}).items()}
 
