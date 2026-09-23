@@ -1276,6 +1276,16 @@ def _modal_context(year: int, month: int) -> dict:
         "as_finished": distrakt_store.month_key(year, month) < _this_month(),
         "film_day": today.isoformat() if viewing_now else f"{year:04d}-{month:02d}-01",
         "film_max": today.isoformat(),
+        # WHICH MONTH THE SEARCH IS FOR, and it has to start in these overlays.
+        # Everything the add flow does afterwards resolves the month from the
+        # ADDRESS it was reached by (`_viewed_month`), and the search form is the
+        # first link in that chain: search -> results -> seasons -> the post. The
+        # month page states this for its own controls, but an overlay is drawn
+        # from this context and was getting an empty string — so filling in a
+        # past month searched, listed and posted against TODAY, which ran the
+        # current month's re-watch evaluation and put the row on the viewer's
+        # list instead of recording it finished on the month on screen.
+        "month_query": f"?year={year}&month={month}",
     }
 
 

@@ -23,9 +23,9 @@
    one — "Search Trakt" stopped being true the moment a second catalogue could
    answer. With no catalogue at all it names nothing: the field is still there,
    and the results say why it can find nothing. #}
-{% macro all(catalogue_sources, as_finished, film_day, film_max, oob=false) %}
+{% macro all(catalogue_sources, as_finished, film_day, film_max, month_query, oob=false) %}
 {%- set search_label = ('Search ' ~ src.names(catalogue_sources)) if catalogue_sources else 'Search' -%}
-{{ add_show.modal(search_label, as_finished, oob=oob) }}
-{{ add_film.modal(search_label, film_day, film_max, oob=oob) }}
+{{ add_show.modal(search_label, as_finished, month_query, oob=oob) }}
+{{ add_film.modal(search_label, film_day, film_max, month_query, oob=oob) }}
 {{ rewatch.modal(oob=oob) }}
 {% endmacro %}

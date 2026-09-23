@@ -20,7 +20,7 @@
    looked up THROUGH ATTRIBUTE INHERITANCE — so an ancestor's `hx-get` is found
    before a descendant's own `hx-post`. The results list and the season slot are
    therefore siblings of this form and not children of it. #}
-{% macro modal(search_label, as_finished, oob=false) %}
+{% macro modal(search_label, as_finished, month_query, oob=false) %}
 <dialog id="addShowModal" class="modal-overlay" closedby="any"{% if oob %} hx-swap-oob="outerHTML"{% endif %}>
     <div class="modal">
         <div class="modal-head">
@@ -37,8 +37,16 @@
                 <strong>finished during it</strong> — your watch history is not
                 consulted and cannot contradict it.</p>
             {%- endif %}
+            {#- THE MONTH RIDES IN THE ADDRESS, and it has to start here. Which
+                month a control acts on is a REFERENCE the server resolves
+                (routes._viewed_month), and this form is the FIRST link in the
+                chain that ends in an add: search -> results -> seasons -> the
+                post. Leave it off and every link after it falls back to today,
+                so filling in a past month quietly ran the current month's
+                re-watch evaluation and put the row on the viewer's list instead
+                of recording it as finished on the month they were looking at. -#}
             <form class="field distrakt-search-submit" hx-boost="false"
-                  hx-get="/distrakt/fragments/search"
+                  hx-get="/distrakt/fragments/search{{ month_query }}"
                   hx-target="#addSearchResults" hx-indicator="#addSearchBusy">
                 <label for="addSearchInput">{{ search_label }}</label>
                 <input type="text" id="addSearchInput" name="q" placeholder="Type a show title…"

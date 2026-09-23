@@ -16,7 +16,7 @@
    row carries its own add, and the date lives outside the results list because a
    new search replaces that list — so the row names the field rather than
    carrying a copy of its value. #}
-{% macro modal(search_label, default_day, max_day, oob=false) %}
+{% macro modal(search_label, default_day, max_day, month_query, oob=false) %}
 <dialog id="addMovieModal" class="modal-overlay" closedby="any"{% if oob %} hx-swap-oob="outerHTML"{% endif %}>
     <div class="modal">
         <div class="modal-head">
@@ -32,7 +32,7 @@
                        value="{{ default_day }}" max="{{ max_day }}">
             </div>
             <form class="field distrakt-search-submit" hx-boost="false"
-                  hx-get="/distrakt/fragments/search-movie"
+                  hx-get="/distrakt/fragments/search-movie{{ month_query }}"
                   hx-target="#addMovieResults" hx-indicator="#addMovieBusy">
                 <label for="addMovieSearch">{{ search_label }}</label>
                 <input type="text" id="addMovieSearch" name="q" placeholder="Type a film title…"

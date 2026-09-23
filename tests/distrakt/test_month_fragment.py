@@ -356,6 +356,67 @@ class EveryConvertedRouteRefusesTests(MonthFragmentTestCase):
                               resp.text, path)
 
 
+class TheAddOverlaysCarryTheMonthTests(MonthFragmentTestCase):
+    """THE FIRST LINK IN THE ADD CHAIN, and the one that broke it.
+
+    Which month a control acts on is a REFERENCE the server resolves from the
+    ADDRESS a request arrives on (routes._viewed_month), never from the body. The
+    add flow is four requests long — search, results, seasons, the post — and
+    each one builds the next one's address, so the month has to be in the FIRST
+    of them or every link after it silently falls back to today.
+
+    IT WAS NOT, AND THE FAILURE WAS INVISIBLE. The overlays are `{% import %}`ed
+    macros, and a Jinja import deliberately does NOT carry the caller's context,
+    so `month_query` rendered empty while every other control on the page had
+    it. Filling in a past month therefore searched, listed and posted against
+    TODAY: the add ran the current month's re-watch evaluation and put the row on
+    the viewer's own list instead of recording it finished on the month they were
+    looking at, and adding a film redrew today's month over the one on screen.
+    Both read as the month being ignored, which is why this asserts the ADDRESS
+    rather than the outcome — the outcome has several ways to look right.
+    """
+
+    def _page(self, year: int, month: int) -> str:
+        outer, season, calendar = self.offline()
+        with outer, season, calendar:
+            return self.client.get(f"/distrakt?year={year}&month={month}").text
+
+    def test_the_show_search_names_the_month_on_screen(self):
+        past_y, past_m = self.past
+        html = self._page(past_y, past_m)
+        self.assertIn(
+            f'hx-get="/distrakt/fragments/search?year={past_y}'
+            f'&amp;month={past_m}"', html)
+
+    def test_the_film_search_names_the_month_on_screen(self):
+        past_y, past_m = self.past
+        html = self._page(past_y, past_m)
+        self.assertIn(
+            f'hx-get="/distrakt/fragments/search-movie?year={past_y}'
+            f'&amp;month={past_m}"', html)
+
+    def test_the_month_answer_carries_it_too(self):
+        """The overlays come back with every month answer, closed and empty, so
+        an answer that redrew them without the month would undo this on the first
+        thing anybody pressed."""
+        past_y, past_m = self.past
+        outer, season, calendar = self.offline()
+        with outer, season, calendar:
+            resp = self.client.get(
+                f"/distrakt/fragments/month?year={past_y}&month={past_m}")
+        self.assertIn(f"search?year={past_y}&amp;month={past_m}",
+                      resp.text)
+
+    def test_the_current_month_names_itself_rather_than_nothing(self):
+        """Not a special case: today is a month like any other, and leaving the
+        address bare is what made every month look like today."""
+        now_y, now_m = self.current
+        html = self._page(now_y, now_m)
+        self.assertIn(
+            f'hx-get="/distrakt/fragments/search?year={now_y}'
+            f'&amp;month={now_m}"', html)
+
+
 class TheAnswersOneHelperGivesTests(MonthFragmentTestCase):
     """Every mutation answers with the month through `_month_answer`, so the
     parts of the page that are not the list travel with it."""
