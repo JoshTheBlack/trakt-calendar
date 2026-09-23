@@ -273,6 +273,72 @@ async def _file_finished(user_id, month_key: str, record: dict, detail) -> dict:
     })
 
 
+async def _add_to_past_month(user_id, month_key: str, show: dict, detail,
+                             settings, year: int, month: int) -> JSONResponse:
+    """Put one season onto a month that is OVER, as a completion, and answer with
+    that month.
+
+    THE WHOLE OF WHAT ADDING TO A PAST MONTH MEANS, in one place, because two
+    routes reach it: the ordinary add when the viewer has navigated back, and the
+    add-a-finished-show route the page uses on a month it is drawing read-only.
+    Written twice they would drift on the only two decisions there are — what the
+    record says and whether the month ends up closed — and drift there is
+    invisible until somebody compares two months filled in by different buttons.
+
+    NOTHING IS INFERRED AND NOTHING IS RECOMPUTED. A past month draws completions
+    and abandons and nothing else, so the record is a completion; the viewer named
+    the month, so it goes on that month; and the season is not put on their list
+    as well, because a finished season is not something anybody is part-way
+    through and both records would draw it twice. There is no re-watch question
+    and no snapshot — see api_distrakt_add for why naming a month that has ended
+    is itself the answer that question was asking for.
+
+    THE EPISODE TOTAL MUST BE REAL, so a lookup that could not answer REFUSES
+    rather than degrading. A settled record's counts are never recomputed, which
+    makes a wrong one wrong for ever: it renders as a part-watched season on a
+    month nothing will ever revisit, and reaches the ranker import as a wrong
+    episode count.
+
+    THE AIR-DATE FLAGS ARE STATED RATHER THAN READ. Every other record takes them
+    from the lookup, which is right while a season is still being kept up with;
+    here the viewer has said one was finished in a month that has ended, so it had
+    started and had finished — and a lookup that happens to disagree (a service
+    still listing an unaired episode, a catalogue since reshaped) would render
+    their own statement back to them as a season that never began.
+    """
+    total = int((detail or {}).get("total") or 0)
+    if not total:
+        return JSONResponse(
+            {"ok": False,
+             "error": "No source lists any episodes for that season, so it cannot be recorded as finished."},
+            status_code=400)
+    try:
+        stored = await distrakt_store.add_month_record(user_id, month_key, {
+            **show,
+            "kind": distrakt_store.RecordKind.COMPLETED,
+            "watched": total,
+            "total": total,
+            "cadence": (detail or {}).get("cadence"),
+            "premiere": (detail or {}).get("premiere"),
+            "finale": (detail or {}).get("finale"),
+            "started_airing": True,
+            "finished_airing": True,
+        })
+    except distrakt_store.UnkeyableRecord as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    # CLOSED THROUGH ITS OWN VERB. A hand-filled past month ends up closed like
+    # every other past month, so it renders and imports from its own rows with no
+    # further provider calls — but closing is two columns on the month row, and a
+    # save_month round trip to set them would delete the month's records and
+    # re-insert only the ones the doc handed over.
+    await distrakt_store.set_month_closed(user_id, month_key)
+    await _register_networks(user_id, [show.get("network") or ""])
+    payload, status = await _distrakt_month_payload(user_id, year, month, settings)
+    return JSONResponse(
+        _point_at(payload, (stored or {}).get("key") or "", int(show["season"])),
+        status_code=status)
+
+
 async def _distrakt_settings(user_id: int):
     """The app-wide settings with EVERY source's credential swapped for
     `user_id`'s own.
@@ -1935,6 +2001,7 @@ async def api_distrakt_add(request: Request):
     # re-added verdict: it could not be questioned again because a refusal made
     # about the row that used to be there still applied to the one replacing it.
     month_key = distrakt_store.month_key(year, month)
+    standing = distrakt_store.month_standing(month_key, today)
     if await distrakt_store.is_backfill_blocked(user_id, month_key, today):
         # No backfill: refuse to create a never-tracked PAST month even via a
         # manual add, consistent with the read path's read-only rendering of such
@@ -1977,6 +2044,25 @@ async def api_distrakt_add(request: Request):
     # they had just added. One watched in an untracked month stayed and showed
     # its full episode count as this run's progress. Writing nothing until the
     # question is answered makes both unreachable rather than compensated for.
+    #
+    # A MONTH THAT IS OVER IS NOT ASKED ABOUT AT ALL, and that is not an exception
+    # to the paragraph above so much as the case it never applied to. The question
+    # exists because "the history says this season is finished" has two readings —
+    # a re-watch beginning now, or an old completion the tracker is meeting for the
+    # first time — and NAMING A PAST MONTH ANSWERS IT. Somebody standing on August
+    # adding a show is saying it belongs to August; there is no current run to
+    # start, and offering to begin one on a month that ended would file a season at
+    # zero on a month nothing will ever advance.
+    #
+    # WHETHER THE MONTH WAS FROZEN IS THE WRONG QUESTION and used to be the one
+    # asked, by the page rather than here: a past month the rollover never reached
+    # has not been frozen, so an account that was offline through August ran the
+    # whole re-watch flow on it. Where a month STANDS is a fact about the calendar
+    # and true whether or not anything has been written down, which is why
+    # month_standing is derived rather than stored.
+    if standing is distrakt_store.MonthStanding.PAST:
+        return await _add_to_past_month(user_id, month_key, show, detail,
+                                        settings, year, month)
     floor = _valid_day(data.get("history_from"))
     ask, already_finished = await _rewatch_question(
         user_id, settings, show, key, int(show["season"]), detail.get("total"),
@@ -2172,47 +2258,21 @@ async def api_distrakt_add_completed(request: Request):
     except SourceUnavailable as exc:
         return JSONResponse({"ok": False, "error": f"That season could not be read: {exc}"},
                             status_code=exc.status or 502)
-    total = int((detail or {}).get("total") or 0)
-    if not total:
-        return JSONResponse(
-            {"ok": False,
-             "error": "No source lists any episodes for that season, so it cannot be recorded as finished."},
-            status_code=400)
-
-    try:
-        stored = await distrakt_store.add_month_record(user_id, month_key, {
-            "media": Media.SHOW,
-            "ids": ids,
-            "title": data.get("title") or "",
-            "season": season,
-            "network": data.get("network") or "",
-            # Stated outright, which is the whole point of this route: the caller
-            # is the authority on what that month held, and nothing here is going
-            # to work the answer out from counts.
-            "kind": distrakt_store.RecordKind.COMPLETED,
-            "watched": total,
-            "total": total,
-            "cadence": (detail or {}).get("cadence"),
-            "premiere": (detail or {}).get("premiere"),
-            "finale": (detail or {}).get("finale"),
-            "started_airing": True,
-            "finished_airing": True,
-            "added_by": distrakt_store.ADDED_BY_MANUAL,
-        })
-    except distrakt_store.UnkeyableRecord as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-    # Writing the record leaves an existing month's `closed` alone and creates a
-    # new one open; either way a hand-filled past month ends up closed, like every
-    # other past month, so it renders and imports with no further Trakt calls.
-    doc = await distrakt_store.load_month(user_id, month_key)
-    if doc is not None and not doc.get("closed"):
-        doc["closed"] = True
-        doc["totals_refreshed_at"] = db.now()
-        await distrakt_store.save_month(user_id, doc)
-    await _register_networks(user_id, [data.get("network") or ""])
-    payload, status = await _distrakt_month_payload(user_id, year, month, settings)
-    return JSONResponse(_point_at(payload, (stored or {}).get("key") or "", season),
-                        status_code=status)
+    # A lookup that names no episodes is refused rather than filed at zero, and
+    # that refusal lives in _add_to_past_month with the reason for it, because the
+    # other door into a past month has to make the same one.
+    #
+    # Through the one place that knows what adding to a month that is over means
+    # — the record it becomes and the month ending up closed — because the
+    # ordinary add reaches the same place once the viewer has navigated back.
+    # `added_by` is stated here rather than there because this is a person filling
+    # a month in, which is a different provenance from anything a sweep wrote.
+    return await _add_to_past_month(
+        user_id, month_key,
+        {"media": Media.SHOW, "ids": ids, "title": data.get("title") or "",
+         "season": season, "network": data.get("network") or "",
+         "added_by": distrakt_store.ADDED_BY_MANUAL},
+        detail, settings, year, month)
 
 
 @guard.get("/api/distrakt/backfill", AuthLevel.DISTRAKT_APPROVED)

@@ -873,3 +873,67 @@ class TheQuestionShowsWhatWasWatchedSinceTests(unittest.TestCase):
         self.assertEqual(got["began"], "2026-03-01")
         self.assertEqual([e["episode"] for e in got["episodes"]], [1])
         self.assertEqual(got["finished_on"], "2026-02-08")
+
+
+class AddingToAMonthThatIsOverDoesNotAskTests(_RosterAddCase):
+    """NAMING A PAST MONTH IS THE ANSWER TO THE QUESTION.
+
+    Everything above this is about the month under way, where "the history says
+    this season is finished" genuinely has two readings and only the viewer can
+    say which. Standing on a month that has ENDED removes the ambiguity: there is
+    no current run to begin on a month that is over, so the add files the
+    completion on the month that was named and asks nothing.
+
+    The month is EXISTING-BUT-OPEN in these, which is the state the old rule got
+    wrong. It keyed on whether the month had been frozen, which a past month that
+    the rollover never reached has not been — so August in an account that was
+    offline through it ran the whole re-watch flow and could be handed a fresh run
+    at zero on a month nothing will ever advance.
+    """
+
+    PAST = "2026-08"
+
+    def setUp(self):
+        super().setUp()
+        # Tracked but never frozen. A month with no row at all is a different
+        # refusal (is_backfill_blocked) with its own tests.
+        asyncio.run(store.save_month(self.user_id, store.new_month_doc(self.PAST)))
+
+    def _add_to_past(self, **extra):
+        return self._search_add(history=dict(self.OLD_RUN),
+                                year=2026, month=8, **extra)
+
+    def test_a_finished_season_added_to_a_past_month_is_not_questioned(self):
+        resp = self._add_to_past()
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertNotIn("needs_decision", resp.json())
+
+    def test_it_lands_as_a_completion_on_the_month_that_was_named(self):
+        self._add_to_past()
+        record = self._completed(self.PAST)
+        self.assertIsNotNone(record, "nothing was filed on the month")
+        self.assertEqual((record["watched"], record["total"]), (13, 13))
+        # Not on the viewer's list as well: a finished season is not something
+        # anybody is part-way through, and both would draw it twice.
+        self.assertIsNone(self._row())
+
+    def test_the_month_ends_up_closed_like_every_other_past_month(self):
+        """So it renders and imports from its own rows, with no provider calls."""
+        self._add_to_past()
+        doc = asyncio.run(store.load_month(self.user_id, self.PAST))
+        self.assertTrue(doc["closed"])
+
+    def test_a_season_no_source_can_size_is_refused_rather_than_filed_at_zero(self):
+        """A settled record's counts are never recomputed, so a wrong one is
+        wrong for ever — it would render as a part-watched season on a month
+        nothing revisits and reach the ranker import as a wrong episode count."""
+        resp = self._search_add(history=dict(self.OLD_RUN), detail={"total": 0},
+                                year=2026, month=8)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIsNone(self._completed(self.PAST))
+
+    def test_the_month_under_way_is_still_asked_about(self):
+        """The boundary, pinned from this side too: the same add, the same
+        history, one month later, still raises the question."""
+        resp = self._search_add(history=dict(self.OLD_RUN))
+        self.assertIn("needs_decision", resp.json())
