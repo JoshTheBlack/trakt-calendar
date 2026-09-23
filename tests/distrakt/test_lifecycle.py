@@ -512,6 +512,34 @@ class ASeasonThatTurnedOutNotToBeFinishedTests(LifecycleTestCase):
         self.assertEqual(listed["kind"], store.RecordKind.KEEPUP)
         self.assertEqual(listed["total"], 10, "the lookup's new total was not written")
 
+    async def test_a_closed_month_gives_a_false_verdict_up_like_any_other(self):
+        """THE ONE CARVE-OUT IN "A FROZEN MONTH IS NEVER RECOMPUTED", and it is a
+        different claim from the rule it looks like it breaks. A closed month is
+        not re-derived from today's watch history — that is what settling means —
+        but this is not a re-derivation: the season is not one the month finished
+        and never was, and the app only ever had half the episode list when it
+        said so. Leaving the row on a frozen month would have it go on announcing
+        a completion that did not happen, where nothing can reach it.
+
+        Pinned separately because closing a month is the state every other test
+        here leaves out, and a guard added to the migration for some other reason
+        would pass all of them."""
+        await self._settle(1, self.last_month)
+        await store.set_month_closed(self.user_id, self.last_month)
+
+        await self._reconcile([_play(1)], CountingLookup({"total": 10}))
+
+        self.assertEqual(await self.month_kinds(self.last_month), {},
+                         "a frozen month kept a completion that turned out not to be one")
+        doc = await store.load_month(self.user_id, self.last_month)
+        self.assertTrue(doc["closed"], "the month stopped being frozen as a side effect")
+        # Back on the viewer's list, where they can get through what turned up.
+        # WHICH of the two listed kinds it lands under is the air dates' business
+        # and is pinned by the test above this one.
+        listed = await store.find_user_record(self.user_id, _key(1), 1)
+        self.assertIn(listed["kind"], {store.RecordKind.KEEPUP, store.RecordKind.CATCHUP})
+        self.assertTrue(listed["came_back"])
+
     async def test_the_came_back_marker_is_what_survives_the_migration(self):
         """The completed record was the only thing that remembered the season had
         ever been finished, and it is gone. The flag is all that is left to draw
