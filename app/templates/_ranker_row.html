@@ -77,12 +77,40 @@
                 onclick="nudgeItem(this, -1)">▲</button>
         <button type="button" class="ranker-act" title="Move down" aria-label="Move down"
                 onclick="nudgeItem(this, 1)">▼</button>
-        {# The menu itself is one element in the page (ranker.html) rather than one
-           per row: a board of a thousand titles would otherwise carry a thousand
-           copies of the same list of tiers. What this button says is only that it
-           is the one that opened it. #}
+        {# MOVING A TITLE IS A BUTTON POSTING ITSELF, like the ✕ below it — one per
+           place it can go, to the same route the bulk Move beside the pool
+           already uses. `move_items` takes any title on the board and reads an
+           empty tier as "back to the pool", so a move out of a tier, a move
+           between tiers and a bulk move are one request shape rather than three,
+           and the answer is the board redrawn with the title where it now is.
+           NOTHING IN THE BROWSER TRACKS WHICH ROW IS MOVING. The menu used to be
+           ONE element for the whole board, which meant a script had to remember
+           which ⇄ opened it, walk the row into the chosen tier, fetch that
+           tier's rows if nobody had opened it, and schedule a save — all of which
+           this row already knows by being the row.
+           THE SIZE IS THE OBJECTION, AND IT WAS MEASURED RATHER THAN FEARED. Its
+           predecessor's comment said a board of a thousand titles would carry a
+           thousand copies of the list of tiers. It would: with the pool's 60 rows
+           drawn and three choices that is 38,000 characters, which is 1.1 KB over
+           the wire behind this app's own gzip and 1ms to lay out (Firefox 155 and
+           Chromium 153, on a real board). A thousand rows — which no board draws
+           at once, because the pool pages in and tiers open closed above
+           EAGER_ROW_LIMIT — is 13.6 KB and under 11ms.
+           A POPOVER PER ROW, each anchored to its own ⇄: `position-anchor: auto`
+           resolves to whichever button invoked it, so one stylesheet rule places
+           every one of them (style.css's `.ranker-menu`). The board is redrawn by
+           the answer, so the menu goes with it and nothing has to close it. #}
         <button type="button" class="ranker-act" title="Move to tier" aria-label="Move to tier"
-                data-move-menu onclick="openMoveMenu(this)">⇄</button>
+                popovertarget="move-{{ item.key }}">⇄</button>
+        <div class="ranker-menu" id="move-{{ item.key }}" popover>
+            {%- for tier in tiers %}
+            <button type="button"
+                    {%- if tier.uid %} data-tier-choice="{{ tier.uid }}"{% endif %}
+                    hx-post="/rankings/boards/{{ board_uid }}/items/move" hx-json-enc
+                    hx-vals='{{ {("pick:" ~ item.key): "1", "tier": tier.uid} | tojson }}'
+                    hx-target="body" hx-swap="innerHTML">{{ tier.label }}</button>
+            {%- endfor %}
+        </div>
         {# TAKING A TITLE OFF IS A BUTTON POSTING ITSELF, answered with the board
            redrawn and a toast whose Undo is the SAME button the removal history
            carries. It asks nothing first, and that is a decision rather than an

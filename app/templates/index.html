@@ -1,15 +1,17 @@
 <!DOCTYPE html>
 <html lang="en">
+{% import '_calendar_meta.html' as calendar_meta with context %}
 {% import '_head.html' as page with context %}
 {{ page.head(product ~ ' – ' ~ month_label,
              scripts=assets.scripts('calendar'),
              site_suffix=false) }}
 {# Body classes are per-account view prefs (card style, packing, hide) that don't
    change across a month/endpoint nav, so they can safely ride the persistent
-   <body> element that an innerHTML swap leaves in place. The per-PAGE context
-   (month/year/endpoint/total) DOES change per nav, so it lives on #pageData
-   below — inside the swapped region — where the new page's values replace it. #}
-{%- set body_class %}pack-{{ view.day_packing }} card-{{ view.card_style }}{% if view.hide_not_watching %} hide-not-watching{% endif %}{% endset %}
+   <body> element that an innerHTML swap leaves in place. Anything that DOES
+   change per nav has to live inside the swapped region, where the new page's
+   copy replaces it — which is why the month rides on each watch toggle's own
+   address (_card.html) rather than on a hidden element the page reads back. #}
+{%- set body_class %}{{ calendar_meta.classes(view) }}{% endset %}
 {# `hx-indicator` IS INHERITED BY EVERY ELEMENT UNDER THIS ONE, which is the
    whole reason it is declared here and nowhere else: a boosted navigation, a
    day block arriving and a search all mark the same bar for as long as they are
@@ -22,12 +24,10 @@
    keeps its scripts — see static/js/boost.js, which reads this and applies both.
    Inside the body deliberately: it has to travel with the swap, and it has to
    survive a Back, which htmx serves from its own cache with no request at all. #}
-{# `data-distrakt` SAYS THERE IS SOMEWHERE TO GO, and it is on this element
-   rather than on `window` because it is a fact about the page on screen: a swap
-   brings the new page's #pageMeta with it, so the reveal cannot fire on a page
-   that never offered one. The server resolves it from the session — see the
-   context key of the same name — and it gates the REVEAL, not the menu item. #}
-<div id="pageMeta" hidden data-page="calendar" data-body-class="{{ body_class }}"{% if distrakt_available %} data-distrakt="1"{% endif %}></div>
+{# Drawn from _calendar_meta.html because the answer to changing a view
+   preference re-draws it out of band, and two copies of what this element says
+   is exactly the drift that partial exists to stop. #}
+{{ calendar_meta.meta(view, distrakt_available) }}
 
 {# The two eye icons, defined ONCE and referenced by every card's <use>. They are
    NOT the same drawing: closed is the open eye plus the diagonal strike. #}
@@ -64,14 +64,22 @@
 {% endmacro %}
 
 {% macro hero_controls() %}
-        {# Boosted along with everything else on the page, so switching the
-           calendar is an AJAX body-swap (CSS and JS stay resident, no re-flash)
-           with htmx managing history. Hidden month/year hold the current
-           position; the select carries the endpoint. With no htmx it degrades to
-           a plain GET form submit, and the query it builds
+        {# Switching the calendar is an AJAX body-swap (CSS and JS stay resident,
+           no re-flash) with htmx managing history. Hidden month/year hold the
+           current position; the select carries the endpoint. With no htmx it
+           degrades to a plain GET form submit, and the query it builds
            (?endpoint=&month=&year=) is exactly what the calendar route already
-           reads. #}
-        <form class="control" action="/calendar" method="get" title="{{ endpoint.description }}">
+           reads.
+
+           ASKING ON `change` IS THE FORM'S, not a handler on the select. A
+           BOOSTED form listens for `submit` only — read in the vendored htmx —
+           so acting on a select's `change` means opting out of boosting and
+           saying the same four things itself: ask on change, draw the answer as
+           the page, push the address. Same shape as templates/pick.html and the
+           public share page. #}
+        <form class="control" action="/calendar" method="get" title="{{ endpoint.description }}"
+              hx-boost="false" hx-get="/calendar" hx-trigger="change" hx-target="body"
+              hx-push-url="true">
             <input type="hidden" name="month" value="{{ month }}">
             <input type="hidden" name="year" value="{{ year }}">
             <label for="endpointSelect">📡</label>
@@ -81,7 +89,7 @@
                selects submit on `change` -- so one showing an endpoint the page
                is not on becomes a trap: picking that same entry fires no event,
                and that view is unreachable until you pick a third one first. #}
-            <select id="endpointSelect" name="endpoint" autocomplete="off" data-url-state onchange="this.form.requestSubmit()">
+            <select id="endpointSelect" name="endpoint" autocomplete="off" data-url-state>
                 {% for ep in endpoints %}
                 <option value="{{ ep.key }}"{% if ep.key == endpoint.key %} selected{% endif %}>{{ ep.label }}</option>
                 {% endfor %}
@@ -115,47 +123,67 @@
            what I am already reading be drawn", which is a question you ask once
            and then leave alone.
 
-           `details`/`summary` and the .nav-menu classes rather than anything new:
-           the ☰ Menu at the other end of this bar and the 🎚️ Filters panel are
-           both already this, so a third popover that behaved or looked
-           differently would be a third thing to learn for no gain. It also means
-           this works with no JavaScript at all, which the two selects that submit
-           forms below rely on anyway.
+           A POPOVER AND THE .nav-menu CLASSES rather than anything new: the
+           ☰ Menu at the other end of this bar is already exactly this, so a
+           second panel that behaved or looked differently would be a second
+           thing to learn for no gain. Light dismiss, Escape and keyboard reach
+           come with `popover` and cost no script — see _nav.html.
 
-           Each row keeps its own id and its own onchange — nothing about what
-           these controls DO moved, only where they sit. app/static/js/calendar/
-           layout.js still finds tzSelect by id. #}
-        <details class="nav-menu view-menu">
-            <summary title="How this calendar is drawn">👁️ View</summary>
-            <div class="nav-menu-items view-menu-items">
+           Each row keeps its own id — nothing about what these controls DO moved,
+           only where they sit. app/static/js/calendar/layout.js still finds
+           tzSelect by id, for the one press that fills it from the device. #}
+        <div class="nav-menu view-menu">
+            <button type="button" class="nav-menu-btn"
+                    popovertarget="viewMenuItems"
+                    title="How this calendar is drawn">👁️ View</button>
+            <div class="nav-menu-items view-menu-items" id="viewMenuItems" popover>
                 {% if source_choices %}
-                <form class="view-row" action="/calendar" method="get" title="Which services fill this view — this page only, nothing saved">
+                <form class="view-row" action="/calendar" method="get" title="Which services fill this view — this page only, nothing saved"
+                      hx-boost="false" hx-get="/calendar" hx-trigger="change" hx-target="body"
+                      hx-push-url="true">
                     <input type="hidden" name="month" value="{{ month }}">
                     <input type="hidden" name="year" value="{{ year }}">
                     <input type="hidden" name="endpoint" value="{{ endpoint.key }}">
                     <label for="sourceSelect">🛰️ Sources</label>
-                    <select id="sourceSelect" name="source" autocomplete="off" data-url-state onchange="this.form.requestSubmit()">
+                    <select id="sourceSelect" name="source" autocomplete="off" data-url-state>
                         {% for choice in source_choices %}
                         <option value="{{ choice.value }}"{% if choice.selected %} selected{% endif %}>{{ choice.label }}</option>
                         {% endfor %}
                     </select>
                 </form>
                 {% endif %}
-                <div class="view-row">
+                {# THE THREE VIEW PREFERENCES BELOW EACH POST THEMSELVES, AND THE
+                   SERVER DRAWS WHAT CHANGES. A form with `hx-json-enc`, because
+                   the payload IS this form's one field, and `hx-swap="none"`
+                   because the whole answer is addressed out of band: the page's
+                   own #pageMeta carrying the classes this view now wants, which
+                   static/js/boost.js wears (templates/_view_answer.html). So
+                   nothing in the browser knows that "poster" means
+                   `card-poster`.
+                   THE MONTH RIDES ON THE ADDRESS because hiding not-watching can
+                   EMPTY a day, and the answer redraws that day's chip — which is
+                   a question about the month on screen.
+                   `hx-boost="false"` like every other writing form in the app:
+                   boosting a form turns its POST into an attempted navigation,
+                   and it is the rule rather than this form's own trigger that
+                   has to be right. #}
+                <form class="view-row" hx-post="/api/me/prefs?{{ {'month': month, 'year': year, 'endpoint': endpoint.key} | urlencode }}" hx-json-enc hx-boost="false"
+                      hx-trigger="change" hx-swap="none">
                     <label for="cardStyleSelect">🎬 Cards</label>
-                    <select id="cardStyleSelect" autocomplete="off" onchange="setLayout('card_style', this.value)">
+                    <select id="cardStyleSelect" name="card_style" autocomplete="off">
                         <option value="vertical"{% if view.card_style == 'vertical' %} selected{% endif %}>Poster on top</option>
                         <option value="horizontal"{% if view.card_style == 'horizontal' %} selected{% endif %}>Poster beside</option>
                         <option value="poster"{% if view.card_style == 'poster' %} selected{% endif %}>Poster only</option>
                     </select>
-                </div>
-                <div class="view-row">
+                </form>
+                <form class="view-row" hx-post="/api/me/prefs?{{ {'month': month, 'year': year, 'endpoint': endpoint.key} | urlencode }}" hx-json-enc hx-boost="false"
+                      hx-trigger="change" hx-swap="none">
                     <label for="dayPackSelect">🗓️ Days</label>
-                    <select id="dayPackSelect" autocomplete="off" onchange="setLayout('day_packing', this.value)">
+                    <select id="dayPackSelect" name="day_packing" autocomplete="off">
                         <option value="stacked"{% if view.day_packing == 'stacked' %} selected{% endif %}>Stacked</option>
                         <option value="packed"{% if view.day_packing == 'packed' %} selected{% endif %}>Packed beside</option>
                     </select>
-                </div>
+                </form>
                 {# THE ONE ROW WITH A THIRD ELEMENT, so its control half is
                    wrapped and the row still has exactly two children like the
                    other three. That is what keeps all four selects the same
@@ -163,11 +191,17 @@
                    cell either way, and the 📍 hangs to the LEFT of the select
                    inside it rather than being a third column the other rows
                    would have to leave empty. #}
-                <div class="view-row tz" title="Your timezone — controls day grouping and air times">
+                {# The zone is the only one of the four that needs the page
+                   again — day headers and air times are rendered server-side for
+                   it — so the route answers `HX-Refresh: true` rather than
+                   nothing. #}
+                <form class="view-row tz" title="Your timezone — controls day grouping and air times"
+                      hx-post="/api/me/timezone" hx-json-enc hx-boost="false"
+                      hx-trigger="change" hx-swap="none">
                     <label for="tzSelect">🌐 Timezone</label>
                     <span class="view-control">
                         <button type="button" class="btn-ghost small" onclick="useDeviceTimezone()" title="Use my device's timezone">📍</button>
-                        <select id="tzSelect" autocomplete="off" onchange="setViewerTimezone(this.value)">
+                        <select id="tzSelect" name="timezone" autocomplete="off">
                             {% for tzgroup in viewer_timezone_groups %}
                             <optgroup label="{{ tzgroup.group }}">
                                 {% for tz in tzgroup['options'] %}
@@ -177,9 +211,9 @@
                             {% endfor %}
                         </select>
                     </span>
-                </div>
+                </form>
             </div>
-        </details>
+        </div>
 {% endmacro %}
 
 {# In `distrakt_href` the YEAR travels and the MONTH deliberately does not. The
@@ -197,12 +231,41 @@
            opposite halves of one question: the filter decides what a month
            shows, and this finds where a title is when the month on screen is not
            the one it is on. #}
-        <button type="button" id="searchBtn" class="pill-btn" onclick="openCalendarSearch()"
+        {# OPENING IT IS THE INVOKER'S, AND SO IS PUTTING THE CARET IN THE BOX.
+           `command="show-modal"` honours the `autofocus` on the field inside,
+           which the panel could not rely on while it was a hidden <div>: that
+           attribute applies when an element is PARSED, and this markup has been
+           sitting in the page since the load. A modal dialog focuses it on every
+           opening. #}
+        <button type="button" id="searchBtn" class="pill-btn"
+                command="show-modal" commandfor="searchModal"
                 title="Find a title on your calendar">🔍 Search</button>
         {{ marks.button() }}
-        <button type="button" id="hideToggle" class="pill-btn{% if view.hide_not_watching %} active{% endif %}" onclick="toggleHideNotWatching()" title="Toggle hiding not-watching items">
-            <span id="hideToggleLabel">{% if view.hide_not_watching %}🚫 Hiding{% else %}👁️ Showing all{% endif %}</span>
-        </button>
+        {# A CHECKBOX WEARING A BUTTON'S CLOTHES, which is what took three
+           statements of one fact down to one. It used to be a button, a script
+           that flipped a body class, a second script that rewrote the label's
+           text, a third that put an `active` class on the button, and a fetch.
+           The box IS the state: the stylesheet draws which of the two words
+           shows and whether the pill looks pressed (`:has(:checked)`), the body
+           class comes back from the server on this page's own #pageMeta
+           (templates/_view_answer.html), and the save is this same post.
+
+           THE HIDDEN COMPANION IS NOT OPTIONAL. An unticked box sends nothing,
+           and "absent" means LEAVE ALONE to this route — so unticking would
+           never be saved. Same name, before the box, so the box overrides it
+           when ticked and the "0" stands alone when it is not
+           (app/route_params.py's `ticked`). #}
+        <form class="hide-toggle-form" hx-post="/api/me/prefs?{{ {'month': month, 'year': year, 'endpoint': endpoint.key} | urlencode }}" hx-json-enc hx-boost="false"
+              hx-trigger="change" hx-swap="none">
+            <input type="hidden" name="hide_not_watching" value="0">
+            <label class="pill-btn hide-toggle" title="Toggle hiding not-watching items">
+                <input type="checkbox" id="hideToggle" name="hide_not_watching" value="1"
+                       autocomplete="off"
+                       {%- if view.hide_not_watching %} checked{% endif %}>
+                <span class="hide-on">🚫 Hiding</span>
+                <span class="hide-off">👁️ Showing all</span>
+            </label>
+        </form>
         {# Library writes land in the operator's own Sonarr/Radarr and Seerr
            requests all carry one app-wide key, so these are an administrator's
            affordance. Left out of the page entirely for everyone else — a button
@@ -226,11 +289,11 @@
    cache (app/calendar/filter.py), which is what lets two people filter the same
    cached month differently — the UI was the only piece missing. #}
 <!-- Calendar search: where a title is, and where it should be if it is not here. -->
-<div id="searchModal" class="modal-overlay">
+<dialog id="searchModal" class="modal-overlay" closedby="any">
     <div class="modal">
         <div class="modal-head">
             <h2>🔍 Find a title</h2>
-            <button type="button" class="modal-close" onclick="closeCalendarSearch()">&times;</button>
+            <button type="button" class="modal-close" command="close" commandfor="searchModal">&times;</button>
         </div>
         <div class="modal-body">
             {# EVERY REQUEST THIS PANEL MAKES IS AN `hx-get`, and nothing here
@@ -275,7 +338,7 @@
                    Firefox never fires it, and everywhere else it only repeated a
                    request `input` had already made. #}
                 <input type="text" id="searchInput" name="q" autocomplete="off" spellcheck="false"
-                       placeholder="Title…"
+                       autofocus placeholder="Title…"
                        hx-get="/calendar/search"
                        hx-trigger="input changed delay:180ms"
                        hx-target="#searchResults"
@@ -302,7 +365,7 @@
             <div id="searchResults"></div>
         </div>
     </div>
-</div>
+</dialog>
 
 
 {# WHERE THE FILTERS AND SHARE PANELS LAND. Empty until 🎚️ Filters or 🔗 Share

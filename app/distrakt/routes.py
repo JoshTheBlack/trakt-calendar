@@ -26,7 +26,7 @@ from typing import NamedTuple
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from . import (backfill, counts, discord_fmt, episode_progress, lifecycle, live,
                slug_repair, unsettled, viewer, watch_history)
@@ -1282,11 +1282,36 @@ def _rewatch_answer(request: Request, ask: dict, resubmit_url: str,
                    # already held a day, correcting itself only once somebody
                    # touched the field — so the prompt arrived naming one answer
                    # and offering another.
-                   "suggested_from_label": _day_label(ask.get("suggested_from"))},
+                   "suggested_from_label": _day_label(ask.get("suggested_from")),
+                   # The button's sentence, composed by the same function that
+                   # answers /distrakt/fragments/day-label as the field is typed
+                   # into — so the day it opens naming and the day it renames
+                   # itself to are spelled one way.
+                   "run_label": _run_label(ask.get("suggested_from"))},
         "resubmit_url": resubmit_url,
         "vals_counting": {**vals, "decided": True, "history_from": ""},
         "vals_fresh": {**vals, "decided": True},
     })
+
+
+def _run_label(iso) -> str:
+    """The submit button's whole sentence for the day a fresh run would start on.
+
+    ONE SPELLING FOR ALL FOUR DAYS THIS QUESTION SHOWS. Three of them were already
+    the server's; the fourth — a day somebody TYPES — was `toLocaleDateString` in
+    the browser, and the two did not agree. MEASURED in Firefox 155 and Chromium
+    153: this returns "5 September 2026" and the browser returned "September 5,
+    2026" on a en-US locale, "5. September 2026" on de-DE, and matched only on
+    en-GB. So the button was drawn naming a day one way and re-spelled it the
+    other the moment the field was touched — the same class of fault _day_label
+    was written to end, left half-done.
+
+    THE EMPTY DAY IS PART OF THE SENTENCE, not a separate attribute on the button:
+    "which run" has no answer when the field is empty, and saying that is this
+    function's job like any other day.
+    """
+    day = _day_label(iso)
+    return f"Start the run from {day}" if day else "Start a fresh run"
 
 
 def _day_label(iso) -> str:
@@ -1486,6 +1511,34 @@ async def distrakt_emoji_rows_fragment(request: Request):
     data = await authz.json_body(request)
     rows = _emoji_rows_from_form(data, drop=str(data.get("remove", "")))
     return _emoji_answer(request, rows, user.is_admin)
+
+
+@guard.get("/distrakt/fragments/day-label", AuthLevel.DISTRAKT_APPROVED)
+async def day_label_fragment(request: Request):
+    """What the rewatch question's submit button should say for a given day.
+
+    A ROUTE FOR ONE SENTENCE, AND IT IS WORTH ONE. The alternative is the browser
+    spelling a date itself, which it did, in a format that disagreed with the
+    three the server had already spelled on the same dialog. Asking costs one
+    request per date somebody types — a date field fires when the date is
+    complete, not per keystroke — and what comes back cannot disagree with what
+    the page opened saying, because the same function wrote both.
+
+    IT READS THE FIELD'S OWN NAME. htmx sends a triggering input's name and value
+    with the request, so the parameter is `history_from` — the same name the
+    answer is posted under later. Inventing a second name for the same day here
+    would be a second thing to keep in step.
+
+    The day is whatever the field holds, including nothing at all; _run_label
+    answers for the empty case too, so this needs no branch of its own.
+
+    NOTHING OF THE QUERY REACHES THE ANSWER, which is why this returns a bare
+    string rather than a template. _day_label parses the parameter as a date and
+    answers "" for anything it cannot, so the sentence is built from a `date`
+    object and two literals — a value carrying markup gets "Start a fresh run".
+    tests/distrakt/test_rewatch.py holds that.
+    """
+    return HTMLResponse(_run_label(request.query_params.get("history_from")))
 
 
 @guard.get("/distrakt/fragments/details", AuthLevel.DISTRAKT_APPROVED)

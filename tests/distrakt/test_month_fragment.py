@@ -385,9 +385,12 @@ class TheAnswersOneHelperGivesTests(MonthFragmentTestCase):
         with outer, season, calendar:
             resp = self.client.post(f"/api/distrakt/refresh?year={year}&month={month}",
                                     json={})
-        self.assertIn('<div id="addShowModal" class="modal-overlay" hx-swap-oob', resp.text)
-        self.assertIn('<div id="rewatchModal" class="modal-overlay" hx-swap-oob', resp.text)
-        self.assertNotIn("modal-overlay open", resp.text)
+        self.assertIn('<dialog id="addShowModal" class="modal-overlay" closedby="any"'
+                      ' hx-swap-oob', resp.text)
+        self.assertIn('<dialog id="rewatchModal" class="modal-overlay" closedby="any"',
+                      resp.text)
+        # Neither arrives asking to be shown — that marker is what opens one.
+        self.assertNotIn("data-open-modal", resp.text)
 
     def test_an_in_place_removal_answers_with_nothing_at_all(self):
         """The mark asked to be swapped out of existence, so having nothing to

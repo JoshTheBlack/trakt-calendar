@@ -962,10 +962,14 @@ class SiteHeaderTests(RegressionTestCase):
     def test_every_page_uses_the_same_header_component(self):
         for path in self.PAGES:
             with self.subTest(path=path):
-                body, head = self.header(path)
+                _, head = self.header(path)
                 self.assertIn('class="hero', head)
                 self.assertIn("hero-actions", head)
-                self.assertIn("/static/js/nav.js", body)
+                # The menu is a popover the browser drives, so there is no
+                # header script to look for any more — the button and the
+                # panel it names are the whole of it.
+                self.assertIn('popovertarget="navMenuItems"', head)
+                self.assertIn('id="navMenuItems" popover', head)
 
     def test_every_page_offers_account_and_sign_out(self):
         for path in self.PAGES:

@@ -11,12 +11,13 @@
    a second label for the same box, which is why cancelling costs no round trip
    and can never leave a half-open confirmation behind.
 
-   WHY NOT confirmInline. That helper measures the trigger with
-   getBoundingClientRect and places a popover by hand, which was the only way to
-   anchor one before `position: absolute` inside the control's own box was
-   arranged for. ONE caller is left — deleting a tier on the rankings board
-   (static/js/ranker/tiers.js), whose shape waits on a decision of its own —
-   and every other "are you sure" in the app is this macro.
+   THIS IS THE ONLY "ARE YOU SURE" IN THE APP. There used to be a second, a
+   helper that measured the trigger with getBoundingClientRect and placed a fixed
+   popover by hand — the only way to anchor one before `position: absolute`
+   inside the control's own box was arranged for. Its last caller was the
+   rankings board's tier delete, which asks through this macro now; the helper
+   went with it, and what the ✕ still runs afterwards is all that is left there
+   (static/js/ranker/tiers.js).
 
    INSIDE A SCROLLER the floating box would be clipped, and the admin tables are
    one: there the stylesheet draws the question in the flow of the cell instead

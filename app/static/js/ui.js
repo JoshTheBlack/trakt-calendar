@@ -1,14 +1,20 @@
-/* The three UI primitives every page uses, in one place.
+/* The primitives every page uses, in one place, and each of them is here because
+ * it is something only a browser can do: write the clipboard, read a local file,
+ * put a dialog in the top layer, follow what somebody is typing.
  *
- * They used to be a copy per page script: app.js, distrakt.js, ranker.js and
- * share.js each carried their own esc(), three of them their own toast(), and
+ * THEY USED TO BE A COPY PER PAGE SCRIPT: app.js, distrakt.js, ranker.js and
+ * share.js each carried their own escaper, three of them their own toast, and
  * each copy carried a comment explaining that a page loads its own script rather
  * than the calendar's. That reason is gone — every page's <head> is built from
  * one list of assets, so one more entry costs a page nothing, while a fourth copy
- * of an escaper costs a reader four places to check when one of them is wrong.
+ * of a thing costs a reader four places to check when one of them is wrong.
  *
- * confirmInline arrived from nav.js, which is the site HEADER's behaviour and was
- * only holding this because it happened to be the file every page loaded.
+ * TWO OF THEM HAVE SINCE LEFT ALTOGETHER, and what replaced them says what this
+ * file is for. `esc()` went because nothing builds markup out of strings any
+ * more — every view this app draws is a template. `confirmInline` measured a
+ * button with getBoundingClientRect and placed a popover by hand; every "are you
+ * sure" in the app is templates/_confirm.html now, which is a checkbox, two
+ * labels and a stylesheet rule.
  */
 
 // ---- "Working on it" for the things htmx does not drive --------------------
@@ -47,114 +53,76 @@ function pageBusy(busy) {
 // server draws the library marks with the page, so nothing polls. Every fetch
 // left is something somebody asked for.
 //
-// htmx REQUESTS DO NOT COME THROUGH HERE. It uses XMLHttpRequest and marks the
-// bar itself through `hx-indicator`, so the two never double-count.
+// htmx REQUESTS COME THROUGH HERE AND MUST NOT BE COUNTED, which is a correction
+// rather than a precaution: htmx 3 and earlier used XMLHttpRequest, so this
+// wrapper never saw one, and htmx 4 issues every request through `window.fetch`
+// — it reads the property at call time (`ctx.fetch ||= window.fetch.bind(window)`,
+// read in the vendored source), so it picks up whatever is installed here.
+// MEASURED in Firefox 155 and Chromium 153 against a fragment carrying
+// `hx-indicator="this"`: the page-wide bar lit for it. That is exactly what
+// `hx-indicator` on a fragment exists to prevent — a card's season line asks for
+// itself as the month scrolls past, and _card.html says in so many words that the
+// page bar is for something a person is waiting through and a line per card is
+// not. htmx marks its own requests through `hx-indicator`, so letting one through
+// here counted it twice and overrode the narrower answer.
+// THE HEADER IS THE TELL: htmx sets `HX-Request: true` on every request it makes.
 const nativeFetch = window.fetch.bind(window);
 
 window.fetch = function (input, init) {
+    if (init && init.headers && init.headers['HX-Request']) return nativeFetch(input, init);
     pageBusy(true);
     // `finally` so a refused request releases the bar exactly as a served one
     // does — a failure is still the end of the waiting.
     return nativeFetch(input, init).finally(() => pageBusy(false));
 };
 
-function esc(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-
+// A LINE THIS SIDE RAISES, AND IT IS THE SERVER'S MARKUP. Every caller is a
+// request that answers no markup to carry one — the layout save and the board
+// read, which are JSON by design; the export, whose answer is a FILE — or the
+// clipboard, which is no request at all. So the line has to be put on the page
+// from here, and what it LOOKS like is still one fact: templates/_toast.html
+// draws it, the <head> carries a <template> of it, and this fills that in.
+// Assembling one here is what let the two drift, and they had: the script's
+// carried no `role`, so every refusal went unannounced.
+//
+// NO TIMERS. `.is-flash` is a 4.2s CSS animation that fades the line in and back
+// out on its own (style.css), which is how the server's toasts have always
+// worked; this used to add a class on the next frame and take it away on a pair
+// of setTimeouts, saying the same 4.2 seconds a second time.
+//
+// NOR A CAP. Six at once was the limit a bulk add needed, enforced by removing
+// the oldest — which only ever applied to the lines THIS side made, and dropped
+// an Undo offer as readily as a report. The stylesheet says it now, for both
+// kinds and sparing an offer.
 function toast(message, ok) {
     let host = document.getElementById('toastHost');
     if (!host) { host = document.createElement('div'); host.id = 'toastHost'; document.body.appendChild(host); }
-    const t = document.createElement('div');
-    t.className = 'toast ' + (ok ? 'ok' : 'err');
-    t.textContent = message;
-    host.appendChild(t);
-    while (host.children.length > 6) host.firstChild.remove();  // don't flood on bulk add
-    requestAnimationFrame(() => t.classList.add('show'));
-    setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 4200);
+    const line = document.getElementById('toastLine')
+        .content.firstElementChild.cloneNode(true);
+    line.classList.toggle('ok', !!ok);
+    line.classList.toggle('err', !ok);
+    line.textContent = message;
+    host.appendChild(line);
 }
 
-// An "are you sure" popover anchored under whichever button triggered it
-// (position: fixed, measured from the button) instead of a browser-native
-// dialog. Dismissed by Cancel, by clicking outside it, by scrolling, or by Escape.
+// WHAT CLOSING A MODAL MEANS, AND IT IS THE ONLY PART OF CLOSING LEFT HERE.
 //
-// ONE CALLER IS LEFT: deleting a tier on the rankings board
-// (static/js/ranker/tiers.js). Every other confirmation in the app is markup —
-// templates/_confirm.html — so when that one moves, this function goes with it.
-function confirmInline(trigger, message, onConfirm, opts) {
-    if (!trigger) return;
-    const existing = document.querySelector('.inline-confirm');
-    if (existing) {
-        const wasForThisTrigger = existing._trigger === trigger;
-        existing._dismiss();
-        if (wasForThisTrigger) return;  // a second click on the same button just cancels it
-    }
-
-    const danger = !!(opts && opts.danger);
-    const pop = document.createElement('div');
-    pop.className = 'inline-confirm' + (danger ? ' danger' : '');
-    // `message` can carry a username, an invite label, or a server error string
-    // — none of it trusted — so it goes in as a text node, never as markup. Only
-    // the two buttons, which contain no interpolation, are built via innerHTML.
-    const msg = document.createElement('span');
-    msg.className = 'hint';
-    msg.textContent = message;
-    const actions = document.createElement('div');
-    actions.className = 'inline-confirm-actions';
-    actions.innerHTML =
-        '<button type="button" class="btn-ghost small">Cancel</button>' +
-        '<button type="button" class="btn-primary small">Confirm</button>';
-    pop.appendChild(msg);
-    pop.appendChild(actions);
-    document.body.appendChild(pop);
-
-    const place = () => {
-        const r = trigger.getBoundingClientRect();
-        const width = pop.offsetWidth;
-        pop.style.top = Math.round(r.bottom + 6) + 'px';
-        const left = Math.min(
-            Math.max(8, r.left),
-            document.documentElement.clientWidth - width - 8,
-        );
-        pop.style.left = Math.round(left) + 'px';
-    };
-    place();
-    requestAnimationFrame(() => pop.classList.add('show'));
-
-    const dismiss = () => {
-        document.removeEventListener('click', onOutside, true);
-        document.removeEventListener('scroll', dismiss, true);
-        document.removeEventListener('keydown', onKey, true);
-        pop.classList.remove('show');
-        setTimeout(() => pop.remove(), 160);
-    };
-    const onOutside = (e) => { if (!pop.contains(e.target) && e.target !== trigger) dismiss(); };
-    const onKey = (e) => { if (e.key === 'Escape') dismiss(); };
-    pop.querySelector('.btn-ghost').addEventListener('click', dismiss);
-    pop.querySelector('.btn-primary').addEventListener('click', () => { dismiss(); onConfirm(); });
-    // Deferred so the click that opened this popover doesn't immediately close it.
-    setTimeout(() => {
-        document.addEventListener('click', onOutside, true);
-        document.addEventListener('scroll', dismiss, true);
-        document.addEventListener('keydown', onKey, true);
-    }, 0);
-
-    pop._trigger = trigger;
-    pop._dismiss = dismiss;
-}
-
-// Close a modal, and STOP WHATEVER IT WAS PLAYING.
+// Every overlay in this app is a modal <dialog> (style.css, `.modal-overlay`), so
+// the browser owns the closing itself: `closedby="any"` gives Escape and the
+// backdrop click, a `command="close"` invoker gives the button, and focus goes
+// back to whatever opened it. All three end in ONE `close` event, which is why a
+// document-wide Escape listener, a document-wide backdrop listener and a close
+// function callers had to remember to use are all gone.
 //
 // THE BUG THIS EXISTS FOR: the details modal embeds a trailer in an iframe, and
-// closing it only removed the `open` class — which hides the modal and leaves the
+// closing it used to only remove a class — which hides the modal and leaves the
 // iframe loaded, so a trailer went on playing, audible, over a calendar with
 // nothing on screen to pause. It stopped only when another modal replaced the
 // markup, or on a reload, or when the video reached its end.
 //
 // HERE RATHER THAN IN EACH CLOSER because there are three of them — the calendar,
 // the share page and the tracker each open a details modal, all three build the
-// same trailer block, and all three had the same fault. Fixing it where they
-// already share code is what stops the next modal inheriting it.
+// same trailer block, and all three had the same fault.
 //
 // THE FRAME HAS TO GO, NOT JUST ITS `src`. Hiding an iframe does not stop it and
 // nor does anything CSS can do to it — the document inside goes on running. The
@@ -163,30 +131,14 @@ function confirmInline(trigger, message, onConfirm, opts) {
 // because dropping the attribute does not tear down the document already loaded.
 // Removing the ELEMENT does. The modal body is rebuilt from the payload every
 // time one opens, so there is nothing here worth keeping.
-// WHAT ONE MODAL NEEDS DOING BESIDES CLOSING, registered by the file that owns
-// it. Five of them have something: a form to reset, a handshake to stop, a timer
-// to clear, a question to answer, a pending choice to forget.
 //
-// A REGISTRY RATHER THAN A LIST OF CLOSE FUNCTIONS, and the difference is which
-// side knows. A list here would have to name functions that may not exist on the
-// page being looked at — the Settings panel is admin-only, and calling its close
-// function unconditionally is what used to throw for everybody else. A hook is
-// registered BY the file that defines it, so it exists exactly when its modal
-// does, and every way of dismissing that modal runs it without having to know it
-// is there.
-const modalCloseHooks = new Map();
-
-function onModalClose(id, fn) {
-    modalCloseHooks.set(id, fn);
-}
-
-function closeModal(id) {
-    const modal = document.getElementById(id);
-    if (!modal) return;
-    // BEFORE the class comes off, so a hook can still read what is on screen.
-    const hook = modalCloseHooks.get(id);
-    if (hook) hook();
-    modal.classList.remove('open');
+// A `close` DOES NOT BUBBLE, so this listens in the CAPTURE phase rather than
+// binding one listener per dialog — which is the same delegation every other
+// primitive in this file uses, and it reaches an overlay the server delivered
+// after the page loaded without anything having to re-arm.
+document.addEventListener('close', (event) => {
+    const modal = event.target;
+    if (!(modal instanceof Element) || !modal.classList.contains('modal-overlay')) return;
     modal.querySelectorAll('iframe').forEach(frame => frame.remove());
     // Native media, for anything that grows one later: pausing is enough, and
     // unlike an iframe it keeps its position if it is shown again.
@@ -194,54 +146,30 @@ function closeModal(id) {
         try { media.pause(); } catch (e) { /* a detached element cannot pause */ }
     });
     // AN OVERLAY THE SERVER DREW FOR ONE OPENING GOES WHEN IT CLOSES
-    // (`data-modal-discard`: Settings, Share). The next opening fetches it again,
-    // so there is nothing to keep — and removing it is what stops anything it was
-    // doing: an htmx `every` poll clears itself only once its element has left
-    // the page, and a hidden overlay has not.
+    // (`data-modal-discard`: Settings, Share, Filters). The next opening fetches
+    // it again, so there is nothing to keep — and removing it is what stops
+    // anything it was doing: an htmx `every` poll clears itself only once its
+    // element has left the page, and a closed dialog has not.
     if (modal.hasAttribute('data-modal-discard')) modal.remove();
-}
+}, true);
 
-// EVERY OVERLAY THAT IS OPEN, CLOSED PROPERLY. Driven off the class rather than a
-// list of close functions, which is the shape the calendar's Escape handler was
-// written in and for a good reason: the Settings modal is only rendered for
-// admins, so calling closeSettings() unconditionally threw for everybody else and
-// took the rest of the handler down with it. What that shape LOST was the
-// teardown — it stripped the class by hand, so a trailer went on playing behind a
-// box that had disappeared. Going through closeModal keeps the reason and fixes
-// the omission, and it is the only place that has to know what closing means.
-function closeOpenModals() {
-    document.querySelectorAll('.modal-overlay.open').forEach(m => closeModal(m.id));
-}
-
-// ESCAPE IS ONE RULE FOR THE WHOLE APP, so it is stated once, here, beside the
-// function that defines what closing is. It used to be four listeners — the
-// calendar's, the site header's, the share page's and the ranker's — of which
-// three closed a different subset and only one of them tore anything down. A page
-// with something else to do on Escape still adds its own listener for THAT (the
-// calendar stops its device-authorization polling, the ranker resolves the
-// question it was asking); none of them has to close anything any more.
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeOpenModals();
-});
-
-// CLICKING THE BACKDROP CLOSES THE MODAL, ON EVERY MODAL. Eight of the fourteen
-// carried an inline click handler on the overlay that compared the event's target
-// with the element itself, and six carried nothing — so whether a stray click
-// dismissed a panel depended on which panel it was. That is not a behaviour
-// anybody chose; it is one that was remembered eight times and forgotten six.
+// AN OVERLAY THE SERVER DELIVERS ALREADY OPEN, PUT INTO THE TOP LAYER.
 //
-// THE TARGET IS THE OVERLAY ITSELF, which is what distinguishes the backdrop from
-// the box: a click inside the dialog has one of its children as the target and
-// only reaches the overlay by bubbling. That is the same test each of the eight
-// inline copies was making, stated once.
-document.addEventListener('click', (e) => {
-    const overlay = e.target;
-    if (overlay instanceof Element && overlay.classList.contains('modal-overlay')
-        && overlay.classList.contains('open')) {
-        closeModal(overlay.id);
-    }
+// THE ONE PART OF OPENING A DIALOG THAT MARKUP CANNOT STATE, and the reason is
+// exact: the `open` ATTRIBUTE makes a NON-modal dialog — no top layer, no
+// backdrop, no Escape — and there is no attribute for the modal kind. A button
+// can say it (`command="show-modal"`), which is how every overlay the page
+// carries is opened, but the Settings, Share, Filters and tier-settings panels
+// are fragments fetched on demand and arrive with nobody pressing anything.
+//
+// `data-open-modal` IS THE SERVER SAYING "AND SHOW IT". Guarded on `open` so a
+// fragment that is redelivered while it is already up — the tracker's rewatch
+// question is answered with itself out of band — is not re-shown, which would
+// throw.
+document.addEventListener('htmx:after:swap', () => {
+    document.querySelectorAll('dialog[data-open-modal]:not([open])')
+        .forEach(modal => modal.showModal());
 });
-
 
 /* ---- The details panel ----
  *
@@ -263,9 +191,41 @@ document.addEventListener('click', (e) => {
  * <template> elements in the shell, so every piece of markup this panel can show
  * is written in a template and none of it is assembled from strings here.
  */
+// NO GUARD ON THE TEMPLATE BEING THERE, deliberately. A page that offers the
+// panel and has not included its shell is broken, and answering a missing
+// template with an empty fragment made that look like a request that returned
+// nothing — the one symptom this panel already has for two other causes.
+// Throwing names the real fault. tests/kernel/test_page_head.py is what catches
+// it before a browser has to.
 function detailsPanelState(id) {
-    const source = document.getElementById(id);
-    return source ? source.content.cloneNode(true) : document.createDocumentFragment();
+    return document.getElementById(id).content.cloneNode(true);
+}
+
+// WHAT THE OPENER IS CURRENTLY SHOWING, PUT ON THE ADDRESS IT OPENS.
+//
+// A calendar card can be showing either service's name, picture or description —
+// it draws every one it was given and a radio group says which (_card.html) — and
+// the panel has to open on the SAME one, or clicking a title you flipped to opens
+// on the words you just replaced. The address the server built already names a
+// service per field; a checked radio simply overrides the one it is about.
+//
+// `set` ON A PARSED ADDRESS rather than appending, because appending a second
+// `title=` would leave the server reading the first. And it is general rather
+// than the card's own: an opener that contains no such control changes nothing,
+// which is every opener in the app but this one.
+function detailsAddress(opener) {
+    const address = new URL(opener.dataset.detailsOpen, window.location.href);
+    opener.querySelectorAll('[data-details-field]:checked').forEach(
+        pick => address.searchParams.set(pick.dataset.detailsField, pick.value));
+    return address.pathname + address.search;
+}
+
+// THE HEADING IS SHOWN BEFORE THE ANSWER ARRIVES, so unlike the fields above it
+// cannot travel on the address — it has to be the text itself. A control that
+// carries one and is checked is the one being shown.
+function detailsHeading(opener) {
+    const titled = opener.querySelector('[data-details-heading]:checked');
+    return (titled ? titled.dataset.detailsHeading : opener.dataset.detailsHeading) || 'Details';
 }
 
 function openDetailsPanel(url, heading) {
@@ -279,11 +239,9 @@ function openDetailsPanel(url, heading) {
     // card's panel while it loads, and over a refusal that has none.
     const actions = document.getElementById('detailsActions');
     if (actions) actions.replaceChildren();
-    document.getElementById('detailsModal').classList.add('open');
+    document.getElementById('detailsModal').showModal();
     htmx.ajax('GET', url, { target: '#detailsBody', swap: 'innerHTML' });
 }
-
-function closeDetailsPanel() { closeModal('detailsModal'); }
 
 // A CONTROL THAT ONLY OPENS THE PANEL IS MARKUP. `data-details-open` is the
 // address the server built and `data-details-heading` the name to show while it
@@ -308,7 +266,7 @@ document.addEventListener('click', (e) => {
     if (!opener) return;
     const control = e.target.closest(ACTS_FOR_ITSELF);
     if (control && control !== opener && opener.contains(control)) return;
-    openDetailsPanel(opener.dataset.detailsOpen, opener.dataset.detailsHeading || 'Details');
+    openDetailsPanel(detailsAddress(opener), detailsHeading(opener));
 });
 
 // A REQUEST THAT ENDED WITHOUT PUTTING ANYTHING THERE left the panel on its
@@ -466,51 +424,29 @@ document.addEventListener('change', (e) => {
     if (e.target instanceof Element && e.target.dataset.fileInto) readChosenFile(e.target);
 });
 
-// `data-modal-open="<id>"` and `data-modal-close="<id>"` — show and hide an
-// overlay.
+// `data-fill="<selector>"` with `data-fill-value` — write a value into a field.
 //
-// A CLASS TOGGLE IS NOT A REASON FOR A FUNCTION. Every modal in this app was
-// opened by a one-line wrapper named after it, called from an inline handler;
-// closing already had one shared implementation (closeModal, which tears down
-// whatever the overlay was playing) and opening had a dozen. The id is the only
-// thing that differed.
+// A BUTTON CANNOT SET ANOTHER ELEMENT'S VALUE, and there is no attribute that
+// says it: the rewatch question's two presets are "count those episodes" and
+// "do not", which are a person's words for two DAYS, and filling the one date
+// field visibly is what shows a reader those are the same statement. Everything
+// there answers into that field rather than around it, which is what stops a
+// typed date being an option with no way to submit it.
 //
-// FOCUS IS WHY OPENING IS NOT PURELY DECLARATIVE. `autofocus` applies when an
-// element is PARSED, so it does nothing for markup that has been sitting hidden
-// in the page since the load — only the browser can move focus into something
-// being revealed, and a search box you have to click into first is the thing
-// this is for.
-document.addEventListener('click', (e) => {
-    if (!(e.target instanceof Element)) return;
-    const closer = e.target.closest('[data-modal-close]');
-    if (closer) { closeModal(closer.dataset.modalClose); return; }
-    const opener = e.target.closest('[data-modal-open]');
-    if (!opener) return;
-    const modal = document.getElementById(opener.dataset.modalOpen);
-    if (!modal) return;
-    modal.classList.add('open');
-    const focus = modal.querySelector('[autofocus]');
-    if (focus) focus.focus();
-});
-
-// `data-fill="<selector>"` with `data-fill-value` — write a value into a field,
-// and `data-day-label="<selector>"` — keep a button naming the day that field
-// holds.
+// THE `input` EVENT IS THE POINT OF THE DISPATCH, not a formality. The field
+// asks the server what the submit button should say (`hx-trigger="input
+// changed"`, templates/_distrakt_rewatch.html), so a preset that set the value
+// silently would leave the button naming the day before it.
 //
-// THE ONE THING ON THIS PAGE THAT IS GENUINELY THE BROWSER'S: a label that has
-// to follow what somebody TYPES, before anything is submitted. Every day the
-// server already knows about arrives spelled — the field's opening value is
-// named in the button as drawn, and each preset carries its own `data-fill-label`
-// — so this formats a date only when there is no server answer to use.
-function fillField(field, value, label) {
+// NAMING THE DAY IS NOT HERE ANY MORE. This used to write the button's text from
+// a label the preset carried, and a second listener re-spelled it with
+// toLocaleDateString as somebody typed — which disagreed with the three days the
+// server had already spelled on the same dialog. One formatter answers for all
+// four now (distrakt/routes.py's `_run_label`).
+function fillField(field, value) {
     if (!field) return;
     field.value = value;
     field.dispatchEvent(new Event('input', { bubbles: true }));
-    // AFTER the event, not before: the listener below would otherwise re-spell
-    // the day this label was handed for.
-    const button = label && field.dataset.dayLabel
-        ? document.querySelector(field.dataset.dayLabel) : null;
-    if (button) button.textContent = `${button.dataset.labelPrefix} ${label}`;
     field.focus();
 }
 
@@ -518,20 +454,7 @@ document.addEventListener('click', (e) => {
     if (!(e.target instanceof Element)) return;
     const preset = e.target.closest('[data-fill]');
     if (preset) fillField(document.querySelector(preset.dataset.fill),
-                          preset.dataset.fillValue || '', preset.dataset.fillLabel);
-});
-
-document.addEventListener('input', (e) => {
-    if (!(e.target instanceof Element) || !e.target.dataset.dayLabel) return;
-    const button = document.querySelector(e.target.dataset.dayLabel);
-    if (!button) return;
-    const value = e.target.value;
-    // The button names the day it will use, so a date typed above it and a
-    // button saying something else can never be two answers on screen at once.
-    button.textContent = value
-        ? `${button.dataset.labelPrefix} ${new Date(value + 'T00:00:00')
-            .toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' })}`
-        : button.dataset.labelEmpty;
+                          preset.dataset.fillValue || '');
 });
 
 

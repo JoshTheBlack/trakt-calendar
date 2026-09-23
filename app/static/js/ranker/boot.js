@@ -1,6 +1,16 @@
 // The rankings page's wiring: one idempotent boot, and the swaps that have to
 // re-run it.
 //
+// WHY THIS IS SCRIPT AT ALL, since every action on this page is markup that
+// posts itself and is answered with the board redrawn: what it re-runs is the
+// DRAG BINDING, and a drop target is something only the pointer machinery can be
+// given (ranker/dnd.js). A fragment arriving — a tier's rows, a page of the
+// pool — brings new containers with it, and the server has no way to say "and
+// bind these": the markup it sends cannot hand an element to a library already
+// running in the page. Everything else this file does is bookkeeping for that
+// one act, and the counts beside it, which are read off containers the DOM is
+// authoritative for mid-drag.
+//
 // LOADED LAST of the page's scripts, deliberately. These files are ordinary
 // scripts sharing one global scope, executed in the order the <head> lists them
 // (defer preserves it), so everything boot() calls is declared before it runs.
@@ -40,9 +50,12 @@ document.addEventListener('htmx:after:swap', (event) => {
     // counted, and none of them brings a row, so rebinding and recounting on every
     // panel opened and every option changed would be work for nothing.
     if (swapped.closest && swapped.closest('#detailsModal, #tierSettings, #exportReadout')) return;
-    // NOR ARE THE SEARCH RESULTS, but they are what the held marks are drawn on,
-    // and the server does not draw those (search.js says why).
-    if (swapped.closest && swapped.closest('#searchResults')) { markHeldResults(); return; }
+    // NOR ARE THE SEARCH RESULTS. They arrive already saying which titles the
+    // board holds, and a result is not a row — nothing there is a drop target or
+    // a thing to count. The list Sortable clones FROM is bound by initSortable
+    // below on any swap that does bring rows, and #searchResults keeps its
+    // element across one of these, so the binding it already has still holds.
+    if (swapped.closest && swapped.closest('#searchResults')) return;
     // Marked loaded only when rows actually arrived: a tier whose fragment
     // failed still holds its titles, and calling that container authoritative
     // would report it as empty.
@@ -57,8 +70,5 @@ document.addEventListener('htmx:after:swap', (event) => {
         if (head) head.removeAttribute('hx-get');
     }
     initSortable(document);
-    if (state.board) {
-        markHeldResults();
-        refreshCounts();
-    }
+    if (state.board) refreshCounts();
 });

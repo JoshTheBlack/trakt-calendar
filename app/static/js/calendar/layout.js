@@ -1,41 +1,27 @@
 // How the month is arranged on screen, and the view preferences that change it:
 // card style, day packing, hiding not-watching, and the viewer's timezone.
-
+//
 // Body classes (card style, packing, hide-not-watching) ride the persistent
 // <body> element rather than the swapped region: they are per-account view prefs
 // that do not change across a month or endpoint nav, so a boosted swap must
 // leave them alone. The per-PAGE context is read separately — see
 // readPageContext in calendar/view.js.
-const BODY = document.body;
 
-// ---- Layout controls: card style + day packing ----
-// Applied instantly via <body> classes (pure CSS), then persisted to settings.
+// NOTHING HERE SETS A LAYOUT OR SAVES ONE ANY MORE, and both halves went for
+// their own reason. The CLASS is `data-sets-body-class` on the control itself
+// (static/js/ui.js), because three controls were doing the same thing three
+// ways; the SAVE is an `hx-post` with `hx-json-enc` on the form each control sits
+// in (templates/index.html), because a payload that is a form's own fields is
+// what that encoder is for and a hand-written fetch was the last reason this
+// page had one.
 //
-// NOTHING HERE RE-PACKS A DAY. How many columns a day's grid takes, and whether
-// hide mode empties it entirely, are the stylesheet's questions about that day's
-// own cards (style.css's `--cols` and the collapse rule beside it). This file
-// used to answer both by walking every day block after every change — a class
-// flip, a mark, a late day — and the caps it worked from were a third spelling
-// of numbers that also sat in the stylesheet and in the calendar's routes.
-async function setLayout(key, value) {
-    if (key === 'card_style') {
-        document.body.classList.remove('card-vertical', 'card-horizontal', 'card-poster');
-        document.body.classList.add('card-' + value);
-    } else if (key === 'day_packing') {
-        document.body.classList.remove('pack-stacked', 'pack-packed');
-        document.body.classList.add('pack-' + value);
-    }
-    // The layout already changed on screen; this only persists it — to this
-    // account's own view preferences, so it sticks on the next visit for
-    // whoever is signed in, not just an administrator.
-    try {
-        await fetch('/api/me/prefs', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ [key]: value })
-        });
-    } catch (e) { console.error(e); }
-}
+// NOTHING HERE RE-PACKS A DAY EITHER. How many columns a day's grid takes, and
+// whether hide mode empties it entirely, are the stylesheet's questions about
+// that day's own cards (style.css's `--cols` and the collapse rule beside it).
+// This file used to answer both by walking every day block after every change —
+// a class flip, a mark, a late day — and the caps it worked from were a third
+// spelling of numbers that also sat in the stylesheet and in the calendar's
+// routes.
 
 // Poster-only wall: if a card is too close to the right edge, open its hover panel
 // to the LEFT so it never runs off-screen (and so it can't flicker-wrap).
@@ -51,52 +37,24 @@ document.addEventListener('mouseover', (e) => {
     }
 });
 
-// ---- Hide / show not-watching ----
-async function toggleHideNotWatching() {
-    const hide = !BODY.classList.contains('hide-not-watching');
-    BODY.classList.toggle('hide-not-watching', hide);
-    const label = document.getElementById('hideToggleLabel');
-    const btn = document.getElementById('hideToggle');
-    label.textContent = hide ? '🚫 Hiding' : '👁️ Showing all';
-    btn.classList.toggle('active', hide);
-    syncChipReach();
-    // Persists to this account's own view preferences (same as setLayout).
-    try {
-        await fetch('/api/me/prefs', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ hide_not_watching: hide })
-        });
-    } catch (e) { console.error(e); }
-}
-
-// ---- Timezone picker (day/time grouping) ----
-// No automatic browser detection: the saved default is a deliberate choice, and
-// "use my device timezone" is one click away rather than something silently
-// applied on load. Changing it reloads the page, since day headers and air
-// times are computed server-side for the viewer's saved zone.
-async function setViewerTimezone(tz) {
-    if (!tz) return;
-    try {
-        const res = await fetch('/api/me/timezone', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ timezone: tz })
-        });
-        if (!res.ok) throw new Error('save failed');
-        window.location.reload();
-    } catch (e) {
-        console.error(e);
-        toast('Could not save timezone', false);
-    }
-}
-
+// ---- The viewer's own timezone ----
+// SAVING IT AND RELOADING ARE BOTH MARKUP: the select posts itself with
+// `hx-json-enc` and the route answers `HX-Refresh: true`, which htmx turns into
+// a reload (read in the vendored source). Day headers and air times are computed
+// server-side for the saved zone, so the page genuinely has to come again.
+//
+// READING THE DEVICE'S OWN ZONE IS THE ONE THING ONLY THIS SIDE KNOWS, and it is
+// all that is left here. No automatic detection: the saved default is a
+// deliberate choice, and "use my device timezone" is one press away rather than
+// something silently applied on load. The press fills the select and lets the
+// select's own request go — rather than posting separately — so there is one
+// statement of where a timezone is saved and what happens afterwards.
 function useDeviceTimezone() {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    if (!tz) return;
     const select = document.getElementById('tzSelect');
-    if (select) select.value = tz;
-    setViewerTimezone(tz);
+    if (!tz || !select || !select.querySelector(`option[value="${CSS.escape(tz)}"]`)) return;
+    select.value = tz;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
 // ---- Jump-to strip: pinned under the header, tucked behind it once scrolled ----
@@ -139,30 +97,15 @@ function initDayChips() {
     syncDayChips();
 }
 
-// A COLLAPSED DAY IS NOT SOMEWHERE TO JUMP TO, so its chip stops looking and
-// acting like a destination.
-//
-// THIS IS WHAT COULD NOT BECOME A STYLESHEET RULE, and the reason is where the
-// chip sits: the strip is pinned above <main>, so the day it names is neither an
-// ancestor nor a following sibling of it and no selector can reach from one to
-// the other. Expressing it as `:has()` on <body> would mean a rule per date —
-// thirty-one whole-document selectors re-evaluated every time a card is marked on
-// a page that can hold a thousand of them.
-//
-// IT ASKS THE STYLESHEET RATHER THAN RESTATING IT. Whether a day is collapsed is
-// decided in exactly one place (style.css's hide-mode rule), and this reads that
-// decision back off the element instead of working the condition out a second
-// time — so a change to what "empty" means cannot leave the chips disagreeing
-// with the days.
-//
-// Only days actually in the DOM are touched: a chip for a day whose block has not
-// loaded yet is still a perfectly good target, and greying it would be a lie.
-function syncChipReach() {
-    document.querySelectorAll('.day-block[data-date]').forEach(block => {
-        const chip = document.getElementById('day-chip-' + block.dataset.date);
-        if (chip) {
-            chip.classList.toggle('unreachable',
-                getComputedStyle(block).display === 'none');
-        }
-    });
-}
+// NOTHING HERE GREYS A CHIP ANY MORE, AND THAT IS THE POINT. A day whose every
+// title is marked draws nothing with hiding on, so its chip has to stop offering
+// to scroll there — and that used to be worked out in the browser, by asking the
+// stylesheet whether each day block had collapsed, because both things that
+// could change the answer happened here: a mark, and the hide switch.
+// NEITHER DOES NOW. A mark is a button posting itself, answered with the cards
+// and the affected days' chips redrawn (_marked_cards.html); the hide switch is
+// a form posting itself, answered with this month's chips redrawn
+// (_view_answer.html). `_day_chip` decides it in both cases, which is the same
+// function the page's own chips were drawn by — so there is one rule for what
+// makes a chip unreachable rather than a server rule and a browser rule that
+// have to agree.

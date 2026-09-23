@@ -1,6 +1,18 @@
-// ---------------------------------------------------------------------------
-// drag and drop
-// ---------------------------------------------------------------------------
+// DRAGGING A TITLE, WHICH IS A STREAM OF POINTER EVENTS AND SO CANNOT BE
+// ANYTHING ELSE. There is no markup for "follow the pointer", no stylesheet rule
+// that reorders a list as a finger moves over it, and no request that could be
+// made until the drop decides where the title went — the server is told
+// afterwards, by the save (ranker/save.js).
+//
+// SORTABLE DOES THE POINTER WORK AND THIS FILE DOES THE BINDING. What is here is
+// which containers are drop targets and when they become one, which is a
+// question about markup that has arrived: htmx replaces the containers as tiers
+// open and pages of the pool land, and binding one twice produces two drop
+// handlers and therefore two saves of one drag.
+//
+// EVERY REORDER A DRAG CAN DO IS ALSO REACHABLE WITHOUT ONE — the ▲▼ buttons
+// and the move menu on each row (ranker/rows.js) — which is what keeps the
+// vendored library a convenience rather than something the feature depends on.
 
 const sortables = new Map();    // element -> Sortable instance, so a detached one can be destroyed
 
@@ -108,7 +120,15 @@ async function onSearchDragEnd(evt) {
         return;
     }
     insertRow(target, target.children[index], key);
-    markHeldResults();
+    // THE ONE RESULT THIS JUST ADDED, and only that one. The list is the server's
+    // and arrives with the board's holdings already marked
+    // (_ranker_search_results.html); a drop is the single way of adding that does
+    // not redraw it, so what is marked here is a fact this side has and the
+    // drawn list could not have had. The clone was removed above — the original
+    // is still in the list and is what has to stop being draggable.
+    const offered = document.querySelector(
+        '#searchResults .ranker-result[data-key="' + CSS.escape(key) + '"]');
+    if (offered) offered.classList.add('is-held');
     refreshCounts();
     scheduleSave();
 }

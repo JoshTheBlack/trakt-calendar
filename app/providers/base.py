@@ -15,6 +15,7 @@ dot access, which reads identically either way.
 """
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from dataclasses import MISSING as MISSING_DEFAULT
 from dataclasses import dataclass, field, fields
@@ -565,6 +566,34 @@ class Item(Record):
     # matching the display form breaks every multi-word genre while leaving
     # single-word ones working.
     genre_slugs: list[str] = field(default_factory=list)
+
+    @property
+    def airing_key(self) -> str:
+        """THIS card, as something one out-of-band swap can address.
+
+        `mark_key` is the TITLE's identity and is deliberately shared by every
+        airing of it — that is what makes one mark apply to a show's whole month.
+        So it cannot name a single card: a weekly show draws four or five of them
+        and a daily one thirty, and marking the show has to redraw each, each
+        with its own episode and its own time.
+
+        A DIGEST RATHER THAN THE PARTS JOINED UP, and the reason is where this
+        value ends up. It is written into an `hx-swap-oob` SELECTOR
+        (`.card[data-airing='…']`), which htmx reads as a style and a selector
+        split on the first space and which a quote would end early — and
+        `mark_key` carries whatever a service spelled a slug with. Sixteen hex
+        characters cannot contain either, whatever the title is called, so
+        nothing has to escape anything. It is not a secret and not stable across
+        releases; it only has to be the same on both sides of one request, which
+        is why it is computed here and read from here by the card and by the
+        route that redraws it.
+
+        THE EPISODE IS IN IT AS WELL AS THE TIME because the all-episodes
+        calendar can draw one show twice on one day, which _card.html's own
+        anchor note records. Two cards sharing a key would swap as one.
+        """
+        parts = f"{self.mark_key}|{self.air_date}|{self.air_time}|{self.season}|{self.episode_number}"
+        return hashlib.blake2s(parts.encode("utf-8"), digest_size=8).hexdigest()
 
     @property
     def mark_key(self) -> str:

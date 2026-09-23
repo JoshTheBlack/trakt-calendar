@@ -13,11 +13,11 @@
    panel: the custom-name field shows for the custom link, the display options for
    "Choose display options", and the year beside a pinned month (style.css, beside
    .share-slug-field). #}
-<div id="shareModal" class="modal-overlay open" data-modal-discard>
+<dialog id="shareModal" class="modal-overlay" closedby="any" data-modal-discard data-open-modal>
     <div class="modal">
         <div class="modal-head">
             <h2>🔗 Share this calendar</h2>
-            <button type="button" class="modal-close" data-modal-close="shareModal">&times;</button>
+            <button type="button" class="modal-close" command="close" commandfor="shareModal">&times;</button>
         </div>
         <div class="modal-body">
             {# Only an administrator can set the public base URL, so only they are
@@ -149,7 +149,7 @@
             </form>
         </div>
         <div class="modal-foot">
-            <button type="button" class="btn-ghost" data-modal-close="shareModal">Close</button>
+            <button type="button" class="btn-ghost" command="close" commandfor="shareModal">Close</button>
         </div>
     </div>
-</div>
+</dialog>

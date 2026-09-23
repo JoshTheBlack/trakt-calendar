@@ -101,9 +101,23 @@
 
     <div class="hero-actions">
         {{ caller() }}
-        <details class="nav-menu">
-            <summary title="Account and settings">☰ Menu</summary>
-            <div class="nav-menu-items">
+        {# A POPOVER RATHER THAN A <details>, AND THAT IS WHAT DELETED THE LAST
+           SCRIPT THE SITE HEADER HAD. A <details> opens and closes on Escape by
+           itself but has no light dismiss, so closing it on a click elsewhere —
+           and on a press of one of its own entries that opens something rather
+           than navigating — was a delegated listener in a file of its own.
+           A popover gets both for nothing: MEASURED in Firefox 155 and Chromium
+           153, clicking outside closes it, Escape closes it, Enter on the button
+           opens it, an entry carrying `popovertargetaction="hide"` closes it AND
+           still runs its own `hx-get`, and focus returns to the button after.
+
+           IT IS IN THE TOP LAYER, so `position: absolute` inside this box no
+           longer places it and anchor positioning does — see style.css, where
+           `position-anchor: auto` names the button that opened it. #}
+        <div class="nav-menu">
+            <button type="button" class="nav-menu-btn" popovertarget="navMenuItems"
+                    title="Account and settings">☰ Menu</button>
+            <div class="nav-menu-items" id="navMenuItems" popover>
                 {# Account and Admin are offered on every page INCLUDING the one
                    you are on. Suppressing the current page's own entry was tried
                    and reverted: it makes the menu a different length per page,
@@ -140,13 +154,13 @@
                 {% endif %}
                 {# No gate: any signed-in account may read the release notes, so
                    the entry is the same on every page for every account. The
-                   press opens the overlay (ui.js's data-modal-open) and asks for
+                   press opens the overlay (`command="show-modal"`) and asks for
                    its body; asked on EVERY press rather than `once`, so an answer
                    that failed is tried again rather than leaving "Loading…" for
                    ever — and the notes are rendered once per process
                    (app/changelog.py), so asking again costs a response, not a
                    render. #}
-                <button type="button" data-modal-open="changelogModal"
+                <button type="button" command="show-modal" commandfor="changelogModal"
                         hx-get="/api/changelog" hx-target="#changelogBody"
                         hx-swap="innerHTML">📜 What's new</button>
                 {# SIGN-OUT POSTS ITSELF and the SERVER says where to go next.
@@ -160,23 +174,23 @@
                    `hx-swap="none"` because there is nothing to put anywhere. #}
                 <button type="button" hx-post="/logout" hx-json-enc hx-swap="none">🚪 Sign out</button>
             </div>
-        </details>
+        </div>
     </div>
 </header>
 
 {# Lives in the macro rather than in each page so it reaches all six of them
    through the one insertion point the header already is. #}
-<div id="changelogModal" class="modal-overlay">
+<dialog id="changelogModal" class="modal-overlay" closedby="any">
     <div class="modal wide">
         <div class="modal-head">
             <h2>What's new</h2>
-            <button type="button" class="modal-close" data-modal-close="changelogModal">&times;</button>
+            <button type="button" class="modal-close" command="close" commandfor="changelogModal">&times;</button>
         </div>
         <div class="modal-body" id="changelogBody">
             <p class="hint">Loading…</p>
         </div>
     </div>
-</div>
+</dialog>
 {# WHERE THE SETTINGS PANEL LANDS, on every page an administrator can reach. Empty
    until the menu asks: the panel is the server's answer, and it removes itself
    when it closes. #}

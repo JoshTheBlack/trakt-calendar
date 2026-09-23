@@ -42,8 +42,28 @@
     {# A plain GET form: every control below is one of the query params this page
        already accepts, so changing one is a navigation, not a write. There is no
        session here and nothing is saved — a visitor's choice lives in their URL,
-       which also means they can share the view they landed on. #}
-    <form class="hero-controls" method="get">
+       which also means they can share the view they landed on.
+
+       ASKING ON `change` IS THE FORM'S OWN ATTRIBUTE, not a handler on each of
+       the five selects. htmx boosts a form on `submit` only — read in the
+       vendored source — so a boosted form cannot act on a select's `change`;
+       this one opts out of boosting and says the whole thing itself: ask on
+       change, draw the answer as the page, and put it in the address bar. The
+       picker at the app's root is the same shape (templates/pick.html). With no
+       htmx at all it is still a GET form, and the <noscript> submit below is
+       what presses it.
+
+       `hx-get="?"` — THE QUERY ALONE, NO PATH, which is what the month arrows
+       beside it have always done. This page is reachable at more than one
+       address (a slug the owner has since replaced goes on working for whoever
+       holds it), so naming a path here would either move a visitor off the link
+       they are using or make the page echo back the address it was asked at.
+       A query-only URL keeps whichever one that is. MEASURED in Firefox 155 and
+       Chromium 153: htmx resolves it against the document and asks
+       `<this path>?<the form's fields>`. #}
+    <form class="hero-controls" method="get"
+          hx-boost="false" hx-get="?" hx-trigger="change"
+          hx-target="body" hx-push-url="true">
         <input type="hidden" name="year" value="{{ year }}">
         <input type="hidden" name="month" value="{{ month }}">
         {# Carried, not offered. Which services fill this link is the owner's
@@ -60,7 +80,7 @@
                rendered `selected` on history navigation and on reload. Since
                these submit on `change`, a restored value the page is not showing
                cannot be chosen back -- picking it fires no event. #}
-            <select id="shareEndpoint" name="endpoint" autocomplete="off" data-url-state onchange="this.form.submit()">
+            <select id="shareEndpoint" name="endpoint" autocomplete="off" data-url-state>
                 {% for ep in endpoints %}
                 <option value="{{ ep.key }}"{% if ep.key == endpoint_key %} selected{% endif %}>{{ ep.label }}</option>
                 {% endfor %}
@@ -68,7 +88,7 @@
         </div>
         <div class="control">
             <label for="shareCard">🎬</label>
-            <select id="shareCard" name="card" autocomplete="off" data-url-state onchange="this.form.submit()">
+            <select id="shareCard" name="card" autocomplete="off" data-url-state>
                 {% for style in card_styles %}
                 <option value="{{ style }}"{% if style == view.card_style %} selected{% endif %}>
                     {{ {'vertical': 'Poster on top', 'horizontal': 'Poster beside', 'poster': 'Poster only'}[style] }}
@@ -78,7 +98,7 @@
         </div>
         <div class="control">
             <label for="sharePacking">🗓️</label>
-            <select id="sharePacking" name="packing" autocomplete="off" data-url-state onchange="this.form.submit()">
+            <select id="sharePacking" name="packing" autocomplete="off" data-url-state>
                 {% for packing in day_packings %}
                 <option value="{{ packing }}"{% if packing == view.day_packing %} selected{% endif %}>
                     {{ 'Stacked' if packing == 'stacked' else 'Packed beside' }}
@@ -88,7 +108,7 @@
         </div>
         <div class="control" title="Times and day grouping are rendered in this timezone">
             <label for="shareTz">🌐</label>
-            <select id="shareTz" name="tz" autocomplete="off" data-url-state onchange="this.form.submit()">
+            <select id="shareTz" name="tz" autocomplete="off" data-url-state>
                 {% for tzgroup in timezone_groups %}
                 <optgroup label="{{ tzgroup.group }}">
                     {% for tz in tzgroup['options'] %}
@@ -104,7 +124,7 @@
            values always send one. #}
         <div class="control" title="Items the owner marked not watching">
             <label for="shareHide">🚫</label>
-            <select id="shareHide" name="hidenw" autocomplete="off" data-url-state onchange="this.form.submit()">
+            <select id="shareHide" name="hidenw" autocomplete="off" data-url-state>
                 <option value="0"{% if not hide_not_watching %} selected{% endif %}>Showing all</option>
                 <option value="1"{% if hide_not_watching %} selected{% endif %}>Hiding not-watching</option>
             </select>

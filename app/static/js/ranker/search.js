@@ -1,48 +1,25 @@
 // ---------------------------------------------------------------------------
-// search
+// adding a title a search found
 // ---------------------------------------------------------------------------
-// THE SEARCH ITSELF IS MARKUP. The box asks /rankings/fragments/search as it is
-// typed into and the server draws the results (_ranker_board_shell.html,
-// _ranker_search_results.html); the debounce, the request and the rendering that
-// used to live here are gone. What is left is what markup cannot do: adding a
-// result, which changes the board and so has to move the page's copy of it, and
-// marking the results the board already holds, which changes without a request.
+// THE SEARCH IS MARKUP, AND SO IS ADDING BY CLICKING. The box asks
+// /rankings/fragments/search as it is typed into and the server draws the
+// results; a result posts itself and is answered with the page, carrying that
+// same search redrawn from the cache its own request filled
+// (_ranker_search_results.html). Whether a result is already held is drawn there
+// too — the sweep that used to write it on afterwards is gone, and with it the
+// page's habit of deciding that against a copy of the board it only ever bumps.
+//
+// WHAT IS LEFT IS THE ONE ADD A PAGE CANNOT ANSWER: a result DRAGGED straight
+// into a tier. The row has to land where the pointer dropped it — a position
+// among siblings no swap can name — so this path takes the count back and puts
+// the row there itself (ranker/dnd.js). It names the result rather than handing
+// over a title: the key and the query that found it go back, and the server
+// reads the title out of that search's own stored answer, so what is stored is
+// what the service said and the add costs no second lookup.
 
-// A title the board already holds is shown as held rather than hidden: seeing
-// that it is already there is the answer somebody searching for it wanted.
-function markHeldResults() {
-    const held = new Set((state.board.pool || []).concat(
-        ...(state.board.categories || []).map(c => c.items)));
-    document.querySelectorAll('#searchResults .ranker-result').forEach(el => {
-        el.classList.toggle('is-held', held.has(el.dataset.key));
-    });
-}
-
-// ADDING A RESULT NAMES IT; IT DOES NOT HAND OVER A TITLE. The result carries its
-// key and the query that found it, and the server reads the title back out of
-// that search's stored answer — so what is stored is what the service said, and
-// the add costs no second lookup. Shared by a click and by a drop (dnd.js).
 async function addFoundTitle(result) {
     const added = await api(
         '/api/rankings/boards/' + encodeURIComponent(boardUid()) + '/items',
         'POST', { query: result.dataset.query, key: result.dataset.key });
     if (added.added) bumpVersion();
 }
-
-async function addSearchResult(el) {
-    if (el.classList.contains('is-held')) return;
-    const key = el.dataset.key;
-    try { await addFoundTitle(el); } catch (e) { toast(e.message, false); return; }
-    state.board.pool.unshift(key);
-    const pool = document.getElementById('rankerPool');
-    insertRow(pool, pool.firstChild, key);
-    const empty = document.getElementById('poolEmpty');
-    if (empty) empty.remove();
-    markHeldResults();
-    refreshCounts();
-}
-
-document.addEventListener('click', (event) => {
-    const result = event.target.closest('#searchResults .ranker-result');
-    if (result) addSearchResult(result);
-});

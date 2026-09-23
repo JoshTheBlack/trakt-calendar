@@ -6,29 +6,29 @@
    element means they cannot arrive from different readings of the month, and it
    is why the panel no longer answers by reloading the page.
 
-   THE TWO FACTS THE CLIENT STILL READS TRAVEL INSIDE IT. #pageData carries the
-   month's total and #calendarViewData its per-show counts; calendar/view.js reads
-   both to keep the tiles honest through a mark made without a reload, and a swap
-   that left them outside would leave that bookkeeping describing the month that
-   was just replaced. #}
+   NOTHING IN HERE IS READ BY A SCRIPT ANY MORE, and the two elements that were
+   have gone with their readers. A hidden `#pageData` carried the month, the year,
+   the endpoint and the month's total, and a JSON block beside it carried the
+   per-show card counts — all of it so that marking a show could move the stat
+   tiles by arithmetic rather than by asking, and so that the page could name its
+   own address when it did. Marking a show is answered with the numbers now,
+   computed over the same reading of the month the cards in the same answer came
+   from. WHICH MONTH THIS IS travels where it is needed instead: on each watch
+   toggle's own address (_card.html), because that is the one request that asks a
+   question about the month rather than about a title. #}
+{% import '_watch_counts.html' as watch_counts %}
 <div id="calendarBody">
-<div id="pageData" hidden data-month="{{ month }}" data-year="{{ year }}" data-endpoint="{{ endpoint.key }}" data-total="{{ total }}"></div>
-{# What the page knows about itself that the client still needs after paint: the
-   month's per-show card counts (so a toggle can move the stat tiles without
-   counting cards it may not be holding), the current split, this viewer's marks,
-   and the ids this load decided were new — as DATA, not only as classes, so a
-   render that ships days separately can mark them from the same one answer. #}
-<script id="calendarViewData" type="application/json">{{ view_data | tojson }}</script>
 {# Every number here is the server's, computed over the whole month before the
-   page was sent. The client only moves them when the viewer toggles something. #}
+   page was sent. The two a mark moves are drawn by _watch_counts.html, which is
+   also what a mark's answer sends back — so nothing here is ever moved by the
+   page itself. #}
 <div id="statsBar" class="stats-bar">
     <div style="width: 100%;">
         <div class="stats-row"><span>📺 Total:</span><strong id="statTotal">{{ stats.total }}</strong></div>
         <span id="deltaMsg" class="delta-msg {{ delta.kind }}">{{ delta.text }}</span>
     </div>
     <hr class="stats-divider">
-    <div class="stats-row"><span>👀 Watching:</span><strong id="statWatching">{{ stats.watching }}</strong></div>
-    <div class="stats-row"><span>🚫 Not Watching:</span><strong id="statNotWatching">{{ stats.not_watching }}</strong></div>
+    {{ watch_counts.counts(stats) }}
     {# WHAT THIS VIEWER'S OWN FILTERS TOOK OUT OF THIS MONTH — every dimension,
        on every calendar. A filter REMOVES titles rather than moving them: a film
        out only in Brazil does not match a filter asking for American releases at

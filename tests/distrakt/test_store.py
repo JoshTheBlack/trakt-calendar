@@ -70,8 +70,9 @@ class VocabularyTests(unittest.TestCase):
     """The two closed sets and the one mapping between them.
 
     RecordKind is what a record IS and reaches the `kind` column; Bucket is what
-    a SECTION is called and reaches app/static/js/tracker/rows.js and the Discord
-    headers. Both are stored or shipped as bare strings, so neither may change.
+    a SECTION is called and reaches templates/_distrakt_rows.html, which compares
+    against these spellings, and the Discord headers. Both are stored or rendered
+    as bare strings, so neither may change.
     """
 
     def test_a_kind_is_the_string_that_goes_in_the_column(self):
@@ -81,7 +82,7 @@ class VocabularyTests(unittest.TestCase):
         self.assertEqual(f"{distrakt.RecordKind.SERIES_PREMIERE}", "series_premiere")
         self.assertEqual(json.dumps({"k": distrakt.RecordKind.CATCHUP}), '{"k": "catchup"}')
 
-    def test_a_bucket_is_the_string_the_browser_groups_by(self):
+    def test_a_bucket_is_the_string_the_month_groups_by(self):
         self.assertEqual(distrakt.Bucket.COMPLETED, "completed")
         self.assertEqual(json.dumps({"b": distrakt.Bucket.CLEANUP}), '{"b": "cleanup"}')
 

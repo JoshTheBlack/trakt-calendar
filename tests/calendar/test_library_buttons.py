@@ -355,7 +355,7 @@ class ThePanelDrawsWhatTheCardIsShowingTests(ThePanelHeaderCarriesTheSameButtons
         self.assertNotIn("A show.", panel)
 
     def test_flipping_the_name_flips_which_row_is_read(self):
-        """What source-swap.js rewrites is one short parameter, so the panel
+        """What a card's flip overrides is one short parameter, so the panel
         follows a flip without a description ever travelling."""
         self.assertIn("Trakt words.", self._panel_for(overview="trakt"))
         self.assertIn("Simkl words.", self._panel_for(overview="simkl"))

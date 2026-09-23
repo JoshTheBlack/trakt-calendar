@@ -159,28 +159,84 @@ nothing, and that is a rare shape.
 back carrying entries two months past its end. Windows are trimmed before
 storage; without the trim a month read shows the same airing several times.
 
-**JavaScript is for what ONLY JavaScript can do.** `app/assets.py`'s
-`PAGE_SCRIPTS` owns it: every script this app serves is declared there, so adding
-one is a visible act and a reviewable claim that nothing else could have done the
-job (`tests/kernel/test_page_head.py` fails a render that reaches for a script the
-list does not track). BEFORE WRITING A LINE OF IT, ANSWER WHY MARKUP, A
-STYLESHEET RULE, A JINJA TEMPLATE OR A ROUTE CANNOT DO THIS — and the answer goes
-in a comment beside whatever survives. The question is not rhetorical: a season
-picker that looked like a script is a radio group and three CSS rules; how wide a
-day is and whether hiding empties it are `:has()` and `:nth-child(k of …)`; a
-details panel opens from `data-details-open` and one delegated listener; adding a
-title to a library is a button posting itself with `hx-json-enc`, answered with
-markup addressed out of band, which is what deleted the last add script on the
-calendar. Each of those was believed to be script until somebody asked.
-WHAT GENUINELY QUALIFIES, and the list is short: a stream of pointer events (a
-drag); measuring what the browser has actually laid out; reading a local file into
-a request body, because the shape guard above admits only `application/json`;
-the clipboard; and input with no declarative form, such as a modifier-click range
-selection. EVERYTHING ELSE IS THE SERVER'S. The reason is not taste: markup and
-stylesheet rules are right the moment anything changes them and cannot drift from
-the data, while a second copy of a fact in the browser is a copy that goes stale
-silently — three of this app's own copies did, and none of them looked wrong from
-any one page.
+**JavaScript is for what ONLY JavaScript can do, and the floor is MEASURED.**
+As of the audit that ended this work the whole first-party surface is **765 code
+lines across 16 .js files, 25 lines of inline `<script>` and 12 inline `on*=`
+handlers** — from 4,024 lines when the audit began, and from 1,213 / 26 / 30 at
+its last conversion. The WATCH TRACKER now loads no script of its own at all. Those three numbers are the point of this paragraph: they
+are what somebody adding a file is adding to, and a number that has drifted is a
+signal to go and ask why.
+
+`app/assets.py`'s `PAGE_SCRIPTS` owns which scripts exist, so adding one is a
+visible act (`tests/kernel/test_page_head.py` fails a render reaching for a
+script the list does not track). `tests/kernel/test_script_reasons.py` owns the
+CLAIM: every .js file and every inline `<script>` must OPEN with prose saying
+what it could not have been, naming at least two of markup, a stylesheet rule, a
+template and a route. A label is not a reason and the test says so.
+
+BEFORE WRITING A LINE OF IT, ANSWER WHY MARKUP, A STYLESHEET RULE, A JINJA
+TEMPLATE OR A ROUTE CANNOT DO THIS. The question is not rhetorical — every item
+below was believed to be script until somebody asked. A season picker is a radio
+group and three CSS rules. How wide a day is and whether hiding empties it are
+`:has()` and `:nth-child(k of …)`. Every overlay in the app is a modal
+`<dialog closedby="any">` opened by a `command="show-modal"` invoker, which is
+where its Escape, its backdrop click, its focus trap and its focus return come
+from. Both header menus are popovers, which is where light dismiss comes from.
+Where a menu OPENS is `position-anchor: auto` plus `anchor()`. Flipping a card
+between the services that described it is a radio per service, each paired with
+its own value, and `input:checked + .flip-value`. Marking a show not-watching is
+a button posting itself, answered with every card for that title redrawn out of
+band. Adding a title a search found is the RESULT posting itself, answered with the page
+and that same search redrawn from the cache its own request filled — so a second
+title from one search costs no second search, and whether a result is already
+held is drawn rather than swept on afterwards.
+Moving a title between tiers is one button per destination ON THE ROW, posting to the
+same route a bulk move already used — a menu shared by the whole board is what
+made "which row opened it" a question the browser had to answer.
+A saved view preference is `hx-post` plus `hx-json-enc` on the control
+itself, answered with the page's own `#pageMeta` out of band — which is how a
+class reaches <body>, the one element a swap can never replace. And a title
+scrolling because it is too wide for its cell is CONTAINER QUERY UNITS: `100cqw`
+is the cell's own width and `100%` in a transform is the title's, so the
+difference IS the overflow and nothing has to measure it — which is what emptied
+the watch tracker of script entirely.
+
+WHAT GENUINELY QUALIFIES, and this list is what actually survived the audit
+rather than what was hoped for:
+  - a stream of pointer events — a drag, and the preview pan;
+  - measuring what the browser has actually LAID OUT — and the only survivor is
+    the header's real height, which wraps when narrow;
+  - reading a local file into a request body, because the shape guard above
+    admits only `application/json`;
+  - the clipboard;
+  - input with no declarative form: a modifier-click range, a ten-key sequence,
+    a run of taps, and a button that has to write a value into another field;
+  - putting a `<dialog>` into the TOP layer when the server delivered it with
+    nobody pressing anything — the `open` attribute makes a NON-modal one and
+    there is no attribute for the other kind;
+  - a window opened INSIDE a click and aimed afterwards (the Plex popup);
+  - a POST whose answer is a file to save;
+  - a payload that is not a form's fields — the board's nested ordered tree;
+  - loading a page's own scripts after a boosted navigation, which is the one
+    thing a body swap cannot do for itself;
+  - reading something the server is deliberately not told: the device's timezone,
+    and whether this browser has found the tracker.
+
+EVERYTHING ELSE IS THE SERVER'S. The reason is not taste: markup and stylesheet
+rules are right the moment anything changes them and cannot drift from the data,
+while a second copy of a fact in the browser is a copy that goes stale silently
+— three of this app's own copies did, and none of them looked wrong from any one
+page. The audit's own largest removals were all of that shape: a month's per-show
+counts held in the page so the tiles could be moved by arithmetic, a serialized
+copy of every alternative value on every card, and a map of marks the page had
+made but not yet saved.
+
+A BROWSER CLAIM IS NOT A BROWSER MEASUREMENT. Two of this audit's findings were
+features that ARE supported and silently did nothing as written: a popover's
+implicit anchor does not resolve unless `position-anchor: auto` is spelled out,
+and `closedby="any"` dismisses nothing on a dialog that fills the viewport,
+because there is no outside left to press. Both read as unsupported. Drive it in
+both browsers before believing either answer.
 
 ## Conventions for code you add or change
 

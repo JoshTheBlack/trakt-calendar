@@ -8,6 +8,7 @@
    all come down in the initial HTML. What JavaScript adds is dragging, saving
    and the export download — not the ability to see what is on a board, and no
    longer the ability to change it. #}
+{% import '_confirm.html' as confirm_box %}
 {% import '_ranker_tier_strip.html' as tier_strip %}
 <div class="ranker-board" id="rankerBoard" data-board="{{ board.uid }}">
 
@@ -20,8 +21,9 @@
         {# THE SEARCH IS MARKUP. The box and the media choice each ask
            /rankings/fragments/search for the results and swap them in — the
            house pattern the calendar's own search box uses, debounce and all.
-           Not a form: a GET fragment needs none, and adding a result is a
-           separate JSON request (ranker/search.js).
+           Not a form: a GET fragment needs none. THE BOARD IS NAMED IN THE
+           ADDRESS because a result has to be drawn knowing whether this board
+           already holds it, and has to carry the button that adds it here.
            ONE ANSWER AT A TIME, ACROSS BOTH CONTROLS: syncing on the results
            rather than on each control stops a slow answer for "sev" landing after
            the one for "severance" and overwriting it. #}
@@ -29,20 +31,38 @@
             <div class="ranker-search-row">
                 {# `input changed`, the calendar search box's trigger and for its
                    reason (index.html): a pasted or cleared title presses no key. #}
+                {# THE QUERY COMES BACK WITH THE PAGE. Adding a title answers with
+                   the whole page, so a box that redrew empty would lose the search
+                   somebody is part-way through adding from. #}
                 <input type="search" id="searchBox" name="q" placeholder="Search for a title…"
-                       autocomplete="off"
-                       hx-get="/rankings/fragments/search" hx-trigger="input changed delay:350ms"
+                       autocomplete="off" value="{{ search.query }}"
+                       hx-get="/rankings/fragments/search?board={{ board.uid | urlencode }}"
+                       hx-trigger="input changed delay:350ms"
                        hx-include="#searchMedia" hx-target="#searchResults" hx-swap="innerHTML"
                        hx-sync="#searchResults:replace">
+                {# `autocomplete="off"` now that the SERVER chooses which option is
+                   selected: without it a reload restores whatever this was last
+                   set to, over the choice the page was drawn with. #}
                 <select id="searchMedia" name="media" aria-label="What to search for"
-                        hx-get="/rankings/fragments/search" hx-trigger="change"
+                        autocomplete="off"
+                        hx-get="/rankings/fragments/search?board={{ board.uid | urlencode }}"
+                        hx-trigger="change"
                         hx-include="#searchBox" hx-target="#searchResults" hx-swap="innerHTML"
                         hx-sync="#searchResults:replace">
-                    {% if board.media_scope != 'movie' %}<option value="show">Shows</option>{% endif %}
-                    {% if board.media_scope != 'show' %}<option value="movie">Movies</option>{% endif %}
+                    {% if board.media_scope != 'movie' %}<option value="show"
+                        {%- if search.media == 'show' %} selected{% endif %}>Shows</option>{% endif %}
+                    {% if board.media_scope != 'show' %}<option value="movie"
+                        {%- if search.media == 'movie' %} selected{% endif %}>Movies</option>{% endif %}
                 </select>
             </div>
-            <div class="ranker-results" id="searchResults"></div>
+            {# EMPTY ON EVERY ARRIVAL BUT ONE, and the same partial the fragment
+               sends: an add answers with the page, so the results it comes back
+               with have to be the results a search would have drawn. #}
+            <div class="ranker-results" id="searchResults">
+                {%- with query = search.query, results = search.results,
+                        held = search.held, message = "", board_uid = board.uid %}
+                {%- include "_ranker_search_results.html" %}{%- endwith %}
+            </div>
 
             {# ABSENT, NOT DISABLED. `_sources` answers by omitting the keys for
                sources this account cannot use, and these controls follow it
@@ -52,7 +72,7 @@
                 {% if sources.import %}
                 {# Opening the dialog is also what asks for its year list, so a
                    page nobody imports from pays nothing for one. #}
-                <button type="button" class="btn-ghost small" data-modal-open="importModal"
+                <button type="button" class="btn-ghost small" command="show-modal" commandfor="importModal"
                         hx-get="/rankings/fragments/import-years?media=show"
                         hx-target="#importYear" hx-swap="outerHTML">
                     ⬇ Import finished titles</button>
@@ -132,7 +152,7 @@
                         hx-post="/rankings/boards/{{ board.uid }}/tiers/template" hx-json-enc
                         hx-target="body" hx-swap="innerHTML">
                     ✨ Apply template</button>
-                <button type="button" class="btn-ghost small" data-modal-open="newTierModal">
+                <button type="button" class="btn-ghost small" command="show-modal" commandfor="newTierModal">
                     ＋ New tier</button>
             </div>
         </div>
@@ -149,11 +169,18 @@
                artwork, and fetches its rows on first open. `click once` on the
                summary is the whole mechanism: the tier opens natively and the
                body is filled by the swap. #}
+            {#- DRAWN WITH ITS ROWS, or as a header that fetches them. Every tier on a
+                small board, and on any board the ONE tier a request just put a title
+                into: a move answers with the page, so a destination left closed would
+                take the title out of the pool and show it landing nowhere. Its rows
+                cost no second read — fetch_board has already read every item on the
+                board by the time this renders. #}
+            {%- set drawn = rows_open or (open_tier and category.uid == open_tier) %}
             <details class="ranker-tier{% if category.is_isolated %} is-isolated{% endif %}"
-                     data-uid="{{ category.uid }}"{% if rows_open %} open{% endif %}
+                     data-uid="{{ category.uid }}"{% if drawn %} open{% endif %}
                      {% if category.colour %}style="--tier-colour: {{ category.colour }}"{% endif %}>
                 <summary class="ranker-tier-head"
-                         {% if not rows_open %}hx-get="{{ rows_url(board.uid, category.uid) }}"
+                         {% if not drawn %}hx-get="{{ rows_url(board.uid, category.uid) }}"
                          hx-trigger="click once"
                          hx-target="#tierBody-{{ category.uid }}"
                          hx-swap="innerHTML"{% endif %}>
@@ -173,8 +200,8 @@
                    opening a tier does not lurch the page while its rows arrive. #}
                 <div class="ranker-rows" id="tierBody-{{ category.uid }}" role="list"
                      data-uid="{{ category.uid }}"
-                     {% if rows_open %}data-loaded="1"{% else %}style="--skeleton-rows: {{ category['items'] | length }}"{% endif %}>
-                    {% if rows_open %}{% with items = category['items'] %}{% include "_ranker_category_rows.html" %}{% endwith %}{% endif %}
+                     {% if drawn %}data-loaded="1"{% else %}style="--skeleton-rows: {{ category['items'] | length }}"{% endif %}>
+                    {% if drawn %}{% with items = category['items'] %}{% include "_ranker_category_rows.html" %}{% endwith %}{% endif %}
                 </div>
             </details>
             <span class="ranker-tier-acts">
@@ -187,9 +214,23 @@
                         aria-label="Tier settings"
                         hx-get="/rankings/fragments/tier-settings?{{ {'board': board.uid, 'tier': category.uid} | urlencode }}"
                         hx-target="#tierSettings" hx-swap="outerHTML">⚙</button>
-                <button type="button" class="ranker-act danger" title="Delete this tier"
-                        aria-label="Delete this tier"
-                        onclick="deleteTier(this, '{{ category.uid }}')">✕</button>
+                {# ASKING IS MARKUP, THE DELETE IS NOT, AND THE SPLIT IS EXACT.
+                   The question is templates/_confirm.html like every other one in
+                   the app — a checkbox, two labels and a stylesheet rule, with no
+                   request behind it. What it confirms is still script, and alone
+                   in this app in being so: a deleted tier's undo is held in the
+                   browser because a tier has no removal history on the server the
+                   way a removed TITLE does (static/js/ranker/tiers.js says so).
+                   The ask used to be script too — a popover measured against this
+                   button with getBoundingClientRect — and it was the last caller
+                   of that helper. #}
+                {% call confirm_box.ask('tier-' ~ category.uid,
+                                        'Delete this tier? Its titles go back to the pool.',
+                                        '✕', title='Delete this tier',
+                                        danger=true, face='ranker-act danger') %}
+                <button type="button" class="btn-primary small"
+                        onclick="deleteTier('{{ category.uid }}')">Delete</button>
+                {% endcall %}
             </span>
             </div>
             {% endfor %}

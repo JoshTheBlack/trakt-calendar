@@ -149,8 +149,13 @@ class ThePanelIsRenderedTests(CalendarRouteTestCase):
                 self.assertIn(pair, asked.group(1).replace("&amp;", "&"))
 
     def test_it_arrives_already_open_and_removes_itself_when_it_closes(self):
+        """`data-open-modal` rather than an `open` class or attribute: the panel
+        is a <dialog>, and only script can put one in the TOP layer — the `open`
+        ATTRIBUTE makes a non-modal dialog with no backdrop and no Escape. The
+        marker is the server saying "and show it" (static/js/ui.js)."""
         panel = self.panel()
-        self.assertIn('class="modal-overlay open"', panel)
+        self.assertIn("<dialog ", panel)
+        self.assertIn("data-open-modal", panel)
         self.assertIn("data-modal-discard", panel)
 
     def test_the_chips_are_server_rendered_markup(self):

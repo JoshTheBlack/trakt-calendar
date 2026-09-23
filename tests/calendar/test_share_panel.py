@@ -78,7 +78,8 @@ class SharePanelTestCase(AppTestCase):
 class ThePanelIsFetchedTests(SharePanelTestCase):
     def test_it_arrives_whole_and_open(self):
         page = self.panel()
-        self.assertIn('<div id="shareModal" class="modal-overlay open" data-modal-discard>', page)
+        self.assertIn('<dialog id="shareModal" class="modal-overlay" closedby="any"'
+                      ' data-modal-discard data-open-modal>', page)
         self.assertIn('id="share_url"', page)
         self.assertIn(f'value="{self.link()}"', page)
 

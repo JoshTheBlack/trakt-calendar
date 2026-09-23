@@ -31,11 +31,11 @@
    token", not "save everything". It also keeps every request made from inside
    the panel carrying only what it is about. #}
 {% import '_filter_fields.html' as ff with context %}
-<div id="filtersModal" class="modal-overlay open" data-modal-discard>
+<dialog id="filtersModal" class="modal-overlay" closedby="any" data-modal-discard data-open-modal>
     <div class="modal filters-modal" id="filtersPanel">
         <div class="modal-head">
             <h2>🎚️ Filters</h2>
-            <button type="button" class="modal-close" data-modal-close="filtersModal">&times;</button>
+            <button type="button" class="modal-close" command="close" commandfor="filtersModal">&times;</button>
         </div>
         {# THE SAVE IS THE FORM AND THE FORM IS EMPTY. `hx-json-enc` is what makes
            it an application/json request, which is the only shape a mutating
@@ -256,4 +256,4 @@
             </div>
 
     </div>
-</div>
+</dialog>

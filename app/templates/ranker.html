@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+{% import '_toast.html' as toast_markup %}
 {% import '_head.html' as page with context %}
 {% import '_confirm.html' as confirm_box %}
 {% call page.head('Rankings' ~ (' – ' ~ (board.name or 'Untitled board') if board else ''),
@@ -34,12 +35,12 @@
         {# Opening the dialog and asking for its first readout are the same press:
            the options are already in the page, so this GET is what turns them
            into a size, a preview and a Download button in the right state. #}
-        <button type="button" class="pill-btn" data-modal-open="exportModal"
+        <button type="button" class="pill-btn" command="show-modal" commandfor="exportModal"
                 hx-get="/rankings/fragments/export?board={{ board.uid | urlencode }}"
                 hx-include="#exportForm" hx-target="#exportReadout"
                 hx-swap="innerHTML">🖼️ Export</button>
         {% endif %}
-        <button type="button" class="pill-btn" data-modal-open="backupModal">🗄️ Backup</button>
+        <button type="button" class="pill-btn" command="show-modal" commandfor="backupModal">🗄️ Backup</button>
 {% endcall %}
 
 {# THE ONE THING ABOUT THIS BOARD THE MARKUP CANNOT CARRY: the version a save has
@@ -75,10 +76,10 @@
            cloning and deleting all land on the new address through HX-Location,
            which is the same arrival a boosted link produces. #}
         <span class="ranker-board-tools">
-            <button type="button" class="btn-ghost small" data-modal-open="newBoardModal">
+            <button type="button" class="btn-ghost small" command="show-modal" commandfor="newBoardModal">
                 ＋ New board</button>
             {% if board %}
-            <button type="button" class="btn-ghost small" data-modal-open="renameBoardModal">
+            <button type="button" class="btn-ghost small" command="show-modal" commandfor="renameBoardModal">
                 ✎ Rename</button>
             <button type="button" class="btn-ghost small"
                     hx-post="/rankings/boards/{{ board.uid }}/clone" hx-json-enc
@@ -101,29 +102,9 @@
         <h2>No board open</h2>
         <p>Make a board to start ranking. Each one has its own pool of titles and
             its own tiers, so "Top Movies" and "Top Drama" can happily coexist.</p>
-        <button type="button" class="btn-primary" data-modal-open="newBoardModal">Create a board</button>
+        <button type="button" class="btn-primary" command="show-modal" commandfor="newBoardModal">Create a board</button>
     </div>
     {% endif %}
-</div>
-
-{# ---- Move-to-tier menu, opened from a row's ⇄ button ----
-   ITS CHOICES ARE MARKUP. Which tiers a board has, and in what order, is the
-   server's to say — the same list and the same order the board is drawn in — so
-   they are rendered here rather than rebuilt in the browser each time the menu
-   opens. `data-tier-choice` marks every control naming a tier, so deleting a tier
-   without a reload removes its choices in one step (ranker/tiers.js).
-
-   A POPOVER, which is what deleted the document-wide click listener that used to
-   close it: the browser gives an `auto` popover light-dismiss, Escape and the top
-   layer for nothing. What is left to script is which row it was opened from and
-   where on the screen it goes — a click and a measurement (ranker/rows.js). #}
-<div class="ranker-menu" id="moveMenu" popover>
-    {%- if board %}
-    <button type="button" data-move-to="">Pool (unranked)</button>
-    {%- for category in board.categories %}
-    <button type="button" data-move-to="{{ category.uid }}" data-tier-choice="{{ category.uid }}">{{ category.label or "Untitled" }}</button>
-    {%- endfor %}
-    {%- endif %}
 </div>
 
 {# ---- A title's details, opened from a row's ⓘ button ----
@@ -147,25 +128,26 @@
    to be built and timed in the browser is the stylesheet's animation now. #}
 {% if notice %}
 <div id="toastHost">
-    <div class="toast {{ 'ok' if notice_ok else 'err' }} is-flash{{ ' is-offer' if undo_key }}"
-         role="status">{{ notice }}
-        {%- if undo_key and board %}
+    {%- if undo_key and board %}
+    {%- call toast_markup.line(notice, notice_ok, offer=true) %}
         <button type="button" class="btn-ghost small"
                 hx-post="/rankings/boards/{{ board.uid }}/removals/restore"
                 hx-json-enc hx-vals='{{ {"key": undo_key} | tojson }}'
                 hx-trigger="click" hx-target="body" hx-swap="innerHTML">Undo</button>
-        {%- endif %}
-    </div>
+    {%- endcall %}
+    {%- else %}
+    {{- toast_markup.line(notice, notice_ok) }}
+    {%- endif %}
 </div>
 {% endif %}
 
 {# ---- Naming a board, and naming a tier ----
    Two small forms rather than one dialog the page filled in and read back: each
    posts itself, and the value it carries is the only thing it has ever held. #}
-<div class="modal-overlay" id="newBoardModal">
+<dialog class="modal-overlay" closedby="any" id="newBoardModal">
     <div class="modal">
         <div class="modal-head"><h2>New board</h2>
-            <button type="button" class="modal-close" data-modal-close="newBoardModal">×</button></div>
+            <button type="button" class="modal-close" command="close" commandfor="newBoardModal">×</button></div>
         <form hx-post="/rankings/boards/new{% if board %}?board={{ board.uid | urlencode }}{% endif %}"
               hx-json-enc hx-boost="false" hx-target="body" hx-swap="innerHTML">
             <div class="modal-body">
@@ -174,18 +156,18 @@
                            autocomplete="off" autofocus></div>
             </div>
             <div class="modal-foot">
-                <button type="button" class="btn-ghost" data-modal-close="newBoardModal">Cancel</button>
+                <button type="button" class="btn-ghost" command="close" commandfor="newBoardModal">Cancel</button>
                 <button type="submit" class="btn-primary">Create</button>
             </div>
         </form>
     </div>
-</div>
+</dialog>
 
 {% if board %}
-<div class="modal-overlay" id="renameBoardModal">
+<dialog class="modal-overlay" closedby="any" id="renameBoardModal">
     <div class="modal">
         <div class="modal-head"><h2>Rename board</h2>
-            <button type="button" class="modal-close" data-modal-close="renameBoardModal">×</button></div>
+            <button type="button" class="modal-close" command="close" commandfor="renameBoardModal">×</button></div>
         <form hx-post="/rankings/boards/{{ board.uid }}/rename" hx-json-enc hx-boost="false"
               hx-target="body" hx-swap="innerHTML">
             <div class="modal-body">
@@ -194,17 +176,17 @@
                            value="{{ board.name or '' }}" autocomplete="off" autofocus></div>
             </div>
             <div class="modal-foot">
-                <button type="button" class="btn-ghost" data-modal-close="renameBoardModal">Cancel</button>
+                <button type="button" class="btn-ghost" command="close" commandfor="renameBoardModal">Cancel</button>
                 <button type="submit" class="btn-primary">Rename</button>
             </div>
         </form>
     </div>
-</div>
+</dialog>
 
-<div class="modal-overlay" id="newTierModal">
+<dialog class="modal-overlay" closedby="any" id="newTierModal">
     <div class="modal">
         <div class="modal-head"><h2>New tier</h2>
-            <button type="button" class="modal-close" data-modal-close="newTierModal">×</button></div>
+            <button type="button" class="modal-close" command="close" commandfor="newTierModal">×</button></div>
         <form hx-post="/rankings/boards/{{ board.uid }}/tiers/new" hx-json-enc hx-boost="false"
               hx-target="body" hx-swap="innerHTML">
             <div class="modal-body">
@@ -213,12 +195,12 @@
                            autocomplete="off" autofocus></div>
             </div>
             <div class="modal-foot">
-                <button type="button" class="btn-ghost" data-modal-close="newTierModal">Cancel</button>
+                <button type="button" class="btn-ghost" command="close" commandfor="newTierModal">Cancel</button>
                 <button type="submit" class="btn-primary">Add tier</button>
             </div>
         </form>
     </div>
-</div>
+</dialog>
 {% endif %}
 
 {# ---- Import finished titles ----
@@ -227,10 +209,10 @@
    dialog in the page for an account that cannot use it would advertise a feature
    `_sources` deliberately declines to mention. #}
 {% if board and sources.import %}
-<div class="modal-overlay" id="importModal">
+<dialog class="modal-overlay" closedby="any" id="importModal">
     <div class="modal">
         <div class="modal-head"><h2>Import finished titles</h2>
-            <button type="button" class="modal-close" data-modal-close="importModal">×</button></div>
+            <button type="button" class="modal-close" command="close" commandfor="importModal">×</button></div>
         <form hx-post="/rankings/boards/{{ board.uid }}/import" hx-json-enc hx-boost="false"
               hx-target="body" hx-swap="innerHTML">
             <div class="modal-body">
@@ -257,12 +239,12 @@
                         out — "what I watched in 2026" is a different list.</span></div>
             </div>
             <div class="modal-foot">
-                <button type="button" class="btn-ghost" data-modal-close="importModal">Cancel</button>
+                <button type="button" class="btn-ghost" command="close" commandfor="importModal">Cancel</button>
                 <button type="submit" class="btn-primary" id="importGo">Import</button>
             </div>
         </form>
     </div>
-</div>
+</dialog>
 {% endif %}
 
 {# ---- Export ----
@@ -277,10 +259,10 @@
    a link somewhere else could spend it for whoever followed it. A POST that saves
    a file is the one thing here a browser has to do. #}
 {% if board %}
-<div class="modal-overlay" id="exportModal">
+<dialog class="modal-overlay" closedby="any" id="exportModal">
     <div class="modal wide">
         <div class="modal-head"><h2>Export a poster grid</h2>
-            <button type="button" class="modal-close" data-modal-close="exportModal">×</button></div>
+            <button type="button" class="modal-close" command="close" commandfor="exportModal">×</button></div>
         <div class="modal-body ranker-export-body">
             <form class="ranker-export-opts" id="exportForm" hx-boost="false"
                   hx-get="/rankings/fragments/export?board={{ board.uid | urlencode }}"
@@ -357,12 +339,12 @@
                rides down with the readout, and writing the clipboard is the only
                part of copying a browser has to do. #}
             <button type="button" class="btn-ghost" data-copy="#exportMarkdown">📋 Copy as Markdown</button>
-            <button type="button" class="btn-ghost" data-modal-close="exportModal">Close</button>
+            <button type="button" class="btn-ghost" command="close" commandfor="exportModal">Close</button>
             <button type="button" class="btn-primary" id="exportGo"
                     onclick="downloadExport()" disabled>Download</button>
         </div>
     </div>
-</div>
+</dialog>
 {% endif %}
 
 {# ---- Backup ----
@@ -371,10 +353,10 @@
    by dragging something back — hence the typed acknowledgement, which is
    deliberately more friction than a confirmation somebody can dismiss by reflex.
    Same shape the other backup screen in this app uses. #}
-<div class="modal-overlay" id="backupModal">
+<dialog class="modal-overlay" closedby="any" id="backupModal">
     <div class="modal">
         <div class="modal-head"><h2>Backup</h2>
-            <button type="button" class="modal-close" data-modal-close="backupModal">×</button></div>
+            <button type="button" class="modal-close" command="close" commandfor="backupModal">×</button></div>
         <div class="modal-body">
             <p class="hint">Every board you have, its tiers and everything in them, as one
                 file. It holds no credentials and nobody else's data. Profile and header
@@ -421,10 +403,10 @@
             </div>
         </div>
         <div class="modal-foot">
-            <button type="button" class="btn-ghost" data-modal-close="backupModal">Close</button>
+            <button type="button" class="btn-ghost" command="close" commandfor="backupModal">Close</button>
         </div>
     </div>
-</div>
+</dialog>
 
 {% include "_footer.html" %}
 </body>

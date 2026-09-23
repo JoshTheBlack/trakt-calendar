@@ -1,0 +1,44 @@
+{# WHAT THE CALENDAR IS, AND HOW IT IS DRAWN, in the one element that carries
+   both — rendered by the page and re-rendered by a view preference's answer.
+
+   `data-body-class` IS THE THREE VIEW PREFERENCES. Card style, day packing and
+   hiding not-watching are classes on <body>, because that is the element the
+   whole month is styled against and the one a swap never replaces. That is also
+   why they cannot simply be swapped: htmx replaces ELEMENTS, and <body> is not
+   one it can replace.
+
+   SO THE ANSWER TO CHANGING ONE IS THIS ELEMENT, OUT OF BAND. It sits inside the
+   body, it has an id, and static/js/boost.js already wears whatever it says on
+   arrival — so a control that changes a preference posts itself, the server
+   re-renders this, and the class lands. No script decides anything, and there is
+   no second copy of "which classes does this view want" in the browser.
+   MEASURED in Firefox 155 and Chromium 153: an out-of-band swap of this element
+   changes the body's classes. `data-view-only` is what stops it also re-starting
+   the page, and it is on the ANSWER's copy alone — boost.js would otherwise run
+   an init nothing asked for. It says so rather than being inferred: telling the
+   two apart by whether the page NAME changed was tried and is wrong, because a
+   boosted navigation from one month to the next carries the same name and the
+   page it arrived at would then never be initialised at all.
+
+   `data-distrakt` SAYS THERE IS SOMEWHERE TO GO, and it is on this element
+   rather than on `window` because it is a fact about the page on screen: a swap
+   brings the new page's copy with it, so the reveal cannot fire on a page that
+   never offered one. The server resolves it from the session — see the context
+   key of the same name — and it gates the REVEAL, not the menu item.
+
+   `oob` is passed only by the answer to a preference; the page draws it inline.
+#}
+
+{# THE CLASS STRING, SPELLED ONCE. The page wears it on <body> at first render
+   and this element carries it on every change after, so the two cannot come to
+   disagree about what "packed" is called. #}
+{%- macro classes(view) -%}
+pack-{{ view.day_packing }} card-{{ view.card_style }}
+{%- if view.hide_not_watching %} hide-not-watching{% endif %}
+{%- endmacro %}
+
+{% macro meta(view, distrakt_available=false, oob=false) -%}
+<div id="pageMeta" hidden data-page="calendar" data-body-class="{{ classes(view) }}"
+     {%- if distrakt_available %} data-distrakt="1"{% endif %}
+     {%- if oob %} data-view-only hx-swap-oob="true"{% endif %}></div>
+{%- endmacro %}

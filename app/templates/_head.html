@@ -20,6 +20,8 @@
    and a plain import would give the macros an empty context and silently drop
    both tags rather than failing. #}
 
+{% import '_toast.html' as toast_markup %}
+
 {% macro head(title, scripts=(), nav_head=true, site_suffix=true) %}
 <head>
   <meta charset="UTF-8">
@@ -103,6 +105,11 @@
   {% for script in scripts -%}
   <script src="{{ assets.url(script) }}" defer></script>
   {% endfor -%}
+  {# What a toast looks like, for the script that raises one where no answer
+     can (static/js/ui.js). HERE because <head> survives a boosted navigation
+     and every page has one, which the pages carrying #toastHost are not: a
+     clipboard result is raised on the admin and the share page too. #}
+  {{ toast_markup.template() }}
   {% if caller %}{{ caller() }}{% endif %}
 </head>
 {% endmacro %}

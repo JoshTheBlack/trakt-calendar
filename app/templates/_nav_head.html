@@ -1,10 +1,20 @@
-{# Inline and synchronous, before any body content is parsed, so the header
-   renders once and correctly. A deferred bundle runs after first paint; deciding
-   this there means the menu repaints with an extra item a beat later.
+{# WHY THIS IS THE ONE SCRIPT IN A <head>, and neither half of it can move.
 
-   Kept a local-storage read rather than a server-rendered flag on purpose: the
-   response stays identical for every account, so it discloses nothing about
-   which of them have found this.
+   THE FACT IS IN THE BROWSER BY DESIGN. Whether this visitor has found the
+   tracker is kept in `localStorage`, deliberately, so that the server's response
+   is byte-identical for every account and discloses nothing about which of them
+   have — which means no Jinja condition, no route and no stylesheet rule can
+   know it. Only script can read it.
+
+   AND IT HAS TO BE READ BEFORE FIRST PAINT. The menu is markup that ships with
+   the page; if this ran with the deferred bundle instead it would run after the
+   page had painted, and the menu would visibly grow an extra item a beat later.
+   Inline and synchronous in the <head> is what makes the header render once and
+   correctly.
+
+   WHAT IT SETS IS A CLASS AND NOTHING ELSE: style.css decides what
+   `has-distrakt` looks like, on <html> rather than <body> so a boosted
+   navigation — which swaps the body's children — cannot lose it.
 
    Included by every page carrying the shared header — the item is in the menu
    now, so the reveal has to hold everywhere the menu does. #}

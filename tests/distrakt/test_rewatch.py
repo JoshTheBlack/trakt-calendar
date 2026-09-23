@@ -33,7 +33,7 @@ from app.distrakt import viewer as distrakt_viewer
 from app.distrakt import store, watch_history
 from app.providers.base import ItemKey
 
-from tests.support import RewatchPrompt, migrated_db
+from tests.support import RewatchPrompt, STATIC_DIR, migrated_db
 from tests.distrakt.test_gating import DistraktTestCase
 
 KEY = ItemKey("show", "tmdb", "1396")
@@ -421,15 +421,52 @@ class TheAddAsksBeforeItWritesAnythingTests(_RosterAddCase):
         asked = RewatchPrompt(self._post(history=self.OLD_RUN).text)
         self.assertEqual(asked.submit_label, "Start the run from 15 February 2020")
 
-    def test_a_restart_draws_both_presets_with_their_days_spelled_out(self):
-        """The presets ARE the two answers anybody means, and the server spells
-        each of their days: pressing one has to be able to say which day it
-        chose without a date formatter in the browser."""
+    def test_a_restart_draws_both_presets_as_the_two_days_either_side(self):
+        """The presets ARE the two answers anybody means — count those episodes
+        or do not — and each carries the DAY that means, computed server-side.
+        Neither carries a spelling any more: pressing one fills the date field,
+        and the field asks the server what the button should now say."""
         restarted = {**self.OLD_RUN, "1": "2026-09-01", "2": "2026-09-03"}
         asked = RewatchPrompt(self._post(history=restarted).text)
         self.assertEqual(asked.presets, ["2026-09-01", "2026-09-04"])
-        self.assertEqual(asked.preset_labels,
-                         ["1 September 2026", "4 September 2026"])
+        self.assertNotIn("data-fill-label", asked.html)
+
+    def test_the_field_asks_the_server_what_the_button_should_say(self):
+        """The one day this question could not spell in advance is one somebody
+        TYPES, and it used to be spelled by toLocaleDateString — which does not
+        agree with _day_label. Measured in Firefox 155 and Chromium 153: the
+        browser said "September 5, 2026" where the server says "5 September
+        2026", matching only on a en-GB locale. So the button was drawn naming a
+        day one way and renamed itself the other as soon as the field was
+        touched. It asks now, and one function answers for all four days."""
+        asked = RewatchPrompt(self._post(history=self.OLD_RUN).text)
+        self.assertEqual(asked.label_source, "/distrakt/fragments/day-label")
+        for gone in ("data-day-label", "data-label-prefix", "data-label-empty"):
+            with self.subTest(attribute=gone):
+                self.assertNotIn(gone, asked.html)
+        # The CALL, not the name: ui.js's comments still say what it removed,
+        # which is the house style and not a leftover.
+        ui = (STATIC_DIR / "js" / "ui.js").read_text(encoding="utf-8")
+        self.assertNotIn("toLocaleDateString(", ui)
+        self.assertNotIn("new Date(", ui)
+
+    def test_the_day_label_route_spells_a_day_the_way_the_page_does(self):
+        answer = self.client.get(
+            "/distrakt/fragments/day-label?history_from=2026-09-05")
+        self.assertEqual(answer.status_code, 200)
+        self.assertEqual(answer.text, "Start the run from 5 September 2026")
+
+    def test_an_empty_or_unreadable_day_names_no_run(self):
+        """The empty case is part of the SENTENCE rather than an attribute on the
+        button, and anything unparseable lands in it — which is also why the
+        answer needs no escaping: it is built from a parsed date and two
+        literals, so nothing of the query can reach it."""
+        for value in ("", "not-a-day", "<script>alert(1)</script>", "2026-13-40"):
+            with self.subTest(sent=value):
+                answer = self.client.get(
+                    "/distrakt/fragments/day-label",
+                    params={"history_from": value})
+                self.assertEqual(answer.text, "Start a fresh run")
 
     def test_asking_writes_no_month_record_either(self):
         """Not merely no roster row: nothing at all. A question is not a change."""

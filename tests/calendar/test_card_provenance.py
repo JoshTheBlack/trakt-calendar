@@ -18,11 +18,13 @@ from __future__ import annotations
 import json
 import re
 import unittest
+from urllib.parse import quote
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.calendar import cache as calendar_cache, resolve as calendar_resolve
 from app.config import Settings
+from app.endpoints import get_endpoint
 from app.providers.base import Record, Source, render
 from app.templating import TEMPLATES_DIR, templates
 
@@ -60,13 +62,18 @@ def _card_html(*records: Record, prefs=None) -> str:
     item = render(resolved, UTC)
     return templates.env.get_template("_card.html").render(
         item=item, not_watching=set(), new_ids=set(), is_admin=False,
+        # The month the card is on, which its watch toggle posts: marking a show
+        # is answered with every card for it ON THIS MONTH, so the button has to
+        # say which month it is asking about.
+        month=1, year=2026, endpoint=get_endpoint("shows/new"),
         settings=Settings())
 
 
 def _swap(html: str, field: str) -> str | None:
-    match = re.search(
-        r'<button type="button" class="source-swap" data-field="%s".*?</button>' % field,
-        html, re.S)
+    """The flip for `field`: a radio group, one entry per service, each paired
+    with that service's own value — see _card.html's `swap` macro."""
+    match = re.search(r'<span class="flip" data-field="%s">.*?</span>\s*</span>' % field,
+                      html, re.S)
     return match.group(0) if match else None
 
 
@@ -140,33 +147,40 @@ class ADisagreementIsDrawnWhereThereIsOneTests(unittest.TestCase):
             _record(Source.SIMKL, title="Another Title", poster="https://simkl.test/q.jpg"))
 
     def test_both_values_ship_with_the_card_so_a_flip_costs_no_request(self):
-        """AND THE ATTRIBUTE PARSES, which is the half a source grep cannot see:
-        `tojson` escapes the quote a single-quoted attribute needs and not the
-        one a double-quoted attribute needs, so getting it the wrong way round
-        ships an attribute that closes itself on the first key."""
-        found = re.search(r"data-alternatives='([^']*)'", self.html)
-        self.assertIsNotNone(found)
-        carried = json.loads(found.group(1))
-        self.assertEqual(set(carried), {"title", "poster"})
-        self.assertEqual(set(carried["title"]), {"trakt", "simkl"})
+        """Each service's own answer is DRAWN, once, in the place it is shown —
+        so flipping is a radio changing which of two elements the stylesheet
+        displays and never a request."""
+        for field in ("title", "poster"):
+            with self.subTest(field=field):
+                flip = _swap(self.html, field)
+                self.assertIsNotNone(flip)
+                self.assertIn('value="trakt"', flip)
+                self.assertIn('value="simkl"', flip)
+        self.assertIn("One Title", self.html)
+        self.assertIn("Another Title", self.html)
+        # Each picture is a real <img>, proxied the way every poster on a card
+        # is; both are in the page and the radio decides which is displayed.
+        self.assertIn(quote("https://simkl.test/q.jpg", safe=""), self.html)
+        self.assertIn(quote("https://trakt.test/p.jpg", safe=""), self.html)
 
-    def test_a_value_carrying_a_quote_cannot_escape_the_attribute(self):
-        """These strings are whatever a service wrote, and they land inside an
-        attribute on every card of a merged group."""
+    def test_a_value_carrying_a_quote_cannot_break_out_of_the_card(self):
+        """These strings are whatever a service wrote, and they are rendered onto
+        every card of a merged group — as text and inside attributes both."""
         html = _card_html(
             _record(Source.TRAKT),
-            _record(Source.SIMKL, title="""A "quoted" <b>title</b>' """))
-        carried = json.loads(re.search(r"data-alternatives='([^']*)'", html).group(1))
-        self.assertEqual(carried["title"]["simkl"], """A "quoted" <b>title</b>' """)
+            _record(Source.SIMKL, title='''A "quoted" <b>title</b>\' '''))
         self.assertNotIn("<b>title</b>", html)
+        self.assertIn("&lt;b&gt;title&lt;/b&gt;", html)
 
-    def test_a_conflicting_field_draws_a_swap_showing_the_winners_logo(self):
-        button = _swap(self.html, "title")
-        self.assertIsNotNone(button)
-        self.assertIn('data-source="trakt" data-label="Trakt"', button)
-        # The other service's logo is here and hidden, which is what makes the
-        # flip a class change rather than a fetch.
-        self.assertRegex(button, r'data-source="simkl"[^>]*hidden')
+    def test_a_conflicting_field_draws_a_mark_per_service_and_checks_the_winner(self):
+        flip = _swap(self.html, "title")
+        self.assertIsNotNone(flip)
+        # The winner is the checked one, and each service's mark travels inside
+        # its own value — so only the shown service's mark is drawn, with no rule
+        # anywhere naming a service.
+        self.assertRegex(flip, r'value="trakt"[^>]*checked')
+        self.assertNotRegex(flip, r'value="simkl"[^>]*checked')
+        self.assertEqual(flip.count('class="source-swap"'), 2)
 
     def test_the_element_showing_the_value_names_the_service_it_came_from(self):
         """The script tells the target from the button by this attribute: the
@@ -192,10 +206,14 @@ class ADisagreementIsDrawnWhereThereIsOneTests(unittest.TestCase):
         self.assertIsNone(_swap(html, "title"))
         self.assertNotIn("poster-marks", html)
 
-    def test_the_swap_stops_the_click_reaching_the_card_underneath(self):
+    def test_the_swap_does_not_also_open_the_details_panel(self):
         """The card opens the details modal on click; flipping one value must not
-        also open it."""
-        self.assertIn('onclick="swapCardField(this, event)"', self.html)
+        also open it. The mark is a <label>, which static/js/ui.js's opener
+        already leaves alone as a control acting for itself — so nothing here
+        stops the click and nothing has to."""
+        self.assertIn('<label class="source-swap"', self.html)
+        self.assertNotIn("stopPropagation", self.html)
+        self.assertNotIn("onclick", _swap(self.html, "title"))
 
     def test_the_preference_decides_which_side_is_shown_first(self):
         """The flip is a view of the same two values whichever way round the
@@ -245,32 +263,55 @@ class TwoNumbersRatherThanAnAverageTests(unittest.TestCase):
 
 
 class AFlipIsAViewFlipAndNothingElseTests(unittest.TestCase):
-    """Clicking a service mark changes one value on one card, on screen, until the
+    """Choosing a service mark changes one value on one card, on screen, until the
     page is left. It is not a preference, and the reason is not tidiness: whose
-    value wins is stated once for every card on the Sources screen, so a click
+    value wins is stated once for every card on the Sources screen, so a choice
     that wrote through would change every other card on the page as a side effect
-    of looking at one of them."""
+    of looking at one of them.
 
-    SCRIPT = (Path(__file__).resolve().parents[2] / "app" / "static" / "js"
-              / "calendar" / "source-swap.js").read_text(encoding="utf-8")
+    IT IS MARKUP, so these are properties of what is rendered rather than of a
+    script's contents. A radio group cannot send anything anywhere and has
+    nowhere to remember anything; `autocomplete="off"` is what stops the BROWSER
+    remembering it across a reload, which would otherwise put a card back showing
+    a service the page did not render it with.
+    """
 
-    def test_it_sends_nothing_anywhere(self):
-        for way in ("fetch(", "XMLHttpRequest", "sendBeacon", "new WebSocket"):
-            with self.subTest(way=way):
-                self.assertNotIn(way, self.SCRIPT)
-
-    def test_it_remembers_nothing_across_a_reload(self):
-        """Nowhere to put it is what makes that true, rather than a promise."""
-        for store in ("localStorage", "sessionStorage", "document.cookie", "indexedDB"):
-            with self.subTest(store=store):
-                self.assertNotIn(store, self.SCRIPT)
-
-    def test_both_values_are_already_in_the_page_so_a_flip_needs_no_request(self):
-        html = _card_html(
+    def setUp(self):
+        self.html = _card_html(
             _record(Source.TRAKT),
             _record(Source.SIMKL, title="Another Title"))
-        carried = json.loads(re.search(r"data-alternatives='([^']*)'", html).group(1))
-        self.assertEqual(carried["title"], {"trakt": "One Title", "simkl": "Another Title"})
+
+    def test_it_sends_nothing_anywhere(self):
+        flip = _swap(self.html, "title")
+        for way in ("hx-post", "hx-get", "hx-put", "hx-patch", "hx-delete", "onchange"):
+            with self.subTest(way=way):
+                self.assertNotIn(way, flip)
+
+    def test_it_remembers_nothing_across_a_reload(self):
+        self.assertIn('autocomplete="off"', _swap(self.html, "title"))
+
+    def test_both_values_are_drawn_rather_than_carried_as_data(self):
+        """Each service's answer is an ELEMENT, once, where it is shown. It used
+        to be a JSON copy of every alternative on every card's attribute, read
+        back by a script — one real database had a 1,790-character description
+        in one of them."""
+        self.assertNotIn("data-alternatives", self.html)
+        self.assertIn("One Title", self.html)
+        self.assertIn("Another Title", self.html)
+
+    def test_the_stylesheet_decides_which_is_shown_and_names_no_service(self):
+        """The pairing is the mechanism: each radio is immediately followed by
+        its own value, so `input:checked + .flip-value` is the whole rule and a
+        third service registering costs the stylesheet nothing."""
+        flip = _swap(self.html, "title")
+        pairs = re.findall(r'<input type="radio"[^>]*>\s*<span class="flip-value">', flip)
+        self.assertEqual(len(pairs), 2, flip)
+        css = (Path(__file__).resolve().parents[2] / "app" / "static" / "css"
+               / "style.css").read_text(encoding="utf-8")
+        self.assertIn(".flip-pick:checked + .flip-value", css)
+        for service in (str(source) for source in Source):
+            with self.subTest(service=service):
+                self.assertNotIn(f'.flip-pick[value="{service}"]', css)
 
 
 class BothServicesPagesAreOfferedTests(unittest.TestCase):

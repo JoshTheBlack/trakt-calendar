@@ -34,14 +34,15 @@
    `vals_fresh` leaves `history_from` to the field). Two dicts rather than one
    edited here, because which of them a button sends IS the answer. #}
 {% macro modal(prompt=None, resubmit_url='', vals_counting=None, vals_fresh=None, oob=false) %}
-<div id="rewatchModal" class="modal-overlay{{ ' open' if prompt }}"
+<dialog id="rewatchModal" class="modal-overlay" closedby="any"
+     {%- if prompt %} data-open-modal{% endif %}
      {%- if oob %} hx-swap-oob="outerHTML"{% endif %}>
 {%- if prompt %}
 {%- set episodes = (prompt.restart or {}).get('episodes') or [] %}
     <div class="modal narrow">
         <div class="modal-head">
             <h2>🔁 Watched this before</h2>
-            <button type="button" class="modal-close" data-modal-close="rewatchModal">&times;</button>
+            <button type="button" class="modal-close" command="close" commandfor="rewatchModal">&times;</button>
         </div>
         <div class="modal-body">
             <p>Your history says you finished {{ prompt.title }} season {{ prompt.season }}
@@ -70,8 +71,20 @@
                 option with no way to submit it. -#}
             <div class="field">
                 <label for="rewatchFrom">Count episodes watched on or after</label>
+                {#- THE BUTTON BELOW NAMES THE DAY THIS FIELD HOLDS, and asks the
+                    server what to call it. Three of the four days this question
+                    shows were always the server's; a day somebody TYPES used to be
+                    spelled by toLocaleDateString instead, which disagrees —
+                    measured: "September 5, 2026" against the server's "5 September
+                    2026" on a en-US browser, matching only on en-GB. So the button
+                    was drawn naming a day one way and renamed itself the other as
+                    soon as the field was touched. `changed` because a date field
+                    fires while a partial date is being assembled. -#}
                 <input type="date" id="rewatchFrom" name="history_from"
-                       value="{{ prompt.suggested_from or '' }}" data-day-label="#rewatchSubmit">
+                       value="{{ prompt.suggested_from or '' }}"
+                       hx-get="/distrakt/fragments/day-label" hx-trigger="input changed delay:250ms"
+                       hx-target="#rewatchSubmit" hx-swap="innerHTML"
+                       hx-sync="#rewatchSubmit:replace">
             </div>
             {%- if episodes %}
             {#- THE TWO ANSWERS ANYBODY ACTUALLY MEANS, as presets on the field
@@ -82,11 +95,9 @@
                 server-side. -#}
             <div class="rewatch-presets">
                 <button type="button" class="btn-ghost small" data-fill="#rewatchFrom"
-                        data-fill-value="{{ prompt.restart.first_day }}"
-                        data-fill-label="{{ prompt.restart.first_day_label }}">Include those episodes</button>
+                        data-fill-value="{{ prompt.restart.first_day }}">Include those episodes</button>
                 <button type="button" class="btn-ghost small" data-fill="#rewatchFrom"
-                        data-fill-value="{{ prompt.restart.after_day }}"
-                        data-fill-label="{{ prompt.restart.after_day_label }}">Start after them</button>
+                        data-fill-value="{{ prompt.restart.after_day }}">Start after them</button>
             </div>
             {%- endif %}
         </div>
@@ -108,23 +119,21 @@
                 DRAWN ALREADY NAMING THE SUGGESTED DAY, because the field opens
                 holding it. The label used to be corrected only by an `input`
                 event, so the question arrived offering a day and a button that
-                denied it. Every day this prompt can show is spelled by
-                routes._day_label — this one, and one on each preset — so the
-                only thing left to the browser is a day somebody TYPES, which is
-                the one case no server answer can be waiting for. -#}
+                denied it. EVERY day it can name is routes._run_label's now — the
+                one it opens with and the one the field above fetches when
+                somebody types — so the two cannot be two spellings of one day,
+                and the empty case is part of that sentence rather than an
+                attribute here. -#}
             <button type="button" class="btn-primary" id="rewatchSubmit"
                     hx-post="{{ resubmit_url }}" hx-json-enc
                     hx-vals='{{ vals_fresh | tojson }}'
                     hx-include="#rewatchFrom"
                     hx-target="#distraktShowList"
-                    hx-swap="innerHTML swapEmpty:false show:top showTarget:.row-marked"
-                    data-label-empty="Start a fresh run"
-                    data-label-prefix="Start the run from">
-                {{- ('Start the run from ' ~ prompt.suggested_from_label)
-                    if prompt.suggested_from_label else 'Start a fresh run' -}}
+                    hx-swap="innerHTML swapEmpty:false show:top showTarget:.row-marked">
+                {{- prompt.run_label -}}
             </button>
         </div>
     </div>
 {%- endif %}
-</div>
+</dialog>
 {% endmacro %}

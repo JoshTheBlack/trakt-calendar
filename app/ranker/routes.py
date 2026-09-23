@@ -228,6 +228,26 @@ def _strips_url(board_uid: str) -> str:
     return f"/rankings/fragments/tier-strips?board={quote(board_uid)}"
 
 
+def _move_choices(board: dict) -> list[dict]:
+    """Where a title on this board can be sent, in the order the board draws its
+    tiers, with the pool first.
+
+    EVERY ROW CARRIES THIS, so it is built once here rather than four times: the
+    shell renders rows inline, the pool pages them in, a tier fetches its own, and
+    a title added after first paint comes from row_fragment — and a row has to be
+    the same row whichever of those drew it, which is the claim row_fragment makes
+    in its own docstring.
+
+    THE POOL IS THE EMPTY UID, which is what move_items already means by it: "or
+    back to the pool when `category_uid` is empty". So a move out of a tier and a
+    move between tiers are one request shape rather than two.
+    """
+    return [{"uid": "", "label": "Pool (unranked)"}] + [
+        {"uid": c["uid"], "label": c.get("label") or "Untitled"}
+        for c in board["categories"]
+    ]
+
+
 def _pool_context(board: dict, page: int) -> dict:
     """One page of the pool, plus the sentinel that asks for the one after it.
     The last page carries no sentinel, which is what ends the chain."""
@@ -239,6 +259,10 @@ def _pool_context(board: dict, page: int) -> dict:
         # Every row names its board, because its details button asks for a title
         # by board and key and a key is only unique within one board.
         "board_uid": board["uid"],
+        # And where it can be moved to. The whole page takes its row context from
+        # here too (_rankings_response updates itself with this), so the tiers a
+        # row offers are the tiers the board drew, in that order.
+        "tiers": _move_choices(board),
         "next_url": _pool_url(board["uid"], page + 1) if remaining > 0 else None,
         # The sentinel reserves the height its page will take, so arriving cards
         # slot into space already made for them instead of shoving the page down.
@@ -312,7 +336,9 @@ async def rankings_page(request: Request):
 
 async def _rankings_response(request: Request, user, wanted: str | None, *,
                              notice: str = "", notice_ok: bool = True,
-                             removals_open: bool = False, undo_key: str = ""):
+                             removals_open: bool = False, undo_key: str = "",
+                             open_tier: str = "", search: dict | None = None,
+                             pool_first: str = ""):
     """The rankings page for the board `wanted`, or for the account's first.
 
     ONE BUILDER FOR EVERY ANSWER THAT IS THE WHOLE PAGE, and that is now every
@@ -330,6 +356,24 @@ async def _rankings_response(request: Request, user, wanted: str | None, *,
     beside the sentence, and that Undo is the SAME button the removal history
     carries, posting to the same route, so a title comes back one way however it
     is asked for.
+    `open_tier` is a tier this request put a title INTO, drawn open with its rows
+    whatever the board's size says: a move answers with the page, so a closed
+    destination would take the title out of the pool and show it landing nowhere.
+    It costs no extra read — the rows are already in `board`.
+    `search` is a search to draw the page WITH — the query, what it was over, and
+    its results. Adding a title answers with the page like everything else here,
+    and a page that came back with the search box empty would make adding a second
+    title from one search mean searching for it again. Its results are read from
+    the cache the search box's own request filled, so redrawing them asks nobody
+    and spends nothing.
+    `pool_first` is a title to draw at the HEAD of the pool. The pool is paged —
+    sixty at a time — and a title just added lands after everything already there,
+    so on any board with a full page of unranked titles it would arrive on a page
+    nobody is looking at: the count would tick up and nothing else would happen.
+    Hoisting it costs nothing that means anything, because the pool stores no
+    order at all (every pooled title shares one rank), and it is done before both
+    the markup and the copy the client saves from are built so the two cannot
+    disagree about it.
     """
     boards = await ranker.fetch_boards(user.user_id)
     wanted = wanted or (boards[0]["uid"] if boards else None)
@@ -350,6 +394,11 @@ async def _rankings_response(request: Request, user, wanted: str | None, *,
         # Once, here, so the markup and the copy the client saves from (below)
         # are built from the same ordering and cannot disagree about it.
         board["categories"] = _tiers_by_priority(board["categories"])
+        # By KEY, over the item dicts the pool actually holds — `_board_state`
+        # is what turns those into bare keys, further down.
+        if pool_first:
+            board["pool"] = ([item for item in board["pool"] if item["key"] == pool_first]
+                             + [item for item in board["pool"] if item["key"] != pool_first])
 
     tiered = sum(len(c["items"]) for c in board["categories"]) if board else 0
     context = {
@@ -368,6 +417,10 @@ async def _rankings_response(request: Request, user, wanted: str | None, *,
         "board_state": _board_state(board) if board else None,
         "sources": await _sources(user.user_id),
         "rows_open": tiered <= EAGER_ROW_LIMIT,
+        "open_tier": open_tier,
+        # An empty search draws an empty box and no results, which is the page as
+        # it arrives by every other route.
+        "search": search or {"query": "", "media": "", "results": (), "held": frozenset()},
         "notice": notice,
         "notice_ok": notice_ok,
         "undo_key": undo_key,
@@ -420,7 +473,8 @@ async def category_rows_fragment(request: Request):
         return _fragment_failure(request, "No such tier.", retry, "ranker-rows")
     return templates.TemplateResponse(
         request, "_ranker_category_rows.html",
-        {"request": request, "items": found[0]["items"], "board_uid": board["uid"]},
+        {"request": request, "items": found[0]["items"], "board_uid": board["uid"],
+         "tiers": _move_choices(board)},
     )
 
 
@@ -471,11 +525,19 @@ async def row_fragment(request: Request):
     board_uid = request.query_params.get("board") or ""
     try:
         item = await ranker.fetch_item(user.user_id, board_uid, request.query_params.get("key"))
+        # THE BOARD AS WELL, FOR THE ROW'S MOVE MENU. A row carries one choice per
+        # tier, so drawing one means knowing the tiers — and a row that arrives
+        # after first paint has to be the row the shell would have drawn, which is
+        # this route's whole claim. Read after the item so a title the board does
+        # not hold still costs nothing.
+        board = await ranker.fetch_board(user.user_id, board_uid)
     except ranker.RankerError:
         return HTMLResponse("")
+    board["categories"] = _tiers_by_priority(board["categories"])
     return templates.TemplateResponse(
         request, "_ranker_row.html",
-        {"request": request, "item": item, "board_uid": board_uid},
+        {"request": request, "item": item, "board_uid": board_uid,
+         "tiers": _move_choices(board)},
     )
 
 
@@ -879,9 +941,14 @@ async def move_board_items(board_uid: str, request: Request):
         moved = await ranker.move_items(user.user_id, board_uid, _picked(data),
                                         data.get("tier"))
         notice = f"Moved {moved} title(s)."
+        # WHERE THEY WENT, DRAWN OPEN. Moving into the pool names no tier and
+        # needs none: the pool is always on screen.
+        landed = str(data.get("tier") or "")
     except ranker.RankerError as exc:
         notice, ok = str(exc), False
-    return await _rankings_response(request, user, board_uid, notice=notice, notice_ok=ok)
+        landed = ""
+    return await _rankings_response(request, user, board_uid, notice=notice,
+                                    notice_ok=ok, open_tier=landed)
 
 
 @guard.get("/api/rankings/boards/{board_uid}", AuthLevel.RANKER_APPROVED)
@@ -1069,6 +1136,14 @@ async def search_fragment(request: Request):
     Uses the INSTANCE credential, deliberately: this grant does not imply a linked
     account, and what is asked for is public catalogue data either way.
 
+    WHICH RESULTS THE BOARD ALREADY HOLDS IS DRAWN HERE. It used to be written on
+    afterwards by a script reading the page's own copy of the board — a copy that
+    is only ever BUMPED, never refreshed, so a result could be marked against a
+    board that had moved. Everything that changes the held set is a request now
+    (an add answers with the result redrawn, and a removal answers with the whole
+    page), so there is nothing left for that sweep to catch that this does not
+    already know. `board_keys` is membership alone, not fetch_board.
+
     EVERY REFUSAL IS DRAWN, at 200: a non-200 is not swapped, so a status would
     leave the previous results standing under a query they no longer answer.
     Too short a query draws nothing, which is what the box shows before anything
@@ -1092,19 +1167,90 @@ async def search_fragment(request: Request):
         {**item, "key": ranker.item_key(item["media"], item["match_source"], item["match_id"])}
         for item in ranker_sources.items_from_refs(refs)
     ][:MAX_SEARCH_RESULTS]
-    return _search_results(request, query=query, results=results)
+    board_uid = request.query_params.get("board") or ""
+    return _search_results(request, query=query, results=results, board_uid=board_uid,
+                           held=await ranker.board_keys(user.user_id, board_uid))
 
 
-def _search_results(request: Request, *, query: str = "", results=(), message: str = ""):
+def _search_results(request: Request, *, query: str = "", results=(), message: str = "",
+                    board_uid: str = "", held=frozenset()):
     return templates.TemplateResponse(request, "_ranker_search_results.html", {
         "request": request, "query": query, "results": results, "message": message,
+        "board_uid": board_uid, "held": held,
     })
+
+
+async def _add_searched_title(user, board_uid: str, data: dict):
+    """The add itself, for the two ways of asking. Answers (added, refusal), where
+    a refusal is the response to send back and `added` is how many titles the
+    board gained — nought when it already held it.
+
+    ONE ADD, TWO ANSWERS, and that is the split rather than two adds. A result
+    CLICKED is answered with the page, because the page is where the title now is
+    and the search has to still be on screen to add a second one. A result DRAGGED
+    into a tier cannot be: the row has to land where the pointer dropped it, which
+    is a position among siblings no swap can name, so that path takes the count
+    back as JSON and puts the row there itself (static/js/ranker/dnd.js).
+    """
+    query = str(data.get("query") or "").strip()
+    try:
+        wanted = ranker.parse_item_key(data.get("key"))
+        media = ranker_sources.parse_media(wanted.media)
+    except (ranker.RankerError, ValueError) as exc:
+        return 0, authz.error(str(exc))
+    item = await ranker_sources.title_from_search(query, media, str(wanted))
+    if item is None:
+        return 0, authz.error("That search result is out of date — search for it again.")
+    try:
+        return await ranker.add_titles(user.user_id, board_uid, [item],
+                                       added_from="manual"), None
+    except ranker.RankerError as exc:
+        return 0, _refusal(exc)
+
+
+@guard.post("/rankings/boards/{board_uid}/items/add", AuthLevel.RANKER_APPROVED)
+async def add_searched_title(board_uid: str, request: Request):
+    """Add the title a result names, and answer with the page — the search still
+    on it, the result now drawn as held, and the board carrying its new version.
+
+    THE SEARCH IS REDRAWN FROM THE CACHE its own request filled, which is what
+    makes answering with the whole page affordable here: nothing is asked
+    upstream and the search budget never sees it. Without that the box would come
+    back empty and adding a second title from one search would mean typing it
+    again.
+    """
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+    query = str(data.get("query") or "").strip()
+    media_name = str(data.get("media") or "")
+    _, refusal = await _add_searched_title(user, board_uid, data)
+    if refusal is not None:
+        return refusal
+    results = ()
+    try:
+        media = ranker_sources.parse_media(media_name, Media.SHOW)
+        refs = await ranker_sources.search_source().search(query, media, cached_only=True)
+        results = [
+            {**item, "key": ranker.item_key(item["media"], item["match_source"],
+                                            item["match_id"])}
+            for item in ranker_sources.items_from_refs(refs)
+        ][:MAX_SEARCH_RESULTS]
+    except (ValueError, ranker_sources.SourceUnavailable):
+        # The search cannot be redrawn, which is not a reason to refuse the add
+        # that already happened: the page comes back without it.
+        query = ""
+    return await _rankings_response(
+        request, user, board_uid, notice="Added to the pool.",
+        pool_first=str(ranker.parse_item_key(data.get("key"))),
+        search={"query": query, "media": media_name, "results": results,
+                "held": await ranker.board_keys(user.user_id, board_uid)})
 
 
 @guard.post("/api/rankings/boards/{board_uid}/items", AuthLevel.RANKER_APPROVED)
 async def add_board_items(board_uid: str, request: Request):
-    """Add a title a search on this page found to the board's pool. Idempotent: a
-    title the board already holds — pooled or tiered — is left exactly as it is.
+    """Add a title to the board's pool for the DRAG, which needs the count back
+    rather than a page. Idempotent: a title the board already holds — pooled or
+    tiered — is left exactly as it is.
 
     THE PAGE NAMES A RESULT; IT DOES NOT HAND OVER A TITLE. It sends the query it
     searched for and the key of the result picked, and the title is read back out
@@ -1116,19 +1262,9 @@ async def add_board_items(board_uid: str, request: Request):
     """
     user = await auth.current_user(request)
     data = await authz.json_body(request)
-    query = str(data.get("query") or "").strip()
-    try:
-        wanted = ranker.parse_item_key(data.get("key"))
-        media = ranker_sources.parse_media(wanted.media)
-    except (ranker.RankerError, ValueError) as exc:
-        return authz.error(str(exc))
-    item = await ranker_sources.title_from_search(query, media, str(wanted))
-    if item is None:
-        return authz.error("That search result is out of date — search for it again.")
-    try:
-        added = await ranker.add_titles(user.user_id, board_uid, [item], added_from="manual")
-    except ranker.RankerError as exc:
-        return _refusal(exc)
+    added, refusal = await _add_searched_title(user, board_uid, data)
+    if refusal is not None:
+        return refusal
     return JSONResponse({"ok": True, "added": added})
 
 

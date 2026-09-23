@@ -72,11 +72,24 @@ JSON_ENC = "static/js/htmx-json-enc.js"
 PAGE_SCRIPTS = {
     "calendar": (
         "static/js/ui.js",
-        "static/js/nav.js",
-        "static/js/calendar/view.js",
+        # NO view.js: marking a show is a button posting itself, answered with
+        # every card for that title on this month redrawn and the counts it
+        # moves (templates/_marked_cards.html). That file held the page's own
+        # copy of the month's numbers and the marks it had made but not yet
+        # saved, and every line of it went with the answer.
         "static/js/calendar/layout.js",
-        "static/js/calendar/source-swap.js",
-        "static/js/calendar/search.js",
+        # NO source-swap.js either: flipping a card between the services that
+        # described it is a radio group and one stylesheet rule
+        # (templates/_card.html, style.css's `.flip`), and keeping the details
+        # panel opening on what the card is showing is ui.js's opener reading
+        # that same radio.
+        # NO SEARCH SCRIPT. The panel's every request is an `hx-get` on the
+        # control that makes it, and WHERE A JUMP LANDS is the stylesheet's:
+        # the server ships the anchor card's whole day with the shell and marks
+        # it `id="jump-target"`, so the browser's own fragment scrolling reaches
+        # it and `scroll-margin-block` keeps it clear of the sticky header. What
+        # was here was a settling loop that re-scrolled until the page stopped
+        # moving; measured against a real month it corrected 69 pixels.
         # NO SETTINGS, SHARE OR FILTERS SCRIPT, ON THIS PAGE OR ANY OTHER. All
         # three panels are fragments the server draws and every control in them
         # posts itself; the Settings panel opens from the site menu on every page
@@ -90,16 +103,15 @@ PAGE_SCRIPTS = {
         "static/js/calendar/boot.js",
     ),
     "tracker": (
+        # NOTHING OF ITS OWN. The month, the rows, the row actions, the add flow,
+        # the emoji editor, the backfill, the copy blocks and the tab strip are
+        # all markup the server draws, and the last thing left — scrolling a
+        # title too wide for its cell — is a stylesheet rule now (style.css's
+        # `.distrakt-title`, which reads its own width in container query units
+        # rather than being told it). What this page still asks of ui.js is the
+        # details panel, copying, reading a chosen backup file into a JSON body,
+        # and the one label in the app that follows a typed date.
         "static/js/ui.js",
-        "static/js/nav.js",
-        # ONE FILE, AND IT IS ONE THING THE BROWSER MUST DO: measuring whether a
-        # title overflows the cell drawn for it. Everything else this page used to
-        # run — the month, the rows, the row actions, the add flow, the emoji
-        # editor, the backfill, the copy blocks and the tab strip — is markup the
-        # server draws, and the page needs no init of its own any more. Reading
-        # the chosen backup file into a JSON body is ui.js's `data-file-into`,
-        # because four pages now do exactly that and it is one act.
-        "static/js/tracker/rows.js",
         # The calendar's file, on this page too, because the Konami code is ONE
         # listener for both — see static/js/calendar/easter-egg.js. Loading it
         # twice is not a re-declaration: boost.js keys what is running on the
@@ -112,7 +124,6 @@ PAGE_SCRIPTS = {
         # load, not for it not having run yet.
         "static/js/sortable.min.js",
         "static/js/ui.js",
-        "static/js/nav.js",
         # WHAT IS LEFT IS THE POINTER AND THE FILE. The drag and its coalesced
         # save, the keyboard and modifier-key ways of moving a title, where a
         # menu opens, the preview's zoom and pan, and a download that has to be a
@@ -132,8 +143,8 @@ PAGE_SCRIPTS = {
         "static/js/ranker/export-preview.js",
         "static/js/ranker/boot.js",
     ),
-    "admin": ("static/js/ui.js", "static/js/nav.js"),
-    "account": ("static/js/ui.js", "static/js/nav.js", "static/js/plex-auth.js"),
+    "admin": ("static/js/ui.js",),
+    "account": ("static/js/ui.js", "static/js/plex-auth.js"),
     # ui.js for `data-copy` alone: a generated key is copied into an environment
     # file, and only a browser can write the clipboard. Everything else on the page
     # posts itself.
@@ -142,7 +153,7 @@ PAGE_SCRIPTS = {
     # picker acts on `change` and is restored by the bfcache exactly like
     # the calendar's, and leaving one copy of that bug unfixed is how the
     # other two came to differ in the first place.
-    "pick": ("static/js/ui.js", "static/js/nav.js"),
+    "pick": ("static/js/ui.js",),
     "sign-in": ("static/js/plex-auth.js",),
     "register": ("static/js/plex-auth.js",),
     # ui.js alone: a card opens the details panel through its delegated

@@ -165,6 +165,18 @@ async function startPage(name) {
 // is nothing to do. A whole-body swap brings a new one.
 let currentMeta = null;
 
+// WEARING THE CLASSES AND STARTING THE PAGE ARE TWO QUESTIONS, because a new
+// #pageMeta does not always mean a new PAGE. The calendar's view preferences —
+// card style, day packing, hiding not-watching — are classes on <body>, and
+// <body> is the one element a swap never replaces, so changing one is answered
+// with this element alone, out of band. That is a new node carrying the same
+// page, and re-starting the page on it would re-run an init nothing asked for.
+//
+// THE ANSWER SAYS WHICH IT IS RATHER THAN THIS GUESSING. `data-view-only` is on
+// the copy a preference sends back (templates/_calendar_meta.html) and on no
+// other. Telling them apart by whether the page NAME changed was tried and is
+// WRONG: a boosted navigation from one month to the next carries the same name,
+// so the page it arrived at would never be initialised.
 function arrived() {
     const meta = document.getElementById('pageMeta');
     if (!meta || meta === currentMeta) return;
@@ -172,7 +184,9 @@ function arrived() {
     // In the same task as the swap that brought it, so the browser paints the new
     // content and the classes that style it together.
     document.body.className = meta.dataset.bodyClass || '';
-    if (meta.dataset.page) startPage(meta.dataset.page);
+    if (meta.dataset.page && !meta.hasAttribute('data-view-only')) {
+        startPage(meta.dataset.page);
+    }
 }
 
 // Every way a page can arrive, and there are only two of them now. A swap covers

@@ -63,41 +63,18 @@ function nudgeItem(button, delta) {
     scheduleSave();
 }
 
-// THE MENU'S CHOICES ARE MARKUP (ranker.html renders one per tier) AND THE MENU
-// IS A POPOVER. Opening it puts it in the top layer and gives it light-dismiss
-// and Escape for nothing, which is what deleted the document-wide click listener
-// that used to close it. What stays here is what markup cannot know: which row it
-// was opened from, and where on the screen that button is — a measurement of
-// rendered geometry.
-let movingRow = null;
+// MOVING A TITLE IS NOT HERE ANY MORE. Each row carries its own menu of places
+// to go and each choice posts itself to the route the bulk Move already used
+// (_ranker_row.html), answered with the board redrawn. What went with it was all
+// bookkeeping for one shared menu: which ⇄ had opened it, walking the row into
+// the chosen container, and scheduling the save afterwards. A pending drag is
+// still written first, and nothing had to be added for that — the move is a
+// POST, and ranker/save.js holds every non-GET behind the save already.
 
-function openMoveMenu(button) {
-    movingRow = button.closest('.ranker-item');
-    const menu = document.getElementById('moveMenu');
-    // SHOWN BEFORE IT IS PLACED, because a popover has no box until it is open
-    // and `offsetWidth` would read zero. In the top layer it is positioned
-    // against the viewport, so the button's own viewport rectangle is the whole
-    // measurement — the page's scroll offset used to have to be added back.
-    menu.showPopover();
-    const box = button.getBoundingClientRect();
-    menu.style.top = (box.bottom + 4) + 'px';
-    menu.style.left = Math.max(8, box.right - menu.offsetWidth) + 'px';
-}
-
-async function moveRowTo(row, categoryUid) {
-    const container = categoryUid === null
-        ? document.getElementById('rankerPool')
-        : await openTierBody(categoryUid);
-    if (!container) return;
-    if (categoryUid !== null) unpick(row);
-    container.appendChild(row);
-    refreshCounts();
-    scheduleSave();
-}
-
-// Opens a tier and makes sure its rows are actually on the page, so a title
-// moved into a tier nobody has opened lands somewhere real rather than into a
-// container whose contents the client has never seen.
+// WHAT IS LEFT, AND IT BELONGS TO THE TIER DELETE. Deleting a tier sends its
+// titles to the pool by moving the elements that already exist, so it needs that
+// tier's rows actually on the page first; a tier nobody has opened has none.
+// ranker/tiers.js is its only caller, and this goes when that does.
 //
 // IT REUSES THE DISCLOSURE'S OWN REQUEST rather than fetching the same address a
 // second way: the address is on the summary, as markup, and htmx.ajax into the
@@ -116,13 +93,3 @@ async function openTierBody(categoryUid) {
     if (body.dataset.loaded !== '1') { toast('Could not open that tier.', false); return null; }
     return body;
 }
-
-document.addEventListener('click', (event) => {
-    const choice = event.target.closest('#moveMenu [data-move-to]');
-    if (!choice) return;
-    const row = movingRow;
-    document.getElementById('moveMenu').hidePopover();
-    movingRow = null;
-    // An empty choice is the pool, which moveRowTo names as null.
-    if (row) moveRowTo(row, choice.dataset.moveTo || null);
-});

@@ -1,4 +1,12 @@
-// ---- Hidden /distrakt reveal: Konami code + footer build-tap (kept independent) ----
+// The hidden tracker's two ways in: a keyboard sequence and a run of taps on
+// the version tag.
+//
+// NEITHER HAS A DECLARATIVE FORM. No markup, stylesheet rule or route can watch
+// for ten keys pressed in an order, or for seven presses inside a second and a
+// half; both are input with no control behind them, which is the whole point of
+// them. And whether this browser has been let in before is `localStorage`,
+// deliberately — a server-rendered flag would make one account's response
+// differ from another's and say who has found it (see _nav_head.html).
 //
 // ONE LISTENER FOR EVERY PAGE THAT HAS ONE, and that is what makes this correct
 // rather than merely tidier. The tracker used to carry a second copy of the
@@ -65,18 +73,23 @@ const BUILD_TAP_WINDOW_MS = 1500;
 let buildTapCount = 0;
 let buildTapLast = 0;
 
-// The version tag is inside the swapped region, so a boosted nav replaces it with
-// a fresh element; the dataset guard keeps a single tap listener per element (the
-// tap counters live at module scope, so a streak survives across a nav).
-function initBuildTap() {
+// DELEGATED FROM THE DOCUMENT, like the keydown above and every primitive in
+// static/js/ui.js. The version tag is inside the swapped region, so a boosted
+// navigation replaces it with a fresh element — which this used to answer by
+// being re-run on every arrival and guarding against binding the same element
+// twice. A listener on the document is bound once and never has to know that the
+// tag was replaced, so the guard, the re-binding and the init call all go.
+//
+// AND IT ASKS AT THE CLICK RATHER THAN AT INIT whether there is anywhere to go,
+// which is the same question one moment later and cannot be left stale by a
+// navigation that arrived after the binding.
+//
+// The counters are module scope on purpose: a streak survives a navigation.
+document.addEventListener('click', (e) => {
+    if (!(e.target instanceof Element) || !e.target.closest('.version-tag')) return;
     if (!distraktReachable()) return;
-    const tag = document.querySelector('.version-tag');
-    if (!tag || tag.dataset.tapBound) return;
-    tag.dataset.tapBound = '1';
-    tag.addEventListener('click', () => {
-        const now = Date.now();
-        buildTapCount = (now - buildTapLast > BUILD_TAP_WINDOW_MS) ? 1 : buildTapCount + 1;
-        buildTapLast = now;
-        if (buildTapCount >= BUILD_TAP_TARGET) revealSecret();
-    });
-}
+    const now = Date.now();
+    buildTapCount = (now - buildTapLast > BUILD_TAP_WINDOW_MS) ? 1 : buildTapCount + 1;
+    buildTapLast = now;
+    if (buildTapCount >= BUILD_TAP_TARGET) revealSecret();
+});

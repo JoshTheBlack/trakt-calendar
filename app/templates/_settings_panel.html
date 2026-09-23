@@ -3,9 +3,13 @@
    why it is never drawn into a page) and swapped into the slot _nav.html keeps
    for administrators, so it opens from any page.
 
+   `data-open-modal` because only script can put a dialog in the TOP layer — the
+   `open` attribute makes a non-modal one — and this panel arrives with nobody
+   having pressed anything (static/js/ui.js).
+
    `data-modal-discard`: CLOSING IT REMOVES IT. It was drawn for one opening, and
    the next opening fetches it again — so nothing it was doing outlives it, the
-   Trakt pairing's poll included (static/js/ui.js's closeModal).
+   Trakt pairing's poll included (static/js/ui.js's `close` listener).
 
    THE TABS ARE RADIOS AND THE STYLESHEET DRAWS THEM, as the Filters panel's are:
    no script switches a panel, and a radiogroup brings arrow-key navigation with
@@ -24,11 +28,11 @@
 {% import '_filter_chip.html' as filter_chips %}
 {% set settings_tabs = [('server', '🖥️ Server'), ('trakt', '🎟️ Trakt'), ('simkl', '🟡 Simkl'),
                         ('calendar', '📅 Calendar'), ('integrations', '🔌 Integrations')] %}
-<div id="settingsModal" class="modal-overlay open" data-modal-discard>
+<dialog id="settingsModal" class="modal-overlay" closedby="any" data-modal-discard data-open-modal>
     <div class="modal settings-modal">
         <div class="modal-head">
             <h2>⚙️ Settings</h2>
-            <button type="button" class="modal-close" data-modal-close="settingsModal">&times;</button>
+            <button type="button" class="modal-close" command="close" commandfor="settingsModal">&times;</button>
         </div>
         {# EMPTY, AND EVERY FIELD NAMES IT — _settings_fields.html says why.
            `novalidate` because a field the browser refuses on a tab that is not
@@ -320,8 +324,8 @@
         </div>
         <div class="modal-foot">
             <p id="settingsNotice" class="settings-notice" role="alert"></p>
-            <button type="button" class="btn-ghost" data-modal-close="settingsModal">Cancel</button>
+            <button type="button" class="btn-ghost" command="close" commandfor="settingsModal">Cancel</button>
             <button type="submit" class="btn-primary" form="settingsForm">Save &amp; reload</button>
         </div>
     </div>
-</div>
+</dialog>

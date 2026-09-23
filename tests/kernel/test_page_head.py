@@ -34,10 +34,96 @@ def read(name: str) -> str:
 
 
 def markup(name: str) -> str:
-    """The template with its Jinja comments removed. Several of them quote the
-    very tags these tests scan for — index.html's explains what rides on <body>
-    and what is inside one <form> — and a comment is not markup."""
-    return re.sub(r"\{#.*?#\}", "", read(name), flags=re.S)
+    """The template with its Jinja comments removed, and with the bodies of the
+    partials it imports appended.
+
+    COMMENTS GO because several of them quote the very tags these tests scan for
+    — index.html's explains what rides on <body> and what is inside one <form>
+    — and a comment is not markup.
+
+    IMPORTS COME IN because an element a page is responsible for carrying may be
+    DRAWN by a macro: the calendar's #pageMeta is, because the answer to changing
+    a view preference re-draws it out of band and one element cannot be spelled
+    in two files. Scanning the page alone would read that as the element being
+    absent, which is the opposite of what moving it into one place achieved.
+    """
+    source = re.sub(r"\{#.*?#\}", "", read(name), flags=re.S)
+    for imported in re.findall(r"\{%-?\s*import\s+'([^']+)'", source):
+        path = TEMPLATES_DIR / imported
+        if path.exists():
+            source += re.sub(r"\{#.*?#\}", "", path.read_text(encoding="utf-8"),
+                             flags=re.S)
+    return source
+
+
+def expanded(name: str, seen=None) -> str:
+    """A page and every partial it reaches, transitively, through both `import`
+    and `include`.
+
+    `markup` above follows imports one level, which is all it needs. This follows
+    both and keeps going, because the thing being asked about is drawn three
+    partials down: a calendar card is included by the month, which is included by
+    the page.
+    """
+    seen = seen if seen is not None else set()
+    if name in seen:
+        return ""
+    seen.add(name)
+    path = TEMPLATES_DIR / name
+    if not path.exists():
+        return ""
+    source = re.sub(r"\{#.*?#\}", "", path.read_text(encoding="utf-8"), flags=re.S)
+    # EITHER QUOTE. This codebase writes imports with single quotes and includes
+    # with double, and a pattern that knew only one found a single page.
+    reached = re.findall(r"""\{%-?\s*(?:import|include)\s+['"]([^'"]+)['"]""", source)
+    return source + "".join(expanded(child, seen) for child in reached)
+
+
+class DetailsPanelShellTests(unittest.TestCase):
+    """A surface that offers the details panel carries the panel.
+
+    THE SHELL AND ITS TWO TEMPLATES TRAVEL TOGETHER. `data-details-open` on a card
+    or a row is the whole of what an opener needs, which is what makes adding one
+    to a new surface easy — and easy to do without the box it opens into.
+    static/js/ui.js clones `detailsPending` and `detailsUnreachable` with NO guard
+    on their being there, deliberately, so a surface that forgot them throws on
+    the first click. This is what says so before a browser has to.
+
+    THE FOUR ARE NAMED RATHER THAN DISCOVERED, and the tracker is why: its rows
+    reach the page as a FRAGMENT it fetches, so nothing a reader can follow from
+    distrakt.html says it offers the panel at all. A discovered list would have
+    quietly covered three surfaces and called it four.
+    """
+
+    OFFERS_PANEL = ("index.html", "distrakt.html", "ranker.html",
+                    "share_calendar.html")
+    OPENER = "data-details-open"
+    REQUIRED = ('id="detailsBody"', 'id="detailsTitle"',
+                'id="detailsPending"', 'id="detailsUnreachable"')
+
+    def test_each_offering_page_carries_the_whole_shell(self):
+        for page in self.OFFERS_PANEL:
+            source = expanded(page)
+            for needed in self.REQUIRED:
+                with self.subTest(page=page, needs=needed):
+                    self.assertIn(needed, source)
+
+    def test_no_other_page_carries_an_opener(self):
+        """The live half. A new surface growing an opener is the easy mistake —
+        the attribute is all it takes — and this fails until that page is named
+        above, which is where somebody has to notice the shell goes with it."""
+        for page in PAGES:
+            if page in self.OFFERS_PANEL:
+                continue
+            with self.subTest(page=page):
+                self.assertNotIn(self.OPENER, expanded(page))
+
+    def test_the_named_pages_are_pages(self):
+        """A name that has stopped being a template would make the pairing above
+        pass by testing nothing."""
+        for page in self.OFFERS_PANEL:
+            with self.subTest(page=page):
+                self.assertIn(page, PAGES)
 
 
 class AssetRegistryTests(unittest.TestCase):
@@ -111,7 +197,7 @@ class HeadMacroTests(unittest.TestCase):
                                 assets.url("static/js/ui.js")])
 
     def test_every_script_is_deferred(self):
-        html = self.render(call="'Title', scripts=('static/js/nav.js',)")
+        html = self.render(call="'Title', scripts=('static/js/ui.js',)")
         for tag in re.findall(r"<script src=[^>]+>", html):
             with self.subTest(tag=tag):
                 self.assertIn(" defer", tag)
@@ -380,6 +466,38 @@ def declares(source: str) -> set[str]:
     return names
 
 
+# `{{ body_class }}` in both places is the simple way to keep <body> and
+# #pageMeta from disagreeing, and most pages do exactly that. The CALENDAR does
+# something stronger: both come from ONE macro, because the answer to changing a
+# view preference re-draws #pageMeta out of band and the class string cannot be
+# spelled in two files. So the test is that the two name the SAME THING, not that
+# they both say a particular thing.
+_EXPR = re.compile(r'(?:data-)?body-?class="\{\{\s*(.+?)\s*\}\}"')
+_SET = re.compile(r"\{%-?\s*set body_class\s*%\}(.*?)\{%-?\s*endset\s*%\}", re.S)
+
+
+def _unqualify(expr: str) -> str:
+    """`calendar_meta.classes(view)` and `classes(view)` are one macro; the
+    prefix is only how the importing file reaches it."""
+    return re.sub(r"^[a-z_]+\.", "", expr.strip())
+
+
+def _class_expression(tag: str) -> str:
+    found = _EXPR.search(tag)
+    return _unqualify(found.group(1)) if found else ""
+
+
+def _body_class_source(source: str) -> str:
+    """What `body_class` is set FROM \u2014 so a page that indirects through it is
+    compared on the thing itself rather than on the name."""
+    found = _SET.search(source)
+    if not found:
+        return "body_class"
+    inner = found.group(1).strip()
+    expr = re.fullmatch(r"\{\{\s*(.+?)\s*\}\}", inner)
+    return _unqualify(expr.group(1)) if expr else "body_class"
+
+
 class PageScriptTests(unittest.TestCase):
     """The three ways splitting one page script into many can break silently.
 
@@ -491,7 +609,10 @@ class PageScriptTests(unittest.TestCase):
                                            "boosted arrival keeps the previous "
                                            "page's body classes")
                 self.assertIn('class="{{ body_class }}"', body.group(0), template)
-                self.assertIn('data-body-class="{{ body_class }}"', meta.group(0), template)
+                self.assertEqual(
+                    _class_expression(meta.group(0)), _body_class_source(source),
+                    f"{template}: <body> and #pageMeta name different things, so "
+                    "a boosted arrival can wear a class the cold load never would")
 
     def test_a_page_with_scripts_names_itself_on_its_meta_element(self):
         """data-page is how a boosted arrival is told which scripts to load: the
@@ -561,40 +682,39 @@ class PageScriptTests(unittest.TestCase):
 
 
 class LateArrivingDayBlockTests(unittest.TestCase):
-    """What a day block that fetches itself in gets from the page, and why it is so
-    little.
+    """What a day block that fetches itself in gets from the page, and it is now
+    NOTHING AT ALL.
 
-    The calendar's swap handler splits on purpose: a boosted arrival re-runs the
-    page init, a CONTENT swap must not — re-running it would re-arm listeners and
-    redo one-time setup. What a late block still needs from script is only what
-    the server could not draw onto it: a mark this page made whose save had not
-    landed when the day's request read the marks. Everything else — is-new, the
-    day's packing, each library button's state — is in the block's own markup,
-    and tests/calendar holds that.
+    The server draws everything onto the block: each card's not-watching state
+    from the stored marks, is-new from the shell's own answer, the day's packing
+    and every library button's state. There used to be one exception — a mark
+    this page had made whose save had not landed when the day's request read the
+    marks — and it went when marking stopped being something the page did ahead
+    of the server. A mark is a button posting itself, answered with every card
+    for that title redrawn.
+
+    So the calendar's swap handler has ONE branch left: a filters save, which
+    replaces the whole of #calendarBody and is a new month to re-init on. A day
+    block arriving is not that and is left alone.
     """
 
     def setUp(self):
         self.boot = js_source("static/js/calendar/boot.js")
 
-    def content_swap_branch(self) -> str:
-        return self.boot.split("function applyViewStateTo(root)")[1].split("\n}")[0]
+    def test_a_late_block_is_not_walked_by_the_page_at_all(self):
+        """Named by IDENTIFIER rather than by the words around them: this file is
+        comment-dense and says what the server draws, so matching prose would
+        fail on its own explanation."""
+        for gone in ("applyViewStateTo", "pendingMarks", "setCardState",
+                     "applyArrStateTo", "readViewData", "updateStats"):
+            with self.subTest(name=gone):
+                self.assertNotIn(gone, self.boot)
 
-    def test_a_swapped_in_block_is_reconciled_against_marks_still_being_saved(self):
-        self.assertIn("pendingMarks", self.content_swap_branch())
-
-    def test_the_content_swap_does_not_reach_for_the_page_init(self):
-        self.assertNotIn("initCalendarPage", self.content_swap_branch())
-
-    def test_nothing_the_server_draws_is_redrawn_by_the_content_swap(self):
-        """Each of these used to be put back onto a late block by the page — and
-        for a while none of them were, silently, because the swap handler was
-        handed a text node. They are the server's to draw now, so the handler
-        naming any of them again would be a second copy of the server's answer."""
-        branch = self.content_swap_branch()
-        for drawn_by_the_server in ("newIds", "is-new", "applyArrStateTo", "arr-btn",
-                                    "notWatching"):
-            with self.subTest(name=drawn_by_the_server):
-                self.assertNotIn(drawn_by_the_server, branch)
+    def test_the_one_swap_it_still_acts_on_is_the_filters_save(self):
+        """Named by what arrived, which is the only thing that distinguishes a
+        whole-body replacement from one day landing."""
+        self.assertIn("calendarBody", self.boot)
+        self.assertIn("initCalendarPage", self.boot)
 
 
 class BundledStylesheetTests(unittest.TestCase):

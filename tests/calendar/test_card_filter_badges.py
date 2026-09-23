@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 from app.calendar import vocab
 from app.config import Settings
+from app.endpoints import get_endpoint
 from app.providers.base import Record, Source, render
 from app.templating import templates
 
@@ -47,6 +48,9 @@ def _html(can_filter=True, prefs=None, **overrides) -> str:
     return templates.env.get_template("_card.html").render(
         item=_item(**overrides), not_watching=set(), new_ids=set(),
         is_admin=False, settings=Settings(), can_filter=can_filter,
+        # The month the card is on, which its watch toggle posts — see
+        # _card.html; nothing about the badges reads it.
+        month=1, year=2026, endpoint=get_endpoint("shows/new"),
         badge_modes=vocab.BadgeModes(prefs or {}))
 
 

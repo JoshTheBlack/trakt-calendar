@@ -1,6 +1,17 @@
 // Writing the board back: reading the current arrangement out of the DOM,
 // coalescing a run of drags into one request, the two ways a save ends, and the
 // one hook that makes every other action on this page safe to press mid-drag.
+//
+// THE ONE WRITE ON THIS PAGE THAT IS NOT A FORM, and the reason is what it has
+// to send. Every other action here is markup posting itself with `hx-json-enc`
+// and is answered with the board redrawn; this sends a NESTED ORDERED TREE —
+// every tier with its settings and its titles in order, plus the pool, plus the
+// board's version token — which is not a set of form fields and has no markup
+// that would produce it. It is also fired 800ms after a drag rather than by
+// anything a person pressed, so there is no control for an attribute to sit on.
+//
+// AND IT IS READ OUT OF THE DOM, which only this side can do: between the drop
+// and the save the arrangement exists nowhere else. The server learns it here.
 
 let saveTimer = null;
 let inFlight = null;            // the write currently on the wire, so a flush can wait for it
@@ -49,11 +60,13 @@ function readLayout() {
     };
 }
 
+// WHICH OF THE FOUR STATES, AND NOT WHAT IT SAYS. The word is the stylesheet's
+// (style.css, `.ranker-save-state[data-state]::after`), which already owned the
+// colour — so there is no longer a map here of what "saving" reads as that could
+// come to disagree with the rule that colours it.
 function setSaveState(value) {
     const el = document.getElementById('saveState');
-    if (!el) return;
-    el.dataset.state = value;
-    el.textContent = { idle: '', saving: 'Saving…', saved: 'Saved', error: 'Not saved' }[value] || '';
+    if (el) el.dataset.state = value;
 }
 
 function scheduleSave() {

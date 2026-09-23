@@ -9,17 +9,33 @@
    whole title serialized onto its element for the add to hand back, which let a
    page decide what was stored.
 
-   Whether a result is already on the board is NOT decided here: that changes as
-   titles are added and removed on the page without a request, so the page marks
-   it (ranker/search.js's markHeldResults) over whatever this drew.
+   WHETHER A RESULT IS ALREADY ON THE BOARD IS DECIDED HERE. It used to be
+   written on afterwards by a script, because the held set "changes without a
+   request" — which stopped being true once a removal began answering with the
+   whole page. Every way of changing it is a request now, and the one that does
+   not redraw this list is a result DRAGGED into a tier, which marks the one
+   result it dragged (ranker/dnd.js). Nothing sweeps the list against the page's
+   copy of the board any more, which is just as well: that copy is bumped rather
+   than refreshed, so it could mark a result against a board that had moved.
+
+   CLICKING A RESULT POSTS IT, and the answer is the page with this search still
+   on it — drawn again from the cache the search box's own request filled, so
+   adding a second title from one search costs no second search. The trigger
+   refuses a held result rather than the page checking afterwards, because a
+   drag can end in a click on the result it just added.
 
    Nothing at all for a query too short to search, which the stylesheet reads as
    "hide the list". #}
 {%- if message %}<span class="ranker-preview-hint">{{ message }}</span>
 {%- elif query %}
 {%- for hit in results %}
-<div class="ranker-result" data-key="{{ hit.key }}" data-query="{{ query }}"
-     title="Drag into a tier, or click to add to the pool">
+<div class="ranker-result{% if hit.key in held %} is-held{% endif %}"
+     data-key="{{ hit.key }}" data-query="{{ query }}"
+     title="Drag into a tier, or click to add to the pool"
+     hx-post="/rankings/boards/{{ board_uid }}/items/add" hx-json-enc
+     hx-vals='{{ {"key": hit.key, "query": query, "media": hit.media} | tojson }}'
+     hx-trigger="click[!this.classList.contains('is-held')]"
+     hx-target="body" hx-swap="innerHTML">
     {%- if hit.tmdb %}<img loading="lazy" alt="" src="/api/rankings/poster?media={{ hit.media }}&amp;tmdb={{ hit.tmdb }}" onerror="this.remove()">{% endif %}
     <span class="ranker-name"><span class="ranker-title">{{ hit.title or "Untitled" }}</span><span class="ranker-year">{{ [hit.year, hit.network, (hit.runtime ~ "m") if hit.runtime else ""] | select | map("string") | join(" · ") }}</span></span>
 </div>

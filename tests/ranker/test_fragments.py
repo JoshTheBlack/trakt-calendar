@@ -235,23 +235,80 @@ class SearchIsMarkupTests(FragmentTestCase):
                         r'<select id="searchMedia"[^>]*>'):
             element = re.search(control, html, re.S).group(0)
             with self.subTest(control=control):
-                self.assertIn('hx-get="/rankings/fragments/search"', element)
+                # The BOARD is in the address, because a result has to be drawn
+                # knowing whether this board already holds it.
+                self.assertIn('hx-get="/rankings/fragments/search?board=b1"', element)
                 self.assertIn('hx-target="#searchResults"', element)
                 self.assertIn('hx-sync="#searchResults:replace"', element)
 
 
-class TierChoicesAreMarkupTests(FragmentTestCase):
-    """The move menu's destinations and the bulk-move list name the board's tiers,
-    which the server already knows — so they are rendered, in the board's own
-    order, rather than rebuilt from the page's copy of the board in the browser."""
+def inside(html: str, opening: str) -> str:
+    """What sits between `opening` and the tag that closes it, by DEPTH.
 
-    def test_the_move_menu_offers_the_pool_and_every_tier_in_board_order(self):
+    A container used to be found by the indentation of its closing tag, which
+    worked until a row started carrying a <div> of its own: a non-greedy match
+    then stopped at the first inner close and reported a container as empty that
+    was not. Counting the nesting says the same thing and does not care how
+    anything is indented.
+    """
+    at = html.index(opening) + len(opening)
+    depth, i = 1, at
+    while depth:
+        opens = html.find("<div", i)
+        closes = html.index("</div>", i)
+        if 0 <= opens < closes:
+            depth, i = depth + 1, opens + 4
+        else:
+            depth, i = depth - 1, closes + 6
+    return html[at:i - 6]
+
+
+class TierChoicesAreMarkupTests(FragmentTestCase):
+    """Where a title can be moved to is the server's to say, and saying it is the
+    whole of the feature now: each row carries one button per destination, and
+    each posts itself to the route the bulk move already used."""
+
+    def test_a_rows_menu_offers_the_pool_and_every_tier_in_board_order(self):
         self.board_with(tiered=1)
         html = self.client.get("/rankings").text
-        menu = re.search(r'<div class="ranker-menu" id="moveMenu" popover>(.*?)</div>',
-                         html, re.S).group(1)
-        self.assertEqual(re.findall(r'data-move-to="([^"]*)"', menu), ["", "tier-s"])
+        key = "show:tmdb:1000"
+        menu = inside(html, f'<div class="ranker-menu" id="move-{key}" popover>')
+        # The POOL FIRST, as the empty tier, which is what move_items already
+        # reads as "back to the pool" — so leaving a tier and changing tier are
+        # one request rather than two.
+        self.assertEqual(re.findall(r'"tier": "([^"]*)"', menu), ["", "tier-s"])
         self.assertIn(">Pool (unranked)</button>", menu)
+
+    def test_every_choice_posts_itself_to_the_route_the_bulk_move_uses(self):
+        """One key instead of a selection, and otherwise the same request: the
+        move menu needed no route of its own."""
+        self.board_with(tiered=1)
+        html = self.client.get("/rankings").text
+        menu = inside(html, '<div class="ranker-menu" id="move-show:tmdb:1000" popover>')
+        for choice in re.findall(r"<button[^>]*>", menu):
+            self.assertIn('hx-post="/rankings/boards/b1/items/move"', choice)
+            self.assertIn("hx-json-enc", choice)
+            self.assertIn('"pick:show:tmdb:1000": "1"', choice)
+            self.assertIn('hx-target="body"', choice)
+        bulk = self.client.get("/rankings").text
+        self.assertIn('hx-post="/rankings/boards/b1/items/move"', bulk)
+
+    def test_a_row_carries_its_menu_however_that_row_was_drawn(self):
+        """The shell, a page of the pool and a title added after first paint all
+        render the same row, which is row_fragment's own claim — and a row
+        without its menu would be a title that cannot be moved from wherever it
+        happened to arrive."""
+        board = self.board_with(pool=ranker_routes.POOL_PAGE_SIZE + 5)
+        key = "show:tmdb:1000"
+        inline = self.client.get("/rankings").text
+        paged = self.pool_html(board, 0)
+        one = self.client.get(
+            f"/rankings/fragments/row?board={board}&key={key}").text
+        for what, html in (("the shell", inline), ("a pool page", paged),
+                           ("row_fragment", one)):
+            with self.subTest(drawn_by=what):
+                self.assertIn(f'id="move-{key}"', html)
+                self.assertIn('hx-post="/rankings/boards/b1/items/move"', html)
 
     def test_the_bulk_move_list_offers_every_tier(self):
         self.board_with(tiered=1)
@@ -260,24 +317,114 @@ class TierChoicesAreMarkupTests(FragmentTestCase):
         self.assertEqual(re.findall(r'<option value="([^"]*)"', select), ["tier-s"])
 
     def test_every_tier_choice_is_marked_so_a_deleted_tier_can_take_its_choices_away(self):
-        """Three of them now: the move menu, the bulk-move list and the export
-        dialog's scope, which is drawn with the page rather than built when the
-        dialog opens."""
-        self.board_with(tiered=1)
+        """The bulk-move list, the export dialog's scope, AND ONE PER ROW now
+        that every row carries its own menu. The count is asserted against the
+        rows drawn rather than as a constant, because a constant would pass or
+        fail on how many titles the fixture happens to have."""
+        self.board_with(pool=3, tiered=1)
         html = self.client.get("/rankings").text
-        self.assertEqual(html.count('data-tier-choice="tier-s"'), 3)
+        rows = html.count('class="ranker-item"')
+        self.assertEqual(rows, 4)
+        self.assertEqual(html.count('data-tier-choice="tier-s"'), rows + 2)
         tiers = (STATIC_DIR / "js" / "ranker" / "tiers.js").read_text(encoding="utf-8")
         self.assertIn("[data-tier-choice=", tiers)
 
-    def test_no_script_builds_the_tier_choices(self):
+    def test_no_script_moves_a_title_between_tiers(self):
+        """Nothing opens the menu, places it, remembers which row it belongs to,
+        or walks that row into a container. The menu is the row's own, so being
+        the row IS the answer; the browser is left with neither the question nor
+        a copy of where anything went."""
         rows = (STATIC_DIR / "js" / "ranker" / "rows.js").read_text(encoding="utf-8")
-        menu = rows[rows.index("function openMoveMenu"):rows.index("async function moveRowTo")]
-        self.assertNotIn("createElement", menu)
+        # By IDENTIFIER, not by the words around them: this file is comment-dense
+        # and its own comments name what it used to do.
+        for gone in ("movingRow", "moveRowTo", "openMoveMenu", "showPopover",
+                     "hidePopover", "menu.style"):
+            with self.subTest(identifier=gone):
+                self.assertNotIn(gone, rows)
+
+        # Nor does any other file on this page build a destination list of its
+        # own: the bulk-move <select> is the server's markup too.
         for name in ("selection.js", "export.js"):
             source = (STATIC_DIR / "js" / "ranker" / name).read_text(encoding="utf-8")
             with self.subTest(script=name):
                 self.assertNotIn("createElement('option')", source)
                 self.assertNotIn("new Option(", source)
+
+
+class MoveShowsWhereItWentTests(FragmentTestCase):
+    """A move answers with the whole page, so the destination has to be drawn
+    open — otherwise a title leaves the pool and is seen landing nowhere.
+
+    ONLY THE DESTINATION, and only when the board would otherwise draw its tiers
+    closed: this is about the one tier the request touched, not about reopening
+    a board somebody deliberately collapsed.
+    """
+
+    def board_with_two_tiers(self) -> str:
+        asyncio.run(ranker.create_board(self.user_id, uid="b1", name="Top", year=2026))
+        refs = [title_ref(str(1000 + n), f"Title {n}") for n in range(3)]
+        asyncio.run(ranker.add_titles(self.user_id, "b1", refs))
+        asyncio.run(ranker.save_layout(self.user_id, "b1", {
+            "version": 1,
+            "categories": [
+                {"uid": "tier-a", "label": "A", "rank_priority": 60, "items": []},
+                {"uid": "tier-b", "label": "B", "rank_priority": 50, "items": []},
+            ],
+            "pool": [ranker.item_key("show", "tmdb", str(1000 + n)) for n in range(3)],
+        }))
+        return "b1"
+
+    def move_into(self, board: str, key: str, tier: str) -> str:
+        with mock.patch.object(ranker_routes, "EAGER_ROW_LIMIT", 0):
+            response = self.client.post(
+                f"/rankings/boards/{board}/items/move",
+                json={f"pick:{key}": "1", "tier": tier})
+        self.assertEqual(response.status_code, 200)
+        return response.text
+
+    def test_the_tier_a_title_moved_into_comes_back_open_with_its_rows(self):
+        board = self.board_with_two_tiers()
+        key = ranker.item_key("show", "tmdb", "1000")
+        html = self.move_into(board, key, "tier-a")
+        opened = re.search(r'<details class="ranker-tier"\s+data-uid="tier-a"( open)?', html)
+        self.assertIsNotNone(opened, "the destination tier should be in the answer")
+        self.assertEqual(opened.group(1), " open")
+        body = inside(html, '<div class="ranker-rows" id="tierBody-tier-a" role="list"')
+        self.assertIn(f'data-key="{key}"', body,
+                      "an open tier has to arrive with its rows, or it opens on nothing")
+
+    def test_a_tier_nobody_moved_into_stays_closed(self):
+        """The complement, without which the test above would pass against a
+        board that simply drew everything open."""
+        board = self.board_with_two_tiers()
+        key = ranker.item_key("show", "tmdb", "1000")
+        html = self.move_into(board, key, "tier-a")
+        other = re.search(r'<details class="ranker-tier"\s+data-uid="tier-b"( open)?', html)
+        self.assertIsNotNone(other)
+        self.assertIsNone(other.group(1))
+        self.assertIn("tierBody-tier-b", html)
+        self.assertNotIn(f'data-key="{key}"',
+                         inside(html, '<div class="ranker-rows" id="tierBody-tier-b" role="list"'))
+
+    def test_moving_back_to_the_pool_opens_nothing(self):
+        """The pool is always on screen, so there is no tier to name — and
+        naming one would reopen a tier the move emptied of that title.
+
+        A SECOND TITLE STAYS IN A TIER, which is the whole reason this asserts
+        anything: `rows_open` is about how much is TIERED, so a board with every
+        title back in the pool draws its tiers open quite correctly and the test
+        would pass without the code under it doing a thing.
+        """
+        board = self.board_with_two_tiers()
+        key = ranker.item_key("show", "tmdb", "1000")
+        self.move_into(board, key, "tier-a")
+        self.move_into(board, ranker.item_key("show", "tmdb", "1001"), "tier-b")
+        html = self.move_into(board, key, "")
+        for uid in ("tier-a", "tier-b"):
+            with self.subTest(tier=uid):
+                found = re.search(r'<details class="ranker-tier"\s+data-uid="%s"( open)?' % uid, html)
+                self.assertIsNone(found.group(1))
+        self.assertIn(f'data-key="{key}"', inside(html, '<div class="ranker-pool" id="rankerPool"'))
 
 
 class PoolSentinelPlacementTests(FragmentTestCase):
@@ -297,15 +444,13 @@ class PoolSentinelPlacementTests(FragmentTestCase):
     def test_the_sentinel_is_not_inside_the_sortable_pool(self):
         self.board_with(pool=ranker_routes.POOL_PAGE_SIZE + 5)
         shell = self.client.get("/rankings").text
-        pool = re.search(r'<div class="ranker-pool" id="rankerPool"[^>]*>(.*?)\n            </div>',
-                         shell, re.S)
-        self.assertIsNotNone(pool, "the shell should render the pool inline")
-        self.assertNotIn("ranker-pool-sentinel", pool.group(1))
+        opening = re.search(r'<div class="ranker-pool" id="rankerPool"[^>]*>', shell)
+        self.assertIsNotNone(opening, "the shell should render the pool inline")
+        self.assertNotIn("ranker-pool-sentinel", inside(shell, opening.group(0)))
         # It is still inside what SCROLLS, or `intersect` would fire immediately
         # and every page would arrive at once.
-        scroll = re.search(r'<div class="ranker-pool-scroll">(.*?)\n        </div>', shell, re.S)
-        self.assertIsNotNone(scroll, "the pool should sit in a scrolling wrapper")
-        self.assertIn("ranker-pool-sentinel", scroll.group(1))
+        self.assertIn("ranker-pool-sentinel",
+                      inside(shell, '<div class="ranker-pool-scroll">'))
 
     def test_a_late_page_appends_its_rows_rather_than_replacing_anything(self):
         board = self.board_with(pool=ranker_routes.POOL_PAGE_SIZE + 5)

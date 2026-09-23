@@ -15,7 +15,7 @@
    AND IT NAMES A SERVICE FOR THE THREE FIELDS THE CARD CAN BE SHOWING SOMEBODY
    ELSE'S ANSWER FOR — the name, the picture and the description — rather than
    carrying their TEXT. Those three are what this viewer's own field order picked
-   and what calendar/source-swap.js can flip afterwards, so the panel has to be
+   and what the card's own flip can change afterwards, so the panel has to be
    told; but `title=simkl` is one word where the description it replaces measured
    1,790 characters at its longest on one real database, and the route reads the
    value back out of the row it drew this card from
@@ -36,17 +36,31 @@
    to be added by the client after /api/state resolved, which meant hidden items
    painted and then popped out and the badges arrived a frame late.
 
+   `oob` IS HOW A MARK'S ANSWER ADDRESSES ONE CARD. Marking a show redraws every
+   card for it on the month, and each one has its own episode and its own time —
+   so they cannot share a selector. `data-airing` is what tells two airings of
+   one title apart (Item.airing_key); it is a digest precisely so that a title's
+   own slug can never put a space or a quote into an attribute htmx parses as a
+   selector. Passed only by the route that answers a mark; the page draws its
+   cards inline.
+
    WHEN TWO SERVICES DESCRIBED THE SAME AIRING, this card is the one place that
    shows. `item.alternatives` is {field: {service: value}} for the fields they
    filled in DIFFERENTLY — and only those, so a field they agreed on draws
    nothing and a card only one service described carries none of this at all.
    Two things are done with it, and which one depends on where there is room:
 
-     A SMALL LOGO, on the poster, the title and the overview. It says whose
-     value you are looking at, and clicking it swaps that one field in place
-     from values already in the page. That is a VIEW FLIP and nothing else: it
+     A SMALL LOGO, on the poster, the title and the overview, and ONLY WHERE
+     THERE IS SOMETHING TO FLIP TO — a mark is a CONTROL, and one drawn on a
+     card that has only one answer offers a choice that cannot be made. It says
+     whose value you are looking at, and pressing it shows the next service's,
+     which is already drawn beside it. That is a VIEW FLIP and nothing else: it
      writes nothing back, because a preference is stated on the Sources screen
      and a card that quietly rewrote one would be changing every other card too.
+     On the poster it sits in the middle of the bottom edge, because the four
+     corners are spoken for — runtime and episode down the left, rating and the
+     watching eye down the right, the network's own logo bottom-right, which is
+     what this control landed on top of when it had a corner of its own.
 
      A DUAL CHIP, in the meta row, for the short scalar values where showing
      both is cheaper than making anybody click. It is deliberately in the CARD
@@ -57,10 +71,14 @@
    Any field named below has to be one app/calendar/resolve.py can actually put
    in `alternatives`; tests/calendar/test_card_provenance.py holds that.
 
-   `data-alternatives` IS SINGLE-QUOTED, and that is not a style choice: `tojson`
-   returns markup Jinja will not escape again, and it escapes `'` (along with
-   `<`, `>` and `&`) but leaves `"` alone — so the same value in a double-quoted
-   attribute closes it on the first key and ships broken markup. #}
+   NO SERIALIZED COPY RIDES ON THE CARD ANY MORE. `alternatives` used to be
+   written onto every card as a JSON attribute so that a script could read a
+   value back out of it and write it into the element — on one real database the
+   description in it measured 1,790 characters, on every card that had two of
+   them. The values are drawn as ELEMENTS now and the flip is a radio choosing
+   between them, so the page holds each of them exactly once, in the place it is
+   shown. The DOM is where the markup lives, not where a copy of the data is
+   parked. #}
 {% import '_source_logo.html' as src with context %}
 {% import '_filter_badge.html' as fb with context %}
 
@@ -70,15 +88,44 @@
    to disagree. See Record.shown_source. #}
 {%- macro won_by(field) -%}{{ item.shown_source(field) }}{%- endmacro -%}
 
-{# The flip control: one logo per service, all but the current one hidden, so the
-   swap is a class change on markup already here rather than a round trip. #}
+{# THE FLIP, AS A RADIO GROUP AND A STYLESHEET RULE. One radio per service that
+   described this field, each IMMEDIATELY FOLLOWED BY THAT SERVICE'S OWN VALUE,
+   so the whole control is `input:checked + .flip-value { ... }` — see style.css.
+   That adjacency is the entire mechanism and it is why the values are drawn here
+   rather than where they used to sit: it means the stylesheet never names a
+   service, so a third one registering (app/providers/base.py's Source) costs
+   this file and that rule nothing.
+
+   THE MARK LIVES INSIDE ITS OWN VALUE, which is what makes "whose answer am I
+   looking at" answerable without naming anyone either: only the checked value is
+   drawn, so only its mark is. It is a <label> pointing at the NEXT radio, so
+   pressing it advances through the services and wraps — exactly what the script
+   this replaced did with an index and a modulo.
+
+   THE RADIOS ARE GROUPED PER CARD PER FIELD (`airing_key` is one card, uniquely
+   — two airings of one show on one day included) so two cards for the same show
+   cannot share a group and flip together. The QUERY name the details panel wants
+   is `data-details-field` instead, because one card carries three of these
+   groups and they cannot all be called `title` (static/js/ui.js).
+
+   `caller()` IS THE VALUE ITSELF, supplied by each of the three call sites,
+   because what a value looks like differs: the poster is an <img>, the title and
+   the overview are text. #}
 {%- macro swap(field) -%}
 {%- set values = item.alternatives.get(field) or {} -%}
-<button type="button" class="source-swap" data-field="{{ field }}"
-        onclick="swapCardField(this, event)"
-        title="From {{ src.label(won_by(field)) }} — click to see the other">
-{%- for name, value in values.items() %}<span class="swap-logo" data-source="{{ name }}" data-label="{{ src.label(name) }}"{% if value != item|attr(field) %} hidden{% endif %}>{{ src.mark(name) }}</span>{% endfor -%}
-</button>
+<span class="flip" data-field="{{ field }}">
+{%- for name, value in values.items() %}
+<input type="radio" class="flip-pick" id="flip-{{ item.airing_key }}-{{ field }}-{{ loop.index0 }}"
+       name="flip-{{ item.airing_key }}-{{ field }}" value="{{ name }}"
+       data-details-field="{{ field }}" autocomplete="off"
+       {%- if field == 'title' %} data-details-heading="{{ value }}"{% endif %}
+       {%- if name == won_by(field) %} checked{% endif %}>
+<span class="flip-value">{{ caller(name, value) }}<label class="source-swap"
+      for="flip-{{ item.airing_key }}-{{ field }}-{{ loop.index % values | length }}"
+      title="From {{ src.label(name) }} — click to see the other"
+      >{{ src.mark(name) }}</label></span>
+{%- endfor %}
+</span>
 {%- endmacro -%}
 {# THE ANCHOR A SEARCH RESULT LANDS ON, put here by the SERVER because the
    server is the only thing that knows which card was asked for before the page
@@ -94,7 +141,7 @@
    the one card (calendar/routes.py's `anchor`) and `sameas` is what tells two
    airings of one show apart without a second way of naming them. #}
 {%- set is_anchor = anchor is defined and anchor is not none and item is sameas anchor -%}
-<div class="card{% if item.mark_key in not_watching %} not-watching{% endif %}{% if item.mark_key in new_ids %} is-new{% endif %}{% if item.episode_number == 1 and item.season == 1 %} is-series-premiere{% endif %}{% if is_anchor %} jump-target{% endif %}"{% if is_anchor %} id="jump-target"{% endif %} data-id="{{ item.mark_key }}" data-media="{{ item.media }}" data-details-open="{{ details_url('/calendar/fragments/details', item.media, item.ids, item.season, item.mark_key) }}&amp;{{ {'title': won_by('title'), 'poster': won_by('poster'), 'overview': won_by('overview')} | urlencode }}{% if library %}&amp;{{ {'tvdb': item.ids.get('tvdb') or '', 'tmdb': item.ids.get('tmdb') or ''} | urlencode }}{% endif %}" data-details-heading="{{ item.title }}"{% if item.alternatives %} data-alternatives='{{ item.alternatives | tojson }}'{% endif %}>
+<div class="card{% if item.mark_key in not_watching %} not-watching{% endif %}{% if item.mark_key in new_ids %} is-new{% endif %}{% if item.episode_number == 1 and item.season == 1 %} is-series-premiere{% endif %}{% if is_anchor %} jump-target{% endif %}"{% if is_anchor %} id="jump-target"{% endif %} data-id="{{ item.mark_key }}" data-airing="{{ item.airing_key }}"{% if oob %} hx-swap-oob="outerHTML:.card[data-airing='{{ item.airing_key }}']"{% endif %} data-media="{{ item.media }}" data-details-open="{{ details_url('/calendar/fragments/details', item.media, item.ids, item.season, item.mark_key) }}&amp;{{ {'title': won_by('title'), 'poster': won_by('poster'), 'overview': won_by('overview')} | urlencode }}{% if library %}&amp;{{ {'tvdb': item.ids.get('tvdb') or '', 'tmdb': item.ids.get('tmdb') or ''} | urlencode }}{% endif %}" data-details-heading="{{ item.title }}">
     <div class="poster-wrap">
         <div class="ribbon-wrap"><div class="ribbon-text">NOT WATCHING</div></div>
         <div class="new-badge">✨ NEW</div>
@@ -123,37 +170,56 @@
         {% if item.runtime %}<div class="runtime-badge">⏱️ {{ item.runtime }}m</div>{% endif %}
         {% if item.network %}{% set logo %}<img class="network-logo" src="/api/network-logo?name={{ item.network | urlencode }}&amp;tmdb={{ item.ids.get('tmdb') or '' }}" alt="" loading="lazy" onerror="this.closest('.network-badge').classList.add('no-logo')"><span class="network-fallback">📡 {{ item.network }}</span>{% endset %}
         {% if can_filter %}{% call fb.badge('network', item.network, item.network, item.media, 'network-badge', 'at-poster') %}{{ logo }}{% endcall %}{% else %}<div class="network-badge" title="{{ item.network }}">{{ logo }}</div>{% endif %}{% endif %}
-        {# THE FLIP CONTROL, CENTRED ALONG THE BOTTOM EDGE, AND ONLY WHERE THERE IS
-           SOMETHING TO FLIP TO. A mark on the poster is a CONTROL, so it is drawn
-           only when `alternatives` names the poster — that is, only when another
-           service supplied a different one. Drawn on every card it read as an
-           offer of a choice that could not be made, and a control that cannot do
-           anything is worse than no control: the reader clicks it and nothing
-           happens. WHICH service a card came from is still on the card — the
-           outbound button below wears that service's own name — so nothing about
-           attribution depends on a mark up here.
-
-           The middle of the bottom edge, because the poster's four corners are
-           already spoken for: runtime and episode down the left, rating and the
-           watching eye down the right, the network's own logo bottom-right, which
-           is what this control was landing on top of when it had a corner of its
-           own. #}
-        {% if 'poster' in item.alternatives %}
-        <div class="poster-marks">{{ swap('poster') }}</div>
-        {% endif %}
         {# Both eyes reference the <symbol>s defined once per page instead of
            repeating ~800 bytes of path data on every card; which one shows is a
            CSS consequence of the card's not-watching class. #}
-        <button type="button" class="watch-toggle" onclick="toggleWatch(this, event)" title="Toggle watching">
+        {# THE MARK IS A BUTTON POSTING ITSELF, and what comes back is every card
+           on this page for this SHOW, redrawn, plus the three tiles. It used to
+           be a hand-written fetch with the whole answer worked out here first:
+           the class written onto each card, the month's counts moved by this
+           show's own airing count, a map of marks whose save had not landed yet
+           so a day arriving late could be corrected against it, and a rollback
+           for a save that failed. Every one of those was the page keeping a
+           second copy of something the server already knew.
+           IT SENDS THE STATE IT WANTS, not "toggle": a second press while the
+           first is in flight then says the same thing twice instead of undoing
+           itself.
+           THE MONTH TRAVELS BECAUSE THE ANSWER IS ABOUT THIS MONTH. The mark has
+           no month in it — it is a statement about the show — but which cards
+           have to be redrawn is exactly a question about the month on screen. #}
+        <button type="button" class="watch-toggle" title="Toggle watching"
+                hx-post="/api/state?{{ {'month': month, 'year': year, 'endpoint': endpoint.key} | urlencode }}"
+                hx-json-enc hx-boost="false" hx-swap="none"
+                hx-vals='{{ {"item_id": item.mark_key,
+                             "not_watching": item.mark_key not in not_watching} | tojson }}'>
             <svg class="icon-open" width="16" height="16" aria-hidden="true"><use href="#eye-open"></use></svg>
             <svg class="icon-closed" width="16" height="16" aria-hidden="true"><use href="#eye-closed"></use></svg>
         </button>
-        <img src="{{ item.poster or '/static/images/nopostertv.png' }}" alt="{{ item.title }} poster" loading="lazy"{% if 'poster' in item.alternatives %} data-field="poster" data-source="{{ won_by('poster') }}"{% endif %}>
+        {%- if 'poster' in item.alternatives %}
+        {#- EVERY SERVICE'S PICTURE IS IN THE PAGE and the checked radio decides
+            which is drawn. `loading="lazy"` on all of them, so the ones not on
+            screen cost nothing until they are asked for. The flip's own mark is
+            inside each value (see the macro), positioned onto the bottom edge by
+            style.css's `.poster-wrap .flip-value > .source-swap` — which is why it is not drawn
+            as a sibling here any more: it has to travel WITH the value it names,
+            or the stylesheet would have to name services to pair the two. -#}
+        {%- call(name, value) swap('poster') -%}
+        <img src="{{ value or '/static/images/nopostertv.png' }}" alt="{{ item.title }} poster"
+             loading="lazy" data-field="poster" data-source="{{ name }}">
+        {%- endcall %}
+        {%- else %}
+        <img src="{{ item.poster or '/static/images/nopostertv.png' }}" alt="{{ item.title }} poster" loading="lazy">
+        {%- endif %}
     </div>
     <div class="card-body">
         <div class="title-row">
-            <div class="show-title"{% if 'title' in item.alternatives %} data-field="title" data-source="{{ won_by('title') }}"{% endif %}>{{ item.title }}</div>
-            {% if 'title' in item.alternatives %}{{ swap('title') }}{% endif %}
+            {%- if 'title' in item.alternatives %}
+            {%- call(name, value) swap('title') -%}
+            <span class="show-title" data-field="title" data-source="{{ name }}">{{ value }}</span>
+            {%- endcall %}
+            {%- else %}
+            <div class="show-title">{{ item.title }}</div>
+            {%- endif %}
             {% if item.year %}<div class="show-year">{{ item.year }}</div>{% endif %}
         </div>
         <div class="meta-row">
@@ -176,8 +242,13 @@
         </div>
         {% if item.overview %}
         <div class="overview-row">
-            <div class="overview"{% if 'overview' in item.alternatives %} data-field="overview" data-source="{{ won_by('overview') }}"{% endif %}>{{ item.overview }}</div>
-            {% if 'overview' in item.alternatives %}{{ swap('overview') }}{% endif %}
+            {%- if 'overview' in item.alternatives %}
+            {%- call(name, value) swap('overview') -%}
+            <span class="overview" data-field="overview" data-source="{{ name }}">{{ value }}</span>
+            {%- endcall %}
+            {%- else %}
+            <div class="overview">{{ item.overview }}</div>
+            {%- endif %}
         </div>
         {% endif %}
         {# THE DATE, THE TIME IT AIRS, AND A THIRD PARTY'S SCORE.

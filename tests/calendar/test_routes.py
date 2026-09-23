@@ -630,7 +630,12 @@ class TimezonePickerTests(CalendarRouteTestCase):
 
     def test_changing_timezone_persists_and_moves_the_item_to_february(self):
         resp = self.client.post("/api/me/timezone", json={"timezone": "America/Los_Angeles"})
-        self.assertEqual(resp.status_code, 200, resp.text)
+        # 204 with `HX-Refresh`, because every day header and air time on the
+        # page was rendered for the OLD zone: the page genuinely has to come
+        # again, and htmx turns that header into the reload the caller used to
+        # do for itself.
+        self.assertEqual(resp.status_code, 204, resp.text)
+        self.assertEqual(resp.headers.get("HX-Refresh"), "true")
 
         user_row = asyncio.run(auth.get_user(self.user_id))
         self.assertEqual(user_row["timezone"], "America/Los_Angeles")
@@ -941,14 +946,6 @@ def _card_class(html: str, item_id: str) -> str:
     return m.group(1) if m else ""
 
 
-def _view_data(html: str) -> dict:
-    """The JSON the page embeds for the client — the counts and the is-new set
-    as DATA, not only as classes."""
-    m = re.search(r'<script id="calendarViewData" type="application/json">(.*?)</script>',
-                  html, re.S)
-    return json.loads(m.group(1)) if m else {}
-
-
 def _stat(html: str, element_id: str) -> str:
     m = re.search(r'id="%s">([^<]*)<' % element_id, html)
     return m.group(1) if m else ""
@@ -997,14 +994,11 @@ class ServerRenderedViewTests(CalendarRouteTestCase):
         self.assertEqual(_stat(html, "statTotal"), "4")
         self.assertEqual(_stat(html, "statWatching"), "2")
         self.assertEqual(_stat(html, "statNotWatching"), "2")
-        data = _view_data(html)
-        self.assertEqual(data["watching"], 2)
-        self.assertEqual(data["notWatchingCount"], 2)
-        # And the per-show card counts the client needs to move those numbers
-        # through a toggle without counting the cards it happens to hold.
-        self.assertEqual(data["showCounts"], {_mark_key("show-a"): 2,
-                                                  _mark_key("show-b"): 1,
-                                                  _mark_key("show-c"): 1})
+        # THE TILES ARE THE ONLY STATEMENT OF THESE NUMBERS. The page used to
+        # embed them again as JSON, with the month's per-show card counts beside
+        # them, so that marking a show could move the tiles by arithmetic; a
+        # mark is answered with the counts now, so a second copy in the page
+        # would be one more thing to keep in step.
 
     def test_a_marked_show_is_rendered_not_watching_rather_than_marked_after_paint(self):
         self.client.post("/api/state?year=2026&month=7&endpoint=shows",
@@ -1368,7 +1362,6 @@ class CalendarShellTests(CalendarRouteTestCase):
         month, so they must not shrink to the days that happen to be rendered."""
         html = self.client.get("/calendar?year=2026&month=7").text
         self.assertEqual(_stat(html, "statTotal"), "10")
-        self.assertEqual(len(_view_data(html)["showCounts"]), 10)
         # A chip for every day that has something on it, including the un-rendered ones.
         self.assertIn('href="#day-2026-07-10"', html)
 
@@ -1923,7 +1916,7 @@ class HeaderPaintStabilityTests(CalendarRouteTestCase):
         deferred means after first paint, which is the shift being prevented."""
         html = self.client.get(self.PAGE).text
         decide = html.index("classList.add('has-distrakt')")
-        self.assertLess(decide, html.index("/static/js/calendar/view.js"))
+        self.assertLess(decide, html.index("/static/js/calendar/layout.js"))
         self.assertLess(decide, html.index("<body"))
 
     def test_the_optional_nav_link_is_not_shown_by_clearing_an_attribute(self):

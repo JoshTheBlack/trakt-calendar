@@ -1,0 +1,28 @@
+{% import '_watch_counts.html' as watch_counts %}
+{# THE ANSWER TO MARKING A SHOW: every card for it on the month on screen, and
+   the two counts, all addressed out of band.
+
+   NOTHING IS SWAPPED IN PLACE. The button that was pressed is inside one of
+   these cards and there is no one place to put the answer — a show airs on as
+   many days as it airs on, and each of those cards has to change. So the
+   response has no main content at all (`hx-swap="none"` on the button) and every
+   piece of it names where it goes.
+
+   THE CARDS ARE _card.html, the same file the page and a late day draw, so a
+   card that changes because of a mark cannot come out looking different from one
+   that was drawn that way to begin with.
+
+   A CARD FOR A DAY THIS PAGE IS NOT HOLDING SWAPS NOTHING, and that is correct
+   rather than tolerated: the day has not been fetched yet, and when it is, the
+   server draws it from the marks it now has.
+
+   THE CHIPS COME TOO, for the days this title airs on. With hide mode on a mark
+   can empty a day, and a chip that goes on offering to scroll to it would be
+   pointing at nothing — `_day_chip.html` already draws that state and already
+   knows how to travel out of band, so nothing here decides it.
+
+   Context: `items` (every airing of the marked title on this month, in the
+   viewer's own reading of it), `chips` and `stats`. #}
+{% for item in items %}{% with oob = true %}{% include "_card.html" %}{% endwith %}{% endfor %}
+{% for chip in chips %}{% with oob = true %}{% include "_day_chip.html" %}{% endwith %}{% endfor %}
+{{ watch_counts.counts(stats, oob=true) }}

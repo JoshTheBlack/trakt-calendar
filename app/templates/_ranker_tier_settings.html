@@ -7,20 +7,20 @@
    from. It also could not avoid showing the last tier's values for as long as
    this tier's were on their way.
 
-   Closing it leaves the overlay in the page with its `open` class stripped
-   (static/js/ui.js's closeModal, reached by the × , by the backdrop and by
-   Escape); the next ⚙ replaces the whole thing, so nothing stale survives.
+   Closing it leaves the dialog in the page, shut — by the ×'s `command="close"`,
+   by the backdrop or by Escape, which `closedby="any"` gives it; the next ⚙
+   replaces the whole thing, so nothing stale survives.
 
    `category` is None for a tier that has gone since the page was drawn — another
    tab deleted it — and the dialog says so rather than opening on empty fields. #}
-<div class="modal-overlay open" id="tierSettings">
+<dialog class="modal-overlay" closedby="any" id="tierSettings" data-open-modal>
     <div class="modal">
         <div class="modal-head"><h2>Tier</h2>
-            <button type="button" class="modal-close" data-modal-close="tierSettings">×</button></div>
+            <button type="button" class="modal-close" command="close" commandfor="tierSettings">×</button></div>
         {% if not category %}
         <div class="modal-body"><p class="hint">That tier is no longer on this board.</p></div>
         <div class="modal-foot">
-            <button type="button" class="btn-ghost" data-modal-close="tierSettings">Close</button>
+            <button type="button" class="btn-ghost" command="close" commandfor="tierSettings">Close</button>
         </div>
         {% else %}
         {# A form, so Enter saves and the browser checks the number field before
@@ -57,10 +57,10 @@
                     <label for="tierIsolated">Isolated — keep out of the consolidated ranking</label></div>
             </div>
             <div class="modal-foot">
-                <button type="button" class="btn-ghost" data-modal-close="tierSettings">Cancel</button>
+                <button type="button" class="btn-ghost" command="close" commandfor="tierSettings">Cancel</button>
                 <button type="submit" class="btn-primary">Save tier</button>
             </div>
         </form>
         {% endif %}
     </div>
-</div>
+</dialog>

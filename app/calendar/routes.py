@@ -6,9 +6,8 @@ than one long context build, because they are asked at different scopes and one
 of them is asked twice. `assemble_month` produces the month's cards and every
 number stated ABOUT the month; `_count_visible` tells a day that has not been
 fetched yet how much space to hold for the cards that are coming;
-`_view_preferences`, `_view_data` and `_day_chips` are three different views of
-the same assembly for three different consumers — the template, the client's own
-bookkeeping, and the jump-to strip.
+`_view_preferences` and `_day_chips` are two different views of the same
+assembly for two different consumers — the template and the jump-to strip.
 
 Everything deciding WHAT a viewer may see is read from their session, never from
 the query string: the per-user filters and the not-watching marks are theirs, so
@@ -551,22 +550,6 @@ def _view_preferences(prefs: dict, settings) -> dict:
     }
 
 
-def _view_data(assembly: MonthAssembly) -> dict:
-    """The shell's numbers again as DATA rather than markup, so the client can keep
-    the stats tiles honest through a toggle without asking the DOM.
-
-    ONLY NUMBERS. It used to carry the month's is-new ids and this viewer's marks
-    as well, for the page to put back onto days that arrived late. The server
-    draws both onto a late day itself now — the marks from storage, and is-new
-    from the answer the shell writes onto that day's own request (`_day_url`) — so
-    the only marks the page keeps are the ones it has not finished saving."""
-    return {
-        "showCounts": dict(assembly.show_counts),
-        "watching": assembly.watching,
-        "notWatchingCount": assembly.not_watching_count,
-    }
-
-
 def _day_chip(day: date, items: list, not_watching: set[str],
               hide_not_watching: bool) -> dict:
     """One day's chip for the jump-to strip.
@@ -775,7 +758,6 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
                   "not_watching": month_view.not_watching_count},
         "delta": month_view.delta,
         "history": month_view.history,
-        "view_data": _view_data(month_view),
         # EVERY CONSUMER GETS THE EXPANDED SET, not the raw stored one. Mixing
         # the two is how a mark hides a card but not its day's chip: the card
         # asks about `mark_key` and the chip would be counting raw ids.
@@ -1103,6 +1085,10 @@ async def calendar_day(request: Request):
                            request.query_params.get("new") or "")
     context = {
         "request": request, "not_watching": not_watching,
+        # WHICH MONTH THIS DAY IS ON, for the watch toggle on each of its cards:
+        # a mark's answer is every card for that title on the month, so the
+        # button has to say which month it is asking about (_card.html).
+        "month": month, "year": year, "endpoint": endpoint,
         # Same as the shell's — a day that arrives late offers the same badges,
         # carrying the same stored answers (vocab.BadgeModes).
         "can_filter": True,
@@ -1539,7 +1525,7 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
 
     THE NAME, THE PICTURE AND THE DESCRIPTION COME FROM THE CARD, not from the
     answer: those three are what this viewer's own field order picked, and
-    calendar/source-swap.js can flip any of them after the card was rendered, so
+    the card's own radio group can flip any of them after it was rendered, so
     a panel drawn from the answer alone would open on words the reader was not
     just looking at.
 
@@ -1720,6 +1706,88 @@ async def get_state(request: Request):
     return JSONResponse(await calendar_state.load_state(user.user_id, endpoint.key, year, month))
 
 
+async def _marked_answer(request: Request, user, endpoint, year: int, month: int,
+                         item_id: str) -> Response:
+    """What a mark looks like on screen, drawn by the side that decided it.
+
+    EVERY CARD FOR THIS TITLE ON THIS MONTH, plus the two counts a mark moves,
+    all out of band (_marked_cards.html). The page used to work this out for
+    itself: it wrote the class onto each card it was holding, moved the tiles by
+    this show's own airing count taken from a per-show map shipped with the page,
+    remembered the mark until its save landed so that a day arriving in the
+    meantime could be corrected against it, and put everything back if the save
+    failed. All of that was the browser keeping a second copy of what the server
+    already knew, and the copy could only ever describe the days the page
+    happened to be holding.
+
+    IT IS THE SAME ASSEMBLY THE CARDS COME FROM, read AFTER the write, so the
+    numbers in this answer and the cards in this answer cannot disagree.
+
+    A TITLE THAT IS NOT ON THIS MONTH ANSWERS WITH THE COUNTS ALONE. That is not
+    an error: the mark is a statement about the show and it has been stored
+    whatever month is on screen, and a page whose month does not draw the title
+    has nothing to redraw.
+    """
+    settings = load_settings()
+    prefs = await auth.get_user_prefs(user.user_id)
+    tz = _resolve_viewer_tz(user, settings)
+    not_watching = await calendar_state.not_watching_ids(user.user_id)
+    try:
+        grouped, meta = await calendar_cache.assemble_range(
+            endpoint, settings, tz=tz,
+            start_date=date(year, month, 1),
+            end_date=date(year, month, _calendar.monthrange(year, month)[1]),
+            **vocab.active_specs(prefs, endpoint.media, honour_pause=True),
+            not_watching_ids=not_watching,
+            prefs=await _viewer_source_selection(request, user, endpoint.media),
+            # `allow_fetch=False`, WHICH IS THE WHOLE DIFFERENCE BETWEEN THIS READ
+            # AND THE PAGE'S. The page asked for this month and filled whatever it
+            # had to; this is redrawing cards that are ALREADY ON SCREEN, so
+            # whatever is stored is by definition what drew them. Letting a mark
+            # fill a window would make pressing an eye spend a sequence of paced
+            # upstream calls — for a month the reader is already looking at — the
+            # first time a cached window aged out mid-session.
+            allow_fetch=False,
+        )
+    except TraktError as exc:
+        # The mark IS stored — that happened before this read. A month that
+        # cannot be re-read leaves the page showing what it showed, which is one
+        # card out of date until the next load rather than a lost mark.
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=200)
+
+    # `not_watching_keys` rather than the raw stored ids, for the reason the page
+    # render gives: a card asks about `mark_key`, which the assembler expands.
+    marked = meta["not_watching_keys"]
+    items = [item for group in grouped for item in group["items"]
+             if item.mark_key == item_id]
+    # AND THE CHIP FOR EVERY DAY THIS TITLE AIRS ON, because with hide mode on a
+    # mark can empty a day outright and a chip offering to scroll somewhere blank
+    # is the thing `_day_chip` exists to avoid. Only those days: a mark cannot
+    # change a day the title does not air on, and the whole strip would be
+    # thirty-one answers to a question about one or two of them. Drawn by the
+    # same rule the shell's chips came from, which is why it is that function
+    # being called rather than this one working the condition out again.
+    days = {group["date"] for group in grouped
+            if any(item.mark_key == item_id for item in group["items"])}
+    chips = [_day_chip(date.fromisoformat(group["date"]), group["items"], marked,
+                       prefs["hide_not_watching"])
+             for group in grouped if group["date"] in days]
+    return templates.TemplateResponse(request, "_marked_cards.html", {
+        "chips": chips,
+        "request": request, "items": items,
+        "not_watching": marked, "new_ids": meta.get("new_ids") or set(),
+        "can_filter": True, "badge_modes": vocab.BadgeModes(prefs),
+        "settings": settings, "is_admin": bool(user and user.is_admin),
+        "library": _library(user, settings),
+        "month": month, "year": year, "endpoint": endpoint,
+        # THE ASSEMBLER'S OWN COUNTS, not a second tally of the same items: it
+        # already translated this viewer's stored marks into mark keys to build
+        # `grouped`, and counting them again here would be a second answer to a
+        # question that has one.
+        "stats": {"watching": meta["watching"], "not_watching": meta["not_watching"]},
+    })
+
+
 @guard.post("/api/state", AuthLevel.CALENDAR_APPROVED)
 async def post_state(request: Request):
     """A DELTA endpoint, not a whole-document replace.
@@ -1748,9 +1816,9 @@ async def post_state(request: Request):
         if not item_id:
             return JSONResponse({"ok": False, "error": "Missing item_id"}, status_code=400)
         await calendar_state.set_not_watching(
-            user.user_id, item_id, bool(payload.get("not_watching")),
+            user.user_id, item_id, route_params.ticked(payload.get("not_watching")),
         )
-        return JSONResponse({"ok": True})
+        return await _marked_answer(request, user, endpoint, year, month, item_id)
 
     if "last_count" in payload or "last_show_ids" in payload:
         last_count = payload.get("last_count")
@@ -1869,14 +1937,26 @@ async def post_me_prefs(request: Request):
     """
     user = await auth.current_user(request)
     data = await authz.json_body(request)
+    # WHICH MONTH IS ON SCREEN, for the answer rather than for the write: a view
+    # preference has no month in it, but hiding not-watching can empty a DAY, and
+    # the chip that day owns is a fact about the month being looked at.
+    today = clock.today()
+    year = route_params.valid_year(request.query_params.get("year"), today.year)
+    month = route_params.valid_month(request.query_params.get("month"), today.month)
+    endpoint = get_endpoint(request.query_params.get("endpoint"))
 
     updates: dict = {}
     if "card_style" in data and data["card_style"] in _CARD_STYLES:
         updates["card_style"] = data["card_style"]
     if "day_packing" in data and data["day_packing"] in _DAY_PACKINGS:
         updates["day_packing"] = data["day_packing"]
+    # `ticked` RATHER THAN `bool`, and that distinction is the whole of it: this
+    # arrives as a checkbox's own "0"/"1" now (templates/index.html posts the box
+    # with a hidden companion, because an unticked box sends nothing and absent
+    # means leave alone here), and `bool("0")` is True. route_params.ticked is the
+    # one place that knows which spellings mean on.
     if "hide_not_watching" in data:
-        updates["hide_not_watching"] = bool(data["hide_not_watching"])
+        updates["hide_not_watching"] = route_params.ticked(data["hide_not_watching"])
     # THE FILTERS ARE NOT HERE ANY MORE. They are one panel's worth of chips,
     # submitted whole, and they now have a route of their own that speaks that
     # shape — see post_me_filters. This one keeps the view preferences: what a
@@ -1890,7 +1970,64 @@ async def post_me_prefs(request: Request):
     await auth.update_user_prefs(user.user_id, **updates)
     if await share_links.get(user.user_id) is not None:
         await share_links.update_owner_defaults(user.user_id, **updates)
-    return JSONResponse({"ok": True})
+    return await _view_answer(request, user, endpoint, year, month,
+                              chips="hide_not_watching" in updates)
+
+
+async def _view_answer(request: Request, user, endpoint, year: int, month: int,
+                       *, chips: bool) -> Response:
+    """What a changed view preference looks like on screen, drawn by the server.
+
+    THE CLASSES ARE ON <body> AND <body> IS THE ONE ELEMENT A SWAP NEVER
+    REPLACES, so the answer is `#pageMeta` out of band: it sits inside the body,
+    it carries what the classes should be, and static/js/boost.js already wears
+    whatever it says on arrival (templates/_calendar_meta.html). Nothing in the
+    browser decides which class a card style means.
+
+    THE DAY CHIPS COME TOO WHEN HIDING CHANGED, and only then. With hiding on, a
+    day whose every title is marked draws nothing at all, and a chip that went on
+    offering to scroll to it would be pointing at nothing — which is the state
+    `_day_chip` already knows how to draw. Card style and day packing cannot
+    empty a day, so they answer with the classes alone.
+
+    IT IS A CACHE-ONLY READ (`allow_fetch=False`) for the reason the watch
+    toggle's is: this is re-describing a month ALREADY ON SCREEN, so whatever is
+    stored is by definition what drew it, and letting a preference toggle spend a
+    sequence of paced upstream calls would be the wrong thing to do with a press.
+    """
+    settings = load_settings()
+    prefs = await auth.get_user_prefs(user.user_id)
+    view = _view_preferences(prefs, settings)
+    context = {
+        "request": request,
+        "view": view,
+        # The same answer the page renders it from, so the reveal cannot
+        # appear or vanish as a side effect of changing a card style.
+        "distrakt_available": bool(
+            user and user.distrakt_approved and user.has_tracker_identity),
+        "chips": [],
+    }
+    if chips:
+        try:
+            grouped, meta = await calendar_cache.assemble_range(
+                endpoint, settings, tz=_resolve_viewer_tz(user, settings),
+                start_date=date(year, month, 1),
+                end_date=date(year, month, _calendar.monthrange(year, month)[1]),
+                **vocab.active_specs(prefs, endpoint.media, honour_pause=True),
+                not_watching_ids=await calendar_state.not_watching_ids(user.user_id),
+                prefs=await _viewer_source_selection(request, user, endpoint.media),
+                allow_fetch=False,
+            )
+        except TraktError:
+            # The preference IS saved; a month that cannot be re-read leaves the
+            # chips describing the previous answer until the next load, which is
+            # a stale grey rather than a lost setting.
+            grouped, meta = [], {"not_watching_keys": set()}
+        context["chips"] = _day_chips(
+            MonthAssembly(grouped=grouped), year, month,
+            _calendar.monthrange(year, month)[1],
+            meta["not_watching_keys"], view["hide_not_watching"])
+    return templates.TemplateResponse(request, "_view_answer.html", context)
 
 
 def _source_selection_from_form(data: dict, settings,
@@ -2269,11 +2406,16 @@ async def post_filter_badge(request: Request):
 
 @guard.post("/api/me/timezone", AuthLevel.CALENDAR_APPROVED)
 async def post_me_timezone(request: Request):
-    """Persist the viewer's calendar timezone.
+    """Persist the viewer's calendar timezone, and ask for the page again.
 
     No automatic browser detection — this is reached either by picking a
     zone from the header's dropdown, or by the "use my device timezone" button
     filling in Intl's resolved zone name before the same request fires.
+
+    ANSWERED WITH `HX-Refresh` RATHER THAN NOTHING, because every day header and
+    air time on the page was rendered server-side for the OLD zone: nothing the
+    browser could do to the page it is holding would make it right. htmx turns
+    that header into a reload, which is what the caller used to do for itself.
     """
     user = await auth.current_user(request)
     data = await authz.json_body(request)
@@ -2289,7 +2431,7 @@ async def post_me_timezone(request: Request):
     # has a share row at all — see that route's docstring.
     if await share_links.get(user.user_id) is not None:
         await share_links.update_owner_defaults(user.user_id, timezone=tz_name)
-    return JSONResponse({"ok": True})
+    return Response(status_code=204, headers={"HX-Refresh": "true"})
 
 
 # `private` rather than `public`: this response now requires a session, so a

@@ -49,8 +49,8 @@
                 hx-post="/api/distrakt/import{{ month_query }}" hx-json-enc
                 hx-target="#distraktShowList"
                 hx-swap="innerHTML swapEmpty:false show:top showTarget:.row-marked">⤓ Import</button>
-        <button type="button" class="pill-btn" data-modal-open="addShowModal">➕ Add show</button>
-        <button type="button" class="pill-btn" data-modal-open="addMovieModal">🎬 Add film</button>
+        <button type="button" class="pill-btn" command="show-modal" commandfor="addShowModal">➕ Add show</button>
+        <button type="button" class="pill-btn" command="show-modal" commandfor="addMovieModal">🎬 Add film</button>
 {% endcall %}
 
 <main class="distrakt-main">

@@ -68,7 +68,7 @@ class FakeSearchSource:
 
 def result_keys(html: str) -> list[str]:
     """The keys of the results a search fragment drew."""
-    return re.findall(r'class="ranker-result" data-key="([^"]+)"', html)
+    return re.findall(r'class="ranker-result[^"]*"\s+data-key="([^"]+)"', html)
 
 
 def result_titles(html: str) -> list[str]:

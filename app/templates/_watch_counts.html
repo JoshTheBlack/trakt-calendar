@@ -1,0 +1,26 @@
+{# THE TWO NUMBERS A MARK MOVES, drawn from one place by the page and by the
+   answer to a mark alike.
+
+   THEY ARE THE SERVER'S, ALWAYS, and that is the whole reason this partial
+   exists. The page used to ship the month's per-show card counts as JSON beside
+   the tiles so that marking a show could move these two without asking — add
+   this show's airings to one, take them off the other — which is arithmetic
+   about a month held in a browser that may only be holding part of it. Marking
+   a show now answers with these, computed over the same assembly the cards in
+   the same answer came from, so the numbers and the cards can never describe
+   two different readings of the month.
+
+   `hx-swap-oob` ON EACH, because a mark's answer is addressed entirely out of
+   band: the cards go to their own selectors and these two go to their own ids.
+   `oob` is passed only by that answer — the page draws them inline.
+
+   THE TOTAL IS NOT HERE. It counts the titles this month HOLDS, which a mark
+   does not change: a show you are not watching is still on the calendar. It
+   moved with every mark in the old arithmetic only because all three were
+   rewritten together. #}
+{% macro counts(stats, oob=false) -%}
+<div class="stats-row"><span>👀 Watching:</span><strong id="statWatching"
+     {%- if oob %} hx-swap-oob="true"{% endif %}>{{ stats.watching }}</strong></div>
+<div class="stats-row"><span>🚫 Not Watching:</span><strong id="statNotWatching"
+     {%- if oob %} hx-swap-oob="true"{% endif %}>{{ stats.not_watching }}</strong></div>
+{%- endmacro %}

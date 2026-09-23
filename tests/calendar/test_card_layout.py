@@ -76,11 +76,24 @@ class ALongDescriptionStaysInsideTheCardTests(unittest.TestCase):
     def test_the_description_is_wrapped_in_a_row_whatever_the_card_carries(self):
         """The row is unconditional, so the layout is one shape rather than one
         shape per card. A row that appeared only beside a flip control would mean
-        two of these layouts were only ever seen on a merged card."""
-        row = re.search(r'<div class="overview-row">\s*<div class="overview"',
-                        CARD, re.S)
-        self.assertIsNotNone(
-            row, "the description is not the first thing inside .overview-row")
+        two of these layouts were only ever seen on a merged card.
+
+        A CARD WHOSE SERVICES DISAGREED DRAWS THE DESCRIPTION INSIDE THE FLIP,
+        and that is still one shape: `.flip` and `.flip-value` are
+        `display: contents` (style.css), so the description is a flex child of
+        this row either way. What is asserted is that the row opens before either
+        branch and that nothing else is laid out between them."""
+        row = re.search(
+            r'<div class="overview-row">\s*\{%-? if .*?\{%-? endif %\}\s*</div>',
+            CARD, re.S)
+        self.assertIsNotNone(row, "the description row is not unconditional")
+        self.assertIn('class="overview"', row.group(0))
+        # The wrapper, and the one value the radio says to show. The others are
+        # `display: none`, which is the whole of the flip.
+        for contents in (".flip", ".flip-pick:checked + .flip-value"):
+            with self.subTest(selector=contents):
+                self.assertEqual(value(declarations(contents), "display"), "contents")
+        self.assertEqual(value(declarations(".flip-value"), "display"), "none")
 
     def test_the_row_can_shrink_so_the_card_bottom_is_never_pushed_off(self):
         """`min-height: 0` is what lets a flex child be smaller than its content.
@@ -131,7 +144,12 @@ class NothingOnThePosterIsDrawnOnTopOfAnythingElseTests(unittest.TestCase):
     # rather than discovered, because "is this drawn on the poster" is a fact
     # about the markup and a stylesheet scan cannot tell an overlay from a modal.
     OVERLAYS = (".runtime-badge", ".ep-badge", ".network-badge", ".rating-badge",
-                ".watch-toggle", ".new-badge", ".poster-marks", ".premiere-badge")
+                ".watch-toggle", ".new-badge", ".premiere-badge",
+                # The service mark on the poster. It is placed from INSIDE the
+                # value it names rather than from a container of its own, so that
+                # only the shown service's mark is drawn without any rule having
+                # to ask which service that is (_card.html's `swap` macro).
+                ".poster-wrap .flip-value > .source-swap")
 
     # Two marks anchored this close on both axes will touch: the smallest of them
     # is a 15px logo in a padded plate and the largest a 30px round button.
@@ -174,19 +192,20 @@ class NothingOnThePosterIsDrawnOnTopOfAnythingElseTests(unittest.TestCase):
                     self.assertTrue(not same_edges or apart,
                                     f"{name} and {other} are drawn on top of each other")
 
-    def test_a_service_mark_is_placed_by_the_stack_and_never_by_itself(self):
-        """Whatever is drawn on a poster is placed in one container, so a second
-        mark that ever earns a place there cannot be given one separately — which
-        is exactly how the flip control ended up on the network's logo."""
-        self.assertIn('class="poster-marks"', CARD)
+    def test_a_service_mark_is_placed_only_where_it_is_drawn_on_a_poster(self):
+        """The flip's mark appears in three places — on the poster, beside the
+        title and beside the description — and only the poster one is an overlay.
+        So the placing lives in the POSTER's rule and the control's own rule says
+        nothing about position, which is what stops a mark beside a title
+        inheriting a corner of a poster it is not on."""
         self.assertIsNone(self._anchor(".source-swap"),
-                          "the flip control positions itself instead of sitting in the stack")
+                          "the flip control positions itself wherever it is drawn")
 
-    def test_the_stack_sits_between_the_two_bottom_corners(self):
+    def test_the_mark_sits_between_the_two_bottom_corners(self):
         """Both bottom corners are taken — the episode badge on one side, the
         network's own logo on the other — and the middle is the gap every card
         has."""
-        marks = declarations(".poster-marks")
+        marks = declarations(".poster-wrap .flip-value > .source-swap")
         self.assertEqual(value(marks, "left"), "50%")
         self.assertIn("translateX(-50%)", value(marks, "transform") or "")
         self.assertIsNotNone(value(marks, "bottom"))

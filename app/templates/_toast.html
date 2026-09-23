@@ -12,10 +12,34 @@
    instead of replacing whatever the other put there. `.is-flash` fades it out
    with a CSS animation and no timer (style.css, beside the toast rules), which
    is why nothing here has to be cleaned up afterwards. #}
+{# THE LINE ITSELF, spelled once for both the ways one can appear. A toast the
+   SERVER raises comes through `flash` below; one the BROWSER raises — a refusal
+   from a request that answers no markup at all, a clipboard result — clones
+   `template` and fills it in (static/js/ui.js). The browser used to assemble its
+   own, and the two had already drifted in the way that matters most: the
+   script's carried no `role`, so every refusal it raised went unannounced while
+   the server's informational lines were read out. #}
+{# `offer` is a toast with something to PRESS in it — the rankings board's
+   removal, whose Undo is the removal history's own button. It stays twice as long
+   and takes pointer events back, both in the stylesheet. Passed as a `call` block
+   so the button is still written where it belongs and this stays the only place
+   that says what a toast is made of. #}
+{% macro line(message, ok=true, offer=false) %}
+<div class="toast {{ 'ok' if ok else 'err' }} is-flash{{ ' is-offer' if offer }}"
+     role="status">{{ message }}{% if caller %}{{ caller() }}{% endif %}</div>
+{%- endmacro %}
+
 {% macro flash(message, ok=true) %}
 {%- if message %}
 <div id="toastHost" hx-swap-oob="beforeend">
-    <div class="toast {{ 'ok' if ok else 'err' }} is-flash" role="status">{{ message }}</div>
+    {{ line(message, ok) }}
 </div>
 {%- endif %}
 {% endmacro %}
+
+{# IN THE <head>, WHICH IS WHY IT IS ALWAYS THERE. A boosted navigation swaps
+   <body> and leaves <head> alone, so a template put here once serves every page
+   of the session — including the ones that carry no #toastHost of their own and
+   whose only toast is a clipboard result. The empty text and the `ok` are
+   placeholders; the script sets both. #}
+{% macro template() %}<template id="toastLine">{{ line("") }}</template>{% endmacro %}

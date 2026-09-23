@@ -911,7 +911,7 @@ class SearchRouteTests(RankerTestCase):
             return self.client.get("/rankings/fragments/search?" + urlencode(params))
 
     def results(self, response) -> list[str]:
-        return re.findall(r'class="ranker-result" data-key="([^"]+)"', response.text)
+        return re.findall(r'class="ranker-result[^"]*"\s+data-key="([^"]+)"', response.text)
 
     def test_a_query_too_short_to_mean_anything_draws_nothing(self):
         resp = self.search(q="a")
@@ -956,6 +956,121 @@ class SearchRouteTests(RankerTestCase):
                 "SELECT COUNT(*) FROM login_attempts WHERE key_type = 'ranker_search' "
                 "AND key_value = ?", (str(self.user_id),)),
             1)
+
+
+class AddingFromSearchTests(RankerTestCase):
+    """Clicking a result adds it and answers with the PAGE — the search still on
+    it, that result now drawn as held, and the board carrying its new version.
+
+    WHY THE PAGE AND NOT A FRAGMENT: the version. Every add bumps it, and a page
+    that took the row alone would have to be told the new one separately or 409 on
+    its next save. The page carries it the way every other action here does. What
+    made that affordable is that the search is redrawn from the cache its own
+    request filled, so answering with the page asks nobody and spends nothing.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.ranker_user()
+        self.sign_in_as(self.user_id)
+        asyncio.run(ranker.create_board(self.user_id, uid="b1"))
+        self.source = _CannedSearch()
+
+    def add(self, key="show:tmdb:1", query="test", media="show"):
+        with patched(ranker_sources, "search_source", lambda: self.source):
+            return self.client.post("/rankings/boards/b1/items/add",
+                                    json={"key": key, "query": query, "media": media})
+
+    def results(self, html) -> list[str]:
+        return re.findall(r'class="ranker-result[^"]*"\s+data-key="([^"]+)"', html)
+
+    def held(self, html) -> list[str]:
+        return re.findall(r'class="ranker-result is-held"\s+data-key="([^"]+)"', html)
+
+    def test_the_answer_is_the_whole_page_with_the_title_in_the_pool(self):
+        response = self.add()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("<html", response.text)
+        self.assertIn('data-key="show:tmdb:1"', response.text)
+        self.assertIn("Added to the pool.", response.text)
+
+    def test_the_search_is_still_on_the_page_afterwards(self):
+        """Adding a second title from one search must not mean typing it again."""
+        html = self.add().text
+        self.assertIn('value="test"', html)
+        self.assertEqual(len(self.results(html)), ranker_routes.MAX_SEARCH_RESULTS)
+
+    def test_redrawing_the_search_reads_the_cache_and_never_asks_again(self):
+        """Otherwise adding a title would be a way to search that the budget
+        never sees — which is the rule title_from_search is built around."""
+        self.add()
+        self.assertTrue(self.source.cached_only,
+                        "the add should have read the search back")
+        self.assertTrue(all(self.source.cached_only),
+                        f"every read must be cache-only, got {self.source.cached_only}")
+
+    def test_the_added_result_comes_back_drawn_as_held(self):
+        html = self.add().text
+        self.assertEqual(self.held(html), ["show:tmdb:1"])
+        self.assertIn("show:tmdb:2", self.results(html))
+        self.assertNotIn("show:tmdb:2", self.held(html))
+
+    def test_the_page_carries_the_boards_new_version(self):
+        """The whole reason this answers with a page: a row alone would leave the
+        browser guessing at the version and 409ing on its next save."""
+        before = asyncio.run(ranker.fetch_board(self.user_id, "b1"))["version"]
+        html = self.add().text
+        after = asyncio.run(ranker.fetch_board(self.user_id, "b1"))["version"]
+        self.assertGreater(after, before)
+        self.assertIn(f'"version": {after}', html)
+
+    def test_the_added_title_is_drawn_at_the_head_of_the_pool(self):
+        """The pool pages sixty at a time and a new title sorts LAST, so on a
+        board with a full page of unranked titles it would land on a page nobody
+        is looking at — the count would tick up and nothing else would happen.
+        The pool stores no order (every pooled title shares one rank), so there is
+        nothing to disturb by putting it first."""
+        # Fill the first page with titles the canned search does NOT offer, so
+        # the one added below is genuinely new and genuinely sorts last. Adding
+        # a title already at the head of the pool would hold whatever the code
+        # did, which is how the first version of this test passed.
+        refs = [show_ref(str(n)) for n in range(30, 30 + ranker_routes.POOL_PAGE_SIZE + 4)]
+        asyncio.run(ranker.add_titles(self.user_id, "b1", refs))
+        drawn = re.findall(r'data-key="([^"]+)"', inside_pool(self.client.get("/rankings").text))
+        self.assertNotIn("show:tmdb:1", drawn, "it should not be on the board yet")
+        self.assertEqual(len(drawn), ranker_routes.POOL_PAGE_SIZE,
+                         "the first page should be full, or nothing is being pushed off it")
+        pool = inside_pool(self.add(key="show:tmdb:1").text)
+        self.assertEqual(re.findall(r'data-key="([^"]+)"', pool)[0], "show:tmdb:1")
+
+    def test_a_stale_result_is_refused_rather_than_looked_up_again(self):
+        response = self.add(key="show:tmdb:9999999")
+        self.assertNotEqual(response.status_code, 200)
+        self.assertTrue(all(self.source.cached_only))
+
+    def test_the_drag_s_route_still_answers_json(self):
+        """Two answers, one add: a dropped result has to land where the pointer
+        put it, which no swap can name, so that path keeps the count."""
+        with patched(ranker_sources, "search_source", lambda: self.source):
+            response = self.client.post("/api/rankings/boards/b1/items",
+                                        json={"key": "show:tmdb:3", "query": "test"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"ok": True, "added": 1})
+
+
+def inside_pool(html: str) -> str:
+    """The pool's own rows, by nesting depth: a row carries a <div> of its own
+    (its move menu), so a non-greedy match to the next close stops inside one."""
+    opening = re.search(r'<div class="ranker-pool" id="rankerPool"[^>]*>', html).group(0)
+    at = html.index(opening) + len(opening)
+    depth, i = 1, at
+    while depth:
+        opens, closes = html.find("<div", i), html.index("</div>", i)
+        if 0 <= opens < closes:
+            depth, i = depth + 1, opens + 4
+        else:
+            depth, i = depth - 1, closes + 6
+    return html[at:i - 6]
 
 
 class _CannedSearch:

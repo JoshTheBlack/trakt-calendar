@@ -266,12 +266,14 @@ class RewatchPrompt:
     the formatting moved with the markup.
     """
 
-    _OPEN = re.compile(r'<div id="rewatchModal" class="modal-overlay open"')
+    _OPEN = re.compile(r'<dialog id="rewatchModal"[^>]*data-open-modal')
     _FINISHED = re.compile(r"Your history says you finished (.*?) season (\d+)\s*"
                            r"on (.*?)\.</p>", re.S)
     _FROM = re.compile(r'id="rewatchFrom"[^>]*value="([^"]*)"')
     _PRESET = re.compile(r'data-fill-value="([^"]*)"')
-    _PRESET_LABEL = re.compile(r'data-fill-label="([^"]*)"')
+    # A preset carries its DAY and no longer its spelling: pressing one fills the
+    # field, and the field asks the server what the button should say.
+    _ASKS_LABEL = re.compile(r'id="rewatchFrom"[^>]*hx-get="([^"]*)"', re.S)
     _SUBMIT = re.compile(r'id="rewatchSubmit".*?>(.*?)</button>', re.S)
     _EPISODE = re.compile(r"<li>S\d+E(\d+)\s*<span class=\"rewatch-when\">([^<]*)</span>")
     _POST = re.compile(r'hx-post="([^"]*)"')
@@ -282,6 +284,14 @@ class RewatchPrompt:
     @property
     def asked(self) -> bool:
         return bool(self._OPEN.search(self.html))
+
+    @property
+    def label_source(self) -> str:
+        """Where the submit button's wording comes from as the field is typed
+        into. Empty when the field asks nobody, which is the shape this replaced:
+        a date formatter in the browser."""
+        found = self._ASKS_LABEL.search(self.html)
+        return found.group(1) if found else ""
 
     @property
     def title(self) -> str:
@@ -326,13 +336,6 @@ class RewatchPrompt:
         answer and announcing another."""
         found = self._SUBMIT.search(self.html)
         return " ".join(found.group(1).split()) if found else ""
-
-    @property
-    def preset_labels(self) -> list[str]:
-        """How each preset's day is SPELLED. The server spells every day this
-        question can show, so pressing a preset needs no date formatter in the
-        browser to say which day it just chose."""
-        return self._PRESET_LABEL.findall(self.html)
 
     @property
     def resubmit(self) -> str:

@@ -114,26 +114,51 @@ html.has-distrakt #distraktNav { display: flex; }
 .control select option { background: var(--bg-panel); color: var(--text); }
 
 /* ---- Nav menu: collapses several destinations into one pill ---- */
-/* <details> rather than a scripted popover — it opens, closes on Escape, and is
-   keyboard reachable with no JS at all. app.js only adds close-on-outside-click. */
+/* A POPOVER, WHICH IS WHY NO SCRIPT DRIVES IT. Light dismiss, Escape and
+   keyboard reach are the browser's; the menu used to be a <details>, which has
+   the last two and not the first, so closing it on a click elsewhere was a
+   delegated listener in a file of its own. See templates/_nav.html.
+   IT IS IN THE TOP LAYER, so it is positioned against the viewport rather than
+   against this box — hence the anchor rules below rather than `position:
+   absolute`. */
 .nav-menu { position: relative; }
-.nav-menu > summary {
-    list-style: none; cursor: pointer;
+.nav-menu-btn {
+    cursor: pointer;
     /* Same shape as .pill-btn so it sits in the row as another button. */
     background: var(--bg-panel); border: 1px solid var(--card-border); color: var(--text);
     padding: 6px 12px; border-radius: 999px; font-size: 0.78rem; font-weight: 600;
     display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
     transition: all .18s ease;
 }
-.nav-menu > summary::-webkit-details-marker { display: none; }
-.nav-menu > summary:hover,
-.nav-menu[open] > summary { border-color: var(--gold); background: rgba(232,181,69,0.12); }
+.nav-menu-btn:hover,
+.nav-menu:has(> [popover]:popover-open) > .nav-menu-btn {
+    border-color: var(--gold); background: rgba(232,181,69,0.12);
+}
+/* `position-anchor: auto` IS LOAD-BEARING AND IT IS NOT THE INITIAL VALUE IN
+   PRACTICE. A popover's implicit anchor is the button that opened it, which is
+   exactly what is wanted here — one panel, positioned under whichever control
+   invoked it — but MEASURED in Firefox 155 and Chromium 153, leaving
+   `position-anchor` unwritten does not resolve that implicit anchor in either:
+   the panel lands at the top-left of the viewport. Spelling `auto` out resolves
+   it in both. */
+/* `display` ONLY WHEN IT IS OPEN, and this is not tidiness. A closed [popover]
+   is `display: none` by the user-agent sheet, and an author rule setting display
+   unconditionally BEATS that — so the panel stays laid out, invisible but in the
+   way, and swallows clicks on whatever it covers. MEASURED: the rankings page's
+   "+ New board" button sits under the menu's box and could not be pressed at
+   all. `.ranker-menu:popover-open` below has always been written this way. */
 .nav-menu-items {
-    position: absolute; right: 0; top: calc(100% + 6px); z-index: 40;
-    display: flex; flex-direction: column; gap: 2px; min-width: 170px; padding: 6px;
+    position: fixed; position-anchor: auto; inset: auto; z-index: 40;
+    top: anchor(bottom); right: anchor(right); margin: 6px 0 0 0;
+    flex-direction: column; gap: 2px; min-width: 170px; padding: 6px;
     background: var(--bg-panel); border: 1px solid var(--card-border); border-radius: 10px;
     box-shadow: 0 18px 40px rgba(0,0,0,0.55);
+    /* A panel opened from a control near the left edge would otherwise hang off
+       it; `--nav-shove` pins it a gutter in instead. */
+    position-try-fallbacks: --nav-shove;
 }
+@position-try --nav-shove { left: 8px; right: auto; top: anchor(bottom); }
+.nav-menu-items:popover-open { display: flex; }
 .nav-menu-items a, .nav-menu-items button {
     display: flex; align-items: center; gap: 8px; width: 100%;
     padding: 7px 10px; border-radius: 7px; border: none; background: none;
@@ -175,11 +200,13 @@ html.has-distrakt #distraktNav { display: flex; }
    is how a row wider than the guess came to draw itself outside the panel's own
    background. Sized from the columns instead, there is no number to get wrong. */
 .view-menu > .nav-menu-items {
-    left: 0; right: auto; width: max-content;
-    display: grid; grid-template-columns: max-content max-content 210px;
+    left: anchor(left); right: auto; width: max-content;
+    grid-template-columns: max-content max-content 210px;
     align-items: center; column-gap: 10px; row-gap: 2px;
     padding: 10px; white-space: nowrap;
 }
+/* AFTER the shared `:popover-open` rule above, so this wins for this panel. */
+.view-menu > .nav-menu-items:popover-open { display: grid; }
 /* The row boxes themselves draw nothing and take no space — they exist to keep
    the markup readable and to carry the `title` tooltip and the form the sources
    row needs. `display: contents` is what puts their children in the grid above.
@@ -251,6 +278,30 @@ html.has-distrakt #distraktNav { display: flex; }
 .pill-btn { cursor: pointer; background: var(--bg-panel); border: 1px solid var(--card-border); color: var(--text); padding: 6px 12px; border-radius: 999px; font-size: 0.78rem; font-weight: 600; font-family: inherit; transition: all .18s ease; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .pill-btn:hover { border-color: var(--gold); background: rgba(232,181,69,0.12); }
 .pill-btn.active { border-color: var(--crimson); color: var(--crimson); background: rgba(224,56,77,0.1); }
+
+/* HIDE NOT-WATCHING: THE PILL SAYS WHAT THE CALENDAR IS DOING, not what was
+   pressed. Which of the two words is drawn and whether the pill looks pressed
+   are read off `hide-not-watching` on <body> — the SAME class the month itself
+   is hidden by, which arrives from the server's answer to the press
+   (templates/_view_answer.html).
+   KEYED ON THAT AND NOT ON THE CHECKBOX, and the difference only shows when
+   something goes wrong: the box flips the instant it is clicked, the class
+   arrives when the write has landed, and a press the server never got would
+   otherwise leave a pill claiming to hide a calendar that is still showing
+   everything. One answer, one appearance.
+   It used to be a button plus a script that rewrote the label's text and a
+   second that added the `active` class, either of which could be got wrong on
+   its own. The box itself is never drawn: it is the control, so it has to stay
+   focusable and reachable rather than being `display: none`. */
+.hide-toggle-form { display: contents; }
+.hide-toggle { cursor: pointer; }
+.hide-toggle input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.hide-toggle:has(input:focus-visible) { outline: 2px solid var(--gold); outline-offset: 2px; }
+body.hide-not-watching .hide-toggle {
+    border-color: var(--crimson); color: var(--crimson); background: rgba(224,56,77,0.1);
+}
+body.hide-not-watching .hide-toggle .hide-off,
+body:not(.hide-not-watching) .hide-toggle .hide-on { display: none; }
 
 /* ---- Sync + stats panels ---- */
 
@@ -1080,23 +1131,41 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
    near-black panel and over the gold a hover turns on, where a transparent
    symbol would be readable on one of the three. */
 .source-logo { height: 13px; width: auto; display: block; border-radius: 4px; }
-/* THE SERVICE MARK ON A POSTER, CENTRED ALONG THE BOTTOM EDGE. Every corner of a
-   poster is already claimed — runtime and episode down the left, rating and the
-   watching eye down the right, the network's own logo bottom-right — so a mark
-   given a corner of its own lands on one of them, which is what put the flip
-   control on top of the network. The middle of the bottom edge is the one place
-   free on every card. It stays a CONTAINER rather than being folded into the
-   button's own rule because placing what is drawn on a poster is a question
-   about the poster, and a second mark that ever earns a place here has to be
-   given it here, where the clearance from everything else is already settled. */
-.poster-marks {
-    position: absolute; bottom: 9px; left: 50%; transform: translateX(-50%);
-    z-index: 6; display: flex; align-items: center; gap: 6px;
+/* THE FLIP ITSELF, AND IT NAMES NO SERVICE. One radio per service, each
+   IMMEDIATELY FOLLOWED BY THAT SERVICE'S OWN VALUE (_card.html's `swap` macro),
+   so the whole control is the adjacent-sibling rule below. That is the reason
+   for the pairing: a rule keyed on which service is checked would have to spell
+   `[value="trakt"]` and `[value="simkl"]`, and a third service registering would
+   then be an edit here as well as a registration. It is not, and this is where
+   that is paid for.
+   `display: contents` ON THE CHECKED VALUE, so the picture, the title or the
+   description lands in the layout its parent already arranges — the poster in
+   `.poster-wrap`, the title in `.title-row` — exactly as the single value it
+   replaced did. The wrapper goes the same way for the same reason.
+   THE RADIOS ARE NEVER DRAWN but stay focusable: the mark is their label, so
+   they are the control, and hiding them outright would take the flip off the
+   keyboard. */
+.flip { display: contents; }
+.flip-pick { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.flip-value { display: none; }
+.flip-pick:checked + .flip-value { display: contents; }
+/* WHERE THE POSTER'S MARK GOES, and it is the one that needs placing: it sits
+   INSIDE the value it names (so that only the shown service's mark is drawn
+   without any rule asking which service that is) and has to be lifted out onto
+   the poster's bottom edge. The middle of that edge because the four corners are
+   spoken for — runtime and episode down the left, rating and the watching eye
+   down the right, the network's logo bottom-right. */
+.poster-wrap .flip-value > .source-swap {
+    position: absolute; bottom: 9px; left: 50%; transform: translateX(-50%); z-index: 6;
+    padding: 3px; background: rgba(10,12,16,0.82); backdrop-filter: blur(4px);
 }
-.poster-marks .source-swap { padding: 3px; background: rgba(10,12,16,0.82); backdrop-filter: blur(4px); }
-.poster-marks .source-logo { height: 15px; }
-/* The flip control. A button, because it does something; sized down to the logo
-   so it reads as a mark beside the value rather than as an action bar. */
+.poster-wrap .flip-value > .source-swap .source-logo { height: 15px; }
+.flip:has(.flip-pick:focus-visible) .flip-pick:checked + .flip-value > .source-swap {
+    outline: 2px solid var(--gold); outline-offset: 2px;
+}
+/* The flip control. A <label> for the NEXT service's radio, so pressing it
+   advances through them and wraps; sized down to the logo so it reads as a mark
+   beside the value rather than as an action bar. */
 /* `align-self` because the row it sits in is told to stretch, and what that
    stretch is for is the description beside it — a flip button as tall as a
    paragraph is a click target nobody aimed at. */
@@ -1195,8 +1264,41 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 .site-footer .tmdb-mark { height: 9px; width: auto; opacity: 0.75; vertical-align: baseline; }
 
 /* ---- Modal (settings + details shell) ---- */
-.modal-overlay { display: none; position: fixed; inset: 0; z-index: 10000; background: rgba(5,6,9,0.72); backdrop-filter: blur(4px); align-items: flex-start; justify-content: center; padding: 40px 16px; overflow-y: auto; }
-.modal-overlay.open { display: flex; }
+/* EVERY OVERLAY IN THIS APP IS A <dialog>, AND THAT IS WHY NOTHING SCRIPTS ONE
+   OPEN OR SHUT ANY MORE. It used to be a <div> shown by a class, which meant a
+   script for opening, a script for closing, a document-wide Escape listener and
+   a document-wide backdrop-click listener — four statements of what a modal is.
+   A modal <dialog> carries all four: `command="show-modal"` opens it and honours
+   `autofocus` inside it, `command="close"` closes it, `closedby="any"` gives
+   Escape and the backdrop click, focus is trapped while it is open and returns
+   to the control that opened it when it shuts. MEASURED identical in Firefox 155
+   and Chromium 153, including that opening one closes any open popover, which is
+   what shuts the ☰ Menu behind Settings and What's new.
+   THE BOX IS STILL THE PAGE'S, NOT THE UA's: a modal dialog is centred and sized
+   to its content by the user-agent sheet, and these overlays are a full-viewport
+   scrolling sheet with the panel laid out inside them, so the four properties
+   that would centre it are cleared. */
+.modal-overlay {
+    position: fixed; inset: 0; margin: 0; border: 0; padding: 40px 16px;
+    width: 100%; max-width: 100%; height: 100%; max-height: 100%;
+    background: transparent; color: inherit; overflow-y: auto;
+}
+.modal-overlay[open] { display: flex; align-items: flex-start; justify-content: center; }
+.modal-overlay::backdrop { background: rgba(5,6,9,0.72); backdrop-filter: blur(4px); }
+/* AND THIS IS WHAT MAKES `closedby="any"` REACH A FULL-BLEED SHEET. Light
+   dismiss fires on a press whose target is OUTSIDE the dialog, and this dialog
+   is the whole viewport — so pressing what looks like the backdrop is pressing
+   the dialog, and MEASURED in Firefox 155 and Chromium 153 it closed nothing.
+   Making the sheet transparent to the pointer puts the press on the page behind
+   it, which IS outside, and both browsers then dismiss. The panel takes the
+   pointer back, so everything in it still works, and the sheet still scrolls
+   under the wheel (measured: 600px in both).
+   THE ALTERNATIVE WAS TO LET THE DIALOG SHRINK-WRAP THE PANEL and use the real
+   ::backdrop, which would have meant the panel rather than the sheet scrolling
+   — a different layout for every overlay in the app, to fix the dismissal of
+   one. */
+.modal-overlay { pointer-events: none; }
+.modal-overlay > .modal { pointer-events: auto; }
 .modal { width: 100%; max-width: 560px; background: var(--bg-panel); border: 1px solid var(--card-border); border-radius: 16px; box-shadow: 0 30px 80px rgba(0,0,0,0.6); }
 .modal.wide { max-width: 720px; }
 /* Settings carries four groups of fields, so it gets more room than the modals
@@ -1321,11 +1423,19 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 /* THE CARD A JUMP LANDED ON, said once and then let go: it means "this is the
    one you asked for", which stops being true as soon as the reader looks
    around. */
+/* THE BORDER IS INSIDE THE ANIMATION, AND THAT IS WHAT LETS THE CLASS STAY.
+   The mark says "this is the one you asked for", which stops being true as soon
+   as the reader looks around — so it has to let go. It used to let go because a
+   script took the class off after 2.6 seconds; the class is the SERVER's now
+   (_card.html marks the anchor) and nothing is left to remove it. An animated
+   property reverts to its computed value when the animation ends, so saying the
+   green border here rather than on the rule means the card goes back to looking
+   ordinary on its own, and the class becomes inert rather than permanent. */
 @keyframes jump-target-pulse {
-    0%   { box-shadow: 0 0 0 0 rgba(34,197,94,0.55); }
-    100% { box-shadow: 0 0 0 14px rgba(34,197,94,0); }
+    0%   { box-shadow: 0 0 0 0 rgba(34,197,94,0.55); border-color: rgba(34,197,94,0.7); }
+    100% { box-shadow: 0 0 0 14px rgba(34,197,94,0); border-color: rgba(34,197,94,0.7); }
 }
-.card.jump-target { animation: jump-target-pulse 1.3s ease-out 2; border-color: rgba(34,197,94,0.7); }
+.card.jump-target { animation: jump-target-pulse 1.3s ease-out 2; }
 /* THE ROW A TRACKER MUTATION JUST WROTE. The same claim the calendar's
    jump-target makes — "this is the one you asked for" — so it is said the same
    way rather than invented again, and let go just as quickly. The row is not a
@@ -1338,19 +1448,41 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 }
 @media (prefers-reduced-motion: reduce) {
     /* No pulse, but still say which row: the mark is the information and the
-       animation is only how it is delivered. */
+       animation is only how it is delivered.
+       IT STAYS UNTIL THE NEXT RENDER HERE, and that is the honest cost of having
+       no script: the only way CSS can time something out is an animation, and
+       this is the branch that has chosen not to animate. The tracker's own mark
+       has always behaved exactly this way — `row-marked` is drawn by the server
+       and nothing takes it off — so the two surfaces agree rather than one of
+       them quietly being different. */
     .card.jump-target, .distrakt-show-row.row-marked {
         animation: none;
         box-shadow: 0 0 0 2px rgba(34,197,94,0.7);
     }
 }
-/* WHERE A JUMP LANDS, decided in CSS rather than by a script calling
-   scrollIntoView({block:'center'}). The server marks the card a search result
-   asked for and ships its whole day with the shell, so the browser's own
-   fragment scrolling reaches it — and `scroll-margin-block` is what stops that
-   landing the card under the sticky header, which is the only thing the script
-   was really contributing. */
-#jump-target { scroll-margin-block: 40vh 20vh; }
+/* WHERE A JUMP LANDS, AND IT IS ENTIRELY THIS ONE LINE NOW. The server marks the
+   card a search result asked for and ships its whole day with the shell, so the
+   browser's own fragment scrolling reaches it; `scroll-margin-block` is what
+   stops that landing it under the sticky header.
+   WHAT THIS REPLACED WAS SIXTY LINES. A settling loop re-scrolled to the card
+   every time anything moved it, because arriving at a late day used to drag the
+   earlier days into view and each one growing pushed the target down — measured
+   once at 842px of drift in Firefox. Shipping the anchor's day inline fixed that
+   on the SERVER, and the loop was left correcting what remained: MEASURED
+   against a real month (3,852 titles, a 306,863px document) it made three or
+   four scroll calls and the target moved 69 pixels, once, in thirteen seconds.
+   A browser that scrolls to a fragment and a rule that says where to stop do the
+   rest. */
+/* 30vh AT BOTH ENDS, AND THE SECOND NUMBER IS THE ONE THAT MATTERS. The two
+   ways in scroll differently: a COLD load is the browser's own fragment
+   navigation, which honours the block-START margin and lands the card that far
+   down; a BOOSTED arrival is htmx scrolling, and MEASURED in Firefox 155 and
+   Chromium 153 it answers to the block-END margin instead. At `40vh 20vh` the
+   boosted landing put a 300px card at 722 in a 1000px viewport — 22 pixels of it
+   below the fold. Raising the end margin lifts it: 30vh lands it at 622, whole,
+   and the cold load stays clear of the sticky header. Both paths measured at
+   each candidate before this number was chosen. */
+#jump-target { scroll-margin-block: 30vh 30vh; }
 
 .source-toggles { display: flex; flex-wrap: wrap; gap: 8px; }
 .source-toggle {
@@ -1388,23 +1520,6 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 
 .btn-primary.small { padding: 7px 14px; font-size: 0.78rem; }
 
-/* Inline confirm (ui.js confirmInline): a small popover anchored under the
-   triggering button via JS, independent of that button's own layout. One caller
-   is left — deleting a rankings tier; every other confirmation is
-   templates/_confirm.html. */
-.inline-confirm {
-    /* Above .modal-overlay (10000): the settings modal is the most common place
-       this appears, and a popover pinned behind it would be invisible there. */
-    position: fixed; z-index: 10002; max-width: 280px;
-    background: var(--bg-panel); border: 1px solid var(--card-border);
-    border-radius: 10px; padding: 10px 12px; box-shadow: 0 12px 32px rgba(0,0,0,0.45);
-    opacity: 0; transform: translateY(-6px); pointer-events: none;
-    transition: opacity .16s ease, transform .16s ease;
-}
-.inline-confirm.show { opacity: 1; transform: translateY(0); pointer-events: auto; }
-.inline-confirm .hint { display: block; margin-bottom: 8px; color: var(--text-dim); }
-.inline-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
-.inline-confirm.danger .btn-primary { background: linear-gradient(90deg, var(--crimson), #8a2331); }
 
 .auth-box { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: -4px; }
 .auth-box .hint { flex-basis: 100%; }
@@ -1449,6 +1564,12 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 /* Toasts (Sonarr/Radarr add feedback) */
 #toastHost { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 10001; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
 .toast { padding: 11px 18px; border-radius: 10px; font-size: 0.85rem; font-weight: 600; color: #fff; box-shadow: 0 12px 32px rgba(0,0,0,0.55); opacity: 0; transform: translateY(12px); transition: opacity .25s ease, transform .25s ease; max-width: 92vw; text-align: center; }
+/* THE CLASS A SCRIPT ADDS AND TAKES AWAY, and static/js/ranker/tiers.js is the
+   only thing left that does: its deleted-tier Undo builds its own toast and times
+   its own removal, which is the last hand-rolled one in the app. Every other
+   toast — the server's and the ones static/js/ui.js raises — is `.is-flash`
+   below and needs no class written onto it at any point. This rule goes when
+   that file does. */
 .toast.show { opacity: 1; transform: translateY(0); }
 .toast.ok { background: linear-gradient(135deg, #1f7a4d, #22c55e); }
 .toast.err { background: linear-gradient(135deg, #8a2331, var(--crimson)); }
@@ -1465,6 +1586,16 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
    a toast never sits over what is underneath it). The nine seconds used to be a
    setTimeout in the browser. */
 .toast.is-flash.is-offer { animation-duration: 9s; pointer-events: auto; }
+/* SIX AT ONCE, WHICH A BULK ADD NEEDS. The calendar's "Add all" can raise a
+   dozen, and each fades on its own 4.2s clock rather than queueing, so without
+   this they stack up the middle of the screen. It used to be a line in
+   static/js/ui.js removing the oldest child, which had two faults this does not:
+   it applied only to the lines the SCRIPT made, leaving a server answer's free to
+   pile up, and it removed whatever was oldest — including an Undo offer, the one
+   toast that is there to be pressed. `:not(.is-offer)` is that exception said out
+   loud. Hidden lines do stay in the document, as every `.is-flash` one already
+   did: they are inert and one small element each. */
+#toastHost > .toast:nth-last-child(n+7):not(.is-offer) { display: none; }
 /* A BUTTON INSIDE A TOAST — the rankings page's Undo. `.btn-ghost`'s own colours
    are for the dark page, and on a toast's green or red they all but vanish, so a
    toast's button takes the toast's white text and a white outline instead, on a
@@ -2013,8 +2144,9 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
    control and the question it turns into are both in the markup; a hidden
    checkbox says which one is drawn, and Cancel is a second label for the same
    box. The question is `position: absolute` inside the control's own box, which
-   is what confirmInline needed getBoundingClientRect for — a popover anchored to
-   whichever button opened it, without measuring anything.
+   is a popover anchored to whichever button opened it without measuring
+   anything — the helper this replaced read the trigger with
+   getBoundingClientRect and placed a fixed box by hand.
 
    RIGHT-ALIGNED AND ABOVE EVERYTHING, because these sit at the end of a row: a
    sentence growing rightwards would leave the viewport, and one in the flow
@@ -2026,9 +2158,10 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
 .confirm:has(.confirm-toggle:focus-visible) .confirm-open {
     outline: 2px solid var(--gold); outline-offset: 2px;
 }
-/* THE SAME BOX confirmInline DRAWS, to the pixel where it can be: this replaces
-   that popover on these controls, and two "are you sure" looks in one app would
-   be the drift this plan exists to remove. The sentence is its own line above
+/* ONE "ARE YOU SURE" LOOK IN THIS APP, because there is now one implementation
+   of it: this box is what every confirmation in the app draws, the rankings
+   board's tier delete included, which was the last one placed by script. The
+   sentence is its own line above
    right-aligned actions, the width is capped so a long one wraps rather than
    stretching the row it sits in, and a danger confirm is crimson rather than the
    gold a primary button wears everywhere else. */
@@ -2123,16 +2256,49 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
     justify-content: center; font-size: 0.72rem; color: var(--text-faint); overflow: hidden;
 }
 .distrakt-badge .distrakt-logo { max-width: 26px; max-height: 26px; border-radius: 5px; object-fit: contain; }
-.distrakt-title { flex: 1 1 auto; min-width: 0; overflow: hidden; font-weight: 600; }
+/* A TITLE TOO WIDE FOR ITS CELL SCROLLS WHILE THE POINTER IS ON IT, AND NOTHING
+   MEASURES IT. Whether a title overflows depends on the font, the viewport and
+   the reader's own text size, so it used to be a script: read `scrollWidth`
+   against `clientWidth`, write the difference into a custom property, add a
+   class. Container query units say the same thing without asking — `100cqw` is
+   this cell's own inline size and `100%` in a transform is the element's, so
+   their difference IS the overflow, and `min(0px, …)` leaves a title that fits
+   exactly where it is.
+   MEASURED in Firefox 155 and Chromium 153, on a real tracker month, and the
+   arithmetic is exact in both: against a 346px cell holding a 470px title the
+   animation reads -31.1, -62.2, -68.5 and -124.5px at a quarter, a half, 55%
+   and the whole of its run, for a computed room of -124.1px. A short title
+   never leaves matrix(1,0,0,1,0,0). Leaving the cell ends the animation and
+   puts the ellipsis back.
+   `container-type` COSTS NOTHING HERE, and that was checked at four viewport
+   widths rather than one: 1500, 1100, 800 and 500px, with the containment on,
+   off, and moved to a wrapper — all seventeen cells identical in every state in
+   both browsers. (At 500px they are identical at ZERO: the row has no narrow
+   layout and the title column is squeezed out of existence by its siblings.
+   That is the row's own defect and predates this rule — the script could not
+   draw anything there either.)
+   FOUR SECONDS EACH WAY IS THE ONE THING THIS GIVES UP. The script scaled the
+   duration with the overflow, floored at 2.5s. It had nothing to be proportional
+   to: at every width where the row actually lays out, none of the real titles
+   overflow at all, so the curve was only ever exercised by the hypothetical. A
+   flat 4s, which `alternate` makes an 8s round trip, sits inside the range the
+   script would have produced. */
+.distrakt-title {
+    flex: 1 1 auto; min-width: 0; overflow: hidden; font-weight: 600;
+    container-type: inline-size;
+}
 .distrakt-title .tt {
     display: inline-block; max-width: 100%; white-space: nowrap;
     overflow: hidden; text-overflow: ellipsis; vertical-align: bottom;
 }
-.distrakt-title.scrolling .tt {
+.distrakt-title:hover .tt {
     overflow: visible; text-overflow: clip; max-width: none;
-    animation: ttscroll var(--dur, 3s) linear infinite alternate;
+    animation: ttscroll 4s linear infinite alternate;
 }
-@keyframes ttscroll { from { transform: translateX(0); } to { transform: translateX(calc(-1 * var(--scroll, 0px))); } }
+@keyframes ttscroll {
+    from { transform: translateX(0); }
+    to   { transform: translateX(min(0px, calc(100cqw - 100%))); }
+}
 .distrakt-season { flex: 0 0 auto; width: 3em; text-align: right; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 /* Details modal -------------------------------------------------------------
    The layout comes from style.css (.modal, .details-hero, .ep-list); this is
@@ -2470,6 +2636,10 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px;
     padding: 7px 10px; border-radius: 10px; font-size: 0.78rem;
     background: rgba(232,181,69,0.12); border: 1px solid rgba(232,181,69,0.4);
+    /* NEVER SHRINKS. It is the last child of a column whose height is capped to
+       the viewport, so without this the scrolling pool above it would squeeze
+       the bar to nothing rather than give up its own height. */
+    flex: 0 0 auto;
 }
 .ranker-pool-col:not(:has(#rankerPool .ranker-pick:checked)) .ranker-bulk { display: none; }
 #poolSelectedCount::after { content: counter(picked) " selected"; }
@@ -2531,8 +2701,27 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
    still GROWS to fill the wrapper, because the blank space under the last row is
    where a title dragged out of a tier gets dropped. */
 .ranker-pool-scroll {
-    flex: 1 1 auto; overflow-y: auto; padding-right: 4px;
+    /* `min-height: 0` IS LOad-BEARING AND IS THE EASIEST LINE IN THIS FILE TO
+       LEAVE OUT. A flex item's automatic minimum size is its CONTENT, so without
+       it this refuses the shrink that `1 1 auto` asks for: it takes all 5,155px
+       of a full pool inside a column capped to the window, `overflow-y: auto`
+       never has anything to scroll, and the column's own `overflow: hidden`
+       clips the rest away. Measured on a real board before this line existed:
+       eight of sixty rows reachable, the other 52 painted and clipped, and the
+       bulk-move bar clipped with them — so ticking titles appeared to do nothing
+       at all. The wheel was swallowed too, because a scroll container that
+       cannot scroll does not chain to the page. */
+    flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 4px;
     display: flex; flex-direction: column;
+    /* LAID OUT AFTER THE BULK BAR THOUGH IT COMES BEFORE IT IN THE MARKUP, which
+       is the whole reason `order` is here. The bar has to follow the rows in the
+       DOCUMENT because `counter(picked)` can only count what the document
+       counted before it — but below a pool the height of the window it is off
+       the bottom of the screen, which is where it was being missed entirely.
+       Flex `order` moves the BOX and not the tree, and counters are resolved in
+       tree order, so the readout keeps working while the bar sits above the rows
+       it describes. */
+    order: 1;
 }
 @media (max-width: 900px) { .ranker-pool-scroll { max-height: 62vh; } }
 .ranker-pool { flex: 1 0 auto; }
@@ -2594,13 +2783,28 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 }
 
 /* ---- move-to-tier menu ----
-   A POPOVER, so the browser gives it the top layer, light-dismiss and Escape.
-   That means overriding the defaults it also gives it: `inset: 0` with
-   `margin: auto` centres one in the viewport, and the script that opens it sets
-   top/left instead (ranker/rows.js). In the top layer those are viewport
-   coordinates, which is why nothing has to add the page's scroll offset back. */
+   A POPOVER, so the browser gives it the top layer, light-dismiss and Escape,
+   and `popovertarget` on the ⇄ button opens it. That means overriding the
+   defaults it also gives it: `inset: 0` with `margin: auto` centres one in the
+   viewport.
+   WHERE IT GOES IS THE STYLESHEET'S, AND IT USED TO BE A MEASUREMENT. A script
+   read the button with getBoundingClientRect and wrote top/left. A popover's
+   implicit anchor IS the control that opened it, which is exactly the question
+   here — one menu, a thousand possible buttons, no way to name them one at a
+   time — so `anchor()` answers it with no measuring at all.
+   `position-anchor: auto` IS LOAD-BEARING AND IT IS NOT WHAT LEAVING IT OUT
+   DOES. MEASURED in Firefox 155 and Chromium 153: unwritten, the implicit anchor
+   does not resolve in either and the menu lands at the top-left of the viewport;
+   spelled out, both place it under the button to the pixel.
+   THE TWO FALLBACKS ARE A FIX, NOT PARITY. The script clamped the left edge to
+   the viewport and had nothing at all to say about the bottom, so a menu opened
+   from a row near the foot of the window was cut off. `@position-try` flips it
+   above instead, and shoves it in from a left edge it cannot fit against — both
+   measured in both browsers. */
 .ranker-menu {
-    position: fixed; inset: auto; margin: 0; overflow: visible;
+    position: fixed; position-anchor: auto; inset: auto; overflow: visible;
+    top: anchor(bottom); right: anchor(right); margin: 4px 0 0 0;
+    position-try-fallbacks: --move-menu-shove, --move-menu-above;
     min-width: 150px; padding: 5px;
     background: var(--bg-panel); border: 1px solid var(--card-border);
     border-radius: 10px; box-shadow: 0 18px 40px rgba(0,0,0,0.6);
@@ -2612,6 +2816,8 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     padding: 6px 10px; border-radius: 6px; font-family: inherit; font-size: 0.8rem;
 }
 .ranker-menu button:hover { background: rgba(255,255,255,0.08); }
+@position-try --move-menu-shove { left: 8px; right: auto; top: anchor(bottom); margin: 4px 0 0 0; }
+@position-try --move-menu-above { bottom: anchor(top); top: auto; right: anchor(right); margin: 0 0 4px 0; }
 
 /* ---- the seed's own confirmation, and the backup's line ----
    The seed control turns into its question and back, one partial per state, the
@@ -2628,11 +2834,23 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     font-family: inherit; font-size: 0.78rem;
 }
 
-/* ---- saving indicator ---- */
+/* ---- saving indicator ----
+   THE WORD AND THE COLOUR COME FROM THE SAME ATTRIBUTE, which is the whole point
+   of writing it here. `data-state` already decided the colour; the text beside it
+   was a second statement of the same fact, written out by script from a map of
+   the four states — so the browser held its own copy of what "saving" reads as,
+   which could drift from the rule colouring it without looking wrong from either
+   side. The script sets the attribute and nothing else now.
+   `idle` DELIBERATELY HAS NO RULE: the empty string is the absence of a word, and
+   a rule setting `content: ""` would say the same nothing twice.
+   Same shape as `#poolSelectedCount::after` above, for the same reason. */
 .ranker-save-state { font-size: 0.74rem; color: var(--text-faint); min-width: 54px; text-align: right; }
 .ranker-save-state[data-state="saving"] { color: var(--gold-soft); }
+.ranker-save-state[data-state="saving"]::after { content: "Saving…"; }
 .ranker-save-state[data-state="saved"] { color: var(--green); }
+.ranker-save-state[data-state="saved"]::after { content: "Saved"; }
 .ranker-save-state[data-state="error"] { color: var(--crimson); }
+.ranker-save-state[data-state="error"]::after { content: "Not saved"; }
 
 /* ---- export modal ---- */
 .ranker-export-body { flex-direction: row; gap: 22px; }

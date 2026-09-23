@@ -11,12 +11,13 @@
    click sets, so a page including this file needs to know nothing else about how
    the panel is filled — see `openDetailsPanel` in static/js/ui.js.
 
-   NOTHING HERE SAYS HOW IT CLOSES. The backdrop click, Escape and the button
-   all go through `closeModal` in static/js/ui.js, which is the one place that
-   knows what closing means — a playing trailer has to be torn down rather than
-   hidden, and that was a property of one call site until it became a property of
-   closing. This markup used to carry its own `onclick` for the backdrop, as
-   seven other overlays did and six did not.
+   NOTHING HERE SAYS HOW IT CLOSES, AND THAT IS THE BROWSER'S DOING NOW. It is a
+   modal <dialog>: `closedby="any"` gives it the backdrop click and Escape, and
+   the × is an invoker carrying `command="close"`. What closing MEANS — a playing
+   trailer torn down rather than hidden — is one `close` listener in
+   static/js/ui.js, reached by every one of those three because they all end in
+   the same event. This markup used to carry its own `onclick` for the backdrop,
+   as seven other overlays did and six did not.
 
    `detailsActions` IS ALWAYS HERE AND USUALLY EMPTY. The add-to-library buttons
    are the calendar's and admin-only; its details route draws them from the
@@ -25,18 +26,18 @@
    empties the slot (static/js/ui.js), so one title's buttons never sit over the
    next one's panel. Reserving the slot on every page is what stops a second shell
    being drawn the day another surface wants one. #}
-<div id="detailsModal" class="modal-overlay">
+<dialog id="detailsModal" class="modal-overlay" closedby="any">
     <div class="modal wide">
         <div class="modal-head">
             <h2 id="detailsTitle">Details</h2>
             <div class="modal-head-right">
                 <div id="detailsActions"></div>
-                <button type="button" class="modal-close" onclick="closeDetailsPanel()">&times;</button>
+                <button type="button" class="modal-close" command="close" commandfor="detailsModal">&times;</button>
             </div>
         </div>
         <div class="modal-body" id="detailsBody"></div>
     </div>
-</div>
+</dialog>
 
 {# THE TWO STATES THE SERVER CANNOT RENDER, AS MARKUP RATHER THAN AS STRINGS IN A
    SCRIPT. One is shown before the request has been answered and the other when it

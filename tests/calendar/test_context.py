@@ -250,26 +250,6 @@ class ViewPreferencesTests(unittest.TestCase):
         self.assertEqual(view["filters_summary"], "")
 
 
-class ViewDataTests(unittest.TestCase):
-    def test_it_mirrors_the_assembly_for_the_client(self):
-        assembly = calendar_routes.MonthAssembly(
-            new_ids={"b", "a"}, show_counts={"a": 2, "b": 1},
-            watching=2, not_watching_count=1)
-        data = calendar_routes._view_data(assembly)
-        self.assertEqual(data["showCounts"], {"a": 2, "b": 1})
-        self.assertEqual(data["watching"], 2)
-        self.assertEqual(data["notWatchingCount"], 1)
-
-    def test_it_carries_numbers_and_nothing_the_server_draws(self):
-        """The is-new ids and the viewer's marks used to ride here so the page
-        could put them back onto days that arrived late. The server draws both
-        onto a late day now, so a copy here would be a second answer to keep in
-        step with the first."""
-        assembly = calendar_routes.MonthAssembly(new_ids={"a"}, show_counts={"a": 1})
-        self.assertEqual(set(calendar_routes._view_data(assembly)),
-                         {"showCounts", "watching", "notWatchingCount"})
-
-
 class DayChipTests(unittest.TestCase):
     def test_every_day_of_the_month_gets_a_chip_even_with_nothing_on_it(self):
         assembly = calendar_routes.MonthAssembly(grouped=[_day("2026-07-02", "a")])

@@ -86,13 +86,14 @@ class RecordKind(StrEnum):
 
 
 class Bucket(StrEnum):
-    """The closed set of section names the browser and the Discord notices group
+    """The closed set of section names the month and the Discord notices group
     by — the RENDER vocabulary.
 
     A StrEnum for the same reason RecordKind is: `row["bucket"]` reaches
-    app/static/js/tracker/rows.js and the notice headers as a plain string with no
-    conversion. These strings are read by shipped browser code, so they cannot
-    change without changing that too.
+    templates/_distrakt_rows.html and the notice headers as a plain string with no
+    conversion. The template COMPARES against these spellings — `show.bucket ==
+    'keepup'` and `in ('new', 'returning')` decide what a row draws — so they
+    cannot change without changing it too.
 
     CATCHUP RENDERS AS "Cleanup", which is why this enum is not simply RecordKind
     under another name: what the viewer's own notices call that section is

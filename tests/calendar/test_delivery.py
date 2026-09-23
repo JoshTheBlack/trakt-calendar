@@ -9,6 +9,7 @@ tests/calendar/test_routes.py does it.
 from __future__ import annotations
 
 import asyncio
+import re
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -144,10 +145,10 @@ class StaticCacheHeaderTests(unittest.TestCase):
 class BoostedNavigationMarkupTests(unittest.TestCase):
     """The calendar page wires hx-boost for snappy, no-reflash navigation. These
     pin the structural pieces that make the boosted swap safe: the vendored htmx
-    <script>, the per-page context moved into the swapped region (#pageData),
-    hx-boost declared on <body> so every link and form under it inherits it, the
-    two JS-handled forms opting back out, and the app scripts loaded (deferred)
-    in <head> so a body swap can't re-execute them.
+    <script>, the per-page context living inside the swapped region rather than
+    on <body>, hx-boost declared on <body> so every link and form under it
+    inherits it, the writing forms opting back out, and the app scripts loaded
+    (deferred) in <head> so a body swap can't re-execute them.
     """
     def setUp(self):
         migrated_db("boost-markup")
@@ -185,7 +186,7 @@ class BoostedNavigationMarkupTests(unittest.TestCase):
         on every nav, re-declaring every top-level const."""
         html = self._page()
         head = html[: html.index("</head>")]
-        for src in ("htmx.min.js", "nav.js", "calendar/boot.js"):
+        for src in ("htmx.min.js", "ui.js", "calendar/boot.js"):
             with self.subTest(src=src):
                 self.assertIn(src, head)
         # ...and NOT left at the end of <body> where the old page carried them.
@@ -193,13 +194,21 @@ class BoostedNavigationMarkupTests(unittest.TestCase):
         self.assertNotIn("/static/js/calendar/", body)
 
     def test_page_context_lives_in_the_swapped_region(self):
-        """month/year/endpoint/total moved off <body> (which an innerHTML swap
-        leaves in place, going stale) onto #pageData inside the swapped body."""
+        """Which month the page is on travels INSIDE the swapped body, because
+        <body> itself is what an innerHTML swap leaves in place and it would go
+        stale on the first nav.
+
+        IT IS ON THE CONTROL THAT ASKS ABOUT IT rather than on a hidden element
+        the page reads back: the watch toggle is the one request that asks a
+        question about the month rather than about a title. `#pageData` and the
+        JSON block beside it carried this for a script that no longer exists."""
         html = self._page()
-        self.assertIn('id="pageData"', html)
-        self.assertIn('data-total="1"', html)
-        self.assertIn('data-month="7"', html)
-        self.assertIn('data-endpoint="shows"', html)
+        self.assertNotIn('id="pageData"', html)
+        self.assertNotIn("calendarViewData", html)
+        toggle = re.search(r'<button[^>]*class="watch-toggle".*?>', html, re.S)
+        self.assertIsNotNone(toggle)
+        self.assertIn("month=7", toggle.group(0).replace("&amp;", "&"))
+        self.assertIn("endpoint=shows", toggle.group(0).replace("&amp;", "&"))
 
     def test_the_whole_page_is_boosted_from_the_body(self):
         """Boosting is declared once, on <body>, and inherited by every link and
@@ -222,12 +231,25 @@ class BoostedNavigationMarkupTests(unittest.TestCase):
         self.assertIn('hx-boost="false"', html[i - 120: i + 40])
         self.assertNotIn('id="filtersForm"', html)
 
-    def test_endpoint_switcher_is_a_boosted_get_form(self):
+    def test_endpoint_switcher_is_a_get_form_that_asks_on_change(self):
+        """The select carries name=endpoint and its FORM says when to ask.
+
+        Not a boosted form: htmx boosts a form on `submit` only, so a boosted one
+        cannot act on a select's `change` — the form opts out and states the same
+        thing itself, which is the shape templates/pick.html and the public share
+        page also use. The `change` belongs to the form rather than to each
+        select because one form can hold several of them.
+        """
         html = self._page()
         form_i = html.index('id="endpointSelect"')
-        # The select carries name=endpoint and submits its enclosing boosted form.
-        self.assertIn('name="endpoint"', html[form_i - 40: form_i + 80])
-        self.assertIn("this.form.requestSubmit()", html[form_i - 40: form_i + 160])
+        self.assertIn('name="endpoint"', html[form_i - 40: form_i + 120])
+        form = html[: form_i].rindex("<form")
+        tag = html[form: html.index(">", form) + 1]
+        for attr in ('hx-boost="false"', 'hx-get="/calendar"',
+                     'hx-trigger="change"', 'hx-target="body"', 'hx-push-url="true"'):
+            with self.subTest(attr=attr):
+                self.assertIn(attr, tag)
+        self.assertNotIn("onchange", html[form_i - 40: form_i + 200])
 
 
 if __name__ == "__main__":

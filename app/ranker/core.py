@@ -483,6 +483,32 @@ def _clone_name(name: Any) -> str:
     return base[:MAX_BOARD_NAME - len(suffix)] + suffix
 
 
+async def board_keys(user_id: int, board_uid: str) -> set[str]:
+    """Which titles this board holds, and nothing else about them.
+
+    FOR DRAWING A SEARCH RESULT AS ALREADY-HELD, which is a question about
+    membership alone — so this is one indexed read of four columns rather than
+    fetch_board, which reads every item with every field and groups them by tier.
+    The search box asks as it is typed into, and paying for a whole board per
+    keystroke to answer "is this one on it?" would be the wrong order of cost.
+
+    NO BOARD ANSWERS EMPTY RATHER THAN RAISING, and that covers three cases with
+    one rule: a uid this account does not own, a uid that is not a uid at all,
+    and the search asking with NO board — which is a real caller, because the
+    results fragment is reachable before a board exists. The only thing this
+    decides is whether to draw a result as already-held, and refusing a search
+    over a board uid is a worse answer than marking nothing.
+    """
+    def _work(conn: db.Connection) -> set[str]:
+        try:
+            board = _resolve_board(conn, user_id, board_uid)
+        except RankerError:
+            return set()
+        return set(_item_ids(conn, int(board["id"])))
+
+    return await db.run(_work)
+
+
 async def fetch_board(user_id: int, board_uid: str) -> dict[str, Any]:
     """One board with its categories, its tiered items and its pool.
 

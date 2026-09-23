@@ -1,0 +1,20 @@
+{% import '_calendar_meta.html' as calendar_meta %}
+{# THE ANSWER TO CHANGING A VIEW PREFERENCE, and it is addressed entirely out of
+   band — there is no main content at all (`hx-swap="none"` on the control).
+
+   WHAT COMES BACK IS THE PAGE'S OWN #pageMeta, carrying the classes this view
+   now wants. <body> is the element the whole month is styled against and the one
+   element a swap can never replace, so the classes reach it the way they reach
+   it on every boosted arrival: static/js/boost.js wears whatever this element
+   says. That is why nothing in the browser has to know that "poster" means
+   `card-poster`.
+
+   AND THE DAY CHIPS, WHEN HIDING CHANGED. A day whose every title is marked
+   draws nothing with hiding on, so its chip must stop offering to scroll there —
+   `_day_chip.html` already draws that state and already knows how to travel out
+   of band. Card style and day packing cannot empty a day, so they send none and
+   this loop renders nothing.
+
+   Context: `view`, `distrakt_available`, `chips`. #}
+{{ calendar_meta.meta(view, distrakt_available, oob=true) }}
+{% for chip in chips %}{% with oob = true %}{% include "_day_chip.html" %}{% endwith %}{% endfor %}
