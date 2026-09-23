@@ -1113,38 +1113,35 @@ async def visible_records(groups, endpoint, *, genres="", countries="",
 # the mark-independent half of a span, and the short memo over it
 # ---------------------------------------------------------------------------
 
-# HOW LONG A MEMOISED SPAN MAY BE SERVED, AND IT MUST STAY WELL UNDER THE
-# SHORTEST STALENESS TIER. Every write that can change a span clears the memo
-# outright (`_forget_spans`), so this bounds only the paths that write nothing a
-# clear can hook - a background enrichment landing between two reads, most of
-# all.
+# HOW OLD A SPAN MAY BE BEFORE IT IS REFRESHED BEHIND WHOEVER ASKED FOR IT, and
+# how old it may be before nobody is served it at all.
 #
-# IT IS ALSO WHAT MAKES SERVING A `allow_fetch=True` READ FROM THE MEMO SAFE.
-# The argument: an unexpired entry can only have been written by a read that
-# found nothing due for a refresh, or by one that refreshed, stored (clearing the
-# memo) and then wrote the post-fill answer. Either way nothing was due at the
-# moment it was written - and since the shortest tier in _STALENESS_TIERS is a
-# DAY, nothing can become due within five minutes either. Raise this past that
-# tier and a page load starts serving a month it should have refetched.
-_SPAN_MEMO_TTL = 300
-# HOW LONG A SPAN IS SERVED TO EVERYBODY, EVEN AFTER THE ROWS UNDER IT MOVED.
-# THE OWNER'S CALL, and it is a trade rather than an oversight: "it is not super
-# important that fresh data is immediate, but it needs to be relatively quick —
-# better to have responsiveness in the app than immediate changes to data."
+# SERVE, THEN REBUILD. A reader is answered from what is here and the rebuild
+# happens after them, so the only request that ever waits for a month is the
+# first one on a cold process. Everything after it is a dictionary lookup, and
+# the copy in hand keeps up because serving it is what schedules its replacement.
 #
-# Inside this window a fill does not cost the reader anything at all; past it,
-# the rule below applies again and a read that may fill goes and rebuilds. So a
-# refill lands within two minutes rather than instantly, and the month a reader
-# is working in never stops for three seconds because a day block behind it
-# happened to refresh a window.
+# THE SOFT AGE IS NOT THE ONLY TRIGGER — a write bumps the endpoint's generation
+# and that schedules a refresh immediately, so a refill shows up in seconds
+# rather than at the end of this clock. The age is the backstop for the writers
+# that cannot bump anything: a background enrichment landing between two reads is
+# the one that matters, because cache.py cannot be called from enrich.py without
+# an import cycle.
 #
-# It only ever DELAYS what a write already stored — nothing is served past
-# _SPAN_MEMO_TTL, and nothing is served from another database or another set of
-# filters, because those are in the key rather than on this clock.
-_SPAN_MEMO_FLOOR = 120
-# Bounded because the key carries the viewer's own filters: a few accounts each
-# reading a few months is a few dozen entries, and a crawler asking for a
-# hundred months must not be able to hold them all.
+# THE HARD MAX IS A SAFETY RAIL, NOT THE DESIGN. Reaching it means refreshes have
+# been failing for a quarter of an hour, and at that point a slow honest answer
+# beats a fast old one. It stays well under the shortest staleness tier so that
+# serving from here can never outlast the point at which the ROWS were due to be
+# refetched; a test holds that.
+_SPAN_SOFT_AGE = 120
+_SPAN_MEMO_TTL = 900
+# AT MOST THIS MANY REBUILDS AT ONCE, ACROSS THE WHOLE PROCESS. A rebuild is
+# seconds of pure Python, which the GIL keeps on the one core the event loop
+# needs — so letting these pile up would spend on refreshing months what the
+# readers they exist for are waiting to be served. One key is refreshed once at a
+# time (`_span_refreshing`) and the process runs at most two.
+_SPAN_REFRESH_LIMIT = 2
+_span_refreshing: set = set()
 _SPAN_MEMO_MAX = 64
 _span_memo: dict = {}
 
@@ -1229,12 +1226,53 @@ def _span_memo_key(endpoint, settings, *, tz, start_date, end_date, genres,
     )
 
 
+def _refresh_span_later(key, endpoint: Endpoint, settings, **kwargs) -> None:
+    """Rebuild one span behind whoever was just served the old one.
+
+    THE ONE IN FLIGHT PER KEY IS THE WHOLE GUARD. Every read of a stale span
+    would otherwise start its own rebuild of the same month — a busy page is
+    thirty requests — and they would all do the identical work while the reader
+    waited on a loop none of them had left alone. A key already being rebuilt is
+    simply not scheduled again; the refresh in flight will publish for everyone.
+
+    AND AT MOST TWO ACROSS THE PROCESS. A rebuild is seconds of pure Python, and
+    the GIL keeps that on the one core the event loop needs, so the cap is what
+    stops refreshes from becoming the thing readers wait behind. Anything turned
+    away here is picked up by the next read of that span, which is a moment away.
+
+    IT FILLS AS WELL AS ASSEMBLES (`allow_fetch=True`), and that is the point
+    rather than a detail. The fill is where the real seconds were — paced calls
+    to a provider — so leaving it on the reader's path would have moved the
+    cheap half of the work and left the expensive half exactly where it was. The
+    reader is answered from what is stored; going and getting what is NOT stored
+    happens behind them.
+
+    NOTHING IS AWAITED AND NOTHING IS RAISED AT THE CALLER. This is scheduled by
+    a request that has already been answered, so a failure must not reach it —
+    the stale span simply stays, and the next read schedules another attempt.
+    """
+    if key in _span_refreshing or len(_span_refreshing) >= _SPAN_REFRESH_LIMIT:
+        return
+    _span_refreshing.add(key)
+
+    async def _run():
+        try:
+            await _assembled_span(endpoint, settings, allow_fetch=True,
+                                  rebuild=True, **kwargs)
+        except Exception:
+            logger.exception("calendar span refresh failed for %s", endpoint.key)
+        finally:
+            _span_refreshing.discard(key)
+
+    asyncio.create_task(_run())
+
+
 async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
                           start_date: date, end_date: date, genres: str,
                           countries: str, show_certifications: str,
                           movie_certifications: str, movie_release_countries: str,
                           movie_release_types: str, network_filter,
-                          allow_fetch: bool, now, prefs):
+                          allow_fetch: bool, now, prefs, rebuild: bool = False):
     """One span's items in air order, with nothing about the reader's marks in
     them: (items, as_of, partial, filtered_out).
 
@@ -1262,50 +1300,47 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         movie_release_countries=movie_release_countries,
         movie_release_types=movie_release_types,
         network_filter=network_filter, prefs=prefs)
-    # EVERY READ IS SERVED, INCLUDING ONE THAT MAY FILL. Serving only the cheap
-    # reads was the first shape here and it was half a fix: it made a mark
-    # instant and left OPENING the month exactly as slow as before, which is the
-    # read somebody actually waits on. Measured on a real September: 2,947ms to
-    # 20ms. See _SPAN_MEMO_TTL for why an unexpired entry cannot be hiding a
-    # refresh that was due, and the write below for why only a filling read may
-    # put one there.
-    # WHICH READS MAY BE ANSWERED FROM ROWS THAT HAVE SINCE MOVED, and this is
-    # the difference between a memo that survives a busy instance and one that
-    # does not.
+    # WHATEVER IS HERE IS WHAT THE READER GETS, and the rebuild happens after
+    # them. The first shape served only the cheap reads and left opening a month
+    # as slow as ever; the second made a filling read wait whenever the rows had
+    # moved, which on a live instance is most of the time, because a calendar
+    # WRITES while it reads — a month opened on stale windows fills them as its
+    # day blocks arrive. Measured on a real instance: marking 5s, switching
+    # endpoints 30s, settling only once the refresh finished.
     #
-    # A read that MAY FILL is the freshest thing there is and must be current: it
-    # is the one that goes and gets new rows, and serving it a span built from
-    # what they replaced would hide the refill it just paid for.
-    #
-    # A read that may NOT fill is redrawing something ALREADY ON SCREEN — a
-    # mark's answer, a view toggle, a share page — and the page it is redrawing
-    # was itself drawn from those same rows or older. So one generation behind is
-    # not staleness there; it is the state the reader is looking at. Requiring
-    # the current generation instead is what made marking slow on a live
-    # instance: opening a month on stale windows FILLS them, every fill retires
-    # the spans built from what it replaced, and the mark that follows a second
-    # later then paid the full three seconds to rebuild a month the page had just
-    # finished drawing. Nothing is served past the TTL either way.
-    hit = _span_memo.get(key)
+    # So nobody waits for a month twice. A span that is behind, or simply old, is
+    # still the answer — it is what the page in front of the reader was drawn
+    # from — and asking for it is what schedules the fresh one.
+    # `rebuild` IS THE REFRESHER SAYING "NOT YOU". Without it the background job
+    # asks the same question its own reader just asked, is handed the very entry
+    # it was scheduled to replace, and returns having done nothing — so the span
+    # never moves and every read forever schedules another refresh that does not
+    # happen. Found by watching the entry's generation stay at 0 while the
+    # endpoint's went to 1.
+    hit = None if rebuild else _span_memo.get(key)
     if hit is not None:
+        age = time.monotonic() - hit[1]
         current = _endpoint_generation.get(endpoint.key, 0)
-        # Within the floor, ANY read is answered from what is here — see
-        # _SPAN_MEMO_FLOOR. After it, only a read that cannot fill may be
-        # answered from rows that have since moved.
-        within_floor = hit[0] - _SPAN_MEMO_TTL + _SPAN_MEMO_FLOOR > time.monotonic()
-        fresh_enough = within_floor or not allow_fetch or hit[1] == current
-        if hit[0] > time.monotonic() and fresh_enough:
-            with span("calcache.memo_hit", items=len(hit[2]),
-                      behind=current - hit[1]):
+        if age < _SPAN_MEMO_TTL:
+            if hit[2] != current or age >= _SPAN_SOFT_AGE:
+                _refresh_span_later(key, endpoint, settings, tz=tz,
+                                    start_date=start_date, end_date=end_date,
+                                    genres=genres, countries=countries,
+                                    show_certifications=show_certifications,
+                                    movie_certifications=movie_certifications,
+                                    movie_release_countries=movie_release_countries,
+                                    movie_release_types=movie_release_types,
+                                    network_filter=network_filter, now=now, prefs=prefs)
+            with span("calcache.memo_hit", items=len(hit[3]),
+                      behind=current - hit[2], age=int(age)):
                 # THE LIST IS COPIED AND THE ITEMS ARE NOT. `grouped` is built
                 # fresh by the caller and a caller may write onto ITS dicts
                 # (routes._count_visible puts a per-viewer count on each day), so
                 # the structure has to be per-request. An Item is a value nothing
                 # in app/ ever assigns to, so sharing one is safe - and copying
                 # two thousand of them would give back what this saves.
-                return list(hit[2]), hit[3], hit[4], hit[5]
-        if hit[0] <= time.monotonic():
-            _span_memo.pop(key, None)
+                return list(hit[3]), hit[4], hit[5], hit[6]
+        _span_memo.pop(key, None)
 
     utc_start, utc_end = _local_span_utc_range(tz, start_date, end_date)
     windows = aligned_windows(utc_start, utc_end)
@@ -1445,9 +1480,9 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # Oldest out first when full. A plain FIFO rather than an LRU because the
     # entries all expire on one timer anyway, and the cap is here to bound memory
     # rather than to keep the best of them.
-    if len(_span_memo) >= _SPAN_MEMO_MAX:
+    if key not in _span_memo and len(_span_memo) >= _SPAN_MEMO_MAX:
         _span_memo.pop(next(iter(_span_memo)), None)
-    _span_memo[key] = (time.monotonic() + _SPAN_MEMO_TTL,
+    _span_memo[key] = (key, time.monotonic(),
                        _endpoint_generation.get(endpoint.key, 0),
                        list(items), as_of, partial, filtered_out)
     return items, as_of, partial, filtered_out

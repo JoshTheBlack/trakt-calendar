@@ -185,42 +185,83 @@ class AFillDoesNotCostTheReaderTheirMemoTests(unittest.TestCase):
         """Entries are RETIRED by the generation travelling with them, not
         deleted — which is what lets a redraw still be answered from the span the
         page was drawn from while a fill is in flight."""
-        calendar_cache._span_memo[("k",)] = (float("inf"), 0, [], None, False, 0)
+        calendar_cache._span_memo[("k",)] = (("k",), 0.0, 0, [], None, False, 0)
         calendar_cache._forget_spans("shows")
         self.assertIn(("k",), calendar_cache._span_memo,
                       "a write must not empty the memo a redraw still needs")
 
     def test_forgetting_everything_still_works_for_a_caller_that_cannot_say(self):
-        calendar_cache._span_memo[("k",)] = (float("inf"), 0, [], None, False, 0)
+        calendar_cache._span_memo[("k",)] = (("k",), 0.0, 0, [], None, False, 0)
         calendar_cache._forget_spans()
         self.assertEqual(calendar_cache._span_memo, {})
         self.assertEqual(calendar_cache._endpoint_generation, {})
 
 
-class TheFloorIsBoundedTests(unittest.TestCase):
-    """The window in which a fill costs the reader nothing at all.
+class TheAgesAreBoundedTests(unittest.TestCase):
+    """The two clocks a served span lives by.
 
-    A deliberate trade, made by the owner: a refill lands within the floor rather
-    than instantly, and in exchange the month somebody is working in never stops
-    for three seconds because a day block behind it refreshed a window. These
-    tests hold the two ends of it — that the floor is shorter than the TTL, so it
-    can only ever DELAY a write and never outlive the entry carrying it, and that
-    the TTL is still well under the soonest a span can go stale.
+    `_SPAN_SOFT_AGE` is when a read still gets what is here and a rebuild starts
+    behind it; `_SPAN_MEMO_TTL` is the safety rail past which nobody is served at
+    all, which is only reached when refreshes have been failing. Both have to
+    stay under the soonest the ROWS were due to be refetched, or serving from
+    here would outlast the data it was built from.
     """
 
-    def test_the_floor_is_shorter_than_the_ttl(self):
-        self.assertLess(calendar_cache._SPAN_MEMO_FLOOR, calendar_cache._SPAN_MEMO_TTL)
+    def test_the_soft_age_comes_before_the_hard_max(self):
+        self.assertLess(calendar_cache._SPAN_SOFT_AGE, calendar_cache._SPAN_MEMO_TTL)
 
-    def test_the_floor_is_shorter_than_the_shortest_staleness_tier(self):
-        """Serving inside the floor must never outlast the point at which the
-        rows themselves were due to be refetched."""
+    def test_both_stay_under_the_shortest_staleness_tier(self):
         shortest = min(seconds for _, seconds in calendar_cache._STALENESS_TIERS)
-        self.assertLess(calendar_cache._SPAN_MEMO_FLOOR, shortest)
+        self.assertLess(calendar_cache._SPAN_MEMO_TTL, shortest)
+        self.assertLess(calendar_cache._SPAN_SOFT_AGE, shortest)
+
+    def test_only_so_many_rebuilds_run_at_once(self):
+        """A rebuild is seconds of pure Python, which the GIL keeps on the one
+        core the event loop needs — so an unbounded number of them would become
+        the thing readers wait behind."""
+        self.assertGreaterEqual(calendar_cache._SPAN_REFRESH_LIMIT, 1)
+        self.assertLessEqual(calendar_cache._SPAN_REFRESH_LIMIT, 4)
+
+
+class TheRefresherDoesNotAnswerItselfTests(unittest.TestCase):
+    """THE DEFECT THAT MADE SERVE-THEN-REBUILD A NO-OP, and it was silent.
+
+    The background job rebuilds by calling `_assembled_span` again. Without
+    `rebuild=True` it asks exactly the question its own reader just asked, is
+    handed the very entry it was scheduled to replace, and returns having done
+    nothing — so the span never moves, and every read forever schedules another
+    refresh that also does nothing. Everything looks fast, because it is; it is
+    just serving the same stale month for the rest of the process's life.
+
+    Caught by watching the entry's generation stay at 0 while the endpoint's went
+    to 1, which is the only place the failure is visible from.
+    """
+
+    def test_a_rebuild_ignores_what_is_already_there(self):
+        import inspect
+        src = inspect.getsource(calendar_cache._assembled_span)
+        self.assertIn("None if rebuild else _span_memo.get(key)", src,
+                      "a rebuild that reads the memo can be answered by the "
+                      "entry it exists to replace")
+
+    def test_the_refresher_asks_for_a_rebuild(self):
+        import inspect
+        src = inspect.getsource(calendar_cache._refresh_span_later)
+        self.assertIn("rebuild=True", src)
+
+    def test_one_refresh_per_key_and_a_cap_across_the_process(self):
+        """Every read of a stale span would otherwise start its own rebuild of
+        the same month — a busy page is thirty requests — all doing identical
+        work on a loop none of them left alone."""
+        import inspect
+        src = inspect.getsource(calendar_cache._refresh_span_later)
+        self.assertIn("key in _span_refreshing", src)
+        self.assertIn("_SPAN_REFRESH_LIMIT", src)
 
 
 class ForgettingTests(unittest.TestCase):
     def test_forgetting_empties_the_memo(self):
-        calendar_cache._span_memo[("a",)] = (float("inf"), 0, [], None, False, 0)
+        calendar_cache._span_memo[("a",)] = (("a",), 0.0, 0, [], None, False, 0)
         calendar_cache._forget_spans()
         self.assertEqual(calendar_cache._span_memo, {})
 
