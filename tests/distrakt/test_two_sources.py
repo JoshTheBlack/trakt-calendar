@@ -1451,6 +1451,11 @@ class TheOtherServiceSaysSoTooTests(AppTestCase):
 
         today = date.today()
         library = LibraryRead(entries={}, events=[], complete=False)
+        # A FORCED LOAD NOW ASKS WHAT EACH SERVICE STILL HOLDS, so the library
+        # listing is doubled too or this reaches the network. It NAMES the
+        # stored title, which is the honest answer for a service answering
+        # normally: no row is marked missing, which is what "left exactly as
+        # they were" is about.
         with patch("app.calendar.cache.read_month", new=AsyncMock(return_value=([], None))), \
              patch("app.providers.trakt.detail.fetch_season_detail", _season), \
              patch("app.providers.simkl.detail.fetch_season_detail", _season), \
@@ -1458,6 +1463,8 @@ class TheOtherServiceSaysSoTooTests(AppTestCase):
                    new=AsyncMock(return_value=BEACON)), \
              patch("app.providers.simkl.sync.fetch_library",
                    new=AsyncMock(return_value=library)), \
+             patch("app.providers.simkl.sync.fetch_library_ids",
+                   new=AsyncMock(return_value={5: "silo"})), \
              patch("app.providers.simkl.sync.fetch_progress_details",
                    new=AsyncMock(return_value={})), \
              patch("app.providers.trakt.transport.cached_get", new=self._refused), \

@@ -1565,11 +1565,27 @@ async def _sync_one(settings, state: dict, source, port, plays: list, *,
     rebaseline = force or _removed_changed(stored, beacons)
 
     # THE SERVICE HAS SAID SOMETHING WAS TAKEN AWAY, so it is worth asking what it
-    # still holds. Only on a genuine removal beacon, never on `force`: a refresh
-    # is the viewer asking for fresher numbers, and nothing about pressing it says
-    # a title left the library. A source with no way to list its ids cheaply is
-    # not asked at all — the full re-baseline below is what covers it.
-    if (not force and _removed_changed(stored, beacons)
+    # still holds — AND SO IS THE VIEWER PRESSING REFRESH.
+    #
+    # THIS USED TO BE `not force`, on the reasoning that a refresh is somebody
+    # asking for fresher numbers and nothing about pressing it says a title left
+    # the library. That is true about the BEACON and wrong about the button. A
+    # mark is the one thing on this page a viewer cannot correct: it is not a
+    # control, it clears only when a service names the title again, and a
+    # `date_from` read never names a title that has not moved — so a mark made
+    # wrongly outlives every ordinary pass. The control that says "look again"
+    # was the one control that did not.
+    #
+    # WHAT THAT COST, MEASURED: a listing that had never asked for `plantowatch`
+    # marked 33 of 51 rows on a live account, and no amount of refreshing moved
+    # them, because the beacon had not shifted and never would. The listing bug is
+    # fixed (simkl/sync.py's LIBRARY_STATUSES) and this is what lets somebody
+    # holding the marks it already made get rid of them.
+    #
+    # IT IS A WHOLE LIBRARY READ, which is why it is not on every pass: the
+    # beacon is what keeps it off the ordinary ones. A source with no way to list
+    # its ids cheaply is not asked at all — the full re-baseline below covers it.
+    if ((force or _removed_changed(stored, beacons))
             and getattr(port, "fetch_library_ids", None) is not None):
         state.setdefault(_REMOVALS_OWED, [])
         if name not in state[_REMOVALS_OWED]:

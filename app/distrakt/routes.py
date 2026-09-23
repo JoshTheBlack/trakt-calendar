@@ -1697,7 +1697,16 @@ async def api_distrakt_add_movie(request: Request):
         return JSONResponse(
             {"ok": False, "error": "That film has no id the tracker can file it under."},
             status_code=400)
-    await _resnapshot_if_closed(user_id, distrakt_store.month_key(watched_on.year, watched_on.month))
+    # The film this call just recorded, put on that month if it is closed. The
+    # entry has the shape a snapshot holds because it comes from the same reader.
+    filed = distrakt_store.month_key(watched_on.year, watched_on.month)
+    state = await watch_history.load_state(user_id)
+    mstart, mend = watch_history.month_bounds(filed)
+    filed_key = str(resolve_key(Media.MOVIE, ids) or "")
+    added = next((m for m in watch_history.movies_in_range(state, mstart, mend)
+                  if str(m.get("key") or "") == filed_key), None)
+    if added is not None:
+        await _amend_closed_month_films(user_id, filed, add=added)
 
     today = clock.today()
     year = route_params.valid_year(data.get("year_view"), today.year)
@@ -1712,21 +1721,34 @@ async def api_distrakt_add_movie(request: Request):
                         status_code=status)
 
 
-async def _resnapshot_if_closed(user_id: int, month_key: str) -> None:
-    """Rebuild a CLOSED month's stored film list from watch history.
+async def _amend_closed_month_films(user_id: int, month_key: str, *,
+                                    add: dict | None = None,
+                                    drop: object = None) -> None:
+    """Put ONE film into a closed month's stored list, or take one out.
 
-    A closed month renders its films from its own snapshot and is never
-    recomputed, so a film added to or removed from that month has to be written
-    into the snapshot or it simply will not appear there. An OPEN month recomputes
-    its films on every load and needs nothing.
+    A closed month renders its films from its own snapshot and never recomputes
+    them, so an edit has to be written into that snapshot or it will not appear
+    there. An OPEN month recomputes on every load and needs nothing from here.
+
+    IT AMENDS RATHER THAN REBUILDS, and that is a correction. This used to
+    re-derive the whole list from today's watch history on every film edit, which
+    made one edit replace the month's entire record with whatever history said at
+    that moment. MEASURED on a live account: a month holding three films, with
+    history reporting two for the same window, lost TWO when one was forgotten.
+    _closed_month_payload says a frozen month's snapshot "is the record of what
+    that month WAS — recomputing it against today's watch history would rewrite
+    history every time it was opened"; this path was the one place doing exactly
+    that.
     """
-    doc = await distrakt_store.load_month(user_id, month_key) if month_key else None
+    if not month_key:
+        return
+    doc = await distrakt_store.load_month(user_id, month_key)
     if doc is None or not doc.get("closed"):
         return
-    state = await watch_history.load_state(user_id)
-    mstart, mend = watch_history.month_bounds(month_key)
-    await distrakt_store.set_month_movies(
-        user_id, month_key, watch_history.movies_in_range(state, mstart, mend))
+    if add is not None:
+        await distrakt_store.add_month_movie(user_id, month_key, add)
+    if drop is not None:
+        await distrakt_store.remove_month_movie(user_id, month_key, drop)
 
 
 @guard.post("/api/distrakt/remove-movie", AuthLevel.DISTRAKT_APPROVED)
@@ -1756,7 +1778,7 @@ async def api_distrakt_remove_movie(request: Request):
 
     # The month it was filed under is the one whose snapshot has to be rebuilt —
     # not necessarily the month being looked at.
-    await _resnapshot_if_closed(user_id, watched_at[:7])
+    await _amend_closed_month_films(user_id, watched_at[:7], drop=key)
 
     today = clock.today()
     year = route_params.valid_year(data.get("year"), today.year)

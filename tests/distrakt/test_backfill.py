@@ -701,23 +701,60 @@ class RemovingAFilmTests(unittest.TestCase):
         state = asyncio.run(watch_history.load_state(self.user_id))
         self.assertEqual([m["title"] for m in state["movies"].values()], ["Did Watch This"])
 
-    def test_a_closed_month_carrying_it_is_re_snapshotted(self):
-        """A frozen month renders films from its own copy, so removing one has
-        to rebuild that copy or the film stays on the page for good."""
+    def _closed_march(self, movies):
         asyncio.run(distrakt.add_month_record(self.user_id, "2026-03", {
             "ids": {"trakt": 803, "tmdb": 803, "slug": "mar"}, "season": 1,
             "title": "Mar Show", "kind": distrakt.RecordKind.SERIES_PREMIERE}))
         doc = asyncio.run(distrakt.load_month(self.user_id, "2026-03"))
         doc["closed"] = True
-        doc["movies"] = [{"key": "movie:tmdb:91", "title": "Never Watched This",
-                          "year": 2011, "watched_at": "2026-03-09T12:00:00Z"}]
+        doc["movies"] = movies
         asyncio.run(distrakt.save_month(self.user_id, doc))
 
+    def test_a_closed_month_loses_exactly_the_film_that_was_forgotten(self):
+        """A frozen month renders films from its own copy, so removing one has to
+        amend that copy or the film stays on the page for good — and amending it
+        means taking out THAT film and touching nothing else."""
+        self._closed_march([
+            {"key": "movie:tmdb:91", "title": "Never Watched This", "year": 2011,
+             "watched_at": "2026-03-09T12:00:00Z"},
+            {"key": "movie:tmdb:92", "title": "Did Watch This", "year": 2012,
+             "watched_at": "2026-03-11T12:00:00Z"},
+        ])
         self._remove()
         after = asyncio.run(distrakt.load_month(self.user_id, "2026-03"))
         self.assertEqual([m["title"] for m in after["movies"]], ["Did Watch This"])
         self.assertTrue(after["closed"])
         self.assertEqual([s["ids"]["trakt"] for s in after["shows"]], [803])
+
+    def test_forgetting_one_film_neither_adds_nor_drops_another(self):
+        """THE DEFECT THIS REPLACED, AND IT SHIPPED AS THE INTENDED BEHAVIOUR.
+        The old path re-derived a closed month's whole film list from today's
+        watch history on every edit, so the month stopped being a record of what
+        it held and became a view of what history currently says. Two ways that
+        goes wrong, and this asserts both at once: a film the month recorded but
+        history no longer reports is DROPPED by a removal it has nothing to do
+        with, and a film history reports but the month never recorded is ADDED by
+        one.
+
+        MEASURED on a live account before the change: a month holding three films,
+        against history reporting two for the same window, lost TWO when one was
+        forgotten.
+        """
+        self._closed_march([
+            {"key": "movie:tmdb:91", "title": "Never Watched This", "year": 2011,
+             "watched_at": "2026-03-09T12:00:00Z"},
+            # Recorded on the month and NOT in watch history at all -- the shape
+            # a re-derive silently drops.
+            {"key": "movie:tmdb:404", "title": "Only The Month Knows", "year": 2013,
+             "watched_at": "2026-03-20T12:00:00Z"},
+        ])
+        self._remove()
+        after = asyncio.run(distrakt.load_month(self.user_id, "2026-03"))
+        titles = [m["title"] for m in after["movies"]]
+        self.assertEqual(titles, ["Only The Month Knows"],
+                         "the month keeps what it recorded and loses only the one forgotten")
+        self.assertNotIn("Did Watch This", titles,
+                         "a film the month never recorded must not arrive via a removal")
 
     def test_a_film_that_was_never_there_is_a_404(self):
         self.assertEqual(self._remove(tmdb=404).status_code, 404)

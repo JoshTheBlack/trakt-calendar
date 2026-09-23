@@ -785,6 +785,71 @@ async def months_with_shows(user_id: int) -> set[str]:
     return {r["month"] for r in rows}
 
 
+async def _month_movies(user_id: int, month: str) -> list[dict] | None:
+    """The films a month has stored, or None when it has never snapshotted any.
+
+    None and [] are different answers: an OPEN month has no stored list at all and
+    recomputes its films on every load, while a closed month with an empty list is
+    a month that recorded no films. A caller that wrote [] over the first would
+    make an open month look settled.
+    """
+    row = await db.fetch_one(
+        "SELECT movies_json FROM distrakt_months WHERE user_id = ? AND month = ?",
+        (user_id, _validate_month(month)),
+    )
+    if row is None or row["movies_json"] is None:
+        return None
+    return list(json.loads(row["movies_json"]) or [])
+
+
+async def add_month_movie(user_id: int, month: str, movie: dict) -> bool:
+    """Put ONE film into a closed month's stored list. True if it wrote.
+
+    ONE FILM, NOT A RE-DERIVED LIST, and that distinction is the whole reason this
+    exists. A closed month's films used to be rebuilt from live watch history
+    whenever one was added or forgotten — so an edit to one film silently
+    replaced the month's whole record with whatever history happened to say at
+    that moment. MEASURED on a live account: a month holding three films, with
+    history reporting two for the same window, lost TWO of them when one was
+    forgotten. The snapshot is the month's own record (see
+    routes._closed_month_payload, which says exactly that), and a record is
+    amended rather than recomputed.
+
+    A film already in the list is REPLACED rather than doubled: it is held once
+    per identity carrying its latest play, which is the same rule watch history
+    itself keeps.
+
+    A MONTH THAT HAS NEVER SNAPSHOTTED ONE STARTS A LIST. `None` from
+    _month_movies means "no stored list", which for a closed month is simply a
+    month that recorded no films — a frozen month with nothing in it is the
+    ordinary case, not a reason to refuse. WHETHER THE MONTH IS CLOSED IS THE
+    CALLER'S to establish (routes._amend_closed_month_films): writing a list onto
+    an OPEN month would give it a stored answer it is supposed to recompute.
+    """
+    held = await _month_movies(user_id, month) or []
+    key = str(movie.get("key") or "")
+    rest = [m for m in held if str(m.get("key") or "") != key] if key else list(held)
+    await set_month_movies(user_id, month, [*rest, dict(movie)])
+    return True
+
+
+async def remove_month_movie(user_id: int, month: str, key) -> bool:
+    """Drop ONE film from a closed month's stored list. True if it removed one.
+
+    The counterpart to add_month_movie, and here for its reason: forgetting a film
+    must take that film out rather than re-derive the month from today's history.
+    """
+    held = await _month_movies(user_id, month)
+    if held is None:
+        return False
+    wanted = str(key)
+    left = [m for m in held if str(m.get("key") or "") != wanted]
+    if len(left) == len(held):
+        return False
+    await set_month_movies(user_id, month, left)
+    return True
+
+
 async def set_month_movies(user_id: int, month: str, movies: list[dict]) -> None:
     """Replace just the films a CLOSED month snapshotted, leaving its records and
     its closed flag alone.
