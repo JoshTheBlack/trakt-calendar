@@ -57,12 +57,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 guard = authz.Guard(router)
 
-# How many of a month's day blocks the calendar page renders inline. The rest are
-# fetched in one request once the page has painted, so a busy month's first
-# response is a few dozen cards instead of a thousand — the document the browser
-# has to parse before it can show anything is what made the page slow, not the
-# cards further down it that nobody has scrolled to yet.
+# How many of a month's day blocks the calendar page renders inline, AT MOST. The
+# rest are fetched as they scroll into view, so a busy month's first response is a
+# few dozen cards instead of a thousand — the document the browser has to parse
+# before it can show anything is what made the page slow, not the cards further
+# down it that nobody has scrolled to yet.
 INITIAL_DAY_BLOCKS = 5
+# AND THE REAL BOUND, BECAUSE A DAY IS NOT A UNIT OF WORK. Five days is a few
+# dozen cards on Series Premieres and 464 on All Episodes, where a calendar full
+# of daily serials puts ninety titles on a single Tuesday — measured at 717ms of
+# template rendering for one month, which is pure Python and therefore holds the
+# event loop for its whole duration (a worker thread does not help: the GIL means
+# the render still runs on the one core the loop needs). Every day block and every
+# season line that same page then asks for queues behind it.
+#
+# So the budget is CARDS, which is what the paragraph above was always really
+# about, and the day count is left as a ceiling for the calendars where cards are
+# scarce. THE FIRST DAY IS ALWAYS DRAWN however big it is: a page that opened on
+# nothing but placeholders would have nothing to show while the first fetch ran.
+INITIAL_DAY_CARDS = 120
 
 # WHAT THE PAGE SAYS WHEN NOBODY CAN SUPPLY A CALENDAR, and it deliberately
 # names no service. The gate in front of it (`calendar_source_configured` ->
@@ -674,7 +687,15 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
     # The first few are chosen by DAY BLOCK rather than by date, because a month
     # can open with a run of empty days and "the first five dates" would then ship
     # nothing.
-    inline = set(range(min(INITIAL_DAY_BLOCKS, len(month_view.grouped))))
+    inline = set()
+    budget = INITIAL_DAY_CARDS
+    for index, group in enumerate(month_view.grouped[:INITIAL_DAY_BLOCKS]):
+        # The first day goes in whatever it costs; every day after it has to fit
+        # what is left, so one enormous Tuesday cannot drag four more in with it.
+        if index and budget <= 0:
+            break
+        inline.add(index)
+        budget -= len(group["items"])
     # THE DAY A JUMP IS AIMED AT SHIPS WITH THE SHELL TOO, wherever in the month it
     # falls. A search result links to one card, and a browser can only scroll to
     # an element that EXISTS when the page is parsed — a card still inside an
