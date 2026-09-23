@@ -343,7 +343,11 @@ async def apply(user_id: int, settings, plan: dict | None = None) -> dict:
     # even when no month has a finished season in it: they are watch history in
     # their own right, nothing else is ever going to record them for these
     # months, and the ranker reads them straight from that table.
-    movie_count = await watch_history.record_movie_watches(user_id, plan_movies)
+    # SWEPT, not folded: these plays come from a full history sweep the viewer
+    # has just confirmed, so they supersede a stored date rather than only
+    # advancing it — see record_movie_watches for the ratchet that caused.
+    movie_count = await watch_history.record_movie_watches(
+        user_id, plan_movies, swept=True)
     state = await watch_history.load_state(user_id)
 
     written: list[str] = []
@@ -546,11 +550,19 @@ async def _split_films(user_id: int, plays: list[dict],
     what is genuinely missing — but the second is what lets the plan say "six
     films, already recorded" instead of showing nothing and looking broken.
 
-    A film whose stored play is OLDER than the one just seen counts as new: that
-    is a later watch, and the fold keeps the later date.
+    A DIFFERENT DAY IS NEWS, NOT MERELY A LATER ONE. It used to be "later", on
+    the reasoning that a later play is a re-watch and an earlier one is nothing to
+    hear about — but that made the cache a ratchet, and the case it locked out is
+    the one that matters most: a play RE-DATED at the source. MEASURED, on the
+    account this was found on: a film watched on 23 August was dragged to 11
+    September by a bad bulk import; the import was undone at both services, both
+    reported 23 August again, and the tracker went on believing September, because
+    August is earlier and earlier was not news. The film was invisible on August,
+    unreachable from anywhere, and proof against every re-import. What the
+    services say now is what happened; this is a cache.
     """
     state = await watch_history.load_state(user_id)
-    known = {key: str((m or {}).get("watched_at") or "")
+    known = {key: watch_history.local_day((m or {}).get("watched_at"), tz)
              for key, m in (state.get("movies") or {}).items()}
     fresh, seen = [], []
     for film in plays:
@@ -560,8 +572,12 @@ async def _split_films(user_id: int, plays: list[dict],
         # them straight from that table, and this sweep is the one thing that can
         # see them.
         key = resolve_key(Media.MOVIE, film.get("ids") or {})
-        if key is None or watch_history.local_day(film["watched_at"], tz)[:7] not in months:
+        day = watch_history.local_day(film.get("watched_at"), tz)
+        if key is None or day[:7] not in months:
             continue
-        target = fresh if str(film["watched_at"]) > known.get(str(key), "") else seen
+        # Compared as DAYS rather than as raw timestamps, because the two services
+        # spell the same moment differently — "…:00Z" against "…:00.000Z" — and
+        # comparing the strings reported an unchanged film as news on every run.
+        target = fresh if day != known.get(str(key), "") else seen
         target.append(film)
     return fresh, seen

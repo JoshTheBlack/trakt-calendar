@@ -1341,27 +1341,66 @@ async def load_state(user_id: int) -> dict:
     return await _load(user_id)
 
 
-async def record_movie_watches(user_id: int, movies: list[dict]) -> int:
+async def record_movie_watches(user_id: int, movies: list[dict], *,
+                               swept: bool = False) -> int:
     """Fold movie plays into the cache and save; returns how many were recorded.
 
     For the backfill: the routine sync only ever looks back to the start of the
     CURRENT month, so movies watched before tracking began are recorded nowhere,
-    and the ranker imports movies too. Uses the same fold as a normal sync, so a
-    movie already known keeps whichever play is later. A film naming no shared id
-    is skipped rather than filed under an invented one, and does not count.
+    and the ranker imports movies too. A film naming no shared id is skipped
+    rather than filed under an invented one, and does not count.
+
+    `swept` SAYS THESE PLAYS ARE A COMPLETE SWEEP rather than news to fold in, and
+    it is what lets a stored date be CORRECTED rather than only advanced. The
+    ordinary fold keeps whichever play is later, which is right for a sync that
+    sees a slice of history and must not erase what it did not look at — but it
+    makes the cache a ratchet: a play deleted or re-dated at the source can never
+    move the stored date back, so the app goes on believing a date that no service
+    reports any more.
+
+    MEASURED: a film watched on 23 August was swept up by a bad bulk import and
+    re-dated to 11 September. The import was undone at both services, both then
+    reported 23 August again, and the tracker went on filing the film under
+    September for ever — invisible on August, unreachable from anywhere, and
+    proof against every re-import.
+
+    A SWEEP STILL KEEPS THE LATEST PLAY IT SAW. It covers a span rather than a
+    moment, so a film watched twice inside it is held at the later of the two;
+    what is discarded is only the stored answer the sweep has just superseded.
     """
     if not movies:
         return 0
     state = await _load(user_id)
     recorded = 0
+    latest: dict[str, dict] = {}
     for movie in movies:
         ids = collect_ids(movie.get("ids") or {})
         key = resolve_key(Media.MOVIE, ids)
         if key is None:
             continue
-        _apply_movie(state, key, ids, movie.get("title"), movie.get("year"),
-                     movie.get("watched_at"))
         recorded += 1
+        if not swept:
+            _apply_movie(state, key, ids, movie.get("title"), movie.get("year"),
+                         movie.get("watched_at"))
+            continue
+        held = latest.get(str(key))
+        if held is None or str(movie.get("watched_at") or "") > str(held["when"] or ""):
+            latest[str(key)] = {"key": key, "ids": ids, "title": movie.get("title"),
+                                "year": movie.get("year"),
+                                "when": movie.get("watched_at")}
+    for entry in latest.values():
+        # Straight in, past the fold, because the sweep is the authority for the
+        # span it covered. The ids still MERGE with what was stored — a service
+        # that named the film by one id last time has not stopped knowing it.
+        movies_state = state.setdefault("movies", {})
+        prev = movies_state.get(str(entry["key"])) or {}
+        movies_state[str(entry["key"])] = {
+            "ids": {**prev.get("ids", {}), **collect_ids(entry["ids"] or {})},
+            "title": entry["title"] or prev.get("title") or "",
+            "year": entry["year"] if entry["year"] is not None else prev.get("year"),
+            "watched_at": entry["when"] or "",
+            "source": prev.get("source", _LEGACY_SOURCE),
+        }
     await _save(user_id, state)
     return recorded
 

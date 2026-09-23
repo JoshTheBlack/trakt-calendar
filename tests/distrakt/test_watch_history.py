@@ -1049,3 +1049,65 @@ class CursorTests(WatchStateTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ASweptFilmPlayCorrectsWhatWasStoredTests(WatchStateTestCase):
+    """The cache is a cache, and the services are the authority on when a play
+    happened. The ordinary fold keeps whichever play is later, which is right for
+    a sync that sees a slice of history — but it made the stored date a ratchet.
+
+    MEASURED, and the reason this class exists: a film watched on 23 August was
+    dragged to 11 September by a bad bulk import. The import was undone at both
+    services, both reported 23 August again, and the tracker went on filing the
+    film under September for ever — invisible on August, unreachable from
+    anywhere, and proof against every re-import.
+    """
+
+    FILM = {"ids": {"trakt": 44, "tmdb": 44}, "title": "The Last One", "year": 2026}
+
+    def _play(self, when):
+        return {**self.FILM, "watched_at": when}
+
+    async def _stored(self):
+        return (await wh.load_state(self.user_id))["movies"].get(MOVIE(44), {})
+
+    async def test_an_ordinary_fold_still_refuses_to_move_a_date_backwards(self):
+        """A routine sync sees a WINDOW. Letting it rewrite a play outside what it
+        looked at is how a month nobody swept gets quietly emptied, so the fold
+        keeps its rule and only a sweep may correct."""
+        await wh.record_movie_watches(self.user_id, [self._play("2026-09-11T08:35:00Z")])
+        await wh.record_movie_watches(self.user_id, [self._play("2026-08-23T04:49:00Z")])
+        self.assertEqual((await self._stored())["watched_at"], "2026-09-11T08:35:00Z")
+
+    async def test_a_sweep_replaces_the_stored_date_even_going_backwards(self):
+        await wh.record_movie_watches(self.user_id, [self._play("2026-09-11T08:35:00Z")])
+        await wh.record_movie_watches(
+            self.user_id, [self._play("2026-08-23T04:49:00Z")], swept=True)
+        self.assertEqual((await self._stored())["watched_at"], "2026-08-23T04:49:00Z")
+
+    async def test_a_sweep_still_keeps_the_latest_play_it_saw(self):
+        """It covers a span rather than a moment, so a film watched twice inside
+        it is held at the later of the two. What a sweep discards is the stored
+        answer it has just superseded, not its own evidence."""
+        await wh.record_movie_watches(self.user_id, [
+            self._play("2026-08-23T04:49:00Z"),
+            self._play("2026-08-30T01:00:00Z"),
+            self._play("2026-08-02T01:00:00Z"),
+        ], swept=True)
+        self.assertEqual((await self._stored())["watched_at"], "2026-08-30T01:00:00Z")
+
+    async def test_a_sweep_keeps_the_ids_the_stored_row_already_carried(self):
+        """A service that named the film last time has not stopped knowing it, so
+        correcting the DATE must not narrow the identity. The sweep here answers
+        with the shared id alone, as a service that has no Trakt id for a title
+        does."""
+        await wh.record_movie_watches(self.user_id, [
+            {"ids": {"trakt": 44, "tmdb": 44}, "title": "The Last One",
+             "year": 2026, "watched_at": "2026-09-11T08:35:00Z"}])
+        await wh.record_movie_watches(self.user_id, [
+            {"ids": {"tmdb": 44}, "title": "The Last One", "year": 2026,
+             "watched_at": "2026-08-23T04:49:00Z"}], swept=True)
+        stored = await self._stored()
+        self.assertEqual(stored["watched_at"], "2026-08-23T04:49:00Z")
+        self.assertEqual(stored["ids"].get("trakt"), 44,
+                         "the correction dropped an id the stored row already had")

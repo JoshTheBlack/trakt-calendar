@@ -345,6 +345,40 @@ class ApplyTests(BackfillTestCase):
         plan = await self._survey(events, {}, {})
         self.assertEqual(plan["movies"], [])
 
+    async def test_a_film_re_dated_at_the_source_moves_to_the_month_it_belongs_on(self):
+        """THE WHOLE JOURNEY OF THE BUG THIS WAS FOUND BY. A film watched in
+        February was dragged to April by a bad bulk import; the import was undone
+        at the source, which now reports February again. Re-importing has to put
+        it back on February — "earlier is not news" left it stranded on April,
+        where the month it belonged to could never see it and no re-run could
+        reach it."""
+        utc = ZoneInfo("UTC")
+        wrong = [_mv_event(72, "Dragged", 2026, "2026-04-30T00:00:00Z")]
+        await self._survey(wrong, {}, {})
+        await backfill.apply(self.user_id, SETTINGS)
+        state = await watch_history.load_state(self.user_id)
+        self.assertEqual(state["movies"]["movie:tmdb:72"]["watched_at"],
+                         "2026-04-30T00:00:00Z")
+
+        # The source is corrected and now reports the real day.
+        right = [_mv_event(72, "Dragged", 2026, "2026-02-14T00:00:00Z")]
+        plan = await self._survey(right, {}, {})
+        self.assertEqual([f["title"] for f in plan["movies"]], ["Dragged"],
+                         "a corrected date was not offered, so it could never be fixed")
+
+        await backfill.apply(self.user_id, SETTINGS)
+        state = await watch_history.load_state(self.user_id)
+        self.assertEqual(state["movies"]["movie:tmdb:72"]["watched_at"],
+                         "2026-02-14T00:00:00Z")
+        # And so it is February's film now, and April's no longer — which is the
+        # whole of what the viewer sees.
+        self.assertEqual(
+            [m["title"] for m in watch_history.movies_in_range(
+                state, *watch_history.month_bounds("2026-02"), utc)], ["Dragged"])
+        self.assertEqual(
+            watch_history.movies_in_range(
+                state, *watch_history.month_bounds("2026-04"), utc), [])
+
     async def test_a_closed_month_that_gains_films_has_its_own_list_topped_up(self):
         """Otherwise the plan says "February: 1 film" and February goes on
         showing none — its verdicts stay settled, its record of what was
