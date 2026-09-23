@@ -146,9 +146,81 @@ class TheTtlIsBoundedByStalenessTests(unittest.TestCase):
         self.assertLess(calendar_cache._SPAN_MEMO_TTL, shortest)
 
 
+class AFillDoesNotCostTheReaderTheirMemoTests(unittest.TestCase):
+    """THE SHAPE THAT MADE THIS USELESS ON A LIVE INSTANCE, and invisible in
+    development.
+
+    A live calendar WRITES while it reads: a month opened on stale windows fills
+    them, one window at a time, as its day blocks arrive. The first version of
+    this memo threw ALL of it away on any window write, so the mark a reader made
+    a second after the page finished drawing paid the full cost of rebuilding a
+    month that had just been built. It looked perfect in development only because
+    nothing there can reach a provider, so nothing is ever written.
+
+    The rule now: a read that may FILL must be current, because it is the one
+    that went and got the new rows. A read that may not fill is redrawing what is
+    already on screen, and the page it is redrawing came from those same rows.
+    """
+
+    def setUp(self):
+        calendar_cache._forget_spans()
+
+    def tearDown(self):
+        calendar_cache._forget_spans()
+
+    def test_a_write_retires_only_its_own_endpoint(self):
+        calendar_cache._forget_spans("shows")
+        self.assertEqual(calendar_cache._endpoint_generation.get("shows"), 1)
+        self.assertIsNone(calendar_cache._endpoint_generation.get("movies"))
+
+    def test_a_write_to_one_endpoint_leaves_anothers_spans_alone(self):
+        """The collateral that made a films page slow because a shows window
+        happened to refill."""
+        calendar_cache._forget_spans("shows")
+        calendar_cache._forget_spans("shows")
+        self.assertEqual(calendar_cache._endpoint_generation.get("shows"), 2)
+        self.assertEqual(calendar_cache._endpoint_generation.get("movies", 0), 0)
+
+    def test_nothing_is_dropped_outright_by_a_write(self):
+        """Entries are RETIRED by the generation travelling with them, not
+        deleted — which is what lets a redraw still be answered from the span the
+        page was drawn from while a fill is in flight."""
+        calendar_cache._span_memo[("k",)] = (float("inf"), 0, [], None, False, 0)
+        calendar_cache._forget_spans("shows")
+        self.assertIn(("k",), calendar_cache._span_memo,
+                      "a write must not empty the memo a redraw still needs")
+
+    def test_forgetting_everything_still_works_for_a_caller_that_cannot_say(self):
+        calendar_cache._span_memo[("k",)] = (float("inf"), 0, [], None, False, 0)
+        calendar_cache._forget_spans()
+        self.assertEqual(calendar_cache._span_memo, {})
+        self.assertEqual(calendar_cache._endpoint_generation, {})
+
+
+class TheFloorIsBoundedTests(unittest.TestCase):
+    """The window in which a fill costs the reader nothing at all.
+
+    A deliberate trade, made by the owner: a refill lands within the floor rather
+    than instantly, and in exchange the month somebody is working in never stops
+    for three seconds because a day block behind it refreshed a window. These
+    tests hold the two ends of it — that the floor is shorter than the TTL, so it
+    can only ever DELAY a write and never outlive the entry carrying it, and that
+    the TTL is still well under the soonest a span can go stale.
+    """
+
+    def test_the_floor_is_shorter_than_the_ttl(self):
+        self.assertLess(calendar_cache._SPAN_MEMO_FLOOR, calendar_cache._SPAN_MEMO_TTL)
+
+    def test_the_floor_is_shorter_than_the_shortest_staleness_tier(self):
+        """Serving inside the floor must never outlast the point at which the
+        rows themselves were due to be refetched."""
+        shortest = min(seconds for _, seconds in calendar_cache._STALENESS_TIERS)
+        self.assertLess(calendar_cache._SPAN_MEMO_FLOOR, shortest)
+
+
 class ForgettingTests(unittest.TestCase):
     def test_forgetting_empties_the_memo(self):
-        calendar_cache._span_memo[("a",)] = (float("inf"), [], None, False, 0)
+        calendar_cache._span_memo[("a",)] = (float("inf"), 0, [], None, False, 0)
         calendar_cache._forget_spans()
         self.assertEqual(calendar_cache._span_memo, {})
 

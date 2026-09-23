@@ -732,10 +732,11 @@ async def store_window(endpoint_key: str, start: date, records: list[Record],
         unchanged=unchanged,
         now=now, stale_after=now + max(0, int(ttl_seconds)))
     # THE ROWS A MEMOISED SPAN WAS ASSEMBLED FROM HAVE JUST MOVED. This is the
-    # one write that can change what any span holds, so it is the one place the
-    # memo has to be given up — otherwise a refilled month would go on being
-    # served from before the refill for the length of its TTL.
-    _forget_spans()
+    # one write that can change what a span holds, so it is the one place the
+    # memo has to give one up — otherwise a refilled month would go on being
+    # served from before the refill for the length of its TTL. Named, because
+    # this window belongs to one endpoint and the others are untouched.
+    _forget_spans(endpoint_key)
     return group_records(records)
 
 
@@ -1126,6 +1127,21 @@ async def visible_records(groups, endpoint, *, genres="", countries="",
 # DAY, nothing can become due within five minutes either. Raise this past that
 # tier and a page load starts serving a month it should have refetched.
 _SPAN_MEMO_TTL = 300
+# HOW LONG A SPAN IS SERVED TO EVERYBODY, EVEN AFTER THE ROWS UNDER IT MOVED.
+# THE OWNER'S CALL, and it is a trade rather than an oversight: "it is not super
+# important that fresh data is immediate, but it needs to be relatively quick —
+# better to have responsiveness in the app than immediate changes to data."
+#
+# Inside this window a fill does not cost the reader anything at all; past it,
+# the rule below applies again and a read that may fill goes and rebuilds. So a
+# refill lands within two minutes rather than instantly, and the month a reader
+# is working in never stops for three seconds because a day block behind it
+# happened to refresh a window.
+#
+# It only ever DELAYS what a write already stored — nothing is served past
+# _SPAN_MEMO_TTL, and nothing is served from another database or another set of
+# filters, because those are in the key rather than on this clock.
+_SPAN_MEMO_FLOOR = 120
 # Bounded because the key carries the viewer's own filters: a few accounts each
 # reading a few months is a few dozen entries, and a crawler asking for a
 # hundred months must not be able to hold them all.
@@ -1133,20 +1149,38 @@ _SPAN_MEMO_MAX = 64
 _span_memo: dict = {}
 
 
-def _forget_spans() -> None:
-    """Drop every memoised span.
+# HOW MANY TIMES EACH ENDPOINT'S STORED ROWS HAVE MOVED. The memo key carries
+# its endpoint's number, so writing a window makes every span built from the old
+# rows UNREACHABLE without touching anybody else's — which is the difference
+# between invalidating what changed and invalidating everything.
+_endpoint_generation: dict[str, int] = {}
 
-    Called by everything that writes what a span is assembled FROM - a stored
-    window, a drained enrichment - because a memo that outlives its source is the
-    whole risk this shape carries.
 
-    WHOLESALE RATHER THAN BY KEY, and that is deliberate. A key carries the
-    viewer's filters and the window that was written carries none of them, so
-    working out which entries a write could have changed would mean re-deriving
-    every key's span. The memo is small and a write is rare next to a read, so
-    throwing all of it away is cheaper than being clever and wrong.
+def _forget_spans(endpoint_key: str | None = None) -> None:
+    """Give up the spans a write has just invalidated.
+
+    PER ENDPOINT, AND THE FIRST SHAPE HERE WAS NOT. It cleared the whole memo on
+    any window write, on the reasoning that a written window carries none of the
+    viewer filters a key does — true, but it made the memo useless on exactly the
+    instance that needs it. A live calendar WRITES while it reads: a month opened
+    on stale windows fills them, and each fill threw away every span for every
+    endpoint, including the one the page had just built. The reader then paid full
+    price for every mark until the refresh happened to finish. It only looked
+    correct in development, where nothing can reach a provider and so nothing is
+    ever written.
+
+    A WINDOW BELONGS TO ONE ENDPOINT, which is the part the old reasoning missed.
+    The filters decide what a span makes OF the rows; the endpoint decides WHICH
+    rows, and that is knowable at the write. So bumping one number retires every
+    span built from the rows that moved and leaves the rest alone.
+
+    `endpoint_key=None` still drops everything, for a caller that cannot say.
     """
-    _span_memo.clear()
+    if endpoint_key is None:
+        _span_memo.clear()
+        _endpoint_generation.clear()
+        return
+    _endpoint_generation[endpoint_key] = _endpoint_generation.get(endpoint_key, 0) + 1
 
 
 def _span_memo_key(endpoint, settings, *, tz, start_date, end_date, genres,
@@ -1235,18 +1269,43 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # 20ms. See _SPAN_MEMO_TTL for why an unexpired entry cannot be hiding a
     # refresh that was due, and the write below for why only a filling read may
     # put one there.
+    # WHICH READS MAY BE ANSWERED FROM ROWS THAT HAVE SINCE MOVED, and this is
+    # the difference between a memo that survives a busy instance and one that
+    # does not.
+    #
+    # A read that MAY FILL is the freshest thing there is and must be current: it
+    # is the one that goes and gets new rows, and serving it a span built from
+    # what they replaced would hide the refill it just paid for.
+    #
+    # A read that may NOT fill is redrawing something ALREADY ON SCREEN — a
+    # mark's answer, a view toggle, a share page — and the page it is redrawing
+    # was itself drawn from those same rows or older. So one generation behind is
+    # not staleness there; it is the state the reader is looking at. Requiring
+    # the current generation instead is what made marking slow on a live
+    # instance: opening a month on stale windows FILLS them, every fill retires
+    # the spans built from what it replaced, and the mark that follows a second
+    # later then paid the full three seconds to rebuild a month the page had just
+    # finished drawing. Nothing is served past the TTL either way.
     hit = _span_memo.get(key)
     if hit is not None:
-        if hit[0] > time.monotonic():
-            with span("calcache.memo_hit", items=len(hit[1])):
+        current = _endpoint_generation.get(endpoint.key, 0)
+        # Within the floor, ANY read is answered from what is here — see
+        # _SPAN_MEMO_FLOOR. After it, only a read that cannot fill may be
+        # answered from rows that have since moved.
+        within_floor = hit[0] - _SPAN_MEMO_TTL + _SPAN_MEMO_FLOOR > time.monotonic()
+        fresh_enough = within_floor or not allow_fetch or hit[1] == current
+        if hit[0] > time.monotonic() and fresh_enough:
+            with span("calcache.memo_hit", items=len(hit[2]),
+                      behind=current - hit[1]):
                 # THE LIST IS COPIED AND THE ITEMS ARE NOT. `grouped` is built
                 # fresh by the caller and a caller may write onto ITS dicts
                 # (routes._count_visible puts a per-viewer count on each day), so
                 # the structure has to be per-request. An Item is a value nothing
                 # in app/ ever assigns to, so sharing one is safe - and copying
                 # two thousand of them would give back what this saves.
-                return list(hit[1]), hit[2], hit[3], hit[4]
-        _span_memo.pop(key, None)
+                return list(hit[2]), hit[3], hit[4], hit[5]
+        if hit[0] <= time.monotonic():
+            _span_memo.pop(key, None)
 
     utc_start, utc_end = _local_span_utc_range(tz, start_date, end_date)
     windows = aligned_windows(utc_start, utc_end)
@@ -1389,6 +1448,7 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     if len(_span_memo) >= _SPAN_MEMO_MAX:
         _span_memo.pop(next(iter(_span_memo)), None)
     _span_memo[key] = (time.monotonic() + _SPAN_MEMO_TTL,
+                       _endpoint_generation.get(endpoint.key, 0),
                        list(items), as_of, partial, filtered_out)
     return items, as_of, partial, filtered_out
 
