@@ -23,7 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import anyio
 import anyio.to_thread
@@ -56,11 +56,16 @@ guard = authz.Guard(router)
 _POSTER_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 
 # A restore is the one request that legitimately carries whole boards rather than
-# a list of keys: fifty boards of a thousand titles, each with its own title,
-# network and provenance map, is several megabytes of perfectly ordinary
-# document. The caps in the data layer are what actually bound what may be
-# written; this only stops something absurd being read into memory first.
-MAX_RESTORE_BYTES = 32 * 1024 * 1024
+# a list of keys, so the largest it may be is DERIVED FROM THE CAPS it has to
+# hold: every board an account may have, each at the item ceiling. A title as the
+# backup writes it MEASURED 350 bytes with no service ids and is ~500 with a full
+# set of ids and slugs, and the document travels as a string inside a JSON body,
+# which escapes every quote in it — 768 a title covers that with room to spare.
+# The caps in the data layer are what actually bound what may be written; this
+# only stops something absurd being read into memory first.
+RESTORE_BYTES_PER_TITLE = 768
+MAX_RESTORE_BYTES = (ranker.MAX_BOARDS_PER_USER * ranker.MAX_ITEMS_PER_BOARD
+                     * RESTORE_BYTES_PER_TITLE)
 
 # Search is the one route here that reaches a provider on every call, so it is
 # the one that can be turned into an amplifier. The window is short and the
@@ -78,15 +83,22 @@ MAX_SEARCH_RESULTS = 20
 
 # How much of the unranked pool comes down in the first response. Everything past
 # it arrives a page at a time behind an intersect sentinel, because a board may
-# hold a thousand titles and each card is a poster request. Sixty is more than a
+# hold thousands of titles and each card is a poster request. Sixty is more than a
 # screenful at any window size, so the first page is never what a viewer waits on.
 POOL_PAGE_SIZE = 60
 
 # Above this many tiered titles a board draws its tiers closed and each one
-# fetches its rows the first time it is opened. Below it the board simply shows
-# itself: rendering a couple of hundred rows costs less than making somebody
-# click through six tiers to see the arrangement they came to look at.
-EAGER_ROW_LIMIT = 200
+# fetches its rows the first time it is opened. At or below it the board simply
+# shows itself — every title on screen and pickable without opening anything.
+# WHAT PRICES IT IS THE REDRAW, NOT THE FIRST LOAD: every action on the board that
+# is not a drag answers with the whole board, so whatever draws open here is drawn
+# again on every rename, removal, move and restore. MEASURED (Firefox 155 and
+# Chromium 153, headless, a mid-range laptop): a thousand rows open redraw in
+# ~630ms and ~590-760ms, a third inside a one-second budget — after the row was
+# cut from ~4 KB to ~2 KB (_ranker_row.html sends no indentation and asks for its
+# move menu when opened). Past this, Chromium stalls for seconds at a time drawing
+# 1,400+ rows, which is what the closed shape is still for at MAX_ITEMS_PER_BOARD.
+EAGER_ROW_LIMIT = 1000
 
 # What an export may ask for. Columns below three make a canvas taller than any
 # format will encode at the item ceiling, and above six the tiles are too small
@@ -178,7 +190,7 @@ def _board_state(board: dict) -> dict:
     and a save that omitted a tier would be refused, while one that named a tier
     with an empty list and the wrong label would overwrite the label. The keys
     and the tier settings are the whole answer and cost almost nothing to send:
-    a board at its thousand-title cap is a thousand short strings.
+    a board at its item cap is that many short strings — some forty kilobytes.
     """
     return {
         "uid": board["uid"],
@@ -215,8 +227,11 @@ def _board_groups(boards: list[dict]) -> list[dict]:
     return groups
 
 
-def _pool_url(board_uid: str, page: int) -> str:
-    return f"/rankings/fragments/pool?board={quote(board_uid)}&page={page}"
+def _pool_url(board_uid: str, after: str) -> str:
+    """Where the pool's next page is asked for: the titles after `after`, which is
+    the key of the last title the server put on the page before it — a reference,
+    not a position (ranker.fetch_pool_after says why a position went wrong)."""
+    return f"/rankings/fragments/pool?{urlencode({'board': board_uid, 'after': after})}"
 
 
 def _rows_url(board_uid: str, category_uid: str) -> str:
@@ -232,11 +247,10 @@ def _move_choices(board: dict) -> list[dict]:
     """Where a title on this board can be sent, in the order the board draws its
     tiers, with the pool first.
 
-    EVERY ROW CARRIES THIS, so it is built once here rather than four times: the
-    shell renders rows inline, the pool pages them in, a tier fetches its own, and
-    a title added after first paint comes from row_fragment — and a row has to be
-    the same row whichever of those drew it, which is the claim row_fragment makes
-    in its own docstring.
+    TWO THINGS OFFER IT, AND THIS IS WHY THEY AGREE: the bulk Move's list, drawn
+    with the page, and a row's own ⇄ menu, asked for when it is opened
+    (move_menu_fragment). A destination added to one and not the other would be a
+    title that can go somewhere by one route and not the other.
 
     THE POOL IS THE EMPTY UID, which is what move_items already means by it: "or
     back to the pool when `category_uid` is empty". So a move out of a tier and a
@@ -248,22 +262,15 @@ def _move_choices(board: dict) -> list[dict]:
     ]
 
 
-def _pool_context(board: dict, page: int) -> dict:
-    """One page of the pool, plus the sentinel that asks for the one after it.
+def _pool_context(board_uid: str, items: list[dict], remaining: int) -> dict:
+    """One page of the pool, plus the sentinel that asks for the titles after it.
     The last page carries no sentinel, which is what ends the chain."""
-    start = page * POOL_PAGE_SIZE
-    items = board["pool"][start:start + POOL_PAGE_SIZE]
-    remaining = len(board["pool"]) - (start + len(items))
     return {
         "items": items,
         # Every row names its board, because its details button asks for a title
         # by board and key and a key is only unique within one board.
-        "board_uid": board["uid"],
-        # And where it can be moved to. The whole page takes its row context from
-        # here too (_rankings_response updates itself with this), so the tiers a
-        # row offers are the tiers the board drew, in that order.
-        "tiers": _move_choices(board),
-        "next_url": _pool_url(board["uid"], page + 1) if remaining > 0 else None,
+        "board_uid": board_uid,
+        "next_url": _pool_url(board_uid, items[-1]["key"]) if items and remaining > 0 else None,
         # The sentinel reserves the height its page will take, so arriving cards
         # slot into space already made for them instead of shoving the page down.
         "next_rows": min(remaining, POOL_PAGE_SIZE),
@@ -381,7 +388,7 @@ async def _rankings_response(request: Request, user, wanted: str | None, *,
     wanted = wanted or (boards[0]["uid"] if boards else None)
     board = None
     if wanted:
-        # A board may hold a thousand titles, and this reads all of them plus
+        # A board may hold thousands of titles, and this reads all of them plus
         # every category, so it is the one part of opening this page that grows
         # with how much somebody has ranked.
         try:
@@ -430,30 +437,35 @@ async def _rankings_response(request: Request, user, wanted: str | None, *,
         "restore_ack": RESTORE_ACK,
     }
     if board:
-        context.update(_pool_context(board, 0))
+        first = board["pool"][:POOL_PAGE_SIZE]
+        context.update(_pool_context(board["uid"], first, len(board["pool"]) - len(first)))
         context.update(await _removals_context(user.user_id, board["uid"]))
         context.update(_export_context(user.user_id, board))
         context["strips_url"] = _strips_url(board["uid"])
+        # The bulk Move's destinations, in the order the tiers are drawn.
+        context["tiers"] = _move_choices(board)
     return templates.TemplateResponse(request, "ranker.html", context)
 
 
 @guard.get("/rankings/fragments/pool", AuthLevel.RANKER_APPROVED)
 async def pool_page_fragment(request: Request):
-    """The next page of a board's unranked pool.
+    """The next page of a board's unranked pool: the titles after the one the
+    page before it ended on.
 
     A VIEW, NOT AN API: it answers with the same cards the shell renders inline,
     and nothing else, so a page that arrives late is indistinguishable from one
-    that came with the document.
+    that came with the document. It reads only the page it draws, not the board.
     """
     user = await auth.current_user(request)
     board_uid = request.query_params.get("board") or ""
-    page = max(0, _query_int(request.query_params.get("page"), 0))
+    after = request.query_params.get("after") or ""
     try:
-        board = await ranker.fetch_board(user.user_id, board_uid)
+        items, remaining = await ranker.fetch_pool_after(
+            user.user_id, board_uid, after, POOL_PAGE_SIZE)
     except ranker.RankerError as exc:
-        return _fragment_failure(request, str(exc), _pool_url(board_uid, page),
+        return _fragment_failure(request, str(exc), _pool_url(board_uid, after),
                                  "ranker-pool-sentinel")
-    context = _pool_context(board, page)
+    context = _pool_context(board_uid, items, remaining)
     return templates.TemplateResponse(
         request, "_ranker_pool_page.html", {"request": request, **context},
     )
@@ -475,8 +487,7 @@ async def category_rows_fragment(request: Request):
         return _fragment_failure(request, "No such tier.", retry, "ranker-rows")
     return templates.TemplateResponse(
         request, "_ranker_category_rows.html",
-        {"request": request, "items": found[0]["items"], "board_uid": board["uid"],
-         "tiers": _move_choices(board)},
+        {"request": request, "items": found[0]["items"], "board_uid": board["uid"]},
     )
 
 
@@ -527,20 +538,39 @@ async def row_fragment(request: Request):
     board_uid = request.query_params.get("board") or ""
     try:
         item = await ranker.fetch_item(user.user_id, board_uid, request.query_params.get("key"))
-        # THE BOARD AS WELL, FOR THE ROW'S MOVE MENU. A row carries one choice per
-        # tier, so drawing one means knowing the tiers — and a row that arrives
-        # after first paint has to be the row the shell would have drawn, which is
-        # this route's whole claim. Read after the item so a title the board does
-        # not hold still costs nothing.
+    except ranker.RankerError:
+        return HTMLResponse("")
+    return templates.TemplateResponse(
+        request, "_ranker_row.html",
+        {"request": request, "item": item, "board_uid": board_uid},
+    )
+
+
+@guard.get("/rankings/fragments/move-menu", AuthLevel.RANKER_APPROVED)
+async def move_menu_fragment(request: Request):
+    """Where one title can be moved to: the pool and every tier, in the order the
+    board draws them — the same `_move_choices` the bulk Move's list is drawn from.
+
+    ASKED FOR THE FIRST TIME A ROW'S ⇄ IS PRESSED, rather than drawn with every row:
+    a board redraws every row on every action that is not a drag, and a menu is
+    opened for one title at a time (_ranker_move_menu.html has the measurement).
+
+    A TITLE THE BOARD DOES NOT HOLD DRAWS AS NOTHING, at 200 like every fragment
+    here — another tab took it off, and an empty menu is the honest answer.
+    """
+    user = await auth.current_user(request)
+    board_uid = request.query_params.get("board") or ""
+    key = request.query_params.get("key") or ""
+    try:
+        item = await ranker.fetch_item(user.user_id, board_uid, key)
         board = await ranker.fetch_board(user.user_id, board_uid)
     except ranker.RankerError:
         return HTMLResponse("")
     board["categories"] = _tiers_by_priority(board["categories"])
-    return templates.TemplateResponse(
-        request, "_ranker_row.html",
-        {"request": request, "item": item, "board_uid": board_uid,
-         "tiers": _move_choices(board)},
-    )
+    return templates.TemplateResponse(request, "_ranker_move_menu.html", {
+        "request": request, "board_uid": board_uid, "key": item["key"],
+        "tiers": _move_choices(board),
+    })
 
 
 # THE REMOVAL HISTORY HAS NO FRAGMENT OF ITS OWN ANY MORE. It used to redraw
@@ -695,13 +725,6 @@ def _fragment_failure(request: Request, message: str, retry_url: str, target: st
     return templates.TemplateResponse(request, "_ranker_failed.html", {
         "request": request, "error": message, "retry_url": retry_url, "target": target,
     })
-
-
-def _query_int(value: Any, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
 
 
 # ---------------------------------------------------------------------------
@@ -985,7 +1008,8 @@ def _picked(data: dict) -> list[str]:
 
 @guard.post("/rankings/boards/{board_uid}/items/move", AuthLevel.RANKER_APPROVED)
 async def move_board_items(board_uid: str, request: Request):
-    """Move the pool's checked titles into a tier.
+    """Move the checked titles — picked in the pool, in any tier, or in both —
+    into a tier, or back to the pool when the tier is empty.
 
     A BULK MOVE IS A LAYOUT CHANGE LIKE A DRAG, so it bumps the board's version
     and answers with the page: the arrangement the next drag saves from is the

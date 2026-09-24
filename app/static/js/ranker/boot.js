@@ -20,11 +20,6 @@ function boot() {
     if (!state.board) return;
     initSortable(document);
     refreshCounts();
-    const pool = document.getElementById('rankerPool');
-    if (pool && !pool.dataset.clickBound) {
-        pool.dataset.clickBound = '1';
-        pool.addEventListener('click', onPoolClick);
-    }
 }
 
 // Registered rather than hung off DOMContentLoaded, which a boosted arrival does

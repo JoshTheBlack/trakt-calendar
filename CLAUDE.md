@@ -212,9 +212,11 @@ back carrying entries two months past its end. Windows are trimmed before
 storage; without the trim a month read shows the same airing several times.
 
 **JavaScript is for what ONLY JavaScript can do, and the floor is MEASURED.**
-As of the audit that ended this work the whole first-party surface is **694 code
-lines across 15 .js files, 25 lines of inline `<script>` and 10 inline `on*=`
-handlers** — from 4,024 lines when the audit began, and from 1,213 / 26 / 30 at
+The whole first-party surface is **702 code lines across 15 .js files, 25 lines
+of inline `<script>` and 10 inline `on*=` handlers** — 694 when the audit ended
+(the rankings board's multi-select then came in three lines under it, and keeping
+a page of its pool from drawing a title twice added eleven), from 4,024
+lines when the audit began, and from 1,213 / 26 / 30 at
 its last conversion. The WATCH TRACKER now loads no script of its own at all. Those three numbers are the point of this paragraph: they
 are what somebody adding a file is adding to, and a number that has drifted is a
 signal to go and ask why.

@@ -2617,25 +2617,29 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .ranker-results:not(:has(*)) { display: none; }
 
 /* ---- bulk selection ----
-   ALL OF IT IS THE CHECKBOX ON EACH ROW (_ranker_row.html). Whether the bar is
-   there, how many are picked and which rows are lit are three readings of that
-   one fact, so none of them needs a script to keep in step.
+   ALL OF IT IS THE DRAG LIBRARY'S CLASS ON EACH PICKED ROW (`.sortable-selected`,
+   ranker/selection.js). Whether the bar is there, how many are picked and which
+   rows are lit are three readings of that one fact, so none of them needs a
+   script to keep in step — and the row's checkbox, which follows the class for
+   the form's sake, is read by none of them.
 
-   BELOW THE POOL, WHICH IS WHAT MAKES THE COUNT FREE: a CSS counter reads what
-   has been counted BEFORE it in the document, so a readout above the rows it
-   counts would always say nought. */
-.ranker-pool-col { counter-reset: picked; }
+   THE BAR FOLLOWS BOTH COLUMNS IN THE DOCUMENT, WHICH IS WHAT MAKES THE COUNT
+   FREE: a CSS counter reads what has been counted BEFORE it, and a pick can sit
+   in the pool or in any tier. So the counter is reset on the board, and the bar
+   is the board's last child, spanning both columns and pinned to the foot of the
+   window for as long as the board runs past it — including on a narrow screen,
+   where the columns stack and the tiers are a long scroll below the pool. */
+.ranker-board { counter-reset: picked; }
 .ranker-bulk {
-    display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px;
+    grid-column: 1 / -1; justify-self: center;
+    position: sticky; bottom: 12px; z-index: 5;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
     padding: 7px 10px; border-radius: 10px; font-size: 0.78rem;
-    background: rgba(232,181,69,0.12); border: 1px solid rgba(232,181,69,0.4);
-    /* NEVER SHRINKS. It is the last child of a column whose height is capped to
-       the viewport, so without this the scrolling pool above it would squeeze
-       the bar to nothing rather than give up its own height. */
-    flex: 0 0 auto;
+    background: var(--bg-panel); border: 1px solid rgba(232,181,69,0.6);
+    box-shadow: 0 10px 30px rgba(0,0,0,0.55);
 }
-.ranker-pool-col:not(:has(#rankerPool .ranker-pick:checked)) .ranker-bulk { display: none; }
-#poolSelectedCount::after { content: counter(picked) " selected"; }
+.ranker-board:not(:has(.ranker-item.sortable-selected)) .ranker-bulk { display: none; }
+#selectionCount::after { content: counter(picked) " selected"; }
 .ranker-bulk select {
     background: var(--card); border: 1px solid var(--card-border); color: var(--text);
     border-radius: 7px; padding: 5px 8px; font-family: inherit; font-size: 0.78rem;
@@ -2651,10 +2655,9 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 }
 .ranker-item:hover { border-color: rgba(232,181,69,0.5); }
 .ranker-item:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }
-/* SCOPED TO THE POOL, which is also what clears a highlight the moment a picked
-   row is dragged into a tier — it stops being one of the pool's rows, so it stops
-   being one of the pool's selection. */
-#rankerPool .ranker-item:has(.ranker-pick:checked) {
+/* EVERYWHERE ON THE BOARD, the pool and every tier alike: one selection spans
+   them, and a picked row dragged into a tier is still picked. */
+.ranker-item.sortable-selected {
     border-color: var(--gold); background: rgba(232,181,69,0.14);
     counter-increment: picked;
 }
@@ -2706,15 +2709,6 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
        cannot scroll does not chain to the page. */
     flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 4px;
     display: flex; flex-direction: column;
-    /* LAID OUT AFTER THE BULK BAR THOUGH IT COMES BEFORE IT IN THE MARKUP, which
-       is the whole reason `order` is here. The bar has to follow the rows in the
-       DOCUMENT because `counter(picked)` can only count what the document
-       counted before it — but below a pool the height of the window it is off
-       the bottom of the screen, which is where it was being missed entirely.
-       Flex `order` moves the BOX and not the tree, and counters are resolved in
-       tree order, so the readout keeps working while the bar sits above the rows
-       it describes. */
-    order: 1;
 }
 @media (max-width: 900px) { .ranker-pool-scroll { max-height: 62vh; } }
 .ranker-pool { flex: 1 0 auto; }
@@ -2804,6 +2798,11 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     color: var(--text);
 }
 .ranker-menu:popover-open { display: flex; flex-direction: column; gap: 2px; }
+/* ITS CHOICES ARRIVE INSIDE A FORM (_ranker_move_menu.html), which is there to
+   post them and not to be a box: its buttons lay out as the menu's own. */
+.ranker-menu > form { display: contents; }
+/* Opened before its choices have landed — they are asked for on the first press. */
+.ranker-menu:empty::before { content: "…"; padding: 6px 10px; color: var(--text-faint); }
 .ranker-menu button {
     cursor: pointer; background: none; border: none; color: var(--text); text-align: left;
     padding: 6px 10px; border-radius: 6px; font-family: inherit; font-size: 0.8rem;
@@ -2836,7 +2835,7 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
    side. The script sets the attribute and nothing else now.
    `idle` DELIBERATELY HAS NO RULE: the empty string is the absence of a word, and
    a rule setting `content: ""` would say the same nothing twice.
-   Same shape as `#poolSelectedCount::after` above, for the same reason. */
+   Same shape as `#selectionCount::after` above, for the same reason. */
 .ranker-save-state { font-size: 0.74rem; color: var(--text-faint); min-width: 54px; text-align: right; }
 .ranker-save-state[data-state="saving"] { color: var(--gold-soft); }
 .ranker-save-state[data-state="saving"]::after { content: "Saving…"; }

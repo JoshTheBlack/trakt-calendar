@@ -1,0 +1,24 @@
+{#- dedent -#}
+{# Where one title can be moved to, drawn the first time its ⇄ is pressed and
+   swapped into that row's empty popover (_ranker_row.html).
+
+   ASKED FOR RATHER THAN DRAWN WITH THE ROW. Every row on a board has one of
+   these, and a board draws up to a thousand rows and redraws all of them on
+   every action that is not a drag — while a menu is opened for one title at a
+   time. MEASURED: drawn with the row it was a third of every row's bytes. Asked
+   for, it costs one small request the first time a given row's menu is opened.
+
+   A FORM, AND THE REQUEST IS SAID ONCE. The address, the encoder, the target and
+   the title's key sit on the form; each choice is only its own `name="tier"` and
+   value, which the browser adds to the form's fields when that button is the one
+   pressed. `move_items` takes any title on the board and reads an empty tier as
+   "back to the pool", so leaving a tier and changing tier are one request, the
+   same one the bulk Move sends. The key's field has no `form=`, so it belongs to
+   this form and never to the board's selection form. #}
+<form hx-boost="false" hx-post="/rankings/boards/{{ board_uid }}/items/move" hx-json-enc
+      hx-target="body" hx-swap="innerHTML">
+    <input type="hidden" name="pick:{{ key }}" value="1">
+    {%- for tier in tiers %}
+    <button name="tier" value="{{ tier.uid }}">{{ tier.label }}</button>
+    {%- endfor %}
+</form>

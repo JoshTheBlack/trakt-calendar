@@ -51,6 +51,13 @@ function dropTargets(root) {
 // SAFE TO CALL ON ANY SUBTREE, ANY NUMBER OF TIMES. A container that is already
 // bound is skipped, so the load-time call and the per-swap call cannot between
 // them install two sets of handlers on the same element.
+//
+// DESTROYING A DETACHED INSTANCE IS ALSO WHAT EMPTIES THE SELECTION after the
+// board is redrawn. MultiDrag holds the picked rows in one array shared by every
+// container, so after a redraw it would be holding rows no longer in the page —
+// and a drag carries every row in it. MEASURED in Firefox 155 and Chromium 153:
+// destroying the instance the last pick was made in deselects every row it held,
+// detached or not, and the next drag carries only what is on screen.
 function initSortable(root) {
     if (typeof Sortable === 'undefined') return;
     for (const [el, instance] of sortables) {
@@ -63,10 +70,21 @@ function initSortable(root) {
             animation: 140,
             draggable: '.ranker-item',
             handle: '.ranker-item',
+            // Also what keeps ✕, ⓘ, the nudges and ⇄ from picking their row: a
+            // press the library filters out never reaches its selection either.
             filter: '.ranker-act',
             preventOnFilter: false,
             ghostClass: 'sortable-ghost',
             dragClass: 'sortable-drag',
+            // One selection across the pool and every open tier (ranker/selection.js).
+            // `avoidImplicitDeselect` because the library otherwise drops the
+            // whole selection on any click outside the container it was made in —
+            // which is every pick in a second column, and the Move button itself.
+            multiDrag: true,
+            selectedClass: 'sortable-selected',
+            avoidImplicitDeselect: true,
+            onSelect: onPicked,
+            onDeselect: onUnpicked,
             onEnd: onDragEnd,
         }));
     });
@@ -88,9 +106,12 @@ function initSearchDrag() {
     }));
 }
 
+// One row put back where it was changed nothing. A drag carrying a selection is
+// saved whatever its own row did, because the others moved even when it did not
+// — and what moved is read back out of the DOM by the save (ranker/save.js's
+// readLayout), which is why nothing here has to know how many rows went where.
 function onDragEnd(evt) {
-    if (evt.from === evt.to && evt.oldIndex === evt.newIndex) return;
-    if (evt.to && evt.to.id !== 'rankerPool') unpick(evt.item);
+    if (evt.items.length < 2 && evt.from === evt.to && evt.oldIndex === evt.newIndex) return;
     refreshCounts();
     scheduleSave();
 }

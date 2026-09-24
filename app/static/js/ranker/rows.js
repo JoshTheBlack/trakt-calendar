@@ -1,5 +1,6 @@
-// One title on the board: drawing a row that arrives after first paint, and the
-// two ways to move one that are not a drag.
+// One title on the board: drawing a row that arrives after first paint, keeping a
+// page of the pool from drawing a title twice, and the two ways to move one that
+// are not a drag.
 //
 // TAKING A TITLE OFF IS NOT HERE ANY MORE. The ✕ on a row posts itself and is
 // answered with the board redrawn and a toast whose Undo is the removal history's
@@ -43,6 +44,38 @@ function insertRow(container, before, key) {
               { target: slot, swap: 'outerHTML' });
     return slot;
 }
+
+// ---------------------------------------------------------------------------
+// a page of the pool never draws a title this page already shows
+// ---------------------------------------------------------------------------
+// The pool arrives a page at a time, each page "the titles after the one the last
+// page ended on" (ranker.fetch_pool_after), so a page cannot skip anything. What it
+// CAN do is repeat: a title dragged back into the pool from a tier on this page,
+// or one just added and drawn at the head of the pool, is also somewhere in the
+// server's pool after that point. Drawn twice, the next save names it twice and
+// is refused whole — MEASURED, and every save after it failed the same way until
+// a reload, which then lost the moves that had not been written.
+//
+// WHY THIS IS SCRIPT: until a save lands, THIS PAGE is the arrangement. No route
+// can know what has been dragged here and not yet written, and no template can
+// leave out a row it does not know is already drawn — only the page can. The row
+// the page already has is kept, because it is where somebody put it; the arriving
+// copy is dropped before it is inserted.
+//
+// READ IN THE VENDORED htmx RATHER THAN ASSUMED: `htmx:before:swap` carries the
+// swap's tasks before any runs, and a pool page's rows are an out-of-band task
+// targeting #rankerPool whose `fragment` is what will be appended.
+document.addEventListener('htmx:before:swap', (event) => {
+    const pool = document.getElementById('rankerPool');
+    const tasks = (event.detail && event.detail.tasks) || [];
+    const pages = tasks.filter(task => pool && task.target === pool && task.fragment);
+    if (!pages.length) return;
+    const shown = new Set(Array.from(document.querySelectorAll('.ranker-item[data-key]'),
+                                     row => row.dataset.key));
+    pages.forEach(task => task.fragment.querySelectorAll('.ranker-item[data-key]').forEach(row => {
+        if (shown.has(row.dataset.key)) row.remove();
+    }));
+});
 
 // ---------------------------------------------------------------------------
 // keyboard and non-pointer moves
