@@ -13,8 +13,8 @@ route decided that for itself and most of them didn't decide at all, which is
 why the links were only present on the two pages that happened to pass the
 flags. version and build were the same problem one level up: eight call sites
 each restating the same lines. The static-asset token used to live here too; it
-now reaches templates through app/assets.py directly, because the head macro is
-the only thing that ever wanted it and a route context was one hop too many.
+now reaches templates through app/assets.py directly, because the base template
+is the only thing that ever wanted it and a route context was one hop too many.
 
 Distrakt is deliberately absent: its menu item is rendered for everyone and
 revealed client-side, so that the HTML gives nothing away. See _nav.html.

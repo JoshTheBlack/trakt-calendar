@@ -25,6 +25,11 @@
 
 // Poster-only wall: if a card is too close to the right edge, open its hover panel
 // to the LEFT so it never runs off-screen (and so it can't flicker-wrap).
+//
+// WHERE A PANEL OPENS DEPENDS ON WHERE THE CARD WAS LAID OUT, which no stylesheet
+// rule can compare against the window's edge — hence script. The calendar and a
+// shared calendar both draw poster-only cards (`body.card-poster`), so this acts
+// on both; on any other page no card wears that style and it does nothing.
 document.addEventListener('mouseover', (e) => {
     const card = e.target.closest && e.target.closest('.card');
     if (!card) return;

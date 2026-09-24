@@ -212,21 +212,33 @@ back carrying entries two months past its end. Windows are trimmed before
 storage; without the trim a month read shows the same airing several times.
 
 **JavaScript is for what ONLY JavaScript can do, and the floor is MEASURED.**
-The whole first-party surface is **702 code lines across 15 .js files, 25 lines
-of inline `<script>` and 10 inline `on*=` handlers** — 694 when the audit ended
-(the rankings board's multi-select then came in three lines under it, and keeping
-a page of its pool from drawing a title twice added eleven), from 4,024
-lines when the audit began, and from 1,213 / 26 / 30 at
-its last conversion. The WATCH TRACKER now loads no script of its own at all. Those three numbers are the point of this paragraph: they
-are what somebody adding a file is adding to, and a number that has drifted is a
-signal to go and ask why.
+The whole first-party surface is **676 code lines across 15 .js files, 24 lines
+of inline `<script>` and 10 inline `on*=` handlers** — 694 when the audit ended,
+702 after the rankings board's multi-select, and 676 once every page extended
+one base template and the per-page script loader went; from 4,024 lines when the
+audit began, and from 1,213 / 26 / 30 at its last conversion. The WATCH TRACKER
+has no script of its own at all. Those three numbers are the point of this
+paragraph: they are what somebody adding a file is adding to, and a number that
+has drifted is a signal to go and ask why.
 
-`app/assets.py`'s `PAGE_SCRIPTS` owns which scripts exist, so adding one is a
-visible act (`tests/kernel/test_page_head.py` fails a render reaching for a
-script the list does not track). `tests/kernel/test_script_reasons.py` owns the
-CLAIM: every .js file and every inline `<script>` must OPEN with prose saying
-what it could not have been, naming at least two of markup, a stylesheet rule, a
-template and a route. A label is not a reason and the test says so.
+`app/assets.py` owns which scripts exist, in two lists — `PUBLIC_SCRIPTS` and
+`APP_SCRIPTS`, the second beginning with the first — so adding one is a visible
+act (`url()` fails a render reaching for a script neither list tracks).
+`tests/kernel/test_script_reasons.py` owns the CLAIM: every .js file and every
+inline `<script>` must OPEN with prose saying what it could not have been, naming
+at least two of markup, a stylesheet rule, a template and a route. A label is not
+a reason and the test says so.
+
+**Every page extends `templates/_base.html`, and which script list it loads is
+tied to whether it boosts.** A boosted link keeps the `<head>` the session
+started with, so a page reached by a swap has only the scripts its session's
+first page loaded. Every signed-in page loads `APP_SCRIPTS`, so a swap between
+them needs nothing fetched; the pages a stranger lands on set `public = true`,
+which loads the short `PUBLIC_SCRIPTS` AND turns boosting off on `<body>` — both
+live on things a swap never replaces, so a session that started public reaches
+the app only by a full load. Making a page public without the other half, or
+boosting out of one, lands a page INERT with nothing on screen to say why.
+`tests/kernel/test_page_head.py`'s `PublicPageTests` names the public pages.
 
 BEFORE WRITING A LINE OF IT, ANSWER WHY MARKUP, A STYLESHEET RULE, A JINJA
 TEMPLATE OR A ROUTE CANNOT DO THIS. The question is not rhetorical — every item
@@ -271,8 +283,10 @@ rather than what was hoped for:
   - a window opened INSIDE a click and aimed afterwards (the Plex popup);
   - a POST whose answer is a file to save;
   - a payload that is not a form's fields — the board's nested ordered tree;
-  - loading a page's own scripts after a boosted navigation, which is the one
-    thing a body swap cannot do for itself;
+  - telling a page it has ARRIVED after a boosted navigation, which fires no
+    DOMContentLoaded — `page-arrived`, announced by static/js/boost.js;
+  - switching a button on once htmx has wired its form, because before then
+    the form would be sent the browser's own way (the sign-in form);
   - reading something the server is deliberately not told: the device's timezone,
     and whether this browser has found the tracker.
 

@@ -1,30 +1,12 @@
-<!DOCTYPE html>
-<html lang="en">
-{% import '_head.html' as page with context %}
+{% extends '_base.html' %}
 {# This page's own styling lives in the bundled stylesheet, NOT in a <style>
    here. A boosted navigation swaps <body> and leaves <head> alone, so CSS a
    page carries in its own head is applied only when that page is the one the
    browser loaded cold — arrive here by clicking and the rules never exist. #}
-{{ page.head('Pick a Month', scripts=assets.scripts('pick'), site_suffix=false) }}
-{%- set body_class %}{% endset %}
-{# `hx-indicator` IS INHERITED BY EVERY ELEMENT UNDER THIS ONE, which is the
-   whole reason it is declared here and nowhere else: a boosted navigation, a
-   day block arriving and a search all mark the same bar for as long as they are
-   in flight, with no script registering anything and nothing to clean up after
-   a swap. The bar itself is drawn by the site header — see _nav.html for what
-   it is for, and style.css for why it waits a moment before appearing. #}
-<body class="{{ body_class }}" hx-boost="true" hx-indicator="#pageProgress">
-{# What a boosted arrival cannot work out for itself. A swap replaces the body's
-   CHILDREN, so the <body> element keeps the previous page's classes and the <head>
-   keeps its scripts — see static/js/boost.js, which reads this and applies both.
-   Inside the body deliberately: it has to travel with the swap, and it has to
-   survive a Back, which htmx serves from its own cache with no request at all.
-
-   `pick`, the same page name the calendar's own chooser uses: the two want the
-   identical one script and neither registers an init, so a second name would be
-   a second copy of the same list in app/assets.py. #}
-<div id="pageMeta" hidden data-page="pick" data-body-class="{{ body_class }}"></div>
-
+{% set site_suffix = false %}
+{% set progress_bar = true %}
+{% block title %}Pick a Month{% endblock %}
+{% block content %}
 {% import '_nav.html' as site_nav %}
 {% call site_nav.navbar(brand='distrakt',
                         calendar_available=calendar_available,
@@ -66,5 +48,4 @@
             </div>
         </div>
     </div>
-</body>
-</html>
+{% endblock %}

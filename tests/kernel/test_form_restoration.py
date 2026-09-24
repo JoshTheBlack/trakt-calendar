@@ -103,25 +103,16 @@ class ServerChosenSelectsOptOutOfRestoration(unittest.TestCase):
             "the page is not showing; add data-url-state:\n  " + "\n  ".join(offenders),
         )
 
-    def test_the_pages_carrying_those_selects_load_the_script_that_resyncs_them(self):
-        """The attribute is inert without ui.js, and a page can grow one of these
-        selects without growing the bundle that makes it work."""
+    def test_the_script_that_resyncs_those_selects_is_on_every_page(self):
+        """The attribute is inert without ui.js. Both script lists carry it — the
+        share page, a public one, has these selects too — so a page growing one
+        has the script already, as long as the lists still carry it."""
         from app import assets
 
-        marked = {
-            path.stem for path in TEMPLATES_DIR.rglob("*.html")
-            if "data-url-state" in markup(path)
-        }
-        # index.html is the calendar page and share_calendar.html the share one;
-        # the bundle keys are the page names, not the template filenames.
-        bundles = {"index": "calendar", "share_calendar": "share", "pick": "pick",
-                   "sources": "sources"}
-        for stem in sorted(marked):
-            with self.subTest(template=stem):
-                key = bundles.get(stem, stem)
-                self.assertIn("static/js/ui.js", assets.PAGE_SCRIPTS[key],
-                              f"{stem}.html marks a select for resync but its "
-                              f"bundle does not load ui.js")
+        self.assertIn("static/js/ui.js", assets.PUBLIC_SCRIPTS)
+        self.assertIn("static/js/ui.js", assets.APP_SCRIPTS)
+        self.assertIn("resyncUrlStateSelects",
+                      (assets.BASE_DIR / "static/js/ui.js").read_text(encoding="utf-8"))
 
     def test_the_scan_actually_finds_the_selects_it_is_guarding(self):
         """A regex that matched nothing would pass the test above silently, and

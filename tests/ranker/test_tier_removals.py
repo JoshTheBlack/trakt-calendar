@@ -417,7 +417,7 @@ class HistoryMarkupTests(_TierTestCase):
         from app import assets
         from tests.support import STATIC_DIR
         self.assertFalse((STATIC_DIR / "js" / "ranker" / "tiers.js").exists())
-        self.assertNotIn("static/js/ranker/tiers.js", assets.PAGE_SCRIPTS["rankings"])
+        self.assertNotIn("static/js/ranker/tiers.js", assets.APP_SCRIPTS)
         self.build({"s": ["1"]})
         html = self.client.get(f"/rankings?board={BOARD}").text
         self.assertNotIn("deleteTier", html)

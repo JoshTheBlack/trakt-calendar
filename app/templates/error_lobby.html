@@ -7,7 +7,7 @@
   <meta name="color-scheme" content="dark">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{ status }} {{ title }} &ndash; {{ product }}</title>
-  {# Spelled out rather than shared with _head.html's macro, for the same reason
+  {# Spelled out rather than taken from _base.html, for the same reason
      the styles below are inline: this page has to render when something else is
      already broken, and it deliberately depends on nothing the rest of the app
      loads. The cost is that these four lines are a second copy — kept adjacent

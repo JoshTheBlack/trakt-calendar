@@ -12,18 +12,38 @@
    line (`hx-target`), at 200 — unknown username, wrong password, a lockout and a
    disabled account all draw the same one, so the page is no more an oracle than the
    status used to be. A success is `204` with `HX-Redirect`, which navigates the
-   whole window: a signed-in page has different scripts in its <head> than this one,
-   and a navigation is what loads them.
+   whole window: these pages load the short public script list and a signed-in page
+   needs the full one (app/assets.py), and a navigation is what loads it.
+
+   THE FORM WAITS FOR htmx, AND UNTIL THEN IT CANNOT BE SENT AT ALL. Before htmx
+   has wired it, this is an ordinary form, and an ordinary form with no method is
+   a GET: pressing Enter on a slow connection put the password in the address bar,
+   the browser's history and any access log. So, twice over:
+     - the submit button is drawn DISABLED and `data-awaits-htmx`, and
+       static/js/ui.js enables it when htmx says this form is wired. A browser will
+       not submit a form by Enter while its submit button is disabled, so there
+       is no way to send it early. `autocomplete="off"` on the button is part of
+       that and not decoration: Firefox restores a button's LIVE disabled state
+       on a reload, so without it a reload brings the button back already
+       enabled, before htmx has loaded — MEASURED, and a press then sent the form
+       the browser's way. The attribute is how Firefox is told not to (MDN's
+       <button> page documents both);
+     - `method="post"`, so that even if something did, the password would travel
+       in the body and never in an address. The request-shape guard refuses a
+       post that is not JSON, so an early one fails rather than signing anybody
+       in the wrong way.
 
    `hx-disable` HOLDS THE SUBMIT BUTTON while the request is out, which is what the
-   script's `btn.disabled` did, with nothing to put back if the request fails.
+   script's `btn.disabled` did, with nothing to put back if the request fails —
+   htmx re-enables it when the request ends rather than restoring what it was, so
+   starting disabled does not leave it stuck (read in the vendored source).
    `hx-boost="false"` because htmx boosts every form under a boosted <body>, and
    this one is not a navigation. #}
 {% macro form(action, submit_label) %}
-<form class="auth-form" hx-post="{{ action }}" hx-json-enc hx-boost="false"
+<form class="auth-form" method="post" hx-post="{{ action }}" hx-json-enc hx-boost="false"
       hx-target="find .auth-error" hx-swap="innerHTML" hx-disable="find button[type=submit]">
   {{ caller() }}
   <p class="auth-error" role="alert"></p>
-  <button class="btn-primary" type="submit">{{ submit_label }}</button>
+  <button class="btn-primary" type="submit" disabled data-awaits-htmx autocomplete="off">{{ submit_label }}</button>
 </form>
 {% endmacro %}

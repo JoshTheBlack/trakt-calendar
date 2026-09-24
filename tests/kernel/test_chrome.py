@@ -43,7 +43,7 @@ class PageContextTests(unittest.TestCase):
             self.assertEqual(chrome.page_context(None)["version"], "9.9.9")
 
     def test_it_no_longer_carries_the_asset_token(self):
-        """Templates get it from app/assets.py through the head macro, which is
+        """Templates get it from app/assets.py through the base template, which is
         the only thing that ever read it. A key nothing reads would tell the next
         reader that a route decides its page's asset URLs, and none does."""
         self.assertNotIn("asset_v", chrome.page_context(None))
@@ -66,7 +66,7 @@ def test_pick_page_renders_the_shared_chrome_context(client, settings):
     resp = client.get("/")
 
     assert resp.status_code == 200
-    # The asset token reaches the page through the head macro rather than
+    # The asset token reaches the page through the base template rather than
     # through this route's context, which is the arrangement worth pinning: the
     # route supplies only the header flags.
     assert f"?v={assets.ASSET_VERSION}" in resp.text

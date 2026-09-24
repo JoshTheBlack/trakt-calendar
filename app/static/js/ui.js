@@ -171,6 +171,29 @@ document.addEventListener('htmx:after:swap', () => {
         .forEach(modal => modal.showModal());
 });
 
+// A BUTTON THAT WAITS FOR htmx (`data-awaits-htmx`), switched on once it can be
+// trusted. The server draws it disabled because pressing it earlier would send its
+// form the browser's own way — templates/_sign_in_form.html says why that is a
+// password in an address bar. No attribute can say "enable me when htmx is
+// ready"; htmx announces exactly that moment, per element it has wired, with
+// `htmx:after:init`, and a button inside the element just wired is ready.
+//
+// AND ONCE AS THIS FILE LOADS, because the announcement for the page's own forms
+// has usually gone already. MEASURED in Chromium: htmx wires the document the
+// moment it executes when the document has finished parsing, which for a deferred
+// script it always has — so the forms a page arrived with are announced before
+// this file runs, and are recognisable afterwards by the `data-htmx-powered`
+// htmx leaves on them. A form arriving later in a swap is announced to the
+// listener.
+function enableAwaiting(root) {
+    root.querySelectorAll('[data-awaits-htmx]').forEach(button => { button.disabled = false; });
+}
+
+document.addEventListener('htmx:after:init', (event) => {
+    if (event.target instanceof Element) enableAwaiting(event.target);
+});
+document.querySelectorAll('[data-htmx-powered]').forEach(enableAwaiting);
+
 /* ---- The details panel ----
  *
  * ONE PANEL AND ONE WAY OF OPENING IT. templates/_details_modal.html is included

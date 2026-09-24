@@ -1,24 +1,10 @@
+{% extends '_base.html' %}
 {% import '_distrakt_modals.html' as modals %}
-<!DOCTYPE html>
-<html lang="en">
-{% import '_head.html' as page with context %}
-{{ page.head('Distrakt', scripts=assets.scripts('tracker'),
-             site_suffix=false) }}
-{%- set body_class %}distrakt-page{% endset %}
-{# `hx-indicator` IS INHERITED BY EVERY ELEMENT UNDER THIS ONE, which is the
-   whole reason it is declared here and nowhere else: a boosted navigation, the
-   month arriving and a search all mark the same bar for as long as they are in
-   flight, with no script registering anything and nothing to clean up after a
-   swap. The bar itself is drawn by the site header — see _nav.html for what it
-   is for, and style.css for why it waits a moment before appearing. #}
-<body class="{{ body_class }}" hx-boost="true" hx-indicator="#pageProgress">
-{# What a boosted arrival cannot work out for itself. A swap replaces the body's
-   CHILDREN, so the <body> element keeps the previous page's classes and the <head>
-   keeps its scripts — see static/js/boost.js, which reads this and applies both.
-   Inside the body deliberately: it has to travel with the swap, and it has to
-   survive a Back, which htmx serves from its own cache with no request at all. #}
-<div id="pageMeta" hidden data-page="tracker" data-body-class="{{ body_class }}"></div>
-
+{% set site_suffix = false %}
+{% set progress_bar = true %}
+{% set body_class = 'distrakt-page' %}
+{% block title %}Distrakt{% endblock %}
+{% block content %}
 {# Aliased `site_nav`, not `nav`: this page's own context already binds `nav` to
    the previous/next month numbers. #}
 {% import '_nav.html' as site_nav %}
@@ -308,5 +294,4 @@
 <div id="toastHost"></div>
 
 {{ modals.all(catalogue_sources, as_finished, film_day, film_max, month_query) }}
-</body>
-</html>
+{% endblock %}

@@ -1,29 +1,15 @@
-<!DOCTYPE html>
-<html lang="en">
-{% import '_head.html' as page with context %}
+{% extends '_base.html' %}
 {# _nav_head is gated for the same reason the menu item is: without the grant
    this page must not mention the tracker at all, and the script names it.
    Nothing to reveal here anyway when the item itself was not rendered. #}
-{{ page.head('Account', scripts=assets.scripts('account'),
-             nav_head=distrakt_available) }}
+{% set nav_head = distrakt_available %}
 {# `has-nav` swaps the centred sign-in layout for a header above centred content.
    The signed-out pages (login, register, onboarding) keep the plain .auth-page
    centring — there is nowhere for a nav to take you before you sign in. #}
-{%- set body_class %}auth-page has-nav{% endset %}
-{# `hx-indicator` IS INHERITED BY EVERY ELEMENT UNDER THIS ONE, which is the
-   whole reason it is declared here and nowhere else: a boosted navigation, a
-   day block arriving and a search all mark the same bar for as long as they are
-   in flight, with no script registering anything and nothing to clean up after
-   a swap. The bar itself is drawn by the site header — see _nav.html for what
-   it is for, and style.css for why it waits a moment before appearing. #}
-<body class="{{ body_class }}" hx-boost="true" hx-indicator="#pageProgress">
-{# What a boosted arrival cannot work out for itself. A swap replaces the body's
-   CHILDREN, so the <body> element keeps the previous page's classes and the <head>
-   keeps its scripts — see static/js/boost.js, which reads this and applies both.
-   Inside the body deliberately: it has to travel with the swap, and it has to
-   survive a Back, which htmx serves from its own cache with no request at all. #}
-<div id="pageMeta" hidden data-page="account" data-body-class="{{ body_class }}"></div>
-
+{% set body_class = 'auth-page has-nav' %}
+{% set progress_bar = true %}
+{% block title %}Account{% endblock %}
+{% block content %}
 {% import '_nav.html' as site_nav %}
 {# The one page that gates the tracker's menu item server-side rather than
    leaving it to CSS: this page must not mention the tracker at all to an account
@@ -49,5 +35,4 @@
    the card being redrawn never takes a toast with it. #}
 <div id="toastHost"></div>
 {% include "_footer.html" %}
-</body>
-</html>
+{% endblock %}

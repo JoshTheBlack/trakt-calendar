@@ -23,11 +23,14 @@
 // however many pages have been visited.
 //
 // Both unlocks only lead anywhere for an account the server would actually let
-// into the tracker. For everyone else the Konami code plays the sound and stops
-// there, which reads as a self-contained joke rather than a locked door, and the
-// footer tap does nothing at all — audio from a stray tap on a version number
-// would startle someone who wasn't looking for an easter egg and give the game
-// away in the process.
+// into the tracker, and only from the calendar, which is the one page that says
+// so. Everywhere else a signed-in session goes, the Konami code plays the sound
+// and stops there, which reads as a self-contained joke rather than a locked
+// door. The pages a stranger lands on do not load this file at all
+// (app/assets.py's PUBLIC_SCRIPTS). The footer tap does nothing at all where
+// there is nowhere to go — audio from a stray tap on a version number would
+// startle someone who wasn't looking for an easter egg and give the game away in
+// the process.
 
 // Whether the page currently on screen has a tracker to reveal.
 function distraktReachable() {
