@@ -11,9 +11,8 @@
 // one act, and the counts beside it, which are read off containers the DOM is
 // authoritative for mid-drag.
 //
-// LOADED LAST of the page's scripts, deliberately. These files are ordinary
-// scripts sharing one global scope, executed in the order the <head> lists them
-// (defer preserves it), so everything boot() calls is declared before it runs.
+// NOTHING RUNS AS THIS FILE LOADS. It declares boot() and listens for the moment
+// to run it, so it depends on no other file having run first.
 
 function boot() {
     readPageData();
@@ -22,18 +21,25 @@ function boot() {
     refreshCounts();
 }
 
-// Registered rather than hung off DOMContentLoaded, which a boosted arrival does
-// not fire. static/js/boost.js calls it once this page's scripts are loaded — on
-// the cold load, on a boosted board switch, and on arriving here from any other
-// page, which are the same thing as far as this page is concerned. Every action
-// on this page that is not a drag answers with the board redrawn, which arrives
-// the same way and re-runs this.
-registerPage('rankings', boot);
+// Hung off `page-arrived` rather than DOMContentLoaded, which a boosted arrival
+// does not fire. static/js/boost.js announces it on the cold load, on a boosted
+// board switch, and on arriving here from any other page, which are the same
+// thing as far as this page is concerned. Every action on this page that is not a
+// drag answers with the board redrawn, which arrives the same way and re-runs
+// this. Every page hears it, so this runs only for the one naming itself.
+document.addEventListener('page-arrived', (event) => {
+    if (event.detail.page === 'rankings') boot();
+});
 
 // What is left here is the LAZY FRAGMENT: a tier's body, a page of the pool or a
 // single row replacing one container. Re-initializing is safe because binding an
 // already-bound container is a no-op.
 document.addEventListener('htmx:after:swap', (event) => {
+    // ONLY WHILE A BOARD IS ON SCREEN. This file runs on every page, and every
+    // page swaps fragments in — a calendar day block, a details panel — while the
+    // CALENDAR carries a `#searchResults` of its own, which the binding below
+    // would take for this board's list and hand to the drag library.
+    if (!document.getElementById('rankerBoard')) return;
     // static/js/boost.js's swappedContent, so "which element did this swap
     // produce" is answered once for the tier body (which keeps its container)
     // and the pool sentinel (which replaces itself) alike. Null is a whole-page

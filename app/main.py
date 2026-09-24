@@ -432,7 +432,7 @@ async def handle_http_exception(request: Request, exc: StarletteHTTPException) -
 # bookmark manager, a feed reader, a chat unfurler, a phone adding the site to a
 # home screen. They ask for /favicon.ico at the ROOT and ignore what the page
 # declared, which is the whole reason the .ico exists — and until this route
-# there was nothing at that address. The declared <link>s in _head.html cover a
+# there was nothing at that address. The declared <link>s in _base.html cover a
 # browser rendering the page; they do not cover a client that never parsed it,
 # and one of those is what still hands back the pre-rename icon.
 #

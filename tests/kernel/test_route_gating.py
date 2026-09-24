@@ -23,7 +23,7 @@ from datetime import date
 
 from fastapi import Request
 
-from app import auth, authz, config, db, distrakt
+from app import assets, auth, authz, config, db, distrakt
 from app.auth import AuthLevel
 from app.config import Settings, save_settings
 from app.main import BASE_DIR, app
@@ -139,7 +139,7 @@ class UnauthenticatedTests(GatingTestCase):
     def test_the_root_favicon_is_served_to_a_stranger_and_is_the_current_one(self):
         """The clients that ask for /favicon.ico — bookmark managers, feed
         readers, unfurlers, a phone saving the site to a home screen — carry no
-        session and never parsed the page, so the <link>s in _head.html do not
+        session and never parsed the page, so the <link>s in _base.html do not
         reach them. Serving them the file the page declares is the only way they
         see the current brand rather than whatever they cached first. The bytes
         are asserted, not the status: the OLD brand's icon is still on disk under
@@ -165,6 +165,23 @@ class UnauthenticatedTests(GatingTestCase):
         resp = self.client.get("/static/images/favicon.ico")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.content, declared.read_bytes())
+
+    def test_the_sign_in_page_is_served_every_script_it_names(self):
+        """THE PAGE A STRANGER LANDS ON LOADS THE PUBLIC LIST, and a script it
+        names that the static mount refuses, or serves under the wrong type, is a
+        page that lands inert with nothing on screen to say why — the sign-in
+        button, which waits for htmx, would never come on. Asked of the page as
+        served rather than of app/assets.py, so it covers what the base actually
+        wrote out."""
+        page = self.client.get("/login")
+        self.assertEqual(page.status_code, 200)
+        scripts = re.findall(r'<script src="([^"]+)"', page.text)
+        self.assertEqual(scripts, [assets.url(name) for name in assets.PUBLIC_SCRIPTS])
+        for src in scripts:
+            with self.subTest(script=src):
+                resp = self.client.get(src)
+                self.assertEqual(resp.status_code, 200)
+                self.assertIn("javascript", resp.headers["content-type"])
 
     def test_session_level_is_refused(self):
         resp = self.client.get("/me")

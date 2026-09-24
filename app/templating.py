@@ -2,7 +2,7 @@
 
 Nine route modules each built their own Jinja2Templates over the same directory.
 That was harmless while a template only read the context a route handed it, but
-templates/_head.html renders the stylesheet, font and script tags FROM
+templates/_base.html renders the stylesheet, font and script tags FROM
 app/assets.py rather than restating the filenames, and reaching a Python module
 from a template means an environment global. Installing that global nine times
 is the same fact in nine places, with the same failure mode as the head block it
@@ -60,7 +60,7 @@ class Dedent(Extension):
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 templates.env.add_extension(Dedent)
 
-# `assets` is the module itself, so _head.html calls assets.url(assets.STYLESHEET)
+# `assets` is the module itself, so _base.html calls assets.url(assets.STYLESHEET)
 # and there is no second copy of any asset path anywhere in the templates.
 templates.env.globals["assets"] = assets
 
@@ -68,9 +68,10 @@ templates.env.globals["assets"] = assets
 # it most are the ones with no context to speak of: the sign-in screen, the
 # invite-expired page and the error pages all render the name and several of
 # them render before there is a user to build a context from. A global is also
-# what makes it reachable from inside the _head.html MACRO, which receives only
-# its own arguments and would otherwise have to be passed the name by every one
-# of its callers — which is the fifteen-literals problem again, one level up.
+# what makes it reachable from inside a MACRO such as _head.html's og(), which
+# receives only its own arguments and would otherwise have to be passed the name
+# by every one of its callers — which is the fifteen-literals problem again, one
+# level up.
 templates.env.globals["product"] = chrome.PRODUCT_NAME
 
 

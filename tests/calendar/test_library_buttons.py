@@ -161,9 +161,10 @@ class TheCardDrawsItsButtonsInTheirStateTests(_LibraryTestCase):
     def test_the_calendar_carries_no_add_script_at_all(self):
         """The poll went when the server started drawing each button's state; the
         press went when the button became an `hx-post`. What is left is markup, so
-        there is no file for either to come back into."""
+        there is no file for either to come back into — in the calendar's scripts
+        or anywhere else, since every page loads all of them."""
         self.assertFalse((assets.BASE_DIR / "static/js/calendar/arr-buttons.js").exists())
-        for name in assets.PAGE_SCRIPTS["calendar"]:
+        for name in assets.APP_SCRIPTS:
             with self.subTest(script=name):
                 source = (assets.BASE_DIR / name).read_text(encoding="utf-8")
                 self.assertNotIn("/calendar/library/", source)

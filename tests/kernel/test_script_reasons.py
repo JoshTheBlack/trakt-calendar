@@ -4,7 +4,7 @@ CLAUDE.md's rule is that script is for what ONLY script can do, and that the
 answer to "why can this not be markup, a stylesheet rule, a Jinja template or a
 route" goes in a comment beside whatever survives. A rule like that decays the
 moment it is only a rule: the cost of adding a file is one line in
-app/assets.py's PAGE_SCRIPTS, and nothing made the person adding it say why.
+app/assets.py's APP_SCRIPTS, and nothing made the person adding it say why.
 
 So every first-party script — a .js file, or an inline <script> a template
 carries — must OPEN with prose that engages with that question. Not a label: a
@@ -111,18 +111,18 @@ class EveryFirstPartyScriptStatesItsReasonTests(unittest.TestCase):
                     f"{path.name}'s opening comment mentions {sorted(met) or 'none'} of "
                     f"{sorted(ALTERNATIVES)}. Say what it could not have been instead.")
 
-    def test_every_file_is_declared_in_the_asset_list(self):
-        """A script nothing serves is a script nobody reviewed the need for."""
-        declared = {name for names in assets.PAGE_SCRIPTS.values() for name in names}
-        declared.update({assets.HTMX, assets.JSON_ENC, assets.BOOST})
+    def test_every_file_is_declared_in_the_app_list(self):
+        """A script nothing serves is a script nobody reviewed the need for, and
+        the app list is every script there is — every signed-in page loads all
+        of it, so a file in it is a file every one of those pages pays for."""
         for path in self.files():
             served = path.relative_to(assets.BASE_DIR).as_posix()
             with self.subTest(script=path.name):
-                self.assertIn(served, declared,
-                              f"{served} is on disk but no page loads it")
+                self.assertIn(served, assets.APP_SCRIPTS,
+                              f"{served} is on disk but no list loads it")
 
 
-# Jinja comments are stripped FIRST and deliberately: _head.html carries one that
+# Jinja comments are stripped FIRST and deliberately: _base.html carries one that
 # mentions a script tag, and a scanner that pairs an opening tag with the next
 # closing one reads seven lines of prose as script.
 JINJA_COMMENT = re.compile(r"\{#.*?#\}", re.S)

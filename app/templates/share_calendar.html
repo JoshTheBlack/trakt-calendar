@@ -1,31 +1,26 @@
-<!DOCTYPE html>
-<html lang="en">
+{% extends '_base.html' %}
 {% import '_head.html' as page with context %}
 {% import '_source_logo.html' as src with context %}
+{% set nav_head = false %}
+{% set public = true %}
+{% set site_suffix = false %}
+{% set body_class = 'pack-' ~ view.day_packing ~ ' card-' ~ view.card_style %}
 {# EVERYTHING IN THIS <head> NAMES THE OWNER THROUGH `owner_label` AND NEVER
    THROUGH `owner_username`. The label is the owner's chosen display name, or a
    subject of its own when they have not set one; app/calendar/share_routes.py's
-   _owner_label says why a username may not stand in for it. This block is the
-   text an unfurler repeats into somebody else's channel, which is a different
-   audience from the page body below. #}
-{% call page.head(owner_label ~ ' – ' ~ month_label,
-                  scripts=assets.scripts('share'), nav_head=false, site_suffix=false) %}
+   _owner_label says why a username may not stand in for it. The title and these
+   tags are the text an unfurler repeats into somebody else's channel, which is a
+   different audience from the page body below. #}
+{% block title %}{{ owner_label }} – {{ month_label }}{% endblock %}
+{% block head %}
   {# The alt text describes the generated picture rather than the page, since it
      is what a screen reader in a chat client reads out in place of it. No name
      in it, for the same reason the picture itself carries none. #}
   {{ page.og(owner_label ~ ' – ' ~ month_label ~ ' ' ~ year,
              "Shows I'm watching this month",
              image_alt='A preview card for ' ~ month_label ~ ' ' ~ year) }}
-{% endcall %}
-{%- set body_class %}pack-{{ view.day_packing }} card-{{ view.card_style }}{% endset %}
-<body class="{{ body_class }}" hx-boost="true">
-{# What a boosted arrival cannot work out for itself. A swap replaces the body's
-   CHILDREN, so the <body> element keeps the previous page's classes and the <head>
-   keeps its scripts — see static/js/boost.js, which reads this and applies both.
-   Inside the body deliberately: it has to travel with the swap, and it has to
-   survive a Back, which htmx serves from its own cache with no request at all. #}
-<div id="pageMeta" hidden data-page="share" data-body-class="{{ body_class }}"></div>
-
+{% endblock %}
+{% block content %}
 <header class="hero">
     <div class="hero-lead">
         <img class="brand-logo" src="/static/images/distrakkl-mark.svg" alt="{{ product }}" width="30" height="30">
@@ -246,6 +241,4 @@
    share_routes._describe_shared_title for why a public page is allowed to look
    anything up at all. #}
 {% include "_details_modal.html" %}
-
-</body>
-</html>
+{% endblock %}

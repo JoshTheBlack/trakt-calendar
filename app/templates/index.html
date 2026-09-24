@@ -1,34 +1,21 @@
-<!DOCTYPE html>
-<html lang="en">
+{% extends '_base.html' %}
 {% import '_calendar_meta.html' as calendar_meta with context %}
-{% import '_head.html' as page with context %}
-{{ page.head(product ~ ' – ' ~ month_label,
-             scripts=assets.scripts('calendar'),
-             site_suffix=false) }}
+{% set site_suffix = false %}
+{% set progress_bar = true %}
 {# Body classes are per-account view prefs (card style, packing, hide) that don't
    change across a month/endpoint nav, so they can safely ride the persistent
    <body> element that an innerHTML swap leaves in place. Anything that DOES
    change per nav has to live inside the swapped region, where the new page's
    copy replaces it — which is why the month rides on each watch toggle's own
    address (_card.html) rather than on a hidden element the page reads back. #}
-{%- set body_class %}{{ calendar_meta.classes(view) }}{% endset %}
-{# `hx-indicator` IS INHERITED BY EVERY ELEMENT UNDER THIS ONE, which is the
-   whole reason it is declared here and nowhere else: a boosted navigation, a
-   day block arriving and a search all mark the same bar for as long as they are
-   in flight, with no script registering anything and nothing to clean up after
-   a swap. The bar itself is drawn by the site header — see _nav.html for what
-   it is for, and style.css for why it waits a moment before appearing. #}
-<body class="{{ body_class }}" hx-boost="true" hx-indicator="#pageProgress">
-{# What a boosted arrival cannot work out for itself. A swap replaces the body's
-   CHILDREN, so the <body> element keeps the previous page's classes and the <head>
-   keeps its scripts — see static/js/boost.js, which reads this and applies both.
-   Inside the body deliberately: it has to travel with the swap, and it has to
-   survive a Back, which htmx serves from its own cache with no request at all. #}
+{% set body_class = calendar_meta.classes(view) %}
+{% block title %}{{ product }} – {{ month_label }}{% endblock %}
 {# Drawn from _calendar_meta.html because the answer to changing a view
    preference re-draws it out of band, and two copies of what this element says
-   is exactly the drift that partial exists to stop. #}
-{{ calendar_meta.meta(view, distrakt_available) }}
-
+   is exactly the drift that partial exists to stop. The macro names the page
+   `calendar` itself, so this page sets no page_name. #}
+{% block page_meta %}{{ calendar_meta.meta(view, distrakt_available) }}{% endblock %}
+{% block content %}
 {# The two eye icons, defined ONCE and referenced by every card's <use>. They are
    NOT the same drawing: closed is the open eye plus the diagonal strike. #}
 <svg class="svg-symbols" aria-hidden="true" focusable="false" width="0" height="0">
@@ -382,6 +369,4 @@
    already be on the page — an add answers with its sentence in here, so the page
    composes nothing from a refusal. #}
 <div id="toastHost"></div>
-
-</body>
-</html>
+{% endblock %}

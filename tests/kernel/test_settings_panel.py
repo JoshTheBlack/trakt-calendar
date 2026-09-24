@@ -503,10 +503,9 @@ class TheMenuOffersSettingsToAdministratorsOnEveryPageTests(PanelTestCase):
                 self.assertNotIn("settingsSlot", html)
 
     def test_no_page_loads_a_settings_script(self):
-        for page, scripts in assets.PAGE_SCRIPTS.items():
-            for name in ("settings", "cert-picker", "share-links"):
-                with self.subTest(page=page, name=name):
-                    self.assertFalse(any(name in script for script in scripts))
+        for name in ("settings", "cert-picker", "share-links"):
+            with self.subTest(name=name):
+                self.assertFalse(any(name in script for script in assets.APP_SCRIPTS))
 
 
 class ArrOptionsTests(PanelTestCase):

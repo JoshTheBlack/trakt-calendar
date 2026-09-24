@@ -1,9 +1,12 @@
 // The calendar page's wiring: one idempotent init, and one swap worth acting on.
 //
-// LOADED LAST of the page's scripts, deliberately. These files are ordinary
-// scripts sharing one global scope, executed in the order the <head> lists them
-// (defer preserves it), and the init below runs the moment this file executes —
-// so everything it calls has to be declared already.
+// WHY THIS IS SCRIPT: what the init starts is a MEASUREMENT of the laid-out
+// header (calendar/layout.js), which no stylesheet rule, template or route can
+// take, and it has to be re-taken whenever a new month lands — a moment only the
+// browser sees.
+//
+// NOTHING RUNS AS THIS FILE LOADS. It declares the init and listens for the
+// moment to run it, so it depends on no other file having run first.
 
 // NOTHING HERE LISTENS FOR ESCAPE. Every overlay is a modal <dialog> carrying
 // `closedby="any"`, so Escape is the browser's; a panel the server drew for one
@@ -35,11 +38,14 @@ function initCalendarPage() {
 // day landing while a mark is in flight is drawn from whichever of the two
 // reached the database first, and the other one's answer redraws it.
 
-// A BOOSTED arrival is not handled here. static/js/boost.js owns those: it has to
-// load whichever of this page's scripts the session has not run yet, and only
-// then is there an init to call — so it calls the one registered below, on the
-// cold load and on every arrival alike.
-//
+// AN ARRIVAL IS static/js/boost.js's to recognise, and it says so with
+// `page-arrived` — on the cold load and on every boosted arrival alike, which is
+// the same thing as far as this page is concerned. Every page hears it, so the
+// init runs only for the page that names itself the calendar.
+document.addEventListener('page-arrived', (event) => {
+    if (event.detail.page === 'calendar') initCalendarPage();
+});
+
 // WHAT IS LEFT HERE IS ONE SWAP: A FILTERS SAVE, which replaces the whole of
 // #calendarBody. Re-running the init then is exactly right — the month on screen
 // has been replaced, so the address it re-reads and the chips it re-checks are
@@ -56,5 +62,3 @@ document.addEventListener('htmx:after:swap', (evt) => {
         initCalendarPage();
     }
 });
-
-registerPage('calendar', initCalendarPage);

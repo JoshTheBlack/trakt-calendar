@@ -1,0 +1,150 @@
+{# THE DOCUMENT EVERY PAGE IS, and the reasons behind the parts of it that look
+   optional and are not. Every page extends this; error_lobby.html is the one
+   that does not, and its own header says why.
+
+   ONE BASE because a boosted navigation swaps <body>'s children and leaves
+   <head> in place: whatever the first page of a session loaded is what every
+   page reached without a full reload has to make do with. So every page's <head>
+   is THIS one, and "all the heads agree" is true by construction rather than by
+   a copy per page that could drift apart without anything failing until somebody
+   boosted between two pages that disagreed.
+
+   WHAT A PAGE SAYS, AND HOW:
+     {% block title %}   the page's own subject. The site name is appended here,
+                         not by each page; a page whose title already carries its
+                         own subject — a month, a board, a share owner — sets
+                         `site_suffix = false`.
+     {% block head %}    anything a page adds to <head>: its Open Graph tags
+                         (_head.html's og macro), nothing else so far.
+     body_class          `{% set body_class = … %}`, worn by <body> on a cold load
+                         and by #pageMeta on a boosted arrival — one variable, so
+                         the two cannot disagree.
+     page_name           `{% set page_name = … %}` for a page with an init to run
+                         on arrival, which static/js/boost.js announces under this
+                         name. A page nothing asks about leaves it unset.
+     nav_head            false on the pages that do not carry the shared header,
+                         and on the account page for an account the tracker is
+                         not offered to — see _nav_head.html.
+     progress_bar        true on the pages that carry the site header, whose bar
+                         everything under <body> marks while it is in flight.
+     public              true on the pages a stranger lands on: they load
+                         assets.PUBLIC_SCRIPTS rather than APP_SCRIPTS, and they
+                         do not boost — see <body> below for why the two go
+                         together.
+     {% block page_meta %}  only the calendar overrides it, because its #pageMeta
+                         is drawn by a macro a view preference's answer redraws.
+     {% block content %} the page.
+
+   Variables a page SETS at its top level are visible here — that is Jinja's own
+   documented way for a child to tell its layout something — which is why each
+   one below has a default rather than being required. #}
+{%- import '_toast.html' as toast_markup %}
+{%- set site_suffix = site_suffix | default(true) %}
+{%- set nav_head = nav_head | default(true) %}
+{%- set progress_bar = progress_bar | default(false) %}
+{%- set body_class = body_class | default('') %}
+{%- set page_name = page_name | default(none) %}
+{%- set public = public | default(false) -%}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  {# Parsed before first paint, so the gap before the stylesheet applies
+     is the page's own dark rather than the browser's default white. #}
+  <meta name="color-scheme" content="dark">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}{% endblock %}{% if site_suffix %} &ndash; {{ product }}{% endif %}</title>
+  {# THE PNGs ARE LISTED FIRST AND THE .ico LAST, which is the order that gets a
+     modern browser the sharp one: a browser picks the best MATCH from the sizes
+     declared, and only falls back to the .ico when it understands none of them.
+     The .ico is built from the same 32px artwork and exists for bookmarks and
+     older clients that ask for /favicon.ico regardless of what is declared here.
+
+     NEW FILENAMES RATHER THAN NEW BYTES UNDER THE OLD ONES. Static images are
+     served with no cache-busting token at all — app/assets.py's ASSET_VERSION is
+     computed from the stylesheet and scripts only, and url() refuses anything
+     outside that list — so replacing favicon.ico in place would have left every
+     browser that had already cached it showing the old brand for as long as it
+     held it. A new URL is never stale.
+
+     AND THE OLD URL GETS THE NEW BYTES ANYWAY, which is not a contradiction of
+     that: the new NAME is what a browser reading this page picks up, and the old
+     one is for the readers that are not reading this page. A favicon is stored
+     by ASSOCIATION — Firefox keeps page-to-icon associations in favicons.sqlite
+     and refetches the icon URL it already has — so a bookmark made before the
+     rename keeps asking for /static/images/favicon.ico, the single icon the
+     pre-rename head declared, revalidates it happily, and gets the old brand
+     back forever. New filenames cannot reach that client; only the old address
+     answering correctly can. So app/static/images/favicon.ico is now a copy of
+     distrakkl-favicon.ico, and tests/kernel/test_route_gating.py holds the two
+     to each other so they cannot drift back apart. #}
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/images/favicon-16.png">
+  <link rel="apple-touch-icon" href="/static/images/distrakkl-mark-512.png">
+  <link rel="shortcut icon" href="/static/images/distrakkl-favicon.ico">
+  {# ORDER MATTERS: the stylesheet is the only resource that gates first paint,
+     so it is requested before the font preloads rather than after them. The
+     three woff2 files are ~86 KB and preload at high priority; ahead of the
+     stylesheet they compete with it for the connection pool on any load where
+     nothing is cached yet, which delays paint instead of just delaying fonts.
+     Preloading them still starts both fetches in the same early batch. #}
+  <link rel="stylesheet" href="{{ assets.url(assets.STYLESHEET) }}">
+  {% for font in assets.FONT_PRELOADS -%}
+  <link rel="preload" href="{{ assets.font_url(font) }}" as="font" type="font/woff2" crossorigin>
+  {% endfor -%}
+  {# Ahead of the scripts, and inline: it decides a header item's visibility, and
+     a deferred bundle runs after first paint, which is the shift being avoided. #}
+  {% if nav_head %}{% include '_nav_head.html' %}{% endif %}
+  {# ONE OF TWO LISTS, IN ONE ORDER — app/assets.py says why two rather than one
+     per page or one for all.
+
+     In <head> with defer, NOT at the end of <body>, because a boosted navigation
+     swaps the body's children in place. A <script src> living inside that
+     swapped region would be re-fetched and re-executed on every nav —
+     re-declaring every top-level const and double-binding every listener. In
+     <head> they load exactly once and survive the swaps.
+
+     NO LISTENER FOR A BOOSTED CLICK THAT FAILS. A link that lands on an error page
+     while boosted used to be caught here and turned into a real navigation; the
+     server answers such a request with HX-Redirect to the same address instead,
+     which htmx acts on before it parses anything — app/main.py's
+     boosted_failure_becomes_a_navigation says why that matters. #}
+  {% for script in (assets.PUBLIC_SCRIPTS if public else assets.APP_SCRIPTS) -%}
+  <script src="{{ assets.url(script) }}" defer></script>
+  {% endfor -%}
+  {# What a toast looks like, for the script that raises one where no answer
+     can (static/js/ui.js). HERE because <head> survives a boosted navigation
+     and every page has one, which the pages carrying #toastHost are not: a
+     clipboard result is raised on the admin and the share page too. #}
+  {{ toast_markup.template() }}
+  {% block head %}{% endblock %}
+</head>
+{# `hx-indicator` IS INHERITED BY EVERY ELEMENT UNDER THIS ONE, which is the whole
+   reason it is declared here and nowhere else: a boosted navigation, a day block
+   arriving and a search all mark the same bar for as long as they are in flight,
+   with no script registering anything and nothing to clean up after a swap. The
+   bar itself is drawn by the site header — see _nav.html for what it is for, and
+   style.css for why it waits a moment before appearing.
+
+   A PUBLIC PAGE DOES NOT BOOST, and that is what makes its shorter script list
+   safe. A boosted link keeps the <head> the session started with, so a stranger's
+   session boosting into a signed-in page would land it without the scripts it
+   needs — inert, which is the failure the per-page loader existed to prevent.
+   Both halves of the decision live on elements a swap never replaces: the
+   <head>, and this tag's attributes. So a session that STARTED on a public page
+   keeps the short list AND never boosts until a full load replaces both, and a
+   public page reached by a boost from a signed-in page is working inside the
+   full list and still boosting, which is equally consistent. Signing in is a full
+   load already (HX-Redirect), so nothing a stranger does crosses with a swap. #}
+<body class="{{ body_class }}" hx-boost="{{ 'false' if public else 'true' }}"{% if progress_bar %} hx-indicator="#pageProgress"{% endif %}>
+{# What a boosted arrival cannot work out for itself. A swap replaces the body's
+   CHILDREN, so the <body> element keeps the previous page's classes, and no
+   DOMContentLoaded fires to start the page — see static/js/boost.js, which reads
+   this and does both. Inside the body deliberately: it has to travel with the
+   swap. #}
+{% block page_meta -%}
+<div id="pageMeta" hidden{% if page_name %} data-page="{{ page_name }}"{% endif %} data-body-class="{{ body_class }}"></div>
+{%- endblock %}
+{% block content %}{% endblock %}
+</body>
+</html>

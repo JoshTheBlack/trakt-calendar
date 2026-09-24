@@ -1,11 +1,11 @@
-"""The shared <head> macro, the asset registry it renders from, and the
-app-wide invariants that make a boosted navigation safe.
+"""The base template every page extends, the asset registry it renders from, and
+the app-wide invariants that make a boosted navigation safe.
 
 Every page swaps only <body>, so the <head> a session's FIRST page loaded is the
 one every later page has to work inside. That turns "all the heads agree" from a
-tidiness preference into a correctness property, and these tests are what keeps
-it true — none of it fails visibly until somebody boosts between two pages that
-disagreed, and by then the symptom is an unstyled page rather than a diff.
+tidiness preference into a correctness property. It is true by construction now —
+there is one <head>, in templates/_base.html — so what these tests hold is that
+every page is built on it, and that what it renders is right.
 
 No network, no database, no client: this reads templates and rendered markup.
 """
@@ -18,7 +18,7 @@ from app import assets
 from app import chrome
 from app.templating import TEMPLATES_DIR, templates
 
-# error_lobby.html is the one page that deliberately does NOT use the macro: it
+# error_lobby.html is the one page that deliberately does NOT extend the base: it
 # inlines its styles because it has to render when something else is already
 # wrong, and a 404 for the stylesheet would leave a white screen and no way home.
 STANDALONE = {"error_lobby.html"}
@@ -28,9 +28,23 @@ PAGES = sorted(
     if not p.name.startswith("_") and p.name not in STANDALONE
 )
 
+BASE = "_base.html"
+
 
 def read(name: str) -> str:
     return (TEMPLATES_DIR / name).read_text(encoding="utf-8")
+
+
+def uncommented(name: str) -> str:
+    return re.sub(r"\{#.*?#\}", "", read(name), flags=re.S)
+
+
+def block(name: str, block_name: str) -> str:
+    """What a page puts in one of the base's blocks, or "" when it does not
+    override it."""
+    found = re.search(rf"\{{%-?\s*block {block_name}\s*-?%\}}(.*?)\{{%-?\s*endblock",
+                      uncommented(name), re.S)
+    return found.group(1) if found else ""
 
 
 def markup(name: str) -> str:
@@ -158,16 +172,20 @@ class AssetRegistryTests(unittest.TestCase):
         self.assertEqual(sheets, [assets.STYLESHEET])
 
 
-class HeadMacroTests(unittest.TestCase):
-    """Rendered output, not the template source — a macro that compiles but
-    renders the wrong tags passes a source grep."""
+class BaseTemplateTests(unittest.TestCase):
+    """Rendered output, not the template source — a layout that compiles but
+    renders the wrong tags passes a source grep. Each render is a page reduced to
+    what it tells the base: the variables it sets and the blocks it fills."""
 
-    def render(self, **kwargs) -> str:
-        source = "{% import '_head.html' as page with context %}{{ page.head(" + kwargs.pop("call") + ") }}"
-        return templates.env.from_string(source).render(**kwargs)
+    def render(self, page: str = "", **context) -> str:
+        source = "{% extends '_base.html' %}" + page
+        return templates.env.from_string(source).render(**context)
+
+    def head(self, page: str = "", **context) -> str:
+        return self.render(page, **context).split("</head>", 1)[0]
 
     def test_it_renders_the_bundled_stylesheet_and_every_font(self):
-        html = self.render(call="'Title'")
+        html = self.head()
         self.assertEqual(re.findall(r'rel="stylesheet" href="([^"]+)"', html),
                          [assets.url(assets.STYLESHEET)])
         self.assertEqual(re.findall(r'rel="preload" href="([^"]+)"', html),
@@ -177,52 +195,97 @@ class HeadMacroTests(unittest.TestCase):
         """Order matters: the stylesheet is the only resource gating first paint,
         and the ~86 KB of high-priority font preloads would compete with it for
         the connection pool on a cold load."""
-        html = self.render(call="'Title'")
+        html = self.head()
         self.assertLess(html.index('rel="stylesheet"'), html.index('rel="preload"'))
 
-    def test_htmx_ships_on_every_page_and_ships_first(self):
+    def srcs(self, page: str = "") -> list[str]:
+        return re.findall(r'<script src="([^"]+)"', self.head(page))
+
+    def test_a_signed_in_page_loads_the_whole_app_list_in_its_order(self):
+        """Every page a boost can reach loads the same list: that sameness is the
+        whole reason a boosted arrival needs nothing fetched."""
+        self.assertEqual(self.srcs(), [assets.url(name) for name in assets.APP_SCRIPTS])
+
+    def test_a_public_page_loads_the_public_list_and_does_not_boost(self):
+        """THE TWO GO TOGETHER OR NEITHER IS SAFE. A session that starts on a
+        public page keeps its shorter <head> for as long as it swaps; not
+        boosting is what makes every way out of it a full load."""
+        page = "{% set public = true %}"
+        self.assertEqual(self.srcs(page), [assets.url(name) for name in assets.PUBLIC_SCRIPTS])
+        self.assertIn('<body class="" hx-boost="false"', self.render(page))
+        self.assertIn('<body class="" hx-boost="true"', self.render())
+
+    def test_the_public_list_is_the_head_of_the_app_list(self):
+        """A public page reached by a boost from a signed-in one is running inside
+        the app list, so everything a public page needs must be in it — and in
+        the same order, so a file never runs before one it ran after elsewhere."""
+        self.assertEqual(assets.APP_SCRIPTS[:len(assets.PUBLIC_SCRIPTS)], assets.PUBLIC_SCRIPTS)
+
+    def test_htmx_ships_first_then_its_extension_then_the_arrival(self):
         """A page without htmx is a one-way door out of a boosted session: you
         can arrive there boosted, but every link on it is then a full reload.
 
         THE ORDER IS THE ASSERTION, not just the membership. An htmx extension
         registers itself against the global htmx publishes as it executes, and
-        the loader sets the config htmx reads when the document finishes
-        parsing; both are wrong if they run first, and neither says so."""
-        html = self.render(call="'Title', scripts=('static/js/ui.js',)")
-        srcs = re.findall(r'<script src="([^"]+)"', html)
-        # htmx, its extension, then the loader that fetches a page's own scripts
-        # on a boosted arrival, then this page's.
-        self.assertEqual(srcs, [assets.url(assets.HTMX), assets.url(assets.JSON_ENC),
-                                assets.url(assets.BOOST),
-                                assets.url("static/js/ui.js")])
+        boost.js sets at its top level the config htmx reads when the document
+        finishes parsing; both are wrong if they run first, and neither says
+        so. Held on the lists themselves, since the base renders exactly a list."""
+        for scripts in (assets.PUBLIC_SCRIPTS, assets.APP_SCRIPTS):
+            self.assertEqual(scripts[:3], (assets.HTMX, assets.JSON_ENC, assets.BOOST))
 
     def test_every_script_is_deferred(self):
-        html = self.render(call="'Title', scripts=('static/js/ui.js',)")
-        for tag in re.findall(r"<script src=[^>]+>", html):
-            with self.subTest(tag=tag):
-                self.assertIn(" defer", tag)
+        for page in ("", "{% set public = true %}"):
+            for tag in re.findall(r"<script src=[^>]+>", self.head(page)):
+                with self.subTest(tag=tag):
+                    self.assertIn(" defer", tag)
 
-    def test_the_site_name_comes_from_the_macro(self):
+    def test_the_site_name_comes_from_the_base(self):
         """Asserted against app/chrome.py's constant rather than a literal: the
-        point of this test is that the macro supplies the name, and spelling the
+        point of this test is that the base supplies the name, and spelling the
         name again here would make a rename fail in a test that is not about
         renaming."""
         self.assertIn(f"<title>Account &ndash; {chrome.PRODUCT_NAME}</title>",
-                      self.render(call="'Account'"))
+                      self.head("{% block title %}Account{% endblock %}"))
 
     def test_a_page_carrying_its_own_subject_opts_out_of_the_suffix(self):
         self.assertIn("<title>Distrakkl – July</title>",
-                      self.render(call="product ~ ' – July', site_suffix=false"))
+                      self.head("{% set site_suffix = false %}"
+                                "{% block title %}{{ product }} – July{% endblock %}"))
 
     def test_the_tracker_reveal_script_can_be_gated_off(self):
         """The account page must not mention the tracker to an account without
         the grant, and the reveal script names it."""
-        self.assertIn("distraktRevealed", self.render(call="'Account'"))
-        self.assertNotIn("distraktRevealed", self.render(call="'Account', nav_head=false"))
+        self.assertIn("distraktRevealed", self.head())
+        self.assertNotIn("distraktRevealed", self.head("{% set nav_head = false %}"))
 
-    def test_a_script_the_asset_list_does_not_track_fails_the_render(self):
-        with self.assertRaises(KeyError):
-            self.render(call="'Title', scripts=('static/js/ghost.js',)")
+    def test_a_page_adds_to_the_head_through_its_block(self):
+        self.assertIn('<meta name="x-probe">',
+                      self.head('{% block head %}<meta name="x-probe">{% endblock %}'))
+
+    def test_the_body_and_page_meta_wear_the_one_class_string(self):
+        """A cold load wears <body>'s class and a boosted arrival wears
+        #pageMeta's; one variable feeding both is what keeps them the same."""
+        html = self.render("{% set body_class = 'auth-page has-nav' %}")
+        self.assertIn('<body class="auth-page has-nav"', html)
+        self.assertRegex(html, r'<div id="pageMeta"[^>]*data-body-class="auth-page has-nav"')
+
+    def test_a_page_names_itself_only_when_it_says_so(self):
+        """`data-page` is what a script tells pages apart by. A page nothing asks
+        about carries none, rather than a name nothing reads."""
+        self.assertNotIn("data-page", self.render())
+        self.assertIn('data-page="rankings"', self.render("{% set page_name = 'rankings' %}"))
+
+    def test_the_progress_bar_is_marked_only_by_pages_that_draw_it(self):
+        """The bar is the site header's, so a page with no header pointing its
+        requests at it would point them at nothing."""
+        self.assertNotIn("hx-indicator", self.render())
+        self.assertIn('hx-indicator="#pageProgress"',
+                      self.render("{% set progress_bar = true %}"))
+
+    def test_the_document_opens_with_its_doctype(self):
+        """The base's own explanation and settings are Jinja, so nothing may be
+        written ahead of the doctype."""
+        self.assertTrue(self.render().startswith("<!DOCTYPE html>"))
 
 
 class OpenGraphMacroTests(unittest.TestCase):
@@ -295,14 +358,99 @@ class OpenGraphMacroTests(unittest.TestCase):
         self.assertIn("https://example.test/x", self.render(og_url="https://example.test/x"))
 
 
+class PublicPageTests(unittest.TestCase):
+    """The pages a stranger lands on, which load the short script list.
+
+    NAMED RATHER THAN DISCOVERED, like the details panel's pages above: "who can
+    reach this page without a session" is a fact about its route, not its
+    template, so a page joining the list is a decision somebody has to write down
+    here — and a page leaving it has to come off it."""
+
+    PUBLIC_PAGES = ("auth_invite_invalid.html", "auth_login.html", "auth_onboarding.html",
+                    "auth_register.html", "share_calendar.html", "share_not_found.html")
+
+    def test_exactly_the_named_pages_are_public(self):
+        public = [name for name in PAGES
+                  if re.search(r"\{%\s*set public = true\s*%\}", uncommented(name))]
+        self.assertEqual(public, list(self.PUBLIC_PAGES))
+
+    def test_nothing_on_a_public_page_calls_a_script_the_public_list_lacks(self):
+        """An inline handler reaches the global scope only, so on a public page it
+        must be declared by one of the files that page actually loads."""
+        available = set()
+        for name in assets.PUBLIC_SCRIPTS:
+            if not name.endswith(VENDORED):
+                available |= declares(js_source(name))
+        for page in self.PUBLIC_PAGES:
+            for missing in sorted(handlers_in(expanded(page)) - available):
+                with self.subTest(page=page, handler=missing):
+                    self.fail(f"{page} calls {missing}() but the public list does not declare it")
+
+
+class SignInFormTests(unittest.TestCase):
+    """The one form a password is typed into, and the window before htmx is ready.
+
+    Until htmx has wired it, it is an ordinary HTML form — and an ordinary form
+    with no method is a GET, which put the password in the address bar, the
+    history and the access log of anybody who pressed Enter early on a slow
+    connection. Held from both sides, because either alone leaves a way through."""
+
+    def render(self) -> str:
+        source = ("{% import '_sign_in_form.html' as sign_in %}"
+                  "{% call sign_in.form('/login', 'Sign in') %}"
+                  '<input name="password" type="password">{% endcall %}')
+        return templates.env.from_string(source).render()
+
+    def test_it_can_never_send_the_password_in_an_address(self):
+        form = re.search(r"<form[^>]*>", self.render()).group(0)
+        self.assertIn('method="post"', form)
+
+    def test_it_cannot_be_sent_until_htmx_has_wired_it(self):
+        """A browser will not submit a form by Enter while its submit button is
+        disabled, so a button drawn disabled closes the window entirely."""
+        button = re.search(r'<button[^>]*type="submit"[^>]*>', self.render()).group(0)
+        self.assertRegex(button, r"\sdisabled[\s>]")
+        self.assertIn("data-awaits-htmx", button)
+
+    def test_a_reload_cannot_bring_the_button_back_enabled(self):
+        """Firefox restores a button's live disabled state across a reload, so a
+        button htmx had switched on comes back switched on before htmx has
+        loaded — measured, and the press then sent the form the browser's way.
+        `autocomplete="off"` is what tells Firefox not to."""
+        button = re.search(r'<button[^>]*type="submit"[^>]*>', self.render()).group(0)
+        self.assertIn('autocomplete="off"', button)
+
+    def test_the_script_that_enables_it_is_on_every_page_that_draws_it(self):
+        """Every page drawing the form is public, and ui.js is on the public list;
+        without it the button would never come on."""
+        self.assertIn("static/js/ui.js", assets.PUBLIC_SCRIPTS)
+        source = js_source("static/js/ui.js")
+        self.assertIn("'htmx:after:init'", source)
+        self.assertIn("[data-awaits-htmx]", source)
+
+
 class EveryPageAgreesTests(unittest.TestCase):
     """The invariants that make a body swap between any two pages land intact."""
 
-    def test_every_page_renders_its_head_through_the_macro(self):
+    def test_every_page_extends_the_base(self):
+        """FIRST, before anything else in the file: Jinja writes out whatever a
+        child template puts ahead of `extends`, so a page that opened with markup
+        would put it in front of the doctype. And a page that did not extend the
+        base at all would be building a <head> of its own — the one thing every
+        page must agree on."""
         for name in PAGES:
             with self.subTest(page=name):
-                self.assertIn("page.head(", read(name),
-                              f"{name} builds its own <head>")
+                self.assertRegex(uncommented(name), r"^\{% extends '_base\.html' %\}",
+                                 f"{name} does not open by extending the base")
+
+    def test_no_page_opens_a_document_of_its_own(self):
+        """The doctype, <head> and <body> tags are the base's. A page spelling one
+        again would nest a second document inside the first."""
+        for name in PAGES:
+            source = uncommented(name)
+            for tag in ("<!DOCTYPE", "<html", "<head>", "<body"):
+                with self.subTest(page=name, tag=tag):
+                    self.assertNotIn(tag, source)
 
     def test_no_page_carries_styling_of_its_own_in_its_head(self):
         """A page's own <style> applies only when that page is the one the
@@ -311,12 +459,14 @@ class EveryPageAgreesTests(unittest.TestCase):
         never exist, and a page whose whole layout was in that block arrives with
         no styling at all. Page CSS goes in the bundled stylesheet, which every
         <head> links; error_lobby.html is the one exception and is excluded above
-        for a reason that does not generalize."""
+        for a reason that does not generalize. A script in that block would fail
+        the same way, so neither is allowed there."""
         for name in PAGES:
-            source = markup(name)
-            with self.subTest(page=name):
-                self.assertNotIn("<style", source[:source.index("<body")],
-                                 f"{name} carries CSS a boosted arrival will not apply")
+            extra = block(name, "head")
+            for tag in ("<style", "<script", "<link"):
+                with self.subTest(page=name, tag=tag):
+                    self.assertNotIn(tag, extra,
+                                     f"{name} adds to <head> what a boosted arrival will not apply")
 
     def test_no_page_writes_an_asset_path_of_its_own(self):
         """Asset filenames live in app/assets.py. A template restating one is a
@@ -327,12 +477,12 @@ class EveryPageAgreesTests(unittest.TestCase):
                 found = re.findall(r'(?:href|src)="(/static/(?:css|js)/[^"]+)"', read(name))
                 self.assertEqual(found, [], f"{name} writes asset paths directly")
 
-    def test_every_page_boosts_from_its_body(self):
-        for name in PAGES:
-            with self.subTest(page=name):
-                body = re.search(r"<body[^>]*>", markup(name))
-                self.assertIsNotNone(body, f"{name} has no <body> at the top level")
-                self.assertIn('hx-boost="true"', body.group(0), name)
+    def test_every_signed_in_page_boosts_from_its_body(self):
+        """The base's <body>, and every page extends the base (above). Rendered,
+        because the attribute is an expression: the public pages turn it off, and
+        PublicPageTests holds which pages those are."""
+        html = templates.env.from_string("{% extends '_base.html' %}").render()
+        self.assertIn('hx-boost="true"', re.search(r"<body[^>]*>", html).group(0))
 
     def test_the_body_attributes_every_page_inherits_from_are_turned_on(self):
         """A plain `hx-boost` on <body> reaches the links under it only because
@@ -349,28 +499,22 @@ class EveryPageAgreesTests(unittest.TestCase):
         self.assertRegex(
             loader, r"htmx\.config\.implicitInheritance\s*=\s*true",
             "the loader no longer turns implicit inheritance on")
-        for name in PAGES:
-            body = re.search(r"<body[^>]*>", markup(name)).group(0)
-            for attr in ("hx-boost", "hx-indicator"):
-                if attr not in body:
-                    continue
-                with self.subTest(page=name, attr=attr):
-                    self.assertNotIn(f"{attr}:inherited", body,
-                                     f"{name} declares {attr} explicitly inheritable — "
-                                     "the loader's implicitInheritance flag is now dead weight")
+        body = re.search(r"<body[^>]*>", uncommented(BASE)).group(0)
+        for attr in ("hx-boost", "hx-indicator"):
+            with self.subTest(attr=attr):
+                self.assertNotIn(f"{attr}:inherited", body,
+                                 f"the base declares {attr} explicitly inheritable — "
+                                 "the loader's implicitInheritance flag is now dead weight")
 
     def test_an_inline_body_script_that_declares_anything_is_wrapped(self):
         """htmx re-executes scripts inside the swapped body, so a top-level
         `const` becomes a redeclaration on the second arrival and the whole
         script fails to parse — leaving that page's controls bound to nothing.
         A function wrapper is what makes a second arrival safe; `function` and
-        `var` declarations are legal to repeat and need no wrapper."""
+        `var` declarations are legal to repeat and need no wrapper. A page's
+        content block IS its body."""
         for name in PAGES:
-            source = read(name)
-            body_at = source.index("\n<body")
-            for match in re.finditer(r"<script>\n(.*?)</script>", source, re.S):
-                if match.start() < body_at:
-                    continue
+            for match in re.finditer(r"<script>\n(.*?)</script>", block(name, "content"), re.S):
                 script = match.group(1)
                 if not re.search(r"^(const|let|class)\s+[A-Za-z_$]", script, re.M):
                     continue
@@ -422,16 +566,19 @@ class EveryPageAgreesTests(unittest.TestCase):
 
 
 # Third-party files served as they were published. The rules the rest of this
-# module enforces — one declaration of a name across a session's scripts, a
-# boot file last — are rules about code this repository writes, and holding
-# somebody else's bundle to them would only teach us to edit it.
+# module enforces — one declaration of a name across the lists, a page name
+# asked for only where a page states it — are rules about code this repository
+# writes, and holding somebody else's library to them would only teach us to
+# edit it.
 VENDORED = ("htmx.min.js", "htmx-json-enc.js", "sortable.min.js")
 
 JS_DIR = assets.BASE_DIR / "static/js"
 
-# A page's <head> is built from assets.scripts('<page>'), so this is how a
-# template says which bundle it loads.
-PAGE_KEY = re.compile(r"assets\.scripts\('([^']+)'\)")
+
+def first_party() -> list[str]:
+    """Every script this repository wrote, in the order a signed-in page loads
+    them."""
+    return [name for name in assets.APP_SCRIPTS if not name.endswith(VENDORED)]
 
 
 def js_source(name: str) -> str:
@@ -458,7 +605,7 @@ def handlers_in(source: str) -> set[str]:
 
 def declares(source: str) -> set[str]:
     """Every name a script declares at TOP LEVEL — the ones that land in the one
-    scope a page's scripts share. Indented declarations are inside something and
+    scope every script shares. Indented declarations are inside something and
     cannot collide."""
     names = set(re.findall(r"^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)", source, re.M))
     for group in re.findall(r"^(?:let|const|var)\s+([^=;\n]+)", source, re.M):
@@ -467,13 +614,14 @@ def declares(source: str) -> set[str]:
 
 
 # `{{ body_class }}` in both places is the simple way to keep <body> and
-# #pageMeta from disagreeing, and most pages do exactly that. The CALENDAR does
-# something stronger: both come from ONE macro, because the answer to changing a
-# view preference re-draws #pageMeta out of band and the class string cannot be
-# spelled in two files. So the test is that the two name the SAME THING, not that
-# they both say a particular thing.
+# #pageMeta from disagreeing, and the base does exactly that for every page that
+# leaves #pageMeta to it. The CALENDAR does something stronger: both come from ONE
+# macro, because the answer to changing a view preference re-draws #pageMeta out
+# of band and the class string cannot be spelled in two files. So the test for a
+# page that draws its own is that the two name the SAME THING, not that they both
+# say a particular thing.
 _EXPR = re.compile(r'(?:data-)?body-?class="\{\{\s*(.+?)\s*\}\}"')
-_SET = re.compile(r"\{%-?\s*set body_class\s*%\}(.*?)\{%-?\s*endset\s*%\}", re.S)
+_SET = re.compile(r"\{%-?\s*set body_class\s*=\s*(.+?)\s*-?%\}")
 
 
 def _unqualify(expr: str) -> str:
@@ -491,56 +639,26 @@ def _body_class_source(source: str) -> str:
     """What `body_class` is set FROM \u2014 so a page that indirects through it is
     compared on the thing itself rather than on the name."""
     found = _SET.search(source)
-    if not found:
-        return "body_class"
-    inner = found.group(1).strip()
-    expr = re.fullmatch(r"\{\{\s*(.+?)\s*\}\}", inner)
-    return _unqualify(expr.group(1)) if expr else "body_class"
+    return _unqualify(found.group(1)) if found else "body_class"
 
 
-class PageScriptTests(unittest.TestCase):
-    """The three ways splitting one page script into many can break silently.
+class ScriptListTests(unittest.TestCase):
+    """What loading one list on every signed-in page asks of the files in it.
 
-    They are ordinary scripts sharing one global scope (see assets.PAGE_SCRIPTS
-    for why they are not modules), so a page is only correct if its files agree
-    about names, its order lets each file see what it calls, and every function an
-    inline handler names is actually on the page.
+    They are ordinary scripts sharing one global scope (app/assets.py says why
+    they are not modules), and every one of them runs on every page of its list.
+    So the list is only correct if its files agree about names, every page a
+    script asks about is a page that says who it is, and every function an inline
+    handler names is somewhere in it.
     """
 
-    def page_scripts(self, page: str) -> list[str]:
-        return [n for n in assets.scripts(page)
-                if not n.endswith(VENDORED)]
-
-    def every_script(self) -> list[str]:
-        """Every first-party script, each once, plus the loader the head macro
-        puts on every page — it shares the same global scope as all of them."""
-        names = [assets.BOOST]
-        for page in assets.PAGE_SCRIPTS:
-            names.extend(n for n in self.page_scripts(page) if n not in names)
-        return names
-
-    def test_every_script_on_disk_is_loaded_by_some_page(self):
-        """A file nothing loads is dead code that still looks alive. Splitting a
-        page script into a directory is exactly when one gets left behind."""
-        loaded = {n for scripts in assets.PAGE_SCRIPTS.values() for n in scripts}
-        loaded.update({assets.HTMX, assets.JSON_ENC, assets.BOOST})  # the head macro's own three
+    def test_every_script_on_disk_is_in_the_app_list(self):
+        """A file nothing loads is dead code that still looks alive. The app list
+        holds the public one, so it is every script there is."""
         for path in sorted(JS_DIR.rglob("*.js")):
             name = path.relative_to(assets.BASE_DIR).as_posix()
-            if path.name in VENDORED:
-                continue
             with self.subTest(script=name):
-                self.assertIn(name, loaded, f"{name} is served but no page loads it")
-
-    def test_each_page_loads_its_boot_file_last(self):
-        """boot.js runs an init the moment it executes, so everything it calls has
-        to have been declared by an earlier file."""
-        for page, scripts in assets.PAGE_SCRIPTS.items():
-            boots = [n for n in scripts if n.endswith("/boot.js")]
-            if not boots:
-                continue
-            with self.subTest(page=page):
-                self.assertEqual(boots, [scripts[-1]],
-                                 f"{page}: boot.js must be the last script")
+                self.assertIn(name, assets.APP_SCRIPTS, f"{name} is served but no list loads it")
 
     def test_typing_in_the_calendar_search_cannot_reach_a_service(self):
         """WHAT SPENDS A REQUEST MUST BE A DELIBERATE ACT, and this is the
@@ -573,19 +691,20 @@ class PageScriptTests(unittest.TestCase):
             page, r"hx-vals=[^>]*live",
             "the live flag is an inherited hx-vals again — it must be a field")
 
-    def test_no_two_scripts_anywhere_declare_the_same_name(self):
-        """One name, one file — across every page, not just within one.
+    def test_no_two_scripts_declare_the_same_name(self):
+        """One name, one file, across every script there is.
 
-        A boosted navigation leaves the scripts it has already run in place and
-        adds the next page's beside them, so any two pages can end up sharing one
-        global scope. A second top-level `let`/`const` of a name is then a
-        SyntaxError that stops that whole file executing, every function in it
-        silently missing; a second `function` of one is worse, because it is legal
-        — whichever page was visited last quietly owns the name, and the button
-        that calls it does the other page's job.
+        STILL WORTH HOLDING WITH ONE LIST, though the reason has narrowed. Every
+        file shares one global scope on every page of its list, so a second
+        top-level `let`/`const` of a name is a SyntaxError that stops that whole
+        file executing on every page — loud in a browser, silent in this suite. A
+        second `function` of one is worse, because it is legal: whichever file
+        the list loads later quietly owns the name, and the button that calls it
+        does the other file's job. Nothing about that is visible from the page
+        the button is on.
         """
         owner: dict[str, str] = {}
-        for name in self.every_script():
+        for name in first_party():
             for declared in declares(js_source(name)):
                 with self.subTest(name=declared):
                     # assertNotIn would print the whole name table.
@@ -594,91 +713,117 @@ class PageScriptTests(unittest.TestCase):
                                   f"{owner[declared]} and {name}")
                 owner[declared] = name
 
+    def test_no_script_calls_another_as_it_loads(self):
+        """WHY THE LISTS' FIRST-PARTY ORDER IS NOT LOAD-BEARING, held rather
+        than hoped. A file that called a function of another file's at its top
+        level would need that file to have run first — the ordering contract a
+        page's boot.js going last used to be. Every call between files happens
+        on an event instead, after every file has run.
+
+        Checked as: no line at the top level of a file (unindented, and not a
+        declaration, an assignment into htmx's config or window, or the start of
+        a listener) calls a function another first-party file declares."""
+        declared_by = {name: declares(js_source(name)) for name in first_party()}
+        for name in first_party():
+            others = set().union(*(names for other, names in declared_by.items() if other != name))
+            code = re.sub(r"/\*.*?\*/", "", js_source(name), flags=re.S)
+            for line in code.splitlines():
+                if not line or line[0].isspace() or line.startswith(("//", "}", ")")):
+                    continue
+                if re.match(r"(?:async\s+)?function\b|(?:let|const|var)\s|document\.addEventListener"
+                            r"|window\.(?:addEventListener|fetch\s*=)|htmx\.config\.", line):
+                    continue
+                with self.subTest(script=name, line=line[:60]):
+                    called = set(CALL.findall(line)) & others
+                    self.assertFalse(called, f"{name} calls {sorted(called)} as it loads")
+
+    def test_every_page_a_script_asks_about_names_itself(self):
+        """A script tells pages apart by `data-page`: boost.js announces the
+        arrival under it, and a boot file starts its page when its own name is
+        announced. A page a boot file waits for that never names itself would
+        land INERT, which is the failure the old per-page loader existed to
+        prevent; a name nothing waits for is a declaration nothing reads. So the
+        two sets must be equal."""
+        asked = set()
+        for name in first_party():
+            asked |= set(re.findall(r"detail\.page\s*[!=]==\s*'([^']+)'", js_source(name)))
+        stated = set()
+        for template in TEMPLATES_DIR.glob("*.html"):
+            source = uncommented(template.name)
+            stated |= set(re.findall(r"\{%-?\s*set page_name\s*=\s*'([^']+)'", source))
+            stated |= set(re.findall(r'<div id="pageMeta"[^>]*\bdata-page="([^"{]+)"', source))
+        self.assertTrue(asked, "no script asks which page is on screen; the scan is wrong")
+        self.assertEqual(asked, stated)
+
     def test_every_page_states_its_body_class_inside_its_body(self):
         """A swap replaces the body's CHILDREN, so the <body> element keeps the
         previous page's classes. #pageMeta is inside the swapped region and so
         arrives with the new page; the class it carries has to be the one the
         <body> tag renders, or a boosted arrival wears something the cold load
-        never would."""
+        never would. The base draws both from `body_class`; a page that draws its
+        own #pageMeta has to draw it from what it set `body_class` to."""
+        base = uncommented(BASE)
+        self.assertIn('class="{{ body_class }}"', re.search(r"<body[^>]*>", base).group(0))
+        self.assertEqual(_class_expression(re.search(r'<div id="pageMeta"[^>]*>', base).group(0)),
+                         "body_class")
         for template in PAGES:
-            source = markup(template)
-            body = re.search(r"<body[^>]*>", source)
-            meta = re.search(r'<div id="pageMeta"[^>]*>', source)
+            if not block(template, "page_meta"):
+                continue
+            meta = re.search(r'<div id="pageMeta"[^>]*>', markup(template))
             with self.subTest(page=template):
-                self.assertIsNotNone(meta, f"{template} has no #pageMeta, so a "
-                                           "boosted arrival keeps the previous "
-                                           "page's body classes")
-                self.assertIn('class="{{ body_class }}"', body.group(0), template)
+                self.assertIsNotNone(meta, f"{template} replaces #pageMeta with nothing")
                 self.assertEqual(
-                    _class_expression(meta.group(0)), _body_class_source(source),
+                    _class_expression(meta.group(0)), _body_class_source(uncommented(template)),
                     f"{template}: <body> and #pageMeta name different things, so "
                     "a boosted arrival can wear a class the cold load never would")
 
-    def test_a_page_with_scripts_names_itself_on_its_meta_element(self):
-        """data-page is how a boosted arrival is told which scripts to load: the
-        <head> is never swapped, so the page landed on has to say what it needs
-        from inside the swapped region. A page whose template loads scripts but
-        does not name itself lands inert."""
-        for template in PAGES:
-            page = PAGE_KEY.search(read(template))
-            meta = re.search(r'<div id="pageMeta"[^>]*>', markup(template)).group(0)
-            declared = re.search(r'data-page="([^"]*)"', meta)
-            with self.subTest(page=template):
-                if not page:
-                    self.assertIsNone(declared, f"{template} names a page but loads "
-                                                "no scripts")
-                    continue
-                self.assertIsNotNone(declared, f"{template} loads scripts but its "
-                                               "#pageMeta carries no data-page")
-                self.assertEqual(declared.group(1), page.group(1),
-                                 f"{template} asks for one page's scripts and names "
-                                 "another")
-
-    def test_every_page_with_an_init_registers_it_with_the_loader(self):
+    def test_every_page_init_starts_on_the_arrival(self):
         """boot.js used to run its init from DOMContentLoaded, which a boosted
-        arrival never fires. The loader calls the registered init instead — on the
-        cold load and on every arrival — so a boot file that still waits for the
-        event would only ever run on a full page load."""
-        for page in assets.PAGE_SCRIPTS:
-            boots = [n for n in assets.scripts(page) if n.endswith("/boot.js")]
-            for name in boots:
-                # Comments stripped: both files explain in prose why they no
-                # longer wait for the event.
-                source = re.sub(r"//[^\n]*", "", js_source(name))
-                with self.subTest(page=page):
-                    self.assertIn(f"registerPage('{page}'", source,
-                                  f"{name} does not register an init for {page}")
-                    self.assertNotIn("DOMContentLoaded", source,
-                                     f"{name} still waits for DOMContentLoaded, which "
-                                     "a boosted arrival does not fire")
+        arrival never fires. static/js/boost.js announces `page-arrived` on the
+        cold load and on every arrival alike, so a boot file that waits for the
+        document event instead would only ever run on a full page load."""
+        boots = [name for name in first_party() if name.endswith("/boot.js")]
+        self.assertTrue(boots)
+        for name in boots:
+            # Comments stripped: both files explain in prose why they no longer
+            # wait for the event.
+            source = re.sub(r"//[^\n]*", "", js_source(name))
+            with self.subTest(script=name):
+                self.assertIn("'page-arrived'", source)
+                self.assertNotIn("DOMContentLoaded", source)
 
-    def test_every_function_an_inline_handler_calls_is_on_that_page(self):
+    def test_every_function_an_inline_handler_calls_is_in_the_app_list(self):
         """The markup calls these functions from onclick/onerror attributes, which
-        reach the global scope only. A page whose script list is missing the file
-        that declares one looks fine until somebody clicks — so the handlers are
-        checked against what the page actually loads. Handlers in markup the page
-        BUILDS in the browser count too: they are the same promise made from a
-        template literal instead of a template."""
-        for template in PAGES:
-            page = PAGE_KEY.search(read(template))
-            scripts = self.page_scripts(page.group(1)) if page else []
-            sources = [js_source(n) for n in scripts]
-            available = set()
-            for source in sources:
-                available |= declares(source)
-            # A page's own inline <script> is part of the page too. Scanned
+        reach the global scope only. Every signed-in page loads the whole list,
+        so a handler is answered if ANY file in it declares the name — and a name
+        none of them declares looks fine until somebody clicks. (A public page is
+        held to its shorter list by PublicPageTests.)
+
+        EVERY TEMPLATE, not only the pages and what they include: a fragment a
+        route draws later — the export readout is one — lands on a page that has
+        the same list as every other, so it is held to the same list."""
+        available = set()
+        for name in first_party():
+            available |= declares(js_source(name))
+        seen = set()
+        for path in sorted(TEMPLATES_DIR.glob("*.html")):
+            if path.name in STANDALONE:
+                continue
+            source = uncommented(path.name)
+            # A template's own inline <script> answers its own handlers. Scanned
             # unanchored, since an inline script's declarations are indented — it
             # over-counts nested names, which can only ever hide a problem here,
             # never invent one.
-            for inline in re.findall(r"<script>(.*?)</script>", read(template), re.S):
-                available |= set(re.findall(r"\bfunction\s+([A-Za-z_$][\w$]*)", inline))
-            called = set()
-            for source in [markup(template), *sources]:
-                called |= handlers_in(source)
-            for name in sorted(called - available):
-                with self.subTest(page=template, handler=name):
-                    self.fail(f"{template} calls {name}() from an attribute, but no "
-                              f"script it loads declares it")
+            local = set()
+            for inline in re.findall(r"<script>(.*?)</script>", source, re.S):
+                local |= set(re.findall(r"\bfunction\s+([A-Za-z_$][\w$]*)", inline))
+            called = handlers_in(source)
+            seen |= called
+            for missing in sorted(called - available - local):
+                with self.subTest(template=path.name, handler=missing):
+                    self.fail(f"{path.name} calls {missing}() from an attribute, but no "
+                              f"script in the app list declares it")
+        self.assertTrue(seen, "no inline handler was found; the scan is wrong")
 
 
 class LateArrivingDayBlockTests(unittest.TestCase):

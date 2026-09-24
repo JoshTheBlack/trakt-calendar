@@ -1,4 +1,4 @@
-"""Static-asset cache busting, and the one list of what a page's <head> loads.
+"""Static-asset cache busting, and the one list of what every page's <head> loads.
 
 Its own module rather than a constant in app/main.py because every page needs the
 token, including the ones whose routes live in app/auth/routes.py and
@@ -9,8 +9,8 @@ The token is the newest mtime across the files browsers cache, recomputed once
 per server start. That means a deploy invalidates them and a running server does
 not, which is what a long-lived cache header wants.
 
-Templates reach this through the head macro rather than writing asset paths of
-their own — see templates/_head.html and app/templating.py.
+Templates reach this through the base template rather than writing asset paths of
+their own — see templates/_base.html and app/templating.py.
 """
 from __future__ import annotations
 
@@ -23,152 +23,131 @@ BASE_DIR = Path(__file__).resolve().parent
 # order to land styled. style.css's own header explains the bargain.
 STYLESHEET = "static/css/style.css"
 
-# On every page too, from the head macro rather than from any page's list below:
-# boosting IS htmx, so a page without it is a one-way door out of a boosted
+# Boosting IS htmx, so a page without it is a one-way door out of a boosted
 # session. BOOST is what makes the rest of a boosted arrival work — a swap
 # replaces the body's children only, so the page arrived at has neither its own
-# <body> classes nor its own scripts until that file gives them to it.
+# <body> classes nor a DOMContentLoaded to start from until that file gives them
+# to it.
 HTMX = "static/js/htmx.min.js"
 BOOST = "static/js/boost.js"
 
 # htmx's json-enc extension, vendored from the same project's community
-# extension repository and served on every page beside htmx itself.
-#
-# ON EVERY PAGE BECAUSE THE THING IT ENCODES IS ON EVERY PAGE. Every mutating
-# request this app makes has to be application/json — app/authz.py's
-# request_shape_guard refuses anything else before routing — and the controls
-# that make those requests are spread across the calendar, the tracker, the
-# board and the shared header. A per-page list would be a second answer to
-# "which pages write?", and the first one to go stale would fail as a form that
-# silently posts the wrong content type.
+# extension repository.
 #
 # INERT UNTIL MARKUP ASKS FOR IT. The extension acts only on an element carrying
-# `hx-json-enc`, so loading it changes no request until one does.
+# `hx-json-enc`, so loading it changes no request until one does — and every
+# mutating request this app makes has to be application/json, because
+# app/authz.py's request_shape_guard refuses anything else before routing.
 JSON_ENC = "static/js/htmx-json-enc.js"
 
-# What each page loads, and IN WHAT ORDER, keyed by the page's own name. The
-# lists live here rather than in the templates for the reason the stylesheet does:
-# a template that spelled out its own script filenames would be a second copy of
-# this list, and adding a file would half-work until somebody edited both.
+# WHAT A PAGE LOADS: ONE OF TWO LISTS, and which one is decided by who can reach
+# the page. The lists live here rather than in a template for the reason the
+# stylesheet does: a template that spelled out filenames would be a second copy,
+# and adding a file would half-work until somebody edited both.
 #
-# THEY ARE ORDINARY SCRIPTS, NOT MODULES, and that is what makes the order matter.
-# The templates call these functions from onclick attributes, which reach names in
-# the global scope only — so a module would have to publish every one of them onto
-# window by hand. Instead a page's files share one global scope and run in the
-# order below (defer preserves it), which means:
-#   - a page's boot.js goes LAST. It is the one file that runs an init rather than
-#     only declaring things, and by then everything it calls has to exist.
-#   - a file's top-level `let`/`const` is visible to the whole page, so a name may
-#     be declared in exactly ONE of a page's files. Two of them declaring the same
-#     one is a SyntaxError that stops the second file dead.
-# tests/kernel/test_page_head.py holds both of those to account.
+# NOT ONE LIST PER PAGE, because a boosted navigation swaps the body and never the
+# <head>. With a list per page, whatever the session's first page loaded was all a
+# later page had, so the page arrived at had to fetch its own scripts at runtime —
+# and then which files were running, and in what order they had run, depended on
+# the route somebody had taken through the app. Every page a signed-in session
+# moves between loads APP_SCRIPTS, so a boosted arrival lands with every script it
+# needs already running and nothing is fetched.
 #
-# THE SAME LISTS ARE SHIPPED TO THE BROWSER, because a boosted navigation swaps
-# the body and never the <head>: the page arrived at has to fetch its own scripts,
-# and static/js/boost.js reads this map to know which. That is also why a name may
-# not be shared across two PAGES' lists — visit both in one session and the second
-# page's copy would be a re-declaration. Only ONE list, though: the head macro
-# serializes this dict, so the browser's copy cannot drift from it.
-PAGE_SCRIPTS = {
-    "calendar": (
-        "static/js/ui.js",
-        # NO view.js: marking a show is a button posting itself, answered with
-        # every card for that title on this month redrawn and the counts it
-        # moves (templates/_marked_cards.html). That file held the page's own
-        # copy of the month's numbers and the marks it had made but not yet
-        # saved, and every line of it went with the answer.
-        "static/js/calendar/layout.js",
-        # NO source-swap.js either: flipping a card between the services that
-        # described it is a radio group and one stylesheet rule
-        # (templates/_card.html, style.css's `.flip`), and keeping the details
-        # panel opening on what the card is showing is ui.js's opener reading
-        # that same radio.
-        # NO SEARCH SCRIPT. The panel's every request is an `hx-get` on the
-        # control that makes it, and WHERE A JUMP LANDS is the stylesheet's:
-        # the server ships the anchor card's whole day with the shell and marks
-        # it `id="jump-target"`, so the browser's own fragment scrolling reaches
-        # it and `scroll-margin-block` keeps it clear of the sticky header. What
-        # was here was a settling loop that re-scrolled until the page stopped
-        # moving; measured against a real month it corrected 69 pixels.
-        # NO SETTINGS, SHARE OR FILTERS SCRIPT, ON THIS PAGE OR ANY OTHER. All
-        # three panels are fragments the server draws and every control in them
-        # posts itself; the Settings panel opens from the site menu on every page
-        # an administrator reaches, and what any of them still asks of a browser —
-        # copying a value and closing an overlay — is ui.js's, which every page
-        # with a header loads. NO BADGE SCRIPT EITHER: a card's filter offer is a
-        # <details> in a named exclusive group with three radios that post
-        # themselves, so opening, closing, keeping one offer open at a time and
-        # storing the answer are all the browser's or the server's.
-        "static/js/calendar/easter-egg.js",
-        "static/js/calendar/boot.js",
-    ),
-    "tracker": (
-        # NOTHING OF ITS OWN. The month, the rows, the row actions, the add flow,
-        # the emoji editor, the backfill, the copy blocks and the tab strip are
-        # all markup the server draws, and the last thing left — scrolling a
-        # title too wide for its cell — is a stylesheet rule now (style.css's
-        # `.distrakt-title`, which reads its own width in container query units
-        # rather than being told it). What this page still asks of ui.js is the
-        # details panel, copying, reading a chosen backup file into a JSON body,
-        # and the one label in the app that follows a typed date.
-        "static/js/ui.js",
-        # The calendar's file, on this page too, because the Konami code is ONE
-        # listener for both — see static/js/calendar/easter-egg.js. Loading it
-        # twice is not a re-declaration: boost.js keys what is running on the
-        # file's PATH, and a page that already has it does not fetch it again.
-        "static/js/calendar/easter-egg.js",
-    ),
-    "rankings": (
-        # SortableJS first: ranker/dnd.js hands it containers, and `typeof
-        # Sortable === 'undefined'` is its check for the file having failed to
-        # load, not for it not having run yet.
-        "static/js/sortable.min.js",
-        "static/js/ui.js",
-        # WHAT IS LEFT IS THE POINTER AND THE FILE. The drag and its coalesced
-        # save, the keyboard and modifier-key ways of moving a title, where a
-        # menu opens, the preview's zoom and pan, and a download that has to be a
-        # POST. Every other action on this page — the boards, the tiers and
-        # deleting one, the removal, both undos, the bulk move, the import, the
-        # seed, the export options and the backup restore — is markup that posts
-        # itself and is answered with the board redrawn, so six of this feature's
-        # files have no contents left at all.
-        "static/js/ranker/core.js",
-        "static/js/ranker/dnd.js",
-        "static/js/ranker/save.js",
-        "static/js/ranker/rows.js",
-        "static/js/ranker/search.js",
-        "static/js/ranker/selection.js",
-        "static/js/ranker/export.js",
-        "static/js/ranker/export-preview.js",
-        "static/js/ranker/boot.js",
-    ),
-    "admin": ("static/js/ui.js",),
-    "account": ("static/js/ui.js", "static/js/plex-auth.js"),
-    # ui.js for `data-copy` alone: a generated key is copied into an environment
-    # file, and only a browser can write the clipboard. Everything else on the page
-    # posts itself.
-    "recovery": ("static/js/ui.js",),
-    # ui.js for its URL-state select resync alone: this page's endpoint
-    # picker acts on `change` and is restored by the bfcache exactly like
-    # the calendar's, and leaving one copy of that bug unfixed is how the
-    # other two came to differ in the first place.
-    "pick": ("static/js/ui.js",),
-    "sign-in": ("static/js/plex-auth.js",),
-    "register": ("static/js/plex-auth.js",),
-    # ui.js alone: a card opens the details panel through its delegated
-    # listener, so the page carries no opener of its own.
-    "share": ("static/js/ui.js",),
-}
+# BUT NOT ONE LIST FOR EVERY PAGE EITHER. The pages a stranger lands on — signing
+# in, registering, a shared calendar — would then carry the rankings board's drag
+# library and the calendar's easter egg for nothing. MEASURED on the sign-in page
+# over HTTP/2 in Chromium on DevTools' Fast 3G profile, cold: the whole list cost
+# 356ms of first paint and 350ms before the form could be used, against the four
+# files that page loaded when every page had its own list; the public list costs
+# about 90ms of each. So those pages load PUBLIC_SCRIPTS, and
+# templates/_base.html makes that safe: a page on this list does not boost, so a
+# session that started on one never swaps its way into a page expecting the other
+# list — it arrives there by a full load, which brings that page's own <head>.
+#
+# THEY ARE ORDINARY SCRIPTS, NOT MODULES. The templates call functions from
+# onclick attributes, which reach names in the global scope only, so a module
+# would have to publish every one of them onto window by hand. So every file on a
+# page shares ONE global scope, which means:
+#   - a name may be declared at top level in exactly ONE file. A second
+#     `let`/`const` of it is a SyntaxError that stops that file dead; a second
+#     `function` is legal and silently hands the name to whichever file runs
+#     later. tests/kernel/test_page_head.py holds that to account.
+#   - a file runs on every page of its list, so a listener has to ask whether
+#     what it acts on is on screen, and must not assume its own page is the one
+#     loaded.
+#
+# THE ORDER THAT MATTERS is the vendored half, and it is short. htmx first,
+# because the extension registers itself against the global htmx publishes as it
+# executes, and boost.js sets htmx's config at its top level. No first-party file
+# calls into another as it loads — each declares, or binds a listener, and every
+# call between files happens on an event, after all of them have run — so their
+# order among themselves is not load-bearing. `defer` preserves this order all
+# the same, which keeps it one fact rather than a thing to reason about.
+PUBLIC_SCRIPTS = (
+    HTMX,
+    JSON_ENC,
+    BOOST,
+    # The details panel and the select resync on a shared calendar, and the
+    # sign-in button waiting for htmx.
+    "static/js/ui.js",
+    # Signing in and registering with Plex.
+    "static/js/plex-auth.js",
+    # A shared calendar's poster-only cards open their panel away from the edge
+    # the same way the owner's calendar does.
+    "static/js/calendar/layout.js",
+)
 
-# Every stylesheet and script served to a browser: the pages' own scripts, plus
-# the four files no page lists (the stylesheet, and the three the head macro puts
-# on every page itself).
+APP_SCRIPTS = PUBLIC_SCRIPTS + (
+    # SortableJS 1.15.6 (MIT), vendored rather than fetched from a CDN so the
+    # board has no third-party origin to trust or to be offline without.
+    # Integrity of the file as committed:
+    # sha384-HZZ/fukV+9G8gwTNjN7zQDG0Sp7MsZy5DDN6VfY3Be7V9dvQpEpR2jF2HlyFUUjU
+    # ranker/dnd.js's `typeof Sortable === 'undefined'` is its check for this
+    # file having failed to load.
+    "static/js/sortable.min.js",
+    # THE CALENDAR. NO view.js: marking a show is a button posting itself,
+    # answered with every card for that title on this month redrawn and the
+    # counts it moves (templates/_marked_cards.html). NO source-swap.js: flipping
+    # a card between the services that described it is a radio group and one
+    # stylesheet rule (templates/_card.html, style.css's `.flip`). NO SEARCH
+    # SCRIPT: the panel's every request is an `hx-get` on the control that makes
+    # it, and WHERE A JUMP LANDS is the stylesheet's — the server marks the anchor
+    # card's day `id="jump-target"`, the browser's own fragment scrolling reaches
+    # it and `scroll-margin-block` keeps it clear of the sticky header. NO
+    # SETTINGS, SHARE, FILTERS OR BADGE SCRIPT, here or anywhere: all of them are
+    # fragments the server draws whose every control posts itself.
+    # The Konami code answers on every page of this list — see its own header.
+    "static/js/calendar/easter-egg.js",
+    "static/js/calendar/boot.js",
+    # THE TRACKER HAS NOTHING OF ITS OWN. The month, the rows, the row actions,
+    # the add flow, the emoji editor, the backfill, the copy blocks and the tab
+    # strip are all markup the server draws, and scrolling a title too wide for
+    # its cell is a stylesheet rule (style.css's `.distrakt-title`, which reads
+    # its own width in container query units rather than being told it).
+    #
+    # THE RANKINGS BOARD: WHAT IS LEFT IS THE POINTER AND THE FILE. The drag and
+    # its coalesced save, the modifier-key ways of picking titles, the preview's
+    # zoom and pan, and a download that has to be a POST. Every other action on
+    # the board is markup that posts itself and is answered with the board
+    # redrawn.
+    "static/js/ranker/core.js",
+    "static/js/ranker/dnd.js",
+    "static/js/ranker/save.js",
+    "static/js/ranker/rows.js",
+    "static/js/ranker/search.js",
+    "static/js/ranker/selection.js",
+    "static/js/ranker/export.js",
+    "static/js/ranker/export-preview.js",
+    "static/js/ranker/boot.js",
+)
+
+# Every stylesheet and script served to a browser. APP_SCRIPTS includes the
+# public list, so it is every script there is.
 # url() refuses a path that is not in here, which is what makes a `?v=` token a
 # promise rather than decoration: a script tag for an untracked file fails the
 # first time the page renders, instead of quietly serving a stale copy for as long
 # as a browser's cache holds it.
-_CACHED_ASSETS = (STYLESHEET, HTMX, JSON_ENC, BOOST) + tuple(
-    dict.fromkeys(name for scripts in PAGE_SCRIPTS.values() for name in scripts))
+_CACHED_ASSETS = (STYLESHEET, *APP_SCRIPTS)
 
 # Preloaded by every page: these are the faces the shared header and body text
 # are set in, so every page waits on them and none should discover them late.
@@ -204,33 +183,8 @@ def url(name: str) -> str:
     busted and never busts.
     """
     if name not in _CACHED_ASSETS:
-        raise KeyError(
-            f"{name} is not a tracked asset; add it to the page that loads it in "
-            "assets.PAGE_SCRIPTS")
+        raise KeyError(f"{name} is not a tracked asset; add it to assets.APP_SCRIPTS")
     return f"/{name}?v={ASSET_VERSION}"
-
-
-def page_script_urls() -> dict[str, list[str]]:
-    """PAGE_SCRIPTS as browser URLs, for static/js/boost.js to load from.
-
-    Serialized into every page's <head>, because a boosted navigation swaps the
-    body and leaves the head alone: the page arrived at has to fetch its own
-    scripts, and it can only do that if it knows what they are. Built from the
-    one dict above rather than restated, so the browser's copy cannot drift.
-    """
-    return {page: [url(name) for name in names] for page, names in PAGE_SCRIPTS.items()}
-
-
-def scripts(page: str) -> tuple[str, ...]:
-    """What `page` loads, in load order — see PAGE_SCRIPTS.
-
-    Raises KeyError for a page that has no entry, rather than rendering a page
-    with no scripts at all: every one of these pages is inert without them, and a
-    silently empty tuple would look like a JavaScript bug rather than a typo here.
-    """
-    if page not in PAGE_SCRIPTS:
-        raise KeyError(f"no scripts declared for page {page!r} in assets.PAGE_SCRIPTS")
-    return PAGE_SCRIPTS[page]
 
 
 def font_url(name: str) -> str:
