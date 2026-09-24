@@ -118,10 +118,14 @@ class Airing:
         THE DAY ANCHOR WAS NOT WRONG, IT WAS TOO COARSE. It landed at the top of
         the right day, which on a day holding thirty titles is not the same as
         landing on the one somebody searched for.
+
+        `day=` NAMES WHICH AIRING, because `highlight=` names a title and a
+        weekly show is four rows in one month. Both are references the server
+        resolves against the month it draws, not data it is being handed.
         """
         return (f"/calendar?year={self.year}&month={self.month}"
                 f"&endpoint={quote(self.endpoint_key, safe='')}"
-                f"&highlight={quote(self.item.mark_key)}#jump-target")
+                f"&highlight={quote(self.item.mark_key)}&day={self.day}#jump-target")
 
 
 @dataclass(frozen=True)

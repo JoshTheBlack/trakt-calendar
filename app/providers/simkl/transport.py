@@ -748,6 +748,34 @@ async def send(client: httpx.AsyncClient, method: str, url: str, *,
         url = target
 
 
+async def send_or_unavailable(client: httpx.AsyncClient, method: str, url: str, *,
+                              pool: http_pool.Pool, headers: dict | None = None,
+                              json=None, timeout: float | None = None) -> httpx.Response:
+    """`send`, for a caller asking Simkl about DATA: a Simkl that could not be
+    reached raises SimklError instead of an httpx exception.
+
+    THE SAME RULE AS app/providers/trakt/transport.py's function of the same
+    name, and two copies for the reason the two transports are two: what a
+    request carries differs between the services, while what an unreachable one
+    MEANS does not. A connection that never answered is this source being
+    unavailable, which every reader of a port already degrades — a calendar
+    window goes partial, a progress read reports itself unread — where an httpx
+    exception reached them unannounced and failed the whole request. The CDN
+    calendar read and the progress POST were the two callers that never
+    translated it.
+
+    `send` STAYS RAW FOR THE SIGN-IN FLOWS in app/auth/, which put a network
+    failure into words for the person linking an account.
+    """
+    try:
+        return await send(client, method, url, pool=pool, headers=headers,
+                          json=json, timeout=timeout)
+    except httpx.HTTPError as exc:
+        path = url.split("?", 1)[0].replace(API_BASE, "") or url
+        logger.warning("Simkl %s %s failed: %s", method.upper(), path, exc)
+        raise SimklError(f"Could not reach Simkl: {exc}") from exc
+
+
 async def _send_once(client: httpx.AsyncClient, method: str, url: str, *,
                      pool: http_pool.Pool, headers: dict | None = None,
                      json=None, timeout: float | None = None) -> httpx.Response:
@@ -857,18 +885,12 @@ async def _fetch_json(client: httpx.AsyncClient, settings: Settings, url: str, p
     pass.
     """
     t0 = _time.perf_counter()
-    try:
-        resp = await send(client, "GET", url, pool=pool,
-                          headers=api_headers(settings, private=private))
-    except httpx.HTTPError as exc:
-        # A transport failure means we never got a real answer. Unlike a 404 or
-        # an empty list that is NOT "Simkl says there is nothing here", so it
-        # must never collapse into the None callers read as an empty result.
-        # Always raise, regardless of raise_errors. (SimklRateLimitError and
-        # SimklBlockedError are not httpx errors and propagate on their own, for
-        # the same reason — their callers degrade them deliberately.)
-        logger.warning("Simkl GET %s failed: %s", path, exc)
-        raise SimklError(f"Could not reach Simkl: {exc}") from exc
+    # A Simkl that could not be reached ALWAYS raises, whatever `raise_errors`
+    # says: that flag decides what a non-200 ANSWER means, and an unreachable
+    # service gave none. (SimklRateLimitError and SimklBlockedError propagate on
+    # their own, for the same reason — their callers degrade them deliberately.)
+    resp = await send_or_unavailable(client, "GET", url, pool=pool,
+                                     headers=api_headers(settings, private=private))
     try:
         pages = max(1, int(resp.headers.get("x-pagination-page-count") or 1))
     except (TypeError, ValueError):

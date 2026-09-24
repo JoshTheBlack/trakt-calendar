@@ -54,6 +54,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import AsyncIterator, Iterable, Mapping
+from typing import NamedTuple
 from datetime import date
 from enum import StrEnum
 
@@ -1397,58 +1398,92 @@ async def remove_season_from_month(user_id: int, month: str, key: ItemKey,
 # for a slug on every row instead would keep a Simkl-only title permanently owing
 # a Trakt name — a debt nothing could ever settle, which turns "is there work to
 # do" into a question that answers yes for ever.
-_SLUG_OWED_BY = {"trakt_id": "trakt_slug", "simkl_id": "simkl_slug"}
+# What a stored record can be short of that the stored calendar may know: each
+# service's own id and its own name for the title (as ID_KEYS spell them, the
+# id's column beside it), and the network.
+_OWABLE_IDS = {"trakt": "trakt_id", "simkl": "simkl_id",
+               "trakt_slug": "trakt_slug", "simkl_slug": "simkl_slug"}
+NETWORK = "network"
 
 
-async def identities_missing_slugs(user_id: int) -> list[tuple[ItemKey, tuple[str, ...]]]:
-    """Every identity this viewer holds a row for that knows a service's id but
-    not what that service CALLS the title, paired with WHICH names it is short of.
+class Owed(NamedTuple):
+    """One identity's debt: what it is short of, and the service ids its rows
+    already hold (merged across rows and tables) — which is what decides whose
+    answer a network should be, the same way live.detail_source decides."""
+    key: ItemKey
+    names: tuple[str, ...]
+    ids: dict
 
-    THE NAMES ARE PART OF THE ANSWER, not something the caller may assume. A
-    title only one service lists is the ordinary case, and handing back the
-    identity alone invites a caller to write whatever names it found — which puts
-    a Trakt slug on a title Trakt never named. That row then looks linkable to a
-    service it holds no id for, and the link renders for a service that cannot be
-    asked about it at all.
 
-    PER IDENTITY, NOT PER ROW, because that is the unit a name is true of and the
-    unit `learn_ids` writes: a title's Simkl slug is as true of a frozen record
-    from last March as of the row on today's list. Answering per row would have
-    the caller ask the same question once per season of one show.
+async def identities_owing(user_id: int) -> list[Owed]:
+    """Every identity this viewer holds a row for that is short of a service id,
+    a service's name for the title, or a network — with WHICH of them.
 
-    BOTH RECORD TABLES, and the settled half is the point. A verdict's counts are
-    never recomputed, so no live pass visits it — which is exactly why a record
-    that settled before the two services' slugs were told apart has no other way
-    to learn one. An identity short of one name in one table and another name in
-    the other is owed both, so the two tables' answers are merged rather than
-    concatenated.
+    THE NAMES ARE PART OF THE ANSWER, not something the caller may assume: a
+    title only one service lists is the ordinary case, and a caller handed the
+    identity alone would write whatever it found.
+
+    A SERVICE'S ID IS OWED WHEREVER IT IS MISSING, not only its name. It used to
+    be names alone — owed only where the row already held that service's id —
+    and that left every row filed off one service permanently half-linked
+    although the stored calendar held the other service's own record of the same
+    title. MEASURED on a live instance: 69 identities owing an id, 29 of them
+    answerable from the stored calendar.
+
+    PER IDENTITY, NOT PER ROW, because that is the unit an id or a name is true of
+    and the unit `learn_ids` writes. BOTH RECORD TABLES, and the settled half is
+    the point: a verdict is never recomputed, so no live pass visits it.
     """
     # THE FLAG COLUMNS ARE ALIASED AWAY FROM THE COLUMNS THEY ARE ABOUT. SQLite
     # resolves a name in HAVING against the source columns before the select
     # aliases, so `... AS trakt_slug ... HAVING trakt_slug = 1` compares the raw
-    # (and here always NULL) column and matches nothing at all — a silent empty
-    # answer rather than an error, which reads exactly like "no work to do".
-    owed = {slug_column: f"owes_{slug_column}" for slug_column in _SLUG_OWED_BY.values()}
+    # column and matches nothing — a silent empty answer that reads exactly like
+    # "no work to do".
+    owable = {**_OWABLE_IDS, NETWORK: NETWORK}
     flags = ", ".join(
-        f"MAX(CASE WHEN {id_column} IS NOT NULL AND {id_column} != '' "
-        f"AND ({slug_column} IS NULL OR {slug_column} = '') THEN 1 ELSE 0 END) "
-        f"AS {owed[slug_column]}"
-        for id_column, slug_column in _SLUG_OWED_BY.items())
+        f"MAX(CASE WHEN {column} IS NULL OR {column} = '' THEN 1 ELSE 0 END) AS owes_{name}"
+        for name, column in owable.items())
+    held = ", ".join(f"MAX({column}) AS has_{name}"
+                     for name, column in _OWABLE_IDS.items() if not name.endswith("_slug"))
     selected = ", ".join(IDENTITY_COLUMNS)
-    having = " OR ".join(f"{alias} = 1" for alias in owed.values())
+    having = " OR ".join(f"owes_{name} = 1" for name in owable)
     sql = " UNION ALL ".join(
-        f"SELECT {selected}, {flags} FROM {table} WHERE user_id = ? "
+        f"SELECT {selected}, {flags}, {held} FROM {table} WHERE user_id = ? "
         f"GROUP BY {selected} HAVING {having}"
         for table in ("distrakt_month_records", "distrakt_user_seasons"))
     rows = await db.fetch_all(sql, (user_id, user_id))
 
-    merged: dict[tuple, set[str]] = {}
+    names: dict[tuple, set[str]] = {}
+    ids: dict[tuple, dict] = {}
     for row in rows:
         address = tuple(str(row[column]) for column in IDENTITY_COLUMNS)
-        names = merged.setdefault(address, set())
-        names.update(slug for slug, alias in owed.items() if row[alias])
-    return [(ItemKey(*address), tuple(sorted(names)))
-            for address, names in merged.items()]
+        names.setdefault(address, set()).update(
+            name for name in owable if row[f"owes_{name}"])
+        for name in ("trakt", "simkl"):
+            if row[f"has_{name}"] not in (None, ""):
+                ids.setdefault(address, {})[name] = row[f"has_{name}"]
+    return [Owed(ItemKey(*address), tuple(sorted(owed)), ids.get(address, {}))
+            for address, owed in names.items()]
+
+
+async def learn_network(user_id: int, key: ItemKey, network: str) -> int:
+    """Fill a blank network on every row of one title. Returns rows changed.
+
+    ADD-ONLY, for `learn_ids`' reason: a network already stored came off the
+    payload the record was built from, and one arriving here is a join. A
+    network is a fact about the SHOW, so it addresses the identity, not a season.
+    """
+    if not str(network or "").strip():
+        return 0
+    address = (user_id, key.media, key.match_source, key.match_id)
+
+    def _work(conn: db.Connection) -> int:
+        return sum(conn.execute(
+            f"UPDATE {table} SET network = ? WHERE user_id = ? AND {_IDENTITY_MATCH} "
+            "AND (network IS NULL OR network = '')", (network, *address)).rowcount
+            for table in ("distrakt_month_records", "distrakt_user_seasons"))
+
+    return await db.transaction(_work)
 
 
 async def learn_ids(user_id: int, key: ItemKey, ids: Mapping) -> int:

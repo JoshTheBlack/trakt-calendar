@@ -290,6 +290,40 @@ async def send(client: httpx.AsyncClient, method: str, url: str, *,
             await asyncio.sleep(wait)
 
 
+async def send_or_unavailable(client: httpx.AsyncClient, method: str, url: str, *,
+                              headers: dict | None = None, json=None,
+                              timeout: float | None = None) -> httpx.Response:
+    """`send`, for a caller asking Trakt about DATA: a Trakt that could not be
+    reached raises TraktError instead of an httpx exception.
+
+    A CONNECTION THAT NEVER ANSWERED IS TRAKT BEING UNAVAILABLE, which is exactly
+    what SourceUnavailable means, and every reader of Trakt's data already knows
+    how to degrade that — a calendar window goes partial or serves its stale
+    copy, a season lookup reports itself unread. What none of them can degrade is
+    an httpx exception they were never told to expect: a DNS failure or a Trakt
+    outage reached the calendar's fill as a ConnectError, sailed past the
+    handler written for a refusal, and turned the page into a 500 — the ordinary
+    way a service is unreachable, reported as a bug in this app.
+    ONE TRANSLATION, NOT ONE PER CALLER. It used to be written out beside each
+    call that remembered it, and the calendar fill and the ratings read were the
+    two that did not.
+
+    NEVER A BARE None, for the reason cached_get's own callers rely on: "could not
+    ask" must not collapse into "asked, and there was nothing".
+
+    `send` STAYS RAW FOR THE SIGN-IN FLOWS in app/auth/, which catch httpx's own
+    exceptions and put the failure into words for the person linking an account;
+    what they are doing is not reading a source, so the port contract does not
+    apply to them.
+    """
+    try:
+        return await send(client, method, url, headers=headers, json=json, timeout=timeout)
+    except httpx.HTTPError as exc:
+        path = url.split("?", 1)[0].replace(API_BASE, "") or url
+        logger.warning("Trakt %s %s failed: %s", method.upper(), path, exc)
+        raise TraktError(f"Could not reach Trakt: {exc}") from exc
+
+
 async def _fetch_json(client: httpx.AsyncClient, settings: Settings, url: str, path: str,
                       fresh: bool, raise_errors: bool):
     """One GET, reduced to "the parsed body, or None". No caching.
@@ -299,20 +333,15 @@ async def _fetch_json(client: httpx.AsyncClient, settings: Settings, url: str, p
     call and what its answer means. The two change for different reasons: a new
     caching mode (cache_only was one) touches the policy alone, and a change in
     how Trakt reports a failure touches this alone.
+
+    A Trakt that could not be reached ALWAYS raises, whatever `raise_errors`
+    says: that flag decides what a non-200 ANSWER means, and an unreachable
+    service gave none — collapsing it into None would render a season as a false
+    0 episodes. An exhausted-retry TraktRateLimitError propagates for the same
+    reason.
     """
     t0 = _time.perf_counter()
-    try:
-        resp = await send(client, "GET", url, headers=api_headers(settings))
-    except httpx.HTTPError as exc:
-        # A transport failure means we never got a real answer from Trakt. Unlike a
-        # 404 or an empty list, that is NOT "Trakt says there's nothing here", so it
-        # must never collapse into the None that callers read as an empty result —
-        # a season would then render a false 0 episodes, a progress record a false
-        # 0 watched. Always raise, regardless of raise_errors. (An exhausted-retry
-        # TraktRateLimitError from send is not an httpx error and propagates on its
-        # own for the same reason — the affected caller degrades it deliberately.)
-        logger.warning("Trakt GET %s failed: %s", path, exc)
-        raise TraktError(f"Could not reach Trakt: {exc}") from exc
+    resp = await send_or_unavailable(client, "GET", url, headers=api_headers(settings))
     _perf.debug("netGET    %s -> %s  %.0fms%s%s", path, resp.status_code,
                 (_time.perf_counter() - t0) * 1000.0,
                 " (fresh)" if fresh else " (miss)", perftrace.activity_tag())

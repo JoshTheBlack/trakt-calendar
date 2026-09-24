@@ -25,7 +25,7 @@ import asyncio
 
 from ..calendar import state as calendar_state
 from ..providers.base import Item, Media, collect_ids, resolve_key
-from . import store
+from . import arrival, store
 from .store import ADDED_BY_CALENDAR, load_month, normalize_show, record_key, save_month
 
 
@@ -197,7 +197,13 @@ async def add_premieres(doc: dict, present: set[tuple[str, int]], user_id: int, 
     added = 0
     # THE MARKS TRAVEL DOWN rather than being applied to what comes back: the
     # question needs the card's whole id map and a record no longer has one.
-    for rec in await premiere_records(user_id, settings, year, month, nw_ids):
+    records = [rec for rec in await premiere_records(user_id, settings, year, month, nw_ids)
+               if _present_key(rec) not in present]
+    # A Simkl calendar record waiting on enrichment states no network, and the
+    # row would keep that blank for ever — see arrival.fill_networks. Here, on
+    # the ADD, and not in premiere_records, which also serves the preview and the
+    # diff: describing a month must not cost a lookup.
+    for rec in await arrival.fill_networks(settings, records):
         key = _present_key(rec)
         if key in present:
             continue

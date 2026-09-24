@@ -1041,10 +1041,16 @@ class AddRoutesAskWhoeverKnowsTheTitleTests(AppTestCase):
                 title=title, network=network, year=None, ids=dict(ids),
                 seasons=[], named_season=None, unkeyable=None)))
 
+    def _network(self):
+        """A Simkl-only hit carries no network, so the add asks for one — see
+        arrival.fill_networks. Stood in for; which service it asks is
+        network_for's own question and tested there."""
+        return patch("app.distrakt.live.network_for", AsyncMock(return_value="Fuji TV"))
+
     def test_add_asks_simkl_for_a_title_trakt_does_not_name(self):
         simkl_call = AsyncMock(return_value=dict(self.SEASON))
         trakt_call = AsyncMock(return_value=dict(self.SEASON))
-        with _quiet_sources(), \
+        with _quiet_sources(), self._network() as network, \
              patch("app.providers.simkl.detail.fetch_season_detail", simkl_call), \
              patch("app.providers.trakt.detail.fetch_season_detail", trakt_call), \
              patch("app.distrakt.watch_history.baseline_show", AsyncMock(return_value=None)),              self._picked(self.SIMKL_ONLY_IDS, "Shingeki no Kyojin Season 3"):
@@ -1055,13 +1061,14 @@ class AddRoutesAskWhoeverKnowsTheTitleTests(AppTestCase):
         # THAT SERVICE'S OWN ID, never a shared one — the same rule /seasons
         # states for the identical lookup.
         self.assertEqual(simkl_call.await_args.args[1], 694485)
+        network.assert_awaited_once()
 
     def test_add_completed_asks_simkl_too_and_no_longer_demands_a_trakt_id(self):
         """It used to refuse outright unless `ids["trakt"]` was present, which
         made a Simkl-only title impossible to fill a past month in with."""
         simkl_call = AsyncMock(return_value=dict(self.SEASON))
         trakt_call = AsyncMock(return_value=dict(self.SEASON))
-        with _quiet_sources(), \
+        with _quiet_sources(), self._network(), \
              patch("app.providers.simkl.detail.fetch_season_detail", simkl_call), \
              patch("app.providers.trakt.detail.fetch_season_detail", trakt_call),              self._picked(self.SIMKL_ONLY_IDS, "Shingeki no Kyojin Season 3"):
             self.client.post("/api/distrakt/add-completed?year=2020&month=1",

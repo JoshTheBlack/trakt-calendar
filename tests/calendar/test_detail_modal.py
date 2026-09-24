@@ -224,17 +224,18 @@ class DetailModalSourceTests(AppTestCase):
         self.assertIn(">Documentary</span>", html)
         self.assertIn(">Game Show</span>", html)
 
-    def test_a_bare_youtube_id_arrives_as_a_watchable_url(self):
+    def test_a_trailer_is_embedded_when_it_names_a_video_and_absent_when_not(self):
         """Trakt sends a finished URL and Simkl sends an id. Reconciling that in
         the provider is what lets `trailer` mean one thing to the panel.
 
-        THE MEASURED FIXTURE'S ID IS NOT ELEVEN CHARACTERS, so it takes the panel's
-        other branch — a link out rather than an embed — and that is the honest
-        thing to assert about it. The embed is asserted beside it, on an id of the
-        length YouTube really issues, because "which branch" is decided by the
-        same test the browser's copy used to make."""
-        self.assertIn('href="https://www.youtube.com/watch?v=simklone"',
-                      self._simkl_only().text)
+        THE FIXTURE'S VALUE IS NOT A VIDEO ID — eight characters, where YouTube
+        issues eleven — and it used to be wrapped in a watch URL anyway and
+        offered as a "Watch trailer" link to YouTube's error page. Measured on a
+        live instance, 38 titles did that. A value naming no video now offers no
+        trailer at all; a real id embeds."""
+        html = self._simkl_only().text
+        self.assertNotIn("youtube.com/watch", html)
+        self.assertNotIn("trailer-embed", html)
         real = {**SIMKL_TITLE,
                 "trailers": [{"name": "Trailer", "youtube": "dQw4w9WgXcQ"}]}
         html = self._get("media=show&simkl=3204421&season=1",

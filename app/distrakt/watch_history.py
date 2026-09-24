@@ -2301,13 +2301,12 @@ async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: b
     # answers "what has been watched" and the record answers "who can be asked".
     with span("wh.learn_source_ids", roster=len(roster or ())):
         await _learn_source_ids(user_id, state, roster)
-    # AND THE NAMES THE ROSTER CANNOT REACH come off the stored calendar. The pass
-    # above can only teach a title something is currently listing; a settled
-    # verdict is deliberately outside it, and Trakt's slug arrives with a play
-    # rather than with a library read. See naming.py for both gaps. Costs one
-    # indexed count when there is nothing owed, and no network ever.
+    # AND WHAT THE ROSTER CANNOT REACH comes off the stored calendar: ids, names
+    # and networks. The pass above can only teach a title something is currently
+    # listing; a settled verdict is deliberately outside it. See naming.py. Costs
+    # one indexed count when there is nothing owed, and no network ever.
     with span("wh.fill_names"):
-        await naming.fill_from_calendar(user_id)
+        await naming.fill_from_calendar(user_id, settings)
     # THE VIEWER'S OWN FLOOR, APPLIED HERE AND NOWHERE ELSE. A season somebody
     # is watching AGAIN has a history full of plays about the previous run;
     # counting those reports the new pass as finished before it began, and

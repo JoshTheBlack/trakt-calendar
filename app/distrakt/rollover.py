@@ -17,7 +17,7 @@ from datetime import date
 from .. import clock, db
 from ..calendar import state as calendar_state
 from ..providers.base import Media, collect_ids
-from . import calendar_import, lifecycle, store
+from . import arrival, calendar_import, lifecycle, store
 from .live import compute_live_shows, live_key
 from .store import (
     ADDED_BY_HISTORY,
@@ -264,7 +264,8 @@ async def history_records(user_id: int, settings, present: set[tuple[str, int]])
             "finished_airing": bool(detail.get("finished_airing")),
             "added_by": ADDED_BY_HISTORY,
         })
-    return out
+    # A history event carries no network — see arrival.fill_networks.
+    return await arrival.fill_networks(settings, out)
 
 
 async def ensure_month(user_id: int, year: int, month: int, settings, today: date | None = None) -> dict:

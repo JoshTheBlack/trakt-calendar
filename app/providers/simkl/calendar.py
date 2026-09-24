@@ -138,8 +138,8 @@ async def _conditional_get(url: str, *, revalidate: bool = True) -> list | None:
     file's body because a SIBLING changed — see fetch_window.
 
     Raises SimklError (which IS SourceUnavailable) for anything that is not a
-    200, a 304 or a 404, so a caller degrades this source rather than storing an
-    empty answer as fact.
+    200, a 304 or a 404 — and for a CDN that could not be reached at all — so a
+    caller degrades this source rather than storing an empty answer as fact.
     """
     from ... import cache  # deferred: providers/ reads the kernel's cache module
 
@@ -152,7 +152,7 @@ async def _conditional_get(url: str, *, revalidate: bool = True) -> list | None:
             headers["If-Modified-Since"] = last_modified
 
     t0 = _time.perf_counter()
-    resp = await transport.send(
+    resp = await transport.send_or_unavailable(
         transport.cdn_client(), "GET", url,
         pool=transport.CDN_POOL, headers=headers, timeout=45,
     )

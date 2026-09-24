@@ -24,6 +24,7 @@ from datetime import date
 from unittest.mock import AsyncMock, patch
 from urllib.parse import quote
 
+import httpx
 from fastapi.testclient import TestClient
 
 from app import auth, db, providers
@@ -696,6 +697,37 @@ class PartialDataBannerTests(CalendarRouteTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("error-banner", resp.text)
         self.assertNotIn("warning-banner", resp.text)
+
+
+def _unreachable_client() -> httpx.AsyncClient:
+    """A real httpx client whose every connection fails, the way a DNS failure
+    or a service outage does — BELOW the stand-ins the tests above use, which
+    raise TraktError themselves and so could never see a network error arrive
+    untranslated."""
+    def refuse(request):
+        raise httpx.ConnectError("All connection attempts failed", request=request)
+    return httpx.AsyncClient(transport=httpx.MockTransport(refuse))
+
+
+class UnreachableServiceTests(CalendarRouteTestCase):
+    """MEASURED BEFORE THE FIX: an instance whose outbound traffic went to a
+    closed proxy answered GET /calendar with a 500 for any month it had nothing
+    stored for, because the ConnectError reached the fill as an httpx exception
+    rather than as a source that could not answer. Unreachable is the ordinary
+    way a service is unavailable, and the page has a banner for exactly that."""
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in_as(self._make_user("offline_viewer"))
+
+    def test_a_calendar_nobody_can_reach_renders_the_error_banner_not_a_500(self):
+        with patch("app.providers.trakt.transport.shared_client",
+                   return_value=_unreachable_client()), \
+             patch("app.providers.simkl.transport.cdn_client",
+                   return_value=_unreachable_client()):
+            resp = self.client.get("/calendar?year=2026&month=7")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("error-banner", resp.text)
 
 
 # ---------------------------------------------------------------------------
@@ -1501,6 +1533,57 @@ class TheJumpAnchorIsRenderedByTheServerTests(CalendarRouteTestCase):
                         html.index('id="jump-target"'))
         self.assertLess(html.index('id="jump-target"'),
                         html.index(_section(html, "2026-07-22")))
+
+    def test_two_airings_of_one_title_in_one_month_are_two_destinations(self):
+        """MEASURED BEFORE THE FIX, on a copy of the owner's data: a search for a
+        weekly show drew four August rows and all four addressed the same page,
+        landing on the 6th. The row knows which airing it is about — its day —
+        and now says so; the route anchors THAT day's card."""
+        weekly = [_entry("the-drama", "The Drama", "2026-07-08T20:00:00Z"),
+                  _entry("the-drama", "The Drama", "2026-07-22T20:00:00Z")]
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(weekly)):
+            self.client.get(self.MONTH)
+            found = self.client.get("/calendar/search?endpoint=shows&q=drama").text
+            links = sorted({link.replace("&amp;", "&") for link in
+                            re.findall(r'href="(/calendar\?[^"]*highlight[^"]*)"', found)})
+            self.assertEqual(len(links), 2, links)
+            for link, day, other in ((links[0], "2026-07-08", "2026-07-22"),
+                                     (links[1], "2026-07-22", "2026-07-08")):
+                self.assertIn(f"day={day}", link)
+                html = self.client.get(link).text
+                anchor = html.index('id="jump-target"')
+                self.assertLess(html.index(_section(html, day)), anchor, link)
+                if day < other:
+                    self.assertLess(anchor, html.index(_section(html, other)), link)
+            # A link that names no day — an old bookmark — keeps landing on the
+            # first airing, which is where every link used to land.
+            html = self.client.get(f"{self.MONTH}&highlight={self._mark()}").text
+            self.assertLess(html.index('id="jump-target"'),
+                            html.index(_section(html, "2026-07-22")))
+
+    def test_a_jump_to_a_title_hidden_by_the_viewers_own_switch_still_lands(self):
+        """MEASURED BEFORE THE FIX in Chromium and Firefox: a search result for a
+        title marked not-watching, with hiding on, left the reader at the top of
+        the month — the anchor was drawn and then hidden, so the browser had
+        nowhere to scroll. The stylesheet now exempts the anchor (and its day)
+        from hiding, which a string test cannot assert; what the SERVER owes is
+        that the search still offers it, the card is still the anchor and still
+        marked — a jump must not edit the reader's own statement about the show —
+        and its day's chip still offers to scroll there, since the chip sits
+        above <main> where no selector reaches."""
+        self.client.get(self.MONTH)
+        mark = self._mark()
+        self.client.post("/api/me/prefs", json={"hide_not_watching": True})
+        self.client.post("/api/state?year=2026&month=7&endpoint=shows",
+                         json={"item_id": mark.replace("%3A", ":"), "not_watching": True})
+        self.assertEqual(self._mark(), mark, "the search stopped offering a hidden title")
+        html = self.client.get(f"{self.MONTH}&highlight={mark}&day=2026-07-15").text
+        card = re.search(r'<[^>]*id="jump-target"[^>]*>', html).group(0)
+        self.assertIn("not-watching", card)
+        self.assertRegex(html, r'<a class="day-chip"[^>]*id="day-chip-2026-07-15"')
+        # And an ordinary load of the same month greys that day, as before.
+        plain = self.client.get(self.MONTH).text
+        self.assertRegex(plain, r'<a class="day-chip unreachable"[^>]*id="day-chip-2026-07-15"')
 
 
 class FollowingASearchResultWritesOneAiringTests(CalendarRouteTestCase):

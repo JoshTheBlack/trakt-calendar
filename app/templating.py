@@ -23,6 +23,7 @@ from jinja2.ext import Extension
 
 from . import assets
 from . import chrome
+from . import youtube
 from .providers.base import Source
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
@@ -75,24 +76,15 @@ templates.env.globals["assets"] = assets
 templates.env.globals["product"] = chrome.PRODUCT_NAME
 
 
-# The eleven-character video id out of any of the URL shapes a source returns for
-# a trailer, or None when it is not a YouTube link at all.
+# The eleven-character video id a trailer names, or None when it names none.
 #
 # A FILTER ON THE ENVIRONMENT RATHER THAN A STEP IN A ROUTE. The details panel is
-# one template rendered by three routes, and "is this a YouTube URL and which
-# video is it" is the panel's own question — asking it in each route would put
-# the same regex back in three places, which is where it was when three
-# JavaScript renderers each carried a copy of it.
-_YOUTUBE_URL = re.compile(
-    r"(?:youtube\.com/(?:watch\?(?:.*&)?v=|embed/|v/)|youtu\.be/)([\w-]{11})")
-
-
-def youtube_id(url: object) -> str | None:
-    match = _YOUTUBE_URL.search(str(url or ""))
-    return match.group(1) if match else None
-
-
-templates.env.filters["youtube_id"] = youtube_id
+# one template rendered by three routes, and "which video is this" is the panel's
+# own question — asking it in each route would put the reading back in three
+# places, which is where it was when three JavaScript renderers each carried a
+# copy of it. The reading itself is app/youtube.py's, because the provider that
+# builds the trailer URL asks the same question.
+templates.env.filters["youtube_id"] = youtube.video_id
 
 
 def details_url(base: str, media, ids, season, key: str = "") -> str:

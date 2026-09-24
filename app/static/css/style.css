@@ -434,17 +434,21 @@ main { padding: 10px 6vw 0 6vw; }
    visible card is exactly what the hide switch changes; one set gated by
    `:not(.hide-not-watching)` and one by `.hide-not-watching` means neither can
    out-specify the other by accident. Six is the largest cap any style has, so
-   there is no seventh rule to write. */
+   there is no seventh rule to write.
+   UNDER HIDING, "VISIBLE" IS NOT MARKED OR THE CARD A JUMP NAMED — see the hide
+   rule further down for why a jump is exempt. The three rules that ask the
+   question (this count, the hide, the collapse) each spell it, because a
+   selector cannot be named once and reused; they have to agree. */
 body:not(.hide-not-watching) .day-block:has(.card:nth-child(2 of .card)) { --cols: 2; }
 body:not(.hide-not-watching) .day-block:has(.card:nth-child(3 of .card)) { --cols: 3; }
 body:not(.hide-not-watching) .day-block:has(.card:nth-child(4 of .card)) { --cols: 4; }
 body:not(.hide-not-watching) .day-block:has(.card:nth-child(5 of .card)) { --cols: 5; }
 body:not(.hide-not-watching) .day-block:has(.card:nth-child(6 of .card)) { --cols: 6; }
-body.hide-not-watching .day-block:has(.card:nth-child(2 of .card:not(.not-watching))) { --cols: 2; }
-body.hide-not-watching .day-block:has(.card:nth-child(3 of .card:not(.not-watching))) { --cols: 3; }
-body.hide-not-watching .day-block:has(.card:nth-child(4 of .card:not(.not-watching))) { --cols: 4; }
-body.hide-not-watching .day-block:has(.card:nth-child(5 of .card:not(.not-watching))) { --cols: 5; }
-body.hide-not-watching .day-block:has(.card:nth-child(6 of .card:not(.not-watching))) { --cols: 6; }
+body.hide-not-watching .day-block:has(.card:nth-child(2 of .card:is(:not(.not-watching), #jump-target))) { --cols: 2; }
+body.hide-not-watching .day-block:has(.card:nth-child(3 of .card:is(:not(.not-watching), #jump-target))) { --cols: 3; }
+body.hide-not-watching .day-block:has(.card:nth-child(4 of .card:is(:not(.not-watching), #jump-target))) { --cols: 4; }
+body.hide-not-watching .day-block:has(.card:nth-child(5 of .card:is(:not(.not-watching), #jump-target))) { --cols: 5; }
+body.hide-not-watching .day-block:has(.card:nth-child(6 of .card:is(:not(.not-watching), #jump-target))) { --cols: 6; }
 /* A DAY THAT HAS NO CARDS TO COUNT answers from the two numbers the shell wrote
    onto it instead — see _day_skeleton.html. `max(1, …)` because a day this viewer
    sees none of is collapsed anyway, and a zero would leave the rows arithmetic
@@ -622,7 +626,17 @@ body.card-horizontal .card .trakt-btn img { height: 12px; }
 }
 .card.not-watching { opacity: 0.72; border-color: rgba(224,56,77,0.5); }
 .card.not-watching .card-body { opacity: 0.55; }
-body.hide-not-watching .card.not-watching { display: none; }
+/* EXCEPT THE CARD A SEARCH RESULT WAS FOLLOWED TO. A search is the one place a
+   reader looks for something they cannot see, and it rightly offers a title they
+   have marked — "hidden by your own switch" is a true answer, "not on your
+   calendar" is not. Hidden, the card's box was all zeros and the browser's
+   fragment scrolling had nowhere to go: MEASURED in Chromium and Firefox, the
+   anchor present, display none, scrollY 0 — the reader left at the top of the
+   month with nothing said. The route already singles that card out as
+   #jump-target, so exempting it is this selector and nothing else: no request,
+   no script, and the MARK IS UNTOUCHED — the card keeps its NOT WATCHING ribbon,
+   which with the pulse is what says why it is on screen when its kind is not. */
+body.hide-not-watching .card.not-watching:not(#jump-target) { display: none; }
 /* IN HIDE MODE, A DAY WITH NOTHING LEFT ON IT GOES TOO, header and all — a bare
    date with no cards under it is not a day, it is a gap. Stated here rather than
    maintained by script for the reason the column count above is: the answer
@@ -632,8 +646,11 @@ body.hide-not-watching .card.not-watching { display: none; }
    placeholder cannot be, so it carries the count the server already worked out
    (`data-visible`). Left to the card query a placeholder would look empty,
    collapse, and — being hidden — never scroll into view, so it would never load
-   its cards at all. */
-body.hide-not-watching .day-block:not(.is-skeleton):not(:has(.card:not(.not-watching))),
+   its cards at all.
+   A DAY HOLDING THE JUMP'S CARD IS NOT EMPTY, however marked the rest of it is:
+   a card made visible inside a collapsed day is still nowhere (measured: a day
+   whose every title was marked stayed display none around the anchor). */
+body.hide-not-watching .day-block:not(.is-skeleton):not(:has(.card:is(:not(.not-watching), #jump-target))),
 body.hide-not-watching .day-block.is-skeleton[data-visible="0"] { display: none; }
 
 .poster-wrap { position: relative; width: 100%; aspect-ratio: 2/3; background: linear-gradient(135deg, #1c2130, #10131b); overflow: hidden; }

@@ -363,10 +363,11 @@ async def network_for(settings, rec: dict) -> str:
     season lookup answers how long a season is and when it aired, which is a
     different question, and should not be widened into this one.
 
-    WHO NEEDS IT: a row added from a history prompt. Every other way onto the
-    roster arrives with a network already — a search hit carries one, a calendar
-    record carries one — so this is the one path with nowhere else to get it, and
-    it is paid once, on a click, exactly as the season lookup beside it is.
+    WHO NEEDS IT: any row that reaches the tracker without one — a history
+    prompt, the backfill and the rollover (history events name no network), a
+    search hit only Simkl answered, a Simkl calendar record not yet enriched.
+    Asked through arrival.fill_networks, which tries the stored calendar first
+    and calls this only for what that cannot answer.
 
     THE TWO SERVICES CAN LEGITIMATELY DISAGREE and that is not a defect to
     reconcile here: Simkl answers Beastars with "Fuji TV" (who aired it) and Trakt

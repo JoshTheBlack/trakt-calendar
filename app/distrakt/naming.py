@@ -1,4 +1,5 @@
-"""Teach stored tracker records the per-service NAMES the calendar already knows.
+"""Teach stored tracker records what the calendar already knows about their
+titles: each service's id, each service's name for the title, and the network.
 
 A record is keyed on a shared identity and carries, beside that, each service's
 own id and each service's own slug. The id is what places a call; the slug is
@@ -20,20 +21,31 @@ sync path that fills the rest in:
   nobody has watched recently goes without one indefinitely — where Simkl's
   arrives for every title at once off a library read.
 
-THE SOURCE IS ALREADY PAID FOR. Every stored calendar window holds each title's
-ids hoisted onto the group, both services' slugs among them, and reading them
-back costs one query and no network at all — Simkl's calendar is CDN-hosted and
-outside the API quota entirely, and Trakt's window was fetched for the calendar's
-own sake. So this is a pure re-read of what the instance already went and got.
-`app/calendar/enrich.py`'s drain derives its work from the same place for the
-same reason: what the stored calendar names is knowable without any viewer having
-read anything.
+AND A ROW FILED OFF ONE SERVICE NEVER LEARNED THE OTHER'S ID. The two services
+catalogue a title at different times and a row keeps whatever ids existed on the
+day it was written — a calendar import carries the ids of whichever service
+listed that airing, and the history backfill those of the one service it
+surveys. Nothing revisited a settled row to learn more, while the stored calendar
+went on holding the other service's OWN record of the same title. Likewise a
+history-built row has no network, and the calendar usually knows it.
+
+THE SOURCE IS ALREADY PAID FOR. `calendar_titles` holds one row per service per
+title, keyed by the same identity the tracker files rows under, and reading it
+costs one indexed query and no network at all. So this is a pure re-read of what
+the instance already went and got. `app/calendar/enrich.py`'s drain derives its
+work from the same place for the same reason.
+
+WHY A LEARNED ID CAN BE TRUSTED. The calendar row it comes from is that service's
+own record, and it sits under this identity because THAT SERVICE states the same
+shared id the tracker row is filed under — an exact match on a shared id, the
+same standard a catalogue lookup would have to meet, and the same match the
+calendar itself merges the two services' cards on. Never a title search.
 
 ADD-ONLY, AND THAT IS `store.learn_ids`' RULE RATHER THAN THIS MODULE'S. A value
 already stored came off the payload the record was built from; a value arriving
-here has been matched across services on the shared identity, which is a join and
-not a statement. Filling a blank cannot make a working record worse. Overwriting
-could.
+here is a join. Filling a blank cannot make a working record worse. Overwriting
+could — and a wrong Trakt id shadows a correct Simkl one, because the details
+layer prefers Trakt wherever it has an id.
 """
 from __future__ import annotations
 
@@ -43,18 +55,16 @@ import logging
 from .. import cache
 from ..calendar import cache as calendar_cache
 from ..calendar import entries as calendar_entries
-from ..providers.base import ItemKey
-from . import store
+from . import arrival, store
 
 logger = logging.getLogger(__name__)
 
-# The names this fills in, and ONLY these. A calendar group's hoisted `ids` also
-# carries the shared spaces a record is KEYED on (tmdb, tvdb, imdb, mal) — and
-# improving one of those is a different question with different consequences,
-# because the record is filed under it. A match arriving from a calendar window
-# has no business anywhere near the identity waterfall; it may only fill in what
-# a title is CALLED on a service, never what it IS.
-LEARNABLE = ("trakt_slug", "simkl_slug")
+# The services whose OWN id and name this fills in, and only these. A calendar
+# row also carries the shared spaces a record is KEYED on (tmdb, tvdb, imdb,
+# mal) — and improving one of those is a different question with different
+# consequences, because the record is filed under it. A join may say who a
+# service calls this title and what it calls it, never what the title IS.
+SERVICES = ("trakt", "simkl")
 
 # Where a viewer's "nothing further to find" marker is kept, and for how long.
 # THE TTL IS A BACKSTOP, NOT THE MECHANISM: the signature is what makes a repeat
@@ -66,72 +76,103 @@ _SETTLED_KEY = "distrakt_naming_settled:{user_id}"
 _SETTLED_TTL_SECONDS = 24 * 60 * 60
 
 
-def _owed_signature(wanted: list[tuple[ItemKey, tuple[str, ...]]]) -> str:
+def _owed_signature(wanted: list[store.Owed]) -> str:
     """A stable digest of exactly what is outstanding, order-independent.
 
     Hashed rather than stored whole because a large account owes a long list and
     this value is compared, never read: nothing downstream needs to know WHICH
     titles it stood for, only whether the set is the one seen last time.
     """
-    owed = sorted(f"{key}={'|'.join(names)}" for key, names in wanted)
+    owed = sorted(f"{debt.key}={'|'.join(debt.names)}" for debt in wanted)
     return hashlib.sha256("\n".join(owed).encode()).hexdigest()[:16]
 
 
+def _service_learned(service: str, owed: tuple[str, ...], row) -> dict:
+    """What `row` — `service`'s OWN stored record of this title — may teach a
+    tracker record owing `owed`: that service's id and its name, and nothing of
+    any other service's.
 
-async def fill_from_calendar(user_id: int) -> int:
-    """Fill in missing service slugs on this viewer's stored records. Returns how
-    many names were written — one row gaining both services' slugs counts twice —
-    which is 0 on every pass after the work is done.
+    THE ID AND THE NAME TRAVEL TOGETHER, and that is the refusal this used to
+    make, re-reasoned rather than deleted. Writing a service's NAME onto a row
+    holding no id for that service would make it look linkable to a service
+    nobody can ask about it — true while only names were written. With the id
+    learned in the same write the row genuinely is linkable, so the name is
+    written only where the row already holds that id or gains it here.
+    """
+    if row is None:
+        return {}
+    ids = row.ids or {}
+    out = {}
+    if service in owed and ids.get(service) not in (None, ""):
+        out[service] = ids[service]
+    slug = f"{service}_slug"
+    name = ids.get(slug) or ids.get("slug")
+    if slug in owed and name not in (None, "") and (service in out or service not in owed):
+        out[slug] = name
+    return out
+
+
+async def fill_from_calendar(user_id: int, settings) -> int:
+    """Fill in what this viewer's stored records are short of from the stored
+    calendar: missing service ids with their names, missing names, a blank
+    network. Returns how many row values were written, which is 0 on every pass
+    after the work is done.
 
     CHEAP WHEN THERE IS NOTHING TO FIND, which on a settled instance is every
     call, and the reason this can sit on an ordinary page load. Two questions are
-    asked before any window is inflated — what this viewer is short of, and
-    whether that plus the stored calendar has changed since the last pass — and
-    both are counts. Measured on the author's database, the walk they guard is
-    about 40ms and the guards about 1ms.
+    asked before anything is read — what this viewer is short of, and whether
+    that plus the stored calendar has changed since the last pass.
 
     NOT GATED ON THE ROSTER. Reaching only listed titles is what left settled
     verdicts out in the first place — the rows that most need this are exactly
     the ones no live pass visits.
     """
-    wanted = await store.identities_missing_slugs(user_id)
+    wanted = await store.identities_owing(user_id)
     if not wanted:
         return 0
     # SOME DEBT NEVER SETTLES, and that is why the guard above is not enough on
-    # its own. A title no stored window names — an older show, something off the
-    # calendar's horizon — is owed a name for as long as it is held, so "is
-    # anything outstanding" answers yes for ever on a real account and the walk
-    # below would run on every single load to rediscover the same nothing.
+    # its own. A title the stored calendar holds no row for from a service is
+    # owed that service's id for as long as it is held, so "is anything
+    # outstanding" answers yes for ever on a real account.
     #
-    # NEITHER SIDE MOVED MEANS THE ANSWER CANNOT HAVE. The work is a function of
-    # exactly two things: what is owed, and what the stored calendar knows. When
-    # both are as they were the last time this ran, there is nothing to find.
+    # NEITHER SIDE MOVED MEANS THE ANSWER CANNOT HAVE — for THIS pass, which reads
+    # nothing but the stored calendar. Its work is a function of exactly two
+    # things, what is owed and what the stored calendar knows, so when both are as
+    # they were there is nothing to find.
+    # DO NOT CARRY THIS GUARD INTO A REPAIR THAT ASKS A SERVICE. There the answer
+    # changes when the UPSTREAM catalogue does, with nothing local changing at all
+    # — a title not listed today is listed next week — and a marker keyed on what
+    # is owed would ask once, find nothing and freeze the backlog for ever. That
+    # repair wants a re-ask clock per row and per service instead.
     signature = f"{_owed_signature(wanted)}/{await calendar_cache.stored_window_signature()}"
     settled_key = _SETTLED_KEY.format(user_id=int(user_id))
     if await cache.get(settled_key, _SETTLED_TTL_SECONDS) == signature:
         return 0
-    # ONLY THE TITLES OWED SOMETHING. This used to build an index of the whole
-    # stored calendar to answer for a handful of them — measured at 3.8 seconds
-    # to learn two names, most of it blocking the event loop. `title_key` is the
-    # same identity the tracker keys its rows by and it is indexed, so the
-    # question is a keyed read.
-    index = await calendar_entries.slugs_for(str(key) for key, _owed in wanted)
-    if not index:
-        await cache.set(settled_key, signature)
-        return 0
+    # ONLY THE TITLES OWED SOMETHING, as a keyed read on `title_key` — the same
+    # identity the tracker keys its rows by, and indexed. This once built an index
+    # of the whole stored calendar to answer a handful of titles: 3.8 seconds to
+    # learn two names, most of it blocking the event loop.
+    index = await calendar_entries.known_about(str(debt.key) for debt in wanted)
     changed = 0
-    for key, owed in wanted:
-        known = index.get(str(key)) or {}
-        # ONLY THE NAMES THAT TITLE IS ACTUALLY SHORT OF. The index holds whatever
-        # the calendar knew, which for a title both services list is both names —
-        # and writing the other one onto a row that holds no id for that service
-        # would make it look linkable to a service nobody can ask about it.
-        learned = {name: known[name] for name in owed if name in known}
+    for debt in wanted:
+        by_source = index.get(str(debt.key)) or {}
+        learned = {}
+        for service in SERVICES:
+            learned.update(_service_learned(service, debt.names, by_source.get(service)))
         if learned:
-            changed += await store.learn_ids(user_id, key, learned)
-    if changed:
-        logger.info("distrakt naming: filled %d service name(s) for user %s from "
-                    "the stored calendar", changed, user_id)
+            wrote = await store.learn_ids(user_id, debt.key, learned)
+            if wrote:
+                # EVERY WRITE IS LOGGED, BY NAME. An id arrived here by a join, and
+                # a wrong one would shadow a right one for good; a line per title
+                # is what makes one auditable after the fact.
+                logger.info("distrakt naming: user %s learned %s for %s from the "
+                            "stored calendar (%d row value(s))", user_id,
+                            learned, debt.key, wrote)
+            changed += wrote
+        if store.NETWORK in debt.names:
+            network = arrival.stored_network(
+                settings, {"media": debt.key.media, "ids": debt.ids}, by_source)
+            changed += await store.learn_network(user_id, debt.key, network)
     # RECORDED AFTER THE WRITES, against what was owed BEFORE them, so the next
     # pass compares like with like: whatever this one could pay is paid, and the
     # rest is the residue this exact pair of inputs leaves behind.

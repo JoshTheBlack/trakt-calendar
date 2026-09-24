@@ -162,9 +162,36 @@ class SendRetryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(client.requests), 1)  # no retry on non-429
 
     async def test_network_error_propagates_as_httpx(self):
+        """`send` itself stays raw: the sign-in flows put httpx's own failure
+        into words for the person linking an account."""
         client = FakeClient([httpx.ConnectError("boom")])
         with self.assertRaises(httpx.ConnectError):
             await transport.send(client, "GET", transport.API_BASE + "/x")
+
+    async def test_a_data_read_reports_an_unreachable_trakt_as_unavailable(self):
+        """What every port reader can degrade. An httpx exception reaching them
+        instead is what turned the calendar into a 500."""
+        from app.providers.base import SourceUnavailable
+        client = FakeClient([httpx.ConnectError("boom")])
+        with self.assertRaises(SourceUnavailable):
+            await transport.send_or_unavailable(client, "GET", transport.API_BASE + "/x")
+
+    async def test_the_calendar_window_and_the_ratings_read_both_translate_it(self):
+        """The two data reads that used to call `send` directly and never
+        translated a network error."""
+        from app.providers.base import SourceUnavailable
+        from app.providers.trakt import calendar as trakt_calendar, sync as trakt_sync
+        from app.endpoints import get_endpoint
+        from datetime import date
+        with patch.object(transport, "shared_client",
+                          return_value=FakeClient([httpx.ConnectError("boom")])):
+            with self.assertRaises(SourceUnavailable):
+                await trakt_calendar.fetch_window(
+                    get_endpoint("shows"), FAKE_SETTINGS, date(2026, 7, 6), 7)
+        with patch.object(transport, "shared_client",
+                          return_value=FakeClient([httpx.ConnectError("boom")])):
+            with self.assertRaises(SourceUnavailable):
+                await trakt_sync.fetch_ratings(FAKE_SETTINGS)
 
 
 class SemaphoreLoopKeyingTests(unittest.TestCase):

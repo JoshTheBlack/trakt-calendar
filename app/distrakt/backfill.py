@@ -42,7 +42,7 @@ import logging
 import re
 from datetime import date
 
-from . import watch_history
+from . import arrival, watch_history
 # The roster is reached through this package's own public surface, the same names
 # an outside caller uses, rather than through the modules those names are defined
 # in — a backfill job has no business knowing which half of the tracker
@@ -227,7 +227,8 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
                 continue  # finished outside the range (or on a date Trakt cannot name)
             by_month[month_key].append(_completed_record(ident, season, total, detail))
 
-    written_months = {m: rows for m, rows in by_month.items() if rows}
+    written_months = await _with_networks(
+        settings, {m: rows for m, rows in by_month.items() if rows})
     plan = {
         "range": [months[0], months[-1]],
         "months": written_months,
@@ -483,6 +484,21 @@ async def _record_films(user_id: int, month_key: str, state: dict, tz) -> bool:
         await distrakt.add_month_movie(user_id, month_key, film)
         wrote = True
     return wrote
+
+
+async def _with_networks(settings, months: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """`months` with each planned record's network filled in, at SURVEY time.
+
+    A history event names no network, so every row this wrote used to be filed
+    without one — and a settled row is never revisited, so it stayed blank.
+    Filled here rather than at apply because the survey is the half that talks
+    to the services and the plan is what the viewer confirms; apply writes back
+    exactly what was surveyed. See arrival.fill_networks for the cost, which is
+    one indexed read plus a lookup per show the stored calendar cannot answer.
+    """
+    flat = [rec for rows in months.values() for rec in rows]
+    filled = iter(await arrival.fill_networks(settings, flat))
+    return {month: [next(filled) for _ in rows] for month, rows in months.items()}
 
 
 def _completed_record(ident: dict, season: int, total: int, detail: dict) -> dict:

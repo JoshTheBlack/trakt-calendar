@@ -28,7 +28,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from . import (backfill, counts, discord_fmt, episode_progress, lifecycle, live,
+from . import (arrival, backfill, counts, discord_fmt, episode_progress, lifecycle, live,
                slug_repair, unsettled, viewer, watch_history)
 # The catalogue-search merge (app/distrakt/search.py) — imported as `catalogue_search`
 # rather than bare `search` so a call site reads which module it is, the same
@@ -2521,6 +2521,8 @@ async def api_distrakt_add(request: Request):
         # calendar — see api_distrakt_remove.
         "added_by": distrakt_store.ADDED_BY_MANUAL,
     }
+    # A hit only Simkl answered carries no network — see arrival.fill_networks.
+    show = (await arrival.fill_networks(settings, [show]))[0]
     try:
         # Resolved before anything is written, so a title with no shared id is
         # refused here rather than at the insert, where the answer would be a 500.
@@ -2802,11 +2804,13 @@ async def api_distrakt_add_completed(request: Request):
     # ordinary add reaches the same place once the viewer has navigated back.
     # `added_by` is stated here rather than there because this is a person filling
     # a month in, which is a different provenance from anything a sweep wrote.
-    return await _add_to_past_month(
-        request, user_id, month_key,
+    # A hit only Simkl answered carries no network — see arrival.fill_networks.
+    record, = await arrival.fill_networks(settings, [
         {"media": Media.SHOW, "ids": ids, "title": pick.title,
          "season": season, "network": pick.network,
-         "added_by": distrakt_store.ADDED_BY_MANUAL},
+         "added_by": distrakt_store.ADDED_BY_MANUAL}])
+    return await _add_to_past_month(
+        request, user_id, month_key, record,
         detail, settings, year, month,
         message=f"Recorded {pick.title} S{season:02d} as finished")
 
@@ -3057,19 +3061,16 @@ async def api_distrakt_unknown_add(request: Request):
         # viewing is what put it here, which is what this records.
         "added_by": distrakt_store.ADDED_BY_HISTORY,
     }
-    # THE NETWORK IS LOOKED UP HERE BECAUSE THE PROMPT ROW HAS NONE TO SEND.
-    # Every other way onto the roster brings one — a search hit carries it, a
-    # calendar record carries it — but a history prompt is built from a play,
-    # which is deliberately thin (see watch_history.EpisodePlay: a lookup per
-    # unmatched episode is the cost the ask-the-viewer path exists to avoid). So
-    # the row arrived with an empty network and the show drew no emoji. Paid on
-    # the click, beside the season lookup, and by the same source-picking rule —
-    # which is what makes it answer on a Simkl-only instance too.
-    detail, network = await asyncio.gather(
+    # THE NETWORK IS FILLED HERE BECAUSE THE PROMPT ROW HAS NONE TO SEND: a
+    # history prompt is built from a play, which is deliberately thin (see
+    # watch_history.EpisodePlay: a lookup per unmatched episode is the cost the
+    # ask-the-viewer path exists to avoid). Paid on the click, beside the season
+    # lookup, through the one filling every way onto the tracker shares — which
+    # answers from the stored calendar when it can and asks only when it cannot.
+    detail, (record,) = await asyncio.gather(
         _season_lookup(settings)(record, season),
-        live.network_for(settings, record),
+        arrival.fill_networks(settings, [record]),
     )
-    record["network"] = record["network"] or network
     year, month = _viewed_month(request)
 
     # THE SAME QUESTION THE ORDINARY ADD ASKS, AND FOR A BETTER REASON HERE. This

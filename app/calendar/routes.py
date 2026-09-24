@@ -564,13 +564,19 @@ def _view_preferences(prefs: dict, settings) -> dict:
 
 
 def _day_chip(day: date, items: list, not_watching: set[str],
-              hide_not_watching: bool) -> dict:
+              hide_not_watching: bool, anchor=None) -> dict:
     """One day's chip for the jump-to strip.
 
     `count` is what the day holds; `shown` is what THIS viewer will see of it, and
     a day showing nothing has no section to scroll to, so its chip renders inert.
     With hide-not-watching on, a day whose every item is marked renders nothing at
     all, so its chip must not offer to scroll somewhere blank.
+
+    THE CARD A SEARCH JUMP NAMED (`anchor`) IS SHOWN WHATEVER ITS MARK, because
+    the stylesheet exempts it from hiding so the jump has somewhere to land — and
+    its day with it. Only the page's own draw knows the anchor; a chip redrawn by
+    a later mark or toggle is asked without one, and by then the reader has moved
+    on from the jump.
 
     ONE RULE, TWO DRAWERS. The shell draws every chip from it, and a day that
     arrives late draws its own chip again from it (_day_fragment.html), having read
@@ -579,16 +585,18 @@ def _day_chip(day: date, items: list, not_watching: set[str],
     reload.
     """
     count = len(items)
-    shown = (sum(1 for item in items if item.mark_key not in not_watching)
+    shown = (sum(1 for item in items if item.mark_key not in not_watching or item is anchor)
              if hide_not_watching else count)
     return {"day": day.day, "date": day.isoformat(), "count": count, "shown": shown}
 
 
 def _day_chips(assembly: MonthAssembly, year: int, month: int, days: int,
-               not_watching: set[str], hide_not_watching: bool) -> list[dict]:
+               not_watching: set[str], hide_not_watching: bool,
+               anchor=None) -> list[dict]:
     """One chip per day of the month for the jump-to strip — see `_day_chip`."""
     items_on = {group["date"]: group["items"] for group in assembly.grouped}
-    return [_day_chip(on, items_on.get(on.isoformat(), []), not_watching, hide_not_watching)
+    return [_day_chip(on, items_on.get(on.isoformat(), []), not_watching,
+                      hide_not_watching, anchor)
             for on in (date(year, month, day) for day in range(1, days + 1))]
 
 
@@ -629,6 +637,36 @@ def _calendar_query(request: Request) -> str:
     route would have had nothing to read the month off but the clock.
     """
     return f"?{request.url.query}" if request.url.query else ""
+
+
+def _jump_anchor(grouped: list[dict], highlight: str, day: str) -> tuple[int, object] | None:
+    """(index of its day, the card) a jump is aimed at, or None when the month
+    draws no card for `highlight`.
+
+    ONE CARD, AND THE ONE THE ROW NAMED. `highlight` is a TITLE's identity, and a
+    title airs on as many days of a month as it airs on — so the search row sends
+    its own DAY beside it, both references the server drew itself, and that
+    day's airing is the anchor. Without the day every row for a weekly show was
+    one destination: four August results all landed on the 6th.
+    A LINK THAT NAMES NO DAY, or a day the month no longer draws the title on (an
+    old bookmark, a jump whose fill landed elsewhere), falls back to the FIRST
+    airing, which is where every jump used to land.
+    The card itself is returned rather than a position, because the template asks
+    whether the card it is drawing IS this one (`sameas`) — the only test that
+    can tell two airings of one show on one day apart without the route and the
+    template agreeing on a second way to name them.
+    """
+    if not highlight:
+        return None
+    first = None
+    for index, group in enumerate(grouped):
+        found = next((item for item in group["items"] if item.mark_key == highlight), None)
+        if found is None:
+            continue
+        if group["date"] == day:
+            return index, found
+        first = first or (index, found)
+    return first
 
 
 async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
@@ -704,24 +742,13 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
     # correcting as the days above it grew. Shipping one extra day costs a
     # handful of cards and lets an anchor behave like an anchor.
     #
-    # AND IT IS ONE CARD. `highlight` is a TITLE's identity, and a title airs on as
-    # many days of a month as it airs on — twice in one day, on the all-episodes
-    # calendar. Every card for it used to match, so `id="jump-target"` was drawn a
-    # dozen times and the browser scrolled to whichever came first. The FIRST
-    # airing is the anchor and the rest are ordinary cards; the template asks
-    # whether the card it is drawing is this exact one (`sameas`), which is the
-    # only test that can tell two airings of one show apart without the route and
-    # the template agreeing on a second way to name them.
-    highlight = request.query_params.get("highlight") or ""
+    # AND IT IS ONE CARD — see _jump_anchor for which one.
     anchor = None
-    if highlight:
-        for index, group in enumerate(month_view.grouped):
-            found = next((item for item in group["items"]
-                          if item.mark_key == highlight), None)
-            if found is not None:
-                anchor = found
-                inline.add(index)
-                break
+    aimed = _jump_anchor(month_view.grouped, request.query_params.get("highlight") or "",
+                        request.query_params.get("day") or "")
+    if aimed is not None:
+        index, anchor = aimed
+        inline.add(index)
     # THE SHELL'S IS-NEW ANSWER IS FILED ONCE AND ITS PLACEHOLDERS CARRY THE
     # TOKEN. The diff above has already committed this load as the baseline, so a
     # day fetched afterwards could never work it out again; pointed at the answer,
@@ -786,7 +813,7 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
         # asks about `mark_key` and the chip would be counting raw ids.
         "day_chips": _day_chips(month_view, year, month, days,
                                 month_view.not_watching_keys,
-                                view["hide_not_watching"]),
+                                view["hide_not_watching"], anchor),
         "error": month_view.error,
         "partial": month_view.partial,
         "unenriched": month_view.unenriched,
