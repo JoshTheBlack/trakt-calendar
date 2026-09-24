@@ -19,6 +19,7 @@ import re
 import shutil
 import unittest
 from unittest import mock
+from urllib.parse import urlencode
 
 from fastapi.testclient import TestClient
 
@@ -90,10 +91,21 @@ class FragmentTestCase(unittest.TestCase):
             }))
         return uid
 
-    def pool_html(self, board_uid: str, page: int) -> str:
-        response = self.client.get(f"/rankings/fragments/pool?board={board_uid}&page={page}")
+    def pool_html(self, board_uid: str, after: str = "") -> str:
+        """A page of the pool: the titles after `after`, or from the start."""
+        response = self.client.get(
+            "/rankings/fragments/pool?" + urlencode({"board": board_uid, "after": after}))
         self.assertEqual(response.status_code, 200)
         return response.text
+
+
+def nth_key(n: int) -> str:
+    """The key board_with gives its n-th title."""
+    return ranker.item_key("show", "tmdb", str(1000 + n))
+
+
+def keys_drawn(html: str) -> list[str]:
+    return re.findall(r'class="ranker-item" data-key="([^"]+)"', html)
 
 
 class FragmentShapeTests(FragmentTestCase):
@@ -102,7 +114,7 @@ class FragmentShapeTests(FragmentTestCase):
 
     def test_a_pool_page_carries_no_page_chrome(self):
         board = self.board_with(pool=3)
-        html = self.pool_html(board, 0)
+        html = self.pool_html(board)
         self.assertIn("ranker-item", html)
         for chrome in PAGE_CHROME:
             self.assertNotIn(chrome, html, f"a pool page must not contain {chrome!r}")
@@ -140,7 +152,7 @@ class InlineAndLazyAgreeTests(FragmentTestCase):
         inline = re.search(r'<div class="ranker-pool" id="rankerPool"[^>]*>(.*?)\n            </div>',
                            shell, re.S)
         self.assertIsNotNone(inline, "the shell should render the pool inline")
-        self.assertIn(inline.group(1).strip(), self.pool_html(board, 0))
+        self.assertIn(inline.group(1).strip(), self.pool_html(board))
 
     def test_a_tiers_rows_are_byte_identical_inline_and_lazily(self):
         board = self.board_with(tiered=4)
@@ -164,6 +176,13 @@ class InlineAndLazyAgreeTests(FragmentTestCase):
         self.assertIn('id="tierBody-tier-s"', shell)
         body = re.search(r'<div class="ranker-rows" id="tierBody-tier-s".*?</div>', shell, re.S)
         self.assertNotIn("ranker-item", body.group(0))
+
+    def test_a_board_at_the_item_ceiling_can_still_draw_closed(self):
+        """The largest boards are the ones the closed shape exists for: drawing
+        every title open is what stops being quick to redraw. A limit at or above
+        the ceiling would make the closed shape — its per-tier fetch included —
+        code no board could reach."""
+        self.assertLess(ranker_routes.EAGER_ROW_LIMIT, ranker.MAX_ITEMS_PER_BOARD)
 
 
 class RowFragmentTests(FragmentTestCase):
@@ -263,35 +282,73 @@ def inside(html: str, opening: str) -> str:
     return html[at:i - 6]
 
 
+def move_menu(client, board: str, key: str) -> tuple[str, str]:
+    """A row's move menu as its ⇄ asks for it: the opening <form> tag, and what
+    sits inside it."""
+    html = client.get(f"/rankings/fragments/move-menu?board={board}&key={key}").text
+    found = re.search(r"(<form\b[^>]*>)(.*?)</form>", html, re.S)
+    return found.group(1), found.group(2)
+
+
 class TierChoicesAreMarkupTests(FragmentTestCase):
     """Where a title can be moved to is the server's to say, and saying it is the
-    whole of the feature now: each row carries one button per destination, and
-    each posts itself to the route the bulk move already used."""
+    whole of the feature now: each row's ⇄ asks for a form with one button per
+    destination, posting to the route the bulk move already used."""
 
     def test_a_rows_menu_offers_the_pool_and_every_tier_in_board_order(self):
         self.board_with(tiered=1)
-        html = self.client.get("/rankings").text
-        key = "show:tmdb:1000"
-        menu = inside(html, f'<div class="ranker-menu" id="move-{key}" popover>')
+        _, menu = move_menu(self.client, "b1", "show:tmdb:1000")
         # The POOL FIRST, as the empty tier, which is what move_items already
         # reads as "back to the pool" — so leaving a tier and changing tier are
         # one request rather than two.
-        self.assertEqual(re.findall(r'"tier": "([^"]*)"', menu), ["", "tier-s"])
+        self.assertEqual(re.findall(r'<button name="tier" value="([^"]*)"', menu), ["", "tier-s"])
         self.assertIn(">Pool (unranked)</button>", menu)
 
-    def test_every_choice_posts_itself_to_the_route_the_bulk_move_uses(self):
-        """One key instead of a selection, and otherwise the same request: the
-        move menu needed no route of its own."""
+    def test_a_row_carries_an_empty_menu_and_the_address_that_fills_it(self):
+        """Drawn with every row, a menu was a third of the row's bytes; it is
+        asked for when opened. The row holds the popover and its opener only."""
         self.board_with(tiered=1)
         html = self.client.get("/rankings").text
-        menu = inside(html, '<div class="ranker-menu" id="move-show:tmdb:1000" popover>')
+        key = "show:tmdb:1000"
+        self.assertIn(f'<div class="ranker-menu" id="move-{key}" popover></div>', html)
+        opener = re.search(rf'<button[^>]*popovertarget="move-{re.escape(key)}"[^>]*>', html).group(0)
+        self.assertIn('hx-get="/rankings/fragments/move-menu?board=b1&amp;key=show%3Atmdb%3A1000"',
+                      opener)
+        self.assertIn('hx-trigger="click once"', opener)
+        # Not the popover's id: a key's colons would read as pseudo-classes.
+        self.assertIn('hx-target="next .ranker-menu"', opener)
+        self.assertNotIn('name="tier"', html.split('id="selectionBar"')[0])
+
+    def test_a_title_the_board_does_not_hold_draws_no_menu(self):
+        self.board_with(tiered=1)
+        self.assertEqual(self.client.get(
+            "/rankings/fragments/move-menu?board=b1&key=show:tmdb:999999").text, "")
+
+    def test_another_accounts_board_draws_no_menu(self):
+        self.board_with(tiered=1)
+        stranger = self.make_user("stranger", ranker_approved=True)
+        self.sign_in_as(stranger)
+        self.assertEqual(self.client.get(
+            "/rankings/fragments/move-menu?board=b1&key=show:tmdb:1000").text, "")
+
+    def test_the_menu_is_one_form_posting_to_the_route_the_bulk_move_uses(self):
+        """One key instead of a selection, and otherwise the same request: the
+        move menu needed no route of its own. The request is said ONCE, on the
+        form, and each choice is only its own value — which the browser adds to
+        the form's fields when that button is the one pressed."""
+        self.board_with(tiered=1)
+        form, menu = move_menu(self.client, "b1", "show:tmdb:1000")
+        self.assertIn('hx-post="/rankings/boards/b1/items/move"', form)
+        self.assertIn("hx-json-enc", form)
+        self.assertIn('hx-target="body"', form)
+        self.assertIn('<input type="hidden" name="pick:show:tmdb:1000" value="1">', menu)
+        # The key's field belongs to this form alone: naming the selection form
+        # would put it in every bulk move.
+        self.assertNotIn("selectionForm", menu)
         for choice in re.findall(r"<button[^>]*>", menu):
-            self.assertIn('hx-post="/rankings/boards/b1/items/move"', choice)
-            self.assertIn("hx-json-enc", choice)
-            self.assertIn('"pick:show:tmdb:1000": "1"', choice)
-            self.assertIn('hx-target="body"', choice)
-        bulk = self.client.get("/rankings").text
-        self.assertIn('hx-post="/rankings/boards/b1/items/move"', bulk)
+            with self.subTest(choice=choice):
+                self.assertNotIn("hx-", choice)
+                self.assertNotIn('type="button"', choice)   # a submit, or it sends nothing
 
     def test_a_row_carries_its_menu_however_that_row_was_drawn(self):
         """The shell, a page of the pool and a title added after first paint all
@@ -301,37 +358,46 @@ class TierChoicesAreMarkupTests(FragmentTestCase):
         board = self.board_with(pool=ranker_routes.POOL_PAGE_SIZE + 5)
         key = "show:tmdb:1000"
         inline = self.client.get("/rankings").text
-        paged = self.pool_html(board, 0)
+        paged = self.pool_html(board)
         one = self.client.get(
             f"/rankings/fragments/row?board={board}&key={key}").text
         for what, html in (("the shell", inline), ("a pool page", paged),
                            ("row_fragment", one)):
             with self.subTest(drawn_by=what):
                 self.assertIn(f'id="move-{key}"', html)
-                self.assertIn('hx-post="/rankings/boards/b1/items/move"', html)
+                self.assertIn('hx-get="/rankings/fragments/move-menu?board=b1&amp;'
+                              'key=show%3Atmdb%3A1000"', html)
 
-    def test_the_bulk_move_list_offers_every_tier(self):
+    def test_the_bulk_move_list_offers_what_a_rows_menu_offers(self):
+        """The pool first and every tier after it, because a selection can now
+        hold tiered titles as well as pooled ones — but the first TIER is the one
+        chosen, since sending a pool selection back to the pool changes nothing
+        anybody could see."""
         self.board_with(tiered=1)
         html = self.client.get("/rankings").text
         select = re.search(r'<select id="bulkTarget"[^>]*>(.*?)</select>', html, re.S).group(1)
-        self.assertEqual(re.findall(r'<option value="([^"]*)"', select), ["tier-s"])
+        self.assertEqual(re.findall(r'<option value="([^"]*)"', select), ["", "tier-s"])
+        self.assertEqual(re.findall(r'<option value="([^"]*)" selected', select), ["tier-s"])
+        _, menu = move_menu(self.client, "b1", "show:tmdb:1000")
+        self.assertEqual(re.findall(r">([^<]+)</option>", select),
+                         re.findall(r">([^<]+)</button>", menu))
 
     def test_a_deleted_tier_takes_every_choice_naming_it_with_it(self):
-        """The bulk-move list, the export dialog's scope, AND ONE PER ROW now
-        that every row carries its own menu. A delete answers with the page
-        redrawn, so none of them has to be found and taken out by hand — they are
-        simply not drawn. The count before is asserted against the rows drawn
-        rather than as a constant, because a constant would pass or fail on how
-        many titles the fixture happens to have."""
+        """The bulk-move list and the export dialog's scope, drawn with the page,
+        and every row's menu, asked for when it is opened. A delete answers with
+        the page redrawn, so none of them has to be found and taken out by hand —
+        they are simply not drawn, and a menu opened afterwards is drawn from the
+        tiers the board now has."""
         board = self.board_with(pool=3, tiered=1)
         before = self.client.get("/rankings").text
-        rows = before.count('class="ranker-item"')
-        self.assertEqual(rows, 4)
-        # A row's move names the title it moves as well, which is what tells it
-        # apart from the restore the delete's own answer offers for this tier.
-        choices = re.compile(r'value="(?:cat:)?tier-s"|"1", "tier": "tier-s"')
-        self.assertEqual(len(choices.findall(before)), rows + 2)
+        # The bulk list's option and the export scope carry the tier as a value;
+        # the restore the delete's own answer offers for this tier names it in its
+        # request instead, so it is not counted here.
+        choices = re.compile(r'value="(?:cat:)?tier-s"')
+        self.assertEqual(len(choices.findall(before)), 2)
+        self.assertEqual(len(choices.findall(move_menu(self.client, board, "show:tmdb:1000")[1])), 1)
         after = self.client.post(f"/rankings/boards/{board}/tiers/tier-s/delete", json={})
+        self.assertEqual(choices.findall(move_menu(self.client, board, "show:tmdb:1000")[1]), [])
         self.assertEqual(choices.findall(after.text), [])
 
     def test_no_script_moves_a_title_between_tiers(self):
@@ -459,7 +525,7 @@ class PoolSentinelPlacementTests(FragmentTestCase):
 
     def test_a_late_page_appends_its_rows_rather_than_replacing_anything(self):
         board = self.board_with(pool=ranker_routes.POOL_PAGE_SIZE + 5)
-        html = self.pool_html(board, 1)
+        html = self.pool_html(board, nth_key(ranker_routes.POOL_PAGE_SIZE - 1))
         self.assertIn('<div id="rankerPool" hx-swap-oob="beforeend">', html)
         self.assertIn('class="ranker-item"', html)
 
@@ -469,36 +535,105 @@ class PoolSentinelTests(FragmentTestCase):
     asks for a page that does not exist, forever."""
 
     def test_a_page_carries_the_sentinel_for_the_next_one(self):
+        """Named by the title the page ENDS on, not by a page number."""
         size = ranker_routes.POOL_PAGE_SIZE
         board = self.board_with(pool=size * 2 + 1)
-        first = self.pool_html(board, 0)
+        first = self.pool_html(board)
         self.assertEqual(first.count('class="ranker-item"'), size)
-        self.assertIn(f'hx-get="/rankings/fragments/pool?board={board}&amp;page=1"', first)
+        after = urlencode({"after": nth_key(size - 1)})
+        self.assertIn(f'hx-get="/rankings/fragments/pool?board={board}&amp;{after}"', first)
         self.assertIn('hx-trigger="intersect once"', first)
         self.assertIn('hx-swap="outerHTML"', first)
 
-        second = self.pool_html(board, 1)
-        self.assertIn(f'page=2"', second)
+        second = self.pool_html(board, nth_key(size - 1))
+        self.assertEqual(keys_drawn(second)[0], nth_key(size))
+        self.assertIn(urlencode({"after": nth_key(size * 2 - 1)}), second)
 
     def test_the_last_page_carries_no_sentinel(self):
         size = ranker_routes.POOL_PAGE_SIZE
         board = self.board_with(pool=size + 2)
-        last = self.pool_html(board, 1)
+        last = self.pool_html(board, nth_key(size - 1))
         self.assertEqual(last.count('class="ranker-item"'), 2)
         self.assertNotIn("ranker-pool-sentinel", last)
 
     def test_a_pool_that_fits_on_one_page_has_no_sentinel_at_all(self):
         board = self.board_with(pool=3)
-        self.assertNotIn("ranker-pool-sentinel", self.pool_html(board, 0))
+        self.assertNotIn("ranker-pool-sentinel", self.pool_html(board))
 
-    def test_a_page_past_the_end_is_empty_rather_than_an_error(self):
+    def test_a_page_after_the_last_title_is_empty_rather_than_an_error(self):
         """A stale sentinel — from a board that shrank in another tab — asks for
-        a page that is now past the end. It gets nothing, which ends the chain,
-        rather than a 500 that leaves a broken element on the page."""
+        what follows a title nothing follows any more. It gets nothing, which
+        ends the chain, rather than a 500 that leaves a broken element behind."""
         board = self.board_with(pool=2)
-        html = self.pool_html(board, 9)
+        html = self.pool_html(board, nth_key(1))
         self.assertNotIn("ranker-item", html)
         self.assertNotIn("ranker-pool-sentinel", html)
+
+
+class PoolPagesFollowTitlesNotPositionsTests(FragmentTestCase):
+    """The pool is shown a page at a time while the page showing it keeps saving,
+    so the next page is "the titles after the one the last page ended on" rather
+    than "the sixty from the 120th".
+
+    BOTH WAYS A POSITION WENT WRONG, MEASURED in the browser before this: when a
+    save had taken titles out ahead of the position, the next page slid past
+    titles that were never shown (so never moved, and back in the pool after a
+    reload); when the pool had grown, the next page repeated titles already on
+    screen, and the next save was refused whole for naming one title twice."""
+
+    def test_titles_leaving_the_pool_make_no_page_skip_any(self):
+        size = ranker_routes.POOL_PAGE_SIZE
+        board = self.board_with(pool=size * 2 + 5)
+        asyncio.run(ranker.add_categories(self.user_id, board, [{"uid": "tier-a", "label": "A"}]))
+        # The first page, all of it, dragged into a tier and saved.
+        asyncio.run(ranker.move_items(self.user_id, board, [nth_key(n) for n in range(size)],
+                                      "tier-a"))
+        page = keys_drawn(self.pool_html(board, nth_key(size - 1)))
+        self.assertEqual(page[0], nth_key(size))
+        self.assertEqual(len(page), size)
+
+    def test_titles_joining_the_pool_make_no_page_repeat_any(self):
+        """Titles that come back to the pool from a tier land ahead of the place
+        the page reached — a position would now point sixty titles too early."""
+        size = ranker_routes.POOL_PAGE_SIZE
+        board = self.board_with(pool=size * 2, tiered=10)     # the tiered hold the lowest ids
+        first = keys_drawn(self.pool_html(board))
+        asyncio.run(ranker.move_items(self.user_id, board, [nth_key(n) for n in range(10)], ""))
+        second = keys_drawn(self.pool_html(board, first[-1]))
+        self.assertEqual(set(first) & set(second), set())
+        self.assertEqual(second[0], nth_key(10 + size))
+
+    def test_the_title_a_page_ended_on_still_marks_the_place_from_a_tier(self):
+        """It has since been dragged somewhere else; its place in the pool's order
+        has not moved."""
+        size = ranker_routes.POOL_PAGE_SIZE
+        board = self.board_with(pool=size + 5)
+        asyncio.run(ranker.add_categories(self.user_id, board, [{"uid": "tier-a", "label": "A"}]))
+        asyncio.run(ranker.move_items(self.user_id, board, [nth_key(size - 1)], "tier-a"))
+        self.assertEqual(keys_drawn(self.pool_html(board, nth_key(size - 1)))[0], nth_key(size))
+
+    def test_a_title_the_board_no_longer_holds_starts_from_the_beginning(self):
+        """A repeat is something the page drops (ranker/rows.js); a gap nobody
+        would ever see."""
+        board = self.board_with(pool=5)
+        asyncio.run(ranker.remove_items(self.user_id, board, [nth_key(2)]))
+        self.assertEqual(keys_drawn(self.pool_html(board, nth_key(2)))[0], nth_key(0))
+
+    def test_the_pool_is_read_in_one_order_even_after_a_tier_is_deleted(self):
+        """A deleted tier hands its titles back to the pool with the ranks they
+        held there. Read by rank, they would sit where no page could find them
+        again; the pool is read by row id everywhere."""
+        board = self.board_with(pool=3, tiered=3)             # S holds 0, 1, 2
+        asyncio.run(ranker.save_layout(self.user_id, board, {
+            "version": asyncio.run(ranker.fetch_board(self.user_id, board))["version"],
+            "categories": [{"uid": "tier-s", "label": "S", "rank_priority": 60,
+                            "items": [nth_key(2), nth_key(1), nth_key(0)]}],
+            "pool": [nth_key(n) for n in range(3, 6)]}))
+        self.client.post(f"/rankings/boards/{board}/tiers/tier-s/delete", json={})
+        pool = [i["key"] for i in asyncio.run(ranker.fetch_board(self.user_id, board))["pool"]]
+        self.assertEqual(pool, [nth_key(n) for n in range(6)])
+        self.assertEqual(keys_drawn(self.pool_html(board, nth_key(1))),
+                         [nth_key(n) for n in range(2, 6)])
 
 
 class FragmentFailureTests(FragmentTestCase):
@@ -506,7 +641,7 @@ class FragmentFailureTests(FragmentTestCase):
     and not a broken board."""
 
     def test_an_unknown_board_renders_retry_markup(self):
-        response = self.client.get("/rankings/fragments/pool?board=nope&page=0")
+        response = self.client.get("/rankings/fragments/pool?board=nope&after=")
         self.assertEqual(response.status_code, 200)
         self.assertIn("ranker-failed", response.text)
         self.assertIn("Retry", response.text)
@@ -519,7 +654,7 @@ class FragmentFailureTests(FragmentTestCase):
         self.assertIn(f"/rankings/fragments/tier?board={board}&amp;tier=ghost", response.text)
 
     def test_a_failed_fragment_is_still_a_bare_fragment(self):
-        response = self.client.get("/rankings/fragments/pool?board=nope&page=0")
+        response = self.client.get("/rankings/fragments/pool?board=nope&after=")
         for chrome in PAGE_CHROME:
             self.assertNotIn(chrome, response.text)
 
@@ -685,7 +820,7 @@ class FragmentGatingTests(FragmentTestCase):
     def test_an_account_without_the_grant_is_refused(self):
         board = self.board_with(pool=2)
         self.sign_in_as(self.make_user("no_grant"))
-        for url in (f"/rankings/fragments/pool?board={board}&page=0",
+        for url in (f"/rankings/fragments/pool?board={board}&after=",
                     f"/rankings/fragments/tier?board={board}&tier=tier-s",
                     "/rankings"):
             with self.subTest(url=url):
@@ -696,7 +831,7 @@ class FragmentGatingTests(FragmentTestCase):
         than JSON. It answers as it would for a board that does not exist."""
         board = self.board_with(pool=3, tiered=2)
         self.sign_in_as(self.make_user("other", ranker_approved=True))
-        html = self.client.get(f"/rankings/fragments/pool?board={board}&page=0").text
+        html = self.client.get(f"/rankings/fragments/pool?board={board}&after=").text
         self.assertIn("ranker-failed", html)
         self.assertNotIn("Title 0", html)
 

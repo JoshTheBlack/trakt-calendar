@@ -106,41 +106,6 @@
         <p class="ranker-empty" id="poolEmpty">Nothing waiting. Search above, or drag a
             title back out of a tier.</p>
         {% endif %}
-
-        {# THE BULK MOVE IS A FORM, AND THE SELECTION IS ITS FIELDS. Each pool row
-           carries a hidden checkbox named `pick:<key>` (_ranker_row.html); ticking
-           them is the one part of this that has to be script, because it is done
-           by ctrl- and shift-clicking rows. Everything else is the form's: Move
-           submits the ticked boxes plus the chosen tier, Clear is the form's own
-           reset, the bar shows itself through `:has(:checked)` and the count is a
-           CSS counter over the same question.
-
-           AN EMPTY FORM ELEMENT, WITH THE CONTROLS ASSOCIATED BY `form=`, rather
-           than one wrapped round the pool. A row's own ✕ posts itself, and htmx
-           sends the enclosing form's fields with any request from inside it — so
-           wrapping the rows would have put the whole selection in the body of
-           every removal. Association reaches exactly the controls named, wherever
-           they sit.
-
-           BELOW THE POOL RATHER THAN ABOVE IT, and that is what makes the count
-           free: a CSS counter reads whatever has been counted BEFORE it in the
-           document, so a readout above the rows it counts would always say nought. #}
-        <form id="poolForm" hidden hx-boost="false"></form>
-        <div class="ranker-bulk" id="poolBulk">
-            <span id="poolSelectedCount"></span>
-            {# The same tiers as the move menu in ranker.html, rendered for the same
-               reason: they are the server's to list, not the browser's to rebuild. #}
-            <select id="bulkTarget" name="tier" form="poolForm"
-                    aria-label="Tier to move the selection into">
-                {%- for category in board.categories %}
-                <option value="{{ category.uid }}">{{ category.label or "Untitled" }}</option>
-                {%- endfor %}
-            </select>
-            <button type="button" class="btn-ghost small" form="poolForm"
-                    hx-post="/rankings/boards/{{ board.uid }}/items/move" hx-json-enc
-                    hx-target="body" hx-swap="innerHTML">Move</button>
-            <button type="reset" class="btn-ghost small" form="poolForm">Clear</button>
-        </div>
     </section>
 
     <section class="ranker-tier-col">
@@ -252,4 +217,41 @@
             set, or make your own.</p>
         {% endif %}
     </section>
+
+    {# THE BULK MOVE IS A FORM, AND THE SELECTION IS ITS FIELDS. Every row, in
+       the pool or a tier, carries a hidden field named `pick:<key>` that is
+       enabled exactly while the drag library has that row picked
+       (_ranker_row.html). Move submits the enabled ones plus the chosen
+       destination; Clear is the form's reset button.
+
+       AN EMPTY FORM ELEMENT, WITH THE CONTROLS ASSOCIATED BY `form=`, rather
+       than one wrapped round the rows. A row's own ✕ posts itself, and htmx
+       sends the enclosing form's fields with any request from inside it — so
+       wrapping the rows would have put the whole selection in the body of every
+       removal. Association reaches exactly the controls named, wherever they sit.
+
+       AFTER BOTH COLUMNS, and that is what makes the count free: a CSS counter
+       reads whatever has been counted BEFORE it in the document, and a pick can
+       be in either column. The stylesheet pins it to the foot of the window while
+       the board runs past it (style.css's `.ranker-bulk`). #}
+    <form id="selectionForm" hidden hx-boost="false"></form>
+    <div class="ranker-bulk" id="selectionBar">
+        <span id="selectionCount"></span>
+        {# The same destinations every row's own move menu offers, pool first —
+           `tiers` is the one list both are drawn from (routes.py's
+           `_move_choices`), so they cannot come to disagree.
+           THE FIRST TIER IS THE DEFAULT, not the pool heading the list: most
+           selections are made in the pool to be sent somewhere, and a Move that
+           put them back where they were would change nothing anybody could see. #}
+        <select id="bulkTarget" name="tier" form="selectionForm" autocomplete="off"
+                aria-label="Where to move the selection">
+            {%- for tier in tiers %}
+            <option value="{{ tier.uid }}"{% if loop.index0 == 1 %} selected{% endif %}>{{ tier.label }}</option>
+            {%- endfor %}
+        </select>
+        <button type="button" class="btn-ghost small" form="selectionForm"
+                hx-post="/rankings/boards/{{ board.uid }}/items/move" hx-json-enc
+                hx-target="body" hx-swap="innerHTML">Move</button>
+        <button type="reset" class="btn-ghost small" form="selectionForm">Clear</button>
+    </div>
 </div>

@@ -319,6 +319,60 @@ class VersionTests(_ActionTestCase):
         self.assertEqual(board["categories"][0]["items"], [])
         self.assertIn(key("1"), [i["key"] for i in board["pool"]])
 
+    def test_a_selection_across_the_pool_and_two_tiers_moves_into_a_third(self):
+        """One selection spans the board, so one Move names titles from anywhere
+        on it — and they land in the order they arrived, after what the tier
+        already held."""
+        asyncio.run(ranker.add_categories(self.user_id, BOARD, [
+            {"uid": "tier-s", "label": "S"}, {"uid": "tier-a", "label": "A"},
+            {"uid": "tier-b", "label": "B"}]))
+        asyncio.run(ranker.move_items(self.user_id, BOARD, [key("1")], "tier-s"))
+        asyncio.run(ranker.move_items(self.user_id, BOARD, [key("2")], "tier-a"))
+        before = self.version()
+        page = self.client.post(f"/rankings/boards/{BOARD}/items/move", json={
+            f"pick:{key('3')}": "1", f"pick:{key('1')}": "1", f"pick:{key('2')}": "1",
+            "tier": "tier-b"})
+        self.assertIn("Moved 3 title(s).", page.text)
+        self.assertEqual(self.version(), before + 1)
+        board = asyncio.run(ranker.fetch_board(self.user_id, BOARD))
+        tiers = {c["uid"]: [i["key"] for i in c["items"]] for c in board["categories"]}
+        self.assertEqual(tiers, {"tier-s": [], "tier-a": [],
+                                 "tier-b": [key("3"), key("1"), key("2")]})
+        self.assertEqual(board["pool"], [])
+        self.assertDragStillSaves(page)
+
+    def test_a_selection_across_the_pool_and_the_tiers_moves_back_to_the_pool(self):
+        """The pool is the empty tier. A pooled title in the selection is moved
+        onto itself, which is harmless: the pool stores no order."""
+        asyncio.run(ranker.add_categories(self.user_id, BOARD, [
+            {"uid": "tier-s", "label": "S"}, {"uid": "tier-a", "label": "A"}]))
+        asyncio.run(ranker.move_items(self.user_id, BOARD, [key("1")], "tier-s"))
+        asyncio.run(ranker.move_items(self.user_id, BOARD, [key("2")], "tier-a"))
+        before = self.version()
+        page = self.client.post(f"/rankings/boards/{BOARD}/items/move", json={
+            f"pick:{key('1')}": "1", f"pick:{key('2')}": "1", f"pick:{key('3')}": "1",
+            "tier": ""})
+        self.assertIn("Moved 3 title(s).", page.text)
+        self.assertEqual(self.version(), before + 1)
+        board = asyncio.run(ranker.fetch_board(self.user_id, BOARD))
+        self.assertEqual([c["items"] for c in board["categories"]], [[], []])
+        self.assertEqual(sorted(i["key"] for i in board["pool"]),
+                         [key("1"), key("2"), key("3")])
+        self.assertDragStillSaves(page)
+
+    def test_moving_titles_into_the_tier_they_are_in_appends_them(self):
+        """Not a no-op, deliberately: a Move reads as "these went to the bottom of
+        that tier" wherever they came from, including from that tier."""
+        asyncio.run(ranker.add_categories(self.user_id, BOARD, [{"uid": "tier-s", "label": "S"}]))
+        asyncio.run(ranker.move_items(
+            self.user_id, BOARD, [key("1"), key("2"), key("3")], "tier-s"))
+        page = self.client.post(f"/rankings/boards/{BOARD}/items/move",
+                                json={f"pick:{key('1')}": "1", "tier": "tier-s"})
+        board = asyncio.run(ranker.fetch_board(self.user_id, BOARD))
+        self.assertEqual([i["key"] for i in board["categories"][0]["items"]],
+                         [key("2"), key("3"), key("1")])
+        self.assertDragStillSaves(page)
+
     def test_an_import_bumps_nothing_it_did_not_change(self):
         """Adding titles to the pool leaves the arrangement alone, so a drag from
         before it is still a save the server accepts."""
@@ -330,33 +384,60 @@ class VersionTests(_ActionTestCase):
 
 
 class SelectionIsMarkupTests(_ActionTestCase):
-    """The selection is one checkbox per row, and three readings of it — the
-    highlight, the count and the bar — are the stylesheet's."""
+    """The selection is the drag library's class on each picked row, three
+    readings of it — the highlight, the count and the bar — are the
+    stylesheet's, and the row's checkbox follows it for the form alone."""
 
-    def test_every_pool_row_carries_the_box_the_move_submits(self):
+    def test_every_row_in_either_column_carries_the_field_the_move_submits(self):
+        asyncio.run(ranker.add_categories(self.user_id, BOARD, [{"uid": "tier-s", "label": "S"}]))
+        asyncio.run(ranker.move_items(self.user_id, BOARD, [key("1")], "tier-s"))
         html = self.client.get(f"/rankings?board={BOARD}").text
-        self.assertIn(f'name="pick:{key("1")}"', html)
-        box = re.search(r'<input type="checkbox" class="ranker-pick"[^>]*>', html).group(0)
-        # Hidden because it is not a control anybody operates, and
-        # autocomplete="off" so a reload cannot come back with rows still ticked.
-        self.assertIn("hidden", box)
-        self.assertIn('autocomplete="off"', box)
+        for match_id in ("1", "2"):         # one tiered, one pooled
+            with self.subTest(title=match_id):
+                field = re.search(rf'<input type="hidden" class="ranker-pick" '
+                                  rf'name="pick:{re.escape(key(match_id))}"[^>]*>',
+                                  html, re.S).group(0)
+                # Naming the board's form rather than sitting inside it, which is
+                # what lets a pick in a tier submit with the pool's.
+                self.assertIn('form="selectionForm"', field)
+                # Drawn unpicked: a disabled field is never submitted.
+                self.assertIn("disabled", field)
+                # Firefox otherwise carries a disabled state across a reload.
+                self.assertIn('autocomplete="off"', field)
 
-    def test_the_bar_and_the_count_are_read_off_the_boxes(self):
-        from tests.support import STATIC_DIR
+    def test_the_field_is_not_a_checkbox(self):
+        """The drag library re-checks, when a press ends, every box that was
+        checked when it began — so a checkbox unpicked by that press came back
+        picked in the form alone."""
+        html = self.client.get(f"/rankings?board={BOARD}").text
+        self.assertNotIn('type="checkbox" class="ranker-pick"', html)
+
+    def test_the_bar_and_the_count_are_read_off_the_librarys_class(self):
         css = (STATIC_DIR / "css" / "style.css").read_text(encoding="utf-8")
         self.assertIn(
-            ".ranker-pool-col:not(:has(#rankerPool .ranker-pick:checked)) .ranker-bulk "
+            ".ranker-board:not(:has(.ranker-item.sortable-selected)) .ranker-bulk "
             "{ display: none; }", css)
-        self.assertIn('#poolSelectedCount::after { content: counter(picked) " selected"; }', css)
-        self.assertIn("counter-reset: picked;", css)
+        self.assertIn('#selectionCount::after { content: counter(picked) " selected"; }', css)
+        self.assertIn(".ranker-board { counter-reset: picked; }", css)
         self.assertIn("counter-increment: picked;", css)
+        # And not off the box: a second reading of which rows are picked is the
+        # thing the stylesheet must not grow back.
+        self.assertNotIn(".ranker-pick:checked", css)
 
-    def test_the_bar_is_drawn_after_the_rows_it_counts(self):
-        """A CSS counter reads what has been counted BEFORE it in the document, so
-        a readout above the rows would always say nought."""
+    def test_the_library_is_given_the_class_the_stylesheet_reads(self):
+        dnd = (STATIC_DIR / "js" / "ranker" / "dnd.js").read_text(encoding="utf-8")
+        self.assertIn("multiDrag: true,", dnd)
+        self.assertIn("selectedClass: 'sortable-selected',", dnd)
+
+    def test_the_bar_is_drawn_after_both_columns(self):
+        """A CSS counter reads what has been counted BEFORE it in the document,
+        and a pick can sit in either column — so the readout follows the last
+        row of each."""
         html = self.client.get(f"/rankings?board={BOARD}").text
-        self.assertLess(html.index('id="rankerPool"'), html.index('id="poolBulk"'))
+        bar = html.index('id="selectionBar"')
+        self.assertLess(html.index('id="rankerPool"'), bar)
+        self.assertLess(html.index('id="rankerTiers"'), bar)
+        self.assertLess(html.index('class="ranker-tier-col"'), bar)
 
     def test_the_selection_travels_as_one_field_per_key(self):
         """json-enc turns a repeated name into a list only when there is more than
@@ -534,6 +615,28 @@ class BackupRestoreIsAFormTests(_ActionTestCase):
         accepted = self.client.post("/api/rankings/restore", json={
             "payload": json.dumps(doc), "ack": "REPLACE MY BOARDS"})
         self.assertIn("Restored 1 board(s).", accepted.text)
+
+    def test_a_whole_account_at_the_caps_fits_under_the_restore_limit(self):
+        """The limit is derived from the caps, so raising one moves it — but the
+        per-title allowance is a measurement, and this is what holds it: a title
+        carrying every id and slug a service gives it, written as the backup
+        writes it and escaped into the string a restore sends, times every board
+        an account may have at the item ceiling."""
+        from app.ranker import routes as ranker_routes
+        asyncio.run(ranker.add_titles(self.user_id, BOARD, [{
+            **show_ref("4"), "title": "A Title of Quite Some Length: The Extended Cut",
+            "network": "Some Streaming Service", "season_count": 12, "episode_count": 240,
+            "runtime": 58, "user_rating": 9,
+            "ids": {"trakt": 1234567, "slug": "a-title-of-quite-some-length-the-extended-cut",
+                    "imdb": "tt12345678", "tvdb": 1234567, "tmdb": 123456, "simkl": 1234567,
+                    "simkl_slug": "a-title-of-quite-some-length-the-extended-cut"}}]))
+        doc = asyncio.run(ranker.export_user_data(self.user_id))
+        item = next(i for i in doc["boards"][0]["items"] if i["match_id"] == "4")
+        sent = len(json.dumps({"payload": json.dumps(item)})) - len('{"payload": ""}')
+        self.assertLessEqual(sent + len(", "), ranker_routes.RESTORE_BYTES_PER_TITLE)
+        self.assertEqual(ranker_routes.MAX_RESTORE_BYTES,
+                         ranker.MAX_BOARDS_PER_USER * ranker.MAX_ITEMS_PER_BOARD
+                         * ranker_routes.RESTORE_BYTES_PER_TITLE)
 
     def test_the_form_states_the_phrase_the_route_checks(self):
         from app.ranker import routes as ranker_routes

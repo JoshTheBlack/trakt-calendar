@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi.templating import Jinja2Templates
+from jinja2.ext import Extension
 
 from . import assets
 from . import chrome
@@ -26,7 +27,38 @@ from .providers.base import Source
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
+# A TEMPLATE THAT OPENS WITH THIS IS SENT WITHOUT ITS INDENTATION. Jinja copies a
+# template's source whitespace into every render, so the nesting that keeps a
+# template readable is paid for by every page that draws it — once for most
+# templates, and once PER ROW for one drawn a thousand times. MEASURED on the
+# rankings board: 869 of a row's 3,971 bytes were indentation, 870 KB of a
+# thousand-row page, all of it parsed again on every redraw.
+# OPT-IN, NOT ENVIRONMENT-WIDE: whitespace is content inside <pre> and
+# <textarea>, and a template that holds literal text in one of those must keep
+# it. A template that draws neither, many times over, asks for this.
+DEDENT_MARKER = "{#- dedent -#}"
+_LEADING_WHITESPACE = re.compile(r"^[ \t]+", re.M)
+
+
+class Dedent(Extension):
+    """Strips each line's leading whitespace from a template that opens with
+    DEDENT_MARKER, AT COMPILE TIME — once per template, not once per render.
+
+    Only LEADING whitespace, and the newline stays. HTML collapses a run of
+    whitespace between tags to the same single space a newline already is, so
+    nothing drawn changes; a Jinja expression does not care how it is indented.
+    What it would break is a value written across lines — an attribute or a
+    string literal wrapped mid-way — which is why a template opts in rather than
+    every template being changed under its author."""
+
+    def preprocess(self, source: str, name: str | None, filename: str | None = None) -> str:
+        if not source.startswith(DEDENT_MARKER):
+            return source
+        return _LEADING_WHITESPACE.sub("", source)
+
+
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
+templates.env.add_extension(Dedent)
 
 # `assets` is the module itself, so _head.html calls assets.url(assets.STYLESHEET)
 # and there is no second copy of any asset path anywhere in the templates.

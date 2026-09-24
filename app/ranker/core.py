@@ -57,9 +57,11 @@ MAX_BOARDS_PER_USER = 50
 MAX_BOARDS_PER_YEAR = 20
 MAX_CATEGORIES_PER_BOARD = 30
 # Far above the 100-item export ceiling on purpose: a board is a working set to
-# curate down from, not just the finished list. This is also the number the
-# pool's pagination and the poster warming are sized against.
-MAX_ITEMS_PER_BOARD = 1000
+# curate down from, not just the finished list. Twice what routes.py's
+# EAGER_ROW_LIMIT draws open, so the largest boards still draw their tiers
+# closed — which is what keeps a board this size quick to redraw — and the size
+# a restore document may be is derived from it (routes.py's MAX_RESTORE_BYTES).
+MAX_ITEMS_PER_BOARD = 2000
 MAX_UID_LENGTH = 64
 
 # WHAT A BOARD REMEMBERS OF THE TITLES TAKEN OFF IT: the last twenty-five, for
@@ -516,6 +518,15 @@ async def board_keys(user_id: int, board_uid: str) -> set[str]:
     return await db.run(_work)
 
 
+# THE ORDER A BOARD'S TITLES ARE READ IN: a tier's by its rank, and the POOL'S BY
+# ROW ID ALONE. The pool stores no order — but it does keep ranks it was never
+# meant to: a deleted tier hands its titles back through the schema's ON DELETE
+# SET NULL, ranks and all. Reading the pool by rank would then put those somewhere
+# a page of the pool cannot find again (fetch_pool_after), so the pool is read by
+# id everywhere, and "the titles after this one" means one thing.
+_READ_ORDER = "CASE WHEN category_id IS NULL THEN 0 ELSE rank_in_category END, id"
+
+
 async def fetch_board(user_id: int, board_uid: str) -> dict[str, Any]:
     """One board with its categories, its tiered items and its pool.
 
@@ -537,7 +548,7 @@ def read_board(conn: db.Connection, user_id: int, board_uid: str) -> dict[str, A
         (board_id,),
     ).fetchall()
     items = conn.execute(
-        "SELECT * FROM tier_items WHERE board_id = ? ORDER BY rank_in_category, id",
+        f"SELECT * FROM tier_items WHERE board_id = ? ORDER BY {_READ_ORDER}",
         (board_id,),
     ).fetchall()
 
@@ -564,6 +575,53 @@ def read_board(conn: db.Connection, user_id: int, board_uid: str) -> dict[str, A
         ],
         "pool": pool,
     }
+
+
+async def fetch_pool_after(user_id: int, board_uid: str, after: Any,
+                           limit: int) -> tuple[list[dict[str, Any]], int]:
+    """Up to `limit` pooled titles that come after the title `after` names, in the
+    pool's order, and how many pooled titles follow those.
+
+    BY TITLE, NOT BY POSITION, which is the whole point. The pool is shown a page
+    at a time while the page it is shown on keeps saving: a page asked for as "the
+    sixty from the 120th" slid past titles whenever a save had taken some out
+    ahead of it — they were never shown, so never moved, and seemed to come back
+    on a reload — and repeated titles whenever the pool had grown, which made the
+    next save refuse the whole arrangement for naming one title twice. A title's
+    row id does not change when it leaves the pool, so the one a page ended on
+    still marks the place after it has been dragged into a tier.
+    A title the pool has GAINED since, from this page, is already on the page; the
+    page drops a repeat of it (ranker/rows.js). A title the board no longer holds
+    starts from the beginning, for the same reason: a repeat is dropped, a gap is
+    not visible at all.
+    """
+    parsed = parse_item_key(after) if after else None
+
+    def _work(conn: db.Connection) -> tuple[list[dict[str, Any]], int]:
+        board_id = int(_resolve_board(conn, user_id, board_uid)["id"])
+        after_id = 0
+        if parsed is not None:
+            found = conn.execute(
+                "SELECT id FROM tier_items WHERE board_id = ? AND media = ? "
+                "   AND match_source = ? AND match_id = ?",
+                (board_id, parsed.media, parsed.match_source, parsed.match_id),
+            ).fetchone()
+            after_id = int(found["id"]) if found else 0
+        rows = conn.execute(
+            "SELECT * FROM tier_items WHERE board_id = ? AND category_id IS NULL AND id > ? "
+            f" ORDER BY {_READ_ORDER} LIMIT ?",
+            (board_id, after_id, limit),
+        ).fetchall()
+        remaining = 0
+        if rows:
+            remaining = int(conn.execute(
+                "SELECT COUNT(*) FROM tier_items "
+                " WHERE board_id = ? AND category_id IS NULL AND id > ?",
+                (board_id, int(rows[-1]["id"])),
+            ).fetchone()[0])
+        return [_item_dict(row) for row in rows], remaining
+
+    return await db.run(_work)
 
 
 # ---------------------------------------------------------------------------
