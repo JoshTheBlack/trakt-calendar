@@ -496,13 +496,14 @@ class FetchWindowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(records, [])
 
     async def _validator(self, url: str, etag: str, last_modified: str = "",
-                         consumer: str = "movies") -> None:
-        """A stored validator for one archive file, as one calendar read it — an
-        ETag and NO BODY, which is the whole of what this app now keeps for a
-        CDN file."""
+                         endpoint=MOVIES, start: date = date(2026, 7, 6)) -> None:
+        """A stored validator for one archive file, as one calendar's window read
+        it — an ETag and NO BODY, which is the whole of what this app now keeps
+        for a CDN file."""
         await cache.record_source_file(
-            simkl_calendar._validator_key(url, consumer), "simkl", "2026-07", etag=etag,
-            last_modified=last_modified, entries=0, now=1000, changed=True)
+            simkl_calendar._validator_key(url, simkl_calendar._consumer(endpoint, start)),
+            "simkl", "2026-07", etag=etag, last_modified=last_modified,
+            entries=0, now=1000, changed=True)
 
     async def test_a_calendar_is_only_told_unchanged_about_a_version_it_read(self):
         """THE THREE SHOW CALENDARS READ THE SAME FILES, and a validator shared
@@ -514,7 +515,7 @@ class FetchWindowTests(unittest.IsolatedAsyncioTestCase):
         tv_url = f"{simkl_calendar.CDN_BASE}/2026/7/tv.json"
         anime_url = f"{simkl_calendar.CDN_BASE}/2026/7/anime.json"
         for url in (tv_url, anime_url):
-            await self._validator(url, '"new-version"', consumer=SHOWS_NEW.key)
+            await self._validator(url, '"new-version"', endpoint=SHOWS_NEW)
         client = _Conditional304()
         with patch("app.providers.simkl.transport.cdn_client", return_value=client):
             records = await simkl_calendar.fetch_window(
@@ -523,8 +524,28 @@ class FetchWindowTests(unittest.IsolatedAsyncioTestCase):
                         "Season Premieres revalidated with New Shows' validator")
         self.assertEqual([r.ids.get("simkl") for r in records], [1])
         etag, _ = await cache.source_file_validator(
-            simkl_calendar._validator_key(tv_url, PREMIERES.key))
+            simkl_calendar._validator_key(
+                tv_url, simkl_calendar._consumer(PREMIERES, date(2026, 7, 6))))
         self.assertEqual(etag, '"new-version"', "its own validator was not recorded")
+
+    async def test_a_window_is_only_told_unchanged_about_a_version_it_read(self):
+        """ONE LEVEL DOWN FROM THE TEST ABOVE, and measured the same day: rows
+        are stored per window and a monthly file feeds about five of them. Season
+        Premieres' week of 28 September refilled alone and recorded October's
+        new ETag; its four October weeks then sent it, were answered 304, and kept
+        rows without four premieres. A window's validator is its own."""
+        tv_url = f"{simkl_calendar.CDN_BASE}/2026/7/tv.json"
+        anime_url = f"{simkl_calendar.CDN_BASE}/2026/7/anime.json"
+        for url in (tv_url, anime_url):
+            await self._validator(url, '"new-version"', endpoint=PREMIERES,
+                                  start=date(2026, 6, 29))
+        client = _Conditional304()
+        with patch("app.providers.simkl.transport.cdn_client", return_value=client):
+            records = await simkl_calendar.fetch_window(
+                PREMIERES, SETTINGS, date(2026, 7, 6), 7, revalidate=True)
+        self.assertTrue(all("If-None-Match" not in h for h in client.headers),
+                        "one week revalidated with another week's validator")
+        self.assertEqual([r.ids.get("simkl") for r in records], [1])
 
     async def test_every_file_unchanged_reports_not_modified_and_fetches_no_body(self):
         """THE POINT OF STORING VALIDATORS INSTEAD OF BODIES. A 304 carries no
@@ -591,7 +612,8 @@ class FetchWindowTests(unittest.IsolatedAsyncioTestCase):
             records = await simkl_calendar.fetch_window(MOVIES, SETTINGS, date(2026, 7, 6), 7)
         self.assertEqual([r.ids.get("simkl") for r in records], [2])
         etag, _ = await cache.source_file_validator(
-            simkl_calendar._validator_key(url, MOVIES.key))
+            simkl_calendar._validator_key(
+                url, simkl_calendar._consumer(MOVIES, date(2026, 7, 6))))
         self.assertEqual(etag, '"new"')
         # The body is NOT kept: the airings derived from it are the stored copy.
         self.assertIsNone(await db.fetch_value(

@@ -117,14 +117,29 @@ def _file_month(url: str) -> str:
         return ""
 
 
-def _validator_key(url: str, consumer: str) -> str:
-    """What one calendar's validator for one CDN file is stored under: the file's
-    URL with the calendar named in its fragment, which a URL may carry and a
-    server is never sent.
+def _consumer(endpoint: Endpoint, start: date) -> str:
+    """Who a validator belongs to: one calendar's rows for one window.
 
-    PER CALENDAR, NOT PER FILE, AND A FILE-WIDE ONE LOST TITLES. A 304 means "you
+    THE WINDOW AS WELL AS THE CALENDAR, because rows are stored per (endpoint,
+    window) and a monthly file feeds about five windows. Keyed on the calendar
+    alone, the first window to refill after Simkl regenerated a month recorded
+    the new ETag and the other windows of that calendar were answered 304 and
+    kept their older rows. MEASURED on a real instance: Season Premieres' week
+    of 28 September refilled alone and read October's tv.json in full; six
+    minutes later its four October weeks were told nothing had changed, and
+    stayed without four series premieres the file had held since that morning.
+    """
+    return f"{endpoint.key}@{start.isoformat()}"
+
+
+def _validator_key(url: str, consumer: str) -> str:
+    """What one reader's validator for one CDN file is stored under: the file's
+    URL with the reader (`_consumer`) named in its fragment, which a URL may carry
+    and a server is never sent.
+
+    PER READER, NOT PER FILE, AND A FILE-WIDE ONE LOST TITLES. A 304 means "you
     have seen this version", and the three show calendars each derive their own
-    rows from the same two files. With one validator per file, the first calendar
+    rows from the same two files — per window, too (see `_consumer`). With one validator per file, the first calendar
     to refill after Simkl regenerated a month fetched the new body and recorded
     its ETag; the other two then sent that ETag, were told nothing had changed,
     and kept rows derived from the OLDER version — for good, since the next
@@ -139,7 +154,7 @@ def _validator_key(url: str, consumer: str) -> str:
 
 async def _conditional_get(url: str, *, consumer: str, revalidate: bool = True) -> list | None:
     """One CDN file's entries, or None when the file has not changed since
-    `consumer` — the calendar these rows are for — last read it.
+    `consumer` — the calendar window these rows are for — last read it.
 
     NONE IS AN ANSWER, NOT AN ABSENCE. A 304 carries no body, and this app no
     longer keeps one to serve in its place: `calendar_source_files` holds the
@@ -680,7 +695,8 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
         # ordinarily a 304 against a copy the blob cache already holds.
         wanted = ([(year, month, _MOVIE_FILE) for year, month in months]
                   + [(year, month, _ANIME_FILE) for year, month in months])
-        read = await _read_files(wanted, consumer=endpoint.key, revalidate=revalidate)
+        read = await _read_files(wanted, consumer=_consumer(endpoint, start),
+                                 revalidate=revalidate)
         movie_results, anime_results = read[:len(months)], read[len(months):]
         raw = [e for batch in movie_results for e in batch]
         films = [e for batch in anime_results for e in batch if is_anime_film(e)]
@@ -697,7 +713,8 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
 
     wanted = ([(year, month, _TV_FILE) for year, month in months]
               + [(year, month, _ANIME_FILE) for year, month in months])
-    read = await _read_files(wanted, consumer=endpoint.key, revalidate=revalidate)
+    read = await _read_files(wanted, consumer=_consumer(endpoint, start),
+                             revalidate=revalidate)
     tv_results, anime_results = read[:len(months)], read[len(months):]
     tv_entries = [e for batch in tv_results for e in batch]
     # THE OTHER HALF OF THE SPLIT ABOVE, AND IT HAS TO BE THE OTHER HALF OF THE
