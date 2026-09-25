@@ -152,14 +152,16 @@
        whatever the reason — including a month whose every week was fetched and
        held nothing, and a month partly unreadable — so "empty because nothing is
        announced" read as "empty because of something you set". `filtered` is what
-       the viewer's own filters removed; `partial` already has its own banner. #}
+       the viewer's own filters removed.
+       A MONTH PARTLY UNREADABLE SAYS THE SAME AS AN EMPTY ONE HERE, because its
+       own banner above already says part of it could not be loaded — a second
+       sentence saying so, in place of the plain one, read as alarm about a month
+       that is, as far as anything can tell, simply empty. #}
     {% if not days and not error %}
     <div class="empty-state">
         <div class="emoji">🕵️</div>
         {% if filtered %}
         <div>No items matched your filters for this range.</div>
-        {% elif partial %}
-        <div>Nothing to show from the part of this month that could be loaded.</div>
         {% else %}
         <div>Nothing is on this calendar for this month yet.</div>
         {% endif %}

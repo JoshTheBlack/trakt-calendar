@@ -715,6 +715,9 @@ class AnEmptyMonthSaysWhyTests(CalendarRouteTestCase):
         self.assertNotIn("matched your filters", html)
 
     def test_a_partly_unreadable_empty_month_says_so_rather_than_blaming_filters(self):
+        """The banner says part of the month could not be loaded; the empty
+        state says what an empty month says, rather than a second, more alarming
+        sentence about the same gap (the owner's call, on a real May 2027)."""
         boom_window = calendar_cache.window_start(date(2026, 7, 20))
 
         def fake(endpoint, start):
@@ -725,7 +728,8 @@ class AnEmptyMonthSaysWhyTests(CalendarRouteTestCase):
         with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
             html = self.client.get("/calendar?year=2026&month=7").text
         self.assertIn("warning-banner", html)
-        self.assertIn("part of this month that could be loaded", html)
+        self.assertIn("Nothing is on this calendar for this month yet.", html)
+        self.assertNotIn("No items matched your filters", html)
 
 
 def _unreachable_client() -> httpx.AsyncClient:
