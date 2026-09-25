@@ -364,6 +364,7 @@ async def catalogue(query: str, *, settings, prefs, tz: ZoneInfo,
         return Results()
 
     out: list[Elsewhere] = []
+    suppressed: list[Elsewhere] = []
     failed: set = set()
     with span("search.catalogue", sources=len(asked)) as sp:
         for media in (Media.SHOW, Media.MOVIE):
@@ -384,6 +385,7 @@ async def catalogue(query: str, *, settings, prefs, tz: ZoneInfo,
             for rows in described:
                 for row in rows:
                     if (row.item.mark_key, row.item.season) in known:
+                        suppressed.append(row)
                         continue
                     if not calendar_filter.filter_records(
                             [row.record], specs["genres"], specs["countries"],
@@ -391,9 +393,44 @@ async def catalogue(query: str, *, settings, prefs, tz: ZoneInfo,
                         continue
                     out.append(row)
         sp.set(found=len(out))
+        await _complete_known_seasons(suppressed)
 
     return Results(elsewhere=tuple(out[:RESULT_LIMIT]),
                    failed=frozenset(failed))
+
+
+async def _complete_known_seasons(rows: list[Elsewhere]) -> int:
+    """Store the airing each suppressed hit already built, where the stored season
+    holds no airing from THAT hit's service. Returns how many were stored.
+
+    THE SUPPRESSION IS A RENDERING DECISION AND THIS IS NOT, and keeping them
+    apart is the point. A season the calendar already draws is rightly not offered
+    as a second place to go — two jumps to one day is the thing that rule exists
+    to prevent. But the rule is keyed on the title and season, not the SOURCE, so
+    a Trakt hit for a season the calendar holds only Simkl's airing of was
+    dropped as a duplicate, and the one write that could have taught the calendar
+    Trakt's airing never happened. MEASURED: Groomed: The Truth Behind the Lie,
+    searched for, answered by Trakt, suppressed, and left Simkl-only.
+
+    COMPLETING A CARD, NOT ADDING ONE, which is why this may happen on a search
+    where fill_one_gap may not: the season is already on the calendar, so the
+    stored airing joins the card it matches (same title key) rather than drawing
+    a new one — no decision about the calendar is being made that the calendar
+    had not made already. It costs no request: each row's record was built by its
+    own source's lookup to draw the row at all.
+    """
+    now = db.now()
+    stored = 0
+    for row in rows:
+        drawn = await entries.sources_airing(row.endpoint_key, row.item.mark_key, row.item.season)
+        if str(row.source) in drawn:
+            continue
+        stored += await entries.store_loose_airings(
+            row.endpoint_key, [row.record], now=now, stale_after=now + TITLE_STALE_SECONDS)
+    if stored:
+        logger.info("calendar search: completed %d stored season(s) with a source's "
+                    "own airing", stored)
+    return stored
 
 
 async def fill_one_gap(settings, *, source, source_id: str, media: Media,

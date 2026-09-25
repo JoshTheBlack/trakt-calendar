@@ -224,14 +224,14 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
    is not part of the month; it is a question, and a question buried under six
    headings is a question nobody answers.
 
-   THREE QUESTIONS SHARE ONE ROW because they read the same way and are answered
+   EVERY QUESTION SHARES ONE ROW because they read the same way and are answered
    the same way; only the sentence and what ✓ does differ. Saying no is one
    statement whichever it was — do not put this season on my list, stop asking —
-   so all three send the same dismissal, which answers with the row REMOVED and
+   so all of them send the same dismissal, which answers with the row REMOVED and
    nothing else (nothing on the page changed, and recomputing a month to drop one
    line would cost a season lookup per listed title).
 
-   `ask.kind` names which of the three this is; the sentence, the ✓ title and the
+   `ask.kind` names which one this is; the sentence, the ✓ title and the
    route it posts to are the server's (routes._ASK_KINDS), because the unbacked
    one's sentence is a comparison between what the month wrote down and what the
    services say now, and only the server holds both halves. #}
@@ -268,6 +268,16 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
                 hx-post="/api/distrakt/unknown-dismiss" hx-json-enc
                 hx-vals='{{ vals | tojson }}'
                 hx-target="closest .distrakt-unknown-row" hx-swap="outerHTML">✗</button>
+        {%- if ask.snooze %}
+        {#- The same refusal lasting to the end of the month rather than to the
+            next play (store.DISMISSAL_MONTH), offered only on the re-watch rows:
+            an episode watched again now and then is the question somebody may
+            not want put to them every evening it happens. -#}
+        <button type="button" class="btn-ghost small" title="Don't ask about this season again this month"
+                hx-post="/api/distrakt/unknown-snooze" hx-json-enc
+                hx-vals='{{ vals | tojson }}'
+                hx-target="closest .distrakt-unknown-row" hx-swap="outerHTML">Not this month</button>
+        {%- endif %}
     </span>
 </div>
 {% endmacro %}

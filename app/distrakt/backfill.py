@@ -116,6 +116,7 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
 
     Returns the plan, which is also stored for `apply` to pick up:
         {"range": [start, end], "months": {"YYYY-MM": [record, ...]},
+         "replayed": {"YYYY-MM": {"<key>:<season>": day}},
          "movies": [...], "replacing": {"YYYY-MM": n},
          "shows_seen": n, "seasons_seen": n}
 
@@ -186,6 +187,11 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
         user_id, port.movie_plays_from(events), set(months), tz)
 
     by_month: dict[str, list[dict]] = {m: [] for m in wanted}
+    # {month: {"<item key>:<season>": day}} — the seasons whose finale the sweep
+    # saw watched again after the viewing they are filed under. Beside the records
+    # rather than on them, because a record is what gets written and this is only
+    # something the confirmation says.
+    replayed: dict[str, dict[str, str]] = {}
     seasons_seen = 0
     show_ids: list[int] = []
     if wanted:
@@ -208,6 +214,7 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
         ))
 
         progress = await _progress_by_show(settings, port, show_ids)
+        viewings = _viewing_days(events, tz)
         # WHAT EACH SEASON WOULD BE FILED AS is arrival.describe's, the same for
         # every way onto the tracker: a history event names no network and only
         # the surveying service's ids, and these rows are settled verdicts that
@@ -219,25 +226,28 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
             settings, [_as_record(ident) for ident in by_key.values()])
 
         wanted_set = set(wanted)
-        for ((_key, season), ident), arrived in zip(by_key.items(), arrivals):
+        for ((key, season), ident), arrived in zip(by_key.items(), arrivals):
             seasons_seen += 1
             source_id = int(ident["ids"][name]) if ident.get("ids", {}).get(name) else None
             episodes = (progress.get(source_id) or {}).get(season) or {}
             total = int(arrived.detail.get("total") or 0)
             if not total or len(episodes) < total:
                 continue  # not finished at all -> belongs to no month
-            finished_on = max((d for w in episodes.values() if w
-                                for d in (watch_history.local_day(w, tz),) if d),
-                               default="")
+            finished_on, again = _finished_on(
+                episodes, viewings.get((key, season)) or {}, tz)
             month_key = finished_on[:7]
             if not month_key or month_key not in wanted_set:
                 continue  # finished outside the range (or on a date Trakt cannot name)
-            by_month[month_key].append(_completed_record(arrived.record, total))
+            record = _completed_record(arrived.record, total)
+            by_month[month_key].append(record)
+            if again:
+                replayed.setdefault(month_key, {})[_replay_address(record)] = again
 
     written_months = {m: rows for m, rows in by_month.items() if rows}
     plan = {
         "range": [months[0], months[-1]],
         "months": written_months,
+        "replayed": replayed,
         "movies": films,
         # Reported, not dropped: a run that found six films and wrote none of
         # them because it already had them must SAY that, or it reads exactly
@@ -287,15 +297,24 @@ def summarize(plan: dict, tz) -> dict:
     # Films are listed month by month beside the seasons, not summed into one
     # number at the end: they are recorded by the same sweep, and a count nobody
     # can see the contents of is not something to confirm.
+    replayed = plan.get("replayed") or {}
+
+    def _season_label(month: str, record: dict) -> str:
+        season = int(record.get("season") or 0)
+        text = f"{record.get('title') or 'Untitled'} S{season:02d}"
+        again = (replayed.get(month) or {}).get(_replay_address(record))
+        # SAID, NOT DECIDED FOR THEM. The season is filed on its finale's first
+        # viewing; the line names the second so a reader who meant the re-watch
+        # can see which month they are agreeing to.
+        return f"{text} — finale watched again {watch_history.day_label(again)}" \
+            if again else text
+
     keys = sorted(set(months) | set(by_month) | set(known_by_month))
     rows = [
         {
             "month": key,
             "count": len(months.get(key) or []),
-            "titles": sorted(
-                f"{r.get('title') or 'Untitled'} S{int(r.get('season') or 0):02d}"
-                for r in (months.get(key) or [])
-            ),
+            "titles": sorted(_season_label(key, r) for r in (months.get(key) or [])),
             "movie_count": len(by_month.get(key) or []),
             "movie_titles": sorted(by_month.get(key) or []),
             "movie_known": known_by_month.get(key, 0),
@@ -418,8 +437,8 @@ class BackfillExpired(Exception):
 # ---------------------------------------------------------------------------
 
 def _empty_plan(start_month: str, end_month: str) -> dict:
-    return {"range": [start_month, end_month], "months": {}, "movies": [],
-            "replacing": {}, "shows_seen": 0, "seasons_seen": 0,
+    return {"range": [start_month, end_month], "months": {}, "replayed": {},
+            "movies": [], "replacing": {}, "shows_seen": 0, "seasons_seen": 0,
             "months_read": 0}
 
 
@@ -491,6 +510,56 @@ async def _record_films(user_id: int, month_key: str, state: dict, tz) -> bool:
         await distrakt.add_month_movie(user_id, month_key, film)
         wrote = True
     return wrote
+
+
+def _replay_address(record: dict) -> str:
+    """How the plan's `replayed` notes name a planned record: the identity it is
+    filed under and its season, flat, because the plan is stored as JSON."""
+    return f"{distrakt.record_key(record)}:{int(record.get('season') or 0)}"
+
+
+def _viewing_days(events, tz) -> dict[tuple[str, int], dict[int, list[str]]]:
+    """{(item key, season): {episode: [every day it was watched, oldest first]}},
+    from the sweep's own events.
+
+    THE ONE READING OF A HISTORY THAT KEEPS EVERY PLAY. A service's per-title
+    progress holds one date per episode — the latest — so a finale watched again
+    has lost its first viewing there; the sweep lists each play as an event of
+    its own, which is the only place the two can be told apart.
+    """
+    out: dict[tuple[str, int], dict[int, set[str]]] = {}
+    for play in watch_history.plays_in(events):
+        day = watch_history.local_day(play.watched_at, tz)
+        if day:
+            out.setdefault((str(play.key), int(play.season)), {}) \
+               .setdefault(int(play.number), set()).add(day)
+    return {season: {number: sorted(days) for number, days in episodes.items()}
+            for season, episodes in out.items()}
+
+
+def _finished_on(episodes: dict, viewings: dict[int, list[str]], tz) -> tuple[str, str]:
+    """`(the day a finished season was finished, the day its finale was watched
+    again or "")`.
+
+    THE FINALE'S DAY, NOT THE LATEST PLAY'S — see watch_history.finale_day, which
+    this defers to for everything the progress record can say. One episode
+    re-watched months later filed a season finished in February onto July's
+    record.
+
+    AND THE FINALE'S FIRST VIEWING when the sweep saw it watched more than once,
+    because progress keeps only the latest and that is the re-watch. The later
+    day comes back beside it so the confirmation can SAY the finale was watched
+    again rather than silently choosing between the two: this is a plan somebody
+    is about to confirm, and naming the choice made is cheaper than a question.
+    A first viewing from before the sweep began cannot be seen, and the season
+    is then filed by the one viewing the sweep did see.
+    """
+    finished = watch_history.finale_day({"": episodes}, tz)
+    finale = max((int(number) for number in episodes), default=0)
+    days = viewings.get(finale) or []
+    if len(days) < 2:
+        return finished, ""
+    return days[0], days[-1]
 
 
 def _as_record(ident: dict) -> dict:

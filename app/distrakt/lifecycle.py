@@ -34,6 +34,13 @@ THE LIFE OF A SEASON, and the verb that carries each step:
                           and reconcile_history() is what notices — from the
                           plays the watch-history pull has already reported, so
                           there is no detection step and no sweep of its own.
+                          The sign is an episode PAST the finale the verdict
+                          recorded; an episode inside it is step 7.
+  7. THE VIEWER WATCHES
+     IT AGAIN             asked, never done: an episode of a season an earlier
+                          month finished is an offer to start a re-watch, and its
+                          finale an offer to record it completed again. See
+                          Rewatch for why neither happens by itself.
 
 A COMPLETED VERDICT CAN BE QUESTIONED FROM THE OTHER DIRECTION TOO, and that one
 is asked rather than acted on. A season is completed on what the services said at
@@ -43,8 +50,8 @@ the record goes on asserting a number nobody reports any more. unbacked_verdicts
 notices, reopen() is what the viewer's yes runs, and nothing happens without one.
 
 WHY 4 AND 5 TAKE THEIR MONTH FROM DIFFERENT PLACES, and it is not an
-inconsistency. Finishing a season is something the history can date: the last
-episode was watched on a day, and that day names the month, however long ago it
+inconsistency. Finishing a season is something the history can date: the finale
+was watched on a day, and that day names the month, however long ago it
 was and whichever month is on screen. Giving up is not in the history at all — it
 is an act performed today, so today is when it happened. Dating an abandon from
 the month being viewed would let somebody browsing March record a decision they
@@ -64,6 +71,7 @@ test can count how many were made.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from datetime import datetime, timezone
 from typing import NamedTuple
 
 from . import counts, live, store, watch_history
@@ -144,6 +152,31 @@ class HistoryQuestions(NamedTuple):
     """
     unknown: list[watch_history.EpisodePlay]
     given_up: list[watch_history.EpisodePlay]
+    # THE THIRD QUESTION A PLAY CAN RAISE: a season an earlier month recorded
+    # finished, watched again since. See Rewatch.
+    rewatched: list["Rewatch"]
+
+
+class Rewatch(NamedTuple):
+    """A season an earlier month recorded as finished, with an episode of it
+    watched again since — and which of two offers that play makes.
+
+    TWO OFFERS, DECIDED BY WHICH EPISODE IT WAS. An episode short of the finale is
+    somebody going back to something: the offer is to start a re-watch, which puts
+    the season on their list counting from that play and leaves the earlier
+    month's record alone. The FINALE is a viewing that finished the season again,
+    so the offer is to record it completed in the month it was watched. Neither
+    is done unasked, because a single episode watched for old times' sake is the
+    commonest re-watch there is, and filing a completed season on its strength
+    puts one where it does not belong.
+
+    `play` is the one the question is about: the finale if the batch held it,
+    otherwise the first episode watched again. `month` is the month whose record
+    says the season was finished, which is what the sentence names.
+    """
+    play: watch_history.EpisodePlay
+    month: str
+    finale: bool
 
 
 class UnbackedVerdict(NamedTuple):
@@ -261,8 +294,8 @@ async def finish(user_id: int, key: ItemKey, season: int, *, month: str,
     `month`'s completed record. None if it was not on the list.
 
     THE MONTH IS THE CALLER'S TO NAME AND IT COMES FROM THE WATCH HISTORY —
-    watch_history.season_completed_map dates the last episode seen, and that date
-    names the month. Not the clock: a season finished in July is July's record
+    watch_history.season_completed_map dates the finale, and that date names the
+    month. Not the clock: a season finished in July is July's record
     however many months later the tracker is next opened, and reading the clock
     here is how a browse of an old month would have re-dated somebody's viewing.
     """
@@ -486,7 +519,7 @@ _DISMISSAL_GRACE_SECONDS = 60
 
 def _still_declined(play: watch_history.EpisodePlay,
                     declined: dict[tuple[str, int], tuple[str, int]],
-                    address: tuple[str, int]) -> bool:
+                    address: tuple[str, int], tz) -> bool:
     """Whether a refusal still covers this play.
 
     A VERDICT REFUSAL COVERS EVERYTHING, for ever — that question is a standing
@@ -495,7 +528,8 @@ def _still_declined(play: watch_history.EpisodePlay,
     every play reported at or before it, and nothing after. So watching another
     episode — or the same one again — asks again, while a forced refresh
     re-reading the month from its first day hands back evidence already answered
-    and is correctly ignored.
+    and is correctly ignored. A refusal FOR THIS MONTH covers every play in the
+    viewer's month it was made in, and asks again about a play in any later one.
 
     A PLAY THAT CANNOT DATE ITSELF STAYS COVERED. With no usable timestamp there
     is no way to show the play is new, and the viewer's refusal is the only thing
@@ -506,18 +540,39 @@ def _still_declined(play: watch_history.EpisodePlay,
     if found is None:
         return False
     kind, dismissed_at = found
-    if kind != store.DISMISSAL_HISTORY:
+    if kind not in (store.DISMISSAL_HISTORY, store.DISMISSAL_MONTH):
         return True
     when = watch_history.watched_at_epoch(play.watched_at)
     if when is None:
         return True
+    if kind == store.DISMISSAL_MONTH:
+        return (watch_history.local_day(play.watched_at, tz)[:7]
+                <= watch_history.local_day(_utc_stamp(dismissed_at), tz)[:7])
     return when <= dismissed_at + _DISMISSAL_GRACE_SECONDS
+
+
+def _utc_stamp(epoch: int) -> str:
+    """An epoch second as the ISO timestamp local_day reads."""
+    return datetime.fromtimestamp(int(epoch), timezone.utc).isoformat()
+
+
+def _watched_after(play: watch_history.EpisodePlay, month: str, tz) -> bool:
+    """Whether a play falls in a month LATER than `month`, in the viewer's zone.
+
+    What makes a play of a finished season a RE-WATCH rather than part of the run
+    that finished it: a sync can hand back plays from the month the verdict was
+    reached in — the incremental cursor overlaps, and a forced refresh re-reads —
+    and those are the viewing the record already describes. An undated play cannot
+    show it is later, so it is not.
+    """
+    day = watch_history.local_day(play.watched_at, tz)
+    return bool(day) and day[:7] > str(month)
 
 
 async def reconcile_history(user_id: int,
                             plays: Sequence[watch_history.EpisodePlay], *,
                             month: str,
-                            look_up: SeasonLookup) -> HistoryQuestions:
+                            look_up: SeasonLookup, tz) -> HistoryQuestions:
     """Fold what the watch history has just reported back into the records, and
     hand back the plays only the viewer can settle.
 
@@ -539,9 +594,17 @@ async def reconcile_history(user_id: int,
     episode re-watched after finishing a season would come back as something the
     tracker had never heard of.
 
-    ONLY A COMPLETED VERDICT REOPENS BY ITSELF. Anywhere still holding the season
-    — the viewer's own list, or this month's premieres — is already the right
-    place for it and needs no move at all.
+    ONLY A COMPLETED VERDICT REOPENS BY ITSELF, AND ONLY FOR AN EPISODE PAST ITS
+    FINALE. Anywhere still holding the season — the viewer's own list, or this
+    month's premieres — is already the right place for it and needs no move at
+    all. An episode the recorded season already had, watched in a later month, is
+    a RE-WATCH and is offered (see Rewatch): it used to reopen the season exactly
+    as growth does, so one episode watched again for old times' sake put a season
+    finished months ago back on the list as if it had never ended.
+
+    `tz` IS THE VIEWER'S, and it has no default for the reason
+    watch_history.season_completed_map gives: it decides which month a play falls
+    in, which is what tells a re-watch from the run a verdict was reached on.
 
     AN ABANDONED VERDICT IS ASKED ABOUT RATHER THAN REOPENED OR IGNORED. Watching
     something again after giving up on it is a real signal, but it is not proof of
@@ -567,11 +630,14 @@ async def reconcile_history(user_id: int,
     declined season that has since been recorded could never reopen.
     """
     if not plays:
-        return HistoryQuestions([], [])
-    # One play per season, in the order the history reported them.
-    seasons: dict[tuple[str, int], watch_history.EpisodePlay] = {}
+        return HistoryQuestions([], [], [])
+    # Every play per season, in the order the history reported them. The whole
+    # batch is kept rather than its first play because two answers read more of it
+    # than that: whether any episode lies past the finale a verdict recorded, and
+    # which plays a refusal does not already cover.
+    seasons: dict[tuple[str, int], list[watch_history.EpisodePlay]] = {}
     for play in plays:
-        seasons.setdefault((str(play.key), int(play.season)), play)
+        seasons.setdefault((str(play.key), int(play.season)), []).append(play)
 
     # COMPLETED ONLY, NOT EVERY SETTLED KIND, and the difference is the whole of
     # the same-month case. The reason written above for leaving a settled season
@@ -591,9 +657,10 @@ async def reconcile_history(user_id: int,
     # hand, and a query for a set nothing will be tested against is a query for
     # nothing.
     declined: dict[tuple[str, int], tuple[str, int]] | None = None
-    for address, play in seasons.items():
+    for address, batch in seasons.items():
         if address in finished_here:
             continue
+        first = batch[0]
         # find_shown_season, NOT find_season, and only because the guard above
         # narrowed. find_season deliberately stops one month short of the month
         # being read, so a season abandoned THIS month is invisible to it — which
@@ -603,29 +670,53 @@ async def reconcile_history(user_id: int,
         # would file a second record beside the verdict. The wider search is the
         # one written for "where is a season this month's page is drawing", which
         # is exactly what this is now asking.
-        placed = await find_shown_season(user_id, play.key, play.season, month=month)
+        placed = await find_shown_season(user_id, first.key, first.season, month=month)
         if placed is not None and placed.month is None:
             continue  # already in hand; the counts refresh covers it
-        asking = placed is None or placed.record["kind"] == RecordKind.ABANDONED
-        if asking:
-            if declined is None:
-                declined = await store.dismissed_prompts(user_id)
-            if _still_declined(play, declined, address):
+        finale = 0
+        rewatching = placed is not None and placed.record["kind"] == RecordKind.COMPLETED
+        if rewatching:
+            finale = int(placed.record.get("total") or 0)
+            # AN EPISODE PAST THE RECORDED FINALE IS PROOF THE SEASON GREW, and
+            # that is the one case withdrawn without asking — the record claims a
+            # season that turned out longer than it knew. Any episode inside it
+            # is a re-watch, which only the viewer can call one.
+            if finale and any(play.number > finale for play in batch):
+                await reopen(user_id, placed, look_up=look_up)
                 continue
-            # WRITTEN DOWN RATHER THAN RETURNED, and that is the whole of the fix
-            # this call used to need. The plays behind these questions do not
-            # outlive the request that reported them, and the next sync reports
-            # nothing new — so a question nobody had answered yet vanished from
-            # the very next payload, and all three answer routes end by building
-            # one. Answering one question threw every other question away.
-            await store.open_prompt(user_id, play.key, play.season, play.number,
-                                    play.title, play.ids, play.watched_at)
-        elif placed.record["kind"] == RecordKind.COMPLETED:
-            await reopen(user_id, placed, look_up=look_up)
-    return await standing_questions(user_id, month=month)
+            batch = [play for play in batch if _watched_after(play, placed.month, tz)]
+        elif placed is not None and placed.record["kind"] != RecordKind.ABANDONED:
+            continue  # this month's premiere; the ordinary transitions have it
+        if declined is None:
+            declined = await store.dismissed_prompts(user_id)
+        # A VERDICT REFUSAL SAYS NOTHING ABOUT A RE-WATCH. It was "stop asking
+        # whether this completion still stands", made about the month that
+        # reached it; watching the season again later is a different question.
+        refusals = declined
+        if rewatching and declined.get(address, ("",))[0] == store.DISMISSAL_VERDICT:
+            refusals = {}
+        # WHAT NO REFUSAL COVERS YET, and a batch rather than its first play: a
+        # sync spanning a refusal carries plays either side of it, and the first
+        # being old must not silence the new ones behind it.
+        fresh = [play for play in batch if not _still_declined(play, refusals, address, tz)]
+        if not fresh:
+            continue
+        # THE FINALE WINS, because it changes which offer this is — see Rewatch.
+        # Otherwise the first play, which is where a re-watch would begin.
+        play = next((p for p in fresh if finale and p.number == finale), fresh[0])
+        # WRITTEN DOWN RATHER THAN RETURNED, and that is the whole of the fix
+        # this call used to need. The plays behind these questions do not
+        # outlive the request that reported them, and the next sync reports
+        # nothing new — so a question nobody had answered yet vanished from
+        # the very next payload, and all three answer routes end by building
+        # one. Answering one question threw every other question away.
+        await store.open_prompt(user_id, play.key, play.season, play.number,
+                                play.title, play.ids, play.watched_at,
+                                supersede=bool(finale) and play.number == finale)
+    return await standing_questions(user_id, month=month, tz=tz)
 
 
-async def standing_questions(user_id: int, *, month: str) -> HistoryQuestions:
+async def standing_questions(user_id: int, *, month: str, tz) -> HistoryQuestions:
     """Every question this viewer still has outstanding, split the way the page
     asks them.
 
@@ -643,12 +734,13 @@ async def standing_questions(user_id: int, *, month: str) -> HistoryQuestions:
     growing a tail of questions nobody will ever be asked.
 
     THE SPLIT IS THE SAME ONE reconcile_history makes for a fresh play, because
-    it is the same question: nothing anywhere knows this season (`unknown`), or
-    the viewer gave up on it and has watched it again (`given_up`).
+    it is the same question: nothing anywhere knows this season (`unknown`), the
+    viewer gave up on it and has watched it again (`given_up`), or an earlier
+    month finished it and they have watched it again (`rewatched`).
     """
     stored = await store.open_prompts(user_id)
     if not stored:
-        return HistoryQuestions([], [])
+        return HistoryQuestions([], [], [])
     # THE SAME NARROWING reconcile_history makes, for the same reason: an
     # abandonment reached this month is still a live question, and only a
     # COMPLETION settles one. Reading every settled kind here would close a
@@ -665,22 +757,34 @@ async def standing_questions(user_id: int, *, month: str) -> HistoryQuestions:
     # question entirely and must not silence this one.
     unknown: list[watch_history.EpisodePlay] = []
     given_up: list[watch_history.EpisodePlay] = []
+    rewatched: list[Rewatch] = []
     for row in stored:
         key, season = row["key"], row["season"]
         address = (str(key), int(season))
         placed = await find_shown_season(user_id, key, season, month=month)
-        # Answered, adopted or settled since it was asked: the question is spent.
-        if (address in finished_here
-                or (placed is not None and placed.month is None)
-                or (placed is not None
-                    and placed.record["kind"] != RecordKind.ABANDONED)):
-            await store.close_prompt(user_id, key, season)
-            continue
         play = watch_history.EpisodePlay(key, season, row["number"],
                                          row["title"], row["ids"],
                                          row.get("watched_at", ""))
+        kind = placed.record["kind"] if placed is not None else None
+        # A RE-WATCH IS STILL A QUESTION WHILE THE VERDICT IT IS ABOUT STANDS ON
+        # AN EARLIER MONTH AND THE PLAY CAME AFTER IT. Recording the season
+        # completed again puts a verdict on this month, which is `finished_here`
+        # below, and starting the re-watch lists it — both spend the question by
+        # the same rules as everything else.
+        if (kind == RecordKind.COMPLETED and address not in finished_here
+                and _watched_after(play, placed.month, tz)):
+            finale = int(placed.record.get("total") or 0)
+            rewatched.append(Rewatch(play, str(placed.month),
+                                     bool(finale) and play.number == finale))
+            continue
+        # Answered, adopted or settled since it was asked: the question is spent.
+        if (address in finished_here
+                or (placed is not None and placed.month is None)
+                or (placed is not None and kind != RecordKind.ABANDONED)):
+            await store.close_prompt(user_id, key, season)
+            continue
         (unknown if placed is None else given_up).append(play)
-    return HistoryQuestions(unknown, given_up)
+    return HistoryQuestions(unknown, given_up, rewatched)
 
 
 async def catch_up_settled(user_id: int, month: str, settled: Sequence[dict],

@@ -71,7 +71,7 @@ def legacy() -> list[Record]:
 
 
 async def store_calendar(records: list[Record], *, day: date = _AIR_DAY,
-                         now: int | None = None) -> None:
+                         now: int | None = None, endpoint: str = "shows") -> None:
     """Put the calendar in the state a fill leaves it in.
 
     STRAIGHT TO `store_window`, because that is what a fill calls. This used to
@@ -82,7 +82,7 @@ async def store_calendar(records: list[Record], *, day: date = _AIR_DAY,
     for record in records:
         record.air_ts = _noon(day)
     await calendar_cache.store_window(
-        "shows", calendar_cache.window_start(day), list(records), 3600,
+        endpoint, calendar_cache.window_start(day), list(records), 3600,
         db.now() if now is None else now, sources=["trakt", "simkl"])
 
 

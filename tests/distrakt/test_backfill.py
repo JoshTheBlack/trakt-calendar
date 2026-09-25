@@ -1,8 +1,8 @@
 """Backfilling months the tracker was never running for, from watch history.
 
 The rule under test is the same one the live Completed bucket uses: a season
-belongs to the month its LAST episode was watched in, and only if every episode
-was watched. Everything expensive is mocked at the Trakt boundary; the sweep,
+belongs to the month its FINALE was watched in, and only if every episode was
+watched. Everything expensive is mocked at the Trakt boundary; the sweep,
 the bucketing, the plan and the writes are all real.
 """
 from __future__ import annotations
@@ -218,6 +218,32 @@ class SurveyTests(BackfillTestCase):
 
         self.assertEqual(plan["months"], {})
         self.assertEqual(plan["range"], ["2026-01", "2026-06"])
+
+    async def test_an_episode_watched_again_later_does_not_move_the_season(self):
+        """Measured on a real account: a finale watched on 2 February and episode
+        four watched again on 5 July filed the season under July, because the
+        month came from the latest play of any episode. The finale's day decides."""
+        events = [_ep_event(110, 1, 5, "2026-02-02T21:00:00Z", title="Watched Again"),
+                  _ep_event(110, 1, 4, "2026-05-05T21:00:00Z", title="Watched Again")]
+        progress = {110: {1: {1: "2026-01-20T00:00:00Z", 2: "2026-01-21T00:00:00Z",
+                              3: "2026-01-22T00:00:00Z", 4: "2026-05-05T21:00:00Z",
+                              5: "2026-02-02T21:00:00Z"}}}
+        plan = await self._survey(events, progress, {(110, 1): {"total": 5}})
+        self.assertEqual(list(plan["months"]), ["2026-02"])
+        self.assertEqual(plan["replayed"], {}, "a middle episode is not the finale")
+
+    async def test_a_finale_watched_again_is_filed_on_its_first_viewing_and_said(self):
+        """Progress keeps one date per episode — the latest — so the replay is
+        all it can see. The sweep lists both plays, and the confirmation names
+        the second rather than choosing silently."""
+        events = [_ep_event(111, 1, 3, "2026-02-14T21:00:00Z", title="Finale Twice"),
+                  _ep_event(111, 1, 3, "2026-05-20T21:00:00Z", title="Finale Twice")]
+        progress = {111: {1: {1: "2026-02-01T00:00:00Z", 2: "2026-02-07T00:00:00Z",
+                              3: "2026-05-20T21:00:00Z"}}}
+        plan = await self._survey(events, progress, {(111, 1): {"total": 3}})
+        self.assertEqual(list(plan["months"]), ["2026-02"])
+        titles = backfill.summarize(plan, ZoneInfo("UTC"))["months"][0]["titles"]
+        self.assertEqual(titles, ["Finale Twice S01 — finale watched again 20 May 2026"])
 
     async def test_the_summary_carries_no_records(self):
         """The client's job is to say yes, not to hand back what to store."""

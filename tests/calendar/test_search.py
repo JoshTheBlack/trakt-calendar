@@ -21,7 +21,7 @@ import unittest
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from app import db
@@ -467,6 +467,47 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
             known=frozenset({(one.item.mark_key, one.item.season)}))
         self.assertEqual(len(again.elsewhere), 1)
         self.assertNotEqual(again.elsewhere[0].item.season, one.item.season)
+
+    async def _stored_airing(self, source: Source, source_id: str):
+        """One source's premiere of season 1 of the title these tests search for
+        (tmdb 777), as the calendar holds it."""
+        await calendar_entries.store_loose_airings("shows/premieres", [Record(
+            source=source, media=Media.SHOW, id=source_id,
+            ids={str(source): source_id, "tmdb": 777}, detail_url="", title="Unseen Show",
+            air_ts=datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp(),
+            season=1, enriched=True)], now=0, stale_after=10**10)
+
+    async def _search_known_season_one(self):
+        found = await self._catalogue(
+            {"first_aired": "2020-01-01T00:00:00Z"},
+            seasons=[{"season": 1, "first_aired": "2020-01-01"}],
+            known=frozenset({("show:tmdb:777", 1)}))
+        return found, await calendar_entries.sources_airing(
+            "shows/premieres", "show:tmdb:777", 1)
+
+    async def test_a_known_season_another_service_airs_learns_this_ones_airing(self):
+        """THE SUPPRESSION WAS KEYED ON TITLE AND SEASON, NOT SOURCE. MEASURED:
+        Groomed was searched for, answered by Trakt, and dropped as a duplicate
+        of the Simkl airing the calendar held — so the only write that could
+        have taught the calendar Trakt's airing never happened. The row is still
+        not offered twice; the season just gains the source it was missing."""
+        await self._stored_airing(Source.TRAKT, "326227")
+        found, sources = await self._search_known_season_one()
+        self.assertEqual(found.elsewhere, ())
+        self.assertEqual(sources, {"trakt", "simkl"})
+
+    async def test_a_known_season_this_service_already_airs_writes_nothing(self):
+        await self._stored_airing(Source.SIMKL, "4242")
+        wrote = []
+
+        async def _store(endpoint_key, records, *, now, stale_after):
+            wrote.append(endpoint_key)
+            return len(records)
+
+        with patch("app.calendar.entries.store_loose_airings", _store):
+            found, _sources = await self._search_known_season_one()
+        self.assertEqual(found.elsewhere, ())
+        self.assertEqual(wrote, [])
 
     async def test_a_film_is_never_asked_for_seasons(self):
         """Films have none, and asking would spend a call to be told so."""

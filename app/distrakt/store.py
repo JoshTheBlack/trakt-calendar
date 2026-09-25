@@ -1575,8 +1575,15 @@ async def learn_ids(user_id: int, key: ItemKey, ids: Mapping) -> int:
 #   VERDICT — a completed record no service backs any more. The question is a
 #   STANDING CONDITION, true on every load until something changes it, so
 #   declining has to be permanent or it returns for ever.
+#
+#   FOR THIS MONTH — a history question the viewer asked to stop hearing about
+#   until the month turns. Chosen for the re-watch offers, where an occasional
+#   episode watched again is exactly what somebody does not want to answer every
+#   evening. It covers every play in the month it was made in and none in a later
+#   one, so it lapses by the calendar rather than by anything being watched.
 DISMISSAL_HISTORY = "history"
 DISMISSAL_VERDICT = "verdict"
+DISMISSAL_MONTH = "month"
 
 
 async def dismiss_prompt(user_id: int, key: ItemKey, season: int,
@@ -1675,7 +1682,8 @@ async def dismissed_prompts(user_id: int) -> dict[tuple[str, int], tuple[str, in
 
 
 async def open_prompt(user_id: int, key: ItemKey, season: int, number: int,
-                      title: str, ids: dict, watched_at: str = "") -> None:
+                      title: str, ids: dict, watched_at: str = "", *,
+                      supersede: bool = False) -> None:
     """Remember one unanswered play, so the question survives the request that
     raised it.
 
@@ -1683,13 +1691,21 @@ async def open_prompt(user_id: int, key: ItemKey, season: int, number: int,
     reconcile_history keeps the FIRST play it saw for a season, so a later
     episode of a season already being asked about must not overwrite the episode
     number the viewer is looking at on screen.
+
+    `supersede` IS THE ONE EXCEPTION: a play that changes WHICH question is being
+    asked. A finished season's finale watched again is an offer to record the
+    season completed, not to start a re-watch, so it replaces a re-watch offer
+    still waiting for an answer rather than queuing behind it.
     """
+    on_conflict = ("DO UPDATE SET number = excluded.number, title = excluded.title, "
+                   "ids_json = excluded.ids_json, watched_at = excluded.watched_at"
+                   if supersede else "DO NOTHING")
     await db.execute(
         "INSERT INTO distrakt_open_prompts "
         "(user_id, media, match_source, match_id, season, number, title, ids_json, "
         " watched_at, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(user_id, media, match_source, match_id, season) DO NOTHING",
+        f"ON CONFLICT(user_id, media, match_source, match_id, season) {on_conflict}",
         (user_id, key.media, key.match_source, key.match_id, int(season), int(number),
          str(title or ""), json.dumps(dict(ids or {})), str(watched_at or ""), db.now()),
     )

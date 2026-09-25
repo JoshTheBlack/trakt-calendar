@@ -440,7 +440,7 @@ class TheAddAsksBeforeItWritesAnythingTests(_RosterAddCase):
     def test_the_field_asks_the_server_what_the_button_should_say(self):
         """The one day this question could not spell in advance is one somebody
         TYPES, and it used to be spelled by toLocaleDateString — which does not
-        agree with _day_label. Measured in Firefox 155 and Chromium 153: the
+        agree with watch_history.day_label. Measured in Firefox 155 and Chromium 153: the
         browser said "September 5, 2026" where the server says "5 September
         2026", matching only on a en-GB locale. So the button was drawn naming a
         day one way and renamed itself the other as soon as the field was

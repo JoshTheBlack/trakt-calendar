@@ -36,10 +36,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import NamedTuple
+from zoneinfo import ZoneInfo
 
-from .. import cache, providers
+from .. import cache, db, providers
 from ..calendar import entries as calendar_entries
-from ..providers.base import MATCH_SOURCES, Media, TitleFacts, collect_ids
+from ..calendar import search as calendar_search
+from ..providers.base import (MATCH_SOURCES, Media, Source, SourceUnavailable,
+                              TitleFacts, collect_ids)
 from . import live, prefs, store
 from .lifecycle import CATALOGUE_FIELDS
 from .store import record_key
@@ -184,6 +187,59 @@ def _network_marker(key) -> str:
     return f"tracker_network_asked:{key}"
 
 
+# Where a title added to a tracker has its premiere written: the same calendar a
+# followed search result is written to (calendar.search's `_endpoint_for`).
+PREMIERES = "shows/premieres"
+
+
+async def write_missing_premieres(settings, record: dict) -> int:
+    """Write this season's premiere into the shared calendar for every service
+    that has the title and whose calendar does not yet draw it. Returns how many
+    airings were written.
+
+    A TITLE ON SOMEBODY'S TRACKER IS A TITLE THIS INSTANCE CARES ABOUT — the same
+    standing a clicked search result has — so it earns the same repair. A service
+    can list a title in its catalogue and omit it from its own calendar feed:
+    MEASURED, Trakt's show record dates Groomed: The Truth Behind the Lie's three
+    episodes and none of its /calendars/all/ endpoints lists any of them, so the
+    calendar held only Simkl's airing and a reload could never change that.
+
+    THROUGH calendar.search.fill_one_gap, whose contract is what makes a second
+    caller sound: it is handed a service and THAT SERVICE'S OWN id and nothing
+    else, and asks the service for the title, the date and every other field —
+    so this can no more invent a calendar row than a hand-made URL can.
+
+    ONLY FOR A TITLE ADDED ONE AT A TIME, BY HAND. The history backfill and the
+    month rollover add in bulk, often old seasons, and writing each of their
+    premieres into the calendar every viewer shares would be dozens of calendar
+    decisions nobody made; the calendar import's airings come from the calendar
+    already. A failure writes nothing and costs the add nothing.
+    """
+    if (record.get("media") or Media.SHOW) != Media.SHOW or record.get("season") is None:
+        return 0
+    key = record_key(record)
+    drawn = await calendar_entries.sources_airing(PREMIERES, str(key), int(record["season"]))
+    ids = record.get("ids") or {}
+    written = 0
+    for source, _port in providers.for_catalogue_search(settings):
+        name = str(source)
+        if name in drawn or ids.get(name) in (None, ""):
+            continue
+        try:
+            mark = await calendar_search.fill_one_gap(
+                settings, source=Source(name), source_id=str(ids[name]), media=Media.SHOW,
+                season=int(record["season"]), endpoint_key=PREMIERES,
+                tz=ZoneInfo(settings.timezone), now=db.now())
+        except SourceUnavailable as exc:
+            logger.info("tracker arrival: %s premiere for %s not written (%r)", name, key, exc)
+            continue
+        if mark:
+            logger.info("tracker arrival: wrote %s's premiere of %s S%s into the calendar",
+                        name, key, record["season"])
+            written += 1
+    return written
+
+
 async def register(user_id: int, records: list[dict]) -> None:
     """Put every network these records carry into the viewer's emoji map, so a
     network any path filed appears in their editor ready to customize — one call
@@ -297,32 +353,84 @@ def _merged_ids(recs: list[dict]) -> dict:
 
 
 async def _ask_missing_services(settings, groups: dict, held: dict) -> None:
-    """Ask each catalogue this instance can search for the titles it has no id
-    for, by shared id, and add what an exact match answers. Every learned id is
-    logged by name; a service that could not be asked is logged and skipped,
-    never remembered as "not listed" — its own cache holds real answers only."""
+    """A newly arriving title's missing service ids, asked — see ask_services."""
+    learned = await ask_services(settings, {
+        key: (Media(recs[0].get("media") or Media.SHOW), held[key])
+        for key, recs in groups.items()})
+    for key, ids in learned.items():
+        held[key].update(ids)
+
+
+async def ask_services(settings, titles: dict[str, tuple[Media, dict]]) -> dict[str, dict]:
+    """{title key: the ids learned} for `titles` — {key: (media, ids held)} —
+    asking each catalogue this instance can search about every title it holds no
+    id for, by shared id, and keeping what an exact match answers that `ids held`
+    lacks. The one implementation for a title arriving and a title stored.
+
+    Every learned id is logged by name; a service that could not be asked is
+    logged and skipped, never remembered as "not listed". THE RE-ASK CLOCK IS
+    EACH PORT'S OWN: an answer, "not listed" included, is kept for a day by the
+    port (Trakt's response cache, Simkl's extracted-answer cache), so asking again
+    within the day costs no request — and a second viewer holding the same title
+    costs none either, since the answer is a fact about the title.
+    """
     asked = [(key, source, port)
-             for key in groups
+             for key, (_media, ids) in titles.items()
              for source, port in providers.for_catalogue_search(settings)
-             if held[key].get(str(source)) in (None, "")]
+             if ids.get(str(source)) in (None, "")]
     if not asked:
-        return
+        return {}
     answers = await asyncio.gather(
-        *(port.find_by_shared_id(settings, Media(groups[key][0].get("media") or Media.SHOW),
-                                 dict(held[key]))
+        *(port.find_by_shared_id(settings, titles[key][0], dict(titles[key][1]))
           for key, _source, port in asked),
         return_exceptions=True)
+    out: dict[str, dict] = {}
     for (key, source, _port), got in zip(asked, answers):
         if isinstance(got, BaseException):
             logger.info("tracker arrival: %s could not be asked about %s (%r)", source, key, got)
             continue
-        learned = {name: value for name, value in collect_ids(got or {}).items()
-                   if held[key].get(name) in (None, "")}
+        held = {**titles[key][1], **out.get(key, {})}
+        learned = {name: value for name, value in canonical_ids(got or {}).items()
+                   if held.get(name) in (None, "")}
         if learned.get(str(source)) in (None, ""):
             continue  # an answer that does not name this service's own id is no answer
         logger.info("tracker arrival: %s answered %s for %s by shared id",
                     source, learned, key)
-        held[key].update(learned)
+        out.setdefault(key, {}).update(learned)
+    return out
+
+
+async def ask_for_missing_ids(user_id: int, settings) -> int:
+    """Ask, by shared id, for every service id this viewer's STORED rows still
+    lack — the stored half of what `describe` does for a title arriving. Returns
+    how many row values were written.
+
+    WHAT THE STORED CALENDAR CANNOT TEACH. naming.fill_from_calendar learns a
+    service's id from that service's own stored record; a title no stored record
+    of that service names stays half-linked — MEASURED on the owner's copy, 54
+    rows after that pass, Groomed: The Truth Behind the Lie among them, whose
+    Trakt id exists but whose Trakt airing no calendar feed carries. Asked here,
+    once per title a day (the ports' own clocks), exact matches only, add-only
+    through store.learn_ids, every learned id logged.
+    """
+    owed = [debt for debt in await store.identities_owing(user_id)
+            if any(str(source) in debt.names
+                   for source, _port in providers.for_catalogue_search(settings))]
+    if not owed:
+        return 0
+    learned = await ask_services(settings, {
+        str(debt.key): (Media(debt.key.media), dict(debt.ids)) for debt in owed})
+    changed = 0
+    for debt in owed:
+        ids = learned.get(str(debt.key))
+        if not ids:
+            continue
+        wrote = await store.learn_ids(user_id, debt.key, ids)
+        if wrote:
+            logger.info("tracker arrival: user %s learned %s for %s by asking "
+                        "(%d row value(s))", user_id, ids, debt.key, wrote)
+        changed += wrote
+    return changed
 
 
 def stored_facts(settings, rec: dict, by_source: dict) -> TitleFacts | None:

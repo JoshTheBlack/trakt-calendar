@@ -244,6 +244,98 @@ class AskingForMissingNetworksTests(DistraktTestCase):
         asked.assert_not_awaited()
 
 
+class AskingForMissingIdsTests(DistraktTestCase):
+    """A stored row's missing service id, asked by shared id. MEASURED: 54 rows
+    on the owner's copy owed one after the stored calendar had taught all it
+    could — Groomed: The Truth Behind the Lie among them."""
+
+    async def _row(self, ids):
+        from app import distrakt
+        await distrakt.add_month_record(self.user_id, "2026-08", {
+            "ids": ids, "season": 1, "kind": distrakt.RecordKind.COMPLETED,
+            "title": "Groomed", "network": "Peacock"})
+
+    async def _ids(self):
+        from app import distrakt
+        rec = await distrakt.find_month_record(
+            self.user_id, "2026-08", distrakt.RecordKind.COMPLETED,
+            ItemKey("show", "tmdb", "330599"), 1)
+        return rec["ids"]
+
+    async def test_the_missing_service_is_asked_and_its_answer_learned(self):
+        await self._row({"tmdb": 330599, "simkl": 2618044})
+        found = AsyncMock(return_value={"trakt": 326227,
+                                        "trakt_slug": "groomed-the-truth-behind-the-lie"})
+        with patch("app.providers.trakt.detail.find_by_shared_id", found):
+            wrote = await arrival.ask_for_missing_ids(self.user_id, SETTINGS)
+        self.assertGreater(wrote, 0)
+        ids = await self._ids()
+        self.assertEqual((ids["trakt"], ids["trakt_slug"]),
+                         (326227, "groomed-the-truth-behind-the-lie"))
+        self.assertEqual(found.await_args.args[2]["tmdb"], 330599)
+
+    async def test_an_answer_not_naming_that_services_id_is_not_written(self):
+        await self._row({"tmdb": 330599, "simkl": 2618044})
+        with patch("app.providers.trakt.detail.find_by_shared_id",
+                   AsyncMock(return_value={"imdb": "tt1"})):
+            self.assertEqual(await arrival.ask_for_missing_ids(self.user_id, SETTINGS), 0)
+        self.assertNotIn("imdb", await self._ids())
+
+    async def test_a_service_that_could_not_be_asked_writes_nothing(self):
+        await self._row({"tmdb": 330599, "simkl": 2618044})
+        with patch("app.providers.trakt.detail.find_by_shared_id",
+                   AsyncMock(side_effect=SourceUnavailable("down"))):
+            self.assertEqual(await arrival.ask_for_missing_ids(self.user_id, SETTINGS), 0)
+
+    async def test_a_row_holding_both_services_is_not_asked_about(self):
+        await self._row({"tmdb": 330599, "simkl": 2618044, "trakt": 326227})
+        found = AsyncMock(return_value={})
+        with patch("app.providers.trakt.detail.find_by_shared_id", found), \
+             patch("app.providers.simkl.by_id.find_by_shared_id", found):
+            await arrival.ask_for_missing_ids(self.user_id, SETTINGS)
+        found.assert_not_awaited()
+
+
+class WritingTheMissingPremiereTests(DistraktTestCase):
+    """A title added by hand gets its premiere written into the calendar for each
+    service that has the title and whose calendar does not draw it. MEASURED:
+    Groomed's only stored airing was Simkl's though Trakt lists the title, and
+    Trakt's calendar feed omits all three of its dated episodes."""
+
+    REC = {"media": Media.SHOW, "ids": {"tmdb": 330599, "trakt": 326227, "simkl": 2618044},
+           "season": 1, "title": "Groomed"}
+
+    async def test_each_service_not_yet_drawn_is_written_from_its_own_id(self):
+        fill = AsyncMock(return_value="show:tmdb:330599")
+        with patch("app.calendar.search.fill_one_gap", fill):
+            written = await arrival.write_missing_premieres(SETTINGS, dict(self.REC))
+        self.assertEqual(written, 2)
+        asked = {(call.kwargs["source"], call.kwargs["source_id"]) for call in fill.await_args_list}
+        self.assertEqual(asked, {("trakt", "326227"), ("simkl", "2618044")})
+        self.assertTrue(all(call.kwargs["endpoint_key"] == "shows/premieres"
+                            and call.kwargs["season"] == 1 for call in fill.await_args_list))
+
+    async def test_a_service_whose_calendar_already_draws_it_is_left_alone(self):
+        await store_calendar([a_calendar_record(
+            "simkl", {"tmdb": 330599, "simkl": 2618044})], endpoint="shows/premieres")
+        fill = AsyncMock(return_value="x")
+        with patch("app.calendar.search.fill_one_gap", fill):
+            await arrival.write_missing_premieres(SETTINGS, dict(self.REC))
+        self.assertEqual([call.kwargs["source"] for call in fill.await_args_list], ["trakt"])
+
+    async def test_a_service_the_title_has_no_id_for_is_not_asked(self):
+        fill = AsyncMock(return_value="x")
+        with patch("app.calendar.search.fill_one_gap", fill):
+            await arrival.write_missing_premieres(
+                SETTINGS, {**self.REC, "ids": {"tmdb": 330599, "simkl": 2618044}})
+        self.assertEqual([call.kwargs["source"] for call in fill.await_args_list], ["simkl"])
+
+    async def test_a_write_that_fails_costs_the_add_nothing(self):
+        with patch("app.calendar.search.fill_one_gap",
+                   AsyncMock(side_effect=SourceUnavailable("down"))):
+            self.assertEqual(await arrival.write_missing_premieres(SETTINGS, dict(self.REC)), 0)
+
+
 # ---------------------------------------------------------------------------
 # every way onto the tracker files what describe decided
 # ---------------------------------------------------------------------------
@@ -342,3 +434,38 @@ class EveryRouteFilesTheDescriptionTests(_FilesTheDescription, _RosterAddCase):
         self.assertEqual(resp.status_code, 200, resp.text[:300])
         self.assert_filed_as_described(asyncio.run(store.find_month_record(
             self.user_id, "2020-01", store.RecordKind.COMPLETED, KEY, 1)))
+
+
+class OnlyAHandAddWritesTheCalendarTests(_RosterAddCase):
+    """The three one-title adds write the missing premiere; nothing else does —
+    see arrival.write_missing_premieres for why the bulk paths do not."""
+
+    def _spy(self):
+        return patch("app.distrakt.arrival.write_missing_premieres", AsyncMock(return_value=0))
+
+    def test_the_search_add_the_prompt_and_a_stated_finish_all_write_it(self):
+        for name, act in (
+                ("search add", lambda: self._search_add()),
+                ("prompt", lambda: self._prompt_add()),
+                ("stated finish", lambda: self._post_completed())):
+            with self.subTest(path=name), self._spy() as spy:
+                act()
+                spy.assert_awaited()
+                self.assertEqual(spy.await_args.args[1]["season"], 1)
+
+    def _post_completed(self):
+        with self._services(), self._picked():
+            return self.client.post("/api/distrakt/add-completed?year=2020&month=1",
+                                    json={"q": "breaking bad", "i": 0, "season": 1})
+
+
+class TheBulkPathsWriteNoCalendarTests(DistraktTestCase):
+    async def test_the_import_the_rollover_and_the_backfill_do_not(self):
+        with patch("app.distrakt.arrival.write_missing_premieres", AsyncMock()) as spy:
+            await EveryPathOfItsOwnFilesTheDescriptionTests.test_the_calendar_import(self)
+            await EveryPathOfItsOwnFilesTheDescriptionTests.test_the_rollover(self)
+            await EveryPathOfItsOwnFilesTheDescriptionTests.test_the_backfill(self)
+        spy.assert_not_awaited()
+
+    FILING = EveryPathOfItsOwnFilesTheDescriptionTests.FILING
+    assert_filed_as_described = _FilesTheDescription.assert_filed_as_described

@@ -244,10 +244,36 @@ class TheQuestionsAboveTheListTests(MonthFragmentTestCase):
                          .split("</span>")[0])
         self.assertIn("This month stops recording that you finished it.", verdict)
 
+    def test_a_rewatch_offer_carries_its_sentence_and_can_be_put_off(self):
+        html = self._drawn({"rewatch_offers": [
+            {"key": str(KEY), "season": 1, "title": "Seen It",
+             "note": "finished in February 2026, and you've watched E04 again."}]})
+        self.assertIn("<strong>Seen It S01</strong> — finished in February 2026", html)
+        self.assertIn("/api/distrakt/rewatch-start", html)
+        self.assertIn("/api/distrakt/unknown-snooze", html)
+        self.assertIn("Not this month", html)
+
+    def test_a_finale_offer_records_a_completion(self):
+        html = self._drawn({"finale_offers": [
+            {"key": str(KEY), "season": 1, "title": "Seen It", "note": "n"}]})
+        self.assertIn("/api/distrakt/rewatch-complete", html)
+        self.assertIn("/api/distrakt/unknown-snooze", html)
+
+    def test_only_the_rewatch_offers_can_be_put_off(self):
+        """An occasional episode watched again is the question somebody may not
+        want every evening; the others are asked once per viewing anyway."""
+        for field in ("unknown_episodes", "given_up_episodes", "unbacked_verdicts"):
+            with self.subTest(field=field):
+                html = self._drawn({field: [
+                    {"key": str(KEY), "season": 1, "number": 1, "title": "T",
+                     "ids": {}, "note": "n"}]})
+                self.assertNotIn("/api/distrakt/unknown-snooze", html)
+
     def test_the_three_share_one_refusal(self):
         """Saying no is one statement whichever question it was — do not put this
-        season on my list, stop asking — so all three send the same dismissal."""
-        for field in ("unknown_episodes", "given_up_episodes", "unbacked_verdicts"):
+        season on my list, stop asking — so every one sends the same dismissal."""
+        for field in ("unknown_episodes", "given_up_episodes", "unbacked_verdicts",
+                      "rewatch_offers", "finale_offers"):
             with self.subTest(field=field):
                 html = self._drawn({field: [
                     {"key": str(KEY), "season": 1, "number": 1, "title": "T",
@@ -272,6 +298,8 @@ class EveryConvertedRouteRefusesTests(MonthFragmentTestCase):
         ("/api/distrakt/unknown-add", {"key": str(KEY), "season": 1}),
         ("/api/distrakt/unknown-resume", {"key": str(KEY), "season": 1}),
         ("/api/distrakt/verdict-readd", {"key": str(KEY), "season": 1}),
+        ("/api/distrakt/rewatch-start", {"key": str(KEY), "season": 1}),
+        ("/api/distrakt/rewatch-complete", {"key": str(KEY), "season": 1}),
         ("/api/distrakt/remove-movie", {"key": "movie:tmdb:7"}),
     )
     OTHER_ROUTES = (
@@ -280,6 +308,7 @@ class EveryConvertedRouteRefusesTests(MonthFragmentTestCase):
         # else's records at all, so naming a season somebody else tracks changes
         # nothing for them. It still owes the other two refusals.
         ("/api/distrakt/unknown-dismiss", {"key": str(KEY), "season": 1}),
+        ("/api/distrakt/unknown-snooze", {"key": str(KEY), "season": 1}),
         ("/api/distrakt/refresh", {}),
         ("/api/distrakt/import", {}),
         ("/api/distrakt/add", {"q": "x", "i": 0, "season": 1}),

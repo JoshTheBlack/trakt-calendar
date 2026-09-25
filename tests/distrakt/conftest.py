@@ -12,6 +12,10 @@ title or network stated. `describe` then keeps the path's own values, which is
 exactly what those tests were written against. A test ABOUT arrival replaces
 these with its own answers — the ports delegate through their modules, so
 patching the same names inside a test wins over this.
+
+AND A HAND ADD WRITES NO PREMIERE INTO THE CALENDAR unless a test says so:
+arrival.write_missing_premieres asks the service through the calendar search's
+fill_one_gap, which answers "" (nothing written) here by default.
 """
 from __future__ import annotations
 
@@ -26,6 +30,7 @@ _NOTHING_MORE = {
     "app.providers.simkl.by_id.find_by_shared_id": AsyncMock(return_value={}),
     "app.providers.trakt.detail.fetch_title_facts": AsyncMock(return_value=TitleFacts("", "")),
     "app.providers.simkl.detail.fetch_title_facts": AsyncMock(return_value=TitleFacts("", "")),
+    "app.calendar.search.fill_one_gap": AsyncMock(return_value=""),
 }
 
 

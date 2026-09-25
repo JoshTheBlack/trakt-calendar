@@ -594,6 +594,80 @@ class GoingBackToSomethingYouGaveUpOnTests(RolloverOverHttpTestCase):
         self.assertNotIn(703, self.listed_ids())
 
 
+class WatchingAFinishedSeasonAgainTests(RolloverOverHttpTestCase):
+    """A season the closing month recorded finished, watched again in the new
+    one. A middle episode offers a re-watch and the finale offers to record the
+    season completed again — and neither moves anything until it is answered."""
+
+    ROW = {"key": "show:tmdb:705", "season": 1}
+
+    def setUp(self):
+        super().setUp()
+        asyncio.run(distrakt_store.add_month_record(self.user_id, CLOSING, {
+            "ids": {"trakt": 705, "tmdb": 705, "slug": "slug-705"},
+            "season": 1, "title": "Seen It", "network": "Net",
+            "kind": distrakt_store.RecordKind.COMPLETED, "watched": 6, "total": 6,
+            "started_airing": True, "finished_airing": True,
+        }))
+
+    def ask(self, number: int) -> dict:
+        play = _play(705, 1, number, "Seen It")._replace(
+            watched_at="2026-08-01T12:00:00.000Z")
+        with fake_today(ON_THE_FIRST):
+            return self.get_month(OPENING, plays=[play])
+
+    def test_a_middle_episode_is_offered_as_a_rewatch_and_moves_nothing(self):
+        payload = self.ask(3)
+        self.assertEqual([(o["key"], o["title"]) for o in payload["rewatch_offers"]],
+                         [("show:tmdb:705", "Seen It")])
+        self.assertIn("finished in July 2026", payload["rewatch_offers"][0]["note"])
+        self.assertEqual(payload["finale_offers"], [])
+        self.assertNotIn(705, self.listed_ids(), "it went back on the list unasked")
+        self.assertIn(705, self.stored_ids(CLOSING), "the verdict was withdrawn")
+        self.assertEqual([c for c in self.season_calls if c[0] == 705], [],
+                         "offering a re-watch must cost no lookup")
+
+    def test_yes_starts_a_rewatch_counting_from_that_play(self):
+        self.ask(3)
+        with fake_today(ON_THE_FIRST):
+            self.post("/api/distrakt/rewatch-start", {**self.ROW, **_viewing(OPENING)})
+        listed = asyncio.run(distrakt_store.find_user_record(
+            self.user_id, ItemKey(Media.SHOW, "tmdb", "705"), 1))
+        self.assertIsNotNone(listed, "saying yes never put the season on the list")
+        self.assertEqual(listed["history_from"], "2026-08-01")
+        self.assertIn(705, self.stored_ids(CLOSING),
+                      "the earlier viewing's record went with it")
+
+    def test_the_finale_is_offered_as_a_completion_and_yes_records_one(self):
+        payload = self.ask(6)
+        self.assertEqual([o["key"] for o in payload["finale_offers"]], ["show:tmdb:705"])
+        self.assertIn("Record it as completed in August 2026 too?",
+                      payload["finale_offers"][0]["note"])
+        with fake_today(ON_THE_FIRST):
+            self.post("/api/distrakt/rewatch-complete", {**self.ROW, **_viewing(OPENING)})
+        self.assertEqual(self.kinds_on(OPENING).get(705),
+                         {distrakt_store.RecordKind.COMPLETED})
+        self.assertIn(705, self.stored_ids(CLOSING))
+        self.assertNotIn(705, self.listed_ids())
+
+    def test_a_middle_episode_cannot_be_recorded_as_a_completion(self):
+        self.ask(3)
+        with fake_today(ON_THE_FIRST), self.offline():
+            resp = self.client.post("/api/distrakt/rewatch-complete?year=2026&month=8",
+                                    json=self.ROW)
+        self.assertIn("toast err", resp.text)
+        self.assertNotIn(705, self.stored_ids(OPENING))
+
+    def test_not_this_month_puts_it_off_and_no_lets_the_next_play_ask(self):
+        self.ask(3)
+        resp = self.client.post("/api/distrakt/unknown-snooze", json=self.ROW)
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(self.ask(4)["rewatch_offers"], [],
+                         "a play in the month it was put off for asked anyway")
+        declined = asyncio.run(distrakt_store.dismissed_prompts(self.user_id))
+        self.assertEqual(declined[("show:tmdb:705", 1)][0], distrakt_store.DISMISSAL_MONTH)
+
+
 class MonthFreezesWhenItsDatePassesTests(RolloverOverHttpTestCase):
     """The month under way stays editable; once the calendar has passed it, it
     closes — whether or not any later month has been built or looked at.

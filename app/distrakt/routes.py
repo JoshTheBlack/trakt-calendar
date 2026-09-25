@@ -329,6 +329,7 @@ async def _add_to_past_month(request: Request, user_id, month_key: str, show: di
     # re-insert only the ones the doc handed over.
     await distrakt_store.set_month_closed(user_id, month_key)
     await arrival.register(user_id, [show])
+    await arrival.write_missing_premieres(settings, show)
     return await _month_answer(
         request, user_id, year, month, settings, message=message,
         point_at=((stored or {}).get("key") or "", int(show["season"])))
@@ -780,6 +781,49 @@ def _unknown_episode_rows(plays) -> list[dict]:
              "title": play.title, "ids": dict(play.ids or {})} for play in plays]
 
 
+def _month_label(month_key: str) -> str:
+    """"2026-02" as "February 2026", for a sentence."""
+    year, month = (int(part) for part in str(month_key).split("-")[:2])
+    return f"{_calendar.month_name[month]} {year}"
+
+
+def _rewatch_rows(offers, state: dict, tz) -> dict[str, list[dict]]:
+    """The re-watch offers in the flat shape the page's question row reads, under
+    the payload field each kind is drawn from.
+
+    THE SENTENCE NAMES EVERY EPISODE WATCHED AGAIN SINCE THE PLAY THAT RAISED IT,
+    not only that one. One offer per season is the whole point — four episodes
+    watched in an evening are one question — so the row says it covers four,
+    read from the watch state already in hand rather than stored beside the
+    question as a second copy of the viewing.
+
+    NO IDS TRAVEL, like the unbacked verdict's row: the answer acts on a record
+    that exists, and a caller handing its own in could only aim it elsewhere.
+    """
+    rows: dict[str, list[dict]] = {"rewatch_offers": [], "finale_offers": []}
+    for offer in offers:
+        play = offer.play
+        day = watch_history.local_day(play.watched_at, tz)
+        finished = _month_label(offer.month)
+        if offer.finale:
+            note = (f"finished in {finished}, and you watched its finale again on "
+                    f"{watch_history.day_label(day)}. Record it as completed in "
+                    f"{_month_label(day[:7])} too?")
+        else:
+            since = watch_history.episodes_watched_since(
+                state, play.key, play.season, day, tz) or [play.number]
+            watched = (f"E{since[0]:02d} again on {watch_history.day_label(day)}"
+                       if len(since) == 1 else
+                       f"{len(since)} episodes of it again since "
+                       f"{watch_history.day_label(day)}")
+            note = (f"finished in {finished}, and you've watched {watched}. "
+                    f"Start a re-watch from that day?")
+        rows["finale_offers" if offer.finale else "rewatch_offers"].append({
+            "key": str(play.key), "season": int(play.season),
+            "title": play.title, "note": note})
+    return rows
+
+
 def _unbacked_note(question: lifecycle.UnbackedVerdict) -> str:
     """The sentence a settled row nothing stands behind any more is offered with.
 
@@ -909,7 +953,7 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     completed_lookup: dict = {}
     dates_lookup: dict = {}
     movies: list[dict] = []
-    questions = lifecycle.HistoryQuestions([], [])
+    questions = lifecycle.HistoryQuestions([], [], [])
     unreadable: list[str] = []
     if ports:
         (state, watched_lookup, completed_lookup, dates_lookup, movies, plays,
@@ -934,9 +978,11 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
             # when there is nothing new to fold in.
             if plays:
                 questions = await lifecycle.reconcile_history(
-                    user_id, plays, month=month_key, look_up=_season_lookup(settings))
+                    user_id, plays, month=month_key, look_up=_season_lookup(settings),
+                    tz=watch_history.viewer_tz(settings))
             else:
-                questions = await lifecycle.standing_questions(user_id, month=month_key)
+                questions = await lifecycle.standing_questions(
+                    user_id, month=month_key, tz=watch_history.viewer_tz(settings))
             # The viewer's list was read BEFORE the history was pulled, so a
             # season that has just come back onto it is not in it. Read again
             # rather than render this load against the state before its own
@@ -1070,6 +1116,9 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
         # history pull produced them.
         "unknown_episodes": _unknown_episode_rows(questions.unknown),
         "given_up_episodes": _unknown_episode_rows(questions.given_up),
+        # A season an earlier month finished, watched again: one offer per season
+        # however many episodes the pull carried, split by which offer it is.
+        **_rewatch_rows(questions.rewatched, state, watch_history.viewer_tz(settings)),
         # The third thing only the viewer can settle, and the only one of the
         # three that is about a row already on the page: a verdict this month
         # reached that the services have stopped backing. Present only on the
@@ -1191,7 +1240,7 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
                                           settings=settings), 200
 
 
-# THE THREE QUESTIONS THE PAGE CAN ASK, and what differs between them. They read
+# THE QUESTIONS THE PAGE CAN ASK, and what differs between them. They read
 # the same way and are answered the same way — so they share one row
 # (templates/_distrakt_rows.html's `ask_row`) and one refusal — and only the
 # sentence, the tick's title and the route the tick posts to are their own.
@@ -1222,21 +1271,40 @@ _ASK_KINDS = {
         "confirm": ("Work this season out again from what your accounts say now? "
                     "This month stops recording that you finished it."),
     },
+    # THE RE-WATCH PAIR, and the only two that can also be put off for the rest of
+    # the month: an episode watched again for old times' sake is the one question
+    # somebody may reasonably not want to answer every evening it happens.
+    "rewatch": {
+        "sentence": "",
+        "yes_title": "Put this season back on your list, counting from that day",
+        "yes_url": "/api/distrakt/rewatch-start",
+        "confirm": "",
+        "snooze": True,
+    },
+    "finale_again": {
+        "sentence": "",
+        "yes_title": "Record this season as completed in that month too",
+        "yes_url": "/api/distrakt/rewatch-complete",
+        "confirm": "",
+        "snooze": True,
+    },
 }
 
 # The order the questions are asked in: the ones nothing knows about first — a
 # title the tracker has never heard of is a bigger gap than one it holds a
-# verdict on, and a verdict that has lost its backing is the smallest of the
-# three, because the row it is about is on the page just below saying exactly
-# what it has always said.
+# verdict on, and a verdict that has lost its backing is the smallest of them,
+# because the row it is about is on the page just below saying exactly what it
+# has always said. A re-watch sits between: its season is known, and the offers
+# are about viewing the page does not otherwise show.
 _ASK_ORDER = (("unknown", "unknown_episodes"), ("given_up", "given_up_episodes"),
+              ("finale_again", "finale_offers"), ("rewatch", "rewatch_offers"),
               ("unbacked", "unbacked_verdicts"))
 
 
 def _ask_rows(payload: dict) -> list[dict]:
     """Every outstanding question in the payload, as the row template reads them:
     what the history event said, plus this kind's own sentence and verb."""
-    return [{**_ASK_KINDS[kind], "kind": kind, **ask}
+    return [{"snooze": False, **_ASK_KINDS[kind], "kind": kind, **ask}
             for kind, field in _ASK_ORDER for ask in payload.get(field) or []]
 
 
@@ -1387,7 +1455,7 @@ def _rewatch_answer(request: Request, ask: dict, resubmit_url: str,
     the question is about an add that has not happened.
     """
     restart = dict(ask.get("restart") or {})
-    episodes = [{**play, "label": _day_label(play.get("day"))}
+    episodes = [{**play, "label": watch_history.day_label(play.get("day"))}
                 for play in restart.get("episodes") or []]
     if episodes:
         after_day = _day_after(restart["episodes"][-1]["day"])
@@ -1395,18 +1463,18 @@ def _rewatch_answer(request: Request, ask: dict, resubmit_url: str,
                    "first_day": restart["episodes"][0]["day"],
                    "first_day_label": episodes[0]["label"],
                    "after_day": after_day,
-                   "after_day_label": _day_label(after_day)}
+                   "after_day_label": watch_history.day_label(after_day)}
     return templates.TemplateResponse(request, "_distrakt_rewatch_answer.html", {
         "request": request,
         "prompt": {**ask, "restart": restart,
-                   "completed_on_label": _day_label(ask.get("completed_on")),
+                   "completed_on_label": watch_history.day_label(ask.get("completed_on")),
                    # EVERY DAY THIS QUESTION CAN SHOW IS SPELLED HERE, including
                    # the one the submit button opens naming. That button used to
                    # be drawn saying "start a fresh run" over a field that
                    # already held a day, correcting itself only once somebody
                    # touched the field — so the prompt arrived naming one answer
                    # and offering another.
-                   "suggested_from_label": _day_label(ask.get("suggested_from")),
+                   "suggested_from_label": watch_history.day_label(ask.get("suggested_from")),
                    # The button's sentence, composed by the same function that
                    # answers /distrakt/fragments/day-label as the field is typed
                    # into — so the day it opens naming and the day it renames
@@ -1427,33 +1495,15 @@ def _run_label(iso) -> str:
     153: this returns "5 September 2026" and the browser returned "September 5,
     2026" on a en-US locale, "5. September 2026" on de-DE, and matched only on
     en-GB. So the button was drawn naming a day one way and re-spelled it the
-    other the moment the field was touched — the same class of fault _day_label
+    other the moment the field was touched — the same class of fault watch_history.day_label
     was written to end, left half-done.
 
     THE EMPTY DAY IS PART OF THE SENTENCE, not a separate attribute on the button:
     "which run" has no answer when the field is empty, and saying that is this
     function's job like any other day.
     """
-    day = _day_label(iso)
+    day = watch_history.day_label(iso)
     return f"Start the run from {day}" if day else "Start a fresh run"
-
-
-def _day_label(iso) -> str:
-    """A stored day as a person reads one — "5 September 2026", or "" for
-    anything unreadable.
-
-    THE SERVER SPELLS IT because the server already holds the day. It was
-    `toLocaleDateString` in the browser, which is one more thing that had to
-    exist so a date could be shown; nothing on this page is localized per
-    viewer, so there was never a viewer-specific answer it was buying.
-    """
-    try:
-        day = date.fromisoformat(str(iso)[:10])
-    except (TypeError, ValueError):
-        return ""
-    # Built rather than strftime`d: the no-leading-zero day is "%-d" on Linux and
-    # "%#d" on Windows, and this app runs on both.
-    return f"{day.day} {day.strftime('%B')} {day.year}"
 
 
 def _and_the_month(response: Response) -> Response:
@@ -1646,7 +1696,7 @@ async def day_label_fragment(request: Request):
     answers for the empty case too, so this needs no branch of its own.
 
     NOTHING OF THE QUERY REACHES THE ANSWER, which is why this returns a bare
-    string rather than a template. _day_label parses the parameter as a date and
+    string rather than a template. watch_history.day_label parses the parameter as a date and
     answers "" for anything it cannot, so the sentence is built from a `date`
     object and two literals — a value carrying markup gets "Start a fresh run".
     tests/distrakt/test_rewatch.py holds that.
@@ -2642,6 +2692,7 @@ async def api_distrakt_add(request: Request):
     else:
         await lifecycle.follow(user_id, {**show, **detail, "season": show["season"]})
     await arrival.register(user_id, [show])
+    await arrival.write_missing_premieres(settings, show)
     # THE DECISION, AS A FLOOR, WRITTEN BEFORE THE MONTH IS RECOMPUTED. A
     # `history_from` in the body says "this pass starts here": the plays before
     # it belong to the previous run and are not counted, which is what makes a
@@ -2711,8 +2762,8 @@ async def _completed_before_add(user_id: int, key, season: int,
     how long a gap has to be, and that is what is offered when it finds one.
 
     THE TOTAL IS REQUIRED AND THAT IS THE POINT OF THE ARGUMENT.
-    `season_completed_map` answers "when was the last episode of this season
-    watched", which is a different question and says so in its own docstring: it
+    `season_completed_map` answers "when was this season's finale watched", which
+    is a different question and says so in its own docstring: it
     dates a season somebody is two episodes into just as readily as a finished
     one. Asking it alone made the re-watch question appear on any season with any
     history at all, which would interrogate a viewer about a run they are in the
@@ -2758,9 +2809,9 @@ async def _completed_before_add(user_id: int, key, season: int,
     if not restart:
         return finished, _day_after(finished), {}
     # THE DAY THE PREVIOUS RUN ENDED, WHERE IT IS KNOWN, because `finished` is
-    # the LATEST play and for a viewer mid-restart that is an episode of the new
-    # run — so the page would tell them they finished the season on a day they
-    # watched episode one.
+    # the finale's LATEST play and for a viewer who has re-watched as far as the
+    # finale that is the new run's — so the page would tell them they finished the
+    # season on the day they finished it the second time.
     return (restart.get("finished_on") or finished), restart["began"], restart
 
 
@@ -3120,6 +3171,7 @@ async def api_distrakt_unknown_add(request: Request):
     # The viewer's own emoji map is keyed by network name, so a network nothing
     # registered draws nothing — the same call every way onto the tracker makes.
     await arrival.register(user_id, [record])
+    await arrival.write_missing_premieres(settings, {**record, "season": season})
     # ANSWERED, so it stops being asked. Closing it here rather than leaving
     # standing_questions to notice the season is now listed keeps the answer and
     # its effect in one place; that check is the safety net, not the mechanism.
@@ -3301,6 +3353,127 @@ async def api_distrakt_unknown_dismiss(request: Request):
     # an empty answer removes it; a refusal is a line out of band and leaves the
     # question standing rather than losing it to a write that never happened.
     return Response(status_code=200)
+
+
+@guard.post("/api/distrakt/unknown-snooze", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_unknown_snooze(request: Request):
+    """Put a question raised by a play off until the month turns.
+
+    THE SAME REFUSAL AS ✗ WITH A DIFFERENT END. ✗ covers the plays it was made
+    about and asks again about the next one; this covers every play in the
+    viewer's month it was made in — see store.DISMISSAL_MONTH — which is what
+    somebody means by "not this month" about an episode they keep watching again.
+
+    ONLY A QUESTION A PLAY RAISED, read from the store as unknown-dismiss reads it.
+    An unbacked verdict is a standing condition rather than a viewing, so a month
+    has nothing to lapse against and it is refused rather than written as some
+    other kind.
+    """
+    user_id = await _distrakt_user_id(request)
+    data = await authz.json_body(request)
+    try:
+        key, season = _row_target(data)
+    except RequestError as exc:
+        return _month_refusal(request, str(exc))
+    if await _outstanding_play(user_id, key, season) is None:
+        return _month_refusal(request, "That question is no longer outstanding.")
+    await distrakt_store.dismiss_prompt(user_id, key, season,
+                                        distrakt_store.DISMISSAL_MONTH)
+    await distrakt_store.close_prompt(user_id, key, season)
+    return Response(status_code=200)
+
+
+async def _rewatch_target(user_id: int, key: ItemKey, season: int
+                          ) -> tuple[dict, lifecycle.Placement] | str:
+    """`(the play that raised a re-watch offer, the finished season it is about)`,
+    or the sentence refusing it.
+
+    BOTH HALVES ARE READ BACK, NEITHER IS TAKEN FROM THE REQUEST: the play from
+    the open question (so its day is the one the offer named) and the verdict
+    from wherever it stands — which has to be an earlier month's COMPLETED record,
+    the only thing a re-watch offer is ever raised about.
+    """
+    asked = await _outstanding_play(user_id, key, season)
+    if asked is None:
+        return "That question is no longer outstanding."
+    month_key = _this_month()
+    placed = await lifecycle.find_shown_season(user_id, key, season, month=month_key)
+    if (placed is None or placed.month is None or placed.month >= month_key
+            or placed.record["kind"] != distrakt_store.RecordKind.COMPLETED):
+        return "That season isn't recorded as finished in an earlier month."
+    return asked, placed
+
+
+@guard.post("/api/distrakt/rewatch-start", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_rewatch_start(request: Request):
+    """Say yes to a re-watch: the season goes on the viewer's list counting from
+    the day of the play that raised the offer.
+
+    THE EARLIER MONTH KEEPS ITS RECORD. That viewing happened and was finished;
+    this is a second one beside it — the same shape a re-watch added by search
+    takes (api_distrakt_add, with a floor), and the same two writes: the roster
+    row, then the floor, both before the month is recomputed so the recompute
+    counts only this run.
+
+    THE FLOOR IS THE PLAY'S OWN DAY, in the viewer's zone, and not a day the page
+    sends. The offer named it, and the question's stored play is where it lives.
+    """
+    user_id = await _distrakt_user_id(request)
+    data = await authz.json_body(request)
+    try:
+        key, season = _row_target(data)
+    except RequestError as exc:
+        return _month_refusal(request, str(exc))
+    target = await _rewatch_target(user_id, key, season)
+    if isinstance(target, str):
+        return _month_refusal(request, target)
+    asked, placed = target
+    settings = await viewer.settings_for_user(user_id)
+    floor = watch_history.local_day(asked["watched_at"], watch_history.viewer_tz(settings))
+    if not floor:
+        return _month_refusal(request, "That play doesn't say when it was watched.")
+    await distrakt_store.clear_prompt_dismissal(user_id, key, season)
+    await lifecycle.follow(user_id, {**placed.record, "season": season, "watched": 0,
+                                     "abandoned_form": None})
+    await distrakt_store.set_history_from(user_id, key, season, floor)
+    await distrakt_store.close_prompt(user_id, key, season)
+    year, month = _viewed_month(request)
+    return await _month_answer(request, user_id, year, month, settings,
+                               point_at=(key, season), message="Re-watch started")
+
+
+@guard.post("/api/distrakt/rewatch-complete", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_rewatch_complete(request: Request):
+    """Say yes to a finale watched again: the season is recorded completed in the
+    month that play fell in, beside the earlier month's record.
+
+    ONLY FOR A PLAY OF THE FINALE, checked against the verdict rather than taken
+    from which button was pressed — the offer is only drawn for one, and this
+    refuses anything else rather than filing a season as finished on the strength
+    of one of its middle episodes.
+    """
+    user_id = await _distrakt_user_id(request)
+    data = await authz.json_body(request)
+    try:
+        key, season = _row_target(data)
+    except RequestError as exc:
+        return _month_refusal(request, str(exc))
+    target = await _rewatch_target(user_id, key, season)
+    if isinstance(target, str):
+        return _month_refusal(request, target)
+    asked, placed = target
+    total = int(placed.record.get("total") or 0)
+    if not total or int(asked["number"]) != total:
+        return _month_refusal(request, "That play wasn't the season's finale.")
+    settings = await viewer.settings_for_user(user_id)
+    day = watch_history.local_day(asked["watched_at"], watch_history.viewer_tz(settings))
+    if not day:
+        return _month_refusal(request, "That play doesn't say when it was watched.")
+    await _file_finished(user_id, day[:7], {**placed.record, "season": season}, placed.record)
+    await distrakt_store.close_prompt(user_id, key, season)
+    year, month = _viewed_month(request)
+    return await _month_answer(request, user_id, year, month, settings,
+                               point_at=(key, season), message="Recorded as completed")
 
 
 async def _live_form_source(settings, record: dict, season: int) -> dict:

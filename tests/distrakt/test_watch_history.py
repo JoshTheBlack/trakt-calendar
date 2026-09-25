@@ -195,6 +195,33 @@ class PureStateTests(unittest.TestCase):
         })}}
         self.assertEqual(wh.season_completed_map(state, ZoneInfo("UTC")), {(SHOW(101), 1): "2026-08-06"})
 
+    def test_an_episode_watched_again_later_does_not_move_the_finish(self):
+        """The finale's day, not the latest play's: a finale on 2 February and
+        episode four again on 5 July is a season finished in February. Measured
+        on a real account, where this alone held six seasons on the wrong month."""
+        state = {"shows": {SHOW(101): _show(101, {"1": {
+            "3": "2026-01-30T00:00:00Z", "4": "2026-07-05T20:00:00Z",
+            "5": "2026-02-02T21:00:00Z"}})}}
+        self.assertEqual(wh.season_completed_map(state, ZoneInfo("UTC")),
+                         {(SHOW(101), 1): "2026-02-02"})
+
+    def test_the_finale_is_the_highest_episode_any_service_saw(self):
+        """Dated by whichever service's play of it was latest, the rule the
+        latest-of-everything reading had across services."""
+        state = {"shows": {SHOW(101): _show(101, {"1": {
+            "trakt": {"1": "2026-03-01T00:00:00Z", "2": "2026-03-08T00:00:00Z"},
+            "simkl": {"1": "2026-06-01T00:00:00Z", "2": "2026-03-09T00:00:00Z"}}})}}
+        self.assertEqual(wh.season_completed_map(state, ZoneInfo("UTC")),
+                         {(SHOW(101), 1): "2026-03-09"})
+
+    def test_an_undated_finale_falls_back_to_the_latest_play(self):
+        """The most the history can say, and what every season was dated by
+        before; guessing nothing would leave the season on the list for ever."""
+        state = {"shows": {SHOW(101): _show(101, {"1": {
+            "1": "2026-03-01T00:00:00Z", "2": "2026-03-08T00:00:00Z", "3": ""}})}}
+        self.assertEqual(wh.season_completed_map(state, ZoneInfo("UTC")),
+                         {(SHOW(101), 1): "2026-03-08"})
+
     def test_season_completed_map_says_nothing_about_completeness(self):
         """It reports WHEN, not WHETHER: the episode total lives on the show
         record, so the caller decides (see compute_live_shows)."""

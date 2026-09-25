@@ -190,8 +190,10 @@ ON CONFLICT(source, media, source_id) DO UPDATE SET
 # column would need the same `CASE WHEN enriched = 1` its neighbours carry.
 
 # `from_search` IS THE LAST COLUMN AND THE CALLER STATES IT. A fill writes 0 and
-# the calendar search writes 1, which is what lets the fill's delete spare rows
-# it would never put back — see store_loose_airings and MIGRATION_37. Because
+# every airing NO FEED OFFERED writes 1 — a calendar search followed, and a title
+# added to somebody's tracker (app/distrakt/arrival.py) — which is what lets the
+# fill's delete spare rows it would never put back. The name is narrower than
+# the meaning, "not from a feed"; see store_loose_airings and MIGRATION_37. Because
 # this is INSERT OR REPLACE on the airing's natural key, a feed row for the same
 # airing overwrites a searched one and returns it to 0, so the exemption ends the
 # moment the service starts listing the title itself.
@@ -720,6 +722,22 @@ async def group_identity(title_key: str) -> tuple[str, dict[str, str], str] | No
             merged.setdefault(key, value)
         title = title or str(row["title"] or "")
     return str(rows[0]["media"]), collect_ids(merged), title
+
+
+async def sources_airing(endpoint_key: str, title_key: str, season: int | None) -> set[str]:
+    """The sources with a stored airing of `title_key` (that season, or with no
+    season for a film) on `endpoint_key` — which services' calendars already
+    draw it there. A keyed read on the airings' own index."""
+    if season is None:
+        rows = await db.fetch_all(
+            "SELECT DISTINCT source FROM calendar_airings "
+            "WHERE endpoint = ? AND title_key = ?", (endpoint_key, str(title_key)))
+    else:
+        rows = await db.fetch_all(
+            "SELECT DISTINCT source FROM calendar_airings "
+            "WHERE endpoint = ? AND title_key = ? AND season = ?",
+            (endpoint_key, str(title_key), int(season)))
+    return {str(row["source"]) for row in rows}
 
 
 @dataclass(frozen=True)

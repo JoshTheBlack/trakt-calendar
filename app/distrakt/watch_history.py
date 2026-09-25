@@ -120,6 +120,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import NamedTuple
@@ -711,7 +712,7 @@ def _apply_episode(state: dict, key, season, number, watched_at=None,
     titles carry counts.
 
     Keeps the LATEST date seen for an episode, the same rule _apply_movie uses:
-    re-watching a season's last episode this month is finishing it this month.
+    re-watching a season's finale this month is finishing it this month.
     A play with no date never overwrites one that has a date.
     """
     if key is None or season is None or number is None:
@@ -813,6 +814,13 @@ def _episode_play(event: dict) -> EpisodePlay | None:
                        str(show.get("title") or ""),
                        collect_ids(show.get("ids") or {}),
                        str(event.get("watched_at") or ""))
+
+
+def plays_in(events) -> list[EpisodePlay]:
+    """Every episode play among raw history events, in the order given — the same
+    reading a sync makes of what it folds in, for a caller holding events of its
+    own (the backfill's sweep)."""
+    return [play for event in events or () if (play := _episode_play(event)) is not None]
 
 
 def episode_plays(state: dict) -> list[EpisodePlay]:
@@ -1050,8 +1058,8 @@ def season_dates_by_source(state: dict) -> dict[tuple[str, int], dict[str, str]]
 
     A SECOND READER RATHER THAN A WIDER season_completed_map, because the two
     answer different questions. That one asks "when was this season finished",
-    which has one answer whichever service saw the last episode go by, and it
-    takes the newest across all of them. This one asks "what does each service
+    which has one answer whichever service saw the finale go by, and it takes
+    the newest across all of them. This one asks "what does each service
     say", which is what a row has to show when it is naming services — the same
     reason watched_map is a dict per season rather than a number.
 
@@ -1141,11 +1149,11 @@ def restart_details(state: dict, key, season: int) -> dict:
     is the same reading `restart_day` already does, so nothing new is inferred.
 
     `finished_on` IS THE END OF THE PREVIOUS RUN, NOT THE LATEST PLAY, and that
-    distinction is the bug this fixes on the way past. `season_completed_map`
-    answers "when was the last episode of this season watched", which for anybody
-    mid-restart is a play from the NEW run — so the modal said "you finished this
-    on 30 April 2023" about a day the viewer had watched episode one. The last
-    play BEFORE the turn-back is the day the old run actually ended.
+    distinction is the bug this fixes on the way past. The latest play of the
+    season is, for anybody mid-restart, a play from the NEW run — so the modal
+    said "you finished this on 30 April 2023" about a day the viewer had watched
+    episode one. The last play BEFORE the turn-back is the day the old run
+    actually ended.
 
     READ FROM THE SERVICE THAT SAW THE RESTART. Two services can date the same
     episodes differently, and the episode list has to come from the same sequence
@@ -1230,9 +1238,82 @@ def local_day(when, tz: ZoneInfo) -> str:
     return stamp.astimezone(tz).date().isoformat()
 
 
+def day_label(iso) -> str:
+    """A stored day as a person reads one — "5 September 2026", or "" for
+    anything unreadable.
+
+    THE SERVER SPELLS IT because the server already holds the day. It was
+    `toLocaleDateString` in the browser, which is one more thing that had to
+    exist so a date could be shown; nothing on this page is localized per
+    viewer, so there was never a viewer-specific answer it was buying. Kept
+    beside local_day because the two are one journey — a moment somebody else
+    recorded, to the viewer's day, to words — and the tracker's questions and the
+    backfill's confirmation both spell days with it.
+    """
+    try:
+        day = date.fromisoformat(str(iso)[:10])
+    except (TypeError, ValueError):
+        return ""
+    # Built rather than strftime`d: the no-leading-zero day is "%-d" on Linux and
+    # "%#d" on Windows, and this app runs on both.
+    return f"{day.day} {day.strftime('%B')} {day.year}"
+
+
+def finale_day(episodes_by_source: Mapping[str, Mapping], tz: ZoneInfo) -> str:
+    """The day a season's FINALE was watched, from {source: {episode: watched_at}},
+    or "" when nothing in it is dated.
+
+    THE FINALE, NOT THE LATEST PLAY, and the difference is somebody re-watching one
+    episode. A season is finished when its last episode is seen; an episode watched
+    again months later is a re-watch and says nothing about when that was. Dated by
+    the latest play of ANY episode, one replayed episode dragged a season finished
+    in February onto July's record — measured on a real account, where it was the
+    only thing holding six seasons on the wrong month.
+
+    THE FINALE IS THE HIGHEST EPISODE ANY SERVICE HAS SEEN. A caller asking this
+    has already established the season is finished, so every episode has been seen
+    and the highest of them is the last one — which needs no episode total, and
+    follows a season that grew to its new last episode without being told.
+
+    THE LATEST DAY ANY SOURCE GIVES THE FINALE, for the reason the old rule took the
+    latest of everything: which service saw it go by does not change when it was
+    seen. A finale no service dated falls back to the latest play of the season,
+    which is the most this history can say and what every season was dated by
+    before.
+
+    One date per episode is all any service keeps, so a finale watched AGAIN
+    carries the replay's day. The watch history cannot tell that apart from a
+    first viewing; the history backfill, which reads every play, can — see
+    backfill.survey.
+    """
+    dated: dict[int, str] = {}
+    for episodes in episodes_by_source.values():
+        for number, when in (episodes or {}).items():
+            day = local_day(when, tz) if when else ""
+            if day and day > dated.get(int(number), ""):
+                dated[int(number)] = day
+    if not dated:
+        return ""
+    watched = {int(number) for episodes in episodes_by_source.values()
+               for number in (episodes or {})}
+    return dated.get(max(watched)) or max(dated.values())
+
+
+def episodes_watched_since(state: dict, key, season: int, day: str,
+                           tz: ZoneInfo) -> list[int]:
+    """The episodes of one season whose latest play, by any service, falls on or
+    after `day` — what a re-watch offer names when it covers more than the one
+    play that raised it."""
+    entry = (state.get("shows") or {}).get(str(key)) or {}
+    slots = _seasons_by_source(entry).get(str(season)) or {}
+    return sorted({int(number) for episodes in slots.values()
+                   for number, when in (episodes or {}).items()
+                   if when and local_day(when, tz) >= day})
+
+
 def season_completed_map(state: dict, tz: ZoneInfo) -> dict[tuple[str, int], str]:
-    """{(item key, season): 'YYYY-MM-DD'} — the day the season's LAST episode was
-    watched, which is the day it was finished.
+    """{(item key, season): 'YYYY-MM-DD'} — the day the season's finale was
+    watched, which is the day it was finished (see finale_day).
 
     Says nothing about whether the season is actually complete: that needs the
     episode total, which lives on the show record, so the caller decides (see
@@ -1248,13 +1329,9 @@ def season_completed_map(state: dict, tz: ZoneInfo) -> dict[tuple[str, int], str
     out: dict[tuple[str, int], str] = {}
     for key, entry in (state.get("shows") or {}).items():
         for season_s, slots in _seasons_by_source(entry).items():
-            # THE LATEST DAY ANY SOURCE REPORTED. Which service saw the last
-            # episode go by does not change the day it was seen, and a season
-            # finished in July is July's whichever of them said so.
-            days = [d for eps in slots.values() for w in eps.values() if w
-                    for d in (local_day(w, tz),) if d]
-            if days:
-                out[(key, int(season_s))] = max(days)
+            day = finale_day(slots, tz)
+            if day:
+                out[(key, int(season_s))] = day
     return out
 
 
@@ -2308,9 +2385,12 @@ async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: b
     with span("wh.fill_names"):
         await naming.fill_from_calendar(user_id, settings)
     # WHAT DISK COULD NOT ANSWER IS ASKED, a title at a time and at most daily:
-    # a network no stored calendar names, and a frozen month's films stored
-    # before films had keys. Both cost nothing once there is nothing left.
+    # a service id no stored calendar record names, then a network (after the
+    # ids, since a learned id can change which service describes the title), and
+    # a frozen month's films stored before films had keys. Each costs nothing
+    # once there is nothing left, and a day's answers are served from cache.
     with span("wh.ask_what_disk_cannot"):
+        await arrival.ask_for_missing_ids(user_id, settings)
         await arrival.ask_for_missing_networks(user_id, settings)
         await film_snapshots.repair(user_id, settings)
     # THE VIEWER'S OWN FLOOR, APPLIED HERE AND NOWHERE ELSE. A season somebody
