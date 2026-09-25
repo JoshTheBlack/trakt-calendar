@@ -138,9 +138,9 @@ _POOL_LIMIT = 8
 # requests per tracked show all at once; the connection pool caps how many are
 # in flight but not how fast they leave, so hundreds can go out in the same few
 # milliseconds — well over the 1000-per-5-minute average — before any 429 comes
-# back to self-correct. This gate paces that burst without serializing it, sized
-# well under _POOL_LIMIT. The retry/backoff loop is the real defense against the
-# 5-minute window; this just keeps the opening spike from tripping it needlessly.
+# back to self-correct. This gate bounds how many are IN FLIGHT, sized well under
+# _POOL_LIMIT; it is not a rate, and GET_PACER below is what keeps a large job
+# inside the 5-minute window. The retry/backoff loop is the last resort.
 # IT LIVES ON THE POOL because it is the same kind of fact — how hard may this
 # app lean on this one service — and declaring it here keeps it beside the
 # connection limit it is deliberately sized under. Trakt's QUOTA is Trakt's
@@ -149,6 +149,20 @@ _SEND_CONCURRENCY = 4
 
 POOL = http_pool.Pool("trakt", max_connections=_POOL_LIMIT, timeout=30,
                       concurrency=_SEND_CONCURRENCY)
+
+# AND THE RATE, WHICH THE GATE ABOVE IS NOT. Trakt publishes its read quota as
+# 1,000 GETs every five minutes (AUTHED_API_GET_LIMIT; the unauthenticated one is
+# the same number per IP). Four in flight is twenty to forty a second at ordinary
+# latencies, so a large enough job spends the whole quota in under a minute and
+# is then refused: MEASURED, a tracker load that built a month of 527 premieres
+# sent over a thousand reads in a burst and ran into 429s part-way. Paced at 900
+# — a tenth of headroom for the reads this instance makes under other people's
+# tokens and for the clock not being Trakt's — with 150 of them free up front, so
+# a page's few dozen reads never wait and a bulk job settles to 2.5 a second.
+# ONE BUCKET FOR EVERY TRAKT READ, whichever token it carries: the quota is per
+# user, but a shared bucket is the conservative reading and nothing this app
+# does needs more than one account's worth of Trakt at once.
+GET_PACER = http_pool.Pacer("trakt", limit=900, period=300, burst=150)
 
 
 def shared_client() -> httpx.AsyncClient:
@@ -245,11 +259,25 @@ async def send(client: httpx.AsyncClient, method: str, url: str, *,
             if remaining <= 0:
                 raise TraktRateLimitError(
                     f"Trakt rate limit not cleared within {_SEND_MAX_ELAPSED:.0f}s for {path}.", 429)
+            method_up = method.upper()
+            if method_up == "GET":
+                # PACED AGAINST THE QUOTA BEFORE IT LEAVES (see GET_PACER), inside
+                # this call's own budget: a read whose turn is further off than
+                # the budget has left is refused now, as a rate limit, rather
+                # than holding a page behind a queue it cannot see.
+                wait = GET_PACER.claim(remaining)
+                if wait is None:
+                    logger.warning("Trakt reads are queued past the %.0fs budget — "
+                                   "not sending %s", _SEND_MAX_ELAPSED, path)
+                    raise TraktRateLimitError(
+                        f"Trakt's read quota is spoken for; {path} was not sent.", 429)
+                if wait:
+                    await asyncio.sleep(wait)
+                    remaining = _SEND_MAX_ELAPSED - (_time.monotonic() - start)
             attempt_timeout = remaining if timeout is None else min(timeout, remaining)
             # Dispatch to get/post (the shape every call site used before this
             # sender existed) rather than client.request, so the per-attempt timeout
             # bounds the request without changing how the call is issued.
-            method_up = method.upper()
             if method_up == "GET":
                 resp = await client.get(url, headers=headers, timeout=attempt_timeout)
             elif method_up == "POST":

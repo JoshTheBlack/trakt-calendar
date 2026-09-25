@@ -146,8 +146,10 @@ class SendRetryTests(unittest.IsolatedAsyncioTestCase):
         # the loop stops on the elapsed check, not after three full attempts.
         sleep = RecordingSleep()
         client = FakeClient([_resp(429), _resp(429), _resp(200)])
-        # monotonic() calls: start, iter1 remaining, iter1 post-429 check, iter2 remaining.
-        clock = iter([0.0, 0.0, 0.0, 100.0])
+        # monotonic() calls: start, iter1 remaining, the read pacer's own clock
+        # (the event loop's time IS time.monotonic), iter1 post-429 check, iter2
+        # remaining.
+        clock = iter([0.0, 0.0, 0.0, 0.0, 100.0])
         with _patch_sleep(sleep), patch("app.providers.trakt.transport._time.monotonic", lambda: next(clock)):
             with self.assertRaises(TraktRateLimitError):
                 await transport.send(client, "GET", transport.API_BASE + "/x")
@@ -192,6 +194,89 @@ class SendRetryTests(unittest.IsolatedAsyncioTestCase):
                           return_value=FakeClient([httpx.ConnectError("boom")])):
             with self.assertRaises(SourceUnavailable):
                 await trakt_sync.fetch_ratings(FAKE_SETTINGS)
+
+
+class _Clock:
+    """The running loop's clock, moved by hand."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+class ThePacerTests(unittest.IsolatedAsyncioTestCase):
+    """http_pool.Pacer — a rate, where the gate beside it is only a count in
+    flight. MEASURED: a tracker load sent over a thousand Trakt reads in a
+    burst, four at a time, and was refused with 429s part-way."""
+
+    def _pacer(self, **kw):
+        from app import http_pool
+        return http_pool.Pacer("test", **({"limit": 10, "period": 10, "burst": 4} | kw))
+
+    async def test_the_burst_leaves_at_once_and_the_rest_are_spaced(self):
+        pacer, clock = self._pacer(), _Clock()
+        with patch.object(asyncio.get_running_loop(), "time", clock):
+            waits = [pacer.claim(60) for _ in range(6)]
+        # Four free, then (10 - 4) / 10 = 0.6 a second: the next two queue behind
+        # each other rather than agreeing on the same instant.
+        self.assertEqual(waits[:4], [0, 0, 0, 0])
+        self.assertAlmostEqual(waits[4], 1 / 0.6)
+        self.assertAlmostEqual(waits[5], 2 / 0.6)
+
+    async def test_it_never_exceeds_the_limit_in_any_period(self):
+        pacer, clock = self._pacer(), _Clock()
+        departures = []
+        with patch.object(asyncio.get_running_loop(), "time", clock):
+            for _ in range(40):
+                departures.append(clock.now + pacer.claim(1e9))
+        for start in departures:
+            inside = [d for d in departures if start <= d < start + 10]
+            self.assertLessEqual(len(inside), 10)
+
+    async def test_a_turn_past_the_callers_budget_is_refused_and_takes_nothing(self):
+        pacer, clock = self._pacer(), _Clock()
+        with patch.object(asyncio.get_running_loop(), "time", clock):
+            for _ in range(4):
+                pacer.claim(60)
+            self.assertIsNone(pacer.claim(1.0))
+            # Nothing was taken, so the next caller who can wait gets the same
+            # turn the refused one would have had.
+            self.assertAlmostEqual(pacer.claim(60), 1 / 0.6)
+
+    async def test_a_new_event_loop_starts_with_a_full_bucket(self):
+        pacer = self._pacer()
+        for _ in range(4):
+            pacer.claim(60)
+        pacer._loop = object()  # as if the bucket had been drained on another loop
+        self.assertEqual(pacer.claim(60), 0)
+
+
+class TheSenderIsPacedTests(unittest.IsolatedAsyncioTestCase):
+    """Every Trakt read goes through `send`, so the pacer is applied there once."""
+
+    async def test_a_read_past_the_burst_waits_its_turn(self):
+        from app import http_pool
+        sleep = RecordingSleep()
+        client = FakeClient([_resp(200)] * 3)
+        pacer = http_pool.Pacer("t", limit=3, period=1, burst=2)
+        with _patch_sleep(sleep), patch.object(transport, "GET_PACER", pacer):
+            for _ in range(3):
+                await transport.send(client, "GET", transport.API_BASE + "/x")
+        self.assertEqual(len(client.requests), 3)
+        self.assertEqual(len(sleep.durations), 1)
+        self.assertGreater(sleep.durations[0], 0)
+
+    async def test_a_read_that_cannot_leave_within_the_budget_is_not_sent(self):
+        from app import http_pool
+        client = FakeClient([_resp(200)])
+        pacer = http_pool.Pacer("t", limit=2, period=3600, burst=1)
+        pacer.claim(60)  # the one free token, spent
+        with patch.object(transport, "GET_PACER", pacer):
+            with self.assertRaises(TraktRateLimitError):
+                await transport.send(client, "GET", transport.API_BASE + "/x")
+        self.assertEqual(client.requests, [], "a refused read still went out")
 
 
 class SemaphoreLoopKeyingTests(unittest.TestCase):
