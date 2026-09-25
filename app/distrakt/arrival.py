@@ -138,7 +138,8 @@ async def describe(settings, records: list[dict], *, strict: bool = False) -> li
 NETWORK_REASK_SECONDS = 24 * 60 * 60
 
 
-async def ask_for_missing_networks(user_id: int, settings) -> int:
+async def ask_for_missing_networks(user_id: int, settings, *,
+                                   within: set[str] | None = None) -> int:
     """Ask the describing service for the network of every title this viewer
     holds rows for that still has none — once per title per day. Returns how many
     row values were written.
@@ -155,9 +156,14 @@ async def ask_for_missing_networks(user_id: int, settings) -> int:
     fact that can change upstream with nothing local moving, so every title
     carries its own day-long marker (global — a network is a fact about the
     title, not the viewer) rather than one verdict over everything owed.
+
+    `within` NARROWS IT TO THE TITLES A LOAD IS DRAWING (their item keys), which
+    is how the tracker's sync calls it — see watch_history.sync_and_baseline.
+    None asks about every row, for a caller that means the whole account.
     """
     owed = [debt for debt in await store.identities_owing(user_id)
-            if store.NETWORK in debt.names and not debt.network]
+            if store.NETWORK in debt.names and not debt.network
+            and (within is None or str(debt.key) in within)]
     due = []
     for debt in owed:
         if not await cache.get(_network_marker(debt.key), NETWORK_REASK_SECONDS):
@@ -400,7 +406,8 @@ async def ask_services(settings, titles: dict[str, tuple[Media, dict]]) -> dict[
     return out
 
 
-async def ask_for_missing_ids(user_id: int, settings) -> int:
+async def ask_for_missing_ids(user_id: int, settings, *,
+                              within: set[str] | None = None) -> int:
     """Ask, by shared id, for every service id this viewer's STORED rows still
     lack — the stored half of what `describe` does for a title arriving. Returns
     how many row values were written.
@@ -412,10 +419,13 @@ async def ask_for_missing_ids(user_id: int, settings) -> int:
     Trakt id exists but whose Trakt airing no calendar feed carries. Asked here,
     once per title a day (the ports' own clocks), exact matches only, add-only
     through store.learn_ids, every learned id logged.
+
+    `within`, as for ask_for_missing_networks: the titles a load is drawing.
     """
     owed = [debt for debt in await store.identities_owing(user_id)
             if any(str(source) in debt.names
-                   for source, _port in providers.for_catalogue_search(settings))]
+                   for source, _port in providers.for_catalogue_search(settings))
+            and (within is None or str(debt.key) in within)]
     if not owed:
         return 0
     learned = await ask_services(settings, {

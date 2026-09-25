@@ -274,6 +274,23 @@ class AskingForMissingIdsTests(DistraktTestCase):
                          (326227, "groomed-the-truth-behind-the-lie"))
         self.assertEqual(found.await_args.args[2]["tmdb"], 330599)
 
+    async def test_a_load_asks_only_about_the_rows_it_is_drawing(self):
+        """An account's rows across every month grow without end, and a title a
+        service does not list is asked again each day — so a load asks only about
+        what it draws, and an ordinary load costs its page, not its history."""
+        await self._row({"tmdb": 330599, "simkl": 2618044})
+        found = AsyncMock(return_value={})
+        with patch("app.providers.trakt.detail.find_by_shared_id", found):
+            await arrival.ask_for_missing_ids(self.user_id, SETTINGS,
+                                              within={"show:tmdb:1"})
+            await arrival.ask_for_missing_networks(self.user_id, SETTINGS,
+                                                   within={"show:tmdb:1"})
+        found.assert_not_awaited()
+        with patch("app.providers.trakt.detail.find_by_shared_id", found):
+            await arrival.ask_for_missing_ids(self.user_id, SETTINGS,
+                                              within={"show:tmdb:330599"})
+        found.assert_awaited()
+
     async def test_an_answer_not_naming_that_services_id_is_not_written(self):
         await self._row({"tmdb": 330599, "simkl": 2618044})
         with patch("app.providers.trakt.detail.find_by_shared_id",

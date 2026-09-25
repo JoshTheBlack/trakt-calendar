@@ -2389,9 +2389,15 @@ async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: b
     # ids, since a learned id can change which service describes the title), and
     # a frozen month's films stored before films had keys. Each costs nothing
     # once there is nothing left, and a day's answers are served from cache.
+    #
+    # ONLY FOR WHAT THIS LOAD IS DRAWING (`roster`). A viewer's rows across every
+    # month they ever filed grow without end, and a title one service simply does
+    # not list is asked again every day — so asked of all of them, an ordinary
+    # load's cost grew with the account's history rather than with its page.
     with span("wh.ask_what_disk_cannot"):
-        await arrival.ask_for_missing_ids(user_id, settings)
-        await arrival.ask_for_missing_networks(user_id, settings)
+        drawn = {str(record_key(record)) for record in roster or ()}
+        await arrival.ask_for_missing_ids(user_id, settings, within=drawn)
+        await arrival.ask_for_missing_networks(user_id, settings, within=drawn)
         await film_snapshots.repair(user_id, settings)
     # THE VIEWER'S OWN FLOOR, APPLIED HERE AND NOWHERE ELSE. A season somebody
     # is watching AGAIN has a history full of plays about the previous run;
