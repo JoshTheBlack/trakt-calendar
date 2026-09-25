@@ -26,7 +26,7 @@ from app import auth, db, distrakt
 from app.distrakt import rollover, watch_history
 from app.calendar import state as calendar_state
 from app.providers.base import Item, ItemKey, Media, PlayCounts, Source, SourceUnavailable
-from tests.support import migrated_db
+from tests.support import import_offered, migrated_db
 
 # The credential flags the tracker reads, all of which a fake settings object has
 # to answer. The first two are the source selection's: it asks every registered
@@ -229,7 +229,10 @@ class RolloverTestCase(unittest.IsolatedAsyncioTestCase):
 
 class RolloverTests(RolloverTestCase):
     async def test_first_month_init_from_scratch(self):
-        """No prior month: seed premieres (new/returning) + in-progress history."""
+        """No prior month: the build seeds the list from in-progress history and
+        takes NO premieres — those are offered by Import and filed when picked.
+        MEASURED: a build that took them all was 527 titles for an account with no
+        filters, and over a thousand Trakt reads to describe them."""
         async def fake_read_month(endpoint, settings, **kw):
             if endpoint.key == "shows/new":
                 return [_cal_item(201, 1, "New One")], None
@@ -245,12 +248,16 @@ class RolloverTests(RolloverTestCase):
             doc = await distrakt.ensure_month(self.user_id, 2026, 8, SETTINGS,
                                               today=self.TODAY)
 
-        self.assertFalse(doc["closed"])
-        # The month holds what BEGINS in it. The season somebody is part-way
-        # through is a fact about them and lands on their own list instead.
-        self.assertEqual(await self._keys(doc), {(201, 1), (301, 2)})
-        self.assertEqual(await self._held(self.user_id), {(401, 1)})
-        self.assertIsNotNone(doc["totals_refreshed_at"])
+            self.assertFalse(doc["closed"])
+            self.assertEqual(await self._keys(doc), set(), "building took premieres")
+            # The season somebody is part-way through is a fact about them and
+            # lands on their own list.
+            self.assertEqual(await self._held(self.user_id), {(401, 1)})
+            self.assertIsNotNone(doc["totals_refreshed_at"])
+            # What the month BEGINS with arrives on the press.
+            await import_offered(self.user_id, self.UNDER_WAY, SETTINGS)
+        self.assertEqual(await self._keys(await distrakt.load_month(self.user_id, self.UNDER_WAY)),
+                         {(201, 1), (301, 2)})
 
     async def test_not_watching_premiere_excluded(self):
         """A premiere the viewer has turned away is simply not built in."""
@@ -266,9 +273,10 @@ class RolloverTests(RolloverTestCase):
         with patch("app.calendar.cache.read_month", side_effect=fake_read_month), \
              patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail):
-            doc = await distrakt.ensure_month(self.user_id, 2026, 8, SETTINGS,
-                                              today=self.TODAY)
+            await distrakt.ensure_month(self.user_id, 2026, 8, SETTINGS, today=self.TODAY)
+            await import_offered(self.user_id, self.UNDER_WAY, SETTINGS)
 
+        doc = await distrakt.load_month(self.user_id, self.UNDER_WAY)
         self.assertEqual(await self._keys(doc), {(201, 1)})
 
     async def test_rollover_freezes_prior_and_takes_nothing_from_it(self):
@@ -317,8 +325,9 @@ class RolloverTests(RolloverTestCase):
         # frozen month renders its announcement offline afterwards.
         self.assertTrue(by_id[101]["started_airing"])
 
-        # The new month holds its own premiere and nothing the closing month had.
-        self.assertEqual(await self._keys(aug), {(201, 1)})
+        # The new month holds nothing the closing month had — nor anything of its
+        # own yet: its premieres wait for Import.
+        self.assertEqual(await self._keys(aug), set())
         # And the still-running season is still the viewer's, read off their own
         # list rather than off a copy the new month was given.
         self.assertEqual(await self._held(self.user_id), {(101, 1)})
@@ -378,9 +387,8 @@ class RolloverTests(RolloverTestCase):
 
         july = await distrakt.load_month(self.user_id, self.CLOSING)
         self.assertFalse(july["closed"])                      # stays open during preview
-        # The month ahead takes what premieres in it and nothing else — see
-        # _initialize_month, and WhatAMonthThatHasNotBegunTakesTests.
-        self.assertEqual(await self._keys(aug), {(201, 1)})
+        # Built, and empty until somebody imports into it.
+        self.assertEqual(await self._keys(aug), set())
 
     async def test_import_premieres_merges_skipping_existing_and_not_watching(self):
         await self._premiere(self.user_id, self.UNDER_WAY, 201, title="Already")
@@ -391,7 +399,7 @@ class RolloverTests(RolloverTestCase):
         await self._mark_not_watching(self.user_id, "slug-203")
 
         with patch("app.calendar.cache.read_month", side_effect=fake_read_month):
-            await distrakt.import_premieres(self.user_id, self.UNDER_WAY, SETTINGS)
+            await import_offered(self.user_id, self.UNDER_WAY, SETTINGS)
 
         doc = await distrakt.load_month(self.user_id, self.UNDER_WAY)
         keys = {(int(s["match_id"]), s["season"]) for s in doc["shows"]}
@@ -483,7 +491,7 @@ class DistraktImportFilterTests(RolloverTestCase):
         await self._open_month("2026-08")
 
         with patch("app.providers.trakt.transport.shared_client", return_value=_FixedClient(entries)):
-            await distrakt.import_premieres(self.user_id, "2026-08", self.settings)
+            await import_offered(self.user_id, "2026-08", self.settings)
 
         doc = await distrakt.load_month(self.user_id, "2026-08")
         self.assertEqual(await self._keys(doc), {(202, 1)})
@@ -504,7 +512,7 @@ class DistraktImportFilterTests(RolloverTestCase):
         await self._open_month("2026-08")
 
         with patch("app.providers.trakt.transport.shared_client", return_value=_FixedClient(entries)):
-            await distrakt.import_premieres(self.user_id, "2026-08", floored_settings)
+            await import_offered(self.user_id, "2026-08", floored_settings)
 
         doc = await distrakt.load_month(self.user_id, "2026-08")
         self.assertEqual(await self._keys(doc), {(202, 1)})
@@ -573,10 +581,11 @@ class PerUserIsolationTests(RolloverTestCase):
         with patch("app.calendar.cache.read_month", side_effect=fake_read_month), \
              patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail):
-            mine = await distrakt.ensure_month(self.user_id, 2026, 8, SETTINGS,
-                                               today=self.TODAY)
-            theirs = await distrakt.ensure_month(self.other_id, 2026, 8, SETTINGS,
-                                                 today=self.TODAY)
+            for uid in (self.user_id, self.other_id):
+                await distrakt.ensure_month(uid, 2026, 8, SETTINGS, today=self.TODAY)
+                await import_offered(uid, self.UNDER_WAY, SETTINGS)
+        mine = await distrakt.load_month(self.user_id, self.UNDER_WAY)
+        theirs = await distrakt.load_month(self.other_id, self.UNDER_WAY)
 
         self.assertEqual(await self._keys(mine), set())          # excluded for me
         self.assertEqual(await self._keys(theirs), {(201, 1)})   # still there for them
@@ -897,8 +906,9 @@ class MonthsAheadAreBuiltWhenAskedForTests(RolloverTestCase):
         self.today = date.today()
 
     async def _ensure(self, offset: int):
-        """ensure_month for the month `offset` after this one, with every Trakt
-        read recorded so what a build actually asked for can be read back."""
+        """ensure_month for the month `offset` after this one, and the import that
+        follows it on the press — building takes no premieres by itself — with every
+        Trakt read recorded so what was actually asked for can be read back."""
         calls: list[str] = []
 
         async def fake_read_month(endpoint, settings, **kw):
@@ -914,8 +924,10 @@ class MonthsAheadAreBuiltWhenAskedForTests(RolloverTestCase):
              patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
              patch("app.distrakt.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline):
-            doc = await distrakt.ensure_month(self.user_id, year, month, SETTINGS, today=self.today)
-        return doc, calls, distrakt.month_key(year, month)
+            await distrakt.ensure_month(self.user_id, year, month, SETTINGS, today=self.today)
+            key = distrakt.month_key(year, month)
+            await import_offered(self.user_id, key, SETTINGS)
+        return await distrakt.load_month(self.user_id, key), calls, key
 
     async def test_a_month_well_out_ahead_is_built_and_takes_that_month(self):
         """The calendar read it makes names the month asked for, so a month five
@@ -987,12 +999,14 @@ class WhatAMonthThatHasNotBegunTakesTests(RolloverTestCase):
             return list(progress)
 
         year, month = _months_ahead(self.today, offset)
+        key = distrakt.month_key(year, month)
         with patch("app.calendar.cache.read_month", side_effect=fake_read_month), \
              patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
              patch("app.distrakt.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline):
-            return await distrakt.ensure_month(self.user_id, year, month, SETTINGS,
-                                               today=self.today)
+            await distrakt.ensure_month(self.user_id, year, month, SETTINGS, today=self.today)
+            await import_offered(self.user_id, key, SETTINGS)
+        return await distrakt.load_month(self.user_id, key)
 
     async def _open(self, offset: int):
         """Open the month `offset` ahead as the page does, recording every read so
@@ -1090,12 +1104,17 @@ class WhatAMonthThatHasNotBegunTakesTests(RolloverTestCase):
         self.assertIsNone(await distrakt.load_month(self.user_id, key))
         self.assertEqual(calls, [])
 
-    async def test_the_month_under_way_still_fills_itself_in_on_sight(self):
-        """The month being asked about is the one case where an empty page would
-        be wrong rather than merely early, so opening it still builds it."""
-        payload, _calls, key = await self._open(0)
+    async def test_opening_the_month_under_way_builds_it_and_asks_for_import(self):
+        """REVERSED DELIBERATELY. It used to fill itself from the calendar on
+        sight, and for an account with no filters that was 527 premieres and over a
+        thousand Trakt reads — MEASURED, ending in Trakt's rate limit and a month
+        that never saved. Opening it still builds it, reads nothing from the
+        calendar, and lights Import, whose dialog offers the premieres to pick."""
+        payload, calls, key = await self._open(0)
 
-        self.assertEqual([s["ids"]["trakt"] for s in payload["shows"]], [201])
+        self.assertEqual(payload["shows"], [])
+        self.assertNotIn("calendar", calls, "opening the month read its calendar")
+        self.assertTrue(payload["import_due"])
         self.assertIsNotNone(await distrakt.load_month(self.user_id, key))
 
     async def test_a_month_ahead_that_was_built_is_read_as_it_stands(self):
@@ -1213,7 +1232,7 @@ class AMonthOnlyShowsWhatItCanShowTests(RolloverTestCase):
             return [_cal_item(301, 1, "Learned Since")], None
 
         with patch("app.calendar.cache.read_month", side_effect=one_new_premiere):
-            await distrakt.import_premieres(self.user_id, preview, SETTINGS)
+            await import_offered(self.user_id, preview, SETTINGS)
 
         stored = {int((r.get("ids") or {}).get("tmdb"))
                   for r in await distrakt.month_records(self.user_id, preview)}

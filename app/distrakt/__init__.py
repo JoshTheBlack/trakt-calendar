@@ -48,7 +48,8 @@ from .backup import (
     export_user_data,
     restore_user_data,
 )
-from .calendar_import import import_premieres, matches_not_watching
+from .calendar_import import (candidate_ref, import_candidates, import_premieres,
+                              matches_not_watching)
 from .live import compute_live_shows, live_key
 from .prefs import DEFAULT_EMOJI, get_emoji_prefs, register_networks, set_emoji_prefs
 from .rollover import (
@@ -145,6 +146,7 @@ __all__ = [
     "open_prompt", "open_prompts",
     "export_user_data", "find_month_record", "find_user_record", "freeze_eligible",
     "frozen_shows", "get_emoji_prefs", "import_premieres", "is_backfill_blocked",
+    "candidate_ref", "import_candidates",
     "is_stale", "list_months", "live_key", "load_month",
     "matches_not_watching", "maybe_freeze", "maybe_freeze_prior",
     "migrate_to_month", "migrate_to_user", "month_committed",

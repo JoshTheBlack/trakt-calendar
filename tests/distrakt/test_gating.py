@@ -50,6 +50,7 @@ DISTRAKT_GETS = (
     "/distrakt/fragments/seasons",
     "/api/distrakt/export",
     "/distrakt/fragments/search-movie",
+    "/distrakt/fragments/import",
 )
 
 DISTRAKT_POSTS = (

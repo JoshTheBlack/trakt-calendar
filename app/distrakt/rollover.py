@@ -335,7 +335,16 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
 
 async def _initialize_month(user_id: int, month_key: str, settings,
                             today: date | None = None) -> dict:
-    """A brand-new month's contents: the calendar's premieres, and nothing else.
+    """A brand-new month: empty of premieres, with recent viewing seeding the
+    viewer's own list once the month has begun.
+
+    THE CALENDAR'S PREMIERES ARE NOT TAKEN HERE ANY MORE. They are offered by the
+    Import control, title by title, and filed only when somebody picks them
+    (calendar_import.import_premieres). Built by opening the page, an account with
+    no filters took all 527 of a month's premieres at once — MEASURED — and
+    describing them cost over a thousand Trakt reads, which ran into Trakt's rate
+    limit, failed the build, and started over on the next load. Opening the
+    tracker must not be the thing that spends that.
 
     A MONTH HOLDS WHAT BEGAN IN IT. What the viewer is behind on and what they are
     keeping up with are facts about the VIEWER, true of no particular month, and
@@ -355,34 +364,14 @@ async def _initialize_month(user_id: int, month_key: str, settings,
     so a season that began in August was announced as new in October.
     """
     doc = new_month_doc(month_key)
-    present: set[tuple[str, int]] = set()
-    year, month = store.parse_month_key(month_key)
     begun = month_committed(month_key, today)
-
-    # Read ONCE and applied to both sources below: a title the viewer has turned
-    # away on their calendar is not built in at all. A month that opens with it
-    # listed as given up on is announcing a verdict about a show they had already
-    # said they were not following, and there is no record here yet for such a
-    # verdict to be about.
-    nw_ids = await calendar_state.not_watching_ids(user_id)
-
-    # This month's premieres, minus not-watching. THE INSTANCE'S SETTINGS, not the
-    # per-account ones this function is working with: a calendar window is
-    # fetched under the instance's own credentials and served to everybody, and
-    # calendar_import.premiere_records states that contract. Handing it the
-    # viewer's made a month's own construction depend on whose token was on the
-    # request — an account signed in with Simkl alone had no Trakt token, so
-    # building a month asked Trakt's calendar with no bearer and the whole build
-    # failed on Trakt's 401. The history read below is the opposite case and
-    # keeps the per-account settings, because whose history it is IS the
-    # question there.
-    from ..config import load_settings
-    await calendar_import.add_premieres(doc, present, user_id, load_settings(),
-                                        year, month, nw_ids)
-
     if begun:
-        present |= {(str(store.record_key(rec)), int(rec["season"]))
-                    for rec in await store.user_records(user_id)}
+        # A title the viewer has turned away on their calendar is not seeded: a
+        # list that opens with it is announcing a show they said they were not
+        # following.
+        nw_ids = await calendar_state.not_watching_ids(user_id)
+        present = {(str(store.record_key(rec)), int(rec["season"]))
+                   for rec in await store.user_records(user_id)}
         seeded = await history_records(user_id, settings, present, nw_ids)
         for rec in seeded:
             await store.add_user_record(user_id, rec)

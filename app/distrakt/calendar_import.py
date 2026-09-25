@@ -198,19 +198,61 @@ def _present_key(rec: dict) -> tuple[str, int]:
     return (str(record_key(rec)), int(rec["season"]))
 
 
-async def add_premieres(doc: dict, present: set[tuple[str, int]], user_id: int, settings,
-                        year: int, month: int, nw_ids: set[str]) -> int:
-    """Append this month's premieres to `doc` as premiere records (skip existing +
-    not-watching). Mutates `doc['shows']`/`present`; returns the number added."""
-    added = 0
-    # THE MARKS TRAVEL DOWN rather than being applied to what comes back: the
-    # question needs the card's whole id map and a record no longer has one.
-    records = [rec for rec in await premiere_records(user_id, settings, year, month, nw_ids)
-               if _present_key(rec) not in present]
+def candidate_ref(rec: dict) -> str:
+    """How the import dialog names one premiere it offers: the title's key and
+    the season, and nothing a lookup could be aimed with. The import re-derives
+    the offer and takes only what these name — see import_premieres."""
+    key, season = _present_key(rec)
+    return f"{key}|{season}"
+
+
+async def import_candidates(user_id: int, doc: dict, settings) -> list[dict]:
+    """The premieres the month's calendar shows this viewer that `doc` does not
+    hold yet — what the import dialog offers.
+
+    NOTHING IS LOOKED UP TO OFFER THEM. This is the calendar as it is stored,
+    through the viewer's own filters and marks: the list somebody reads before
+    deciding, which has to cost nothing however long it is. Describing a title —
+    the lookups that make it land identically to any other way in — is paid on
+    the import, for the titles actually chosen.
+
+    MARKS ARE APPLIED, because putting a title the viewer has turned away onto a
+    month is never the right answer. What a turn-away means for a row that
+    ALREADY exists is a different question, answered where such a row is acted on.
+    """
+    year, month = store.parse_month_key(doc["month"])
+    present = {_present_key(s) for s in doc.get("shows") or []}
+    nw_ids = await calendar_state.not_watching_ids(user_id)
+    return [rec for rec in await premiere_records(user_id, settings, year, month, nw_ids)
+            if _present_key(rec) not in present]
+
+
+async def import_premieres(user_id: int, month_key: str, settings,
+                           chosen: set[str]) -> int:
+    """File the premieres the viewer ticked onto their OPEN month. Returns how many
+    were added; 0 on a missing or closed month.
+
+    CHOSEN BY REFERENCE, RE-DERIVED HERE. `chosen` holds `candidate_ref`s, and
+    what is filed is this month's offer as the server reads it now, narrowed to
+    them — a reference to a title the offer does not hold files nothing, so no
+    request can put onto a month anything the calendar would not have offered.
+
+    NEVER RUN BY LOOKING. A month used to import every premiere its calendar held
+    the moment it was built, which for an account with no filters was 527 titles
+    — MEASURED, and over a thousand Trakt reads to describe them, which ran into
+    Trakt's rate limit and left the month unbuilt so the next load tried again.
+    An import is somebody pressing Import and saying which.
+    """
+    doc = await load_month(user_id, month_key)
+    if doc is None or doc.get("closed"):
+        return 0
+    records = [rec for rec in await import_candidates(user_id, doc, settings)
+               if candidate_ref(rec) in chosen]
+    if not records:
+        return 0
+    present = {_present_key(s) for s in doc.get("shows") or []}
     # WHAT A PREMIERE IS FILED AS IS arrival.describe's, not this calendar
-    # record's — the same title added any other way must land identically. Here,
-    # on the ADD, and not in premiere_records, which also serves the preview and
-    # the diff: describing a month must not cost a lookup.
+    # record's — the same title added any other way must land identically.
     filed = []
     for arrived in await arrival.describe(settings, records):
         rec = arrived.record
@@ -224,26 +266,7 @@ async def add_premieres(doc: dict, present: set[tuple[str, int]], user_id: int, 
         }))
         filed.append(rec)
         present.add(key)
-        added += 1
     await arrival.register(user_id, filed)
-    return added
-
-
-async def import_premieres(user_id: int, month_key: str, settings) -> dict | None:
-    """Merge this month's calendar premieres into `user_id`'s OPEN month (skip
-    existing + not-watching). Powers the manual "Import from calendar" action and
-    the preview-month auto-populate. No-op on a missing/closed month."""
-    doc = await load_month(user_id, month_key)
-    if doc is None or doc.get("closed"):
-        return doc
-    year, month = store.parse_month_key(month_key)
-    present = {_present_key(s) for s in doc.get("shows") or []}
-    # Putting a title the user has turned away back onto a month is never the
-    # right answer, so every mark filters this ADD path. What a turn-away means
-    # for a row that ALREADY exists is a different question — it is a verdict on
-    # that row rather than a reason never to write one — and it is answered where
-    # such a row is acted on, not here where there is no row yet.
-    nw_ids = await calendar_state.not_watching_ids(user_id)
-    if await add_premieres(doc, present, user_id, settings, year, month, nw_ids):
+    if filed:
         await save_month(user_id, doc)
-    return doc
+    return len(filed)

@@ -24,7 +24,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 from datetime import date, datetime, timedelta, timezone
+from html import unescape
 from unittest import mock
 
 from app import clock, distrakt as distrakt_store
@@ -34,7 +36,7 @@ from app.config import Settings
 from app.distrakt import watch_history
 from app.providers.base import Item, ItemKey, Media, Source, TitleFacts
 
-from ..support import ORIGIN, AppTestCase, tracker_month
+from ..support import ORIGIN, AppTestCase, import_everything_offered, tracker_month
 
 # The two months the rollover happens across, and the day either side of the
 # boundary between them. Named once so a test reads as a story about a boundary
@@ -265,8 +267,7 @@ class RolloverOverHttpTestCase(AppTestCase):
         """
         year, month = distrakt_store.parse_month_key(key)
         with self.offline(premieres):
-            resp = self.client.post(
-                f"/api/distrakt/import?year={year}&month={month}", json={})
+            resp = import_everything_offered(self.client, year, month)
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertNotIn("toast err", resp.text, resp.text[:300])
         return self.get_month(key, premieres)
@@ -368,12 +369,14 @@ class RolloverOverHttpTestCase(AppTestCase):
 
     def open_the_new_month(self) -> dict:
         """Cross the boundary the way a person does: look at the closing month
-        while it is still under way, then look at the new one on its 1st."""
+        while it is still under way, then look at the new one on its 1st and press
+        Import — a month no longer fills itself from its calendar by being opened."""
+        premieres = {OPENING: [_item(801, 1, "August New", "2026-08-05")]}
         with fake_today(BEFORE_THE_FIRST):
             self.get_month(CLOSING)
         with fake_today(ON_THE_FIRST):
-            return self.get_month(
-                OPENING, {OPENING: [_item(801, 1, "August New", "2026-08-05")]})
+            self.get_month(OPENING, premieres)
+            return self.import_month(OPENING, premieres)
 
 
 def _play(trakt_id: int, season: int = 1, number: int = 7,
@@ -794,6 +797,78 @@ class AMonthHoldsOnlyItsOwnPremieresTests(RolloverOverHttpTestCase):
         self.assertEqual(self.kinds_on(OPENING),
                          {801: {distrakt_store.RecordKind.SERIES_PREMIERE}})
         self.assertIn(801, self.listed_ids())
+
+
+class ImportingIsSomethingSomebodyPicksTests(RolloverOverHttpTestCase):
+    """A month is not filled from its calendar by being opened. Import offers its
+    premieres title by title and files what is ticked.
+
+    MEASURED, the reason: opening the tracker for an account with no filters built
+    a month of 527 premieres and spent over a thousand Trakt reads describing
+    them, ran into Trakt's rate limit, and never saved the month — so every reload
+    started the same storm again."""
+
+    PREMIERES = {OPENING: [_item(801, 1, "August New", "2026-08-05"),
+                           _item(911, 4, "August Returner", "2026-08-08")]}
+
+    def offer(self) -> str:
+        with fake_today(ON_THE_FIRST), self.offline(self.PREMIERES):
+            resp = self.client.get("/distrakt/fragments/import?year=2026&month=8")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return resp.text
+
+    def test_opening_the_month_takes_nothing_and_lights_import(self):
+        with fake_today(ON_THE_FIRST):
+            payload = self.get_month(OPENING, self.PREMIERES)
+        self.assertEqual(self.stored_ids(OPENING), set(), "opening the month imported")
+        self.assertTrue(payload["import_due"])
+
+    def test_the_offer_lists_every_premiere_ticked_and_looks_nothing_up(self):
+        text = self.offer()
+        self.assertIn("<strong>2</strong> premieres", text)
+        self.assertEqual(text.count('type="checkbox"'), 2)
+        self.assertEqual(text.count(" checked "), 2)
+        self.assertIn("August New", text)
+        self.assertIn("August Returner", text)
+        self.assertEqual((self.season_calls, self.facts_calls), ([], []),
+                         "drawing the offer described titles")
+
+    def test_only_what_is_ticked_is_filed(self):
+        refs = re.findall(r'name="(pick:[^"]+)"', self.offer())
+        wanted = [unescape(ref) for ref in refs if "801" in ref]
+        with fake_today(ON_THE_FIRST), self.offline(self.PREMIERES):
+            resp = self.client.post("/api/distrakt/import?year=2026&month=8",
+                                    json={ref: "1" for ref in wanted})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(self.stored_ids(OPENING), {801})
+        self.assertIn("Imported 1 premiere from the calendar", resp.text)
+
+    def test_a_reference_to_something_not_on_offer_files_nothing(self):
+        """The ticks are references to the offer the server reads now, never
+        data: a name the calendar did not offer cannot put a title on a month."""
+        with fake_today(ON_THE_FIRST), self.offline(self.PREMIERES):
+            self.client.post("/api/distrakt/import?year=2026&month=8",
+                             json={"pick:show:tmdb:4242|1": "1"})
+        self.assertEqual(self.stored_ids(OPENING), set())
+
+    def test_nothing_ticked_is_refused(self):
+        with fake_today(ON_THE_FIRST), self.offline(self.PREMIERES):
+            resp = self.client.post("/api/distrakt/import?year=2026&month=8", json={})
+        self.assertIn("Tick at least one title", resp.text)
+        self.assertEqual(self.stored_ids(OPENING), set())
+
+    def test_import_stops_asking_once_something_is_imported(self):
+        with fake_today(ON_THE_FIRST):
+            self.get_month(OPENING, self.PREMIERES)
+            payload = self.import_month(OPENING, self.PREMIERES)
+        self.assertFalse(payload["import_due"])
+        self.assertEqual(self.stored_ids(OPENING), {801, 911})
+
+    def test_the_button_is_drawn_lit_by_the_months_own_answer(self):
+        with fake_today(ON_THE_FIRST), self.offline(self.PREMIERES):
+            html = self.client.get("/distrakt/fragments/month?year=2026&month=8").text
+        self.assertRegex(html, r'id="distraktImport" class="pill-btn import-due"')
+        self.assertIn('hx-swap-oob="outerHTML">⤓ Import', html)
 
 
 class AnyMonthAheadCanBeAskedForTests(RolloverOverHttpTestCase):

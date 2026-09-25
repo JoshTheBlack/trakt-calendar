@@ -1124,6 +1124,13 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
         # reached that the services have stopped backing. Present only on the
         # month under way, and only until it is answered either way.
         "unbacked_verdicts": _unbacked_rows(unbacked),
+        # WHETHER THE IMPORT BUTTON ASKS TO BE PRESSED: the month is under way and
+        # nothing has been taken from its calendar yet. A month is no longer
+        # filled by opening it (rollover._initialize_month), so this is the only
+        # thing that says a new month's premieres are waiting.
+        "import_due": under_way and not any(
+            record.get("added_by") == distrakt_store.ADDED_BY_CALENDAR
+            for record in premieres),
         # WHAT THE PAGE SAYS ABOUT WHAT IT COULD NOT REFRESH, as finished
         # sentences rather than as names for the browser to build one from. A
         # season showing one number has to say WHY that is all there is, instead
@@ -1380,6 +1387,7 @@ def _month_context(request: Request, payload: dict, year: int, month: int,
         "sections": discord_fmt.page_sections(shows),
         "films": discord_fmt.page_films(payload.get("movies")),
         "asks": _ask_rows(payload),
+        "import_due": bool(payload.get("import_due")),
         "empty_note": payload.get("empty_note") or "",
         # The degraded-month sentence and every unreadable source's, in one list:
         # they say the same thing to a reader, which is that something on this
@@ -1612,20 +1620,73 @@ async def api_distrakt_import(request: Request):
     # under the same instance settings, for the same reason.
     if not load_settings().calendar_source_configured:
         return _month_refusal(request, "No calendar is configured, so there is nothing to import.")
-    await authz.json_body(request)
+    data = await authz.json_body(request)
+    # WHICH TITLES, BY REFERENCE: one `pick:<key>|<season>` field per ticked row
+    # of the dialog (calendar_import.candidate_ref). What they name is checked
+    # against the offer the server reads now, so nothing arrives here as data.
+    chosen = {name[len(_IMPORT_PICK):] for name, value in data.items()
+              if name.startswith(_IMPORT_PICK) and value}
     today = clock.today()
     year, month = _viewed_month(request)
     month_key = distrakt_store.month_key(year, month)
     if await distrakt_store.is_backfill_blocked(user_id, month_key, today):
         return _month_refusal(request, "Can't import into a past month that was never tracked.")
+    # BUILT ON THE PRESS, BEFORE THE TICKS ARE COUNTED: building a month takes
+    # nothing from its calendar any more, so pressing Import on a month ahead
+    # makes it whether or not anything was chosen.
     doc = await distrakt_store.ensure_month(user_id, year, month, settings, today=today)
     if doc.get("closed"):
         return _month_refusal(request, "Past month is frozen (read-only).")
+    if not chosen:
+        return _month_refusal(request, "Tick at least one title to import.")
     # The instance's settings, for the reason the gate above gives.
     # The networks it files are registered where it files them (arrival.register).
-    await distrakt_store.import_premieres(user_id, month_key, load_settings())
-    return await _month_answer(request, user_id, year, month, settings,
-                               message="Imported premieres from calendar")
+    added = await distrakt_store.import_premieres(user_id, month_key, load_settings(), chosen)
+    return await _month_answer(
+        request, user_id, year, month, settings,
+        message=f"Imported {added} premiere{'' if added == 1 else 's'} from the calendar")
+
+
+# The dialog's field prefix for one offered premiere — see api_distrakt_import.
+_IMPORT_PICK = "pick:"
+
+
+@guard.get("/distrakt/fragments/import", AuthLevel.DISTRAKT_APPROVED)
+async def import_fragment(request: Request):
+    """What the Import dialog offers: the premieres this month's calendar shows
+    this viewer that the month does not hold yet, each with a box to untick.
+
+    IT LOOKS NOTHING UP AND BUILDS NOTHING. The list is the stored calendar
+    through the viewer's own filters and marks (calendar_import.import_candidates)
+    — so a month of five hundred premieres costs a read of what is held, and the
+    reader can see what they would be taking before a single title is described.
+    A month that has not been built is read as an empty one rather than created:
+    building it is the import's, on the press.
+    """
+    user_id = await _distrakt_user_id(request)
+    year, month = _viewed_month(request)
+    month_key = distrakt_store.month_key(year, month)
+    context = {"request": request, "month_query": f"?year={year}&month={month}",
+               "rows": [], "note": ""}
+    settings = load_settings()
+    if not settings.calendar_source_configured:
+        context["note"] = "No calendar is configured, so there is nothing to import."
+    elif await distrakt_store.is_backfill_blocked(user_id, month_key, clock.today()):
+        context["note"] = "Can't import into a past month that was never tracked."
+    else:
+        doc = (await distrakt_store.load_month(user_id, month_key)
+               or distrakt_store.new_month_doc(month_key))
+        if doc.get("closed"):
+            context["note"] = "This month is frozen (read-only)."
+        else:
+            offered = await distrakt_store.import_candidates(user_id, doc, settings)
+            context["rows"] = sorted(
+                ({"ref": distrakt_store.candidate_ref(rec), "title": rec.get("title") or "",
+                  "season": int(rec["season"]), "network": rec.get("network") or "",
+                  "kind": "New" if int(rec["season"]) <= 1 else "Returning"}
+                 for rec in offered),
+                key=lambda row: (row["kind"] != "New", row["title"].casefold()))
+    return templates.TemplateResponse(request, "_distrakt_import_list.html", context)
 
 
 @guard.post("/api/distrakt/backfill-networks", AuthLevel.DISTRAKT_APPROVED)

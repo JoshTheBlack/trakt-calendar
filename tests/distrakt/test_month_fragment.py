@@ -465,9 +465,10 @@ class TheAnswersOneHelperGivesTests(MonthFragmentTestCase):
                        'id="post1Text"', 'id="post2Text"'):
             self.assertIn(f'{marker}', resp.text)
         self.assertEqual(resp.text.count('hx-swap-oob="outerHTML"'),
-                         # the notice, the banner, the two copy blocks and the
-                         # three overlays the add flow uses
-                         7)
+                         # the notice, the banner, the two copy blocks, the
+                         # three overlays the add flow uses, the import dialog
+                         # and the Import button whose state is the month's
+                         9)
 
     def test_the_answer_brings_the_add_overlays_back_closed(self):
         """Unconditional rather than per-route: an answer only ever exists

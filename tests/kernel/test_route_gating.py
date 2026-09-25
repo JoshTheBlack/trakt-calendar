@@ -202,7 +202,7 @@ class UnauthenticatedTests(GatingTestCase):
                      "/distrakt/fragments/day-label", "/distrakt/fragments/details",
                      "/distrakt/fragments/details/season", "/distrakt/fragments/search",
                      "/distrakt/fragments/seasons",
-                     "/distrakt/fragments/search-movie"):
+                     "/distrakt/fragments/search-movie", "/distrakt/fragments/import"):
             with self.subTest(path=path):
                 self.assertEqual(self.client.get(path).status_code, 401)
         for path in ("/api/distrakt/refresh", "/api/distrakt/import",

@@ -380,11 +380,14 @@ class EveryPathOfItsOwnFilesTheDescriptionTests(_FilesTheDescription, DistraktTe
               "title": "What the path had", "season": 1, "network": ""}
 
     async def test_the_calendar_import(self):
-        doc = store.new_month_doc("2026-09")
+        await store.save_month(self.user_id, store.new_month_doc("2026-09"))
         with _canonical(), patch.object(calendar_import, "premiere_records",
                                         AsyncMock(return_value=[dict(self.FILING)])):
-            await calendar_import.add_premieres(doc, set(), self.user_id, SETTINGS,
-                                                2026, 9, set())
+            added = await calendar_import.import_premieres(
+                self.user_id, "2026-09", SETTINGS,
+                {calendar_import.candidate_ref(self.FILING)})
+        self.assertEqual(added, 1)
+        doc = await store.load_month(self.user_id, "2026-09")
         self.assert_filed_as_described(doc["shows"][0])
 
     async def test_the_rollover(self):

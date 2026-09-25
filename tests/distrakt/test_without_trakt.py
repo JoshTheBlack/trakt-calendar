@@ -965,11 +965,15 @@ class ASimklOnlyAccountGetsAMonthAtAllTests(AppTestCase):
             seen.append(settings)
             return ([], None)
 
-        with patch("app.calendar.cache.read_month", _read),              patch("app.distrakt.watch_history.tracker_ports", AsyncMock(return_value=[])):
+        # THE READ MOVED, THE RULE DID NOT: a month is no longer filled from its
+        # calendar by being built, so the calendar is read by the Import dialog's
+        # offer — and it has to be read as the instance there for the same reason.
+        with patch("app.calendar.cache.read_month", _read), \
+             patch("app.distrakt.watch_history.tracker_ports", AsyncMock(return_value=[])):
             resp = self.client.get(
-                f"/distrakt/fragments/month?year={self.today.year}&month={self.today.month}")
+                f"/distrakt/fragments/import?year={self.today.year}&month={self.today.month}")
         self.assertEqual(resp.status_code, 200)
-        self.assertTrue(seen, "the month was built without reading a calendar at all")
+        self.assertTrue(seen, "the import offer did not read a calendar at all")
         for settings in seen:
             self.assertEqual(settings.trakt_access_token, "instance-token")
 

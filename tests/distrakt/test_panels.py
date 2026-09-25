@@ -28,7 +28,7 @@ from app import distrakt as distrakt_store
 from app.calendar import state as calendar_state
 from app.providers.base import Item, ItemKey, Media, Source
 from app.config import Settings, load_settings
-from tests.support import AppTestCase, ORIGIN, restore_backup
+from tests.support import AppTestCase, ORIGIN, import_everything_offered, restore_backup
 
 
 def _month_offset(today: date, offset: int) -> tuple[int, int]:
@@ -212,8 +212,7 @@ class ImportingAMonthTests(TrackerPanelTestCase):
              patch("app.distrakt.live.season_detail", AsyncMock(return_value={})), \
              patch("app.distrakt.routes._month_answer",
                    new=AsyncMock(return_value=Response(status_code=200))):
-            return self.client.post(f"/api/distrakt/import?year={year}&month={month}",
-                                    json={})
+            return import_everything_offered(self.client, year, month)
 
     def _key(self, offset: int) -> str:
         index = self.today.month - 1 + offset
