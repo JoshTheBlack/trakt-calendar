@@ -2701,6 +2701,30 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 /* In the narrow pool column the per-title facts are noise; the title and its
    poster are what somebody scanning a pool is reading. */
 .ranker-pool .ranker-facts { display: none; }
+
+/* A NARROW TIER PUTS THE FACTS UNDER THE TITLE. In one line the facts and the
+   five controls are both content-sized and the title is the only part allowed to
+   shrink, so on a narrow screen it gave up everything: MEASURED at a 400px
+   viewport in Chromium and Firefox, a 321px tier row drew 108px of facts, 108px
+   of controls and a title 0-21px wide on all six rows of a real board. Below this
+   width the row becomes two lines beside the poster — title and year, then the
+   facts — which the poster's own height already has room for.
+   A CONTAINER QUERY RATHER THAN A VIEWPORT ONE, because what squeezes the title
+   is the width of the tier and not of the window: the tiers are a column beside
+   the pool on a wide screen and the whole width below it. */
+.ranker-rows { container-type: inline-size; }
+@container (max-width: 520px) {
+    .ranker-rows .ranker-item {
+        display: grid; column-gap: 8px; row-gap: 3px;
+        grid-template-columns: auto auto minmax(0, 1fr) auto;
+        grid-template-areas: "grip thumb name actions" "grip thumb facts actions";
+    }
+    .ranker-rows .ranker-grip { grid-area: grip; }
+    .ranker-rows .ranker-thumb { grid-area: thumb; }
+    .ranker-rows .ranker-name { grid-area: name; align-self: end; }
+    .ranker-rows .ranker-facts { grid-area: facts; align-self: start; justify-content: flex-start; }
+    .ranker-rows .ranker-actions { grid-area: actions; }
+}
 .ranker-pool, .ranker-rows { display: flex; flex-direction: column; gap: 5px; min-height: 40px; }
 /* The scrolling part of the pinned column: it takes whatever height is left
    under the search box and the source buttons, so the pool is as tall as the

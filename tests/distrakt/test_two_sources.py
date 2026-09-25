@@ -1804,6 +1804,41 @@ class WhoDescribesThisTests(unittest.IsolatedAsyncioTestCase):
         rec = {"ids": {"tvdb": 4321}, "season": 1, "media": "show"}
         self.assertEqual(await live.title_facts(self.settings(), rec), TitleFacts("", ""))
 
+    async def test_a_network_the_describer_leaves_blank_is_asked_of_the_next(self):
+        """REPORTED: Juliet & Juliet drew no badge because the service describing
+        it said null. The network comes from the next service the row carries an
+        id for; the title stays the describing service's."""
+        rec = {"ids": {"trakt": 5, "simkl": 2611545}, "season": 1, "media": "show"}
+        with patch("app.providers.trakt.detail.fetch_title_facts",
+                   AsyncMock(return_value=TitleFacts("Juliet & Juliet", ""))), \
+             patch("app.providers.simkl.detail.fetch_title_facts",
+                   AsyncMock(return_value=TitleFacts("Juliet and Juliet", "Rai 1"))) as simkl:
+            got = await live.title_facts(self.settings(), rec)
+        self.assertEqual(got, TitleFacts("Juliet & Juliet", "Rai 1"))
+        self.assertEqual(simkl.await_args.args[1], 2611545)
+
+    async def test_a_stated_network_is_never_asked_about_again(self):
+        rec = {"ids": {"trakt": 5, "simkl": 6}, "season": 1, "media": "show"}
+        with patch("app.providers.trakt.detail.fetch_title_facts",
+                   AsyncMock(return_value=TitleFacts("T", "Netflix"))), \
+             patch("app.providers.simkl.detail.fetch_title_facts", AsyncMock()) as simkl:
+            self.assertEqual((await live.title_facts(self.settings(), rec)).network, "Netflix")
+        simkl.assert_not_awaited()
+
+    async def test_no_other_id_means_no_second_ask_and_a_failure_leaves_it_blank(self):
+        only = {"ids": {"simkl": 6}, "season": 1, "media": "show"}
+        with patch("app.providers.simkl.detail.fetch_title_facts",
+                   AsyncMock(return_value=TitleFacts("T", ""))), \
+             patch("app.providers.trakt.detail.fetch_title_facts", AsyncMock()) as trakt:
+            self.assertEqual(await live.title_facts(self.settings(), only), TitleFacts("T", ""))
+        trakt.assert_not_awaited()
+        both = {"ids": {"trakt": 5, "simkl": 6}, "season": 1, "media": "show"}
+        with patch("app.providers.trakt.detail.fetch_title_facts",
+                   AsyncMock(return_value=TitleFacts("T", ""))), \
+             patch("app.providers.simkl.detail.fetch_title_facts",
+                   AsyncMock(side_effect=SimklError("down"))):
+            self.assertEqual(await live.title_facts(self.settings(), both), TitleFacts("T", ""))
+
     async def test_a_simkl_record_with_no_simkl_id_asks_nothing(self):
         """detail_source can only have named Simkl from an id, but the guard is
         cheap and a lookup on None is a request that cannot succeed."""

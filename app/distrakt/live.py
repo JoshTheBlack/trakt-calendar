@@ -13,7 +13,7 @@ import logging
 from . import counts, discord_fmt
 from .. import providers
 from ..perftrace import span
-from ..providers.base import Media, TitleFacts
+from ..providers.base import Media, SourceUnavailable, TitleFacts
 from ..sources import prefs as source_prefs
 from .store import Bucket, record_key
 
@@ -366,13 +366,41 @@ async def title_facts(settings, rec: dict) -> TitleFacts:
 
     THROUGH THE SOURCE'S OWN DetailPort, which owns how it reads its catalogue —
     Simkl's series-root network fallback included.
+
+    A NETWORK THE DESCRIBING SERVICE LEAVES BLANK IS ASKED OF THE NEXT ONE, and
+    the network alone. REPORTED on a real title (Juliet & Juliet): Simkl was the
+    only service the row had an id for, answered `"network": null`, and the row
+    drew no badge although Trakt states one. The title stays the describing
+    service's — that is the rule above — and a service is only asked by an id of
+    its own that the record already carries, in the same declared order, so this
+    fills a silence and never overrides an answer. One that cannot be reached
+    leaves the network blank, as the describing service did.
     """
     source = detail_source(rec, settings)
-    source_id = (rec.get("ids") or {}).get(source) if source else None
+    ids = rec.get("ids") or {}
+    source_id = ids.get(source) if source else None
     if not source_id:
         return TitleFacts("", "")
-    port = providers.get(source).detail_port
-    return await port.fetch_title_facts(settings, source_id, rec.get("media") or Media.SHOW)
+    media = rec.get("media") or Media.SHOW
+    facts = await providers.get(source).detail_port.fetch_title_facts(
+        settings, source_id, media)
+    if facts.network:
+        return facts
+    # Function-local for the name, as in detail_source() above.
+    from ..providers import detail_source as catalogue_answerer
+    for other, port in catalogue_answerer.ports():
+        other_id = ids.get(str(other))
+        if (other == source or other_id in (None, "")
+                or not port.catalogue_configured(settings)):
+            continue
+        try:
+            network = (await port.fetch_title_facts(settings, other_id, media)).network
+        except SourceUnavailable as exc:
+            logger.info("title facts: %s could not be asked for a network (%s)", other, exc)
+            continue
+        if network:
+            return TitleFacts(facts.title, network)
+    return facts
 
 
 async def fetch_season_details(settings, records: list[dict], *, fresh: bool,
