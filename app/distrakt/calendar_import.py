@@ -118,23 +118,17 @@ async def premiere_records(user_id: int, settings, year: int, month: int,
     # currently being applied, which is the only reading where "show me
     # everything for a moment" cannot leave a mess behind.
     specs = vocab.active_specs(prefs, Media.SHOW, honour_pause=False)
-    (new_items, _), (prem_items, _) = await asyncio.gather(
+    (new_items, _), (prem_items, _) = await asyncio.gather(*(
         calendar_cache.read_month(
-            get_endpoint("shows/new"), settings, tz=tz, year=year, month=month,
+            get_endpoint(name), settings, tz=tz, year=year, month=month,
             genres=specs["genres"], countries=specs["countries"],
-            show_certifications=specs["show_certifications"],
-        ),
-        calendar_cache.read_month(
-            get_endpoint("shows/premieres"), settings, tz=tz, year=year, month=month,
-            genres=specs["genres"], countries=specs["countries"],
-            show_certifications=specs["show_certifications"],
-        ),
-    )
+            show_certifications=specs["show_certifications"])
+        for name in ("shows/new", "shows/premieres")))
     # A CALLER THAT DOES NOT PASS MARKS IS READING THE MONTH, NOT IMPORTING IT.
     # The roster this returns is also what the preview and the diff are built
     # from, and those describe the calendar rather than write to it; only the ADD
     # path owes the viewer their marks, and it passes them.
-    marks = nw_ids or set()
+    marks = _marked_titles([*new_items, *prem_items], nw_ids or set())
     out: list[dict] = []
     new_keys: set[tuple[str, int]] = set()
     for item in new_items:
@@ -153,30 +147,44 @@ async def premiere_records(user_id: int, settings, year: int, month: int,
     return out
 
 
-def _keyable(item: Item, nw_ids: set[str]) -> dict | None:
+def _marked_titles(items, nw_ids: set[str]) -> set[str]:
+    """The mark keys of every TITLE among `items` that a mark covers.
+
+    A TITLE, NOT A CARD: the calendar hides every card of a marked title, because
+    assemble_range expands a mark across the ids of everything grouped with it —
+    and a mark is stored under whichever service's name the viewer pressed it on.
+    Asked of each item alone, one service's copy slipped through: MEASURED, a
+    viewer's `treasure-island` mark (Simkl's name for the show) matched Simkl's
+    copy and not Trakt's, which carries `treasure-island-2026`, and the import
+    filed a show the calendar was hiding. Asked of both reads together, because
+    New Shows and Season Premieres can hold different services' copies of one
+    title and the mark need only match one of them.
+    """
+    return {item.mark_key for item in items if calendar_state.marked(nw_ids, item)}
+
+
+def _keyable(item: Item, marked: set[str]) -> dict | None:
     """The record for `item`, or None when it cannot go on a roster: no season to
     file it under, no shared id to file it by, or a mark saying the viewer has
     turned this title away. Skipped rather than raised — a calendar month is a
     list somebody else assembled, and one unusable entry in it is not a reason to
     fail the import.
 
-    THE MARK IS ASKED OF THE ITEM AND NOT OF THE RECORD, and that is the whole
-    repair. A mark may be stored under any spelling a title has ever been known
-    by — the calendar accepts six of them — while a record's id map is
-    `collect_ids`, an ALLOWLIST that keeps the ids the tracker files rows under
-    and drops the rest. Three of those six (`traktslug`, `tvdbslug`, `mdlslug`)
-    are among the dropped, so a record simply cannot answer this question:
-    measured here, a viewer's Nocturne mark reads `lazarus`, which the card
-    carries as Simkl's `tvdbslug` and the record does not carry at all. The
-    calendar hid the show and the import added it, and no amount of comparing
-    records could have found each other.
+    THE MARK IS ASKED OF THE CARD AND NOT OF THE RECORD. A mark may be stored
+    under any spelling a title has ever been known by — the calendar accepts six
+    of them — while a record's id map is `collect_ids`, an ALLOWLIST that keeps
+    the ids the tracker files rows under and drops the rest. Three of those six
+    (`traktslug`, `tvdbslug`, `mdlslug`) are among the dropped, so a record
+    simply cannot answer this question: measured here, a viewer's Nocturne mark
+    reads `lazarus`, which the card carries as Simkl's `tvdbslug` and the record
+    does not carry at all.
 
-    So it is asked at the last moment the full id map exists, through the
-    calendar's own predicate.
+    `marked` is `_marked_titles`' answer: the titles a mark covers, whichever copy
+    of them it matched.
     """
     if item.season is None:
         return None
-    if calendar_state.marked(nw_ids, item):
+    if item.mark_key in marked:
         return None
     record = calendar_record(item)
     try:

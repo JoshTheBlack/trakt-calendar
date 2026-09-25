@@ -27,6 +27,7 @@ from app.config import Settings
 from app.distrakt import calendar_import
 from app.endpoints import get_endpoint
 from app.providers.base import Media, Record, Source
+from app.providers.simkl import SimklError
 from tests.support import migrated_db
 
 # 2026-07-15 12:00Z, inside the aligned window the fixtures are stored under.
@@ -139,6 +140,26 @@ class TheMonthlyImportSurvivesTheStorageChangeTests(unittest.IsolatedAsyncioTest
         self.assertEqual({r["title"] for r in await self._import()}, {"Nocturne"})
         kept = await self._import(marks={"lazarus"})
         self.assertEqual(kept, [], "a mark the record cannot carry still has to exclude")
+
+    async def test_a_mark_matching_one_services_copy_excludes_the_title(self):
+        """MEASURED ON A REAL OCTOBER: Treasure Island was marked under
+        `treasure-island`, Simkl's name for it. Season Premieres held Simkl's copy
+        and New Shows only Trakt's, whose name is `treasure-island-2026`. The
+        calendar hides every card of a marked TITLE, while the import asked each
+        copy on its own and filed Trakt's. A mark that matches any copy of a
+        title, on either calendar the import reads, now covers the title."""
+        self.settings = Settings(simkl_public_calendar_enabled=True)
+        await self._fill(NEW, [_record(Source.TRAKT, "treasure-island-2026", tmdb=333101)])
+        await calendar_cache.store_window(
+            PREMIERES.key, calendar_cache.window_start(date(2026, 7, 15)),
+            [_record(Source.SIMKL, "treasure-island", tmdb=333101)], 600, 1000,
+            sources=["simkl"], asked=["simkl"])
+        # Simkl's refill fails, so the stored copy is what is read — the fixture
+        # is the rows, not whatever a fill would fetch.
+        with patch("app.providers.simkl.calendar.fetch_window",
+                   side_effect=SimklError("offline")):
+            self.assertTrue(await self._import(), "the fixture should import unmarked")
+            self.assertEqual(await self._import(marks={"treasure-island"}), [])
 
     async def test_a_mark_in_the_stable_key_excludes_too(self):
         """The ordinary case, so the fix above is not the only path that works."""

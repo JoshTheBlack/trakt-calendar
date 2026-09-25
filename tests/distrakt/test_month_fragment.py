@@ -165,8 +165,11 @@ class TheRowsControlsTests(MonthFragmentTestCase):
         self.drawn = self.month(*self.current)
 
     def test_the_row_opens_the_details_panel_and_carries_no_opener_script(self):
-        self.assertIn('data-details-open="/distrakt/fragments/details?key=show%3Atmdb%3A500&amp;season=1"',
-                      self.drawn.html)
+        year, month = self.current
+        # The month on screen rides in the address: the route looks the row up
+        # from it, so a premiere on a month still ahead is found.
+        self.assertIn(f'data-details-open="/distrakt/fragments/details?year={year}&amp;month={month}'
+                      f'&amp;key=show%3Atmdb%3A500&amp;season=1"', self.drawn.html)
         self.assertIn('data-details-heading="Listed Show · S01"', self.drawn.html)
         self.assertNotIn("onclick", self.drawn.html)
 

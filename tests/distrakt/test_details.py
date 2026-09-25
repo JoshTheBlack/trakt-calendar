@@ -114,17 +114,21 @@ class _DetailsRouteTestCase(AppTestCase):
         asyncio.run(distrakt_store.add_month_record(
             self.user_id, month, _settled(kind, season=season)))
 
-    def _details(self, season: int = 2):
+    def _details(self, season: int = 2, month: str = ""):
         client = _CatalogueClient({
             "shows/7": SHOW, "shows/7/people": PEOPLE,
             f"shows/7/seasons/{season}": EPISODES,
         })
+        viewed = ""
+        if month:
+            year, number = distrakt_store.parse_month_key(month)
+            viewed = f"&year={year}&month={number}"
         with patch.object(transport, "shared_client", return_value=client):
             return self.client.get(
-                f"/distrakt/fragments/details?key={KEY}&season={season}")
+                f"/distrakt/fragments/details?key={KEY}&season={season}{viewed}")
 
-    def _panel(self, season: int = 2) -> DetailsPanel:
-        resp = self._details(season)
+    def _panel(self, season: int = 2, month: str = "") -> DetailsPanel:
+        resp = self._details(season, month)
         self.assertEqual(resp.status_code, 200, resp.text)
         return DetailsPanel(resp.text)
 
@@ -158,6 +162,18 @@ class ASeasonSettledInTheMonthBeingViewedTests(_DetailsRouteTestCase):
         doing is still the first thing asked."""
         self._settle(_month_back(1))
         self.assertIn("Spies.", self._panel().html)
+
+    def test_a_premiere_on_a_month_still_ahead_opens_from_that_month(self):
+        """REPORTED: every row an import filed onto next month opened on "Not on
+        your roster", because the row was looked up from today's month and a
+        month ahead's premieres were never searched. The row names the month on
+        screen, and the search starts there."""
+        ahead = _month_back(-1)
+        self._settle(ahead, distrakt_store.RecordKind.SEASON_PREMIERE)
+        self.assertIn("Spies.", self._panel(month=ahead).html)
+        tabs = self._panel(month=ahead).html
+        year, number = distrakt_store.parse_month_key(ahead)
+        self.assertIn(f"year={year}", tabs, "a season tab would search from today again")
 
     def test_a_season_still_on_the_viewers_list_still_opens(self):
         asyncio.run(distrakt_store.add_user_record(self.user_id, {
@@ -650,7 +666,10 @@ class SeasonTabsOnARosterRowTests(_DetailsRouteTestCase):
         through would answer "Not on your roster"."""
         url = self._open().tab_urls[1]
         self.assertEqual(parse_qs(urlsplit(url).query),
-                         {"key": [KEY], "row": ["4"], "season": ["1"]})
+                         {"key": [KEY], "row": ["4"], "season": ["1"],
+                          # The month the row was found from — today's, since
+                          # this panel was opened without naming one.
+                          "year": [str(today().year)], "month": [str(today().month)]})
 
     def test_a_season_the_roster_has_no_row_for_still_opens(self):
         """The case the picker exists for. Season 1 was never tracked; the title

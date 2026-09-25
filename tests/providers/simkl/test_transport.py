@@ -190,7 +190,8 @@ class UnreachableSimklTests(TransportStateTestCase):
                           return_value=FakeClient([httpx.ConnectError("boom")])):
             with self.assertRaises(SourceUnavailable):
                 await simkl_calendar._conditional_get(
-                    simkl_calendar._archive_url(2026, 7, "tv.json"), revalidate=False)
+                    simkl_calendar._archive_url(2026, 7, "tv.json"), consumer="shows",
+                    revalidate=False)
 
 
 class CatalogPacerTests(TransportStateTestCase):

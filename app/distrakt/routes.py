@@ -1808,9 +1808,17 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     # verdicts, which is exactly the case the modal reported "could not load" for:
     # a season finished this month has left the viewer's list and is not a
     # premiere, so all three of that search's places miss it.
-    today = clock.today()
+    #
+    # FROM THE MONTH ON SCREEN, NOT TODAY'S. The row names that month in its
+    # address (templates/_distrakt_rows.html), and the search walks the viewer's
+    # list, that month's premieres and what it and every month before it
+    # settled. Asked from today's month instead, a premiere on a month still
+    # ahead — every row an import files onto next month — was never searched,
+    # and each one opened on "Not on your roster". Nothing is widened by it: the
+    # search reads only this viewer's own records, whichever month it starts at.
+    year, month = _viewed_month(request)
     placed = await lifecycle.find_shown_season(
-        user_id, key, row_season, month=distrakt_store.month_key(today.year, today.month))
+        user_id, key, row_season, month=distrakt_store.month_key(year, month))
     if placed is None:
         return details_panel.gap(request, "Not on your roster")
     ids = placed.record.get("ids") or {}
@@ -1885,7 +1893,10 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
                                # rendered back into the panel, which is the rule
                                # the tick links already follow.
                                carry=("key",),
-                               pinned={"row": str(row_season)})
+                               # AND THE MONTH IT WAS FOUND FROM, so a tab asks
+                               # the same search the panel did.
+                               pinned={"row": str(row_season),
+                                       "year": str(year), "month": str(month)})
 
 
 # The emoji editor's rows travel as one flat field per value, named by the row's

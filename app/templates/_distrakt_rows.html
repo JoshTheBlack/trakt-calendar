@@ -130,7 +130,7 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
 {%- endif -%}
 <div class="distrakt-show-row{{ ' abandoned' if show.abandoned }}{{ ' unavailable' if show.unavailable }}{{ ' row-marked' if marked }}"
      title="{{ show.network or '' }}"
-     data-details-open="/distrakt/fragments/details?key={{ show.key | urlencode }}&amp;season={{ show.season }}"
+     data-details-open="/distrakt/fragments/details{{ month_query }}&amp;key={{ show.key | urlencode }}&amp;season={{ show.season }}"
      data-details-heading="{{ show.title }} · S{{ '%02d' % show.season }}">
     {#- Whether these numbers are this load's, first in the row so the column
         reads down as one thing rather than being hunted for beside each row's
