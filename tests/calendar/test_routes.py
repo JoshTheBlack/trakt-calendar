@@ -1183,6 +1183,22 @@ class CalendarMarkupTests(CalendarRouteTestCase):
         shown = self.client.get(self.PAGE).text
         self.assertIn('<a class="day-chip" data-date="2026-07-15"', shown)
 
+    def test_a_mark_under_a_key_the_card_has_moved_off_still_redraws_it(self):
+        """REPORTED: a Simkl title was drawn as `show:tvdb:…`, enrichment then
+        added a tmdb id and the same card keyed as `show:tmdb:…`, and pressing
+        the eye stored the mark but redrew nothing until a reload. The answer
+        finds its cards by the mark rule, which knows every key a title's ids
+        spell."""
+        entry = _entry("show-c", "Show C", "2026-07-17T20:00:00Z")
+        entry["show"]["ids"].update({"tvdb": 482228, "tmdb": 777})
+        with patch("app.calendar.cache.fetch_window_records", window_fetch([entry])):
+            self.client.get(self.PAGE)
+            answer = self.client.post("/api/state?year=2026&month=7&endpoint=shows",
+                                      json={"item_id": "show:tvdb:482228",
+                                            "not_watching": True})
+        self.assertEqual(answer.status_code, 200, answer.text)
+        self.assertIn("Show C", answer.text, "the card the mark covers was not redrawn")
+
     def test_a_hidden_days_chip_keeps_its_href_so_a_toggle_can_revive_it(self):
         """The client toggles hiding without a reload and answers by adding or
         removing a class, so a day that merely LOOKS empty to this viewer must

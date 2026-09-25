@@ -27,6 +27,7 @@ from datetime import date, datetime, timedelta
 
 from .. import db
 from ..config import DATA_DIR
+from ..providers.base import MATCH_SOURCES, item_key, parse_item_key
 from ..endpoints import ENDPOINTS
 
 logger = logging.getLogger(__name__)
@@ -81,10 +82,28 @@ def marked(marks, item) -> bool:
     would make a show hidden on one screen and visible on the next.
     """
     return marked_by_ids(marks, mark_key=item.mark_key, ids=item.ids,
-                         display_id=item.id)
+                         display_id=item.id, media=item.media)
 
 
-def marked_by_ids(marks, *, mark_key: str, ids, display_id="") -> bool:
+def key_spellings(media, ids) -> set[str]:
+    """Every item key a title known by `ids` could be filed under — one per shared
+    id it carries, not only the one the waterfall picks today.
+
+    A TITLE'S KEY CAN MOVE, AND A MARK MUST NOT MOVE WITH IT. The key is
+    `resolve_key`'s first match in MATCH_SOURCES, and a Simkl calendar entry often
+    arrives with no tmdb id: Recipe of the Year was keyed `show:tvdb:482228`.
+    Enrichment later merges the ids Simkl's own record states into the stored
+    title, and the same card then keys as `show:tmdb:…`. A mark pressed on the
+    first key stopped matching the card under the second, and the redraw after a
+    mark found no card to redraw — measured on a real October, on the Simkl
+    titles whose enrichment landed while the page was open.
+    """
+    ids = ids or {}
+    return {item_key(str(media), name, str(ids[name])) for name in MATCH_SOURCES
+            if ids.get(name) not in (None, "", 0)}
+
+
+def marked_by_ids(marks, *, mark_key: str, ids, display_id="", media="") -> bool:
     """The rule itself, said without an `Item`.
 
     IT TAKES THE PIECES BECAUSE NOT EVERY CALLER HOLDS A CARD. The tracker's
@@ -105,6 +124,12 @@ def marked_by_ids(marks, *, mark_key: str, ids, display_id="") -> bool:
     if mark_key and mark_key in marks:
         return True
     if display_id and str(display_id) in marks:
+        return True
+    # ANY KEY THE TITLE'S IDS SPELL, for a mark made before its key moved — see
+    # key_spellings. `media` defaults to the mark key's own, which is what a
+    # caller holding only a key and an id map has.
+    if any(key in marks for key in
+           key_spellings(media or str(mark_key).split(":", 1)[0], ids)):
         return True
     # EVERY SPELLING THIS CARD HAS EVER BEEN IDENTIFIED BY, not just the one it
     # carries today. Simkl's own slugs are not unique, so records moved from
@@ -202,9 +227,12 @@ async def spellings_of(mark_key: str) -> set[str]:
     there. Measured on one real account: 909 of its 1,038 marks were in a legacy
     spelling, which is the majority of every mark it held.
 
-    `Item.mark_key` IS `calendar_titles.title_key` — both are `resolve_key`'s
-    output for the same ids — so the stored row for the title is what knows which
-    spellings it has ever answered to, and no card has to carry them.
+    THE STORED ROW FOR THE TITLE is what knows which spellings it has ever
+    answered to, so no card has to carry them. It is found by its title key OR by
+    the id the mark key names, because the two can differ: `Item.mark_key` is
+    `resolve_key` over the ids as they are NOW, and enrichment adds ids to a row
+    without re-keying it (see key_spellings). Every key those ids spell is cleared
+    too, so a mark made under the title's earlier key comes off.
 
     A SPELLING TWO TITLES SHARE UNMARKS BOTH, and that is the honest answer
     rather than a flaw. 21 of that account's legacy marks are slugs naming more
@@ -213,8 +241,19 @@ async def spellings_of(mark_key: str) -> set[str]:
     ambiguity is in the old data, and clearing it is what lets the next mark be
     written under a key that has none.
     """
-    rows = await db.fetch_all(
-        "SELECT ids_json FROM calendar_titles WHERE title_key = ?", (str(mark_key),))
+    try:
+        key = parse_item_key(mark_key)
+    except ValueError:
+        key = None
+    if key is None:
+        rows = await db.fetch_all(
+            "SELECT media, ids_json FROM calendar_titles WHERE title_key = ?",
+            (str(mark_key),))
+    else:
+        rows = await db.fetch_all(
+            "SELECT media, ids_json FROM calendar_titles WHERE title_key = ? "
+            "OR (media = ? AND CAST(json_extract(ids_json, '$.' || ?) AS TEXT) = ?)",
+            (str(mark_key), key.media, key.match_source, key.match_id))
     found = {str(mark_key)}
     for row in rows:
         try:
@@ -223,6 +262,7 @@ async def spellings_of(mark_key: str) -> set[str]:
             continue
         found.update(str(ids[name]) for name in _LEGACY_ID_NAMESPACES
                      if ids.get(name) not in (None, ""))
+        found.update(key_spellings(row["media"], ids))
     return found
 
 

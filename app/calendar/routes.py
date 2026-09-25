@@ -1885,8 +1885,14 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
     # `not_watching_keys` rather than the raw stored ids, for the reason the page
     # render gives: a card asks about `mark_key`, which the assembler expands.
     marked = meta["not_watching_keys"]
+    # THE CARDS THIS MARK COVERS, found by the mark rule itself rather than by
+    # key equality. The key the page posted is the one it DREW; a Simkl title's
+    # key can move under it when enrichment adds a tmdb id (state.key_spellings),
+    # and matching on equality then found no card and redrew nothing — the button
+    # did not flip until a reload.
+    covers = {item_id}
     items = [item for group in grouped for item in group["items"]
-             if item.mark_key == item_id]
+             if calendar_state.marked(covers, item)]
     # AND THE CHIP FOR EVERY DAY THIS TITLE AIRS ON, because with hide mode on a
     # mark can empty a day outright and a chip offering to scroll somewhere blank
     # is the thing `_day_chip` exists to avoid. Only those days: a mark cannot
@@ -1895,7 +1901,7 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
     # same rule the shell's chips came from, which is why it is that function
     # being called rather than this one working the condition out again.
     days = {group["date"] for group in grouped
-            if any(item.mark_key == item_id for item in group["items"])}
+            if any(calendar_state.marked(covers, item) for item in group["items"])}
     chips = [_day_chip(date.fromisoformat(group["date"]), group["items"], marked,
                        prefs["hide_not_watching"])
              for group in grouped if group["date"] in days]
