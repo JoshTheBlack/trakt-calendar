@@ -498,6 +498,13 @@ class DetailsPanel:
         return found
 
     @property
+    def unasked(self) -> list[str]:
+        """The services whose ticks are drawn as NOT ASKED — no id for this
+        title — rather than as an answer."""
+        return sorted({tick.group("source") for tick in self._TICK.finditer(self.html)
+                       if "unasked" in tick.group("flags")})
+
+    @property
     def services(self) -> list[str]:
         """Every service a tick is drawn for, filled or hollow."""
         return sorted({tick.group("source") for tick in self._TICK.finditer(self.html)})

@@ -32,10 +32,19 @@
    part of a control here (the rule _source_logo.html sets for drawing one at
    all), and naming the only service there is would put a logo on every row of a
    checklist with nothing to disambiguate. #}
+{#- A SERVICE THIS TITLE CANNOT BE LOOKED UP AT keeps its slot, so the column
+    stays a column, and is drawn as a dash that says it was never asked — a
+    hollow tick there read as "not recorded", which is a claim about a service
+    nobody had put the question to. -#}
 {%- macro tick(t, single) -%}
-{%- set body %}{% if not single %}{{ src.mark(t.source, 'ep-mark') }}{% endif %}{{ '✓' if t.seen else '○' }}{% endset -%}
-{%- set css = 'ep-check svc-' ~ t.source ~ ('' if t.seen else ' unseen') -%}
+{%- set glyph = ('✓' if t.seen else '○') if t.asked else '–' -%}
+{%- set body %}{% if not single %}{{ src.mark(t.source, 'ep-mark') }}{% endif %}{{ glyph }}{% endset -%}
+{%- set css = 'ep-check svc-' ~ t.source ~ ('' if t.seen else ' unseen') ~ ('' if t.asked else ' unasked') -%}
+{%- if t.asked -%}
 {%- set label = src.label(t.source) ~ (' recorded this' if t.seen else ' has not recorded this') ~ ' — open on ' ~ src.label(t.source) -%}
+{%- else -%}
+{%- set label = src.label(t.source) ~ ' was not asked: this title is not linked to ' ~ src.label(t.source) ~ ' here' -%}
+{%- endif -%}
 {% if t.url %}<a class="{{ css }}" href="{{ t.url }}" target="_blank" rel="noopener"
    title="{{ label }}">{{ body }}</a>{% else %}<span class="{{ css }}" title="{{ label }}">{{ body }}</span>{% endif %}
 {%- endmacro -%}

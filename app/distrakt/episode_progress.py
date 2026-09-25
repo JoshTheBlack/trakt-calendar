@@ -40,10 +40,17 @@ class Tick(NamedTuple):
     nowhere useful to go is drawn as plain text rather than as a link somewhere
     unhelpful — every tick opening Trakt whatever service had recorded the
     episode is the fault this shape replaced.
+
+    `asked` IS FALSE FOR A SERVICE THIS TITLE CANNOT BE LOOKED UP AT — no id for
+    it, and nothing recorded by it. Its tick is still drawn, so a season list
+    keeps one column per service down every row, but drawn as NOT ASKED rather
+    than as a hollow "not recorded": the two used to look identical, and the
+    second is a claim about the service that had never been put to it.
     """
     source: str
     seen: bool
     url: str
+    asked: bool = True
 
 
 class SourceCount(NamedTuple):
@@ -193,8 +200,17 @@ class SeasonProgress:
 
     def ticks(self, number) -> tuple[Tick, ...]:
         n = _as_number(number)
-        return tuple(Tick(name, n in self._by_source.get(name, ()), self._url_for(name, n))
+        return tuple(Tick(name, n in self._by_source.get(name, ()), self._url_for(name, n),
+                          self._asked(name))
                      for name in self._services)
+
+    def _asked(self, name: str) -> bool:
+        """Whether this service could be asked about this title: it has an id for
+        it — the same test `checked_by` makes — or it recorded something of the
+        season anyway, which it could only have done by being asked. A library
+        read matches titles on the shared identity rather than on an id, so the
+        second half is not hypothetical."""
+        return bool(self._ids[name]) or bool(self._by_source.get(name))
 
     def _url_for(self, name: str, number: int) -> str:
         if name == "trakt":

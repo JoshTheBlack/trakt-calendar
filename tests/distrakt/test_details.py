@@ -426,6 +426,35 @@ class WhoWasASKEDTests(_DetailsRouteTestCase):
         self.assertEqual(panel.services, ["simkl", "trakt"])
         self.assertNotIn("simkl", panel.tick_links)
 
+    def test_a_service_that_cannot_be_asked_is_drawn_as_not_asked(self):
+        """KEPT, NOT OMITTED: the column stays a column down every row. But drawn
+        as a dash saying it was never asked rather than a hollow tick, which read
+        as "Simkl has not recorded this" about a service nobody had asked."""
+        self._settle_with({"trakt": 7, "tmdb": 1})
+        self._progress("trakt", {1: "2026-08-01"})
+        panel = self._panel()
+        self.assertEqual(panel.unasked, ["simkl"])
+        self.assertEqual(panel.html.count("Simkl was not asked"), 10,
+                         "every row keeps the slot, and says why it is empty")
+        self.assertNotIn("Simkl has not recorded this", panel.html)
+
+    def test_a_service_that_can_be_asked_answers_even_when_it_has_nothing(self):
+        self._settle_with({"trakt": 7, "simkl": 55512, "tmdb": 1})
+        self._progress("trakt", {1: "2026-08-01"})
+        panel = self._panel()
+        self.assertEqual(panel.unasked, [])
+        self.assertIn("Simkl has not recorded this", panel.html)
+
+    def test_a_service_that_recorded_something_was_asked_whatever_its_id(self):
+        """Its record came from being asked — a library read matches on the
+        shared identity rather than on an id — so a tick it filled is an answer."""
+        self._settle_with({"trakt": 7, "tmdb": 1})
+        self._progress("trakt", {1: "2026-08-01"})
+        self._progress("simkl", {1: "2026-08-01"})
+        panel = self._panel()
+        self.assertEqual(panel.unasked, [])
+        self.assertEqual(panel.by_source, {"trakt": [1], "simkl": [1]})
+
     def test_one_linked_service_names_nobody_either(self):
         """With one service there is nothing to disambiguate, and a name on every
         row of a one-service checklist is noise — the same rule that stops a

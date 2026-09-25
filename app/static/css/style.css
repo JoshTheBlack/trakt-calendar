@@ -2355,6 +2355,11 @@ a.ep-check.unseen:hover { color: var(--text); background: rgba(255,255,255,0.08)
    which service is missing it. */
 .ep-check.unseen .ep-mark { opacity: 0.4; filter: grayscale(1); }
 a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
+/* A service this title cannot be looked up at: the slot stays so the column
+   does, drawn further back than a hollow tick and with no link, because it
+   is not an answer at all. */
+.ep-check.unasked { opacity: 0.45; cursor: help; }
+.ep-check.unasked .ep-mark { opacity: 0.3; }
 
 /* WHOSE TICKS THESE ARE, drawn only where the services disagree about the
    season. Quiet on purpose: nothing is wrong when two services hold different
