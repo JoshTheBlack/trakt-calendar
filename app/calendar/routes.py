@@ -1833,6 +1833,11 @@ async def get_state(request: Request):
     return JSONResponse(await calendar_state.load_state(user.user_id, endpoint.key, year, month))
 
 
+# What a card's `data-id` (Item.mark_key) can hold: a media, an id namespace and
+# an id, or a source and its own id. Nothing that could close a quoted selector.
+_CARD_KEY = re.compile(r"[A-Za-z0-9._-]+(?::[A-Za-z0-9._-]+){1,2}")
+
+
 async def _marked_answer(request: Request, user, endpoint, year: int, month: int,
                          item_id: str) -> Response:
     """What a mark looks like on screen, drawn by the side that decided it.
@@ -1893,6 +1898,14 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
     covers = {item_id}
     items = [item for group in grouped for item in group["items"]
              if calendar_state.marked(covers, item)]
+    # A TITLE THIS READ NO LONGER DRAWS HAS ITS CARDS TAKEN OFF THE PAGE. The eye
+    # was pressed on a card, so the title was on screen; if the month read now
+    # draws none of it, something changed since the page was drawn — REPORTED:
+    # a Simkl title's details landed a few minutes after the page did, named a
+    # country this viewer filters out, and the mark redrew nothing while a reload
+    # showed the title gone. The answer now says what the reload would. The key
+    # goes into a selector, so only a key's own characters are let through.
+    gone = item_id if not items and _CARD_KEY.fullmatch(item_id) else ""
     # AND THE CHIP FOR EVERY DAY THIS TITLE AIRS ON, because with hide mode on a
     # mark can empty a day outright and a chip offering to scroll somewhere blank
     # is the thing `_day_chip` exists to avoid. Only those days: a mark cannot
@@ -1907,7 +1920,7 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
              for group in grouped if group["date"] in days]
     logo_networks = await _logo_networks(settings, items)
     return templates.TemplateResponse(request, "_marked_cards.html", {
-        "chips": chips,
+        "chips": chips, "gone": gone,
         "request": request, "items": items,
         "not_watching": marked, "new_ids": meta.get("new_ids") or set(),
         "can_filter": True, "badge_modes": vocab.BadgeModes(prefs),

@@ -1199,6 +1199,28 @@ class CalendarMarkupTests(CalendarRouteTestCase):
         self.assertEqual(answer.status_code, 200, answer.text)
         self.assertIn("Show C", answer.text, "the card the mark covers was not redrawn")
 
+    def test_a_title_the_read_no_longer_draws_is_taken_off_the_page(self):
+        """REPORTED: a card was on screen, its details then named a country the
+        viewer filters out, and the eye redrew nothing — a reload showed the
+        title gone. The answer now says what the reload would."""
+        answer = self.client.post("/api/state?year=2026&month=7&endpoint=shows",
+                                  json={"item_id": "show:tmdb:4040", "not_watching": True})
+        self.assertIn("""hx-swap-oob="delete:.card[data-id='show:tmdb:4040']\"""", answer.text)
+
+    def test_a_title_still_drawn_is_redrawn_and_not_removed(self):
+        self.client.get(self.PAGE)
+        answer = self.client.post("/api/state?year=2026&month=7&endpoint=shows",
+                                  json={"item_id": "show-a", "not_watching": True})
+        self.assertIn("Show A", answer.text)
+        self.assertNotIn("delete:", answer.text)
+
+    def test_a_key_that_is_not_key_shaped_never_reaches_the_selector(self):
+        """The key is the page's own, but it is still a value a request carried,
+        and it lands inside a quoted selector."""
+        answer = self.client.post("/api/state?year=2026&month=7&endpoint=shows",
+                                  json={"item_id": "x'],body", "not_watching": True})
+        self.assertNotIn("delete:", answer.text)
+
     def test_a_hidden_days_chip_keeps_its_href_so_a_toggle_can_revive_it(self):
         """The client toggles hiding without a reload and answers by adding or
         removing a class, so a day that merely LOOKS empty to this viewer must
