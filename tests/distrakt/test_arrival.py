@@ -399,7 +399,8 @@ class EveryPathOfItsOwnFilesTheDescriptionTests(_FilesTheDescription, DistraktTe
     async def test_the_calendar_import(self):
         await store.save_month(self.user_id, store.new_month_doc("2026-09"))
         with _canonical(), patch.object(calendar_import, "premiere_records",
-                                        AsyncMock(return_value=[dict(self.FILING)])):
+                                        AsyncMock(return_value=calendar_import.Premieres(
+                                            [dict(self.FILING)]))):
             added = await calendar_import.import_premieres(
                 self.user_id, "2026-09", SETTINGS,
                 {calendar_import.candidate_ref(self.FILING)})

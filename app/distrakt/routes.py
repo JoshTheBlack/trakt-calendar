@@ -1667,7 +1667,7 @@ async def import_fragment(request: Request):
     year, month = _viewed_month(request)
     month_key = distrakt_store.month_key(year, month)
     context = {"request": request, "month_query": f"?year={year}&month={month}",
-               "rows": [], "note": ""}
+               "rows": [], "undescribed": [], "note": ""}
     settings = load_settings()
     if not settings.calendar_source_configured:
         context["note"] = "No calendar is configured, so there is nothing to import."
@@ -1679,13 +1679,14 @@ async def import_fragment(request: Request):
         if doc.get("closed"):
             context["note"] = "This month is frozen (read-only)."
         else:
-            offered = await distrakt_store.import_candidates(user_id, doc, settings)
+            offer = await distrakt_store.import_candidates(user_id, doc, settings)
             context["rows"] = sorted(
                 ({"ref": distrakt_store.candidate_ref(rec), "title": rec.get("title") or "",
                   "season": int(rec["season"]), "network": rec.get("network") or "",
                   "kind": "New" if int(rec["season"]) <= 1 else "Returning"}
-                 for rec in offered),
+                 for rec in offer.offered),
                 key=lambda row: (row["kind"] != "New", row["title"].casefold()))
+            context["undescribed"] = sorted(offer.undescribed, key=str.casefold)
     return templates.TemplateResponse(request, "_distrakt_import_list.html", context)
 
 

@@ -9,13 +9,28 @@
    THE COUNT COMES FIRST, because the number is what decides whether to go on or
    to go and tidy the calendar's filters first.
 
-   Context: `rows` [{ref, title, season, network, kind}], `note` (why nothing can
-   be offered, when nothing can), `month_query`. #}
+   TITLES NOT DESCRIBED YET ARE NAMED, NOT OFFERED: until their genres, country
+   and network arrive, the viewer's filters cannot rule on them, and an import
+   writes a row that stays. Naming them says why a title the calendar just
+   gained is missing here, and that it will not be missing for long.
+
+   Context: `rows` [{ref, title, season, network, kind}], `undescribed` (titles),
+   `note` (why nothing can be offered, when nothing can), `month_query`. #}
 {% if note %}
 <p class="distrakt-note distrakt-warn">{{ note }}</p>
-{% elif not rows %}
+{% else %}
+{% if undescribed %}
+<p class="distrakt-note distrakt-import-pending">{{ undescribed | length }}
+    title{{ '' if undescribed | length == 1 else 's' }} on this month's calendar
+    {{ 'is' if undescribed | length == 1 else 'are' }} still being looked up, so your
+    filters can't be checked against {{ 'it' if undescribed | length == 1 else 'them' }}
+    yet: {{ undescribed | join(', ') }}. Open Import again in a minute.</p>
+{% endif %}
+{% if not rows %}
+{% if not undescribed %}
 <p class="distrakt-note">Nothing new: every premiere your calendar shows for this month is
     already on it, or filtered out, or marked not watching.</p>
+{% endif %}
 {% else %}
 <form hx-post="/api/distrakt/import{{ month_query }}" hx-json-enc hx-boost="false"
       hx-target="#distraktShowList"
@@ -38,4 +53,5 @@
         <button type="submit" class="btn-primary">Import selected</button>
     </div>
 </form>
+{% endif %}
 {% endif %}

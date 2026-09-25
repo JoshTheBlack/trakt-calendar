@@ -380,9 +380,9 @@ async def import_offered(user_id: int, month_key: str, settings) -> int:
     doc = await store.load_month(user_id, month_key)
     if doc is None:
         return 0
-    offered = await calendar_import.import_candidates(user_id, doc, settings)
+    offer = await calendar_import.import_candidates(user_id, doc, settings)
     return await calendar_import.import_premieres(
-        user_id, month_key, settings, {calendar_import.candidate_ref(r) for r in offered})
+        user_id, month_key, settings, {calendar_import.candidate_ref(r) for r in offer.offered})
 
 
 def tracker_month(user_id: int, year: int, month: int, *, fresh: bool = False) -> dict:

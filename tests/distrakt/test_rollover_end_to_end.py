@@ -864,6 +864,24 @@ class ImportingIsSomethingSomebodyPicksTests(RolloverOverHttpTestCase):
         self.assertFalse(payload["import_due"])
         self.assertEqual(self.stored_ids(OPENING), {801, 911})
 
+    def test_a_title_nothing_has_described_yet_is_named_and_not_offered(self):
+        """MEASURED: a documentary Simkl had just listed was offered to a viewer
+        who keeps only US titles, because its country had not arrived yet. The
+        dialog now names it and offers only what the filters could rule on."""
+        from app.auth import prefs as auth_prefs
+
+        asyncio.run(auth_prefs.update_user_prefs(self.user_id, tv_countries="us"))
+        undescribed = _item(955, 1, "Girls of Warsaw", "2026-08-17")
+        undescribed.enriched = False
+        with fake_today(ON_THE_FIRST), self.offline(
+                {OPENING: [*self.PREMIERES[OPENING], undescribed]}):
+            text = self.client.get("/distrakt/fragments/import?year=2026&month=8").text
+        self.assertIn("<strong>2</strong> premieres", text)
+        self.assertEqual(text.count('type="checkbox"'), 2)
+        self.assertNotIn("tmdb:955", text)
+        self.assertIn("still being looked up", text)
+        self.assertIn("Girls of Warsaw", text)
+
     def test_the_button_is_drawn_lit_by_the_months_own_answer(self):
         with fake_today(ON_THE_FIRST), self.offline(self.PREMIERES):
             html = self.client.get("/distrakt/fragments/month?year=2026&month=8").text

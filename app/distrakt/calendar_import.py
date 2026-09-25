@@ -22,6 +22,7 @@ is how the two sections come to disagree.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 
 from ..calendar import state as calendar_state
 from ..providers.base import Item, Media, collect_ids, resolve_key
@@ -68,8 +69,20 @@ def matches_not_watching(rec: dict, nw_ids: set[str]) -> bool:
         nw_ids, mark_key=str(key) if key is not None else "", ids=ids)
 
 
+@dataclass
+class Premieres:
+    """What a month's calendar offers the tracker: the records it may file, and
+    the titles held back because nothing has described them yet.
+
+    `undescribed` IS TITLES, NOT A COUNT, because the dialog names them — "not
+    offered yet" is only something a reader can act on when they can see which.
+    """
+    offered: list[dict] = field(default_factory=list)
+    undescribed: list[str] = field(default_factory=list)
+
+
 async def premiere_records(user_id: int, settings, year: int, month: int,
-                           nw_ids: set[str] | None = None) -> list[dict]:
+                           nw_ids: set[str] | None = None) -> Premieres:
     """This month's calendar premieres split by rule: shows/new -> New (S01);
     shows/premieres minus shows/new -> Returning (S02+).
 
@@ -94,6 +107,23 @@ async def premiere_records(user_id: int, settings, year: int, month: int,
     with Simkl alone came to be refused a calendar the instance was reading
     perfectly well. The PREFS above are the importer's and stay so: which titles
     they may keep is theirs, who is asked is not.
+
+    THE READ IS THE CALENDAR PAGE'S, KEYWORD FOR KEYWORD: every field
+    `vocab.active_specs` answers and the importer's own source selection. This
+    used to name three of the specs, which left out the network filter, and pass
+    no selection, which let in services the viewer switched off. Either way it
+    offered titles their calendar did not show.
+
+    A TITLE THE READ KEPT UNJUDGED IS HELD BACK, NOT OFFERED. The calendar SHOWS
+    a title nothing has described yet whenever a filter would otherwise rule on
+    it (see app/calendar/filter.py's `exempt_unenriched`), because hiding what
+    has not been looked up reads as "nothing matched", and the page says how many
+    it is showing unjudged. An import WRITES A ROW, which does not come back off
+    when the facts arrive. Measured: a Polish documentary landed in Simkl's
+    September file at 12:21:32 and was described at 12:21:36. A dialog opened in
+    those four seconds offered it to a viewer who keeps only US titles. Whether a
+    title was let through unjudged is `calendar_cache.exempts_undescribed`'s
+    answer, the same one the calendar's note counts, so the two cannot disagree.
     """
     from zoneinfo import ZoneInfo
 
@@ -102,7 +132,9 @@ async def premiere_records(user_id: int, settings, year: int, month: int,
     from ..calendar import vocab
     from ..endpoints import get_endpoint
     from ..providers.base import Media
+    from ..sources import prefs as source_prefs
     prefs = await auth.get_user_prefs(user_id)
+    selection = (await source_prefs.load(user_id)).for_media(Media.SHOW)
     tz = ZoneInfo(settings.timezone)
     # BOTH ENDPOINTS ARE SHOW CALENDARS, so both read the importer's TV answers
     # — asked through the one function that knows which stored column governs
@@ -121,29 +153,31 @@ async def premiere_records(user_id: int, settings, year: int, month: int,
     (new_items, _), (prem_items, _) = await asyncio.gather(*(
         calendar_cache.read_month(
             get_endpoint(name), settings, tz=tz, year=year, month=month,
-            genres=specs["genres"], countries=specs["countries"],
-            show_certifications=specs["show_certifications"])
+            **specs, prefs=selection)
         for name in ("shows/new", "shows/premieres")))
+    exempting = calendar_cache.exempts_undescribed(Media.SHOW, settings, **specs)
     # A CALLER THAT DOES NOT PASS MARKS IS READING THE MONTH, NOT IMPORTING IT.
-    # The roster this returns is also what the preview and the diff are built
-    # from, and those describe the calendar rather than write to it; only the ADD
-    # path owes the viewer their marks, and it passes them.
+    # Only the ADD path owes the viewer their marks, and it passes them.
     marks = _marked_titles([*new_items, *prem_items], nw_ids or set())
-    out: list[dict] = []
+    out = Premieres()
+    held: set[str] = set()
     new_keys: set[tuple[str, int]] = set()
-    for item in new_items:
-        record = _keyable(item, marks)
-        if record is None:
-            continue
-        new_keys.add(_present_key(record))
-        out.append(record)
-    for item in prem_items:
-        record = _keyable(item, marks)
-        if record is None:
-            continue
-        if _present_key(record) in new_keys:
-            continue  # this S01 premiere is already counted as a New Shows entry
-        out.append(record)
+    for endpoint_items, is_new in ((new_items, True), (prem_items, False)):
+        for item in endpoint_items:
+            record = _keyable(item, marks)
+            if record is None:
+                continue
+            key = _present_key(record)
+            if is_new:
+                new_keys.add(key)
+            elif key in new_keys:
+                continue  # this S01 premiere is already counted as a New Shows entry
+            if exempting and not item.enriched:
+                if item.mark_key not in held:
+                    held.add(item.mark_key)
+                    out.undescribed.append(record["title"])
+                continue
+            out.offered.append(record)
     return out
 
 
@@ -206,9 +240,10 @@ def candidate_ref(rec: dict) -> str:
     return f"{key}|{season}"
 
 
-async def import_candidates(user_id: int, doc: dict, settings) -> list[dict]:
+async def import_candidates(user_id: int, doc: dict, settings) -> Premieres:
     """The premieres the month's calendar shows this viewer that `doc` does not
-    hold yet — what the import dialog offers.
+    hold yet — what the import dialog offers — and the titles held back until
+    they are described (see premiere_records).
 
     NOTHING IS LOOKED UP TO OFFER THEM. This is the calendar as it is stored,
     through the viewer's own filters and marks: the list somebody reads before
@@ -223,8 +258,9 @@ async def import_candidates(user_id: int, doc: dict, settings) -> list[dict]:
     year, month = store.parse_month_key(doc["month"])
     present = {_present_key(s) for s in doc.get("shows") or []}
     nw_ids = await calendar_state.not_watching_ids(user_id)
-    return [rec for rec in await premiere_records(user_id, settings, year, month, nw_ids)
-            if _present_key(rec) not in present]
+    read = await premiere_records(user_id, settings, year, month, nw_ids)
+    read.offered = [rec for rec in read.offered if _present_key(rec) not in present]
+    return read
 
 
 async def import_premieres(user_id: int, month_key: str, settings,
@@ -246,7 +282,7 @@ async def import_premieres(user_id: int, month_key: str, settings,
     doc = await load_month(user_id, month_key)
     if doc is None or doc.get("closed"):
         return 0
-    records = [rec for rec in await import_candidates(user_id, doc, settings)
+    records = [rec for rec in (await import_candidates(user_id, doc, settings)).offered
                if candidate_ref(rec) in chosen]
     if not records:
         return 0
