@@ -35,7 +35,7 @@ from app import assets, db, distrakt
 from app.distrakt import (counts, discord_fmt, lifecycle, live,
                           routes as distrakt_routes, store, watch_history as wh)
 from app.providers.base import (ItemKey, LibraryEntry, LibraryRead, PlayCounts,
-                                UnlistedSeasons)
+                                TitleFacts, UnlistedSeasons)
 from app.providers.simkl import SimklError
 from app.providers.trakt import TraktError
 from tests.support import AppTestCase, ORIGIN, migrated_db, tracker_month
@@ -1763,14 +1763,12 @@ class AnOldFrozenMonthExplainsItselfTests(unittest.TestCase):
         self.assertNotIn("recorded before", note)
 
 
-class WhoBroadcastThisTests(unittest.IsolatedAsyncioTestCase):
-    """live.network_for — which service answers "who broadcast this", and how.
+class WhoDescribesThisTests(unittest.IsolatedAsyncioTestCase):
+    """live.title_facts — which service's words a tracker row is filed with.
 
-    It exists because a row added from a history prompt has nowhere else to get a
-    network: the play behind the prompt is deliberately thin, and the season
-    lookup the add already makes answers about the SEASON. Measured against both
-    live services while this was written — neither fetch_season_detail carries a
-    network, and neither should.
+    The describing service, by the same rule its season lookups use
+    (detail_source), asked through its own DetailPort with ITS OWN id. What each
+    port reads is tested with the port (tests/providers); this is the choice.
     """
 
     def settings(self):
@@ -1785,34 +1783,29 @@ class WhoBroadcastThisTests(unittest.IsolatedAsyncioTestCase):
         """THE CASE THAT MUST NOT REGRESS. Reaching for Trakt first would answer
         nothing at all on a Simkl-only instance."""
         rec = {"ids": {"simkl": 1231401}, "season": 2, "media": "show"}
-        naming = SimpleNamespace(season=2, network="", ids={}, siblings=[])
-        with patch("app.providers.simkl._naming.fetch",
-                   AsyncMock(return_value=naming)) as fetch, \
-             patch("app.providers.simkl._naming.network_of_series",
-                   AsyncMock(return_value="Fuji TV")) as series:
-            got = await live.network_for(self.settings(), rec)
-        self.assertEqual(got, "Fuji TV")
-        fetch.assert_awaited_once()
-        # The season-title's OWN record states no network — Simkl fills it in on
-        # the series root only — so the series is what has to answer.
-        series.assert_awaited_once()
+        with patch("app.providers.simkl.detail.fetch_title_facts",
+                   AsyncMock(return_value=TitleFacts("Beastars", "Fuji TV"))) as simkl,              patch("app.providers.trakt.detail.fetch_title_facts", AsyncMock()) as trakt:
+            got = await live.title_facts(self.settings(), rec)
+        self.assertEqual(got, TitleFacts("Beastars", "Fuji TV"))
+        self.assertEqual(simkl.await_args.args[1], 1231401)
+        trakt.assert_not_awaited()
 
-    async def test_a_trakt_record_is_answered_by_trakt(self):
-        rec = {"ids": {"trakt": 145309}, "season": 2, "media": "show"}
-        with patch("app.providers.trakt.detail.fetch_show_summary",
-                   AsyncMock(return_value={"network": "Netflix"})) as summary:
-            got = await live.network_for(self.settings(), rec)
-        self.assertEqual(got, "Netflix")
-        summary.assert_awaited_once()
+    async def test_a_record_trakt_can_describe_is_answered_by_trakt(self):
+        rec = {"ids": {"trakt": 145309, "simkl": 1}, "season": 2, "media": "show"}
+        with patch("app.providers.trakt.detail.fetch_title_facts",
+                   AsyncMock(return_value=TitleFacts("Beastars", "Netflix"))) as trakt:
+            got = await live.title_facts(self.settings(), rec)
+        self.assertEqual(got.network, "Netflix")
+        self.assertEqual(trakt.await_args.args[1], 145309)
 
     async def test_a_record_no_configured_source_can_name_answers_empty(self):
         """Not a zero to write down — the same shape detail_source already
-        returns None for, and an empty network is what the roster renders."""
+        returns None for, and an empty answer leaves the row's own words."""
         rec = {"ids": {"tvdb": 4321}, "season": 1, "media": "show"}
-        self.assertEqual(await live.network_for(self.settings(), rec), "")
+        self.assertEqual(await live.title_facts(self.settings(), rec), TitleFacts("", ""))
 
     async def test_a_simkl_record_with_no_simkl_id_asks_nothing(self):
         """detail_source can only have named Simkl from an id, but the guard is
         cheap and a lookup on None is a request that cannot succeed."""
         rec = {"ids": {"simkl": ""}, "season": 1, "media": "show"}
-        self.assertEqual(await live.network_for(self.settings(), rec), "")
+        self.assertEqual(await live.title_facts(self.settings(), rec), TitleFacts("", ""))

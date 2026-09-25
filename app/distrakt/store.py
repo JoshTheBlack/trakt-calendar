@@ -853,6 +853,20 @@ async def remove_month_movie(user_id: int, month: str, key) -> bool:
     return True
 
 
+async def months_with_unkeyed_films(user_id: int) -> list[tuple[str, list[dict]]]:
+    """(month, its stored film list) for every month whose list still holds a
+    film in the shape written before films had keys — `{trakt_id, title, year,
+    watched_at}`, no `key` — which migration 18 deliberately left alone.
+
+    Found by the one field only that shape has, so a month already repaired costs
+    nothing to skip: the current shape carries its ids in an `ids` map.
+    """
+    rows = await db.fetch_all(
+        "SELECT month, movies_json FROM distrakt_months "
+        "WHERE user_id = ? AND movies_json LIKE '%\"trakt_id\"%'", (user_id,))
+    return [(row["month"], list(json.loads(row["movies_json"]) or [])) for row in rows]
+
+
 async def set_month_movies(user_id: int, month: str, movies: list[dict]) -> None:
     """Replace just the films a CLOSED month snapshotted, leaving its records and
     its closed flag alone.
@@ -1392,43 +1406,44 @@ async def remove_season_from_month(user_id: int, month: str, key: ItemKey,
 # an id a record did not have when it was written
 # ---------------------------------------------------------------------------
 
-# Which slug column each service id column owes a value to. A slug is OWED only
-# where that service's own id is present: the id is the service saying it knows
-# this title, and without one there is no reason to think it ever will. Asking
-# for a slug on every row instead would keep a Simkl-only title permanently owing
-# a Trakt name — a debt nothing could ever settle, which turns "is there work to
-# do" into a question that answers yes for ever.
-# What a stored record can be short of that the stored calendar may know: each
-# service's own id and its own name for the title (as ID_KEYS spell them, the
-# id's column beside it), and the network.
+# What a stored record can be short of that the stored calendar may know, as
+# ID_KEYS spell each one with its column beside it: each service's own id and
+# its own name for the title, and each shared id the row is not filed under.
+# THE FILING ID NEVER APPEARS OWED: it is what the row is addressed by, so it is
+# present by definition — and `learn_ids` could not reach it anyway.
 _OWABLE_IDS = {"trakt": "trakt_id", "simkl": "simkl_id",
-               "trakt_slug": "trakt_slug", "simkl_slug": "simkl_slug"}
+               "trakt_slug": "trakt_slug", "simkl_slug": "simkl_slug",
+               "tmdb": "tmdb", "tvdb": "tvdb", "imdb": "imdb", "mal": "mal"}
 NETWORK = "network"
 
 
 class Owed(NamedTuple):
-    """One identity's debt: what it is short of, and the service ids its rows
-    already hold (merged across rows and tables) — which is what decides whose
-    answer a network should be, the same way live.detail_source decides."""
+    """One identity's debt: what it is short of, and every id its rows already
+    hold (merged across rows and tables) — what decides which service's words
+    it should carry, and what a stored-calendar match may only add to — and the
+    network one of its rows states, "" when none does."""
     key: ItemKey
     names: tuple[str, ...]
     ids: dict
+    network: str = ""
 
 
 async def identities_owing(user_id: int) -> list[Owed]:
-    """Every identity this viewer holds a row for that is short of a service id,
-    a service's name for the title, or a network — with WHICH of them.
+    """Every identity this viewer holds a row for that is short of an id, a
+    service's name for the title, or a network — with WHICH of them.
 
     THE NAMES ARE PART OF THE ANSWER, not something the caller may assume: a
     title only one service lists is the ordinary case, and a caller handed the
     identity alone would write whatever it found.
 
-    A SERVICE'S ID IS OWED WHEREVER IT IS MISSING, not only its name. It used to
-    be names alone — owed only where the row already held that service's id —
-    and that left every row filed off one service permanently half-linked
-    although the stored calendar held the other service's own record of the same
-    title. MEASURED on a live instance: 69 identities owing an id, 29 of them
-    answerable from the stored calendar.
+    A SERVICE'S ID IS OWED WHEREVER IT IS MISSING, not only its name, and so is
+    every shared id. It used to be names alone — owed only where the row already
+    held that service's id — which left every row filed off one service
+    permanently half-linked although the stored calendar held the other
+    service's own record of the same title. MEASURED on a live instance: 69
+    identities owing a service id, 29 of them answerable from the stored
+    calendar; and history-written rows missing tvdb and imdb on 13 of the 14
+    titles that other paths had filed with both.
 
     PER IDENTITY, NOT PER ROW, because that is the unit an id or a name is true of
     and the unit `learn_ids` writes. BOTH RECORD TABLES, and the settled half is
@@ -1444,7 +1459,7 @@ async def identities_owing(user_id: int) -> list[Owed]:
         f"MAX(CASE WHEN {column} IS NULL OR {column} = '' THEN 1 ELSE 0 END) AS owes_{name}"
         for name, column in owable.items())
     held = ", ".join(f"MAX({column}) AS has_{name}"
-                     for name, column in _OWABLE_IDS.items() if not name.endswith("_slug"))
+                     for name, column in {**_OWABLE_IDS, NETWORK: NETWORK}.items())
     selected = ", ".join(IDENTITY_COLUMNS)
     having = " OR ".join(f"owes_{name} = 1" for name in owable)
     sql = " UNION ALL ".join(
@@ -1455,14 +1470,18 @@ async def identities_owing(user_id: int) -> list[Owed]:
 
     names: dict[tuple, set[str]] = {}
     ids: dict[tuple, dict] = {}
+    networks: dict[tuple, str] = {}
     for row in rows:
         address = tuple(str(row[column]) for column in IDENTITY_COLUMNS)
         names.setdefault(address, set()).update(
             name for name in owable if row[f"owes_{name}"])
-        for name in ("trakt", "simkl"):
+        for name in _OWABLE_IDS:
             if row[f"has_{name}"] not in (None, ""):
-                ids.setdefault(address, {})[name] = row[f"has_{name}"]
-    return [Owed(ItemKey(*address), tuple(sorted(owed)), ids.get(address, {}))
+                ids.setdefault(address, {}).setdefault(name, row[f"has_{name}"])
+        if row[f"has_{NETWORK}"]:
+            networks.setdefault(address, str(row[f"has_{NETWORK}"]))
+    return [Owed(ItemKey(*address), tuple(sorted(owed)), ids.get(address, {}),
+                 networks.get(address, ""))
             for address, owed in names.items()]
 
 

@@ -20,7 +20,8 @@ from ...endpoints import ENDPOINTS
 from datetime import date
 
 from .. import register
-from ..base import Capabilities, Media, Record, SearchHit, SeasonsAnswer, Source
+from ..base import (Capabilities, Media, Record, SearchHit, SeasonsAnswer, Source,
+                    TitleFacts)
 from . import calendar, detail, sync
 from .transport import TraktError, TraktRateLimitError
 
@@ -118,6 +119,10 @@ class _TraktDetailPort:
             return season_rules.empty_season(int(season))
         return await detail.fetch_season_detail(settings, source_id, int(season))
 
+    async def fetch_title_facts(self, settings: Settings, source_id,
+                                media: Media) -> TitleFacts:
+        return await detail.fetch_title_facts(settings, source_id, str(media))
+
     async def fetch_seasons(self, settings: Settings, source_id, media: Media, *,
                             cached_only: bool = False) -> SeasonsAnswer:
         """app/providers/base.py's DetailPort.fetch_seasons, over the existing
@@ -182,6 +187,9 @@ class _TraktSearchPort:
             )
             for entry in raw
         ]
+
+    async def find_by_shared_id(self, settings: Settings, media: Media, ids: dict) -> dict:
+        return await detail.find_by_shared_id(settings, str(media), ids)
 
 
 class _TraktSyncPort:

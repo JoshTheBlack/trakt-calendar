@@ -13,6 +13,7 @@ import logging
 from . import counts, discord_fmt
 from .. import providers
 from ..perftrace import span
+from ..providers.base import Media, TitleFacts
 from ..sources import prefs as source_prefs
 from .store import Bucket, record_key
 
@@ -327,19 +328,19 @@ async def season_detail(settings, rec: dict, *, fresh: bool = False, client=None
                                      fresh=fresh, client=client)
 
 
-async def network_for(settings, rec: dict) -> str:
-    """Who broadcast this title, from whichever source can answer for it — "" when
-    none can.
+async def title_facts(settings, rec: dict) -> TitleFacts:
+    """What the service that DESCRIBES this record calls the title, and who it
+    says carried it — empty strings when no service can be asked.
 
-    BESIDE `season_detail` AND PICKING ITS SOURCE THE SAME WAY, because it is the
-    same kind of question: a public catalogue fact about a title, decided by which
-    ids the record carries and which of those services this instance can actually
-    ask (`detail_source`). That is what makes it work on a Simkl-only instance,
-    where reaching for Trakt first would answer nothing.
+    THE DESCRIBING SERVICE, `detail_source`'s answer: the one this record's ids
+    and this instance's credentials select, which is the same service its season
+    lookups and its counts come from. That is what makes the answer the same
+    whichever way the title reached the tracker — a path's own copy of a title
+    or a network is only what that path happened to be handed.
 
-    WHY IT IS A SECOND CALL AND NOT A PARAMETER ON THE ONE ALREADY BEING MADE.
-    Asked of both services' docs and then measured against both live, because a
-    free ride would have been worth having:
+    WHY IT IS A SECOND CALL AND NOT A PARAMETER ON THE SEASON LOOKUP. Asked of
+    both services' docs and then measured against both live, because a free ride
+    would have been worth having:
 
       SIMKL — GET /tv/episodes/{id} takes no `extended` at all. Its own
       conventions page says the parameter "is still accepted for backward
@@ -359,40 +360,19 @@ async def network_for(settings, rec: dict) -> str:
       and does not fill, and reading it would have looked right in review and
       returned nothing in production.
 
-    So the network is a fact about the SHOW and has to be asked for as one. The
-    season lookup answers how long a season is and when it aired, which is a
-    different question, and should not be widened into this one.
-
-    WHO NEEDS IT: any row that reaches the tracker without one — a history
-    prompt, the backfill and the rollover (history events name no network), a
-    search hit only Simkl answered, a Simkl calendar record not yet enriched.
-    Asked through arrival.fill_networks, which tries the stored calendar first
-    and calls this only for what that cannot answer.
-
     THE TWO SERVICES CAN LEGITIMATELY DISAGREE and that is not a defect to
     reconcile here: Simkl answers Beastars with "Fuji TV" (who aired it) and Trakt
-    with "Netflix" (who carried it), both true. Whichever source the record's own
-    ids and this instance's credentials select is the one that answers, which is
-    the same answer the rest of the row is built from.
+    with "Netflix" (who carried it), both true. One service decides, by one rule.
+
+    THROUGH THE SOURCE'S OWN DetailPort, which owns how it reads its catalogue —
+    Simkl's series-root network fallback included.
     """
-    from ..providers.simkl import _naming as simkl_naming
-    from ..providers.trakt.detail import fetch_show_summary
-    ids = rec.get("ids") or {}
     source = detail_source(rec, settings)
-    if source == "simkl":
-        simkl_id = ids.get("simkl")
-        if not simkl_id:
-            return ""
-        naming = await simkl_naming.fetch(settings, simkl_id)
-        # Simkl fills the network in on the SERIES root and leaves it null on
-        # every later season-title, so a season added from a prompt has to read
-        # it off the series — see network_of_series, which is where that
-        # measurement lives.
-        return await simkl_naming.network_of_series(settings, simkl_id, naming)
-    if source is None:
-        return ""
-    info = await fetch_show_summary(settings, ids.get("trakt"))
-    return str((info or {}).get("network") or "")
+    source_id = (rec.get("ids") or {}).get(source) if source else None
+    if not source_id:
+        return TitleFacts("", "")
+    port = providers.get(source).detail_port
+    return await port.fetch_title_facts(settings, source_id, rec.get("media") or Media.SHOW)
 
 
 async def fetch_season_details(settings, records: list[dict], *, fresh: bool,

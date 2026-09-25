@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
@@ -341,6 +341,37 @@ class TopLevelDegradeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("rate-limiting", payload["notice"])
         self.assertEqual(len(payload["shows"]), 1)  # rendered from the stored record
         self.assertEqual(payload["shows"][0]["total"], 12)  # last-known, not a false 0
+
+    async def test_any_unreachable_service_degrades_the_same_way(self):
+        """MEASURED with every outbound connection refused: an account whose first
+        service is Simkl got a 500 and a page stuck on "Loading…", because only
+        TraktError was caught here. The sync raises whichever service failed
+        first when none answered; the contract is SourceUnavailable."""
+        from datetime import date
+
+        from app.distrakt.routes import _distrakt_month_payload
+        from app.providers.simkl import SimklError
+
+        today = date.today()
+        month_key = f"{today.year:04d}-{today.month:02d}"
+        doc = distrakt_store.new_month_doc(month_key)
+        doc["shows"] = [_record(1, 1, kind="completed", bucket="completed", total=12, watched=8)]
+        await distrakt_store.save_month(self.user_id, doc)
+
+        async def _unreachable(*a, **k):
+            raise SimklError("Could not reach Simkl: All connection attempts failed")
+
+        with patch("app.distrakt.watch_history.sync_and_baseline", _unreachable), \
+             patch("app.distrakt.watch_history.tracker_sources",
+                   AsyncMock(return_value=["simkl", "trakt"])):
+            payload, status = await _distrakt_month_payload(
+                self.user_id, today.year, today.month,
+                Settings(trakt_client_id="cid", trakt_access_token="tok"))
+
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["rate_limited"])
+        self.assertIn("Couldn't reach Simkl and Trakt", payload["notice"])
+        self.assertEqual(payload["shows"][0]["total"], 12)
 
 
 class MockTransportSendTests(unittest.IsolatedAsyncioTestCase):

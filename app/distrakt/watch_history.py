@@ -124,7 +124,7 @@ from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import NamedTuple
 
-from . import counts, naming, removals, store
+from . import arrival, counts, film_snapshots, naming, removals, store
 from .store import ID_COLUMNS, IDENTITY_COLUMNS, record_key
 from .. import clock, db, providers
 from ..providers.base import (ItemKey, LibraryPort, Media, PlayCountPort,
@@ -2307,6 +2307,12 @@ async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: b
     # one indexed count when there is nothing owed, and no network ever.
     with span("wh.fill_names"):
         await naming.fill_from_calendar(user_id, settings)
+    # WHAT DISK COULD NOT ANSWER IS ASKED, a title at a time and at most daily:
+    # a network no stored calendar names, and a frozen month's films stored
+    # before films had keys. Both cost nothing once there is nothing left.
+    with span("wh.ask_what_disk_cannot"):
+        await arrival.ask_for_missing_networks(user_id, settings)
+        await film_snapshots.repair(user_id, settings)
     # THE VIEWER'S OWN FLOOR, APPLIED HERE AND NOWHERE ELSE. A season somebody
     # is watching AGAIN has a history full of plays about the previous run;
     # counting those reports the new pass as finished before it began, and

@@ -699,6 +699,35 @@ class PartialDataBannerTests(CalendarRouteTestCase):
         self.assertNotIn("warning-banner", resp.text)
 
 
+class AnEmptyMonthSaysWhyTests(CalendarRouteTestCase):
+    """OBSERVED by the owner on months far ahead: every empty month said "No
+    items matched your filters" — including ones whose every week had been fetched
+    and simply held nothing, with no filter removing anything at all."""
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in_as(self._make_user("empty_viewer"))
+
+    def test_a_month_that_holds_nothing_does_not_blame_the_filters(self):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch([])):
+            html = self.client.get("/calendar?year=2026&month=7").text
+        self.assertIn("Nothing is on this calendar for this month yet.", html)
+        self.assertNotIn("matched your filters", html)
+
+    def test_a_partly_unreadable_empty_month_says_so_rather_than_blaming_filters(self):
+        boom_window = calendar_cache.window_start(date(2026, 7, 20))
+
+        def fake(endpoint, start):
+            if start == boom_window:
+                raise TraktError("Trakt unreachable", 503)
+            return []
+
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
+            html = self.client.get("/calendar?year=2026&month=7").text
+        self.assertIn("warning-banner", html)
+        self.assertIn("part of this month that could be loaded", html)
+
+
 def _unreachable_client() -> httpx.AsyncClient:
     """A real httpx client whose every connection fails, the way a DNS failure
     or a service outage does — BELOW the stand-ins the tests above use, which

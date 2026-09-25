@@ -725,10 +725,11 @@ async def group_identity(title_key: str) -> tuple[str, dict[str, str], str] | No
 @dataclass(frozen=True)
 class StoredTitle:
     """One service's stored record of a title: that service's own id map for it,
-    and the network it states. Empty network means that service has not said —
-    a Simkl row waits for enrichment to fill it."""
+    its own name for the title, and the network it states. Empty network means
+    that service has not said — a Simkl row waits for enrichment to fill it."""
     ids: dict
     network: str
+    title: str = ""
 
 
 async def known_about(title_keys) -> dict[str, dict[str, StoredTitle]]:
@@ -757,7 +758,7 @@ async def known_about(title_keys) -> dict[str, dict[str, StoredTitle]]:
     for start in range(0, len(keys), 400):
         chunk = keys[start:start + 400]
         rows = await db.fetch_all(
-            "SELECT title_key, source, ids_json, network FROM calendar_titles "
+            "SELECT title_key, source, ids_json, network, title FROM calendar_titles "
             f"WHERE title_key IN ({', '.join('?' * len(chunk))}) "
             "ORDER BY title_key, source, network = '', source_id", tuple(chunk))
         for row in rows:
@@ -768,7 +769,8 @@ async def known_about(title_keys) -> dict[str, dict[str, StoredTitle]]:
             # then the lowest id, so the answer never depends on scan order.
             out.setdefault(str(row["title_key"]), {}).setdefault(
                 str(row["source"]),
-                StoredTitle(ids=dict(ids), network=str(row["network"] or "")))
+                StoredTitle(ids=dict(ids), network=str(row["network"] or ""),
+                            title=str(row["title"] or "")))
     return out
 
 

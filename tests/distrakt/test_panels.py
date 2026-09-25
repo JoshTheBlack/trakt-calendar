@@ -204,10 +204,12 @@ class ImportingAMonthTests(TrackerPanelTestCase):
         route decides by comparing the month against today."""
         index = self.today.month - 1 + offset
         year, month = self.today.year + index // 12, index % 12 + 1
-        # Building the month also consults recent viewing, and the route ends by
-        # recomputing the whole month; neither is what is under test here.
+        # Building the month also consults recent viewing, describes each premiere
+        # it files (arrival.describe — the season lookup), and the route ends by
+        # recomputing the whole month; none of that is what is under test here.
         with patch("app.calendar.cache.read_month", side_effect=_fake_premiere_read(303, 1)), \
              patch("app.providers.trakt.sync.fetch_watched_progress", return_value=[]), \
+             patch("app.distrakt.live.season_detail", AsyncMock(return_value={})), \
              patch("app.distrakt.routes._month_answer",
                    new=AsyncMock(return_value=Response(status_code=200))):
             return self.client.post(f"/api/distrakt/import?year={year}&month={month}",

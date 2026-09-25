@@ -1,5 +1,7 @@
 """Teach stored tracker records what the calendar already knows about their
-titles: each service's id, each service's name for the title, and the network.
+titles: each service's id, each service's name for the title, the shared ids,
+and the network — by the same rules a newly arriving record is described by
+(app/distrakt/arrival.py), so a repaired row and a new one carry the same words.
 
 A record is keyed on a shared identity and carries, beside that, each service's
 own id and each service's own slug. The id is what places a call; the slug is
@@ -27,7 +29,10 @@ day it was written — a calendar import carries the ids of whichever service
 listed that airing, and the history backfill those of the one service it
 surveys. Nothing revisited a settled row to learn more, while the stored calendar
 went on holding the other service's OWN record of the same title. Likewise a
-history-built row has no network, and the calendar usually knows it.
+history-built row has no network, and rows written before the whole id map was
+kept have no tvdb or imdb; the calendar usually knows both. A SHARED id is only
+ever ADDED beside the one the row is filed under, never in place of it: the
+filing id is what addresses the row, so the row stays exactly where it was.
 
 THE SOURCE IS ALREADY PAID FOR. `calendar_titles` holds one row per service per
 title, keyed by the same identity the tracker files rows under, and reading it
@@ -59,13 +64,6 @@ from . import arrival, store
 
 logger = logging.getLogger(__name__)
 
-# The services whose OWN id and name this fills in, and only these. A calendar
-# row also carries the shared spaces a record is KEYED on (tmdb, tvdb, imdb,
-# mal) — and improving one of those is a different question with different
-# consequences, because the record is filed under it. A join may say who a
-# service calls this title and what it calls it, never what the title IS.
-SERVICES = ("trakt", "simkl")
-
 # Where a viewer's "nothing further to find" marker is kept, and for how long.
 # THE TTL IS A BACKSTOP, NOT THE MECHANISM: the signature is what makes a repeat
 # pass unnecessary, and this only bounds how long a stale marker could suppress
@@ -85,31 +83,6 @@ def _owed_signature(wanted: list[store.Owed]) -> str:
     """
     owed = sorted(f"{debt.key}={'|'.join(debt.names)}" for debt in wanted)
     return hashlib.sha256("\n".join(owed).encode()).hexdigest()[:16]
-
-
-def _service_learned(service: str, owed: tuple[str, ...], row) -> dict:
-    """What `row` — `service`'s OWN stored record of this title — may teach a
-    tracker record owing `owed`: that service's id and its name, and nothing of
-    any other service's.
-
-    THE ID AND THE NAME TRAVEL TOGETHER, and that is the refusal this used to
-    make, re-reasoned rather than deleted. Writing a service's NAME onto a row
-    holding no id for that service would make it look linkable to a service
-    nobody can ask about it — true while only names were written. With the id
-    learned in the same write the row genuinely is linkable, so the name is
-    written only where the row already holds that id or gains it here.
-    """
-    if row is None:
-        return {}
-    ids = row.ids or {}
-    out = {}
-    if service in owed and ids.get(service) not in (None, ""):
-        out[service] = ids[service]
-    slug = f"{service}_slug"
-    name = ids.get(slug) or ids.get("slug")
-    if slug in owed and name not in (None, "") and (service in out or service not in owed):
-        out[slug] = name
-    return out
 
 
 async def fill_from_calendar(user_id: int, settings) -> int:
@@ -156,22 +129,30 @@ async def fill_from_calendar(user_id: int, settings) -> int:
     changed = 0
     for debt in wanted:
         by_source = index.get(str(debt.key)) or {}
-        learned = {}
-        for service in SERVICES:
-            learned.update(_service_learned(service, debt.names, by_source.get(service)))
-        if learned:
-            wrote = await store.learn_ids(user_id, debt.key, learned)
-            if wrote:
-                # EVERY WRITE IS LOGGED, BY NAME. An id arrived here by a join, and
-                # a wrong one would shadow a right one for good; a line per title
-                # is what makes one auditable after the fact.
+        # THE SAME RULE A NEWLY ARRIVING RECORD IS DESCRIBED BY
+        # (arrival.calendar_teaches), so a repaired row and a new one carry the
+        # same ids: each service's own id with its name, and shared ids, only
+        # ever added.
+        taught = arrival.calendar_teaches(debt.ids, by_source)
+        # AND ONE TITLE'S ROWS AGREE: a value any row of it already holds is
+        # every row's, so a settled row filed before a sibling learned an id is
+        # given it too. Only what is actually owed is written.
+        known = {**debt.ids, **taught}
+        fill = {name: value for name, value in known.items() if name in debt.names}
+        if fill:
+            wrote = await store.learn_ids(user_id, debt.key, fill)
+            if wrote and taught:
+                # EVERY LEARNED ID IS LOGGED, BY NAME. An id arrived here by a
+                # join, and a wrong one would shadow a right one for good; a line
+                # per title is what makes one auditable after the fact.
                 logger.info("distrakt naming: user %s learned %s for %s from the "
                             "stored calendar (%d row value(s))", user_id,
-                            learned, debt.key, wrote)
+                            taught, debt.key, wrote)
             changed += wrote
         if store.NETWORK in debt.names:
-            network = arrival.stored_network(
-                settings, {"media": debt.key.media, "ids": debt.ids}, by_source)
+            stored = arrival.stored_facts(
+                settings, {"media": debt.key.media, "ids": known}, by_source)
+            network = debt.network or (stored.network if stored else "")
             changed += await store.learn_network(user_id, debt.key, network)
     # RECORDED AFTER THE WRITES, against what was owed BEFORE them, so the next
     # pass compares like with like: whatever this one could pay is paid, and the

@@ -18,7 +18,7 @@ import httpx
 
 from ...config import Settings
 from .. import season as season_rules
-from ..base import Media
+from ..base import MATCH_SOURCES, Media, TitleFacts
 from . import _ids, transport
 from .transport import TraktError
 
@@ -637,6 +637,49 @@ async def search_titles(settings: Settings, media: str, query: str, *,
     return out
 
 
+# The shared ids Trakt's id lookup accepts, in MATCH_SOURCES order. Trakt has no
+# `mal` lookup, so a title known only by that cannot be found here.
+SHARED_ID_LOOKUPS = tuple(source for source in MATCH_SOURCES if source != "mal")
+
+# How long an answer — "not listed" included — stands before Trakt is asked
+# again: a catalogue that has not listed a title today will not have listed it
+# within the hour, and a day is short enough that a title Trakt adds tomorrow is
+# linked tomorrow. The response cache's own age IS the re-ask clock.
+REASK_SECONDS = 24 * 60 * 60
+
+
+async def find_by_shared_id(settings: Settings, media: str, ids: dict) -> dict:
+    """Trakt's own ids for the title `ids` names, by the first shared id Trakt
+    recognises — {} when none of them is listed. /search/{tmdb|tvdb|imdb}/{id}.
+
+    AN EXACT MATCH OR NOTHING. Trakt's id search answers a list, and a hit is
+    taken only when its type is the media asked for AND its own id in that space
+    equals the one asked about. A title search would be a guess, and a wrong
+    Trakt id shadows a correct Simkl one wherever the details layer prefers
+    Trakt — for good, because nothing overwrites an id once stored.
+
+    EVERY SHARED ID IS TRIED, because Trakt can map a title by one space and not
+    another. Raises TraktError when Trakt could not be asked, which the caller
+    must not remember as "not listed".
+    """
+    if media not in SEARCH_MEDIA:
+        raise ValueError(f"Unknown media type {media!r}.")
+    for id_type in SHARED_ID_LOOKUPS:
+        value = ids.get(id_type)
+        if value in (None, "", 0):
+            continue
+        results = await transport.cached_get(
+            transport.shared_client(), settings, f"search/{id_type}/{value}",
+            {"type": media}, ttl_seconds=REASK_SECONDS, raise_errors=True)
+        for entry in results if isinstance(results, list) else []:
+            if not isinstance(entry, dict) or entry.get("type") != media:
+                continue
+            found = ids_map(entry.get(media) or {})
+            if str(found.get(id_type) or "") == str(value) and found.get("trakt"):
+                return found
+    return {}
+
+
 async def fetch_show_summary(settings: Settings, trakt_id) -> dict | None:
     """/shows/{id}?extended=full -> the raw show object, or None.
 
@@ -658,6 +701,16 @@ async def fetch_show_summary(settings: Settings, trakt_id) -> dict | None:
         transport.shared_client(), settings, f"shows/{trakt_id}", {"extended": "full"},
     )
     return data if isinstance(data, dict) else None
+
+
+async def fetch_title_facts(settings: Settings, trakt_id, media: str) -> TitleFacts:
+    """DetailPort.fetch_title_facts: Trakt's own title and network for a show or
+    a film (a film has no network), from the same cached summary lookups the
+    rest of this module uses. Empty when Trakt answers nothing for the id."""
+    info = (await fetch_movie_summary(settings, trakt_id) if media == Media.MOVIE
+            else await fetch_show_summary(settings, trakt_id)) or {}
+    return TitleFacts(str(info.get("title") or "").strip(),
+                      str(info.get("network") or "").strip())
 
 
 async def fetch_movie_summary(settings: Settings, trakt_id) -> dict | None:

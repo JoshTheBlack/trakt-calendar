@@ -776,6 +776,40 @@ async def send_or_unavailable(client: httpx.AsyncClient, method: str, url: str, 
         raise SimklError(f"Could not reach Simkl: {exc}") from exc
 
 
+async def redirect_target(settings: Settings, path: str, params: dict) -> str:
+    """Where an endpoint that ANSWERS BY REDIRECTING points — read off the one
+    response and never followed — or "" when it answered with anything else.
+
+    A THIRD ANSWER BESIDE `send`'s TWO. `send` follows a same-host hop and
+    refuses a cross-host one; `/redirect` lands on simkl.com, another host, so
+    `send` would refuse it and log the refusal. What this endpoint is FOR is the
+    Location itself (Simkl's own doc: "do not follow the redirect; extract the
+    Simkl ID from the Location header instead"), and reading a header off the
+    first response makes no second request — so both leaks the refusal guards
+    against (the client id riding in the Location, custom headers crossing
+    hosts) belong to a request this never makes. The rule is not relaxed; it
+    does not apply.
+
+    SYNC_POOL, because /redirect is outside the parallel-safe family and so under
+    the 10 GET/second ceiling — the same budget `redirect_pool` gives such a path.
+
+    Raises SimklError when Simkl could not be reached or answered an error; a
+    404 or a non-redirect 200 reads as "no such title", which is an answer.
+    """
+    url = f"{API_BASE}/{path}?{urlencode(api_params(settings, params))}"
+    try:
+        resp = await _send_once(sync_client(), "GET", url, pool=SYNC_POOL,
+                                headers=api_headers(settings))
+    except httpx.HTTPError as exc:
+        logger.warning("Simkl GET /%s failed: %s", path, exc)
+        raise SimklError(f"Could not reach Simkl: {exc}") from exc
+    if resp.status_code in REDIRECT_STATUSES:
+        return str(resp.headers.get("location") or "")
+    if resp.status_code in (200, 404):
+        return ""
+    raise SimklError(f"Simkl /{path} returned HTTP {resp.status_code}.", resp.status_code)
+
+
 async def _send_once(client: httpx.AsyncClient, method: str, url: str, *,
                      pool: http_pool.Pool, headers: dict | None = None,
                      json=None, timeout: float | None = None) -> httpx.Response:

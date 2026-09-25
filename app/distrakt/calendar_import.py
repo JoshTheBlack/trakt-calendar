@@ -199,11 +199,13 @@ async def add_premieres(doc: dict, present: set[tuple[str, int]], user_id: int, 
     # question needs the card's whole id map and a record no longer has one.
     records = [rec for rec in await premiere_records(user_id, settings, year, month, nw_ids)
                if _present_key(rec) not in present]
-    # A Simkl calendar record waiting on enrichment states no network, and the
-    # row would keep that blank for ever — see arrival.fill_networks. Here, on
-    # the ADD, and not in premiere_records, which also serves the preview and the
-    # diff: describing a month must not cost a lookup.
-    for rec in await arrival.fill_networks(settings, records):
+    # WHAT A PREMIERE IS FILED AS IS arrival.describe's, not this calendar
+    # record's — the same title added any other way must land identically. Here,
+    # on the ADD, and not in premiere_records, which also serves the preview and
+    # the diff: describing a month must not cost a lookup.
+    filed = []
+    for arrived in await arrival.describe(settings, records):
+        rec = arrived.record
         key = _present_key(rec)
         if key in present:
             continue
@@ -212,8 +214,10 @@ async def add_premieres(doc: dict, present: set[tuple[str, int]], user_id: int, 
             "kind": store.premiere_kind(rec["season"]),
             "added_by": ADDED_BY_CALENDAR,
         }))
+        filed.append(rec)
         present.add(key)
         added += 1
+    await arrival.register(user_id, filed)
     return added
 
 

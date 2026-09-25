@@ -32,7 +32,7 @@ from app import db
 from app.distrakt import routes as distrakt_routes
 from app.distrakt import viewer as distrakt_viewer
 from app.distrakt import store, watch_history
-from app.providers.base import ItemKey
+from app.providers.base import ItemKey, TitleFacts
 
 from tests.support import RewatchPrompt, STATIC_DIR, migrated_db
 from tests.distrakt.test_gating import DistraktTestCase
@@ -63,9 +63,9 @@ class _RosterAddCase(DistraktTestCase):
     a title nobody has ever asked a service about. `self.baselines` counts the
     calls, so a test can assert the fetch happened at all.
 
-    BOTH ROUTES' LOOKUPS ARE PATCHED TOGETHER. `/api/distrakt/add` reaches
-    `live.season_detail`; `/api/distrakt/unknown-add` reaches `_season_lookup`
-    and `live.network_for`. Patching a name the route under test never calls
+    BOTH ROUTES' LOOKUPS ARE PATCHED TOGETHER. Both reach `live.season_detail`
+    and `live.title_facts` through arrival.describe. Patching a name the route
+    under test never calls
     costs nothing, and one stack means a test moving between the two doors does
     not need a different set of doubles to say the same thing.
     """
@@ -132,7 +132,8 @@ class _RosterAddCase(DistraktTestCase):
                    AsyncMock(return_value=season)), \
              patch("app.distrakt.routes._season_lookup",
                    lambda settings: AsyncMock(return_value=season)), \
-             patch("app.distrakt.live.network_for", AsyncMock(return_value="AMC")), \
+             patch("app.distrakt.live.title_facts",
+                   AsyncMock(return_value=TitleFacts("", "AMC"))), \
              patch("app.distrakt.watch_history.baseline_show", _baseline), \
              patch("app.distrakt.watch_history.sync_and_baseline", _sync), \
              patch("app.distrakt.watch_history.load_state", _load):

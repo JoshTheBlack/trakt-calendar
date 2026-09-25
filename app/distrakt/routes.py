@@ -49,7 +49,7 @@ from ..perftrace import span
 from ..providers import detail_source
 from ..providers.base import (ItemKey, Media, Source, SourceUnavailable,
                               parse_item_key, parse_media, resolve_key)
-from ..providers.trakt import TraktError, TraktRateLimitError
+from ..providers.trakt import TraktError
 # Reached through the MODULE rather than by importing the functions off it. A name
 # bound at import time is a second reference to the same function that patching
 # the owning module cannot reach, so a test double installed on
@@ -328,7 +328,7 @@ async def _add_to_past_month(request: Request, user_id, month_key: str, show: di
     # save_month round trip to set them would delete the month's records and
     # re-insert only the ones the doc handed over.
     await distrakt_store.set_month_closed(user_id, month_key)
-    await _register_networks(user_id, [show.get("network") or ""])
+    await arrival.register(user_id, [show])
     return await _month_answer(
         request, user_id, year, month, settings, message=message,
         point_at=((stored or {}).get("key") or "", int(show["season"])))
@@ -614,10 +614,19 @@ async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, defau
     shape = lifecycle.shape_of(distrakt_store.frozen_shows(doc) if doc else [],
                                live.stored_shows(listed, settings))
     shows = _rows_for(shape, standing)
+    # EVERY SERVICE THE TRACKER READS IS NAMED, because this page is only drawn
+    # when none of them answered — naming Trakt alone told a Simkl account the
+    # wrong thing.
+    labels = live.source_labels()
+    named = [labels.get(str(source), str(source))
+             for source in await watch_history.tracker_sources(settings, user_id)]
+    services = live.and_list(named) or "The services this tracker reads"
     notice = (
-        "Trakt is rate-limiting us right now — showing last-known totals. Refresh again in a moment."
+        f"{services} {'is' if len(named) == 1 else 'are'} rate-limiting us right now — "
+        "showing last-known totals. Refresh again in a moment."
         if rate_limited else
-        "Couldn't reach Trakt just now — showing last-known totals. Try refreshing again shortly."
+        f"Couldn't reach {services} just now — showing last-known totals. "
+        "Try refreshing again shortly."
     )
     return {
         "ok": True,
@@ -1165,15 +1174,20 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
         return await _live_month_payload(
             user_id, doc, month_key, settings, emojis, default_emoji, link_url,
             force_fresh, today)
-    except TraktRateLimitError as exc:
-        logger.warning("distrakt month %s degraded to stale (Trakt rate-limited): %s", month_key, exc)
+    except SourceUnavailable as exc:
+        # THE CONTRACT, NOT ONE SERVICE'S ERROR. watch_history.sync raises when
+        # NO service it reads could answer, promising that this handler draws
+        # last-known totals at 200 — and this caught TraktError alone, so an
+        # account whose first-read service is Simkl got a 500 and a page stuck on
+        # "Loading…" whenever the network was down (measured with every outbound
+        # connection refused). Any source's failure is degraded the same way.
+        # A rate limit is told apart by its status, which both transports raise
+        # their rate-limit errors with.
+        rate_limited = getattr(exc, "status", None) == 429
+        logger.warning("distrakt month %s degraded to stale (%s): %s", month_key,
+                       "rate-limited" if rate_limited else "unreachable", exc)
         return await _stale_month_payload(user_id, month_key, emojis, default_emoji, link_url,
-                                          rate_limited=True, standing=standing,
-                                          settings=settings), 200
-    except TraktError as exc:
-        logger.warning("distrakt month %s degraded to stale (Trakt unreachable): %s", month_key, exc)
-        return await _stale_month_payload(user_id, month_key, emojis, default_emoji, link_url,
-                                          rate_limited=False, standing=standing,
+                                          rate_limited=rate_limited, standing=standing,
                                           settings=settings), 200
 
 
@@ -1558,8 +1572,8 @@ async def api_distrakt_import(request: Request):
     if doc.get("closed"):
         return _month_refusal(request, "Past month is frozen (read-only).")
     # The instance's settings, for the reason the gate above gives.
-    doc = await distrakt_store.import_premieres(user_id, month_key, load_settings())
-    await _register_networks(user_id, [show.get("network") for show in (doc or {}).get("shows", [])])
+    # The networks it files are registered where it files them (arrival.register).
+    await distrakt_store.import_premieres(user_id, month_key, load_settings())
     return await _month_answer(request, user_id, year, month, settings,
                                message="Imported premieres from calendar")
 
@@ -2226,7 +2240,7 @@ async def api_distrakt_add_movie(request: Request):
 
 async def _amend_closed_month_films(user_id: int, month_key: str, *,
                                     add: dict | None = None,
-                                    drop: object = None) -> None:
+                                    drop: object = None) -> bool:
     """Put ONE film into a closed month's stored list, or take one out.
 
     A closed month renders its films from its own snapshot and never recomputes
@@ -2242,16 +2256,21 @@ async def _amend_closed_month_films(user_id: int, month_key: str, *,
     that month WAS — recomputing it against today's watch history would rewrite
     history every time it was opened"; this path was the one place doing exactly
     that.
+
+    Returns whether it changed the month's list — what a removal reports when no
+    watch record was behind the film.
     """
     if not month_key:
-        return
+        return False
     doc = await distrakt_store.load_month(user_id, month_key)
     if doc is None or not doc.get("closed"):
-        return
+        return False
+    changed = False
     if add is not None:
-        await distrakt_store.add_month_movie(user_id, month_key, add)
+        changed = await distrakt_store.add_month_movie(user_id, month_key, add)
     if drop is not None:
-        await distrakt_store.remove_month_movie(user_id, month_key, drop)
+        changed = await distrakt_store.remove_month_movie(user_id, month_key, drop) or changed
+    return changed
 
 
 @guard.post("/api/distrakt/remove-movie", AuthLevel.DISTRAKT_APPROVED)
@@ -2276,14 +2295,24 @@ async def api_distrakt_remove_movie(request: Request):
         return _month_refusal(request, str(exc))
 
     watched_at = await watch_history.forget_movie_watch(user_id, key)
-    if watched_at is None:
+    year, month = _viewed_month(request)
+
+    # TWO MONTHS MAY HOLD IT, AND BOTH ARE AMENDED: the one the watch record
+    # names, and the one on screen — the film the viewer pressed the X on.
+    # A FROZEN MONTH'S FILM LIST IS ITS OWN RECORD, so a film can be on it with no
+    # watch record behind it at all: filed before the tracker kept film history,
+    # or no longer reported by any service. MEASURED: four February films on the
+    # owner's account, removable in the page and refused here with "No such
+    # film on record", because the watch was asked about and the month never was.
+    # And a play re-dated since leaves the month on screen holding the old copy.
+    months = {distrakt_store.month_key(year, month)}
+    if watched_at is not None:
+        months.add(watched_at[:7])
+    dropped = [await _amend_closed_month_films(user_id, month_key, drop=key)
+               for month_key in sorted(months)]
+    if watched_at is None and not any(dropped):
         return _month_refusal(request, "No such film on record.")
 
-    # The month it was filed under is the one whose snapshot has to be rebuilt —
-    # not necessarily the month being looked at.
-    await _amend_closed_month_films(user_id, watched_at[:7], drop=key)
-
-    year, month = _viewed_month(request)
     return await _month_answer(request, user_id, year, month,
                                await viewer.settings_for_user(user_id),
                                message="Film removed")
@@ -2521,8 +2550,6 @@ async def api_distrakt_add(request: Request):
         # calendar — see api_distrakt_remove.
         "added_by": distrakt_store.ADDED_BY_MANUAL,
     }
-    # A hit only Simkl answered carries no network — see arrival.fill_networks.
-    show = (await arrival.fill_networks(settings, [show]))[0]
     try:
         # Resolved before anything is written, so a title with no shared id is
         # refused here rather than at the insert, where the answer would be a 500.
@@ -2544,19 +2571,16 @@ async def api_distrakt_add(request: Request):
         # months. api_distrakt_add_completed is the way to state one outright.
         return _month_refusal(
             request, "Can't add shows to a past month that was never tracked.")
-    try:
-        # WHICHEVER SOURCE THIS TITLE'S OWN IDS NAME, through the same one rule
-        # the live pass uses. Asking Trakt directly handed a Simkl-only title a
-        # None id, so the record was stored with no episode total, no air dates
-        # and no way to ever acquire them.
-        #
-        # AHEAD OF EVERY WRITE, because the question below needs the season's
-        # episode total and the question has to be answered before anything is
-        # stored. It reads and does not write, so moving it earlier costs the
-        # refused paths above nothing.
-        detail = await live.season_detail(settings, show)
-    except SourceUnavailable:
-        detail = {}
+    # WHAT THE SEASON IS FILED AS is arrival.describe's — the same ids, title,
+    # network and season facts any other way onto the tracker would file — and
+    # its season lookup is asked of whichever service those ids name, so a
+    # Simkl-only title gets a real episode total too.
+    #
+    # AHEAD OF EVERY WRITE, because the question below needs the season's episode
+    # total and has to be answered before anything is stored; after the refusals
+    # above, so a refused add spends no lookup.
+    arrived, = await arrival.describe(settings, [show])
+    show, detail = arrived.record, arrived.detail
 
     # ALREADY FINISHED, ACCORDING TO THE VIEWER'S OWN HISTORY — asked FIRST, and
     # nothing at all is written until it is answered.
@@ -2617,7 +2641,7 @@ async def api_distrakt_add(request: Request):
         })
     else:
         await lifecycle.follow(user_id, {**show, **detail, "season": show["season"]})
-    await _register_networks(user_id, [show["network"]])
+    await arrival.register(user_id, [show])
     # THE DECISION, AS A FLOOR, WRITTEN BEFORE THE MONTH IS RECOMPUTED. A
     # `history_from` in the body says "this pass starts here": the plays before
     # it belong to the previous run and are not counted, which is what makes a
@@ -2783,16 +2807,16 @@ async def api_distrakt_add_completed(request: Request):
         return _month_refusal(request, "That search has expired — search for it again.")
     if pick.unkeyable:
         return _month_refusal(request, pick.unkeyable)
-    ids = pick.ids
-
     try:
-        # The episode total has to be REAL here — a frozen month's counts are
-        # never recomputed — so unlike the ordinary add this one refuses rather
-        # than degrading. Asked of whichever source the ids name, so a
-        # Simkl-only title can be filled in by hand too; it used to require a
-        # Trakt id outright, which is why it could not be.
-        detail = await live.season_detail(settings, {"media": Media.SHOW, "ids": ids,
-                                                     "season": season})
+        # WHAT THE SEASON IS FILED AS is arrival.describe's, as for every way
+        # onto the tracker. STRICT: the episode total has to be REAL here — a
+        # frozen month's counts are never recomputed — so unlike the ordinary add
+        # a lookup that fails refuses rather than degrading. Asked of whichever
+        # source the ids name, so a Simkl-only title can be filled in by hand too.
+        arrived, = await arrival.describe(settings, [
+            {"media": Media.SHOW, "ids": pick.ids, "title": pick.title,
+             "season": season, "network": pick.network,
+             "added_by": distrakt_store.ADDED_BY_MANUAL}], strict=True)
     except SourceUnavailable as exc:
         return _month_refusal(request, f"That season could not be read: {exc}")
     # A lookup that names no episodes is refused rather than filed at zero, and
@@ -2804,15 +2828,10 @@ async def api_distrakt_add_completed(request: Request):
     # ordinary add reaches the same place once the viewer has navigated back.
     # `added_by` is stated here rather than there because this is a person filling
     # a month in, which is a different provenance from anything a sweep wrote.
-    # A hit only Simkl answered carries no network — see arrival.fill_networks.
-    record, = await arrival.fill_networks(settings, [
-        {"media": Media.SHOW, "ids": ids, "title": pick.title,
-         "season": season, "network": pick.network,
-         "added_by": distrakt_store.ADDED_BY_MANUAL}])
     return await _add_to_past_month(
-        request, user_id, month_key, record,
-        detail, settings, year, month,
-        message=f"Recorded {pick.title} S{season:02d} as finished")
+        request, user_id, month_key, arrived.record,
+        arrived.detail, settings, year, month,
+        message=f"Recorded {arrived.record['title']} S{season:02d} as finished")
 
 
 def _backfill_answer(request: Request, *, plan: dict | None = None,
@@ -3061,16 +3080,12 @@ async def api_distrakt_unknown_add(request: Request):
         # viewing is what put it here, which is what this records.
         "added_by": distrakt_store.ADDED_BY_HISTORY,
     }
-    # THE NETWORK IS FILLED HERE BECAUSE THE PROMPT ROW HAS NONE TO SEND: a
-    # history prompt is built from a play, which is deliberately thin (see
+    # WHAT THE SEASON IS FILED AS is arrival.describe's, paid HERE, on the click:
+    # a history prompt is built from a play, which is deliberately thin (see
     # watch_history.EpisodePlay: a lookup per unmatched episode is the cost the
-    # ask-the-viewer path exists to avoid). Paid on the click, beside the season
-    # lookup, through the one filling every way onto the tracker shares — which
-    # answers from the stored calendar when it can and asks only when it cannot.
-    detail, (record,) = await asyncio.gather(
-        _season_lookup(settings)(record, season),
-        arrival.fill_networks(settings, [record]),
-    )
+    # ask-the-viewer path exists to avoid) — no network, one service's ids.
+    arrived, = await arrival.describe(settings, [record])
+    record, detail = arrived.record, arrived.detail
     year, month = _viewed_month(request)
 
     # THE SAME QUESTION THE ORDINARY ADD ASKS, AND FOR A BETTER REASON HERE. This
@@ -3103,9 +3118,8 @@ async def api_distrakt_unknown_add(request: Request):
         if floor:
             await distrakt_store.set_history_from(user_id, key, season, floor)
     # The viewer's own emoji map is keyed by network name, so a network nothing
-    # registered draws nothing — the same call the manual add makes for the same
-    # reason.
-    await _register_networks(user_id, [record["network"]])
+    # registered draws nothing — the same call every way onto the tracker makes.
+    await arrival.register(user_id, [record])
     # ANSWERED, so it stops being asked. Closing it here rather than leaving
     # standing_questions to notice the season is now listed keeps the answer and
     # its effect in one place; that check is the safety net, not the mechanism.

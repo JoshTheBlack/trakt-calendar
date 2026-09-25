@@ -31,7 +31,7 @@ from unittest.mock import AsyncMock, patch
 from app import cache, db, distrakt as distrakt_store
 from app.config import Settings, save_settings
 from app.distrakt import live, routes as distrakt_routes
-from app.providers.base import PlayCounts
+from app.providers.base import PlayCounts, TitleFacts
 from app.providers.trakt import TraktError
 from app.providers.trakt import detail as trakt_detail, transport
 from tests.support import (AppTestCase, DetailsPanel, ORIGIN, migrated_db,
@@ -1042,10 +1042,11 @@ class AddRoutesAskWhoeverKnowsTheTitleTests(AppTestCase):
                 seasons=[], named_season=None, unkeyable=None)))
 
     def _network(self):
-        """A Simkl-only hit carries no network, so the add asks for one — see
-        arrival.fill_networks. Stood in for; which service it asks is
-        network_for's own question and tested there."""
-        return patch("app.distrakt.live.network_for", AsyncMock(return_value="Fuji TV"))
+        """Every add asks the describing service for its words — see
+        arrival.describe. Stood in for; which service it asks is
+        live.title_facts' own question and tested there."""
+        return patch("app.distrakt.live.title_facts",
+                     AsyncMock(return_value=TitleFacts("", "Fuji TV")))
 
     def test_add_asks_simkl_for_a_title_trakt_does_not_name(self):
         simkl_call = AsyncMock(return_value=dict(self.SEASON))

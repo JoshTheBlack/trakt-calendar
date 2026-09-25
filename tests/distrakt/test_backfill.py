@@ -146,9 +146,10 @@ class SurveyTests(BackfillTestCase):
         self.assertEqual((row["watched"], row["total"]), (3, 3))
         self.assertEqual(row["added_by"], distrakt.ADDED_BY_HISTORY)
         # The whole id map the sweep reported travels into the record, so the row
-        # it becomes is keyed on the shared id and not on Trakt's own.
-        self.assertEqual(row["ids"], {"trakt": 101, "tmdb": 1001,
-                                      "slug": "slug-101", "trakt_slug": "slug-101"})
+        # it becomes is keyed on the shared id and not on Trakt's own — less the
+        # ambiguous bare `slug`, which no way onto the tracker files any more
+        # (arrival.canonical_ids): Trakt's name for it rides as `trakt_slug`.
+        self.assertEqual(row["ids"], {"trakt": 101, "tmdb": 1001, "trakt_slug": "slug-101"})
 
     async def test_an_unfinished_season_belongs_to_no_month(self):
         events = [_ep_event(102, 1, 2, "2026-03-14T20:00:00Z")]
@@ -863,11 +864,35 @@ class RemovingAFilmTests(unittest.TestCase):
         self.client.close()
         db.close_thread_connection()
 
-    def _remove(self, tmdb=91):
+    def _remove(self, tmdb=91, month=7):
         with patch("app.distrakt.routes._month_answer",
                    new=AsyncMock(return_value=Response(status_code=200))):
-            return self.client.post("/api/distrakt/remove-movie?year=2026&month=7",
+            return self.client.post(f"/api/distrakt/remove-movie?year=2026&month={month}",
                                     json={"key": f"movie:tmdb:{tmdb}"})
+
+    def test_a_film_only_the_frozen_month_records_is_removed_from_it(self):
+        """MEASURED on the owner's account: four February films with no watch
+        record behind them — filed before film history was kept, reported by no
+        service since — drew a remove control and answered "No such film on
+        record", because the watch was asked about and the month never was. The
+        month on screen is the film the viewer pressed the X on."""
+        self._closed_march([
+            {"key": "movie:tmdb:404", "title": "Only The Month Knows", "year": 2013,
+             "watched_at": "2026-03-20T12:00:00Z"},
+            {"key": "movie:tmdb:92", "title": "Did Watch This", "year": 2012,
+             "watched_at": "2026-03-11T12:00:00Z"},
+        ])
+        resp = self._remove(tmdb=404, month=3)
+        self.assertNotIn("toast err", resp.text)
+        after = asyncio.run(distrakt.load_month(self.user_id, "2026-03"))
+        self.assertEqual([m["title"] for m in after["movies"]], ["Did Watch This"])
+
+    def test_a_film_nothing_holds_is_still_refused(self):
+        with patch("app.distrakt.routes._month_answer", new=AsyncMock()) as answered:
+            resp = self.client.post("/api/distrakt/remove-movie?year=2026&month=3",
+                                    json={"key": "movie:tmdb:555"})
+        self.assertIn("No such film on record", resp.text)
+        answered.assert_not_awaited()
 
     def test_it_forgets_only_that_film(self):
         self.assertEqual(self._remove().status_code, 200)

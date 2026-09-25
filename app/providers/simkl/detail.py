@@ -24,7 +24,7 @@ from datetime import date, datetime
 from ... import youtube
 from ...config import Settings
 from .. import season as season_rules
-from ..base import Media, SeasonsAnswer
+from ..base import Media, SeasonsAnswer, TitleFacts
 from . import _ids, _naming, titles, transport
 
 logger = logging.getLogger(__name__)
@@ -253,6 +253,25 @@ def _modal_episodes(episodes: list[dict], season: int) -> list[dict]:
         })
     rows.sort(key=lambda row: row["number"])
     return rows
+
+
+async def fetch_title_facts(settings: Settings, simkl_id, media: Media) -> TitleFacts:
+    """DetailPort.fetch_title_facts: Simkl's own name for the title `simkl_id`
+    names, and its network.
+
+    A SHOW'S NETWORK COMES FROM ITS SERIES WHEN THE TITLE STATES NONE. Simkl fills
+    the network in on the series root and leaves it null on every later
+    season-title (see _naming.network_of_series, where that was measured), and a
+    blank there is a gap in Simkl's record rather than a season aired nowhere.
+    THE TITLE IS THIS TITLE'S OWN, a season-title's included — the name Simkl
+    lists it under.
+    """
+    if Media(media) == Media.SHOW:
+        naming = await _naming.fetch(settings, simkl_id)
+        return TitleFacts(naming.title,
+                          await _naming.network_of_series(settings, simkl_id, naming))
+    fields = await titles.fetch_title(settings, int(simkl_id), media) or {}
+    return TitleFacts(str(fields.get("title") or ""), str(fields.get("network") or ""))
 
 
 def _trailer_url(trailers) -> str:

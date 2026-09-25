@@ -208,15 +208,22 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
         ))
 
         progress = await _progress_by_show(settings, port, show_ids)
-        totals = await _season_totals(settings, list(by_key.values()))
+        # WHAT EACH SEASON WOULD BE FILED AS is arrival.describe's, the same for
+        # every way onto the tracker: a history event names no network and only
+        # the surveying service's ids, and these rows are settled verdicts that
+        # nothing revisits. Its season lookup is also the episode total that
+        # decides whether a season was finished at all, so the decision and the
+        # row it writes come from one answer. A lookup that fails reads as no
+        # total, and the season is left out rather than guessed at.
+        arrivals = await arrival.describe(
+            settings, [_as_record(ident) for ident in by_key.values()])
 
         wanted_set = set(wanted)
-        for (key, season), ident in by_key.items():
+        for ((_key, season), ident), arrived in zip(by_key.items(), arrivals):
             seasons_seen += 1
             source_id = int(ident["ids"][name]) if ident.get("ids", {}).get(name) else None
             episodes = (progress.get(source_id) or {}).get(season) or {}
-            detail = totals.get((key, season)) or {}
-            total = int(detail.get("total") or 0)
+            total = int(arrived.detail.get("total") or 0)
             if not total or len(episodes) < total:
                 continue  # not finished at all -> belongs to no month
             finished_on = max((d for w in episodes.values() if w
@@ -225,10 +232,9 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
             month_key = finished_on[:7]
             if not month_key or month_key not in wanted_set:
                 continue  # finished outside the range (or on a date Trakt cannot name)
-            by_month[month_key].append(_completed_record(ident, season, total, detail))
+            by_month[month_key].append(_completed_record(arrived.record, total))
 
-    written_months = await _with_networks(
-        settings, {m: rows for m, rows in by_month.items() if rows})
+    written_months = {m: rows for m, rows in by_month.items() if rows}
     plan = {
         "range": [months[0], months[-1]],
         "months": written_months,
@@ -373,6 +379,7 @@ async def apply(user_id: int, settings, plan: dict | None = None) -> dict:
             continue
         for record in rows:
             await distrakt.add_month_record(user_id, month_key, record)
+        await arrival.register(user_id, rows)
         await _record_films(user_id, month_key, state, tz)
         # Closed LAST and through its own verb, because closing is two columns on
         # the month row: handing save_month a doc to close the month with would
@@ -486,23 +493,16 @@ async def _record_films(user_id: int, month_key: str, state: dict, tz) -> bool:
     return wrote
 
 
-async def _with_networks(settings, months: dict[str, list[dict]]) -> dict[str, list[dict]]:
-    """`months` with each planned record's network filled in, at SURVEY time.
-
-    A history event names no network, so every row this wrote used to be filed
-    without one — and a settled row is never revisited, so it stayed blank.
-    Filled here rather than at apply because the survey is the half that talks
-    to the services and the plan is what the viewer confirms; apply writes back
-    exactly what was surveyed. See arrival.fill_networks for the cost, which is
-    one indexed read plus a lookup per show the stored calendar cannot answer.
-    """
-    flat = [rec for rows in months.values() for rec in rows]
-    filled = iter(await arrival.fill_networks(settings, flat))
-    return {month: [next(filled) for _ in rows] for month, rows in months.items()}
+def _as_record(ident: dict) -> dict:
+    """A history candidate as the record arrival.describe is handed: what the
+    sweep knows — the surveying service's ids, its title, the season."""
+    return {"media": Media.SHOW, "ids": dict(ident.get("ids") or {}),
+            "title": str(ident.get("title") or ""), "season": int(ident["season"]),
+            "network": str(ident.get("network") or "")}
 
 
-def _completed_record(ident: dict, season: int, total: int, detail: dict) -> dict:
-    """One finished season as that month's COMPLETED record.
+def _completed_record(described: dict, total: int) -> dict:
+    """One finished, described season as that month's COMPLETED record.
 
     The kind is stated outright rather than left to be worked out later: this row
     exists precisely because the sweep proved every episode was watched inside the
@@ -512,21 +512,16 @@ def _completed_record(ident: dict, season: int, total: int, detail: dict) -> dic
 
     watched == total by construction, for the same reason, and a settled record's
     counts are never recomputed — so writing anything else would render as a
-    part-watched season forever.
+    part-watched season forever. The airing flags are stated for the same reason
+    they are on a hand-filled past month: it finished, so it had started and
+    ended, whatever a lookup made later says.
     """
     return {
-        "media": Media.SHOW,
-        "ids": dict(ident.get("ids") or {}),
-        "title": str(ident.get("title") or ""),
-        "season": int(season),
-        "network": str(ident.get("network") or ""),
+        **described,
         "kind": distrakt.RecordKind.COMPLETED,
         "abandoned_form": None,
         "watched": total,
         "total": total,
-        "cadence": detail.get("cadence"),
-        "premiere": detail.get("premiere"),
-        "finale": detail.get("finale"),
         "started_airing": True,
         "finished_airing": True,
         "added_by": distrakt.ADDED_BY_HISTORY,
@@ -548,29 +543,6 @@ async def _progress_by_show(settings, port, show_ids: list[int]) -> dict[int, di
         int(source_id): {int(season): eps for season, eps in (detail or {}).items()}
         for source_id, detail in details.items()
     }
-
-
-async def _season_totals(settings, candidates: list[dict]) -> dict[tuple[str, int], dict]:
-    """{(item key, season): season detail} — the episode total that decides
-    whether a season is finished, plus the dates a frozen row carries."""
-    from . import live
-    if not candidates:
-        return {}
-    keys = [(str(resolve_key(Media.SHOW, c["ids"])), int(c["season"])) for c in candidates]
-    # Through the shared season lookup rather than one service's, so a title only
-    # one of them knows is still measured against a real episode count instead of
-    # against zero.
-    details = await live.fetch_season_details(
-        settings, [{"ids": c["ids"], "season": c["season"], "media": Media.SHOW}
-                   for c in candidates],
-        fresh=False, allow_degrade=True)
-    out: dict[tuple[str, int], dict] = {}
-    for key, detail in zip(keys, details):
-        if isinstance(detail, Exception):
-            logger.warning("distrakt backfill: season lookup failed for %s", key)
-            continue
-        out[key] = detail or {}
-    return out
 
 
 async def _split_films(user_id: int, plays: list[dict],

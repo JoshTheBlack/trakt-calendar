@@ -136,24 +136,46 @@ class FillingFromTheStoredCalendarTests(DistraktTestCase):
     # What survives of it is that a bare `slug` is read as belonging to the source
     # whose record carries it, which is exactly what the legacy test above pins.
 
-    async def test_it_never_writes_a_shared_id_the_record_is_filed_under(self):
-        """A calendar match may say what a title is CALLED on a service. It may
-        not say what the title IS: the shared spaces are the identity waterfall,
-        the record is filed under one of them, and a window's match arriving there
-        would be a re-identification wearing a repair's clothes."""
+    async def test_a_shared_id_is_added_beside_the_filing_id_never_in_its_place(self):
+        """A calendar match may ADD a shared id the row lacks — a history row
+        filed before the whole id map was kept had tmdb and nothing else, while
+        the same title arriving any other way carried tvdb and imdb too. What it
+        may never do is touch the id the row is FILED under: that addresses the
+        row, and a match arriving there would be a re-identification wearing a
+        repair's clothes. So the row gains imdb and stays exactly where it was,
+        and an id it already holds is never replaced by the calendar's."""
         await distrakt.add_month_record(self.user_id, self.month, a_record(
-            ids={"tmdb": 900, "simkl": 222}))
+            ids={"tmdb": 900, "simkl": 222, "tvdb": 1}))
         await store_calendar([
             a_calendar_record("simkl", {"tmdb": 900, "simkl": 222,
-                                        "simkl_slug": "a-show",
-                                        "imdb": "tt-from-calendar"}),
-            a_calendar_record("trakt", {"tmdb": 900, "trakt": 111,
-                                        "trakt_slug": "a-show-2019",
+                                        "simkl_slug": "a-show", "tvdb": 2,
                                         "imdb": "tt-from-calendar"}),
         ])
 
         await naming.fill_from_calendar(self.user_id, SETTINGS)
-        self.assertNotIn("imdb", await self._month_ids())
+        ids = await self._month_ids()
+        self.assertEqual(ids["imdb"], "tt-from-calendar")
+        self.assertEqual(ids["tvdb"], 1, "a held id was replaced")
+        self.assertEqual(ids["tmdb"], 900)
+        self.assertEqual(await distrakt.find_month_record(
+            self.user_id, self.month, distrakt.RecordKind.SERIES_PREMIERE,
+            ItemKey("show", "tmdb", "900"), 1) is not None, True)
+
+    async def test_rows_of_one_title_agree_on_what_any_of_them_holds(self):
+        """A settled row filed before its sibling learned an id is given it: one
+        title's rows are one title's ids, whichever row learned them first."""
+        await distrakt.add_month_record(self.user_id, self.month, a_record(
+            season=1, kind=distrakt.RecordKind.COMPLETED, ids={"tmdb": 900}))
+        await distrakt.add_month_record(self.user_id, self.month, a_record(
+            season=2, ids={"tmdb": 900, "trakt": 111, "imdb": "tt9"}, network="HBO"))
+
+        await naming.fill_from_calendar(self.user_id, SETTINGS)
+        settled = await distrakt.find_month_record(
+            self.user_id, self.month, distrakt.RecordKind.COMPLETED,
+            ItemKey("show", "tmdb", "900"), 1)
+        self.assertEqual(settled["ids"]["trakt"], 111)
+        self.assertEqual(settled["ids"]["imdb"], "tt9")
+        self.assertEqual(settled["network"], "HBO")
 
     async def test_it_never_overwrites_a_slug_the_record_already_carries(self):
         """`store.learn_ids` owns this rule and this pins that the caller has not
@@ -358,6 +380,9 @@ class WhoIsOwedANameTests(DistraktTestCase):
     """store.identities_owing — the guard that decides whether any of the above
     is worth doing at all, and what each identity is short of."""
 
+    ALL_IDS = {"trakt": 111, "trakt_slug": "t", "simkl": 222, "simkl_slug": "s",
+               "tvdb": 7, "imdb": "tt7", "mal": 9}
+
     def setUp(self):
         self.month = month_back(0)
 
@@ -370,8 +395,9 @@ class WhoIsOwedANameTests(DistraktTestCase):
         await distrakt.add_month_record(self.user_id, self.month, a_record(
             season=2, ids={"tmdb": 900, "simkl": 222}, network="Fuji TV"))
         self.assertEqual(await store.identities_owing(self.user_id), [store.Owed(
-            ItemKey("show", "tmdb", "900"), ("simkl_slug", "trakt", "trakt_slug"),
-            {"simkl": 222})])
+            ItemKey("show", "tmdb", "900"),
+            ("imdb", "mal", "simkl_slug", "trakt", "trakt_slug", "tvdb"),
+            {"simkl": 222, "tmdb": 900}, "Fuji TV")])
 
     async def test_a_service_id_is_owed_wherever_it_is_missing(self):
         """Not only the name. Owing names alone — only where the row already held
@@ -383,14 +409,15 @@ class WhoIsOwedANameTests(DistraktTestCase):
             network="AMC"))
         owed, = await store.identities_owing(self.user_id)
         self.assertEqual(owed.key, ItemKey("show", "tmdb", "901"))
-        self.assertEqual(owed.names, ("simkl", "simkl_slug", "trakt_slug"))
-        self.assertEqual(owed.ids, {"trakt": 111})
+        self.assertEqual(owed.names,
+                         ("imdb", "mal", "simkl", "simkl_slug", "trakt_slug", "tvdb"))
+        self.assertEqual(owed.ids, {"trakt": 111, "tmdb": 901})
 
     async def test_an_identity_short_of_different_things_in_each_table_owes_the_union(self):
         """The two tables are asked separately and their answers merged, not
         concatenated — reporting it twice would have the caller write each half
-        over the other's rows. The ids either table holds are merged the same
-        way, since they decide whose network the row should carry."""
+        over the other's rows. What either table holds is merged the same way,
+        since one title's rows are one title's ids."""
         await distrakt.add_month_record(self.user_id, self.month, a_record(
             season=1, kind=distrakt.RecordKind.COMPLETED,
             ids={"tmdb": 900, "trakt": 111, "trakt_slug": "t"}))
@@ -398,13 +425,15 @@ class WhoIsOwedANameTests(DistraktTestCase):
             season=2, kind=distrakt.RecordKind.KEEPUP,
             ids={"tmdb": 900, "simkl": 222, "simkl_slug": "s"}, network="HBO"))
         owed, = await store.identities_owing(self.user_id)
-        self.assertEqual(owed.names, ("network", "simkl", "simkl_slug", "trakt", "trakt_slug"))
-        self.assertEqual(owed.ids, {"trakt": 111, "simkl": 222})
+        self.assertEqual(owed.names, ("imdb", "mal", "network", "simkl", "simkl_slug",
+                                      "trakt", "trakt_slug", "tvdb"))
+        self.assertEqual(owed.ids, {"trakt": 111, "trakt_slug": "t", "simkl": 222,
+                                    "simkl_slug": "s", "tmdb": 900})
+        self.assertEqual(owed.network, "HBO")
 
     async def test_a_complete_record_owes_nothing(self):
         await distrakt.add_month_record(self.user_id, self.month, a_record(
-            ids={"tmdb": 900, "trakt": 111, "trakt_slug": "t", "simkl": 222,
-                 "simkl_slug": "s"}, network="HBO"))
+            ids={"tmdb": 900, **self.ALL_IDS}, network="HBO"))
         self.assertEqual(await store.identities_owing(self.user_id), [])
 
     async def test_another_viewers_rows_are_not_this_viewers_work(self):

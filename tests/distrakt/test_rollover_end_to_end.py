@@ -32,7 +32,7 @@ from app.distrakt import routes as distrakt_routes
 from app.calendar import state as calendar_state
 from app.config import Settings
 from app.distrakt import watch_history
-from app.providers.base import Item, ItemKey, Media, Source
+from app.providers.base import Item, ItemKey, Media, Source, TitleFacts
 
 from ..support import ORIGIN, AppTestCase, tracker_month
 
@@ -190,7 +190,7 @@ class RolloverOverHttpTestCase(AppTestCase):
         """
         held = premieres or {}
         self.season_calls = []
-        self.network_calls = []
+        self.facts_calls = []
         self.baseline_calls = []
 
         async def read_month(endpoint, settings, year=None, month=None, **kw):
@@ -208,7 +208,7 @@ class RolloverOverHttpTestCase(AppTestCase):
         async def baseline_show(settings, user_id, record):
             """The per-title history read that the re-watch question is asked OF.
 
-            RECORDED RATHER THAN MERELY STUBBED, for the reason `network_for`
+            RECORDED RATHER THAN MERELY STUBBED, for the reason `title_facts`
             gives just below: it is an outbound call per CLICK, and a change that
             starts making one per ROW should have to say so here. It arrived when
             the re-watch question moved inside `_rewatch_question` — asking
@@ -223,13 +223,13 @@ class RolloverOverHttpTestCase(AppTestCase):
             """
             self.baseline_calls.append(str((record.get("ids") or {}).get("tmdb") or ""))
 
-        async def network_for(settings, rec):
-            """The show-level lookup an add from a history prompt makes, because
+        async def title_facts(settings, rec):
+            """The show-level lookup every add makes to describe what it files —
             the prompt row carries no network of its own. Recorded rather than
             merely stubbed: it is a per-click outbound call, so a test that starts
             making one per ROW should have to say so."""
-            self.network_calls.append(str((rec.get("ids") or {}).get("tmdb") or ""))
-            return "Fake Network"
+            self.facts_calls.append(str((rec.get("ids") or {}).get("tmdb") or ""))
+            return TitleFacts("", "Fake Network")
 
         with contextlib.ExitStack() as stack:
             for target, fake in (
@@ -238,7 +238,7 @@ class RolloverOverHttpTestCase(AppTestCase):
                 ("app.providers.trakt.detail.fetch_season_detail", season_detail),
                 ("app.distrakt.watch_history.sync_and_baseline", sync_and_baseline),
                 ("app.distrakt.watch_history.baseline_show", baseline_show),
-                ("app.distrakt.live.network_for", network_for),
+                ("app.distrakt.live.title_facts", title_facts),
             ):
                 stack.enter_context(mock.patch(target, side_effect=fake))
             yield
@@ -299,10 +299,10 @@ class RolloverOverHttpTestCase(AppTestCase):
         self.assertNotIn("toast err", resp.text, resp.text[:300])
         # WHAT THE POST ITSELF SPENT, kept before the month is read back: reading
         # it enters `offline` again, and that is where the recorders are set up.
-        spent = (list(self.season_calls), list(self.network_calls),
+        spent = (list(self.season_calls), list(self.facts_calls),
                  list(self.baseline_calls))
         month_payload = self.get_month(month)
-        self.season_calls, self.network_calls, self.baseline_calls = spent
+        self.season_calls, self.facts_calls, self.baseline_calls = spent
         return month_payload
 
     def kinds_on(self, month_key: str) -> dict[int, set[str]]:
@@ -1298,11 +1298,11 @@ class AddingFromAPromptBringsTheNetworkTests(RolloverOverHttpTestCase):
         the lookup happens because somebody pressed the button. A test that starts
         seeing one per rendered row has found a real regression."""
         self.ask()
-        self.assertEqual(self.network_calls, [],
+        self.assertEqual(self.facts_calls, [],
                          "rendering the prompt looked a network up")
         with fake_today(ON_THE_FIRST):
             self.post("/api/distrakt/unknown-add", {**self.ROW, **_viewing(OPENING)})
-        self.assertEqual(len(self.network_calls), 1)
+        self.assertEqual(len(self.facts_calls), 1)
 
     def test_the_row_the_page_drew_is_re_read_rather_than_taken_from_the_request(self):
         """A CALLER CANNOT NAME A DIFFERENT TITLE. The play that raised the
