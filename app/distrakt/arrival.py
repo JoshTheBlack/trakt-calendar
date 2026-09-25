@@ -235,7 +235,11 @@ async def write_missing_premieres(settings, record: dict) -> int:
             mark = await calendar_search.fill_one_gap(
                 settings, source=Source(name), source_id=str(ids[name]), media=Media.SHOW,
                 season=int(record["season"]), endpoint_key=PREMIERES,
-                tz=ZoneInfo(settings.timezone), now=db.now())
+                tz=ZoneInfo(settings.timezone), now=db.now(),
+                # THIS SEASON'S PREMIERE OR NOTHING: a service that cannot date
+                # the season must not write the show's own first-air date into
+                # the shared calendar in its place.
+                exact_season=True)
         except SourceUnavailable as exc:
             logger.info("tracker arrival: %s premiere for %s not written (%r)", name, key, exc)
             continue

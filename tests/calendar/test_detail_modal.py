@@ -483,3 +483,86 @@ class SimklOnlyOnAPublicShareLinkTests(AppTestCase):
             resp = self._details("media=show&simkl=999999&season=1")
         self.assertIn("No source can describe this title", resp.text)
         self.assertNotIn("Simkl&#39;s words.", resp.text)
+
+
+class OpeningAOneServiceCardAsksTheOtherTests(AppTestCase):
+    """A premiere card only Trakt's calendar draws: its panel carries a request to
+    ask Simkl about it, fired once the panel is open, and that request's answer
+    redraws the card with Simkl's airing joined to it.
+
+    The panel itself is unchanged and answers at once — the ask is after it, so
+    opening a card never waits on a lookup."""
+
+    KEY = "show:tmdb:777"
+    PANEL = ("media=show&trakt=203330&season=1&key=show%3Atmdb%3A777"
+             "&endpoint={endpoint}&year=2026&month=7")
+
+    make_settings = DetailModalSourceTests.make_settings
+    _get = DetailModalSourceTests._get
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in_as(self.make_user("viewer", calendar_approved=True))
+        from app.calendar import cache as calendar_cache
+        from app.providers.base import Record, Source
+        # Trakt's premiere of season 1 alone, in a stored week of July 2026.
+        asyncio.run(calendar_cache.store_window(
+            "shows/premieres", calendar_cache.window_start(date(2026, 7, 8)),
+            [Record(source=Source.TRAKT, media=Media.SHOW, id="203330",
+                    ids={"trakt": "203330", "tmdb": 777}, detail_url="",
+                    title="The Elusive Samurai",
+                    air_ts=datetime(2026, 7, 8, 20, tzinfo=timezone.utc).timestamp(),
+                    season=1, episode_number=1, episode_label="S01E01", enriched=True)],
+            10**9, 10**10, sources=["trakt", "simkl"], asked=["trakt", "simkl"]))
+
+    def _panel(self, endpoint="shows/premieres"):
+        return self._get(self.PANEL.format(endpoint=endpoint),
+                         trakt={"shows/203330": TRAKT_SHOW,
+                                "shows/203330/people": TRAKT_PEOPLE,
+                                "shows/203330/seasons/1": TRAKT_EPISODES}).text
+
+    def test_a_one_service_premiere_card_asks_once_the_panel_is_open(self):
+        html = self._panel()
+        self.assertIn('hx-post="/api/calendar/complete-card?endpoint=shows%2Fpremieres'
+                      '&amp;year=2026&amp;month=7"', html)
+        self.assertIn('hx-trigger="load"', html)
+        self.assertIn("Trakt&#39;s words.", html, "the panel itself was not drawn")
+
+    def test_an_all_episodes_card_does_not_ask(self):
+        """Only a premiere can be built from the other service's record."""
+        self.assertNotIn("complete-card", self._panel(endpoint="shows"))
+
+    def test_the_answer_redraws_the_card_with_the_other_services_airing(self):
+        from types import SimpleNamespace
+        from app.providers.base import Record, Source
+
+        async def _find(settings, media, ids):
+            return {"simkl": "4242", "tmdb": 777}
+
+        async def _seasons(settings, source_id, media):
+            return SimpleNamespace(seasons=[{"season": 1, "first_aired": "2026-07-08"}])
+
+        async def _records(settings, source_id, media, moments):
+            return [Record(source=Source.SIMKL, media=media, id=str(source_id),
+                           ids={"simkl": str(source_id), "tmdb": 777}, detail_url="",
+                           title="The Elusive Samurai",
+                           air_ts=datetime(2026, 7, 8, tzinfo=timezone.utc).timestamp(),
+                           date_only=True, season=season, episode_number=1,
+                           episode_label="S01E01", enriched=True)
+                    for season, _when in moments]
+
+        port = SimpleNamespace(fetch_seasons=_seasons, records_for=_records,
+                               fetch_details=AsyncMock(return_value={}))
+        with patch("app.providers.for_catalogue_search", return_value=[
+                    (Source.SIMKL, SimpleNamespace(find_by_shared_id=_find))]), \
+             patch("app.providers.get", return_value=SimpleNamespace(detail_port=port)):
+            resp = self.client.post(
+                "/api/calendar/complete-card?endpoint=shows%2Fpremieres&year=2026&month=7",
+                json={"key": self.KEY, "season": 1})
+            again = self.client.post(
+                "/api/calendar/complete-card?endpoint=shows%2Fpremieres&year=2026&month=7",
+                json={"key": self.KEY, "season": 1})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIn('hx-swap-oob="outerHTML:.card[data-airing=', resp.text)
+        self.assertIn("simkl=4242", resp.text, "the redrawn card does not carry Simkl's id")
+        self.assertEqual(again.text, "", "a card two services draw was asked about again")

@@ -87,7 +87,8 @@ def panel(request: Request, details: dict, *, media: str, season: int | None,
           title: str = "", poster: str = "", progress: object | None = None,
           links=(), season_count: int = 0, picker: bool = True,
           carry: Sequence[str] = (), pinned: dict[str, str] | None = None,
-          note: str = "", actions: str = "", overview: str = ""):
+          note: str = "", actions: str = "", overview: str = "",
+          follow_up: str = ""):
     """The panel's contents for one title.
 
     `title` and `poster` are the CARD's, not the answer's, and the surfaces that
@@ -146,12 +147,17 @@ def panel(request: Request, details: dict, *, media: str, season: int | None,
     `overview` is the CARD's description where it has one worth sending — a card
     whose services described it differently sends the one on screen, flipped or
     not — and the template prefers it to the answer's, by the poster's rule.
+
+    `follow_up` is markup for a request the panel fires once it is on screen,
+    where the surface has one to make: the calendar asks the service a card's
+    calendar is missing about it, and that answer redraws the card behind the
+    panel. The panel does not know what it is, as with `actions`.
     """
     shown = answered_season(details, season)
     return templates.TemplateResponse(request, "_details.html", {
         "request": request, "d": details, "media": media, "season": shown,
         "title": title, "poster": poster, "progress": progress, "links": links,
-        "note": note, "actions": actions, "overview": overview,
+        "note": note, "actions": actions, "overview": overview, "follow_up": follow_up,
         # `shown` rather than the asked-for season, so the tab that reads as
         # current is the one whose rows are actually below it.
         #

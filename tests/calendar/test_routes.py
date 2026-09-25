@@ -1852,7 +1852,10 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
     def test_a_day_that_arrives_late_is_the_same_markup_as_an_inline_one(self):
         """Both render through the one card partial, which is what keeps a day that
         arrived late indistinguishable from one that shipped with the page."""
-        inline = self.client.get("/calendar?year=2026&month=7").text
+        # THE SAME CALENDAR AS THE DAY: a card's details address names the
+        # calendar it is on, so a card from another calendar is not the same
+        # markup and should not be.
+        inline = self.client.get("/calendar?endpoint=shows&year=2026&month=7").text
         fragment = self.client.get(self.DAY).text
         card = re.search(
             r'(<div class="card[^>]*data-id="%s".*?)</div>\s*</div>\s*</section>'

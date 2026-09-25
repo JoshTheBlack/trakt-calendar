@@ -17,6 +17,7 @@ for one, which is exactly the assertion the typing path needs.
 """
 from __future__ import annotations
 
+import dataclasses
 import unittest
 from datetime import date
 from types import SimpleNamespace
@@ -724,3 +725,148 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AskingTheServiceACardIsMissingTests(SearchTestCase):
+    """A card only one service's calendar draws, opened: the other service is
+    asked once, by shared id, and its own premiere stored if it lists the title.
+
+    MEASURED, the reason it is on the click and not a schedule: 17,205 of 18,342
+    stored titles on the owner's instance are one service's, most of them
+    genuinely so, and asking about all of them would spend thousands of lookups
+    a day to make a handful of cards two-sided."""
+
+    KEY = "show:tmdb:777"
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # Simkl's calendar in play, so a Trakt-only card has a service to ask.
+        self.settings = Settings(simkl_public_calendar_enabled=True)
+        # A STORED WEEK holding Trakt's premiere alone, the way a card is drawn:
+        # a loose airing is read inside the coverage its week already has.
+        await calendar_cache.store_window(
+            SHOWS, calendar_cache.window_start(date(2020, 1, 1)),
+            [Record(source=Source.TRAKT, media=Media.SHOW, id="326227",
+                    ids={"trakt": "326227", "tmdb": 777}, detail_url="",
+                    title="Unseen Show",
+                    air_ts=datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp(),
+                    season=1, episode_number=1, episode_label="S01E01", enriched=True)],
+            600, 1000, sources=["trakt", "simkl"], asked=["trakt", "simkl"])
+
+    def _services(self, answer):
+        """The Simkl catalogue answering `answer` by shared id (a dict, or an
+        exception to raise), and its detail port building its own records."""
+        async def _find(settings, media, ids):
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+        built = TheCatalogueHalfIsADifferentPromiseTests._port(
+            self, {"first_aired": "2020-01-01T00:00:00Z"},
+            seasons=[{"season": 1, "first_aired": "2020-01-01"}])
+
+        async def _records(settings, source_id, media, moments):
+            # EPISODE 1 STATED, as both real builders state it for a premiere
+            # (see each provider's records_for), so it pairs with the card's.
+            return [dataclasses.replace(r, episode_number=1, episode_label="S01E01")
+                    for r in await built.records_for(settings, source_id, media, moments)]
+
+        port = SimpleNamespace(fetch_details=built.fetch_details,
+                               fetch_seasons=built.fetch_seasons, records_for=_records)
+        return (patch("app.providers.for_catalogue_search", return_value=[
+                    (Source.SIMKL, SimpleNamespace(find_by_shared_id=_find))]),
+                patch("app.providers.get", return_value=SimpleNamespace(detail_port=port)))
+
+    async def _ask(self, answer, endpoint=SHOWS):
+        search_patch, get_patch = self._services(answer)
+        with search_patch, get_patch:
+            source = await calendar_search.other_service_to_ask(
+                self.settings, endpoint_key=endpoint, title_key=self.KEY, season=1)
+            if not source:
+                return source, False
+            return source, await calendar_search.complete_from_other_service(
+                self.settings, source=source, endpoint_key=endpoint,
+                title_key=self.KEY, season=1, tz=self.tz, now=1000)
+
+    async def test_a_one_service_premiere_gains_the_others_airing(self):
+        source, stored = await self._ask({"simkl": "4242", "tmdb": 777})
+        self.assertEqual((source, stored), ("simkl", True))
+        self.assertEqual(await calendar_entries.sources_airing(SHOWS, self.KEY, 1),
+                         {"trakt", "simkl"})
+        again, _ = await self._ask({"simkl": "4242", "tmdb": 777})
+        self.assertEqual(again, "", "a card two services draw was asked about again")
+
+    async def test_not_listed_is_an_answer_kept_for_a_week(self):
+        _, stored = await self._ask({})
+        self.assertFalse(stored)
+        again, _ = await self._ask({"simkl": "4242", "tmdb": 777})
+        self.assertEqual(again, "", "the same question was asked twice in a week")
+
+    async def test_a_service_that_could_not_be_asked_is_asked_next_time(self):
+        _, stored = await self._ask(SourceUnavailable("offline"))
+        self.assertFalse(stored)
+        again, stored = await self._ask({"simkl": "4242", "tmdb": 777})
+        self.assertEqual((again, stored), ("simkl", True))
+
+    async def test_only_a_premiere_or_a_release_can_be_completed(self):
+        """An All Episodes or Finales card is some other episode, and a
+        service's own record can only be built for a season's premiere."""
+        for endpoint in ("shows", "shows/finales"):
+            with self.subTest(endpoint=endpoint):
+                source, _ = await self._ask({"simkl": "4242", "tmdb": 777}, endpoint)
+                self.assertEqual(source, "")
+
+    async def test_the_next_read_of_the_month_draws_the_new_airing(self):
+        """The month is held in memory between reads, and a held month that is
+        behind is still served while its replacement builds. The redraw that
+        answers the panel has to see the airing it just stored."""
+        async def read(*, page_load: bool):
+            # THE PAGE'S READ MAY FILL and is the one held in memory; a redraw may
+            # not, and is served from what the page's read held. One day, inside
+            # the stored week, read at a moment that week is fresh, so the page's
+            # read has nothing to fetch.
+            grouped, _meta = await calendar_cache.assemble_range(
+                get_endpoint(SHOWS), self.settings, tz=self.tz,
+                start_date=date(2020, 1, 1), end_date=date(2020, 1, 1),
+                allow_fetch=page_load, now=1100)
+            return [item for day in grouped for item in day["items"]
+                    if item.mark_key == self.KEY]
+
+        before = await read(page_load=True)
+        self.assertTrue(before)
+        self.assertNotIn("simkl", before[0].ids)
+        _, stored = await self._ask({"simkl": "4242", "tmdb": 777})
+        self.assertTrue(stored)
+        after = await read(page_load=False)
+        self.assertEqual(len(after), 1, "the two services' premieres drew two cards")
+        self.assertEqual(after[0].ids.get("simkl"), "4242",
+                         "the read after the write was served the month from before it")
+
+
+class CompletingASeasonNeverWritesTheShowsStartTests(AskingTheServiceACardIsMissingTests):
+    """MEASURED on a live copy: asked to complete a season-6 premiere card, a
+    service that could not date season 6 had its SHOW's first-air date (2021)
+    written into the shared premieres calendar instead, with no season. A season
+    the other service cannot date writes nothing."""
+
+    def _services(self, answer):
+        search_patch, _get_patch = super()._services(answer)
+        built = TheCatalogueHalfIsADifferentPromiseTests._port(
+            self, {"first_aired": "2016-05-01T00:00:00Z"},
+            # Seasons the service CAN date, and season 1 is not among them.
+            seasons=[{"season": 2, "first_aired": "2021-07-13"}])
+        return search_patch, patch("app.providers.get",
+                                   return_value=SimpleNamespace(detail_port=built))
+
+    async def test_a_season_the_other_service_cannot_date_writes_nothing(self):
+        source, stored = await self._ask({"simkl": "4242", "tmdb": 777})
+        self.assertEqual((source, stored), ("simkl", False))
+        self.assertEqual(await calendar_entries.sources_airing(SHOWS, self.KEY, None),
+                         {"trakt"}, "the show's own start was written in the season's place")
+
+    # The parent's cases assume the season can be dated; they are not this class's.
+    test_a_one_service_premiere_gains_the_others_airing = None
+    test_a_service_that_could_not_be_asked_is_asked_next_time = None
+    test_the_next_read_of_the_month_draws_the_new_airing = None
+    test_not_listed_is_an_answer_kept_for_a_week = None
+    test_only_a_premiere_or_a_release_can_be_completed = None

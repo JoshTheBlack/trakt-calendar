@@ -26,7 +26,7 @@ import re
 import secrets
 from collections import Counter
 from datetime import date, datetime
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Request
@@ -1738,7 +1738,30 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
         # being added here too; `key` rides beside them because the ticks are
         # addressed by it. Nothing else does — a parameter this route does not
         # read has no business being rendered back into the page.
-        carry=details_query_names() + ("key",))
+        carry=details_query_names() + ("key",),
+        follow_up=await _completion_follow_up(settings, params, season))
+
+
+async def _completion_follow_up(settings, params, season: int | None) -> str:
+    """The request the panel fires once it is open to ask the service this card's
+    calendar is missing about it, as markup — or "" when there is nothing worth
+    asking (calendar/search.py's other_service_to_ask decides, from what this
+    instance holds rather than from the request).
+
+    The card's calendar and month arrive as references on its own details address
+    (_card.html); the month only says which cards the answer redraws."""
+    endpoint_key = str(params.get("endpoint") or "")
+    key = str(params.get("key") or "")
+    if not await calendar_search.other_service_to_ask(
+            settings, endpoint_key=endpoint_key, title_key=key, season=season):
+        return ""
+    today = clock.today()
+    query = urlencode({
+        "endpoint": endpoint_key,
+        "year": route_params.valid_year(params.get("year"), today.year),
+        "month": route_params.valid_month(params.get("month"), today.month)})
+    return Markup(templates.get_template("_details_follow_up.html").render(
+        query=query, key=key, season=season))
 
 
 async def _library_actions(request: Request, settings, media: str, params) -> str:
@@ -1855,6 +1878,9 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
     IT IS THE SAME ASSEMBLY THE CARDS COME FROM, read AFTER the write, so the
     numbers in this answer and the cards in this answer cannot disagree.
 
+    IT IS ALSO complete_card's ANSWER: a card's missing service answering is a
+    write about the title, not a mark, and the cards it changes are the same ones.
+
     A TITLE THAT IS NOT ON THIS MONTH ANSWERS WITH THE COUNTS ALONE. That is not
     an error: the mark is a statement about the show and it has been stored
     whatever month is on screen, and a page whose month does not draw the title
@@ -1936,6 +1962,44 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
         # question that has one.
         "stats": {"watching": meta["watching"], "not_watching": meta["not_watching"]},
     })
+
+
+@guard.post("/api/calendar/complete-card", AuthLevel.CALENDAR_APPROVED)
+async def complete_card(request: Request):
+    """Ask the service a card's calendar is missing whether it lists the title,
+    and if it does, answer with the title's cards redrawn — what the details
+    panel's follow-up posts once the panel is open (_details_follow_up.html).
+
+    THE REQUEST NAMES THE CARD, NOTHING ELSE. `key` and `season` in the body, the
+    calendar and month in the address, and every other fact — whether only one
+    service draws this season, which service is missing, the ids to ask by — is
+    read back from what this instance holds (calendar/search.py). A write into
+    the calendar every viewer shares is made only about a title it already holds.
+
+    THE REDRAW IS THE EYE'S (_marked_answer): every card for this title on this
+    month, out of band, from the same assembly the page came from. Nothing stored
+    — the other service does not list it, could not be asked, or was asked this
+    week — answers empty, and the page is left as it is.
+    """
+    user = await auth.current_user(request)
+    today = clock.today()
+    year = route_params.valid_year(request.query_params.get("year"), today.year)
+    month = route_params.valid_month(request.query_params.get("month"), today.month)
+    endpoint = get_endpoint(request.query_params.get("endpoint"))
+    payload = await authz.json_body(request)
+    key = str(payload.get("key") or "")
+    season = route_params.season(payload.get("season"))
+    settings = load_settings()
+    source = await calendar_search.other_service_to_ask(
+        settings, endpoint_key=endpoint.key, title_key=key, season=season)
+    if not source:
+        return Response(status_code=200)
+    stored = await calendar_search.complete_from_other_service(
+        settings, source=source, endpoint_key=endpoint.key, title_key=key,
+        season=season, tz=_resolve_viewer_tz(user, settings), now=db.now())
+    if not stored:
+        return Response(status_code=200)
+    return await _marked_answer(request, user, endpoint, year, month, key)
 
 
 @guard.post("/api/state", AuthLevel.CALENDAR_APPROVED)

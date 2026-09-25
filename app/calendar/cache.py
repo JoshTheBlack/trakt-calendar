@@ -1191,6 +1191,25 @@ def _forget_spans(endpoint_key: str | None = None) -> None:
     _endpoint_generation[endpoint_key] = _endpoint_generation.get(endpoint_key, 0) + 1
 
 
+def forget_endpoint_spans(endpoint_key: str) -> None:
+    """Drop every held span of `endpoint_key` outright, for a write that did not
+    come through a window fill.
+
+    NOT _forget_spans, which only moves the endpoint's number: a span that is
+    behind is still SERVED while its replacement builds behind the reader, which
+    is right for a refill nobody is watching and wrong for a write somebody has
+    just asked for. A gap filled from a search, a premiere a tracker add wrote,
+    or a card's missing service answering on its panel is a single airing whose
+    reader expects to see it on the very next read — the search jumps to it and
+    the panel's answer redraws the card. With only the number moved, the read
+    that follows is handed the span from before the write. These are single
+    clicks, so the rebuild they cost is one month's, once.
+    """
+    _forget_spans(endpoint_key)
+    for key in [key for key in _span_memo if key[1] == endpoint_key]:
+        _span_memo.pop(key, None)
+
+
 def _span_memo_key(endpoint, settings, *, tz, start_date, end_date, genres,
                    countries, show_certifications, movie_certifications,
                    movie_release_countries, movie_release_types, network_filter,
