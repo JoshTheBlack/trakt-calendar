@@ -29,6 +29,9 @@
     month holding anything at all; it merges now, so the row has to say that part
     of what it offers will land on records the month already has. -#}
 {%- if month.replacing %}{% set _ = parts.append(month.replacing ~ " replacing what's there") %}{% endif -%}
+{#- A finale watched again in this month is said here and written nowhere: the
+    season's finish is filed on the month it was first finished. -#}
+{%- if month.replays %}{% set _ = parts.append(month.replays | length ~ ' finale' ~ ('' if month.replays | length == 1 else 's') ~ ' watched again') %}{% endif -%}
 <strong>{{ month.month }}</strong> &mdash; {{ parts | join(', ') or 'nothing' }}
 {%- endmacro -%}
 
@@ -64,12 +67,13 @@ recorded.{% endif %}
 {#- Films get their own line per month rather than one total at the end: they
     come from the same sweep, and a count you cannot see the contents of is not
     something to confirm. -#}
-{%- if month.titles or month.movie_titles %}
+{%- if month.titles or month.movie_titles or month.replays %}
 <details class="distrakt-backfill-month">
     <summary>{{ line(month) }}</summary>
     <ul>
         {%- for title in month.titles %}<li>{{ title }}</li>{% endfor %}
         {%- for title in month.movie_titles %}<li>🎬 {{ title }}</li>{% endfor %}
+        {%- for note in month.replays %}<li>🔁 {{ note }}</li>{% endfor %}
     </ul>
 </details>
 {%- else %}

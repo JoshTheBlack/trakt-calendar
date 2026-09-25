@@ -187,10 +187,11 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
         user_id, port.movie_plays_from(events), set(months), tz)
 
     by_month: dict[str, list[dict]] = {m: [] for m in wanted}
-    # {month: {"<item key>:<season>": day}} — the seasons whose finale the sweep
-    # saw watched again after the viewing they are filed under. Beside the records
-    # rather than on them, because a record is what gets written and this is only
-    # something the confirmation says.
+    # {replay month: {"<item key>:<season>": {title, season, day, finished_in}}} —
+    # the finales watched again after the viewing that finished them, kept under
+    # the month the REPLAY happened in, which is the month somebody surveying it
+    # is asking about. Beside the records rather than on them: nothing is written
+    # for a replay, and this is only something the confirmation says.
     replayed: dict[str, dict[str, str]] = {}
     seasons_seen = 0
     show_ids: list[int] = []
@@ -215,6 +216,7 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
 
         progress = await _progress_by_show(settings, port, show_ids)
         viewings = _viewing_days(events, tz)
+        completed_in = await _completed_months(user_id)
         # WHAT EACH SEASON WOULD BE FILED AS is arrival.describe's, the same for
         # every way onto the tracker: a history event names no network and only
         # the surveying service's ids, and these rows are settled verdicts that
@@ -236,12 +238,22 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
             finished_on, again = _finished_on(
                 episodes, viewings.get((key, season)) or {}, tz)
             month_key = finished_on[:7]
+            held = completed_in.get((key, season))
+            if held and month_key and month_key > held:
+                # A FINALE THIS TRACKER ALREADY RECORDED FINISHED, SEEN AGAIN.
+                # The sweep starts at the range, so a replay whose first viewing
+                # came earlier is the only viewing it saw, and taken as the finish
+                # it filed the season a second time on the replay's month
+                # (measured: A Knight of the Seven Kingdoms, finished in
+                # February, finale watched again 8 July). It is a replay: said
+                # on that month, filed nowhere.
+                _note_replay(replayed, wanted_set, arrived.record, finished_on, held)
+                continue
+            if again:
+                _note_replay(replayed, wanted_set, arrived.record, again, month_key)
             if not month_key or month_key not in wanted_set:
                 continue  # finished outside the range (or on a date Trakt cannot name)
-            record = _completed_record(arrived.record, total)
-            by_month[month_key].append(record)
-            if again:
-                replayed.setdefault(month_key, {})[_replay_address(record)] = again
+            by_month[month_key].append(_completed_record(arrived.record, total))
 
     written_months = {m: rows for m, rows in by_month.items() if rows}
     plan = {
@@ -299,22 +311,26 @@ def summarize(plan: dict, tz) -> dict:
     # can see the contents of is not something to confirm.
     replayed = plan.get("replayed") or {}
 
-    def _season_label(month: str, record: dict) -> str:
-        season = int(record.get("season") or 0)
-        text = f"{record.get('title') or 'Untitled'} S{season:02d}"
-        again = (replayed.get(month) or {}).get(_replay_address(record))
-        # SAID, NOT DECIDED FOR THEM. The season is filed on its finale's first
-        # viewing; the line names the second so a reader who meant the re-watch
-        # can see which month they are agreeing to.
-        return f"{text} — finale watched again {watch_history.day_label(again)}" \
-            if again else text
+    def _season_label(record: dict) -> str:
+        return f"{record.get('title') or 'Untitled'} S{int(record.get('season') or 0):02d}"
 
-    keys = sorted(set(months) | set(by_month) | set(known_by_month))
+    def _replay_lines(month: str) -> list[str]:
+        """SAID ON THE MONTH IT HAPPENED, NOT DECIDED FOR THEM. A finale watched
+        again is the month's own viewing, so a survey of that month names it and
+        where the season's finish is filed; nothing is written for it. A value in
+        the shape plans had before (a bare day) is skipped, not misread."""
+        return sorted(
+            f"{_season_label(note)} — finale watched again "
+            f"{watch_history.day_label(note['day'])} (finished in {note['finished_in']})"
+            for note in (replayed.get(month) or {}).values() if isinstance(note, dict))
+
+    keys = sorted(set(months) | set(by_month) | set(known_by_month) | set(replayed))
     rows = [
         {
             "month": key,
             "count": len(months.get(key) or []),
-            "titles": sorted(_season_label(key, r) for r in (months.get(key) or [])),
+            "titles": sorted(_season_label(r) for r in (months.get(key) or [])),
+            "replays": _replay_lines(key),
             "movie_count": len(by_month.get(key) or []),
             "movie_titles": sorted(by_month.get(key) or []),
             "movie_known": known_by_month.get(key, 0),
@@ -510,6 +526,40 @@ async def _record_films(user_id: int, month_key: str, state: dict, tz) -> bool:
         await distrakt.add_month_movie(user_id, month_key, film)
         wrote = True
     return wrote
+
+
+async def _completed_months(user_id: int) -> dict[tuple[str, int], str]:
+    """{(item key, season): the earliest month this tracker records it COMPLETED}.
+
+    Read once per survey, whole, because the survey asks it of every season it
+    examines: whether a finale seen in the range is the one that finished the
+    season or a replay of one finished before the range began, which the sweep
+    alone cannot tell."""
+    out: dict[tuple[str, int], str] = {}
+    async for month, records in distrakt.walk_settled(user_id):
+        for record in records:
+            if record.get("kind") == distrakt.RecordKind.COMPLETED:
+                address = (str(record["key"]), int(record["season"]))
+                out[address] = min(month, out.get(address, month))
+    return out
+
+
+def _note_replay(replayed: dict, wanted: set[str], record: dict, day: str,
+                 finished_in: str) -> None:
+    """File one replayed finale under the month it was watched in, if that month
+    is being surveyed. `finished_in` is the month the season is filed under, so
+    the note can say where the finish went.
+
+    ONLY A LATER MONTH'S. A second play of the finale inside the month that
+    finished it is not a re-watch worth naming, and the live rule leaves it alone
+    too (lifecycle, a season completed and watched again in the same month).
+    Measured on a real history: four of the seven second plays were that — a
+    service recording one viewing twice, or a finale finished off the next day."""
+    if day[:7] not in wanted or day[:7] <= finished_in:
+        return
+    replayed.setdefault(day[:7], {})[_replay_address(record)] = {
+        "title": str(record.get("title") or ""), "season": int(record.get("season") or 0),
+        "day": day, "finished_in": finished_in}
 
 
 def _replay_address(record: dict) -> str:

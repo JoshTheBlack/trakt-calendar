@@ -242,8 +242,43 @@ class SurveyTests(BackfillTestCase):
                               3: "2026-05-20T21:00:00Z"}}}
         plan = await self._survey(events, progress, {(111, 1): {"total": 3}})
         self.assertEqual(list(plan["months"]), ["2026-02"])
-        titles = backfill.summarize(plan, ZoneInfo("UTC"))["months"][0]["titles"]
-        self.assertEqual(titles, ["Finale Twice S01 — finale watched again 20 May 2026"])
+        rows = {row["month"]: row for row in backfill.summarize(plan, ZoneInfo("UTC"))["months"]}
+        self.assertEqual(rows["2026-02"]["titles"], ["Finale Twice S01"])
+        # Said on the month the replay happened, which is the month being asked about.
+        self.assertEqual(rows["2026-05"]["replays"],
+                         ["Finale Twice S01 — finale watched again 20 May 2026 (finished in 2026-02)"])
+        self.assertEqual(rows["2026-05"]["count"], 0, "a replay was filed as a finish")
+
+    async def test_a_second_play_of_the_finale_in_the_same_month_is_not_named(self):
+        events = [_ep_event(113, 1, 3, "2026-05-10T21:00:00Z", title="Twice In May"),
+                  _ep_event(113, 1, 3, "2026-05-20T21:00:00Z", title="Twice In May")]
+        progress = {113: {1: {1: "2026-05-01T00:00:00Z", 2: "2026-05-07T00:00:00Z",
+                              3: "2026-05-20T21:00:00Z"}}}
+        plan = await self._survey(events, progress, {(113, 1): {"total": 3}})
+        self.assertEqual(list(plan["months"]), ["2026-05"])
+        self.assertEqual(plan["replayed"], {})
+
+    async def test_a_replay_of_a_season_already_recorded_finished_is_said_not_filed(self):
+        """MEASURED: A Knight of the Seven Kingdoms was finished in February, and
+        its finale watched again on 8 July. A July survey sees only the July play,
+        so it read as the finish and would have filed the season completed a
+        second time, on July. The tracker already records it finished in
+        February, so the July play is a replay: named on July, written nowhere."""
+        await distrakt.add_month_record(self.user_id, "2026-02", {
+            "ids": {"trakt": 112, "tmdb": 1012, "slug": "slug-112"}, "season": 1,
+            "title": "Seen Before", "kind": distrakt.RecordKind.COMPLETED,
+            "watched": 3, "total": 3})
+        events = [_ep_event(112, 1, 3, "2026-05-20T21:00:00Z", title="Seen Before")]
+        progress = {112: {1: {1: "2026-02-01T00:00:00Z", 2: "2026-02-07T00:00:00Z",
+                              3: "2026-05-20T21:00:00Z"}}}
+        plan = await self._survey(events, progress, {(112, 1): {"total": 3}},
+                                  start="2026-05", end="2026-05")
+        self.assertEqual(plan["months"], {}, "the replay was filed as a second finish")
+        summary = backfill.summarize(plan, ZoneInfo("UTC"))
+        self.assertEqual([(r["month"], r["replays"]) for r in summary["months"]],
+                         [("2026-05", ["Seen Before S01 — finale watched again 20 May 2026 "
+                                       "(finished in 2026-02)"])])
+        self.assertEqual(summary["to_write"], 0, "a note alone offered to write a month")
 
     async def test_the_summary_carries_no_records(self):
         """The client's job is to say yes, not to hand back what to store."""
@@ -253,7 +288,7 @@ class SurveyTests(BackfillTestCase):
 
         summary = backfill.summarize(plan, ZoneInfo("UTC"))
         self.assertEqual(summary["months"], [{"month": "2026-04", "count": 1,
-                                              "titles": ["Season Two S02"],
+                                              "titles": ["Season Two S02"], "replays": [],
                                               "movie_count": 0, "movie_titles": [],
                                               "movie_known": 0,
                                               "replacing": 0}])
