@@ -845,6 +845,14 @@ class ImportingIsSomethingSomebodyPicksTests(RolloverOverHttpTestCase):
         self.assertEqual((self.season_calls, self.facts_calls), ([], []),
                          "drawing the offer described titles")
 
+    def test_untick_all_draws_every_box_clear_and_tick_all_ticks_them(self):
+        with fake_today(ON_THE_FIRST), self.offline(self.PREMIERES):
+            clear = self.client.get("/distrakt/fragments/import?year=2026&month=8&ticked=none").text
+            ticked = self.client.get("/distrakt/fragments/import?year=2026&month=8&ticked=all").text
+        self.assertEqual((clear.count('type="checkbox"'), clear.count(" checked ")), (2, 0))
+        self.assertEqual((ticked.count('type="checkbox"'), ticked.count(" checked ")), (2, 2))
+        self.assertIn("ticked=none", ticked, "the dialog does not offer Untick all")
+
     def test_only_what_is_ticked_is_filed(self):
         refs = re.findall(r'name="(pick:[^"]+)"', self.offer())
         wanted = [unescape(ref) for ref in refs if "801" in ref]
@@ -911,6 +919,24 @@ class ImportingIsSomethingSomebodyPicksTests(RolloverOverHttpTestCase):
         with fake_today(BEFORE_THE_FIRST):
             payload = self.import_month(OPENING, self.PREMIERES)
         self.assertFalse(payload["import_due"])
+
+    def test_a_premiere_already_airing_that_no_list_holds_is_still_drawn(self):
+        """MEASURED: Gnomes was filed on the month ahead from Simkl's calendar
+        (S01E01 on 7 October) while Trakt, which described it, says it aired on
+        7 September. A premiere that has begun airing was left out on the
+        grounds that the list shows it, and a month ahead has no list, so it was
+        drawn nowhere and could not be removed."""
+        with fake_today(BEFORE_THE_FIRST), self.offline(self.PREMIERES):
+            self.import_month(OPENING, self.PREMIERES)
+            asyncio.run(distrakt_store.add_month_record(self.user_id, OPENING, {
+                "ids": {"trakt": 955, "tmdb": 955, "slug": "slug-955"},
+                "season": 1, "title": "Aired Already", "network": "Net",
+                "kind": distrakt_store.RecordKind.SERIES_PREMIERE,
+                "started_airing": True, "premiere": "7/7",
+            }))
+            html = self.client.get("/distrakt/fragments/month?year=2026&month=8").text
+        # A ROW, not only the copy block, which named it all along.
+        self.assertRegex(html, r'data-details-heading="Aired Already · S01"')
 
     def test_the_button_is_drawn_lit_by_the_months_own_answer(self):
         with fake_today(ON_THE_FIRST), self.offline(self.PREMIERES):

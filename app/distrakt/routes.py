@@ -549,10 +549,11 @@ def _rows_for(shape: lifecycle.MonthShape,
     notice legitimately disagree about premieres, and the one declaration in
     READER_BUCKETS is what lets them without a second table restating it.
 
-    A PREMIERE THAT HAS BEGUN AIRING IS NOT LISTED HERE. It is already on the
-    viewer's list, and showing both copies would put the same season on the page
-    twice under two different headings. Its premiere record is untouched and still
-    carries the month's announcement — that is what the first notice reads.
+    A PREMIERE THAT HAS BEGUN AIRING AND IS ON THE VIEWER'S LIST IS NOT LISTED
+    HERE, since showing both copies would put the same season on the page twice
+    under two different headings. Its premiere record is untouched and still
+    carries the month's announcement — that is what the first notice reads. One
+    the list does not hold is drawn as the premiere, or nothing would.
 
     NOR IS ONE THE MONTH HAS ALREADY SETTLED. A season that premiered and was
     settled in the same month genuinely holds TWO records on it — the
@@ -572,11 +573,22 @@ def _rows_for(shape: lifecycle.MonthShape,
     """
     allowed = discord_fmt.READER_BUCKETS[standing].page
     decided = {(s["key"], int(s["season"])) for s in shape.settled}
-    unaired = [s for s in shape.premieres()
-               if not s.get("started_airing")
-               and (s["key"], int(s["season"])) not in decided]
+    # ON THE LIST, CHECKED RATHER THAN ASSUMED. A premiere that has begun airing
+    # is left out because the list shows it, so it is left out only when the list
+    # does. And one that IS drawn is drawn as what it was filed as — New or
+    # Returning, its record's kind — not as the Keepup or Cleanup its airing
+    # would make a listed season, because a month ahead shows only its premieres.
+    # Measured: a premiere filed on the month ahead whose describing service says
+    # it has already aired (Gnomes: Simkl's calendar dates S01E01 7 October,
+    # Trakt 7 September) was drawn nowhere — only the first notice named it, and
+    # it could not be removed.
+    held = {(s["key"], int(s["season"])) for s in shape.listed}
+    announced = [{**s, "bucket": distrakt_store.bucket_of_kind(s["kind"])}
+                 for s in shape.premieres()
+                 if (s["key"], int(s["season"])) not in decided
+                 and not (s.get("started_airing") and (s["key"], int(s["season"])) in held)]
     rows = []
-    for show in (*unaired, *shape.listed, *shape.settled):
+    for show in (*announced, *shape.listed, *shape.settled):
         if show["bucket"] not in allowed:
             continue
         # The stored flag under the name the browser draws the marker from, and
@@ -1691,8 +1703,11 @@ async def import_fragment(request: Request):
     user_id = await _distrakt_user_id(request)
     year, month = _viewed_month(request)
     month_key = distrakt_store.month_key(year, month)
+    # Every box starts ticked, so importing everything is one press; `ticked=none`
+    # is the dialog's Untick all, drawing the same list with every box clear.
     context = {"request": request, "month_query": f"?year={year}&month={month}",
-               "rows": [], "undescribed": [], "note": ""}
+               "rows": [], "undescribed": [], "note": "",
+               "ticked": request.query_params.get("ticked") != "none"}
     settings = load_settings()
     if not settings.calendar_source_configured:
         context["note"] = "No calendar is configured, so there is nothing to import."

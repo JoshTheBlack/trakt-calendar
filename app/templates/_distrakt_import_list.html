@@ -14,7 +14,8 @@
    writes a row that stays. Naming them says why a title the calendar just
    gained is missing here, and that it will not be missing for long.
 
-   Context: `rows` [{ref, title, season, network, kind}], `undescribed` (titles),
+   Context: `rows` [{ref, title, season, network, kind}], `ticked` (whether the
+   boxes start ticked), `undescribed` (titles),
    `note` (why nothing can be offered, when nothing can), `month_query`. #}
 {% if note %}
 <p class="distrakt-note distrakt-warn">{{ note }}</p>
@@ -39,10 +40,23 @@
         on your calendar for this month {{ 'is' if rows | length == 1 else 'are' }} not on it yet.
         Untick any you don't want. If the list is long, your calendar's filters and
         not-watching marks are what shorten it.</p>
+    {#- TICK ALL / UNTICK ALL ARE THE LIST DRAWN AGAIN, not a script walking the
+        boxes: the server already draws every box, so drawing them all ticked or
+        all clear is one more answer from the same route.
+        `hx-json-enc="false"` BECAUSE THE FORM AROUND THEM CARRIES IT, and the
+        extension reads the attribute from any ancestor: on these GETs it went
+        looking for a body to encode, found none, and threw before any request
+        was sent. -#}
+    <p class="distrakt-import-toggle">
+        <button type="button" class="btn-ghost small" hx-get="/distrakt/fragments/import{{ month_query }}&amp;ticked=all"
+                hx-json-enc="false" hx-target="#importBody" hx-swap="innerHTML">Tick all</button>
+        <button type="button" class="btn-ghost small" hx-get="/distrakt/fragments/import{{ month_query }}&amp;ticked=none"
+                hx-json-enc="false" hx-target="#importBody" hx-swap="innerHTML">Untick all</button>
+    </p>
     <ul class="distrakt-import-list">
         {%- for row in rows %}
         <li><label>
-            <input type="checkbox" name="pick:{{ row.ref }}" value="1" checked autocomplete="off">
+            <input type="checkbox" name="pick:{{ row.ref }}" value="1"{{ " checked" if ticked }} autocomplete="off">
             <strong>{{ row.title or 'Untitled' }}</strong> S{{ '%02d' % row.season }}
             <span class="distrakt-import-meta">{{ row.kind }}{% if row.network %} · {{ row.network }}{% endif %}</span>
         </label></li>
