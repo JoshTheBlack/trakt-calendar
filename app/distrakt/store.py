@@ -1586,8 +1586,19 @@ DISMISSAL_VERDICT = "verdict"
 DISMISSAL_MONTH = "month"
 
 
+class Refusal(NamedTuple):
+    """One stored refusal: which kind, when, and — for a history refusal made
+    since the plays were recorded — the latest play of each episode it answered,
+    as {episode number: epoch seconds}. None where the row predates that, which
+    leaves `when` as its watermark."""
+    kind: str
+    when: int
+    covered: dict[int, int] | None = None
+
+
 async def dismiss_prompt(user_id: int, key: ItemKey, season: int,
-                         kind: str = DISMISSAL_VERDICT) -> None:
+                         kind: str = DISMISSAL_VERDICT,
+                         covered: dict[int, int] | None = None) -> None:
     """Record that the viewer declined one of the page's questions about a season.
 
     `kind` SAYS WHICH QUESTION, and therefore how long the refusal lasts — see the
@@ -1600,15 +1611,25 @@ async def dismiss_prompt(user_id: int, key: ItemKey, season: int,
     REFRESHES it rather than leaving the first one standing. Declining the same
     season a second time has to move the mark, or the play that prompted the
     second refusal would still read as newer than the first and ask a third time.
+
+    `covered` IS WHAT A HISTORY REFUSAL ANSWERED, per episode, and when given it
+    replaces the timestamp as the mark: a play of an episode it does not name,
+    or a later play of one it does, asks again. A clock cannot tell apart two
+    plays a service stamped in the same minute, or a play logged with an earlier
+    date, and both are watching more. Also refreshed on every write, for the
+    same reason as the timestamp.
     """
+    covered_json = (json.dumps({str(n): int(t) for n, t in covered.items()})
+                    if covered is not None else None)
     await db.execute(
         "INSERT INTO distrakt_prompt_dismissals "
-        "(user_id, media, match_source, match_id, season, created_at, kind) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "(user_id, media, match_source, match_id, season, created_at, kind, covered_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(user_id, media, match_source, match_id, season) DO UPDATE SET "
-        "created_at = excluded.created_at, kind = excluded.kind",
+        "created_at = excluded.created_at, kind = excluded.kind, "
+        "covered_json = excluded.covered_json",
         (user_id, key.media, key.match_source, key.match_id, int(season),
-         db.now(), str(kind)),
+         db.now(), str(kind), covered_json),
     )
 
 
@@ -1637,8 +1658,8 @@ async def clear_prompt_dismissal(user_id: int, key: ItemKey, season: int) -> Non
     )
 
 
-async def dismissed_prompts(user_id: int) -> dict[tuple[str, int], tuple[str, int]]:
-    """What this viewer has said no to: {(item key, season): (kind, when)}.
+async def dismissed_prompts(user_id: int) -> dict[tuple[str, int], Refusal]:
+    """What this viewer has said no to: {(item key, season): Refusal}.
 
     A MAPPING RATHER THAN A SET, and every existing caller is unaffected by that:
     `address in declined` reads a dict exactly as it read a set, which is what
@@ -1651,15 +1672,29 @@ async def dismissed_prompts(user_id: int) -> dict[tuple[str, int], tuple[str, in
     two questions.
     """
     rows = await db.fetch_all(
-        "SELECT media, match_source, match_id, season, kind, created_at "
+        "SELECT media, match_source, match_id, season, kind, created_at, covered_json "
         "FROM distrakt_prompt_dismissals WHERE user_id = ?",
         (user_id,),
     )
     return {
         (item_key(r["media"], r["match_source"], r["match_id"]), int(r["season"])):
-            (str(r["kind"] or DISMISSAL_VERDICT), int(r["created_at"]))
+            Refusal(str(r["kind"] or DISMISSAL_VERDICT), int(r["created_at"]),
+                    _covered(r["covered_json"]))
         for r in rows
     }
+
+
+def _covered(stored) -> dict[int, int] | None:
+    """A refusal's stored coverage, or None for a row that has none. A value
+    that does not read as {episode: epoch} is treated as absent, so the
+    refusal falls back to the timestamp it was written with rather than failing
+    the page."""
+    if not stored:
+        return None
+    try:
+        return {int(n): int(t) for n, t in json.loads(stored).items()}
+    except (ValueError, TypeError, AttributeError):
+        return None
 
 
 # ---------------------------------------------------------------------------

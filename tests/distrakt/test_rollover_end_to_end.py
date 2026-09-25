@@ -661,6 +661,18 @@ class WatchingAFinishedSeasonAgainTests(RolloverOverHttpTestCase):
         self.assertIn("toast err", resp.text)
         self.assertNotIn(705, self.stored_ids(OPENING))
 
+    def test_no_is_for_now_and_the_next_episode_asks_again(self):
+        """✗ answers what has been watched so far. Every play here carries the
+        same stamp, which is what a service did on a real account, so only the
+        episodes the refusal answered can tell the next play apart."""
+        self.ask(3)
+        resp = self.client.post("/api/distrakt/unknown-dismiss", json=self.ROW)
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(self.ask(3)["rewatch_offers"], [],
+                         "the play that was answered asked again")
+        self.assertEqual([o["key"] for o in self.ask(4)["rewatch_offers"]],
+                         ["show:tmdb:705"], "watching another episode did not ask again")
+
     def test_not_this_month_puts_it_off_and_no_lets_the_next_play_ask(self):
         self.ask(3)
         resp = self.client.post("/api/distrakt/unknown-snooze", json=self.ROW)
@@ -881,6 +893,24 @@ class ImportingIsSomethingSomebodyPicksTests(RolloverOverHttpTestCase):
         self.assertNotIn("tmdb:955", text)
         self.assertIn("still being looked up", text)
         self.assertIn("Girls of Warsaw", text)
+
+    def test_the_month_ahead_lights_import_before_it_is_built(self):
+        """Its premieres are listed and worth choosing before the 1st. Opening it
+        builds nothing, so the answer comes from the unbuilt month's own path."""
+        with fake_today(BEFORE_THE_FIRST):
+            payload = self.get_month(OPENING, self.PREMIERES)
+        self.assertTrue(payload["import_due"])
+        self.assertEqual(self.stored_ids(OPENING), set(), "looking at it imported")
+
+    def test_two_months_ahead_does_not_light_import(self):
+        with fake_today(BEFORE_THE_FIRST):
+            payload = self.get_month("2026-09", {"2026-09": self.PREMIERES[OPENING]})
+        self.assertFalse(payload["import_due"])
+
+    def test_the_month_ahead_goes_quiet_once_something_is_imported(self):
+        with fake_today(BEFORE_THE_FIRST):
+            payload = self.import_month(OPENING, self.PREMIERES)
+        self.assertFalse(payload["import_due"])
 
     def test_the_button_is_drawn_lit_by_the_months_own_answer(self):
         with fake_today(ON_THE_FIRST), self.offline(self.PREMIERES):

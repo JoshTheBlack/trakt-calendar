@@ -29,7 +29,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from . import (arrival, backfill, counts, discord_fmt, episode_progress, lifecycle, live,
-               slug_repair, unsettled, viewer, watch_history)
+               rollover, slug_repair, unsettled, viewer, watch_history)
 # The catalogue-search merge (app/distrakt/search.py) — imported as `catalogue_search`
 # rather than bare `search` so a call site reads which module it is, the same
 # reason the six modules above are imported by name rather than star-imported.
@@ -118,6 +118,26 @@ def _this_month() -> str:
     """The month key the clock is standing in."""
     today = clock.today()
     return distrakt_store.month_key(today.year, today.month)
+
+
+def _import_due(month_key: str, today: date, premieres: list[dict]) -> bool:
+    """Whether the Import button asks to be pressed on `month_key`: the month
+    under way or the one after it, with nothing taken from its calendar yet.
+
+    THE MONTH AHEAD TOO, because that is when its premieres are worth a look: the
+    calendar already lists them, and choosing ahead of the 1st is what somebody
+    tidying their month does. Further out the calendar is still thin, and a
+    button lit on every month ahead would stop meaning anything.
+
+    One rule for both ways a month is drawn (built, or ahead and not built yet),
+    since a month is no longer filled by opening it (rollover._initialize_month)
+    and this is the only thing that says its premieres are waiting.
+    """
+    this_month = distrakt_store.month_key(today.year, today.month)
+    if month_key != this_month and rollover.prev_month_key(month_key) != this_month:
+        return False
+    return not any(record.get("added_by") == distrakt_store.ADDED_BY_CALENDAR
+                   for record in premieres)
 
 
 async def _distrakt_user_id(request: Request) -> int:
@@ -918,9 +938,9 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     # decide what is in it.
     #
     # AND A TURN-AWAY ON THE CALENDAR NO LONGER REACHES A MONTH THAT EXISTS. It is
-    # read where a month is BUILT — app/distrakt/calendar_import.py's
-    # add_premieres skips a marked title, so one is never imported — and nowhere
-    # else. A record already on a month is the tracker's, and ending its run is
+    # read where premieres are IMPORTED — app/distrakt/calendar_import.py's
+    # premiere_records skips a marked title, so one is never offered — and
+    # nowhere else. A record already on a month is the tracker's, and ending its run is
     # what the row's own ✕ and Abandon are for.
     premieres = await distrakt_store.month_records(
         user_id, month_key, distrakt_store.PREMIERE_KINDS)
@@ -1124,13 +1144,7 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
         # reached that the services have stopped backing. Present only on the
         # month under way, and only until it is answered either way.
         "unbacked_verdicts": _unbacked_rows(unbacked),
-        # WHETHER THE IMPORT BUTTON ASKS TO BE PRESSED: the month is under way and
-        # nothing has been taken from its calendar yet. A month is no longer
-        # filled by opening it (rollover._initialize_month), so this is the only
-        # thing that says a new month's premieres are waiting.
-        "import_due": under_way and not any(
-            record.get("added_by") == distrakt_store.ADDED_BY_CALENDAR
-            for record in premieres),
+        "import_due": _import_due(month_key, today, premieres),
         # WHAT THE PAGE SAYS ABOUT WHAT IT COULD NOT REFRESH, as finished
         # sentences rather than as names for the browser to build one from. A
         # season showing one number has to say WHY that is all there is, instead
@@ -1211,14 +1225,16 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
             # worth of rows written — and out here it is also a guess: nothing has
             # aired, so there is no state to catch up with. Opening it therefore
             # shows an empty month that says what it is waiting for, and ⤓ Import
-            # is what builds it (api_distrakt_import). The month UNDER WAY is the
-            # opposite case and still fills itself in on sight: it is the month
-            # being asked about, and an empty one there would be wrong rather than
-            # merely early. Not persisted and no Trakt call either way.
-            return _empty_month_payload(
+            # is what builds it (api_distrakt_import). The month UNDER WAY is
+            # built on sight, since what has been watched in it is already there
+            # to catch up with, but its premieres wait for Import like these.
+            # Not persisted and no Trakt call either way.
+            payload = _empty_month_payload(
                 month_key, emojis, default_emoji, standing, link_url=link_url,
                 empty_note=MONTH_AWAITS_IMPORT,
-            ), 200
+            )
+            payload["import_due"] = _import_due(month_key, today, [])
+            return payload, 200
 
     try:
         with span("payload.ensure_month", month=month_key, force=force_fresh):
@@ -1258,20 +1274,27 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
 # acting: the other two ADD something and the row's own remove undoes them, while
 # this one takes a verdict apart and the month's record of having finished that
 # season does not survive it.
+# `no_title` IS HOW LONG ✗ LASTS, said on the button. A question a play raised is
+# declined for what has been watched so far and asks again when more is (see
+# lifecycle._still_declined); a verdict nothing backs any more is a standing
+# condition, and declining it is for good.
 _ASK_KINDS = {
     "unknown": {
+        "no_title": "Not now. Ask again if I watch more of it",
         "sentence": "Should we add this to Distrakt?",
         "yes_title": "Add this season",
         "yes_url": "/api/distrakt/unknown-add",
         "confirm": "",
     },
     "given_up": {
+        "no_title": "Not now. Ask again if I watch more of it",
         "sentence": "You'd given this up. Add it back to Distrakt?",
         "yes_title": "Put this season back on your list",
         "yes_url": "/api/distrakt/unknown-resume",
         "confirm": "",
     },
     "unbacked": {
+        "no_title": "Don't ask about this again",
         "sentence": "",
         "yes_title": "Work this season out again from what the services say now",
         "yes_url": "/api/distrakt/verdict-readd",
@@ -1282,6 +1305,7 @@ _ASK_KINDS = {
     # the month: an episode watched again for old times' sake is the one question
     # somebody may reasonably not want to answer every evening it happens.
     "rewatch": {
+        "no_title": "Not now. Ask again if I watch more of it",
         "sentence": "",
         "yes_title": "Put this season back on your list, counting from that day",
         "yes_url": "/api/distrakt/rewatch-start",
@@ -1289,6 +1313,7 @@ _ASK_KINDS = {
         "snooze": True,
     },
     "finale_again": {
+        "no_title": "Not now. Ask again if I watch more of it",
         "sentence": "",
         "yes_title": "Record this season as completed in that month too",
         "yes_url": "/api/distrakt/rewatch-complete",
@@ -3410,12 +3435,16 @@ async def api_distrakt_unknown_dismiss(request: Request):
     # one. Asking the store therefore answers it outright — and it keeps a client
     # from being able to choose how long its own refusal lasts, which is the part
     # that should not be up for negotiation.
-    outstanding = {(str(row["key"]), int(row["season"]))
-                   for row in await distrakt_store.open_prompts(user_id)}
-    kind = (distrakt_store.DISMISSAL_HISTORY
-            if (str(key), int(season)) in outstanding
-            else distrakt_store.DISMISSAL_VERDICT)
-    await distrakt_store.dismiss_prompt(user_id, key, season, kind)
+    asked = await _outstanding_play(user_id, key, season)
+    if asked is not None:
+        # NOT FOR WHAT HAS BEEN WATCHED SO FAR, and nothing more: the refusal
+        # records the plays it answered, so watching more asks again.
+        await distrakt_store.dismiss_prompt(
+            user_id, key, season, distrakt_store.DISMISSAL_HISTORY,
+            covered=await lifecycle.plays_answered(user_id, key, season, asked))
+    else:
+        await distrakt_store.dismiss_prompt(user_id, key, season,
+                                            distrakt_store.DISMISSAL_VERDICT)
     # TWO WRITES BECAUSE THEY SAY DIFFERENT THINGS. The dismissal is the refusal
     # itself — permanent for a verdict, a watermark for a history question.
     # Closing the open prompt retires THIS outstanding question. A decline needs

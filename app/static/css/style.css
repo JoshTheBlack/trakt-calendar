@@ -2209,7 +2209,10 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
     background: linear-gradient(90deg, var(--crimson), #8a2331);
 }
 
-.distrakt-show-list { display: flex; flex-direction: column; gap: 5px; }
+.distrakt-show-list {
+    display: flex; flex-direction: column; gap: 5px;
+    container: distrakt-rows / inline-size;
+}
 .distrakt-bucket-head {
     font-family: 'Bebas Neue', sans-serif; letter-spacing: 0.5px; font-size: 1rem;
     color: var(--gold-soft); margin: 14px 0 3px 0;
@@ -2402,6 +2405,36 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .distrakt-counts { flex: 0 0 auto; width: 6em; text-align: right; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 .distrakt-dates { flex: 0 0 auto; width: 8.5em; text-align: right; white-space: nowrap; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 .distrakt-row-actions { flex: 0 0 auto; display: flex; gap: 4px; }
+/* A NARROW LIST PUTS A ROW'S FACTS UNDER ITS TITLE. The one-line row gives
+   fixed widths to the season, network, counts and dates (about 26em between
+   them) plus the logo and the buttons, which at a 400px phone left the title no
+   width at all. MEASURED: in Firefox's responsive mode titles appeared only from
+   a 550px window. Below this width a row becomes two lines beside its logo: the
+   title and the buttons on the first, the facts sized to what they say on the
+   second. A container query and not a viewport one, because what
+   squeezes the title is the list's own width, the same reason the rankings
+   board's tier rows use one. Every cell is placed by column, so a row without
+   the freshness dot (a closed month's) lays out the same. */
+@container distrakt-rows (max-width: 760px) {
+    .distrakt-show-row {
+        display: grid; column-gap: 8px; row-gap: 1px;
+        grid-template-columns: auto auto auto minmax(0, 1fr) auto auto auto;
+        grid-template-rows: auto auto;
+    }
+    .distrakt-freshness { grid-column: 1; grid-row: 1 / 3; }
+    .distrakt-badge { grid-column: 2; grid-row: 1 / 3; }
+    .distrakt-title { grid-column: 3 / 7; grid-row: 1; }
+    .distrakt-row-actions { grid-column: 7; grid-row: 1; }
+    .distrakt-season, .distrakt-network, .distrakt-counts, .distrakt-dates {
+        grid-row: 2; width: auto; text-align: left; font-size: 0.78rem;
+    }
+    .distrakt-season { grid-column: 3; }
+    .distrakt-network { grid-column: 4; min-width: 0; }
+    .distrakt-counts { grid-column: 5; }
+    /* The dates reach under the buttons, which sit on the first line only: at a
+       360px window a premiere-to-finale span did not fit beside the rest. */
+    .distrakt-dates { grid-column: 6 / 8; }
+}
 /* A watched film: same row shape as a show so the columns line up, but nothing
    to open and nothing to act on — it is a play that happened on a day. */
 .distrakt-film-row { cursor: default; }

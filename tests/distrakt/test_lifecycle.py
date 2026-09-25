@@ -763,6 +763,39 @@ class ASeasonWatchedAgainTests(LifecycleTestCase):
         self.assertEqual([r.play.number for r in (await self._questions([old, new])).rewatched],
                          [5], "a later episode did not ask again, or an old one did")
 
+    async def test_no_covers_the_plays_it_answered_not_a_moment_in_time(self):
+        """MEASURED: a viewer declined a re-watch offer about E01, then logged E02,
+        and Trakt stamped that play the same minute as E01's, before the refusal.
+        Measured by the clock it read as answered and nothing asked. Measured by
+        the plays the refusal answered, E02 is watching more."""
+        answered = _stamp(-120)
+        epoch = watch_history.watched_at_epoch(answered)
+        await store.dismiss_prompt(self.user_id, _key(1), 1, store.DISMISSAL_HISTORY,
+                                   covered={1: epoch, 3: epoch - 86400})
+        await store.close_prompt(self.user_id, _key(1), 1)
+        again = _dated(_play(1, 1, 1), answered)
+        self.assertEqual((await self._questions([again])).rewatched, [],
+                         "the play the refusal answered asked again")
+        same_minute = _dated(_play(1, 1, 2), answered)
+        self.assertEqual([r.play.number for r in (await self._questions([same_minute])).rewatched],
+                         [2], "another episode stamped before the refusal stayed silent")
+
+    async def test_a_later_play_of_an_answered_episode_asks_again(self):
+        answered = _stamp(-120)
+        epoch = watch_history.watched_at_epoch(answered)
+        await store.dismiss_prompt(self.user_id, _key(1), 1, store.DISMISSAL_HISTORY,
+                                   covered={4: epoch})
+        await store.close_prompt(self.user_id, _key(1), 1)
+        later = _dated(_play(1, 1, 4), _stamp(3600))
+        self.assertEqual([r.play.number for r in (await self._questions([later])).rewatched], [4])
+
+    async def test_what_a_refusal_answers_includes_the_play_that_asked(self):
+        """The watch state may not hold the question's own play yet; the refusal
+        is certainly about it, so it is folded in."""
+        asked = {"number": 4, "watched_at": _stamp(-120)}
+        covered = await lifecycle.plays_answered(self.user_id, _key(1), 1, asked)
+        self.assertEqual(covered, {4: watch_history.watched_at_epoch(asked["watched_at"])})
+
     async def test_not_this_month_covers_the_month_and_lapses_with_it(self):
         await store.dismiss_prompt(self.user_id, _key(1), 1, store.DISMISSAL_MONTH)
         later_today = _dated(_play(1, 1, 5), _stamp(60))

@@ -119,12 +119,14 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
     claim neither of them made. -#}
 {%- set xy = show.counts or (show.watched ~ '/' ~ show.total) -%}
 {%- set counts = (xy ~ (', ' ~ show.cadence if show.cadence else '')) if is_premiere else xy -%}
-{#- New/Returning: premiere (– finale for weekly). Keepup: finale (end date). -#}
+{#- New/Returning: premiere (– finale for weekly). Keepup: finale (end date).
+    A date nobody has announced reads TBA, as the details panel's episode list
+    says it. -#}
 {%- if is_premiere -%}
-{%- set dates = (show.premiere or '?/?') if show.cadence == 'b'
-                else ((show.premiere or '?/?') ~ ' – ' ~ (show.finale or '?/?')) -%}
+{%- set dates = (show.premiere or 'TBA') if show.cadence == 'b'
+                else ((show.premiere or 'TBA') ~ ' – ' ~ (show.finale or 'TBA')) -%}
 {%- elif show.bucket == 'keepup' -%}
-{%- set dates = show.finale or '?/?' -%}
+{%- set dates = show.finale or 'TBA' -%}
 {%- else -%}
 {%- set dates = '' -%}
 {%- endif -%}
@@ -225,10 +227,12 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
    headings is a question nobody answers.
 
    EVERY QUESTION SHARES ONE ROW because they read the same way and are answered
-   the same way; only the sentence and what ✓ does differ. Saying no is one
-   statement whichever it was — do not put this season on my list, stop asking —
-   so all of them send the same dismissal, which answers with the row REMOVED and
-   nothing else (nothing on the page changed, and recomputing a month to drop one
+   the same way; only the sentence, what ✓ does and how long ✗ lasts differ. ✗
+   on a question a play raised means "not for what I have watched so far" and
+   asks again when more is watched; on a verdict nothing backs it means stop
+   asking. The server decides which from the store, and `ask.no_title` says
+   which on the button. All of them send the same dismissal, which answers
+   with the row REMOVED and nothing else (nothing on the page changed, and recomputing a month to drop one
    line would cost a season lookup per listed title).
 
    `ask.kind` names which one this is; the sentence, the ✓ title and the
@@ -264,7 +268,7 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
         {#- The dismissal takes the ROW out and leaves the month alone. Aimed at
             the row rather than at the button, so a refusal the server could not
             record leaves the question standing to be pressed again. -#}
-        <button type="button" class="btn-ghost small" title="Don't ask about this season again"
+        <button type="button" class="btn-ghost small" title="{{ ask.no_title }}"
                 hx-post="/api/distrakt/unknown-dismiss" hx-json-enc
                 hx-vals='{{ vals | tojson }}'
                 hx-target="closest .distrakt-unknown-row" hx-swap="outerHTML">✗</button>
@@ -273,7 +277,7 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
             next play (store.DISMISSAL_MONTH), offered only on the re-watch rows:
             an episode watched again now and then is the question somebody may
             not want put to them every evening it happens. -#}
-        <button type="button" class="btn-ghost small" title="Don't ask about this season again this month"
+        <button type="button" class="btn-ghost small" title="Don't ask again this month, whatever else I watch of it"
                 hx-post="/api/distrakt/unknown-snooze" hx-json-enc
                 hx-vals='{{ vals | tojson }}'
                 hx-target="closest .distrakt-unknown-row" hx-swap="outerHTML">Not this month</button>

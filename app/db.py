@@ -3178,6 +3178,29 @@ CREATE INDEX ix_tier_category_removals_sweep
     ON tier_category_removals(removed_at);
 """
 
+MIGRATION_44 = """
+-- A HISTORY REFUSAL REMEMBERS WHICH PLAYS IT ANSWERED, NOT ONLY WHEN.
+--
+-- Migration 34 made a history refusal a watermark: a play later than the
+-- refusal asks again. Measured on a real account, a clock is the wrong mark.
+-- The viewer said no to a re-watch offer about E01 at 18:51:20, then logged E02,
+-- and Trakt stamped that play 18:51:00, the same minute as E01's, so it read as
+-- already answered. A play logged with an earlier date on purpose ("watched
+-- yesterday") would be silenced the same way. What the viewer meant by no was
+-- "not for what I have watched so far", and the question should come back when
+-- they watch more.
+--
+-- So the refusal stores, per episode, the latest play the tracker knew of when
+-- it was made: {"<episode>": <epoch seconds>}. A play asks again when its
+-- episode had no play by then, or has one later than that. A re-read of plays
+-- already answered stays quiet.
+--
+-- NULL FOR EVERY EXISTING ROW, and a NULL row keeps the time watermark it was
+-- written under. Verdict and month refusals never carry one: a verdict refusal
+-- is permanent and a month refusal lapses by the calendar.
+ALTER TABLE distrakt_prompt_dismissals ADD COLUMN covered_json TEXT;
+"""
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -3222,6 +3245,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (41, MIGRATION_41),
     (42, MIGRATION_42),
     (43, MIGRATION_43),
+    (44, MIGRATION_44),
 ]
 
 

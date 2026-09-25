@@ -180,13 +180,13 @@ class DeriveSeasonTests(unittest.TestCase):
         self.assertNotEqual(res["cadence"], "b")
 
     def test_weekly_unknown_tail(self):
-        # Two aired, two announced-but-unscheduled -> finale unknown ("?/?").
+        # Two aired, two announced-but-unscheduled -> finale unknown (TBA on the row).
         eps = [_ep(1, "2026-07-05"), _ep(2, "2026-07-12"), _ep(3, None), _ep(4, None)]
         res = _derive_season(eps, UTC, now=NOW)
         self.assertEqual(res["total"], 4)          # y counts undated eps too
         self.assertEqual(res["cadence"], "Sun")    # still weekly, from known dates
         self.assertEqual(res["premiere"], "7/5")
-        self.assertIsNone(res["finale"])           # renderer shows "?/?"
+        self.assertIsNone(res["finale"])           # the row draws TBA
         self.assertTrue(res["started_airing"])
         self.assertFalse(res["finished_airing"])   # no known finale -> not finished
 

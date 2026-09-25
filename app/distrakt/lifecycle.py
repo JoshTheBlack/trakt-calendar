@@ -518,7 +518,7 @@ _DISMISSAL_GRACE_SECONDS = 60
 
 
 def _still_declined(play: watch_history.EpisodePlay,
-                    declined: dict[tuple[str, int], tuple[str, int]],
+                    declined: dict[tuple[str, int], store.Refusal],
                     address: tuple[str, int], tz) -> bool:
     """Whether a refusal still covers this play.
 
@@ -531,6 +531,13 @@ def _still_declined(play: watch_history.EpisodePlay,
     and is correctly ignored. A refusal FOR THIS MONTH covers every play in the
     viewer's month it was made in, and asks again about a play in any later one.
 
+    WHAT A HISTORY REFUSAL COVERS IS THE PLAYS IT ANSWERED, where it recorded
+    them (store.Refusal.covered): the latest play of each episode the tracker
+    knew of when it was made. A play of any other episode, or a later play of
+    one of those, is watching more. The clock is only the mark for a refusal
+    written before that was recorded, and it could not tell apart two plays a
+    service stamped in the same minute, or a play logged with an earlier date.
+
     A PLAY THAT CANNOT DATE ITSELF STAYS COVERED. With no usable timestamp there
     is no way to show the play is new, and the viewer's refusal is the only thing
     actually known — honouring it beats guessing, because guessing wrong here
@@ -539,7 +546,7 @@ def _still_declined(play: watch_history.EpisodePlay,
     found = declined.get(address)
     if found is None:
         return False
-    kind, dismissed_at = found
+    kind, dismissed_at, covered = found
     if kind not in (store.DISMISSAL_HISTORY, store.DISMISSAL_MONTH):
         return True
     when = watch_history.watched_at_epoch(play.watched_at)
@@ -548,7 +555,30 @@ def _still_declined(play: watch_history.EpisodePlay,
     if kind == store.DISMISSAL_MONTH:
         return (watch_history.local_day(play.watched_at, tz)[:7]
                 <= watch_history.local_day(_utc_stamp(dismissed_at), tz)[:7])
+    if covered is not None:
+        answered = covered.get(int(play.number))
+        return answered is not None and when <= answered
     return when <= dismissed_at + _DISMISSAL_GRACE_SECONDS
+
+
+async def plays_answered(user_id: int, key, season: int,
+                         asked: dict | None) -> dict[int, int]:
+    """What a history refusal made now answers: the latest play of each episode
+    of the season the tracker knows of, with the play that raised the question
+    (`asked`, the open prompt's row) folded in. See _still_declined for how a
+    later play is measured against it.
+
+    THE QUESTION'S OWN PLAY IS ADDED rather than trusted to be in the watch
+    state, because it is the one play the refusal is certainly about.
+    """
+    covered = watch_history.latest_plays(await watch_history.load_state(user_id),
+                                         key, season)
+    if asked is not None and asked.get("number") is not None:
+        when = watch_history.watched_at_epoch(asked.get("watched_at") or "")
+        if when is not None:
+            number = int(asked["number"])
+            covered[number] = max(when, covered.get(number, when))
+    return covered
 
 
 def _utc_stamp(epoch: int) -> str:

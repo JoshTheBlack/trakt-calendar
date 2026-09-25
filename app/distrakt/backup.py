@@ -53,7 +53,11 @@ _EXPORT_TABLES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # what says whether it is one — a restore that dropped either would turn every
     # history refusal into a permanent veto, or every permanent one into a
     # watermark that the next play lifts. See store.dismiss_prompt.
-    ("distrakt_prompt_dismissals", (*IDENTITY_COLUMNS, "season", "created_at", "kind")),
+    # `covered_json` travels for the same reason: it is what a history refusal is
+    # now measured against, and a restore without it would fall back to the
+    # clock and silence plays the refusal never answered.
+    ("distrakt_prompt_dismissals", (*IDENTITY_COLUMNS, "season", "created_at", "kind",
+                                    "covered_json")),
     # THE QUESTIONS STILL OUTSTANDING, and they are backed up because they CANNOT
     # BE REBUILT. The plays behind them never reach storage at all (watch_history's
     # _PLAYS is in-memory by design), so a restore without these is a tracker that

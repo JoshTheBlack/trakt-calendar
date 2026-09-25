@@ -1311,6 +1311,20 @@ def episodes_watched_since(state: dict, key, season: int, day: str,
                    if when and local_day(when, tz) >= day})
 
 
+def latest_plays(state: dict, key, season: int) -> dict[int, int]:
+    """{episode number: epoch seconds of its latest play, by any service} for one
+    season, from the watch state. An episode with no dated play is left out."""
+    entry = (state.get("shows") or {}).get(str(key)) or {}
+    slots = _seasons_by_source(entry).get(str(season)) or {}
+    out: dict[int, int] = {}
+    for episodes in slots.values():
+        for number, when in (episodes or {}).items():
+            epoch = watched_at_epoch(when) if when else None
+            if epoch is not None:
+                out[int(number)] = max(epoch, out.get(int(number), epoch))
+    return out
+
+
 def season_completed_map(state: dict, tz: ZoneInfo) -> dict[tuple[str, int], str]:
     """{(item key, season): 'YYYY-MM-DD'} — the day the season's finale was
     watched, which is the day it was finished (see finale_day).
