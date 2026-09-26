@@ -376,27 +376,84 @@ async def boosted_failure_becomes_a_navigation(request: Request, call_next):
     return response
 
 
-# THE THREE ENFORCED DIRECTIVES NEED NO REWRITE OF ANYTHING: nothing in this app
-# is ever meant to be framed, so frame-ancestors closes clickjacking outright, and
-# nothing here builds a <base> tag or expects object/embed content, so base-uri
-# and object-src cost nothing to enforce today.
-_CSP_ENFORCED = "frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
-
-# THE REST OF THE TARGET POLICY, REPORT-ONLY, so the browser lists every
-# violation in its console without breaking anything while the inline handlers
-# and inline <script> blocks that would violate it still exist. NO
-# 'unsafe-inline' IN script-src, even here — that term would hide exactly the
-# violations this header exists to collect, so shipping it would be a policy
-# that looks like a control and measures nothing.
-#
-# img-src NAMES wsrv.nl, MEASURED RATHER THAN ASSUMED: every poster this app
+# EVERY DIRECTIVE BUT script-src IS ENFORCED HERE, MEASURED RATHER THAN
+# ASSUMED: a real browser pass over the calendar, the ranker (a board, its
+# search box, an export download), the tracker, distrakt, a signed-in details
+# panel's trailer AND its cast and poster, the settings panel, and the share
+# link from both a signed-in and a signed-out context turned up violations on
+# exactly two directives — script-src (the ten inline handlers and the two
+# inline <script> blocks the report-only header below still lists) and
+# img-src, which is why img-src names wsrv.nl here too: every poster this app
 # draws — the calendar card, the ranker row, the details panel, the share
-# page, signed in or out — addresses that host directly (app/providers/
-# base.py's _IMAGE_PROXY; app/media/posters.py explains why: the proxy does
-# the resizing, and it is deliberately the same host the server warms and the
-# browser draws so the two are one cached object rather than two fetches of
-# the same picture). Leaving it out would not tighten anything real; it would
-# just make every poster in the app a logged violation.
+# page, signed in or out, and every cast headshot in the details panel —
+# addresses that host directly (app/providers/base.py's _IMAGE_PROXY;
+# app/media/posters.py explains why: the proxy does the resizing, and it is
+# deliberately the same host the server warms and the browser draws so the
+# two are one cached object rather than two fetches of the same picture).
+#
+# THE DETAILS PANEL'S OWN POSTER AND ITS CAST HEADSHOTS WERE NOT ON THIS PATH
+# UNTIL NOW. The card's opener deliberately does not hand the details panel
+# the card's own poster text (_card.html: "the picture ... rather than
+# carrying their TEXT" — the panel resolves its own, by the service that
+# describes the title), and that resolution — app/providers/trakt/detail.py's
+# `_headshot` and its `poster` field, app/providers/simkl/detail.py's `poster`
+# field — read Trakt's or Simkl's own address directly. trakt_calendar.poster()
+# returns that address UNPROXIED ON PURPOSE (see its docstring: most of its
+# callers download server-side, not to a browser), which is right for those
+# callers and was silently wrong for this one — a real hotlink to Trakt's CDN
+# from every visitor's browser, found only because this phase's own browser
+# drive opened a real details panel and watched two images come back broken.
+# FIXED AT THE SOURCE, not by widening this header: both detail modules now
+# proxy the address before handing it back (`proxied_image`, the same function
+# every calendar record's poster already goes through), so the picture a
+# details panel draws is the same wsrv.nl request as a calendar card's, and
+# img-src needs nothing beyond what card posters already required.
+# Nothing else ever fired, so enforcing the rest today costs nothing real.
+#
+# script-src IS DELIBERATELY NOT STRICT, and that is a decision, not an
+# oversight: 'unsafe-inline' covers the ten inline event-handler attributes
+# (nudgeItem, the export preview's zoom/pan/download, the onerror image
+# fallbacks) and the two inline <script> blocks (_nav_head.html's localStorage
+# probe, error_lobby.html's intermission toggle) that a strict script-src
+# would break outright — converting them to delegated listeners is a
+# separate, open question (memo item B) and is not this change. 'unsafe-eval'
+# is required TODAY by _ranker_search_results.html's
+# hx-trigger="click[!this.classList.contains('is-held')]": htmx 4 builds that
+# event filter with the Function constructor at the moment it installs the
+# trigger, with no config flag gating the call, so a strict script-src throws
+# there regardless of anything else in this file. Leaving script-src out of
+# this policy entirely would not avoid that trade — an enforced policy with
+# default-src 'self' and no script-src falls back to default-src, which is
+# STRICT and breaks every one of the above the same way; it must be spelled
+# out explicitly, permissively, to keep the fallback from applying while
+# these are unresolved.
+#
+# THE REPORT-ONLY HEADER BELOW IS UNCHANGED, and that is deliberate: it keeps
+# carrying the STRICT script-src from day one, so the console goes on listing
+# exactly the violations a future strict policy would have to answer for (the
+# two block hashes included), even though the enforced header next to it no
+# longer measures anything on that directive.
+_CSP_ENFORCED = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: https://wsrv.nl; "
+    "font-src 'self'; "
+    "connect-src 'self'; "
+    "frame-src https://www.youtube-nocookie.com; "
+    "frame-ancestors 'none'; "
+    "base-uri 'none'; "
+    "form-action 'self'; "
+    "object-src 'none'"
+)
+
+# THE FULL TARGET POLICY, STILL REPORT-ONLY, so the browser goes on listing
+# every script-src violation in its console without breaking anything — the
+# inline handlers and inline <script> blocks above still violate this one.
+# NO 'unsafe-inline' AND NO 'unsafe-eval' IN script-src, even here — either
+# term would hide exactly the violations this header exists to collect, so
+# shipping them would be a policy that looks like a control and measures
+# nothing.
 _CSP_REPORT_ONLY = (
     "default-src 'self'; "
     "script-src 'self'; "

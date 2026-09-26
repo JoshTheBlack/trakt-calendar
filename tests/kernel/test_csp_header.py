@@ -19,16 +19,35 @@ class ContentSecurityPolicyHeaderTests(AppTestCase):
         self.sign_in_as(self.make_user("viewer", calendar_approved=True))
 
     def _assert_both_headers(self, resp):
-        self.assertIn("frame-ancestors 'none'", resp.headers["Content-Security-Policy"])
-        self.assertIn("base-uri 'none'", resp.headers["Content-Security-Policy"])
-        self.assertIn("object-src 'none'", resp.headers["Content-Security-Policy"])
+        enforced = resp.headers["Content-Security-Policy"]
+        self.assertIn("frame-ancestors 'none'", enforced)
+        self.assertIn("base-uri 'none'", enforced)
+        self.assertIn("object-src 'none'", enforced)
+        # script-src must be spelled out explicitly in the ENFORCED header, even
+        # though it stays permissive: default-src 'self' with script-src simply
+        # absent would fall back to default-src, which is strict and breaks the
+        # inline handlers and the hx-trigger event filter this phase does not
+        # touch. A missing script-src here is the regression this guards.
+        enforced_script_src = enforced.split("script-src", 1)[1].split(";", 1)[0]
+        self.assertIn("'self'", enforced_script_src)
+        self.assertIn("unsafe-inline", enforced_script_src)
+        self.assertIn("unsafe-eval", enforced_script_src)
+        # Every poster this app draws — the calendar card, the ranker row, the
+        # share page, and the details panel's own poster and cast headshots —
+        # addresses the image proxy (app/providers/base.py's _IMAGE_PROXY); the
+        # detail modules proxy their own reads before handing them back, so
+        # nothing needs a second host here.
+        enforced_img_src = enforced.split("img-src", 1)[1].split(";", 1)[0]
+        self.assertIn("https://wsrv.nl", enforced_img_src)
+        self.assertNotIn("media.trakt.tv", enforced_img_src)
+        self.assertNotIn("simkl.in", enforced_img_src)
+
         report_only = resp.headers["Content-Security-Policy-Report-Only"]
         self.assertIn("script-src 'self'", report_only)
         self.assertNotIn("unsafe-inline", report_only.split("script-src", 1)[1].split(";", 1)[0])
-        # Every poster in this app is addressed straight at the image proxy
-        # (app/providers/base.py's _IMAGE_PROXY), so img-src has to admit it or
-        # a browser pass logs a violation on every card.
-        self.assertIn("https://wsrv.nl", report_only.split("img-src", 1)[1].split(";", 1)[0])
+        self.assertNotIn("unsafe-eval", report_only.split("script-src", 1)[1].split(";", 1)[0])
+        report_only_img_src = report_only.split("img-src", 1)[1].split(";", 1)[0]
+        self.assertIn("https://wsrv.nl", report_only_img_src)
 
     def test_a_page_response_carries_both_headers(self):
         resp = self.client.get("/me")

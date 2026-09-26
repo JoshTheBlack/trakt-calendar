@@ -24,7 +24,7 @@ from datetime import date, datetime
 from ... import youtube
 from ...config import Settings
 from .. import season as season_rules
-from ..base import Media, SeasonsAnswer, TitleFacts
+from ..base import Media, SeasonsAnswer, TitleFacts, proxied_image
 from . import _ids, _naming, titles, transport
 
 logger = logging.getLogger(__name__)
@@ -471,13 +471,15 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         # shape is versioned by EXTRACT_VERSION); the correction belongs here, at
         # the projection, exactly where the Trakt package puts its own.
         "ids": _ids.normalize(fields.get("ids") or {}),
-        # THE POSTER, AS A FULL URL. `_extract` keeps Simkl's partial path and
-        # this projection dropped it, so a card the calendar SEARCH wrote had no
-        # picture. Built by this package's own one reading of that path -- the
-        # same one the calendar feed uses -- because Simkl states a poster as a
-        # fragment and two places turning it into a URL would be two chances to
-        # get the size suffix wrong.
-        "poster": simkl_calendar.poster_url(fields.get("poster")) or "",
+        # THE POSTER, AS A FULL URL, THROUGH THE SHARED PROXY. `_extract` keeps
+        # Simkl's partial path and this projection dropped it, so a card the
+        # calendar SEARCH wrote had no picture. Built by this package's own one
+        # reading of that path -- the same one the calendar feed uses -- because
+        # Simkl states a poster as a fragment and two places turning it into a
+        # URL would be two chances to get the size suffix wrong. Proxied here
+        # because this caller (the details panel) hands the address straight to
+        # a browser, which is exactly what the proxy exists to sit in front of.
+        "poster": proxied_image(simkl_calendar.poster_url(fields.get("poster"))) or "",
         "runtime": runtime,
         # SLUGS BACK INTO WORDS, exactly as the Trakt package does to its own.
         # `_extract` slugs a genre so a viewer's filter spec matches one spelling

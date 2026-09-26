@@ -132,7 +132,7 @@ class TheModalsFieldSetTests(unittest.IsolatedAsyncioTestCase):
     # here reaches for the series behind it (see SeriesGapFillTests) and the two
     # lookups this class is about stay two.
     TITLE = {"title": "A Show", "ids": {"simkl": 55}, "overview": "Words.",
-             "network": "TV Tokyo", "genres": ["Game Show"],
+             "network": "TV Tokyo", "genres": ["Game Show"], "poster": "abc123",
              "trailers": [{"youtube": "abc123DEF_-"}]}
 
     async def _details(self, season=1):
@@ -198,6 +198,14 @@ class TheModalsFieldSetTests(unittest.IsolatedAsyncioTestCase):
                                                   {"youtube": "dQw4w9WgXcQ"}]}):
             got, _calls = await self._details()
         self.assertEqual(got["trailer"], "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+
+    async def test_the_poster_is_addressed_through_the_shared_proxy(self):
+        """Simkl's own address (simkl_calendar.poster_url) must never reach the
+        browser directly — the details panel hands this straight to an <img
+        src>, and only the proxy host is admitted by this app's CSP img-src."""
+        got, _calls = await self._details()
+        self.assertTrue(got["poster"].startswith("https://wsrv.nl/?url="))
+        self.assertIn("simkl.in%2Fposters%2Fabc123_m.jpg", got["poster"])
 
     async def test_a_title_simkl_cannot_place_still_answers_with_every_key(self):
         """Simkl's "not found" is a 200 with a body that is not a title, so the

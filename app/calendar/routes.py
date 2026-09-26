@@ -46,7 +46,7 @@ from ..integrations import routes as integrations_routes
 from ..media import logos
 from ..perftrace import span
 from ..providers import detail_source
-from ..providers.base import Media, Source, SourceUnavailable, parse_item_key
+from ..providers.base import Media, Source, SourceUnavailable, parse_item_key, proxied_image
 from ..providers.trakt import TraktError
 from ..sources import prefs as source_prefs
 from ..timezones import build_options as build_timezone_options
@@ -1721,9 +1721,16 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     shown = await calendar_entries.stored_values(
         params.get("key", ""),
         {name: params.get(name, "") for name in calendar_entries.SHOWN_FIELDS})
+    # `stored_values` reads the STORED column, which is the source's own raw
+    # address (the calendar cache holds every source's records unfiltered and
+    # unproxied — see app/calendar/cache.py; proxying is `render()`'s job, done
+    # when a Record becomes a card's Item, and this route bypasses render() to
+    # read the row directly). This is a second place that hands a picture to a
+    # browser, so it proxies here too, through the same function render() uses.
+    poster = proxied_image(shown.get("poster", "")) or ""
     return details_panel.panel(
         request, details, media=media, season=season,
-        title=shown.get("title", ""), poster=shown.get("poster", ""),
+        title=shown.get("title", ""), poster=poster,
         overview=shown.get("overview", ""),
         links=detail_source.outbound_links(ids, media),
         progress=progress,
