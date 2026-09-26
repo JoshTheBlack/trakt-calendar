@@ -376,6 +376,62 @@ async def boosted_failure_becomes_a_navigation(request: Request, call_next):
     return response
 
 
+# THE THREE ENFORCED DIRECTIVES NEED NO REWRITE OF ANYTHING: nothing in this app
+# is ever meant to be framed, so frame-ancestors closes clickjacking outright, and
+# nothing here builds a <base> tag or expects object/embed content, so base-uri
+# and object-src cost nothing to enforce today.
+_CSP_ENFORCED = "frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+
+# THE REST OF THE TARGET POLICY, REPORT-ONLY, so the browser lists every
+# violation in its console without breaking anything while the inline handlers
+# and inline <script> blocks that would violate it still exist. NO
+# 'unsafe-inline' IN script-src, even here — that term would hide exactly the
+# violations this header exists to collect, so shipping it would be a policy
+# that looks like a control and measures nothing.
+#
+# img-src NAMES wsrv.nl, MEASURED RATHER THAN ASSUMED: every poster this app
+# draws — the calendar card, the ranker row, the details panel, the share
+# page, signed in or out — addresses that host directly (app/providers/
+# base.py's _IMAGE_PROXY; app/media/posters.py explains why: the proxy does
+# the resizing, and it is deliberately the same host the server warms and the
+# browser draws so the two are one cached object rather than two fetches of
+# the same picture). Leaving it out would not tighten anything real; it would
+# just make every poster in the app a logged violation.
+_CSP_REPORT_ONLY = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: https://wsrv.nl; "
+    "font-src 'self'; "
+    "connect-src 'self'; "
+    "frame-src https://www.youtube-nocookie.com; "
+    "frame-ancestors 'none'; "
+    "base-uri 'none'; "
+    "form-action 'self'; "
+    "object-src 'none'"
+)
+
+
+@app.middleware("http")
+async def content_security_policy(request: Request, call_next):
+    """Set both CSP headers on every response — a page, a JSON refusal, a
+    static file — because a policy some responses carry and others do not is
+    the "invariant living in one call site" failure CLAUDE.md names.
+
+    REGISTERED HERE, AFTER authz.install(app) ABOVE, beside
+    boosted_failure_becomes_a_navigation, for the same reason that one sits
+    here: Starlette's registration order is reversed, so a middleware added
+    after authz's own wraps OUTSIDE it and therefore still runs on authz's
+    short-circuit refusals and on the themed error pages, not only on a route
+    that reached its handler. Static files go through this same stack via
+    app.mount above and get it too.
+    """
+    response = await call_next(request)
+    response.headers["Content-Security-Policy-Report-Only"] = _CSP_REPORT_ONLY
+    response.headers["Content-Security-Policy"] = _CSP_ENFORCED
+    return response
+
+
 # LAST, and therefore outermost: what it reports has to be the time the client
 # actually waited, which includes the gates authz just installed and the gzip of
 # the response below them.
