@@ -1,8 +1,8 @@
 """Backfilling months the tracker was never running for, from watch history.
 
 The rule under test is the same one the live Completed bucket uses: a season
-belongs to the month its LAST episode was watched in, and only if every episode
-was watched. Everything expensive is mocked at the Trakt boundary; the sweep,
+belongs to the month its FINALE was watched in, and only if every episode was
+watched. Everything expensive is mocked at the Trakt boundary; the sweep,
 the bucketing, the plan and the writes are all real.
 """
 from __future__ import annotations
@@ -146,9 +146,10 @@ class SurveyTests(BackfillTestCase):
         self.assertEqual((row["watched"], row["total"]), (3, 3))
         self.assertEqual(row["added_by"], distrakt.ADDED_BY_HISTORY)
         # The whole id map the sweep reported travels into the record, so the row
-        # it becomes is keyed on the shared id and not on Trakt's own.
-        self.assertEqual(row["ids"], {"trakt": 101, "tmdb": 1001,
-                                      "slug": "slug-101", "trakt_slug": "slug-101"})
+        # it becomes is keyed on the shared id and not on Trakt's own — less the
+        # ambiguous bare `slug`, which no way onto the tracker files any more
+        # (arrival.canonical_ids): Trakt's name for it rides as `trakt_slug`.
+        self.assertEqual(row["ids"], {"trakt": 101, "tmdb": 1001, "trakt_slug": "slug-101"})
 
     async def test_an_unfinished_season_belongs_to_no_month(self):
         events = [_ep_event(102, 1, 2, "2026-03-14T20:00:00Z")]
@@ -218,6 +219,67 @@ class SurveyTests(BackfillTestCase):
         self.assertEqual(plan["months"], {})
         self.assertEqual(plan["range"], ["2026-01", "2026-06"])
 
+    async def test_an_episode_watched_again_later_does_not_move_the_season(self):
+        """Measured on a real account: a finale watched on 2 February and episode
+        four watched again on 5 July filed the season under July, because the
+        month came from the latest play of any episode. The finale's day decides."""
+        events = [_ep_event(110, 1, 5, "2026-02-02T21:00:00Z", title="Watched Again"),
+                  _ep_event(110, 1, 4, "2026-05-05T21:00:00Z", title="Watched Again")]
+        progress = {110: {1: {1: "2026-01-20T00:00:00Z", 2: "2026-01-21T00:00:00Z",
+                              3: "2026-01-22T00:00:00Z", 4: "2026-05-05T21:00:00Z",
+                              5: "2026-02-02T21:00:00Z"}}}
+        plan = await self._survey(events, progress, {(110, 1): {"total": 5}})
+        self.assertEqual(list(plan["months"]), ["2026-02"])
+        self.assertEqual(plan["replayed"], {}, "a middle episode is not the finale")
+
+    async def test_a_finale_watched_again_is_filed_on_its_first_viewing_and_said(self):
+        """Progress keeps one date per episode — the latest — so the replay is
+        all it can see. The sweep lists both plays, and the confirmation names
+        the second rather than choosing silently."""
+        events = [_ep_event(111, 1, 3, "2026-02-14T21:00:00Z", title="Finale Twice"),
+                  _ep_event(111, 1, 3, "2026-05-20T21:00:00Z", title="Finale Twice")]
+        progress = {111: {1: {1: "2026-02-01T00:00:00Z", 2: "2026-02-07T00:00:00Z",
+                              3: "2026-05-20T21:00:00Z"}}}
+        plan = await self._survey(events, progress, {(111, 1): {"total": 3}})
+        self.assertEqual(list(plan["months"]), ["2026-02"])
+        rows = {row["month"]: row for row in backfill.summarize(plan, ZoneInfo("UTC"))["months"]}
+        self.assertEqual(rows["2026-02"]["titles"], ["Finale Twice S01"])
+        # Said on the month the replay happened, which is the month being asked about.
+        self.assertEqual(rows["2026-05"]["replays"],
+                         ["Finale Twice S01 — finale watched again 20 May 2026 (finished in 2026-02)"])
+        self.assertEqual(rows["2026-05"]["count"], 0, "a replay was filed as a finish")
+
+    async def test_a_second_play_of_the_finale_in_the_same_month_is_not_named(self):
+        events = [_ep_event(113, 1, 3, "2026-05-10T21:00:00Z", title="Twice In May"),
+                  _ep_event(113, 1, 3, "2026-05-20T21:00:00Z", title="Twice In May")]
+        progress = {113: {1: {1: "2026-05-01T00:00:00Z", 2: "2026-05-07T00:00:00Z",
+                              3: "2026-05-20T21:00:00Z"}}}
+        plan = await self._survey(events, progress, {(113, 1): {"total": 3}})
+        self.assertEqual(list(plan["months"]), ["2026-05"])
+        self.assertEqual(plan["replayed"], {})
+
+    async def test_a_replay_of_a_season_already_recorded_finished_is_said_not_filed(self):
+        """MEASURED: A Knight of the Seven Kingdoms was finished in February, and
+        its finale watched again on 8 July. A July survey sees only the July play,
+        so it read as the finish and would have filed the season completed a
+        second time, on July. The tracker already records it finished in
+        February, so the July play is a replay: named on July, written nowhere."""
+        await distrakt.add_month_record(self.user_id, "2026-02", {
+            "ids": {"trakt": 112, "tmdb": 1012, "slug": "slug-112"}, "season": 1,
+            "title": "Seen Before", "kind": distrakt.RecordKind.COMPLETED,
+            "watched": 3, "total": 3})
+        events = [_ep_event(112, 1, 3, "2026-05-20T21:00:00Z", title="Seen Before")]
+        progress = {112: {1: {1: "2026-02-01T00:00:00Z", 2: "2026-02-07T00:00:00Z",
+                              3: "2026-05-20T21:00:00Z"}}}
+        plan = await self._survey(events, progress, {(112, 1): {"total": 3}},
+                                  start="2026-05", end="2026-05")
+        self.assertEqual(plan["months"], {}, "the replay was filed as a second finish")
+        summary = backfill.summarize(plan, ZoneInfo("UTC"))
+        self.assertEqual([(r["month"], r["replays"]) for r in summary["months"]],
+                         [("2026-05", ["Seen Before S01 — finale watched again 20 May 2026 "
+                                       "(finished in 2026-02)"])])
+        self.assertEqual(summary["to_write"], 0, "a note alone offered to write a month")
+
     async def test_the_summary_carries_no_records(self):
         """The client's job is to say yes, not to hand back what to store."""
         events = [_ep_event(106, 2, 1, "2026-04-02T00:00:00Z", title="Season Two")]
@@ -226,7 +288,7 @@ class SurveyTests(BackfillTestCase):
 
         summary = backfill.summarize(plan, ZoneInfo("UTC"))
         self.assertEqual(summary["months"], [{"month": "2026-04", "count": 1,
-                                              "titles": ["Season Two S02"],
+                                              "titles": ["Season Two S02"], "replays": [],
                                               "movie_count": 0, "movie_titles": [],
                                               "movie_known": 0,
                                               "replacing": 0}])
@@ -863,11 +925,35 @@ class RemovingAFilmTests(unittest.TestCase):
         self.client.close()
         db.close_thread_connection()
 
-    def _remove(self, tmdb=91):
+    def _remove(self, tmdb=91, month=7):
         with patch("app.distrakt.routes._month_answer",
                    new=AsyncMock(return_value=Response(status_code=200))):
-            return self.client.post("/api/distrakt/remove-movie?year=2026&month=7",
+            return self.client.post(f"/api/distrakt/remove-movie?year=2026&month={month}",
                                     json={"key": f"movie:tmdb:{tmdb}"})
+
+    def test_a_film_only_the_frozen_month_records_is_removed_from_it(self):
+        """MEASURED on the owner's account: four February films with no watch
+        record behind them — filed before film history was kept, reported by no
+        service since — drew a remove control and answered "No such film on
+        record", because the watch was asked about and the month never was. The
+        month on screen is the film the viewer pressed the X on."""
+        self._closed_march([
+            {"key": "movie:tmdb:404", "title": "Only The Month Knows", "year": 2013,
+             "watched_at": "2026-03-20T12:00:00Z"},
+            {"key": "movie:tmdb:92", "title": "Did Watch This", "year": 2012,
+             "watched_at": "2026-03-11T12:00:00Z"},
+        ])
+        resp = self._remove(tmdb=404, month=3)
+        self.assertNotIn("toast err", resp.text)
+        after = asyncio.run(distrakt.load_month(self.user_id, "2026-03"))
+        self.assertEqual([m["title"] for m in after["movies"]], ["Did Watch This"])
+
+    def test_a_film_nothing_holds_is_still_refused(self):
+        with patch("app.distrakt.routes._month_answer", new=AsyncMock()) as answered:
+            resp = self.client.post("/api/distrakt/remove-movie?year=2026&month=3",
+                                    json={"key": "movie:tmdb:555"})
+        self.assertIn("No such film on record", resp.text)
+        answered.assert_not_awaited()
 
     def test_it_forgets_only_that_film(self):
         self.assertEqual(self._remove().status_code, 200)

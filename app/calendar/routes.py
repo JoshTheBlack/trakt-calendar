@@ -26,7 +26,7 @@ import re
 import secrets
 from collections import Counter
 from datetime import date, datetime
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Request
@@ -564,13 +564,19 @@ def _view_preferences(prefs: dict, settings) -> dict:
 
 
 def _day_chip(day: date, items: list, not_watching: set[str],
-              hide_not_watching: bool) -> dict:
+              hide_not_watching: bool, anchor=None) -> dict:
     """One day's chip for the jump-to strip.
 
     `count` is what the day holds; `shown` is what THIS viewer will see of it, and
     a day showing nothing has no section to scroll to, so its chip renders inert.
     With hide-not-watching on, a day whose every item is marked renders nothing at
     all, so its chip must not offer to scroll somewhere blank.
+
+    THE CARD A SEARCH JUMP NAMED (`anchor`) IS SHOWN WHATEVER ITS MARK, because
+    the stylesheet exempts it from hiding so the jump has somewhere to land — and
+    its day with it. Only the page's own draw knows the anchor; a chip redrawn by
+    a later mark or toggle is asked without one, and by then the reader has moved
+    on from the jump.
 
     ONE RULE, TWO DRAWERS. The shell draws every chip from it, and a day that
     arrives late draws its own chip again from it (_day_fragment.html), having read
@@ -579,16 +585,18 @@ def _day_chip(day: date, items: list, not_watching: set[str],
     reload.
     """
     count = len(items)
-    shown = (sum(1 for item in items if item.mark_key not in not_watching)
+    shown = (sum(1 for item in items if item.mark_key not in not_watching or item is anchor)
              if hide_not_watching else count)
     return {"day": day.day, "date": day.isoformat(), "count": count, "shown": shown}
 
 
 def _day_chips(assembly: MonthAssembly, year: int, month: int, days: int,
-               not_watching: set[str], hide_not_watching: bool) -> list[dict]:
+               not_watching: set[str], hide_not_watching: bool,
+               anchor=None) -> list[dict]:
     """One chip per day of the month for the jump-to strip — see `_day_chip`."""
     items_on = {group["date"]: group["items"] for group in assembly.grouped}
-    return [_day_chip(on, items_on.get(on.isoformat(), []), not_watching, hide_not_watching)
+    return [_day_chip(on, items_on.get(on.isoformat(), []), not_watching,
+                      hide_not_watching, anchor)
             for on in (date(year, month, day) for day in range(1, days + 1))]
 
 
@@ -629,6 +637,36 @@ def _calendar_query(request: Request) -> str:
     route would have had nothing to read the month off but the clock.
     """
     return f"?{request.url.query}" if request.url.query else ""
+
+
+def _jump_anchor(grouped: list[dict], highlight: str, day: str) -> tuple[int, object] | None:
+    """(index of its day, the card) a jump is aimed at, or None when the month
+    draws no card for `highlight`.
+
+    ONE CARD, AND THE ONE THE ROW NAMED. `highlight` is a TITLE's identity, and a
+    title airs on as many days of a month as it airs on — so the search row sends
+    its own DAY beside it, both references the server drew itself, and that
+    day's airing is the anchor. Without the day every row for a weekly show was
+    one destination: four August results all landed on the 6th.
+    A LINK THAT NAMES NO DAY, or a day the month no longer draws the title on (an
+    old bookmark, a jump whose fill landed elsewhere), falls back to the FIRST
+    airing, which is where every jump used to land.
+    The card itself is returned rather than a position, because the template asks
+    whether the card it is drawing IS this one (`sameas`) — the only test that
+    can tell two airings of one show on one day apart without the route and the
+    template agreeing on a second way to name them.
+    """
+    if not highlight:
+        return None
+    first = None
+    for index, group in enumerate(grouped):
+        found = next((item for item in group["items"] if item.mark_key == highlight), None)
+        if found is None:
+            continue
+        if group["date"] == day:
+            return index, found
+        first = first or (index, found)
+    return first
 
 
 async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
@@ -704,24 +742,13 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
     # correcting as the days above it grew. Shipping one extra day costs a
     # handful of cards and lets an anchor behave like an anchor.
     #
-    # AND IT IS ONE CARD. `highlight` is a TITLE's identity, and a title airs on as
-    # many days of a month as it airs on — twice in one day, on the all-episodes
-    # calendar. Every card for it used to match, so `id="jump-target"` was drawn a
-    # dozen times and the browser scrolled to whichever came first. The FIRST
-    # airing is the anchor and the rest are ordinary cards; the template asks
-    # whether the card it is drawing is this exact one (`sameas`), which is the
-    # only test that can tell two airings of one show apart without the route and
-    # the template agreeing on a second way to name them.
-    highlight = request.query_params.get("highlight") or ""
+    # AND IT IS ONE CARD — see _jump_anchor for which one.
     anchor = None
-    if highlight:
-        for index, group in enumerate(month_view.grouped):
-            found = next((item for item in group["items"]
-                          if item.mark_key == highlight), None)
-            if found is not None:
-                anchor = found
-                inline.add(index)
-                break
+    aimed = _jump_anchor(month_view.grouped, request.query_params.get("highlight") or "",
+                        request.query_params.get("day") or "")
+    if aimed is not None:
+        index, anchor = aimed
+        inline.add(index)
     # THE SHELL'S IS-NEW ANSWER IS FILED ONCE AND ITS PLACEHOLDERS CARRY THE
     # TOKEN. The diff above has already committed this load as the baseline, so a
     # day fetched afterwards could never work it out again; pointed at the answer,
@@ -786,7 +813,7 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
         # asks about `mark_key` and the chip would be counting raw ids.
         "day_chips": _day_chips(month_view, year, month, days,
                                 month_view.not_watching_keys,
-                                view["hide_not_watching"]),
+                                view["hide_not_watching"], anchor),
         "error": month_view.error,
         "partial": month_view.partial,
         "unenriched": month_view.unenriched,
@@ -1711,7 +1738,30 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
         # being added here too; `key` rides beside them because the ticks are
         # addressed by it. Nothing else does — a parameter this route does not
         # read has no business being rendered back into the page.
-        carry=details_query_names() + ("key",))
+        carry=details_query_names() + ("key",),
+        follow_up=await _completion_follow_up(settings, params, season))
+
+
+async def _completion_follow_up(settings, params, season: int | None) -> str:
+    """The request the panel fires once it is open to ask the service this card's
+    calendar is missing about it, as markup — or "" when there is nothing worth
+    asking (calendar/search.py's other_service_to_ask decides, from what this
+    instance holds rather than from the request).
+
+    The card's calendar and month arrive as references on its own details address
+    (_card.html); the month only says which cards the answer redraws."""
+    endpoint_key = str(params.get("endpoint") or "")
+    key = str(params.get("key") or "")
+    if not await calendar_search.other_service_to_ask(
+            settings, endpoint_key=endpoint_key, title_key=key, season=season):
+        return ""
+    today = clock.today()
+    query = urlencode({
+        "endpoint": endpoint_key,
+        "year": route_params.valid_year(params.get("year"), today.year),
+        "month": route_params.valid_month(params.get("month"), today.month)})
+    return Markup(templates.get_template("_details_follow_up.html").render(
+        query=query, key=key, season=season))
 
 
 async def _library_actions(request: Request, settings, media: str, params) -> str:
@@ -1806,6 +1856,11 @@ async def get_state(request: Request):
     return JSONResponse(await calendar_state.load_state(user.user_id, endpoint.key, year, month))
 
 
+# What a card's `data-id` (Item.mark_key) can hold: a media, an id namespace and
+# an id, or a source and its own id. Nothing that could close a quoted selector.
+_CARD_KEY = re.compile(r"[A-Za-z0-9._-]+(?::[A-Za-z0-9._-]+){1,2}")
+
+
 async def _marked_answer(request: Request, user, endpoint, year: int, month: int,
                          item_id: str) -> Response:
     """What a mark looks like on screen, drawn by the side that decided it.
@@ -1822,6 +1877,9 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
 
     IT IS THE SAME ASSEMBLY THE CARDS COME FROM, read AFTER the write, so the
     numbers in this answer and the cards in this answer cannot disagree.
+
+    IT IS ALSO complete_card's ANSWER: a card's missing service answering is a
+    write about the title, not a mark, and the cards it changes are the same ones.
 
     A TITLE THAT IS NOT ON THIS MONTH ANSWERS WITH THE COUNTS ALONE. That is not
     an error: the mark is a statement about the show and it has been stored
@@ -1858,8 +1916,22 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
     # `not_watching_keys` rather than the raw stored ids, for the reason the page
     # render gives: a card asks about `mark_key`, which the assembler expands.
     marked = meta["not_watching_keys"]
+    # THE CARDS THIS MARK COVERS, found by the mark rule itself rather than by
+    # key equality. The key the page posted is the one it DREW; a Simkl title's
+    # key can move under it when enrichment adds a tmdb id (state.key_spellings),
+    # and matching on equality then found no card and redrew nothing — the button
+    # did not flip until a reload.
+    covers = {item_id}
     items = [item for group in grouped for item in group["items"]
-             if item.mark_key == item_id]
+             if calendar_state.marked(covers, item)]
+    # A TITLE THIS READ NO LONGER DRAWS HAS ITS CARDS TAKEN OFF THE PAGE. The eye
+    # was pressed on a card, so the title was on screen; if the month read now
+    # draws none of it, something changed since the page was drawn — REPORTED:
+    # a Simkl title's details landed a few minutes after the page did, named a
+    # country this viewer filters out, and the mark redrew nothing while a reload
+    # showed the title gone. The answer now says what the reload would. The key
+    # goes into a selector, so only a key's own characters are let through.
+    gone = item_id if not items and _CARD_KEY.fullmatch(item_id) else ""
     # AND THE CHIP FOR EVERY DAY THIS TITLE AIRS ON, because with hide mode on a
     # mark can empty a day outright and a chip offering to scroll somewhere blank
     # is the thing `_day_chip` exists to avoid. Only those days: a mark cannot
@@ -1868,13 +1940,13 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
     # same rule the shell's chips came from, which is why it is that function
     # being called rather than this one working the condition out again.
     days = {group["date"] for group in grouped
-            if any(item.mark_key == item_id for item in group["items"])}
+            if any(calendar_state.marked(covers, item) for item in group["items"])}
     chips = [_day_chip(date.fromisoformat(group["date"]), group["items"], marked,
                        prefs["hide_not_watching"])
              for group in grouped if group["date"] in days]
     logo_networks = await _logo_networks(settings, items)
     return templates.TemplateResponse(request, "_marked_cards.html", {
-        "chips": chips,
+        "chips": chips, "gone": gone,
         "request": request, "items": items,
         "not_watching": marked, "new_ids": meta.get("new_ids") or set(),
         "can_filter": True, "badge_modes": vocab.BadgeModes(prefs),
@@ -1890,6 +1962,44 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
         # question that has one.
         "stats": {"watching": meta["watching"], "not_watching": meta["not_watching"]},
     })
+
+
+@guard.post("/api/calendar/complete-card", AuthLevel.CALENDAR_APPROVED)
+async def complete_card(request: Request):
+    """Ask the service a card's calendar is missing whether it lists the title,
+    and if it does, answer with the title's cards redrawn — what the details
+    panel's follow-up posts once the panel is open (_details_follow_up.html).
+
+    THE REQUEST NAMES THE CARD, NOTHING ELSE. `key` and `season` in the body, the
+    calendar and month in the address, and every other fact — whether only one
+    service draws this season, which service is missing, the ids to ask by — is
+    read back from what this instance holds (calendar/search.py). A write into
+    the calendar every viewer shares is made only about a title it already holds.
+
+    THE REDRAW IS THE EYE'S (_marked_answer): every card for this title on this
+    month, out of band, from the same assembly the page came from. Nothing stored
+    — the other service does not list it, could not be asked, or was asked this
+    week — answers empty, and the page is left as it is.
+    """
+    user = await auth.current_user(request)
+    today = clock.today()
+    year = route_params.valid_year(request.query_params.get("year"), today.year)
+    month = route_params.valid_month(request.query_params.get("month"), today.month)
+    endpoint = get_endpoint(request.query_params.get("endpoint"))
+    payload = await authz.json_body(request)
+    key = str(payload.get("key") or "")
+    season = route_params.season(payload.get("season"))
+    settings = load_settings()
+    source = await calendar_search.other_service_to_ask(
+        settings, endpoint_key=endpoint.key, title_key=key, season=season)
+    if not source:
+        return Response(status_code=200)
+    stored = await calendar_search.complete_from_other_service(
+        settings, source=source, endpoint_key=endpoint.key, title_key=key,
+        season=season, tz=_resolve_viewer_tz(user, settings), now=db.now())
+    if not stored:
+        return Response(status_code=200)
+    return await _marked_answer(request, user, endpoint, year, month, key)
 
 
 @guard.post("/api/state", AuthLevel.CALENDAR_APPROVED)

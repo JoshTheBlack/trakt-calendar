@@ -1,0 +1,13 @@
+{# ASK THE SERVICE THIS CARD'S CALENDAR IS MISSING, ONCE THE PANEL IS OPEN.
+   Drawn only when calendar/routes.py's _details_view found a question worth one
+   lookup (calendar/search.py's other_service_to_ask). Fired on load, after the
+   panel is on screen, so opening the panel never waits on it; the answer carries
+   the card redrawn out of band (_marked_cards.html, the eye's own redraw), so the
+   card behind the panel turns two-sided in place and the panel reopened is drawn
+   from it. `hx-swap="none"` because nothing here is replaced: the answer is all
+   out of band, or empty when the other service does not list the title.
+
+   Context: `query` (endpoint, year, month, urlencoded), `key`, `season`. #}
+<div hidden hx-post="/api/calendar/complete-card?{{ query }}" hx-json-enc hx-boost="false"
+     hx-swap="none" hx-trigger="load"
+     hx-vals='{{ {"key": key, "season": season} | tojson }}'></div>

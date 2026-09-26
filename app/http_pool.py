@@ -142,6 +142,61 @@ class Pool:
             await client.aclose()
 
 
+class Pacer:
+    """At most `limit` requests leave in any `period` seconds — a RATE, which a
+    pool's `concurrency` is not.
+
+    WHY A SEPARATE THING. Concurrency bounds how many requests are in flight; at
+    ordinary latencies four in flight is twenty to forty a second, and a quota
+    stated per five minutes is spent in under one. MEASURED on a real instance:
+    one tracker load fired over a thousand Trakt reads in a burst and was refused
+    with 429s part-way, while the four-in-flight gate had done exactly what it
+    was built to do.
+
+    A TOKEN BUCKET SIZED SO IT CANNOT EXCEED THE QUOTA IN ANY WINDOW: `burst`
+    tokens up front, refilled at (limit - burst) / period a second, so the most
+    that can leave in any `period` is burst + refill * period = limit. An
+    ordinary page's few dozen reads spend the burst and leave at once; only a
+    large job is slowed, and it is slowed to the rate the service publishes.
+
+    A TICKET, CLAIMED SYNCHRONOUSLY. `claim` debits the bucket before anything
+    awaits — which under asyncio cannot interleave — so callers queue in the
+    order they asked rather than all reading the same balance and leaving
+    together. A caller whose turn is further off than it may wait gets None and
+    takes nothing, so a page is refused quickly rather than held behind a queue.
+
+    LOOP-KEYED LIKE THE POOL, for the same reason: the suite runs every test on a
+    fresh loop, and a bucket drained by one test must not slow the next.
+    """
+
+    __slots__ = ("name", "burst", "rate", "_loop", "_tokens", "_stamp")
+
+    def __init__(self, name: str, *, limit: int, period: float, burst: int):
+        if not 0 < burst < limit:
+            raise ValueError("a pacer's burst must be positive and below its limit")
+        self.name = name
+        self.burst = float(burst)
+        self.rate = (limit - burst) / float(period)
+        self._loop = None
+        self._tokens = self.burst
+        self._stamp = 0.0
+
+    def claim(self, max_wait: float) -> float | None:
+        """Seconds this request must wait before it leaves, or None when that
+        would be longer than `max_wait` — in which case nothing is taken."""
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        if self._loop is not loop:
+            self._loop, self._tokens, self._stamp = loop, self.burst, now
+        self._tokens = min(self.burst, self._tokens + (now - self._stamp) * self.rate)
+        self._stamp = now
+        wait = 0.0 if self._tokens >= 1 else (1 - self._tokens) / self.rate
+        if wait > max_wait:
+            return None
+        self._tokens -= 1
+        return wait
+
+
 async def aclose_all() -> None:
     """Close every pool's client. Called once, from the app's shutdown.
 

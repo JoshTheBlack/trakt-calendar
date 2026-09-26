@@ -17,7 +17,7 @@ from datetime import date
 from .. import clock, db
 from ..calendar import state as calendar_state
 from ..providers.base import Media, collect_ids
-from . import calendar_import, lifecycle, store
+from . import arrival, calendar_import, lifecycle, store
 from .live import compute_live_shows, live_key
 from .store import (
     ADDED_BY_HISTORY,
@@ -195,7 +195,8 @@ async def freeze_month(user_id: int, doc: dict, settings) -> dict:
     return doc
 
 
-async def history_records(user_id: int, settings, present: set[tuple[str, int]]) -> list[dict]:
+async def history_records(user_id: int, settings, present: set[tuple[str, int]],
+                          nw_ids: set[str] = frozenset()) -> list[dict]:
     """Seasons from recent viewing that the viewer is part-way through, as records
     for their OWN LIST rather than for any month.
 
@@ -209,7 +210,7 @@ async def history_records(user_id: int, settings, present: set[tuple[str, int]])
     whether the season is finished, so it costs nothing extra and is right from
     the first write instead of being corrected on the next load.
     """
-    from . import live, watch_history
+    from . import watch_history
     # THE PRIMARY SOURCE ALONE. This seeds the viewer's OWN LIST with seasons they
     # are part-way through, and a season is on that list or it is not — there is
     # no half-listed. Two services proposing overlapping sets of "you seem to be
@@ -237,31 +238,34 @@ async def history_records(user_id: int, settings, present: set[tuple[str, int]])
             continue  # nothing shared to file it under; not this pass's problem
         if (str(key), int(rec["season"])) in present or int(entry.get("watched") or 0) <= 0:
             continue
+        # A TITLE THE VIEWER TURNED AWAY IS NOT BUILT IN, asked HERE, of the
+        # history's own id map: a mark may be spelled in any of the namespaces the
+        # calendar accepts, and describing a title normalizes its ids — so the
+        # question is put before that, and a turned-away title costs no lookup.
+        if calendar_import.matches_not_watching(rec, nw_ids):
+            continue
         candidates.append((rec, entry))
     if not candidates:
         return []
-    details = await live.fetch_season_details(
-        settings, [rec for rec, _ in candidates], fresh=False, allow_degrade=False)
+    # WHAT EACH SEASON IS FILED AS is arrival.describe's, the same for every way
+    # onto the tracker — a history event names no network and only one service's
+    # ids. STRICT, as the season lookup here always was: a lookup that fails
+    # aborts the build rather than seeding the list with guesses.
+    arrivals = await arrival.describe(settings, [rec for rec, _ in candidates], strict=True)
     out = []
-    for (rec, entry), detail in zip(candidates, details):
-        # None means no source could be asked about this title at all (see
-        # live.fetch_season_details) — the row still goes on the pile, with the
-        # nothing it is known by, rather than being dropped over a credential.
-        detail = detail or {}
+    for (_rec, entry), arrived in zip(candidates, arrivals):
+        # An empty detail means no source could be asked about this title at all
+        # — the row still goes on the pile, with the nothing it is known by,
+        # rather than being dropped over a credential.
+        detail = arrived.detail
         total = int(detail.get("total") or 0)
         watched = int(entry.get("watched") or 0)
         if total > 0 and watched >= total:
             continue  # already finished -> nothing left on the pile
         out.append({
-            **rec,
+            **arrived.record,
             "kind": lifecycle.listed_kind(detail),
             "watched": watched,
-            "total": total,
-            "cadence": detail.get("cadence"),
-            "premiere": detail.get("premiere"),
-            "finale": detail.get("finale"),
-            "started_airing": bool(detail.get("started_airing")),
-            "finished_airing": bool(detail.get("finished_airing")),
             "added_by": ADDED_BY_HISTORY,
         })
     return out
@@ -331,7 +335,16 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
 
 async def _initialize_month(user_id: int, month_key: str, settings,
                             today: date | None = None) -> dict:
-    """A brand-new month's contents: the calendar's premieres, and nothing else.
+    """A brand-new month: empty of premieres, with recent viewing seeding the
+    viewer's own list once the month has begun.
+
+    THE CALENDAR'S PREMIERES ARE NOT TAKEN HERE ANY MORE. They are offered by the
+    Import control, title by title, and filed only when somebody picks them
+    (calendar_import.import_premieres). Built by opening the page, an account with
+    no filters took all 527 of a month's premieres at once — MEASURED — and
+    describing them cost over a thousand Trakt reads, which ran into Trakt's rate
+    limit, failed the build, and started over on the next load. Opening the
+    tracker must not be the thing that spends that.
 
     A MONTH HOLDS WHAT BEGAN IN IT. What the viewer is behind on and what they are
     keeping up with are facts about the VIEWER, true of no particular month, and
@@ -351,36 +364,16 @@ async def _initialize_month(user_id: int, month_key: str, settings,
     so a season that began in August was announced as new in October.
     """
     doc = new_month_doc(month_key)
-    present: set[tuple[str, int]] = set()
-    year, month = store.parse_month_key(month_key)
     begun = month_committed(month_key, today)
-
-    # Read ONCE and applied to both sources below: a title the viewer has turned
-    # away on their calendar is not built in at all. A month that opens with it
-    # listed as given up on is announcing a verdict about a show they had already
-    # said they were not following, and there is no record here yet for such a
-    # verdict to be about.
-    nw_ids = await calendar_state.not_watching_ids(user_id)
-
-    # This month's premieres, minus not-watching. THE INSTANCE'S SETTINGS, not the
-    # per-account ones this function is working with: a calendar window is
-    # fetched under the instance's own credentials and served to everybody, and
-    # calendar_import.premiere_records states that contract. Handing it the
-    # viewer's made a month's own construction depend on whose token was on the
-    # request — an account signed in with Simkl alone had no Trakt token, so
-    # building a month asked Trakt's calendar with no bearer and the whole build
-    # failed on Trakt's 401. The history read below is the opposite case and
-    # keeps the per-account settings, because whose history it is IS the
-    # question there.
-    from ..config import load_settings
-    await calendar_import.add_premieres(doc, present, user_id, load_settings(),
-                                        year, month, nw_ids)
-
     if begun:
-        present |= {(str(store.record_key(rec)), int(rec["season"]))
-                    for rec in await store.user_records(user_id)}
-        for rec in await history_records(user_id, settings, present):
-            if calendar_import.matches_not_watching(rec, nw_ids):
-                continue
+        # A title the viewer has turned away on their calendar is not seeded: a
+        # list that opens with it is announcing a show they said they were not
+        # following.
+        nw_ids = await calendar_state.not_watching_ids(user_id)
+        present = {(str(store.record_key(rec)), int(rec["season"]))
+                   for rec in await store.user_records(user_id)}
+        seeded = await history_records(user_id, settings, present, nw_ids)
+        for rec in seeded:
             await store.add_user_record(user_id, rec)
+        await arrival.register(user_id, seeded)
     return doc

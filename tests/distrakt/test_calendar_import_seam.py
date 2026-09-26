@@ -27,6 +27,7 @@ from app.config import Settings
 from app.distrakt import calendar_import
 from app.endpoints import get_endpoint
 from app.providers.base import Media, Record, Source
+from app.providers.simkl import SimklError
 from tests.support import migrated_db
 
 # 2026-07-15 12:00Z, inside the aligned window the fixtures are stored under.
@@ -36,14 +37,22 @@ PREMIERES = get_endpoint("shows/premieres")
 
 
 def _record(source, slug, *, tmdb, season=1, title=None, country="us",
-            genres=("drama",), certification="TV-14"):
+            genres=("drama",), certification="TV-14", network="A Network",
+            enriched=True):
     return Record(
         source=source, media=Media.SHOW, id=slug,
         ids={"tmdb": tmdb, str(source): slug, f"{source}_slug": slug},
         detail_url=f"https://{source}.test/{slug}", title=title or slug.title(),
         air_ts=AIR, season=season, episode_number=1, episode_label=f"S{season:02d}E01",
         country=country, genres=list(genres), certification=certification,
-        network="A Network")
+        network=network, enriched=enriched)
+
+
+def _undescribed(source, slug, *, tmdb):
+    """A title as a calendar file first delivers it: nothing but its name, ids
+    and airing, waiting on the background lookup for the rest."""
+    return _record(source, slug, tmdb=tmdb, country="", genres=(), certification="",
+                   network="", enriched=False)
 
 
 class TheMonthlyImportSurvivesTheStorageChangeTests(unittest.IsolatedAsyncioTestCase):
@@ -62,6 +71,10 @@ class TheMonthlyImportSurvivesTheStorageChangeTests(unittest.IsolatedAsyncioTest
 
     async def _import(self, **prefs):
         """The roster `premiere_records` yields for July 2026."""
+        return (await self._read(**prefs)).offered
+
+    async def _read(self, **prefs):
+        """`premiere_records`' whole answer for July 2026, held-back titles too."""
         from app.distrakt import calendar_import
 
         # THE TV COLUMNS, because both endpoints the import reads are show
@@ -140,6 +153,26 @@ class TheMonthlyImportSurvivesTheStorageChangeTests(unittest.IsolatedAsyncioTest
         kept = await self._import(marks={"lazarus"})
         self.assertEqual(kept, [], "a mark the record cannot carry still has to exclude")
 
+    async def test_a_mark_matching_one_services_copy_excludes_the_title(self):
+        """MEASURED ON A REAL OCTOBER: Treasure Island was marked under
+        `treasure-island`, Simkl's name for it. Season Premieres held Simkl's copy
+        and New Shows only Trakt's, whose name is `treasure-island-2026`. The
+        calendar hides every card of a marked TITLE, while the import asked each
+        copy on its own and filed Trakt's. A mark that matches any copy of a
+        title, on either calendar the import reads, now covers the title."""
+        self.settings = Settings(simkl_public_calendar_enabled=True)
+        await self._fill(NEW, [_record(Source.TRAKT, "treasure-island-2026", tmdb=333101)])
+        await calendar_cache.store_window(
+            PREMIERES.key, calendar_cache.window_start(date(2026, 7, 15)),
+            [_record(Source.SIMKL, "treasure-island", tmdb=333101)], 600, 1000,
+            sources=["simkl"], asked=["simkl"])
+        # Simkl's refill fails, so the stored copy is what is read — the fixture
+        # is the rows, not whatever a fill would fetch.
+        with patch("app.providers.simkl.calendar.fetch_window",
+                   side_effect=SimklError("offline")):
+            self.assertTrue(await self._import(), "the fixture should import unmarked")
+            self.assertEqual(await self._import(marks={"treasure-island"}), [])
+
     async def test_a_mark_in_the_stable_key_excludes_too(self):
         """The ordinary case, so the fix above is not the only path that works."""
         await self._fill(NEW, [_record(Source.TRAKT, "nocturne", tmdb=292741)])
@@ -158,6 +191,61 @@ class TheMonthlyImportSurvivesTheStorageChangeTests(unittest.IsolatedAsyncioTest
         ])
         narrowed = await self._import(tv_countries="us", filters_paused=True)
         self.assertEqual({r["ids"]["tmdb"] for r in narrowed}, {1})
+
+    async def test_a_title_not_described_yet_is_held_back_while_a_filter_could_rule(self):
+        """MEASURED: a Polish documentary landed in Simkl's September file and was
+        described four seconds later. The Import dialog opened in between offered
+        it to a viewer who keeps only US titles, because a title nothing has
+        described is exempt from the filters. The calendar may show it unjudged;
+        an import writes a row that stays, so it is named and held back."""
+        await self._fill(NEW, [
+            _record(Source.TRAKT, "us-drama", tmdb=1),
+            _undescribed(Source.TRAKT, "girls-of-warsaw", tmdb=330632),
+        ])
+        read = await self._read(tv_countries="us")
+        self.assertEqual([r["ids"]["tmdb"] for r in read.offered], [1])
+        self.assertEqual(read.undescribed, ["Girls-Of-Warsaw"])
+
+    async def test_with_nothing_narrowing_a_title_not_described_yet_is_offered(self):
+        """A description can only matter to a filter. With none set, waiting for
+        one would hold a title back for nothing."""
+        await self._fill(NEW, [_undescribed(Source.TRAKT, "girls-of-warsaw", tmdb=330632)])
+        read = await self._read()
+        self.assertEqual([r["ids"]["tmdb"] for r in read.offered], [330632])
+        self.assertEqual(read.undescribed, [])
+
+    async def test_the_viewers_network_filter_narrows_the_import(self):
+        """The calendar page reads every field `vocab.active_specs` answers; the
+        import named three of them and never passed the network filter."""
+        await self._fill(NEW, [
+            _record(Source.TRAKT, "kept", tmdb=1, network="A Network"),
+            _record(Source.TRAKT, "dropped", tmdb=2, network="Other Network"),
+        ])
+        narrowed = await self._import(network_filter=["-Other Network"])
+        self.assertEqual({r["ids"]["tmdb"] for r in narrowed}, {1})
+
+    async def test_the_viewers_calendar_source_narrows_the_import(self):
+        """A viewer who reads the calendar from Trakt alone does not see Simkl's
+        titles there, so the import must not offer them either."""
+        from app.sources import prefs as source_prefs
+
+        self.settings = Settings(simkl_public_calendar_enabled=True)
+        await calendar_cache.store_window(
+            NEW.key, calendar_cache.window_start(date(2026, 7, 15)),
+            [_record(Source.TRAKT, "on-trakt", tmdb=1),
+             _record(Source.SIMKL, "only-on-simkl", tmdb=2)], 600, 1000,
+            sources=["trakt", "simkl"], asked=["trakt", "simkl"])
+        # Season Premieres needs a stored window too: with Simkl refused below, a
+        # calendar that has none cannot be read at all.
+        await calendar_cache.store_window(
+            PREMIERES.key, calendar_cache.window_start(date(2026, 7, 15)), [], 600, 1000,
+            sources=["trakt", "simkl"], asked=["trakt", "simkl"])
+        with patch("app.providers.simkl.calendar.fetch_window",
+                   side_effect=SimklError("offline")):
+            self.assertEqual({r["ids"]["tmdb"] for r in await self._import()}, {1, 2})
+            with patch.object(source_prefs, "load", return_value=source_prefs.SourcePrefs(
+                    user_id=1, calendar_source="trakt")):
+                self.assertEqual({r["ids"]["tmdb"] for r in await self._import()}, {1})
 
     async def test_a_title_both_endpoints_list_is_imported_once(self):
         """shows/new and shows/premieres overlap, and the import reads both. The

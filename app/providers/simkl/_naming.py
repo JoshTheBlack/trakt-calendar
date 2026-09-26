@@ -64,6 +64,9 @@ class Naming(NamedTuple):
     season: int | None
     network: str
     siblings: tuple[int, ...] = ()
+    # THIS title's own name — for a season-title, the season's ("… Season 3"),
+    # which is the name Simkl lists and the tracker files that row under.
+    title: str = ""
 
 
 EMPTY = Naming(ids={}, season=None, network="", siblings=())
@@ -104,6 +107,7 @@ def read(record: dict | None) -> Naming:
         season=_season(record),
         network=str(record.get("network") or "").strip(),
         siblings=_siblings(record),
+        title=str(record.get("title") or "").strip(),
     )
 
 

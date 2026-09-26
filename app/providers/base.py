@@ -1163,6 +1163,13 @@ class SeasonsAnswer(NamedTuple):
     network: str
 
 
+class TitleFacts(NamedTuple):
+    """A title's name and network as one service states them (see
+    DetailPort.fetch_title_facts). "" where the service does not say."""
+    title: str
+    network: str
+
+
 @runtime_checkable  # see the note on SyncPort above
 class DetailPort(Protocol):
     """A source that can describe ONE TITLE as fully as it knows how — what the
@@ -1272,6 +1279,22 @@ class DetailPort(Protocol):
         failure, and answers an EMPTY season (`season.empty_season`) for one that
         does not exist. Those are different answers and callers act on the
         difference — see the Trakt implementation for what conflating them cost.
+        """
+        ...
+
+    async def fetch_title_facts(self, settings: Settings, source_id,
+                                media: Media) -> "TitleFacts":
+        """What THIS SOURCE calls the title `source_id` names, and who it says
+        carried it — the two words a tracker row is filed with.
+
+        A PORT BECAUSE EVERY WAY ONTO THE TRACKER HAS TO FILE THE SAME WORDS. A
+        row used to carry whatever its path was handed — a calendar record's, a
+        search hit's, a history event's (which names no network at all) — so one
+        title arrived differently by different doors. The service that describes
+        the row answers instead, through this.
+
+        Empty strings where the source does not say. Raises this source's own
+        SourceUnavailable subclass when it could not be asked.
         """
         ...
 
@@ -1391,6 +1414,29 @@ class SearchPort(Protocol):
         port in this file draws, and collapsing them here would report a
         search that could not be made as a search that succeeded with an
         empty answer.
+        """
+        ...
+
+    async def find_by_shared_id(self, settings: Settings, media: Media,
+                                ids: dict) -> dict:
+        """THIS SOURCE's ids for the title `ids` names — its own id, its own
+        name for the title, and whatever shared ids it states — found by a
+        SHARED id (MATCH_SOURCES), or {} when this source does not list it.
+
+        WHY IT IS A PORT: a title reaches the tracker carrying whichever ids the
+        path it came by happened to hold, and the same title arriving by two
+        paths must be filed identically. So every arrival asks each source it
+        is missing: "which of your titles is this tmdb/tvdb/imdb/mal id?"
+
+        AN EXACT LOOKUP ON AN ID, NEVER A TITLE SEARCH, and the answer is taken
+        only when the source's own record states the very id that was asked
+        about. A wrong service id is worse than a missing one: it is never
+        overwritten, and where the details layer prefers one service it shadows
+        a correct id from the other for good.
+
+        {} ("not listed") is an answer and may be re-asked on the source's own
+        cadence; a failure to ask raises this source's SourceUnavailable
+        subclass, so a caller never files "could not ask" as "not listed".
         """
         ...
 

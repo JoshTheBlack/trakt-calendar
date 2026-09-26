@@ -185,3 +185,9 @@
     rather than asked for separately is what keeps one title's buttons from ever
     arriving beside another title's panel. -#}
 {% if actions %}<div id="detailsActions" hx-swap-oob="innerHTML">{{ actions }}</div>{% endif %}
+
+{#- A REQUEST THE PANEL FIRES ONCE IT IS ON SCREEN, where the surface has one: the
+    calendar asking the service a card's calendar is missing about it, whose
+    answer redraws the card behind the panel. After the panel, so opening it never
+    waits on the lookup. -#}
+{% if follow_up %}{{ follow_up }}{% endif %}

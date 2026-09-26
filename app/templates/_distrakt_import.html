@@ -1,0 +1,37 @@
+{# THE IMPORT CONTROL AND ITS DIALOG.
+
+   A MONTH IS NO LONGER FILLED BY OPENING IT. Its calendar's premieres are
+   offered here, title by title, and only what is ticked is filed — see
+   calendar_import.import_premieres for the load that made this a button.
+
+   THE BUTTON ASKS TO BE PRESSED on the month under way until something has been
+   imported into it (`due`, routes' `import_due`). Its state is the MONTH's, so
+   every month answer redraws it out of band — the same way the page's other
+   month-level pieces are kept current — and pressing Import is what stops it.
+
+   ONE PRESS, TWO THINGS: `command="show-modal"` opens the dialog natively and
+   `hx-get` fills it with the offer. The dialog is redrawn closed and empty with
+   every month answer (_distrakt_modals.html), which is how an import that landed
+   closes it. #}
+{% macro button(month_query, due=false, oob=false) %}
+<button type="button" id="distraktImport" class="pill-btn{{ ' import-due' if due }}"
+        title="{{ 'This month\'s premieres are waiting to be imported' if due else 'Choose premieres to import from the calendar' }}"
+        command="show-modal" commandfor="importModal"
+        hx-get="/distrakt/fragments/import{{ month_query }}"
+        hx-target="#importBody" hx-swap="innerHTML"
+        {%- if oob %} hx-swap-oob="outerHTML"{% endif %}>⤓ Import</button>
+{% endmacro %}
+
+{% macro modal(oob=false) %}
+<dialog id="importModal" class="modal-overlay" closedby="any"{% if oob %} hx-swap-oob="outerHTML"{% endif %}>
+    <div class="modal">
+        <div class="modal-head">
+            <h2>⤓ Import premieres</h2>
+            <button type="button" class="modal-close" command="close" commandfor="importModal">&times;</button>
+        </div>
+        <div id="importBody" class="modal-body">
+            <div class="distrakt-empty">Reading this month's calendar…</div>
+        </div>
+    </div>
+</dialog>
+{% endmacro %}

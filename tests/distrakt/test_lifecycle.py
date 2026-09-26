@@ -20,6 +20,8 @@ month and would test the wrong rule most of them.
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from app import clock, db, distrakt
 from app.distrakt import lifecycle, store, watch_history
@@ -500,12 +502,14 @@ class ASeasonThatTurnedOutNotToBeFinishedTests(LifecycleTestCase):
 
     async def _questions(self, plays, lookup):
         return await lifecycle.reconcile_history(
-            self.user_id, plays, month=self.this_month, look_up=lookup)
+            self.user_id, plays, month=self.this_month, look_up=lookup,
+            tz=ZoneInfo("UTC"))
 
     async def test_a_verdict_on_a_past_month_is_withdrawn_and_the_season_relisted(self):
+        """E09 of a season recorded finished at eight: the season grew."""
         await self._settle(1, self.last_month)
         lookup = CountingLookup({"total": 10, "finished_airing": False, "cadence": "Mon"})
-        self.assertEqual(await self._reconcile([_play(1)], lookup), [])
+        self.assertEqual(await self._reconcile([_play(1, 1, 9)], lookup), [])
         self.assertEqual(await self.month_kinds(self.last_month), {},
                          "the month went on recording a verdict it no longer settled")
         listed = await store.find_user_record(self.user_id, _key(1), 1)
@@ -527,7 +531,7 @@ class ASeasonThatTurnedOutNotToBeFinishedTests(LifecycleTestCase):
         await self._settle(1, self.last_month)
         await store.set_month_closed(self.user_id, self.last_month)
 
-        await self._reconcile([_play(1)], CountingLookup({"total": 10}))
+        await self._reconcile([_play(1, 1, 9)], CountingLookup({"total": 10}))
 
         self.assertEqual(await self.month_kinds(self.last_month), {},
                          "a frozen month kept a completion that turned out not to be one")
@@ -545,14 +549,14 @@ class ASeasonThatTurnedOutNotToBeFinishedTests(LifecycleTestCase):
         ever been finished, and it is gone. The flag is all that is left to draw
         the marker from."""
         await self._settle(1, self.last_month)
-        await self._reconcile([_play(1)], CountingLookup({"total": 10}))
+        await self._reconcile([_play(1, 1, 9)], CountingLookup({"total": 10}))
         self.assertTrue((await store.find_user_record(self.user_id, _key(1), 1))["came_back"])
 
     async def test_a_later_counts_write_does_not_dismiss_the_marker(self):
         """Only the viewer clears it. A routine refresh writing the row back
         without the flag must not do it for them."""
         await self._settle(1, self.last_month)
-        await self._reconcile([_play(1)], CountingLookup({"total": 10}))
+        await self._reconcile([_play(1, 1, 9)], CountingLookup({"total": 10}))
         await lifecycle.follow(self.user_id, _show(1, watched=9, total=10))
         self.assertTrue((await store.find_user_record(self.user_id, _key(1), 1))["came_back"])
 
@@ -560,7 +564,7 @@ class ASeasonThatTurnedOutNotToBeFinishedTests(LifecycleTestCase):
         """It may go straight back to being completed on the next transition, and
         that is the honest answer when nothing further is known to exist."""
         await self._settle(1, self.last_month, watched=8, total=8)
-        await self._reconcile([_play(1)], CountingLookup())
+        await self._reconcile([_play(1, 1, 9)], CountingLookup())
         listed = await store.find_user_record(self.user_id, _key(1), 1)
         self.assertEqual((listed["watched"], listed["total"]), (8, 8))
         self.assertTrue(lifecycle.is_finished(listed))
@@ -660,11 +664,11 @@ class ASeasonThatTurnedOutNotToBeFinishedTests(LifecycleTestCase):
         is the first thing the search asks."""
         await self._settle(1, self.last_month)
         first = CountingLookup({"total": 10})
-        await self._reconcile([_play(1)], first)
+        await self._reconcile([_play(1, 1, 9)], first)
         before = await store.find_user_record(self.user_id, _key(1), 1)
 
         again = CountingLookup({"total": 10})
-        await self._reconcile([_play(1)], again)
+        await self._reconcile([_play(1, 1, 9)], again)
         self.assertEqual(again.calls, [])
         self.assertEqual(await store.find_user_record(self.user_id, _key(1), 1), before)
 
@@ -676,6 +680,154 @@ class ASeasonThatTurnedOutNotToBeFinishedTests(LifecycleTestCase):
         self.assertEqual(lookup.calls, [])
 
 
+def _stamp(offset_seconds: int = 0) -> str:
+    """A play's watched_at, `offset_seconds` from now, as the services send it."""
+    return datetime.fromtimestamp(db.now() + offset_seconds, timezone.utc) \
+        .strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _dated(play: watch_history.EpisodePlay, watched_at: str) -> watch_history.EpisodePlay:
+    return play._replace(watched_at=watched_at)
+
+
+class ASeasonWatchedAgainTests(LifecycleTestCase):
+    """An episode of a season an earlier month recorded finished, watched since.
+
+    TWO OFFERS, NEITHER TAKEN UNASKED. A middle episode offers a re-watch; the
+    finale offers to record the season completed again. What decided this is a
+    real account: one episode watched again in July reopened a season finished in
+    February, as if a season that grew."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        await store.add_month_record(
+            self.user_id, self.last_month,
+            _show(1, kind=store.RecordKind.COMPLETED, watched=8, total=8, finished=True))
+
+    async def _questions(self, plays, lookup=None):
+        return await lifecycle.reconcile_history(
+            self.user_id, plays, month=self.this_month,
+            look_up=lookup or CountingLookup({"total": 8}), tz=ZoneInfo("UTC"))
+
+    async def _standing(self):
+        return await lifecycle.standing_questions(
+            self.user_id, month=self.this_month, tz=ZoneInfo("UTC"))
+
+    async def test_a_middle_episode_offers_a_rewatch_and_moves_nothing(self):
+        lookup = CountingLookup({"total": 8})
+        questions = await self._questions([_dated(_play(1, 1, 4), _stamp(-120))], lookup)
+        self.assertEqual([(str(r.play.key), r.play.number, r.month, r.finale)
+                          for r in questions.rewatched],
+                         [(str(_key(1)), 4, self.last_month, False)])
+        self.assertEqual(lookup.calls, [], "offering a re-watch must cost no lookup")
+        self.assertIsNone(await store.find_user_record(self.user_id, _key(1), 1),
+                          "the season went back on the list unasked")
+        self.assertIn(_live_key(1), await self.month_kinds(self.last_month),
+                      "the earlier month's verdict was withdrawn")
+
+    async def test_four_episodes_in_one_pull_are_one_offer(self):
+        plays = [_dated(_play(1, 1, n), _stamp(-400 + n)) for n in (2, 3, 4, 5)]
+        questions = await self._questions(plays)
+        self.assertEqual([r.play.number for r in questions.rewatched], [2],
+                         "one offer per season, about where the re-watch began")
+        self.assertEqual(len(await store.open_prompts(self.user_id)), 1)
+
+    async def test_the_finale_offers_a_completion_instead(self):
+        plays = [_dated(_play(1, 1, n), _stamp(-400 + n)) for n in (7, 8)]
+        questions = await self._questions(plays)
+        self.assertEqual([(r.play.number, r.finale) for r in questions.rewatched], [(8, True)])
+
+    async def test_a_finale_after_an_unanswered_rewatch_offer_replaces_it(self):
+        await self._questions([_dated(_play(1, 1, 3), _stamp(-800))])
+        questions = await self._questions([_dated(_play(1, 1, 8), _stamp(-120))])
+        self.assertEqual([(r.play.number, r.finale) for r in questions.rewatched], [(8, True)])
+
+    async def test_a_play_from_the_month_that_finished_it_is_the_run_itself(self):
+        """A sync can hand back the plays that finished the season — the cursor
+        overlaps, a refresh re-reads — and those are what the record describes."""
+        play = _dated(_play(1, 1, 8), f"{self.last_month}-20T20:00:00.000Z")
+        self.assertEqual((await self._questions([play])).rewatched, [])
+        self.assertEqual(await store.open_prompts(self.user_id), [])
+
+    async def test_an_undated_play_cannot_show_it_is_a_rewatch(self):
+        self.assertEqual((await self._questions([_play(1, 1, 4)])).rewatched, [])
+
+    async def test_no_covers_those_plays_and_a_later_one_asks_again(self):
+        """The watermark: declining settles the episodes watched so far, and
+        watching more afterwards is new evidence."""
+        await store.dismiss_prompt(self.user_id, _key(1), 1, store.DISMISSAL_HISTORY)
+        await store.close_prompt(self.user_id, _key(1), 1)
+        old = _dated(_play(1, 1, 4), _stamp(-120))
+        self.assertEqual((await self._questions([old])).rewatched, [])
+        new = _dated(_play(1, 1, 5), _stamp(3600))
+        self.assertEqual([r.play.number for r in (await self._questions([old, new])).rewatched],
+                         [5], "a later episode did not ask again, or an old one did")
+
+    async def test_no_covers_the_plays_it_answered_not_a_moment_in_time(self):
+        """MEASURED: a viewer declined a re-watch offer about E01, then logged E02,
+        and Trakt stamped that play the same minute as E01's, before the refusal.
+        Measured by the clock it read as answered and nothing asked. Measured by
+        the plays the refusal answered, E02 is watching more."""
+        answered = _stamp(-120)
+        epoch = watch_history.watched_at_epoch(answered)
+        await store.dismiss_prompt(self.user_id, _key(1), 1, store.DISMISSAL_HISTORY,
+                                   covered={1: epoch, 3: epoch - 86400})
+        await store.close_prompt(self.user_id, _key(1), 1)
+        again = _dated(_play(1, 1, 1), answered)
+        self.assertEqual((await self._questions([again])).rewatched, [],
+                         "the play the refusal answered asked again")
+        same_minute = _dated(_play(1, 1, 2), answered)
+        self.assertEqual([r.play.number for r in (await self._questions([same_minute])).rewatched],
+                         [2], "another episode stamped before the refusal stayed silent")
+
+    async def test_a_later_play_of_an_answered_episode_asks_again(self):
+        answered = _stamp(-120)
+        epoch = watch_history.watched_at_epoch(answered)
+        await store.dismiss_prompt(self.user_id, _key(1), 1, store.DISMISSAL_HISTORY,
+                                   covered={4: epoch})
+        await store.close_prompt(self.user_id, _key(1), 1)
+        later = _dated(_play(1, 1, 4), _stamp(3600))
+        self.assertEqual([r.play.number for r in (await self._questions([later])).rewatched], [4])
+
+    async def test_what_a_refusal_answers_includes_the_play_that_asked(self):
+        """The watch state may not hold the question's own play yet; the refusal
+        is certainly about it, so it is folded in."""
+        asked = {"number": 4, "watched_at": _stamp(-120)}
+        covered = await lifecycle.plays_answered(self.user_id, _key(1), 1, asked)
+        self.assertEqual(covered, {4: watch_history.watched_at_epoch(asked["watched_at"])})
+
+    async def test_not_this_month_covers_the_month_and_lapses_with_it(self):
+        await store.dismiss_prompt(self.user_id, _key(1), 1, store.DISMISSAL_MONTH)
+        later_today = _dated(_play(1, 1, 5), _stamp(60))
+        self.assertEqual((await self._questions([later_today])).rewatched, [],
+                         "a play in the month the viewer put it off for asked anyway")
+        next_month = _dated(_play(1, 1, 6), _stamp(40 * 86400))
+        self.assertEqual([r.play.number for r in (await self._questions([next_month])).rewatched],
+                         [6], "putting it off for a month lasted longer than the month")
+
+    async def test_a_verdict_refusal_does_not_silence_a_rewatch(self):
+        await store.dismiss_prompt(self.user_id, _key(1), 1, store.DISMISSAL_VERDICT)
+        questions = await self._questions([_dated(_play(1, 1, 4), _stamp(-120))])
+        self.assertEqual(len(questions.rewatched), 1)
+
+    async def test_the_offer_survives_a_load_with_nothing_new(self):
+        await self._questions([_dated(_play(1, 1, 4), _stamp(-120))])
+        self.assertEqual([r.play.number for r in (await self._standing()).rewatched], [4])
+
+    async def test_starting_the_rewatch_spends_the_offer(self):
+        await self._questions([_dated(_play(1, 1, 4), _stamp(-120))])
+        await lifecycle.follow(self.user_id, _show(1, watched=1))
+        self.assertEqual((await self._standing()).rewatched, [])
+        self.assertEqual(await store.open_prompts(self.user_id), [])
+
+    async def test_recording_it_completed_this_month_spends_the_offer(self):
+        await self._questions([_dated(_play(1, 1, 8), _stamp(-120))])
+        await store.add_month_record(
+            self.user_id, self.this_month,
+            _show(1, kind=store.RecordKind.COMPLETED, watched=8, total=8, finished=True))
+        self.assertEqual((await self._standing()).rewatched, [])
+
+
 class AnEpisodeNothingKnowsAboutTests(LifecycleTestCase):
     """When the search runs out of data the play is handed back untouched, and
     nothing is looked up for it — that is the whole point of handing it back."""
@@ -684,7 +836,8 @@ class AnEpisodeNothingKnowsAboutTests(LifecycleTestCase):
         """The plays nothing could place. A season the tracker holds a verdict on
         is a different question and is asserted on in its own class."""
         return (await lifecycle.reconcile_history(
-            self.user_id, plays, month=self.this_month, look_up=lookup)).unknown
+            self.user_id, plays, month=self.this_month, look_up=lookup,
+            tz=ZoneInfo("UTC"))).unknown
 
     async def test_it_comes_back_carrying_the_title_and_the_episode(self):
         lookup = CountingLookup({"total": 10})
@@ -705,7 +858,7 @@ class AnEpisodeNothingKnowsAboutTests(LifecycleTestCase):
             self.user_id, self.last_month,
             _show(1, kind=store.RecordKind.COMPLETED, watched=8))
         lookup = CountingLookup({"total": 10})
-        unknown = await self._reconcile([_play(1), _play(9, 1, 1)], lookup)
+        unknown = await self._reconcile([_play(1, 1, 9), _play(9, 1, 1)], lookup)
         self.assertEqual([str(p.key) for p in unknown], [str(_key(9))])
         self.assertEqual(lookup.calls, [(str(_key(1)), 1)])
 
@@ -738,7 +891,8 @@ class AnEpisodeNothingKnowsAboutTests(LifecycleTestCase):
                                      _show(3, kind=store.RecordKind.ABANDONED))
         await store.dismiss_prompt(self.user_id, _key(3), 1)
         questions = await lifecycle.reconcile_history(
-            self.user_id, [_play(3)], month=self.this_month, look_up=CountingLookup())
+            self.user_id, [_play(3)], month=self.this_month, look_up=CountingLookup(),
+            tz=ZoneInfo("UTC"))
         self.assertEqual((questions.unknown, questions.given_up), ([], []))
 
     async def test_declining_says_nothing_about_a_season_later_recorded(self):
@@ -750,7 +904,7 @@ class AnEpisodeNothingKnowsAboutTests(LifecycleTestCase):
             self.user_id, self.last_month,
             _show(1, kind=store.RecordKind.COMPLETED, watched=8))
         lookup = CountingLookup({"total": 10})
-        self.assertEqual(await self._reconcile([_play(1)], lookup), [])
+        self.assertEqual(await self._reconcile([_play(1, 1, 9)], lookup), [])
         self.assertEqual(lookup.calls, [(str(_key(1)), 1)],
                          "a declined season that is now on record must still reopen")
         reopened = await store.find_user_record(self.user_id, _key(1), 1)

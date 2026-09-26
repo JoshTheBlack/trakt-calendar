@@ -1,6 +1,7 @@
 {% import '_distrakt_add_show.html' as add_show %}
 {% import '_distrakt_add_film.html' as add_film %}
 {% import '_distrakt_rewatch.html' as rewatch %}
+{% import '_distrakt_import.html' as imports %}
 {% import '_source_logo.html' as src with context %}
 {# THE THREE OVERLAYS THE ADD FLOW USES, drawn together because they are reset
    together.
@@ -28,4 +29,5 @@
 {{ add_show.modal(search_label, as_finished, month_query, oob=oob) }}
 {{ add_film.modal(search_label, film_day, film_max, month_query, oob=oob) }}
 {{ rewatch.modal(oob=oob) }}
+{{ imports.modal(oob=oob) }}
 {% endmacro %}

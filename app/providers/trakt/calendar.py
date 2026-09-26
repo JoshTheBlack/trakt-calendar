@@ -78,7 +78,8 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
     below fires if that ever changes, because the symptom would otherwise be a
     silently short window.
 
-    Raises TraktError for a refusal, a non-200, or a body that will not parse. A
+    Raises TraktError for a refusal, a non-200, a body that will not parse, or a
+    Trakt that could not be reached at all (see transport.send_or_unavailable). A
     body that parses to something other than a list reads as an empty window —
     there is nothing to salvage from it and nothing to report about it.
     """
@@ -87,8 +88,9 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
         f"?{urlencode({'extended': 'full,images'})}"
     )
     t0 = _time.perf_counter()
-    resp = await transport.send(transport.shared_client(), "GET", url,
-                                headers=transport.api_headers(settings, paginate=False))
+    resp = await transport.send_or_unavailable(
+        transport.shared_client(), "GET", url,
+        headers=transport.api_headers(settings, paginate=False))
     _perf.debug("netGET    calendar/%s/%s+%dd -> %s  %.0fms%s", endpoint.key, start.isoformat(),
                 days, resp.status_code, (_time.perf_counter() - t0) * 1000.0,
                 perftrace.activity_tag())

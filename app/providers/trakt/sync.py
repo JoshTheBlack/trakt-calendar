@@ -265,12 +265,8 @@ async def fetch_play_counts(settings: Settings, limit: int = 250,
         params = {"limit": str(limit), "page": str(number)}
         url = f"{transport.API_BASE}/sync/watched/shows?{urlencode(params)}"
         t0 = _time.perf_counter()
-        try:
-            resp = await transport.send(
-                client, "GET", url, headers=transport.api_headers(settings, paginate=False))
-        except httpx.HTTPError as exc:
-            logger.warning("fetch_play_counts: request failed: %s", exc)
-            raise TraktError(f"Could not reach Trakt: {exc}") from exc
+        resp = await transport.send_or_unavailable(
+            client, "GET", url, headers=transport.api_headers(settings, paginate=False))
         _perf.debug("netGET    sync/watched/shows?page=%s -> %s  %.0fms", number,
                     resp.status_code, (_time.perf_counter() - t0) * 1000.0)
         if resp.status_code != 200:
@@ -358,11 +354,8 @@ async def fetch_history(settings: Settings, start_at: str | None = None,
             params["start_at"] = start_at
         url = f"{transport.API_BASE}/users/me/history?{urlencode(params)}"
         t0 = _time.perf_counter()
-        try:
-            resp = await transport.send(client, "GET", url, headers=transport.api_headers(settings, paginate=False))
-        except httpx.HTTPError as exc:
-            logger.warning("fetch_history: request failed: %s", exc)
-            raise TraktError(f"Could not reach Trakt: {exc}") from exc
+        resp = await transport.send_or_unavailable(
+            client, "GET", url, headers=transport.api_headers(settings, paginate=False))
         _perf.debug("netGET    users/me/history?page=%s -> %s  %.0fms", page,
                     resp.status_code, (_time.perf_counter() - t0) * 1000.0)
         if resp.status_code != 200:
@@ -477,8 +470,9 @@ async def fetch_ratings(settings: Settings) -> list[dict]:
     library at the pagination limit with nothing in the response to say so.
     """
     url = f"{transport.API_BASE}/sync/ratings?{urlencode({'extended': 'full'})}"
-    resp = await transport.send(transport.shared_client(), "GET", url,
-                                 headers=transport.api_headers(settings, paginate=False))
+    resp = await transport.send_or_unavailable(
+        transport.shared_client(), "GET", url,
+        headers=transport.api_headers(settings, paginate=False))
     if resp.status_code == 401:
         raise TraktError("Trakt rejected the credentials (401).", 401)
     if resp.status_code != 200:

@@ -117,8 +117,44 @@ def _file_month(url: str) -> str:
         return ""
 
 
-async def _conditional_get(url: str, *, revalidate: bool = True) -> list | None:
-    """One CDN file's entries, or None when the file has not changed.
+def _consumer(endpoint: Endpoint, start: date) -> str:
+    """Who a validator belongs to: one calendar's rows for one window.
+
+    THE WINDOW AS WELL AS THE CALENDAR, because rows are stored per (endpoint,
+    window) and a monthly file feeds about five windows. Keyed on the calendar
+    alone, the first window to refill after Simkl regenerated a month recorded
+    the new ETag and the other windows of that calendar were answered 304 and
+    kept their older rows. MEASURED on a real instance: Season Premieres' week
+    of 28 September refilled alone and read October's tv.json in full; six
+    minutes later its four October weeks were told nothing had changed, and
+    stayed without four series premieres the file had held since that morning.
+    """
+    return f"{endpoint.key}@{start.isoformat()}"
+
+
+def _validator_key(url: str, consumer: str) -> str:
+    """What one reader's validator for one CDN file is stored under: the file's
+    URL with the reader (`_consumer`) named in its fragment, which a URL may carry
+    and a server is never sent.
+
+    PER READER, NOT PER FILE, AND A FILE-WIDE ONE LOST TITLES. A 304 means "you
+    have seen this version", and the three show calendars each derive their own
+    rows from the same two files — per window, too (see `_consumer`). With one validator per file, the first calendar
+    to refill after Simkl regenerated a month fetched the new body and recorded
+    its ETag; the other two then sent that ETag, were told nothing had changed,
+    and kept rows derived from the OLDER version — for good, since the next
+    change repeated it. MEASURED on a real instance: four October series
+    premieres stored on New Shows and absent from Season Premieres and All
+    Episodes, all three filled from one tv.json twenty minutes apart. The
+    tracker's import reads New Shows, so it filed titles the viewer's own
+    calendar had never shown them.
+    """
+    return f"{url}#{consumer}"
+
+
+async def _conditional_get(url: str, *, consumer: str, revalidate: bool = True) -> list | None:
+    """One CDN file's entries, or None when the file has not changed since
+    `consumer` — the calendar window these rows are for — last read it.
 
     NONE IS AN ANSWER, NOT AN ABSENCE. A 304 carries no body, and this app no
     longer keeps one to serve in its place: `calendar_source_files` holds the
@@ -138,21 +174,22 @@ async def _conditional_get(url: str, *, revalidate: bool = True) -> list | None:
     file's body because a SIBLING changed — see fetch_window.
 
     Raises SimklError (which IS SourceUnavailable) for anything that is not a
-    200, a 304 or a 404, so a caller degrades this source rather than storing an
-    empty answer as fact.
+    200, a 304 or a 404 — and for a CDN that could not be reached at all — so a
+    caller degrades this source rather than storing an empty answer as fact.
     """
     from ... import cache  # deferred: providers/ reads the kernel's cache module
 
+    key = _validator_key(url, consumer)
     headers = {"User-Agent": transport.USER_AGENT}
     if revalidate:
-        etag, last_modified = await cache.source_file_validator(url)
+        etag, last_modified = await cache.source_file_validator(key)
         if etag:
             headers["If-None-Match"] = etag
         if last_modified:
             headers["If-Modified-Since"] = last_modified
 
     t0 = _time.perf_counter()
-    resp = await transport.send(
+    resp = await transport.send_or_unavailable(
         transport.cdn_client(), "GET", url,
         pool=transport.CDN_POOL, headers=headers, timeout=45,
     )
@@ -164,7 +201,7 @@ async def _conditional_get(url: str, *, revalidate: bool = True) -> list | None:
         # though nothing moved — see record_source_file on why that is a
         # different field from when it last changed.
         await cache.record_source_file(
-            url, str(Source.SIMKL), _file_month(url),
+            key, str(Source.SIMKL), _file_month(url),
             etag=headers.get("If-None-Match", ""),
             last_modified=headers.get("If-Modified-Since", ""),
             entries=0, now=int(_time.time()), changed=False)
@@ -186,7 +223,7 @@ async def _conditional_get(url: str, *, revalidate: bool = True) -> list | None:
     if not isinstance(data, list):
         data = []
     await cache.record_source_file(
-        url, str(Source.SIMKL), _file_month(url),
+        key, str(Source.SIMKL), _file_month(url),
         etag=str(resp.headers.get("ETag") or ""),
         last_modified=str(resp.headers.get("Last-Modified") or ""),
         entries=len(data), now=int(_time.time()), changed=True)
@@ -200,15 +237,15 @@ def _archive_url(year: int, month: int, filename: str) -> str:
 
 
 async def _fetch_file(year: int, month: int, filename: str,
-                      *, revalidate: bool = True) -> list[dict] | None:
+                      *, consumer: str, revalidate: bool = True) -> list[dict] | None:
     entries = await _conditional_get(_archive_url(year, month, filename),
-                                     revalidate=revalidate)
+                                     consumer=consumer, revalidate=revalidate)
     if entries is None:
         return None
     return _dedupe_file_entries([e for e in entries if isinstance(e, dict)])
 
 
-async def _read_files(wanted: list[tuple[int, int, str]], *,
+async def _read_files(wanted: list[tuple[int, int, str]], *, consumer: str,
                       revalidate: bool = True) -> list[list[dict]]:
     """Every file a window needs, or SourceNotModified when none of them moved.
 
@@ -230,7 +267,7 @@ async def _read_files(wanted: list[tuple[int, int, str]], *,
     is possible and handled; it is not the ordinary case.
     """
     results = await asyncio.gather(
-        *(_fetch_file(year, month, name, revalidate=revalidate)
+        *(_fetch_file(year, month, name, consumer=consumer, revalidate=revalidate)
           for year, month, name in wanted))
     if all(entries is None for entries in results):
         raise SourceNotModified(
@@ -240,7 +277,7 @@ async def _read_files(wanted: list[tuple[int, int, str]], *,
         logger.debug("%d of %d Simkl archive file(s) were unchanged while a sibling "
                      "moved; re-reading them for their bodies.", len(stale), len(wanted))
         refetched = await asyncio.gather(
-            *(_fetch_file(*wanted[i], revalidate=False) for i in stale))
+            *(_fetch_file(*wanted[i], consumer=consumer, revalidate=False) for i in stale))
         for i, entries in zip(stale, refetched):
             results[i] = entries
     return [entries or [] for entries in results]
@@ -658,7 +695,8 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
         # ordinarily a 304 against a copy the blob cache already holds.
         wanted = ([(year, month, _MOVIE_FILE) for year, month in months]
                   + [(year, month, _ANIME_FILE) for year, month in months])
-        read = await _read_files(wanted, revalidate=revalidate)
+        read = await _read_files(wanted, consumer=_consumer(endpoint, start),
+                                 revalidate=revalidate)
         movie_results, anime_results = read[:len(months)], read[len(months):]
         raw = [e for batch in movie_results for e in batch]
         films = [e for batch in anime_results for e in batch if is_anime_film(e)]
@@ -675,7 +713,8 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
 
     wanted = ([(year, month, _TV_FILE) for year, month in months]
               + [(year, month, _ANIME_FILE) for year, month in months])
-    read = await _read_files(wanted, revalidate=revalidate)
+    read = await _read_files(wanted, consumer=_consumer(endpoint, start),
+                             revalidate=revalidate)
     tv_results, anime_results = read[:len(months)], read[len(months):]
     tv_entries = [e for batch in tv_results for e in batch]
     # THE OTHER HALF OF THE SPLIT ABOVE, AND IT HAS TO BE THE OTHER HALF OF THE

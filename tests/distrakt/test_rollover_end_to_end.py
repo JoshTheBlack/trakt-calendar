@@ -24,7 +24,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 from datetime import date, datetime, timedelta, timezone
+from html import unescape
 from unittest import mock
 
 from app import clock, distrakt as distrakt_store
@@ -32,9 +34,9 @@ from app.distrakt import routes as distrakt_routes
 from app.calendar import state as calendar_state
 from app.config import Settings
 from app.distrakt import watch_history
-from app.providers.base import Item, ItemKey, Media, Source
+from app.providers.base import Item, ItemKey, Media, Source, TitleFacts
 
-from ..support import ORIGIN, AppTestCase, tracker_month
+from ..support import ORIGIN, AppTestCase, import_everything_offered, tracker_month
 
 # The two months the rollover happens across, and the day either side of the
 # boundary between them. Named once so a test reads as a story about a boundary
@@ -190,7 +192,7 @@ class RolloverOverHttpTestCase(AppTestCase):
         """
         held = premieres or {}
         self.season_calls = []
-        self.network_calls = []
+        self.facts_calls = []
         self.baseline_calls = []
 
         async def read_month(endpoint, settings, year=None, month=None, **kw):
@@ -208,7 +210,7 @@ class RolloverOverHttpTestCase(AppTestCase):
         async def baseline_show(settings, user_id, record):
             """The per-title history read that the re-watch question is asked OF.
 
-            RECORDED RATHER THAN MERELY STUBBED, for the reason `network_for`
+            RECORDED RATHER THAN MERELY STUBBED, for the reason `title_facts`
             gives just below: it is an outbound call per CLICK, and a change that
             starts making one per ROW should have to say so here. It arrived when
             the re-watch question moved inside `_rewatch_question` — asking
@@ -223,13 +225,13 @@ class RolloverOverHttpTestCase(AppTestCase):
             """
             self.baseline_calls.append(str((record.get("ids") or {}).get("tmdb") or ""))
 
-        async def network_for(settings, rec):
-            """The show-level lookup an add from a history prompt makes, because
+        async def title_facts(settings, rec):
+            """The show-level lookup every add makes to describe what it files —
             the prompt row carries no network of its own. Recorded rather than
             merely stubbed: it is a per-click outbound call, so a test that starts
             making one per ROW should have to say so."""
-            self.network_calls.append(str((rec.get("ids") or {}).get("tmdb") or ""))
-            return "Fake Network"
+            self.facts_calls.append(str((rec.get("ids") or {}).get("tmdb") or ""))
+            return TitleFacts("", "Fake Network")
 
         with contextlib.ExitStack() as stack:
             for target, fake in (
@@ -238,7 +240,7 @@ class RolloverOverHttpTestCase(AppTestCase):
                 ("app.providers.trakt.detail.fetch_season_detail", season_detail),
                 ("app.distrakt.watch_history.sync_and_baseline", sync_and_baseline),
                 ("app.distrakt.watch_history.baseline_show", baseline_show),
-                ("app.distrakt.live.network_for", network_for),
+                ("app.distrakt.live.title_facts", title_facts),
             ):
                 stack.enter_context(mock.patch(target, side_effect=fake))
             yield
@@ -265,8 +267,7 @@ class RolloverOverHttpTestCase(AppTestCase):
         """
         year, month = distrakt_store.parse_month_key(key)
         with self.offline(premieres):
-            resp = self.client.post(
-                f"/api/distrakt/import?year={year}&month={month}", json={})
+            resp = import_everything_offered(self.client, year, month)
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertNotIn("toast err", resp.text, resp.text[:300])
         return self.get_month(key, premieres)
@@ -299,10 +300,10 @@ class RolloverOverHttpTestCase(AppTestCase):
         self.assertNotIn("toast err", resp.text, resp.text[:300])
         # WHAT THE POST ITSELF SPENT, kept before the month is read back: reading
         # it enters `offline` again, and that is where the recorders are set up.
-        spent = (list(self.season_calls), list(self.network_calls),
+        spent = (list(self.season_calls), list(self.facts_calls),
                  list(self.baseline_calls))
         month_payload = self.get_month(month)
-        self.season_calls, self.network_calls, self.baseline_calls = spent
+        self.season_calls, self.facts_calls, self.baseline_calls = spent
         return month_payload
 
     def kinds_on(self, month_key: str) -> dict[int, set[str]]:
@@ -368,12 +369,14 @@ class RolloverOverHttpTestCase(AppTestCase):
 
     def open_the_new_month(self) -> dict:
         """Cross the boundary the way a person does: look at the closing month
-        while it is still under way, then look at the new one on its 1st."""
+        while it is still under way, then look at the new one on its 1st and press
+        Import — a month no longer fills itself from its calendar by being opened."""
+        premieres = {OPENING: [_item(801, 1, "August New", "2026-08-05")]}
         with fake_today(BEFORE_THE_FIRST):
             self.get_month(CLOSING)
         with fake_today(ON_THE_FIRST):
-            return self.get_month(
-                OPENING, {OPENING: [_item(801, 1, "August New", "2026-08-05")]})
+            self.get_month(OPENING, premieres)
+            return self.import_month(OPENING, premieres)
 
 
 def _play(trakt_id: int, season: int = 1, number: int = 7,
@@ -594,6 +597,92 @@ class GoingBackToSomethingYouGaveUpOnTests(RolloverOverHttpTestCase):
         self.assertNotIn(703, self.listed_ids())
 
 
+class WatchingAFinishedSeasonAgainTests(RolloverOverHttpTestCase):
+    """A season the closing month recorded finished, watched again in the new
+    one. A middle episode offers a re-watch and the finale offers to record the
+    season completed again — and neither moves anything until it is answered."""
+
+    ROW = {"key": "show:tmdb:705", "season": 1}
+
+    def setUp(self):
+        super().setUp()
+        asyncio.run(distrakt_store.add_month_record(self.user_id, CLOSING, {
+            "ids": {"trakt": 705, "tmdb": 705, "slug": "slug-705"},
+            "season": 1, "title": "Seen It", "network": "Net",
+            "kind": distrakt_store.RecordKind.COMPLETED, "watched": 6, "total": 6,
+            "started_airing": True, "finished_airing": True,
+        }))
+
+    def ask(self, number: int) -> dict:
+        play = _play(705, 1, number, "Seen It")._replace(
+            watched_at="2026-08-01T12:00:00.000Z")
+        with fake_today(ON_THE_FIRST):
+            return self.get_month(OPENING, plays=[play])
+
+    def test_a_middle_episode_is_offered_as_a_rewatch_and_moves_nothing(self):
+        payload = self.ask(3)
+        self.assertEqual([(o["key"], o["title"]) for o in payload["rewatch_offers"]],
+                         [("show:tmdb:705", "Seen It")])
+        self.assertIn("finished in July 2026", payload["rewatch_offers"][0]["note"])
+        self.assertEqual(payload["finale_offers"], [])
+        self.assertNotIn(705, self.listed_ids(), "it went back on the list unasked")
+        self.assertIn(705, self.stored_ids(CLOSING), "the verdict was withdrawn")
+        self.assertEqual([c for c in self.season_calls if c[0] == 705], [],
+                         "offering a re-watch must cost no lookup")
+
+    def test_yes_starts_a_rewatch_counting_from_that_play(self):
+        self.ask(3)
+        with fake_today(ON_THE_FIRST):
+            self.post("/api/distrakt/rewatch-start", {**self.ROW, **_viewing(OPENING)})
+        listed = asyncio.run(distrakt_store.find_user_record(
+            self.user_id, ItemKey(Media.SHOW, "tmdb", "705"), 1))
+        self.assertIsNotNone(listed, "saying yes never put the season on the list")
+        self.assertEqual(listed["history_from"], "2026-08-01")
+        self.assertIn(705, self.stored_ids(CLOSING),
+                      "the earlier viewing's record went with it")
+
+    def test_the_finale_is_offered_as_a_completion_and_yes_records_one(self):
+        payload = self.ask(6)
+        self.assertEqual([o["key"] for o in payload["finale_offers"]], ["show:tmdb:705"])
+        self.assertIn("Record it as completed in August 2026 too?",
+                      payload["finale_offers"][0]["note"])
+        with fake_today(ON_THE_FIRST):
+            self.post("/api/distrakt/rewatch-complete", {**self.ROW, **_viewing(OPENING)})
+        self.assertEqual(self.kinds_on(OPENING).get(705),
+                         {distrakt_store.RecordKind.COMPLETED})
+        self.assertIn(705, self.stored_ids(CLOSING))
+        self.assertNotIn(705, self.listed_ids())
+
+    def test_a_middle_episode_cannot_be_recorded_as_a_completion(self):
+        self.ask(3)
+        with fake_today(ON_THE_FIRST), self.offline():
+            resp = self.client.post("/api/distrakt/rewatch-complete?year=2026&month=8",
+                                    json=self.ROW)
+        self.assertIn("toast err", resp.text)
+        self.assertNotIn(705, self.stored_ids(OPENING))
+
+    def test_no_is_for_now_and_the_next_episode_asks_again(self):
+        """✗ answers what has been watched so far. Every play here carries the
+        same stamp, which is what a service did on a real account, so only the
+        episodes the refusal answered can tell the next play apart."""
+        self.ask(3)
+        resp = self.client.post("/api/distrakt/unknown-dismiss", json=self.ROW)
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(self.ask(3)["rewatch_offers"], [],
+                         "the play that was answered asked again")
+        self.assertEqual([o["key"] for o in self.ask(4)["rewatch_offers"]],
+                         ["show:tmdb:705"], "watching another episode did not ask again")
+
+    def test_not_this_month_puts_it_off_and_no_lets_the_next_play_ask(self):
+        self.ask(3)
+        resp = self.client.post("/api/distrakt/unknown-snooze", json=self.ROW)
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(self.ask(4)["rewatch_offers"], [],
+                         "a play in the month it was put off for asked anyway")
+        declined = asyncio.run(distrakt_store.dismissed_prompts(self.user_id))
+        self.assertEqual(declined[("show:tmdb:705", 1)][0], distrakt_store.DISMISSAL_MONTH)
+
+
 class MonthFreezesWhenItsDatePassesTests(RolloverOverHttpTestCase):
     """The month under way stays editable; once the calendar has passed it, it
     closes — whether or not any later month has been built or looked at.
@@ -720,6 +809,140 @@ class AMonthHoldsOnlyItsOwnPremieresTests(RolloverOverHttpTestCase):
         self.assertEqual(self.kinds_on(OPENING),
                          {801: {distrakt_store.RecordKind.SERIES_PREMIERE}})
         self.assertIn(801, self.listed_ids())
+
+
+class ImportingIsSomethingSomebodyPicksTests(RolloverOverHttpTestCase):
+    """A month is not filled from its calendar by being opened. Import offers its
+    premieres title by title and files what is ticked.
+
+    MEASURED, the reason: opening the tracker for an account with no filters built
+    a month of 527 premieres and spent over a thousand Trakt reads describing
+    them, ran into Trakt's rate limit, and never saved the month — so every reload
+    started the same storm again."""
+
+    PREMIERES = {OPENING: [_item(801, 1, "August New", "2026-08-05"),
+                           _item(911, 4, "August Returner", "2026-08-08")]}
+
+    def offer(self) -> str:
+        with fake_today(ON_THE_FIRST), self.offline(self.PREMIERES):
+            resp = self.client.get("/distrakt/fragments/import?year=2026&month=8")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return resp.text
+
+    def test_opening_the_month_takes_nothing_and_lights_import(self):
+        with fake_today(ON_THE_FIRST):
+            payload = self.get_month(OPENING, self.PREMIERES)
+        self.assertEqual(self.stored_ids(OPENING), set(), "opening the month imported")
+        self.assertTrue(payload["import_due"])
+
+    def test_the_offer_lists_every_premiere_ticked_and_looks_nothing_up(self):
+        text = self.offer()
+        self.assertIn("<strong>2</strong> premieres", text)
+        self.assertEqual(text.count('type="checkbox"'), 2)
+        self.assertEqual(text.count(" checked "), 2)
+        self.assertIn("August New", text)
+        self.assertIn("August Returner", text)
+        self.assertEqual((self.season_calls, self.facts_calls), ([], []),
+                         "drawing the offer described titles")
+
+    def test_untick_all_draws_every_box_clear_and_tick_all_ticks_them(self):
+        with fake_today(ON_THE_FIRST), self.offline(self.PREMIERES):
+            clear = self.client.get("/distrakt/fragments/import?year=2026&month=8&ticked=none").text
+            ticked = self.client.get("/distrakt/fragments/import?year=2026&month=8&ticked=all").text
+        self.assertEqual((clear.count('type="checkbox"'), clear.count(" checked ")), (2, 0))
+        self.assertEqual((ticked.count('type="checkbox"'), ticked.count(" checked ")), (2, 2))
+        self.assertIn("ticked=none", ticked, "the dialog does not offer Untick all")
+
+    def test_only_what_is_ticked_is_filed(self):
+        refs = re.findall(r'name="(pick:[^"]+)"', self.offer())
+        wanted = [unescape(ref) for ref in refs if "801" in ref]
+        with fake_today(ON_THE_FIRST), self.offline(self.PREMIERES):
+            resp = self.client.post("/api/distrakt/import?year=2026&month=8",
+                                    json={ref: "1" for ref in wanted})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(self.stored_ids(OPENING), {801})
+        self.assertIn("Imported 1 premiere from the calendar", resp.text)
+
+    def test_a_reference_to_something_not_on_offer_files_nothing(self):
+        """The ticks are references to the offer the server reads now, never
+        data: a name the calendar did not offer cannot put a title on a month."""
+        with fake_today(ON_THE_FIRST), self.offline(self.PREMIERES):
+            self.client.post("/api/distrakt/import?year=2026&month=8",
+                             json={"pick:show:tmdb:4242|1": "1"})
+        self.assertEqual(self.stored_ids(OPENING), set())
+
+    def test_nothing_ticked_is_refused(self):
+        with fake_today(ON_THE_FIRST), self.offline(self.PREMIERES):
+            resp = self.client.post("/api/distrakt/import?year=2026&month=8", json={})
+        self.assertIn("Tick at least one title", resp.text)
+        self.assertEqual(self.stored_ids(OPENING), set())
+
+    def test_import_stops_asking_once_something_is_imported(self):
+        with fake_today(ON_THE_FIRST):
+            self.get_month(OPENING, self.PREMIERES)
+            payload = self.import_month(OPENING, self.PREMIERES)
+        self.assertFalse(payload["import_due"])
+        self.assertEqual(self.stored_ids(OPENING), {801, 911})
+
+    def test_a_title_nothing_has_described_yet_is_named_and_not_offered(self):
+        """MEASURED: a documentary Simkl had just listed was offered to a viewer
+        who keeps only US titles, because its country had not arrived yet. The
+        dialog now names it and offers only what the filters could rule on."""
+        from app.auth import prefs as auth_prefs
+
+        asyncio.run(auth_prefs.update_user_prefs(self.user_id, tv_countries="us"))
+        undescribed = _item(955, 1, "Girls of Warsaw", "2026-08-17")
+        undescribed.enriched = False
+        with fake_today(ON_THE_FIRST), self.offline(
+                {OPENING: [*self.PREMIERES[OPENING], undescribed]}):
+            text = self.client.get("/distrakt/fragments/import?year=2026&month=8").text
+        self.assertIn("<strong>2</strong> premieres", text)
+        self.assertEqual(text.count('type="checkbox"'), 2)
+        self.assertNotIn("tmdb:955", text)
+        self.assertIn("still being looked up", text)
+        self.assertIn("Girls of Warsaw", text)
+
+    def test_the_month_ahead_lights_import_before_it_is_built(self):
+        """Its premieres are listed and worth choosing before the 1st. Opening it
+        builds nothing, so the answer comes from the unbuilt month's own path."""
+        with fake_today(BEFORE_THE_FIRST):
+            payload = self.get_month(OPENING, self.PREMIERES)
+        self.assertTrue(payload["import_due"])
+        self.assertEqual(self.stored_ids(OPENING), set(), "looking at it imported")
+
+    def test_two_months_ahead_does_not_light_import(self):
+        with fake_today(BEFORE_THE_FIRST):
+            payload = self.get_month("2026-09", {"2026-09": self.PREMIERES[OPENING]})
+        self.assertFalse(payload["import_due"])
+
+    def test_the_month_ahead_goes_quiet_once_something_is_imported(self):
+        with fake_today(BEFORE_THE_FIRST):
+            payload = self.import_month(OPENING, self.PREMIERES)
+        self.assertFalse(payload["import_due"])
+
+    def test_a_premiere_already_airing_that_no_list_holds_is_still_drawn(self):
+        """MEASURED: Gnomes was filed on the month ahead from Simkl's calendar
+        (S01E01 on 7 October) while Trakt, which described it, says it aired on
+        7 September. A premiere that has begun airing was left out on the
+        grounds that the list shows it, and a month ahead has no list, so it was
+        drawn nowhere and could not be removed."""
+        with fake_today(BEFORE_THE_FIRST), self.offline(self.PREMIERES):
+            self.import_month(OPENING, self.PREMIERES)
+            asyncio.run(distrakt_store.add_month_record(self.user_id, OPENING, {
+                "ids": {"trakt": 955, "tmdb": 955, "slug": "slug-955"},
+                "season": 1, "title": "Aired Already", "network": "Net",
+                "kind": distrakt_store.RecordKind.SERIES_PREMIERE,
+                "started_airing": True, "premiere": "7/7",
+            }))
+            html = self.client.get("/distrakt/fragments/month?year=2026&month=8").text
+        # A ROW, not only the copy block, which named it all along.
+        self.assertRegex(html, r'data-details-heading="Aired Already · S01"')
+
+    def test_the_button_is_drawn_lit_by_the_months_own_answer(self):
+        with fake_today(ON_THE_FIRST), self.offline(self.PREMIERES):
+            html = self.client.get("/distrakt/fragments/month?year=2026&month=8").text
+        self.assertRegex(html, r'id="distraktImport" class="pill-btn import-due"')
+        self.assertIn('hx-swap-oob="outerHTML">⤓ Import', html)
 
 
 class AnyMonthAheadCanBeAskedForTests(RolloverOverHttpTestCase):
@@ -1298,11 +1521,11 @@ class AddingFromAPromptBringsTheNetworkTests(RolloverOverHttpTestCase):
         the lookup happens because somebody pressed the button. A test that starts
         seeing one per rendered row has found a real regression."""
         self.ask()
-        self.assertEqual(self.network_calls, [],
+        self.assertEqual(self.facts_calls, [],
                          "rendering the prompt looked a network up")
         with fake_today(ON_THE_FIRST):
             self.post("/api/distrakt/unknown-add", {**self.ROW, **_viewing(OPENING)})
-        self.assertEqual(len(self.network_calls), 1)
+        self.assertEqual(len(self.facts_calls), 1)
 
     def test_the_row_the_page_drew_is_re_read_rather_than_taken_from_the_request(self):
         """A CALLER CANNOT NAME A DIFFERENT TITLE. The play that raised the

@@ -3178,6 +3178,133 @@ CREATE INDEX ix_tier_category_removals_sweep
     ON tier_category_removals(removed_at);
 """
 
+MIGRATION_44 = """
+-- A HISTORY REFUSAL REMEMBERS WHICH PLAYS IT ANSWERED, NOT ONLY WHEN.
+--
+-- Migration 34 made a history refusal a watermark: a play later than the
+-- refusal asks again. Measured on a real account, a clock is the wrong mark.
+-- The viewer said no to a re-watch offer about E01 at 18:51:20, then logged E02,
+-- and Trakt stamped that play 18:51:00, the same minute as E01's, so it read as
+-- already answered. A play logged with an earlier date on purpose ("watched
+-- yesterday") would be silenced the same way. What the viewer meant by no was
+-- "not for what I have watched so far", and the question should come back when
+-- they watch more.
+--
+-- So the refusal stores, per episode, the latest play the tracker knew of when
+-- it was made: {"<episode>": <epoch seconds>}. A play asks again when its
+-- episode had no play by then, or has one later than that. A re-read of plays
+-- already answered stays quiet.
+--
+-- NULL FOR EVERY EXISTING ROW, and a NULL row keeps the time watermark it was
+-- written under. Verdict and month refusals never carry one: a verdict refusal
+-- is permanent and a month refusal lapses by the calendar.
+ALTER TABLE distrakt_prompt_dismissals ADD COLUMN covered_json TEXT;
+
+-- A RANKINGS BOARD CAN HOLD A SEASON, NOT ONLY A SHOW.
+--
+-- A board identified a title by (media, match_source, match_id) alone, so two
+-- seasons of one show were the same row by construction, and the details a
+-- board drew were whatever the show-level lookup answered, which is season 1's.
+-- The tracker, which is where most board titles come from, knows exactly which
+-- season was finished; the board threw that away at import.
+--
+-- `season` IS NULL FOR THE WHOLE SHOW, and that is what every existing row
+-- becomes: a board somebody has ranked must not be rearranged or relabelled
+-- under them, and each row is given a season by its owner, not by a guess.
+-- NULL rather than 0 because season 0 is a real season (the specials).
+--
+-- THE UNIQUENESS MOVES FROM THE TABLE TO AN INDEX, which is why the table is
+-- rebuilt: SQLite cannot drop a table-level UNIQUE in place. It becomes one
+-- entry per title AND SEASON per board, and it is written over
+-- IFNULL(season, -1) because SQLite treats NULLs as distinct in a unique index,
+-- so a plain `season` column would let one show sit on a board whole twice.
+-- A writer relying on it says `ON CONFLICT DO NOTHING` with no target, which
+-- any unique index satisfies.
+--
+-- Ids are copied verbatim (the pages and the removal history name rows by
+-- them), nothing references tier_items and it has no triggers, and its two
+-- indexes are recreated as they were.
+CREATE TABLE tier_items_new (
+    id            INTEGER PRIMARY KEY,
+    board_id      INTEGER NOT NULL REFERENCES tier_boards(id) ON DELETE CASCADE,
+    -- NULL means the board's unranked pool. SET NULL rather than CASCADE so
+    -- deleting a tier returns its titles to the pool instead of destroying
+    -- curated work over a mis-click.
+    category_id   INTEGER REFERENCES tier_categories(id) ON DELETE SET NULL,
+    media         TEXT    NOT NULL DEFAULT 'show',
+    -- The first shared id the identity waterfall found: tmdb, then tvdb, then
+    -- imdb, then mal. A title with no tmdb can still be ranked; it just has no
+    -- artwork, because ranking must not be gated on a poster existing.
+    match_source  TEXT    NOT NULL,
+    match_id      TEXT    NOT NULL,
+    -- Which season of the show this row is; NULL is the whole show. Always NULL
+    -- for a film.
+    season        INTEGER,
+    -- Artwork key specifically, because TMDB is the artwork source and its id is
+    -- what indexes the image. NULL renders the placeholder tile.
+    tmdb          INTEGER,
+    -- The whole id map as it arrived, so an id this feature does not use today
+    -- is still there for a future match.
+    ids_json      TEXT    NOT NULL DEFAULT '{}',
+    -- Self-contained by design: a manually searched title has no other row in
+    -- this database to join against. Refreshed opportunistically, never
+    -- authoritative.
+    title         TEXT    NOT NULL DEFAULT '',
+    year          INTEGER,
+    network       TEXT    NOT NULL DEFAULT '',
+    season_count  INTEGER,
+    episode_count INTEGER,
+    runtime       INTEGER,
+    user_rating   INTEGER,
+    added_from    TEXT    NOT NULL DEFAULT 'manual',
+    rank_in_category INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL
+);
+INSERT INTO tier_items_new
+       (id, board_id, category_id, media, match_source, match_id, season, tmdb,
+        ids_json, title, year, network, season_count, episode_count, runtime,
+        user_rating, added_from, rank_in_category, created_at)
+    SELECT id, board_id, category_id, media, match_source, match_id, NULL, tmdb,
+           ids_json, title, year, network, season_count, episode_count, runtime,
+           user_rating, added_from, rank_in_category, created_at
+      FROM tier_items;
+DROP TABLE tier_items;
+ALTER TABLE tier_items_new RENAME TO tier_items;
+-- One entry per title and season per board. Board-scoped rather than
+-- user-scoped on purpose: the same film appearing in both "Top 2026" and
+-- "All-Time" is a normal thing to want.
+CREATE UNIQUE INDEX ux_tier_items_title
+    ON tier_items(board_id, media, match_source, match_id, IFNULL(season, -1));
+CREATE INDEX ix_tier_items_category ON tier_items(category_id, rank_in_category);
+CREATE INDEX ix_tier_items_pool ON tier_items(board_id) WHERE category_id IS NULL;
+
+-- A REMOVED SEASON IS RESTORED AS THAT SEASON. The removal history names a title
+-- by the same identity the board does, so it gains the same column; NULL, as
+-- for every row written before this, is the whole show.
+ALTER TABLE tier_item_removals ADD COLUMN season INTEGER;
+
+-- A SEASON'S OWN ARTWORK. show_posters is keyed (media, tmdb, source), which has
+-- nowhere to put a season, and the calendar and share cards that lean on it
+-- never need one — so seasons get their own registry beside it rather than a
+-- rebuild of that one with a sentinel for "the whole show". Same bookkeeping,
+-- same reasons: global, and out of reach of api_cache's LRU. A season row with
+-- no artwork of its own falls back to its show's, which is show_posters' answer.
+CREATE TABLE season_posters (
+    media          TEXT    NOT NULL,
+    tmdb           INTEGER NOT NULL,
+    season         INTEGER NOT NULL,
+    source         TEXT    NOT NULL,
+    url            TEXT    NOT NULL,
+    first_seen_at  INTEGER NOT NULL,
+    last_seen_at   INTEGER NOT NULL,
+    last_ok_at     INTEGER,
+    last_failed_at INTEGER,
+    fail_count     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (media, tmdb, season, source)
+);
+CREATE INDEX ix_season_posters_seen ON season_posters(last_seen_at);
+"""
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -3222,6 +3349,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (41, MIGRATION_41),
     (42, MIGRATION_42),
     (43, MIGRATION_43),
+    (44, MIGRATION_44),
 ]
 
 

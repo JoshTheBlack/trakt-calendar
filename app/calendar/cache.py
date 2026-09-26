@@ -1191,6 +1191,25 @@ def _forget_spans(endpoint_key: str | None = None) -> None:
     _endpoint_generation[endpoint_key] = _endpoint_generation.get(endpoint_key, 0) + 1
 
 
+def forget_endpoint_spans(endpoint_key: str) -> None:
+    """Drop every held span of `endpoint_key` outright, for a write that did not
+    come through a window fill.
+
+    NOT _forget_spans, which only moves the endpoint's number: a span that is
+    behind is still SERVED while its replacement builds behind the reader, which
+    is right for a refill nobody is watching and wrong for a write somebody has
+    just asked for. A gap filled from a search, a premiere a tracker add wrote,
+    or a card's missing service answering on its panel is a single airing whose
+    reader expects to see it on the very next read — the search jumps to it and
+    the panel's answer redraws the card. With only the number moved, the read
+    that follows is handed the span from before the write. These are single
+    clicks, so the rebuild they cost is one month's, once.
+    """
+    _forget_spans(endpoint_key)
+    for key in [key for key in _span_memo if key[1] == endpoint_key]:
+        _span_memo.pop(key, None)
+
+
 def _span_memo_key(endpoint, settings, *, tz, start_date, end_date, genres,
                    countries, show_certifications, movie_certifications,
                    movie_release_countries, movie_release_types, network_filter,
@@ -1513,6 +1532,35 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     return items, as_of, partial, filtered_out
 
 
+def exempts_undescribed(media, settings, *, genres: str = "", countries: str = "",
+                        show_certifications: str = "", movie_certifications: str = "",
+                        network_filter=None, **_release_specs) -> bool:
+    """Whether a read under these filters lets a title nothing has described yet
+    through UNJUDGED — true exactly when one of the filters that run with
+    `exempt_unenriched` is set, the viewer's or the operator's.
+
+    THE ONE ANSWER TO "IS THIS UNDESCRIBED TITLE HERE ONLY BY EXEMPTION". The
+    calendar counts such titles to say its filters have not reached them yet,
+    and the tracker's import holds them back, because a row it writes does not
+    come back off when the facts arrive. Asked in two places, the two answers
+    drifted: the count ignored filters entirely and apologised to viewers who had
+    none, while the import's own copy had to remember the operator's network list.
+
+    Takes the read's own keywords, so a caller passes `**vocab.active_specs(...)`
+    unchanged. The release specs are accepted and ignored: they rule on a
+    source's release schedule, which comes with the calendar rather than from
+    enrichment, so they never exempt anything.
+    """
+    certifications = show_certifications if media == "show" else movie_certifications
+    if any((genres, countries, certifications, network_filter)):
+        return True
+    if settings is None:
+        return False
+    return any((settings.genres, settings.countries, settings.network_filter,
+                settings.show_certifications if media == "show"
+                else settings.movie_certifications))
+
+
 async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
                          start_date: date, end_date: date,
                          genres: str = "", countries: str = "",
@@ -1618,6 +1666,10 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # answer rather than expanding it a second time and possibly differently.
     nw = calendar_state.marked_keys(not_watching_ids or set(), items)
     not_watching_count = sum(1 for i in items if i.mark_key in nw)
+    exempting = exempts_undescribed(
+        endpoint.media, settings, genres=genres, countries=countries,
+        show_certifications=show_certifications,
+        movie_certifications=movie_certifications, network_filter=network_filter)
     meta = {
         "total": len(items),
         "watching": len(items) - not_watching_count,
@@ -1634,13 +1686,10 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         "as_of": as_of,
         "partial": partial,
         # How many of THIS read's items survived only because of the
-        # exempt_unenriched grace period above — not a count of every
-        # unenriched title on the instance, only the ones this viewer's span
-        # actually rendered. Nothing reads this yet; it exists so a future
-        # Sources-preference screen can say "N items here are still catching
-        # up" without inventing a second way to ask the question this
-        # function already answers.
-        "unenriched": sum(1 for i in items if not i.enriched),
+        # exempt_unenriched grace period — not a count of every unenriched
+        # title on the instance, only the ones this viewer's span rendered and
+        # a filter would have ruled on (see exempts_undescribed).
+        "unenriched": sum(1 for i in items if not i.enriched) if exempting else 0,
         # HOW MANY CARDS THIS VIEWER'S OWN FILTERS REMOVED from this read —
         # every dimension, not the release rule alone. A filter removes titles
         # rather than re-dating them, so somebody who narrows hard enough can

@@ -358,6 +358,33 @@ def restore_backup(client, document: dict, ack: str = "REPLACE MY DATA"):
                        json={"payload": json.dumps(document), "ack": ack})
 
 
+_IMPORT_PICK = re.compile(r'name="(pick:[^"]+)"')
+
+
+def import_everything_offered(client, year: int, month: int):
+    """Press Import and keep every box ticked, the way the dialog opens: read the
+    offer the page would draw, then post every row of it. Returns the answer.
+
+    A MONTH IS NOT FILLED BY OPENING IT, and the import files only what is picked,
+    so a test that means "import the month" has to say which — and "all of them"
+    is what the dialog's default states."""
+    offer = client.get(f"/distrakt/fragments/import?year={year}&month={month}")
+    picks = {unescape(name): "1" for name in _IMPORT_PICK.findall(offer.text)}
+    return client.post(f"/api/distrakt/import?year={year}&month={month}", json=picks)
+
+
+async def import_offered(user_id: int, month_key: str, settings) -> int:
+    """`calendar_import.import_premieres` with every offered title chosen — the
+    store-level twin of `import_everything_offered`."""
+    from app.distrakt import calendar_import, store
+    doc = await store.load_month(user_id, month_key)
+    if doc is None:
+        return 0
+    offer = await calendar_import.import_candidates(user_id, doc, settings)
+    return await calendar_import.import_premieres(
+        user_id, month_key, settings, {calendar_import.candidate_ref(r) for r in offer.offered})
+
+
 def tracker_month(user_id: int, year: int, month: int, *, fresh: bool = False) -> dict:
     """The payload a month is computed into, called directly.
 
@@ -496,6 +523,13 @@ class DetailsPanel:
                 if "unseen" not in tick.group("flags"):
                     found.setdefault(tick.group("source"), []).append(number)
         return found
+
+    @property
+    def unasked(self) -> list[str]:
+        """The services whose ticks are drawn as NOT ASKED — no id for this
+        title — rather than as an answer."""
+        return sorted({tick.group("source") for tick in self._TICK.finditer(self.html)
+                       if "unasked" in tick.group("flags")})
 
     @property
     def services(self) -> list[str]:

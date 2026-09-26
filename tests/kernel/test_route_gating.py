@@ -202,7 +202,7 @@ class UnauthenticatedTests(GatingTestCase):
                      "/distrakt/fragments/day-label", "/distrakt/fragments/details",
                      "/distrakt/fragments/details/season", "/distrakt/fragments/search",
                      "/distrakt/fragments/seasons",
-                     "/distrakt/fragments/search-movie"):
+                     "/distrakt/fragments/search-movie", "/distrakt/fragments/import"):
             with self.subTest(path=path):
                 self.assertEqual(self.client.get(path).status_code, 401)
         for path in ("/api/distrakt/refresh", "/api/distrakt/import",
@@ -210,7 +210,8 @@ class UnauthenticatedTests(GatingTestCase):
                      "/api/distrakt/add", "/api/distrakt/abandon",
                      "/api/distrakt/acknowledge-return",
                      "/api/distrakt/unknown-add", "/api/distrakt/unknown-resume",
-                     "/api/distrakt/unknown-dismiss",
+                     "/api/distrakt/unknown-dismiss", "/api/distrakt/unknown-snooze",
+                     "/api/distrakt/rewatch-start", "/api/distrakt/rewatch-complete",
                      "/api/distrakt/add-completed", "/api/distrakt/backfill/survey",
                      "/api/distrakt/backfill/apply", "/api/distrakt/add-movie",
                      "/api/distrakt/remove-movie"):

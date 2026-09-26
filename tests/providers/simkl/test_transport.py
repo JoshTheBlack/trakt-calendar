@@ -170,6 +170,30 @@ class PostPacerTests(TransportStateTestCase):
         self.assertEqual(len(sleep.durations), 1)
 
 
+class UnreachableSimklTests(TransportStateTestCase):
+    """A Simkl that could not be reached is a source that could not answer,
+    which every port reader degrades — not an httpx exception they were never
+    told to expect."""
+
+    async def test_a_data_read_reports_it_as_unavailable(self):
+        from app.providers.base import SourceUnavailable
+        client = FakeClient([httpx.ConnectError("boom")])
+        with self.assertRaises(SourceUnavailable):
+            await transport.send_or_unavailable(client, "GET", URL, pool=transport.CATALOG_POOL)
+
+    async def test_the_calendar_cdn_read_translates_it(self):
+        """The CDN read called `send` directly and was one of the two callers
+        that let the ConnectError through to the calendar fill."""
+        from app.providers.base import SourceUnavailable
+        from app.providers.simkl import calendar as simkl_calendar
+        with patch.object(transport, "cdn_client",
+                          return_value=FakeClient([httpx.ConnectError("boom")])):
+            with self.assertRaises(SourceUnavailable):
+                await simkl_calendar._conditional_get(
+                    simkl_calendar._archive_url(2026, 7, "tv.json"), consumer="shows",
+                    revalidate=False)
+
+
 class CatalogPacerTests(TransportStateTestCase):
     """Catalogue GETs leave at a bounded rate.
 

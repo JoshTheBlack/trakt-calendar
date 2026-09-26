@@ -1,0 +1,71 @@
+{# WHAT THE IMPORT DIALOG OFFERS — routes.import_fragment's answer.
+
+   EVERY ROW TICKED, so importing everything is one press, and each can be
+   unticked, so a month can be taken selectively without going back to the
+   calendar to mark what is not wanted. A box posts `pick:<key>|<season>` only
+   while ticked (htmx's json encoding sends a checked box and leaves an unchecked
+   one out), and the route re-reads the offer and files only what those name.
+
+   THE COUNT COMES FIRST, because the number is what decides whether to go on or
+   to go and tidy the calendar's filters first.
+
+   TITLES NOT DESCRIBED YET ARE NAMED, NOT OFFERED: until their genres, country
+   and network arrive, the viewer's filters cannot rule on them, and an import
+   writes a row that stays. Naming them says why a title the calendar just
+   gained is missing here, and that it will not be missing for long.
+
+   Context: `rows` [{ref, title, season, network, kind}], `ticked` (whether the
+   boxes start ticked), `undescribed` (titles),
+   `note` (why nothing can be offered, when nothing can), `month_query`. #}
+{% if note %}
+<p class="distrakt-note distrakt-warn">{{ note }}</p>
+{% else %}
+{% if undescribed %}
+<p class="distrakt-note distrakt-import-pending">{{ undescribed | length }}
+    title{{ '' if undescribed | length == 1 else 's' }} on this month's calendar
+    {{ 'is' if undescribed | length == 1 else 'are' }} still being looked up, so your
+    filters can't be checked against {{ 'it' if undescribed | length == 1 else 'them' }}
+    yet: {{ undescribed | join(', ') }}. Open Import again in a minute.</p>
+{% endif %}
+{% if not rows %}
+{% if not undescribed %}
+<p class="distrakt-note">Nothing new: every premiere your calendar shows for this month is
+    already on it, or filtered out, or marked not watching.</p>
+{% endif %}
+{% else %}
+<form hx-post="/api/distrakt/import{{ month_query }}" hx-json-enc hx-boost="false"
+      hx-target="#distraktShowList"
+      hx-swap="innerHTML swapEmpty:false show:top showTarget:.row-marked">
+    <p class="distrakt-note"><strong>{{ rows | length }}</strong> premiere{{ '' if rows | length == 1 else 's' }}
+        on your calendar for this month {{ 'is' if rows | length == 1 else 'are' }} not on it yet.
+        Untick any you don't want. If the list is long, your calendar's filters and
+        not-watching marks are what shorten it.</p>
+    {#- TICK ALL / UNTICK ALL ARE THE LIST DRAWN AGAIN, not a script walking the
+        boxes: the server already draws every box, so drawing them all ticked or
+        all clear is one more answer from the same route.
+        `hx-json-enc="false"` BECAUSE THE FORM AROUND THEM CARRIES IT, and the
+        extension reads the attribute from any ancestor: on these GETs it went
+        looking for a body to encode, found none, and threw before any request
+        was sent. -#}
+    <p class="distrakt-import-toggle">
+        <button type="button" class="btn-ghost small" hx-get="/distrakt/fragments/import{{ month_query }}&amp;ticked=all"
+                hx-json-enc="false" hx-target="#importBody" hx-swap="innerHTML">Tick all</button>
+        <button type="button" class="btn-ghost small" hx-get="/distrakt/fragments/import{{ month_query }}&amp;ticked=none"
+                hx-json-enc="false" hx-target="#importBody" hx-swap="innerHTML">Untick all</button>
+    </p>
+    <ul class="distrakt-import-list">
+        {%- for row in rows %}
+        <li><label>
+            <input type="checkbox" name="pick:{{ row.ref }}" value="1"{{ " checked" if ticked }} autocomplete="off">
+            <strong>{{ row.title or 'Untitled' }}</strong> S{{ '%02d' % row.season }}
+            <span class="distrakt-import-meta">{{ row.kind }}{% if row.network %} · {{ row.network }}{% endif %}</span>
+        </label></li>
+        {%- endfor %}
+    </ul>
+    <div class="modal-foot">
+        <button type="button" class="btn-ghost" command="close" commandfor="importModal">Cancel</button>
+        <button type="submit" class="btn-primary">Import selected</button>
+    </div>
+</form>
+{% endif %}
+{% endif %}

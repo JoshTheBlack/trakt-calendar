@@ -1013,7 +1013,7 @@ async def fetch_progress_details(settings: Settings,
             # entirely in its body, and the response cache is keyed by URL — two
             # different rosters would share one key. It is also one person's
             # viewing, which is the other reason.
-            resp = await transport.send(
+            resp = await transport.send_or_unavailable(
                 client, "POST", url, pool=transport.SYNC_POOL,
                 headers=transport.api_headers(settings, private=True),
                 json=[{"simkl": show_id} for show_id in batch])

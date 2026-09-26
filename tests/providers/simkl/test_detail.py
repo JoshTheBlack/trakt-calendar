@@ -133,7 +133,7 @@ class TheModalsFieldSetTests(unittest.IsolatedAsyncioTestCase):
     # lookups this class is about stay two.
     TITLE = {"title": "A Show", "ids": {"simkl": 55}, "overview": "Words.",
              "network": "TV Tokyo", "genres": ["Game Show"],
-             "trailers": [{"youtube": "abc123"}]}
+             "trailers": [{"youtube": "abc123DEF_-"}]}
 
     async def _details(self, season=1):
         calls = []
@@ -183,7 +183,21 @@ class TheModalsFieldSetTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_bare_youtube_id_becomes_a_url_here_and_not_in_the_renderer(self):
         got, _calls = await self._details()
-        self.assertEqual(got["trailer"], "https://www.youtube.com/watch?v=abc123")
+        self.assertEqual(got["trailer"], "https://www.youtube.com/watch?v=abc123DEF_-")
+
+    async def test_a_trailer_naming_no_video_is_not_offered(self):
+        """A value that names no video used to become a watch URL anyway — a
+        trailer button that opened YouTube's error page. A later entry that does
+        name one is used instead."""
+        unreadable = {**self.TITLE, "trailers": [{"youtube": "https://youtu.be/EhV"},
+                                                 {"youtube": "@RealTime"}]}
+        with patch.dict(self.TITLE, unreadable):
+            got, _calls = await self._details()
+        self.assertEqual(got["trailer"], "")
+        with patch.dict(self.TITLE, {"trailers": [{"youtube": "274574"},
+                                                  {"youtube": "dQw4w9WgXcQ"}]}):
+            got, _calls = await self._details()
+        self.assertEqual(got["trailer"], "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 
     async def test_a_title_simkl_cannot_place_still_answers_with_every_key(self):
         """Simkl's "not found" is a 200 with a body that is not a title, so the
@@ -467,7 +481,7 @@ class SeriesGapFillTests(unittest.IsolatedAsyncioTestCase):
     THIN = {"overview": "", "trailers": [], "network": "", "year": 2026,
             "status": "tba", "genres": ["drama"], "rating": 7.4}
     SERIES = {"overview": "Herbivores and carnivores.", "network": "Fuji TV",
-              "trailers": [{"youtube": "abc123"}], "year": 2019, "status": "ended",
+              "trailers": [{"youtube": "abc123DEF_-"}], "year": 2019, "status": "ended",
               "genres": ["drama", "school"], "rating": 7.8}
 
     async def _details(self, simkl_id, season, per_title):
@@ -484,7 +498,7 @@ class SeriesGapFillTests(unittest.IsolatedAsyncioTestCase):
     async def test_an_undescribed_season_takes_the_series_description(self):
         got = await self._details(2831384, 3, {2831384: self.THIN, 1034467: self.SERIES})
         self.assertEqual(got["overview"], "Herbivores and carnivores.")
-        self.assertEqual(got["trailer"], "https://www.youtube.com/watch?v=abc123")
+        self.assertEqual(got["trailer"], "https://www.youtube.com/watch?v=abc123DEF_-")
         self.assertEqual(got["network"], "Fuji TV")
 
     async def test_the_seasons_own_facts_are_not_overwritten(self):

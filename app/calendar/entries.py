@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import unicodedata
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -189,8 +190,10 @@ ON CONFLICT(source, media, source_id) DO UPDATE SET
 # column would need the same `CASE WHEN enriched = 1` its neighbours carry.
 
 # `from_search` IS THE LAST COLUMN AND THE CALLER STATES IT. A fill writes 0 and
-# the calendar search writes 1, which is what lets the fill's delete spare rows
-# it would never put back — see store_loose_airings and MIGRATION_37. Because
+# every airing NO FEED OFFERED writes 1 — a calendar search followed, and a title
+# added to somebody's tracker (app/distrakt/arrival.py) — which is what lets the
+# fill's delete spare rows it would never put back. The name is narrower than
+# the meaning, "not from a feed"; see store_loose_airings and MIGRATION_37. Because
 # this is INSERT OR REPLACE on the airing's natural key, a feed row for the same
 # airing overwrites a searched one and returns it to 0, so the exemption ends the
 # moment the service starts listing the title itself.
@@ -669,7 +672,7 @@ async def stored_values(title_key: str, by_source: dict[str, str]) -> dict[str, 
 
     `title_key` is the SHARED identity (app/providers/base.py's `resolve_key`,
     stringified) that every row carries and every card sends as its `key` — the
-    same indexed column `slugs_for` above reads by.
+    same indexed column `known_about` below reads by.
     """
     wanted = {field: name for field in SHOWN_FIELDS
               if (name := str(by_source.get(field) or "")) in _SOURCE_NAMES}
@@ -721,55 +724,71 @@ async def group_identity(title_key: str) -> tuple[str, dict[str, str], str] | No
     return str(rows[0]["media"]), collect_ids(merged), title
 
 
-async def slugs_for(title_keys) -> dict[str, dict[str, str]]:
-    """`{title key: {"<source>_slug": name}}` for the titles named, and only
-    those.
+async def sources_airing(endpoint_key: str, title_key: str, season: int | None) -> set[str]:
+    """The sources with a stored airing of `title_key` (that season, or with no
+    season for a film) on `endpoint_key` — which services' calendars already
+    draw it there. A keyed read on the airings' own index."""
+    if season is None:
+        rows = await db.fetch_all(
+            "SELECT DISTINCT source FROM calendar_airings "
+            "WHERE endpoint = ? AND title_key = ?", (endpoint_key, str(title_key)))
+    else:
+        rows = await db.fetch_all(
+            "SELECT DISTINCT source FROM calendar_airings "
+            "WHERE endpoint = ? AND title_key = ? AND season = ?",
+            (endpoint_key, str(title_key), int(season)))
+    return {str(row["source"]) for row in rows}
 
-    A KEYED READ WHERE THERE USED TO BE A WALK, and the difference is the whole
-    reason this exists. The tracker fills in the names it is missing from what
-    the calendar already knows, and it did that by materialising EVERY stored
-    airing and grouping them in memory to build an index of the lot. Measured on
-    a live instance: 3.8 seconds to learn two names, 2.7 of them blocking the
-    event loop, on every add and every remove — because a roster edit changes
-    what is owed, which is half of the signature that guards the walk.
 
-    `title_key` IS ALREADY THE ANSWER TO "WHICH TITLE IS THIS". It is
-    `resolve_key` stringified, written onto every row at store time and indexed,
-    which is exactly the identity the tracker keys its own rows by — so the
-    question "what does the calendar call these few titles" is an indexed lookup
-    on a handful of keys rather than a reduction over the whole table.
+@dataclass(frozen=True)
+class StoredTitle:
+    """One service's stored record of a title: that service's own id map for it,
+    its own name for the title, and the network it states. Empty network means
+    that service has not said — a Simkl row waits for enrichment to fill it."""
+    ids: dict
+    network: str
+    title: str = ""
 
-    READ PER SOURCE, NOT OFF A MERGE. A title both services list has two names
-    and a merged id map can only carry one; each row here is one service's own
-    record, so `simkl_slug` comes from Simkl's row and `trakt_slug` from Trakt's,
-    with nothing to disambiguate.
 
-    THE NAMESPACED SPELLING IS PREFERRED where a row has one, falling back to the
-    bare `slug` that older rows carry — both mean the same thing, and taking the
-    explicit one first keeps this from depending on the per-source reading
-    staying correct for ever.
+async def known_about(title_keys) -> dict[str, dict[str, StoredTitle]]:
+    """`{title key: {source: StoredTitle}}` for the titles named, and only those.
+
+    WHAT THE STORED CALENDAR ALREADY KNOWS ABOUT A TITLE, PER SERVICE — for the
+    tracker, which files rows under the same `title_key` identity and arrives at
+    many of them knowing less than this table does: a history-built row has no
+    network, and a row filed off one service's calendar has only that service's
+    ids. Reading it costs one indexed query and no outbound call.
+
+    A KEYED READ, NEVER A WALK. `title_key` is `resolve_key` stringified, written
+    onto every row at store time and indexed — exactly the identity the tracker
+    keys its own rows by. The tracker once answered this by materialising every
+    stored airing: measured at 3.8 seconds to learn two names, 2.7 of them
+    blocking the event loop.
+
+    PER SOURCE, NEVER MERGED. A title both services list has two names, two ids
+    and possibly two networks (Simkl says who aired it, Trakt who carries it); a
+    merged map can carry one of each, and each row here is one service's own
+    record, so whose answer is whose needs no disambiguating.
     """
     keys = [str(k) for k in dict.fromkeys(title_keys or ()) if k]
-    if not keys:
-        return {}
-    # Chunked because SQLite has a bound-parameter ceiling (999 by default) and
-    # the caller's list is however many names an account happens to owe.
-    out: dict[str, dict[str, str]] = {}
+    out: dict[str, dict[str, StoredTitle]] = {}
+    # Chunked because SQLite has a bound-parameter ceiling (999 by default).
     for start in range(0, len(keys), 400):
         chunk = keys[start:start + 400]
         rows = await db.fetch_all(
-            "SELECT title_key, source, ids_json FROM calendar_titles "
-            f"WHERE title_key IN ({', '.join('?' * len(chunk))})", tuple(chunk))
+            "SELECT title_key, source, ids_json, network, title FROM calendar_titles "
+            f"WHERE title_key IN ({', '.join('?' * len(chunk))}) "
+            "ORDER BY title_key, source, network = '', source_id", tuple(chunk))
         for row in rows:
-            ids = json.loads(row["ids_json"] or "{}") if row["ids_json"] else {}
-            source = str(row["source"])
-            value = ids.get(f"{source}_slug") or ids.get("slug")
-            if value in (None, ""):
-                continue
-            # First writer wins, so two rows naming one title give a stable
-            # answer rather than one that depends on the order they came back.
+            ids = json.loads(row["ids_json"]) if row["ids_json"] else {}
+            # ONE ROW PER (title, source), CHOSEN BY THE ORDER ABOVE: a service
+            # can hold several rows for one title (Simkl lists an anime's seasons
+            # as separate titles), and the one stating a network is preferred,
+            # then the lowest id, so the answer never depends on scan order.
             out.setdefault(str(row["title_key"]), {}).setdefault(
-                f"{source}_slug", str(value))
+                str(row["source"]),
+                StoredTitle(ids=dict(ids), network=str(row["network"] or ""),
+                            title=str(row["title"] or "")))
     return out
 
 

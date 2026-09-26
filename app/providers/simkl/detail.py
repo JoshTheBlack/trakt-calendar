@@ -21,9 +21,10 @@ import asyncio
 import logging
 from datetime import date, datetime
 
+from ... import youtube
 from ...config import Settings
 from .. import season as season_rules
-from ..base import Media, SeasonsAnswer
+from ..base import Media, SeasonsAnswer, TitleFacts
 from . import _ids, _naming, titles, transport
 
 logger = logging.getLogger(__name__)
@@ -254,26 +255,51 @@ def _modal_episodes(episodes: list[dict], season: int) -> list[dict]:
     return rows
 
 
+async def fetch_title_facts(settings: Settings, simkl_id, media: Media) -> TitleFacts:
+    """DetailPort.fetch_title_facts: Simkl's own name for the title `simkl_id`
+    names, and its network.
+
+    A SHOW'S NETWORK COMES FROM ITS SERIES WHEN THE TITLE STATES NONE. Simkl fills
+    the network in on the series root and leaves it null on every later
+    season-title (see _naming.network_of_series, where that was measured), and a
+    blank there is a gap in Simkl's record rather than a season aired nowhere.
+    THE TITLE IS THIS TITLE'S OWN, a season-title's included — the name Simkl
+    lists it under.
+    """
+    if Media(media) == Media.SHOW:
+        naming = await _naming.fetch(settings, simkl_id)
+        return TitleFacts(naming.title,
+                          await _naming.network_of_series(settings, simkl_id, naming))
+    fields = await titles.fetch_title(settings, int(simkl_id), media) or {}
+    return TitleFacts(str(fields.get("title") or ""), str(fields.get("network") or ""))
+
+
 def _trailer_url(trailers) -> str:
-    """The first trailer Simkl lists, as a watchable URL, or "".
+    """The first trailer Simkl lists that names a video, as a watchable URL, or "".
 
-    Simkl gives `[{"name": ..., "youtube": "<id>", "size": ...}]` — a bare
-    YouTube id rather than a link — so the URL is built here. Building it in the
-    provider rather than in the renderer is what lets the modal's `trailer` key
-    mean the same thing whoever filled it in: Trakt sends a finished URL, and a
-    renderer that had to know which source it was looking at would be a second
-    place the two shapes are reconciled.
+    Simkl gives `[{"name": ..., "youtube": "<id>", "size": ...}]` — documented as
+    a bare YouTube id rather than a link — so the URL is built here. Building it
+    in the provider rather than in the renderer is what lets the modal's
+    `trailer` key mean the same thing whoever filled it in: Trakt sends a finished
+    URL, and a renderer that had to know which source it was looking at would be
+    a second place the two shapes are reconciled.
 
-    THE FIRST ONE, because there is no basis for choosing another: the list is
-    unordered as far as the payload says, and 2316 of 7698 titles on a live
-    instance carry one at all.
+    THE FIELD IS NOT ALWAYS AN ID, and wrapping whatever it held in a watch URL
+    offered a trailer button that went to YouTube's error page — a truncated
+    URL, a channel handle, a number, free text (measured on a live instance: 38
+    of 6,259 titles offering one). app/youtube.py reads which video a value names,
+    and a value naming none is SKIPPED, because an offered trailer that goes
+    nowhere is worse than no trailer.
+
+    THE FIRST READABLE ONE, because there is no other basis for choosing: the
+    list is unordered as far as the payload says.
     """
     for entry in trailers or []:
         if not isinstance(entry, dict):
             continue
-        youtube = str(entry.get("youtube") or "").strip()
-        if youtube:
-            return f"https://www.youtube.com/watch?v={youtube}"
+        url = youtube.watch_url(entry.get("youtube"))
+        if url:
+            return url
     return ""
 
 

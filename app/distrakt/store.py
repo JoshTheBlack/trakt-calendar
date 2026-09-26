@@ -54,6 +54,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import AsyncIterator, Iterable, Mapping
+from typing import NamedTuple
 from datetime import date
 from enum import StrEnum
 
@@ -852,6 +853,20 @@ async def remove_month_movie(user_id: int, month: str, key) -> bool:
     return True
 
 
+async def months_with_unkeyed_films(user_id: int) -> list[tuple[str, list[dict]]]:
+    """(month, its stored film list) for every month whose list still holds a
+    film in the shape written before films had keys — `{trakt_id, title, year,
+    watched_at}`, no `key` — which migration 18 deliberately left alone.
+
+    Found by the one field only that shape has, so a month already repaired costs
+    nothing to skip: the current shape carries its ids in an `ids` map.
+    """
+    rows = await db.fetch_all(
+        "SELECT month, movies_json FROM distrakt_months "
+        "WHERE user_id = ? AND movies_json LIKE '%\"trakt_id\"%'", (user_id,))
+    return [(row["month"], list(json.loads(row["movies_json"]) or [])) for row in rows]
+
+
 async def set_month_movies(user_id: int, month: str, movies: list[dict]) -> None:
     """Replace just the films a CLOSED month snapshotted, leaving its records and
     its closed flag alone.
@@ -1391,64 +1406,103 @@ async def remove_season_from_month(user_id: int, month: str, key: ItemKey,
 # an id a record did not have when it was written
 # ---------------------------------------------------------------------------
 
-# Which slug column each service id column owes a value to. A slug is OWED only
-# where that service's own id is present: the id is the service saying it knows
-# this title, and without one there is no reason to think it ever will. Asking
-# for a slug on every row instead would keep a Simkl-only title permanently owing
-# a Trakt name — a debt nothing could ever settle, which turns "is there work to
-# do" into a question that answers yes for ever.
-_SLUG_OWED_BY = {"trakt_id": "trakt_slug", "simkl_id": "simkl_slug"}
+# What a stored record can be short of that the stored calendar may know, as
+# ID_KEYS spell each one with its column beside it: each service's own id and
+# its own name for the title, and each shared id the row is not filed under.
+# THE FILING ID NEVER APPEARS OWED: it is what the row is addressed by, so it is
+# present by definition — and `learn_ids` could not reach it anyway.
+_OWABLE_IDS = {"trakt": "trakt_id", "simkl": "simkl_id",
+               "trakt_slug": "trakt_slug", "simkl_slug": "simkl_slug",
+               "tmdb": "tmdb", "tvdb": "tvdb", "imdb": "imdb", "mal": "mal"}
+NETWORK = "network"
 
 
-async def identities_missing_slugs(user_id: int) -> list[tuple[ItemKey, tuple[str, ...]]]:
-    """Every identity this viewer holds a row for that knows a service's id but
-    not what that service CALLS the title, paired with WHICH names it is short of.
+class Owed(NamedTuple):
+    """One identity's debt: what it is short of, and every id its rows already
+    hold (merged across rows and tables) — what decides which service's words
+    it should carry, and what a stored-calendar match may only add to — and the
+    network one of its rows states, "" when none does."""
+    key: ItemKey
+    names: tuple[str, ...]
+    ids: dict
+    network: str = ""
 
-    THE NAMES ARE PART OF THE ANSWER, not something the caller may assume. A
-    title only one service lists is the ordinary case, and handing back the
-    identity alone invites a caller to write whatever names it found — which puts
-    a Trakt slug on a title Trakt never named. That row then looks linkable to a
-    service it holds no id for, and the link renders for a service that cannot be
-    asked about it at all.
 
-    PER IDENTITY, NOT PER ROW, because that is the unit a name is true of and the
-    unit `learn_ids` writes: a title's Simkl slug is as true of a frozen record
-    from last March as of the row on today's list. Answering per row would have
-    the caller ask the same question once per season of one show.
+async def identities_owing(user_id: int) -> list[Owed]:
+    """Every identity this viewer holds a row for that is short of an id, a
+    service's name for the title, or a network — with WHICH of them.
 
-    BOTH RECORD TABLES, and the settled half is the point. A verdict's counts are
-    never recomputed, so no live pass visits it — which is exactly why a record
-    that settled before the two services' slugs were told apart has no other way
-    to learn one. An identity short of one name in one table and another name in
-    the other is owed both, so the two tables' answers are merged rather than
-    concatenated.
+    THE NAMES ARE PART OF THE ANSWER, not something the caller may assume: a
+    title only one service lists is the ordinary case, and a caller handed the
+    identity alone would write whatever it found.
+
+    A SERVICE'S ID IS OWED WHEREVER IT IS MISSING, not only its name, and so is
+    every shared id. It used to be names alone — owed only where the row already
+    held that service's id — which left every row filed off one service
+    permanently half-linked although the stored calendar held the other
+    service's own record of the same title. MEASURED on a live instance: 69
+    identities owing a service id, 29 of them answerable from the stored
+    calendar; and history-written rows missing tvdb and imdb on 13 of the 14
+    titles that other paths had filed with both.
+
+    PER IDENTITY, NOT PER ROW, because that is the unit an id or a name is true of
+    and the unit `learn_ids` writes. BOTH RECORD TABLES, and the settled half is
+    the point: a verdict is never recomputed, so no live pass visits it.
     """
     # THE FLAG COLUMNS ARE ALIASED AWAY FROM THE COLUMNS THEY ARE ABOUT. SQLite
     # resolves a name in HAVING against the source columns before the select
     # aliases, so `... AS trakt_slug ... HAVING trakt_slug = 1` compares the raw
-    # (and here always NULL) column and matches nothing at all — a silent empty
-    # answer rather than an error, which reads exactly like "no work to do".
-    owed = {slug_column: f"owes_{slug_column}" for slug_column in _SLUG_OWED_BY.values()}
+    # column and matches nothing — a silent empty answer that reads exactly like
+    # "no work to do".
+    owable = {**_OWABLE_IDS, NETWORK: NETWORK}
     flags = ", ".join(
-        f"MAX(CASE WHEN {id_column} IS NOT NULL AND {id_column} != '' "
-        f"AND ({slug_column} IS NULL OR {slug_column} = '') THEN 1 ELSE 0 END) "
-        f"AS {owed[slug_column]}"
-        for id_column, slug_column in _SLUG_OWED_BY.items())
+        f"MAX(CASE WHEN {column} IS NULL OR {column} = '' THEN 1 ELSE 0 END) AS owes_{name}"
+        for name, column in owable.items())
+    held = ", ".join(f"MAX({column}) AS has_{name}"
+                     for name, column in {**_OWABLE_IDS, NETWORK: NETWORK}.items())
     selected = ", ".join(IDENTITY_COLUMNS)
-    having = " OR ".join(f"{alias} = 1" for alias in owed.values())
+    having = " OR ".join(f"owes_{name} = 1" for name in owable)
     sql = " UNION ALL ".join(
-        f"SELECT {selected}, {flags} FROM {table} WHERE user_id = ? "
+        f"SELECT {selected}, {flags}, {held} FROM {table} WHERE user_id = ? "
         f"GROUP BY {selected} HAVING {having}"
         for table in ("distrakt_month_records", "distrakt_user_seasons"))
     rows = await db.fetch_all(sql, (user_id, user_id))
 
-    merged: dict[tuple, set[str]] = {}
+    names: dict[tuple, set[str]] = {}
+    ids: dict[tuple, dict] = {}
+    networks: dict[tuple, str] = {}
     for row in rows:
         address = tuple(str(row[column]) for column in IDENTITY_COLUMNS)
-        names = merged.setdefault(address, set())
-        names.update(slug for slug, alias in owed.items() if row[alias])
-    return [(ItemKey(*address), tuple(sorted(names)))
-            for address, names in merged.items()]
+        names.setdefault(address, set()).update(
+            name for name in owable if row[f"owes_{name}"])
+        for name in _OWABLE_IDS:
+            if row[f"has_{name}"] not in (None, ""):
+                ids.setdefault(address, {}).setdefault(name, row[f"has_{name}"])
+        if row[f"has_{NETWORK}"]:
+            networks.setdefault(address, str(row[f"has_{NETWORK}"]))
+    return [Owed(ItemKey(*address), tuple(sorted(owed)), ids.get(address, {}),
+                 networks.get(address, ""))
+            for address, owed in names.items()]
+
+
+async def learn_network(user_id: int, key: ItemKey, network: str) -> int:
+    """Fill a blank network on every row of one title. Returns rows changed.
+
+    ADD-ONLY, for `learn_ids`' reason: a network already stored came off the
+    payload the record was built from, and one arriving here is a join. A
+    network is a fact about the SHOW, so it addresses the identity, not a season.
+    """
+    if not str(network or "").strip():
+        return 0
+    address = (user_id, key.media, key.match_source, key.match_id)
+
+    def _work(conn: db.Connection) -> int:
+        return sum(conn.execute(
+            f"UPDATE {table} SET network = ? WHERE user_id = ? AND {_IDENTITY_MATCH} "
+            "AND (network IS NULL OR network = '')", (network, *address)).rowcount
+            for table in ("distrakt_month_records", "distrakt_user_seasons"))
+
+    return await db.transaction(_work)
 
 
 async def learn_ids(user_id: int, key: ItemKey, ids: Mapping) -> int:
@@ -1521,12 +1575,30 @@ async def learn_ids(user_id: int, key: ItemKey, ids: Mapping) -> int:
 #   VERDICT — a completed record no service backs any more. The question is a
 #   STANDING CONDITION, true on every load until something changes it, so
 #   declining has to be permanent or it returns for ever.
+#
+#   FOR THIS MONTH — a history question the viewer asked to stop hearing about
+#   until the month turns. Chosen for the re-watch offers, where an occasional
+#   episode watched again is exactly what somebody does not want to answer every
+#   evening. It covers every play in the month it was made in and none in a later
+#   one, so it lapses by the calendar rather than by anything being watched.
 DISMISSAL_HISTORY = "history"
 DISMISSAL_VERDICT = "verdict"
+DISMISSAL_MONTH = "month"
+
+
+class Refusal(NamedTuple):
+    """One stored refusal: which kind, when, and — for a history refusal made
+    since the plays were recorded — the latest play of each episode it answered,
+    as {episode number: epoch seconds}. None where the row predates that, which
+    leaves `when` as its watermark."""
+    kind: str
+    when: int
+    covered: dict[int, int] | None = None
 
 
 async def dismiss_prompt(user_id: int, key: ItemKey, season: int,
-                         kind: str = DISMISSAL_VERDICT) -> None:
+                         kind: str = DISMISSAL_VERDICT,
+                         covered: dict[int, int] | None = None) -> None:
     """Record that the viewer declined one of the page's questions about a season.
 
     `kind` SAYS WHICH QUESTION, and therefore how long the refusal lasts — see the
@@ -1539,15 +1611,25 @@ async def dismiss_prompt(user_id: int, key: ItemKey, season: int,
     REFRESHES it rather than leaving the first one standing. Declining the same
     season a second time has to move the mark, or the play that prompted the
     second refusal would still read as newer than the first and ask a third time.
+
+    `covered` IS WHAT A HISTORY REFUSAL ANSWERED, per episode, and when given it
+    replaces the timestamp as the mark: a play of an episode it does not name,
+    or a later play of one it does, asks again. A clock cannot tell apart two
+    plays a service stamped in the same minute, or a play logged with an earlier
+    date, and both are watching more. Also refreshed on every write, for the
+    same reason as the timestamp.
     """
+    covered_json = (json.dumps({str(n): int(t) for n, t in covered.items()})
+                    if covered is not None else None)
     await db.execute(
         "INSERT INTO distrakt_prompt_dismissals "
-        "(user_id, media, match_source, match_id, season, created_at, kind) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "(user_id, media, match_source, match_id, season, created_at, kind, covered_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(user_id, media, match_source, match_id, season) DO UPDATE SET "
-        "created_at = excluded.created_at, kind = excluded.kind",
+        "created_at = excluded.created_at, kind = excluded.kind, "
+        "covered_json = excluded.covered_json",
         (user_id, key.media, key.match_source, key.match_id, int(season),
-         db.now(), str(kind)),
+         db.now(), str(kind), covered_json),
     )
 
 
@@ -1576,8 +1658,8 @@ async def clear_prompt_dismissal(user_id: int, key: ItemKey, season: int) -> Non
     )
 
 
-async def dismissed_prompts(user_id: int) -> dict[tuple[str, int], tuple[str, int]]:
-    """What this viewer has said no to: {(item key, season): (kind, when)}.
+async def dismissed_prompts(user_id: int) -> dict[tuple[str, int], Refusal]:
+    """What this viewer has said no to: {(item key, season): Refusal}.
 
     A MAPPING RATHER THAN A SET, and every existing caller is unaffected by that:
     `address in declined` reads a dict exactly as it read a set, which is what
@@ -1590,15 +1672,29 @@ async def dismissed_prompts(user_id: int) -> dict[tuple[str, int], tuple[str, in
     two questions.
     """
     rows = await db.fetch_all(
-        "SELECT media, match_source, match_id, season, kind, created_at "
+        "SELECT media, match_source, match_id, season, kind, created_at, covered_json "
         "FROM distrakt_prompt_dismissals WHERE user_id = ?",
         (user_id,),
     )
     return {
         (item_key(r["media"], r["match_source"], r["match_id"]), int(r["season"])):
-            (str(r["kind"] or DISMISSAL_VERDICT), int(r["created_at"]))
+            Refusal(str(r["kind"] or DISMISSAL_VERDICT), int(r["created_at"]),
+                    _covered(r["covered_json"]))
         for r in rows
     }
+
+
+def _covered(stored) -> dict[int, int] | None:
+    """A refusal's stored coverage, or None for a row that has none. A value
+    that does not read as {episode: epoch} is treated as absent, so the
+    refusal falls back to the timestamp it was written with rather than failing
+    the page."""
+    if not stored:
+        return None
+    try:
+        return {int(n): int(t) for n, t in json.loads(stored).items()}
+    except (ValueError, TypeError, AttributeError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -1621,7 +1717,8 @@ async def dismissed_prompts(user_id: int) -> dict[tuple[str, int], tuple[str, in
 
 
 async def open_prompt(user_id: int, key: ItemKey, season: int, number: int,
-                      title: str, ids: dict, watched_at: str = "") -> None:
+                      title: str, ids: dict, watched_at: str = "", *,
+                      supersede: bool = False) -> None:
     """Remember one unanswered play, so the question survives the request that
     raised it.
 
@@ -1629,13 +1726,21 @@ async def open_prompt(user_id: int, key: ItemKey, season: int, number: int,
     reconcile_history keeps the FIRST play it saw for a season, so a later
     episode of a season already being asked about must not overwrite the episode
     number the viewer is looking at on screen.
+
+    `supersede` IS THE ONE EXCEPTION: a play that changes WHICH question is being
+    asked. A finished season's finale watched again is an offer to record the
+    season completed, not to start a re-watch, so it replaces a re-watch offer
+    still waiting for an answer rather than queuing behind it.
     """
+    on_conflict = ("DO UPDATE SET number = excluded.number, title = excluded.title, "
+                   "ids_json = excluded.ids_json, watched_at = excluded.watched_at"
+                   if supersede else "DO NOTHING")
     await db.execute(
         "INSERT INTO distrakt_open_prompts "
         "(user_id, media, match_source, match_id, season, number, title, ids_json, "
         " watched_at, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(user_id, media, match_source, match_id, season) DO NOTHING",
+        f"ON CONFLICT(user_id, media, match_source, match_id, season) {on_conflict}",
         (user_id, key.media, key.match_source, key.match_id, int(season), int(number),
          str(title or ""), json.dumps(dict(ids or {})), str(watched_at or ""), db.now()),
     )

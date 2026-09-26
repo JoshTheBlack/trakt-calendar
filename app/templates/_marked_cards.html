@@ -21,8 +21,14 @@
    pointing at nothing — `_day_chip.html` already draws that state and already
    knows how to travel out of band, so nothing here decides it.
 
+   A TITLE THE READ NO LONGER DRAWS AT ALL IS TAKEN OFF the page (`gone`, its
+   key): the card that was pressed is proof it was on screen, so a read with none
+   of it means something changed since — its details arriving and naming a
+   country the viewer filters out — and the page is told what a reload shows.
+
    Context: `items` (every airing of the marked title on this month, in the
-   viewer's own reading of it), `chips` and `stats`. #}
+   viewer's own reading of it), `gone`, `chips` and `stats`. #}
 {% for item in items %}{% with oob = true %}{% include "_card.html" %}{% endwith %}{% endfor %}
+{% if gone %}<div hx-swap-oob="delete:.card[data-id='{{ gone }}']"></div>{% endif %}
 {% for chip in chips %}{% with oob = true %}{% include "_day_chip.html" %}{% endwith %}{% endfor %}
 {{ watch_counts.counts(stats, oob=true) }}

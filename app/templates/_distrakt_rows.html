@@ -119,18 +119,20 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
     claim neither of them made. -#}
 {%- set xy = show.counts or (show.watched ~ '/' ~ show.total) -%}
 {%- set counts = (xy ~ (', ' ~ show.cadence if show.cadence else '')) if is_premiere else xy -%}
-{#- New/Returning: premiere (– finale for weekly). Keepup: finale (end date). -#}
+{#- New/Returning: premiere (– finale for weekly). Keepup: finale (end date).
+    A date nobody has announced reads TBA, as the details panel's episode list
+    says it. -#}
 {%- if is_premiere -%}
-{%- set dates = (show.premiere or '?/?') if show.cadence == 'b'
-                else ((show.premiere or '?/?') ~ ' – ' ~ (show.finale or '?/?')) -%}
+{%- set dates = (show.premiere or 'TBA') if show.cadence == 'b'
+                else ((show.premiere or 'TBA') ~ ' – ' ~ (show.finale or 'TBA')) -%}
 {%- elif show.bucket == 'keepup' -%}
-{%- set dates = show.finale or '?/?' -%}
+{%- set dates = show.finale or 'TBA' -%}
 {%- else -%}
 {%- set dates = '' -%}
 {%- endif -%}
 <div class="distrakt-show-row{{ ' abandoned' if show.abandoned }}{{ ' unavailable' if show.unavailable }}{{ ' row-marked' if marked }}"
      title="{{ show.network or '' }}"
-     data-details-open="/distrakt/fragments/details?key={{ show.key | urlencode }}&amp;season={{ show.season }}"
+     data-details-open="/distrakt/fragments/details{{ month_query }}&amp;key={{ show.key | urlencode }}&amp;season={{ show.season }}"
      data-details-heading="{{ show.title }} · S{{ '%02d' % show.season }}">
     {#- Whether these numbers are this load's, first in the row so the column
         reads down as one thing rather than being hunted for beside each row's
@@ -224,14 +226,16 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
    is not part of the month; it is a question, and a question buried under six
    headings is a question nobody answers.
 
-   THREE QUESTIONS SHARE ONE ROW because they read the same way and are answered
-   the same way; only the sentence and what ✓ does differ. Saying no is one
-   statement whichever it was — do not put this season on my list, stop asking —
-   so all three send the same dismissal, which answers with the row REMOVED and
-   nothing else (nothing on the page changed, and recomputing a month to drop one
+   EVERY QUESTION SHARES ONE ROW because they read the same way and are answered
+   the same way; only the sentence, what ✓ does and how long ✗ lasts differ. ✗
+   on a question a play raised means "not for what I have watched so far" and
+   asks again when more is watched; on a verdict nothing backs it means stop
+   asking. The server decides which from the store, and `ask.no_title` says
+   which on the button. All of them send the same dismissal, which answers
+   with the row REMOVED and nothing else (nothing on the page changed, and recomputing a month to drop one
    line would cost a season lookup per listed title).
 
-   `ask.kind` names which of the three this is; the sentence, the ✓ title and the
+   `ask.kind` names which one this is; the sentence, the ✓ title and the
    route it posts to are the server's (routes._ASK_KINDS), because the unbacked
    one's sentence is a comparison between what the month wrote down and what the
    services say now, and only the server holds both halves. #}
@@ -264,10 +268,20 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
         {#- The dismissal takes the ROW out and leaves the month alone. Aimed at
             the row rather than at the button, so a refusal the server could not
             record leaves the question standing to be pressed again. -#}
-        <button type="button" class="btn-ghost small" title="Don't ask about this season again"
+        <button type="button" class="btn-ghost small" title="{{ ask.no_title }}"
                 hx-post="/api/distrakt/unknown-dismiss" hx-json-enc
                 hx-vals='{{ vals | tojson }}'
                 hx-target="closest .distrakt-unknown-row" hx-swap="outerHTML">✗</button>
+        {%- if ask.snooze %}
+        {#- The same refusal lasting to the end of the month rather than to the
+            next play (store.DISMISSAL_MONTH), offered only on the re-watch rows:
+            an episode watched again now and then is the question somebody may
+            not want put to them every evening it happens. -#}
+        <button type="button" class="btn-ghost small" title="Don't ask again this month, whatever else I watch of it"
+                hx-post="/api/distrakt/unknown-snooze" hx-json-enc
+                hx-vals='{{ vals | tojson }}'
+                hx-target="closest .distrakt-unknown-row" hx-swap="outerHTML">Not this month</button>
+        {%- endif %}
     </span>
 </div>
 {% endmacro %}

@@ -468,12 +468,12 @@ async def clone_board(
         # in, with no id map to build in Python.
         conn.execute(
             "INSERT INTO tier_items (board_id, category_id, media, match_source, match_id, "
-            "tmdb, ids_json, title, year, network, season_count, episode_count, runtime, "
-            "user_rating, added_from, rank_in_category, created_at) "
+            "season, tmdb, ids_json, title, year, network, season_count, episode_count, "
+            "runtime, user_rating, added_from, rank_in_category, created_at) "
             "SELECT ?, (SELECT c.id FROM tier_categories c "
             "             JOIN tier_categories o ON o.uid = c.uid "
             "            WHERE c.board_id = ? AND o.id = i.category_id), "
-            "       i.media, i.match_source, i.match_id, i.tmdb, i.ids_json, i.title, i.year, "
+            "       i.media, i.match_source, i.match_id, i.season, i.tmdb, i.ids_json, i.title, i.year, "
             "       i.network, i.season_count, i.episode_count, i.runtime, i.user_rating, "
             "       i.added_from, i.rank_in_category, ? "
             "  FROM tier_items i WHERE i.board_id = ?",
@@ -637,7 +637,7 @@ async def add_titles(
 ) -> int:
     """Add titles to a board's pool, returning how many were actually new.
 
-    Idempotent by way of the board's UNIQUE constraint: re-adding a title that
+    Idempotent by way of the board's unique index: re-adding a title that
     is already on the board — in the pool OR already tiered — does nothing,
     rather than duplicating it or dragging it back out of the tier it is in.
 
@@ -678,16 +678,19 @@ def _insert_item(conn: db.Connection, board_id: int, row: Mapping[str, Any],
 
     The one place a tier_items row is written, so every way a title can arrive —
     a search, an import, a ratings seed — stores exactly the same columns and
-    respects the same UNIQUE.
+    respects the same unique index.
     """
     cur = conn.execute(
         "INSERT INTO tier_items (board_id, category_id, media, match_source, match_id, "
-        "tmdb, ids_json, title, year, network, season_count, episode_count, runtime, "
-        "user_rating, added_from, rank_in_category, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT (board_id, media, match_source, match_id) DO NOTHING",
+        "season, tmdb, ids_json, title, year, network, season_count, episode_count, "
+        "runtime, user_rating, added_from, rank_in_category, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        # NO CONFLICT TARGET: the board's uniqueness is an index over
+        # IFNULL(season, -1) (migration 44), and a named target must match an
+        # index exactly. Any unique index satisfies a bare DO NOTHING.
+        "ON CONFLICT DO NOTHING",
         (board_id, category_id, row["media"], row["match_source"], row["match_id"],
-         row["tmdb"], row["ids_json"], row["title"], row["year"], row["network"],
+         row.get("season"), row["tmdb"], row["ids_json"], row["title"], row["year"], row["network"],
          row["season_count"], row["episode_count"], row["runtime"],
          row["user_rating"], added_from, rank, ts),
     )
@@ -851,9 +854,9 @@ def _remember_removal(conn: db.Connection, board_id: int, item_id: int, ts: int)
     _forget_removal(conn, identity)
     conn.execute(
         "INSERT INTO tier_item_removals (board_id, media, match_source, match_id, "
-        "category_uid, rank_in_category, removed_at, item_json) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (*identity, row["category_uid"], row["rank_in_category"], ts,
+        "season, category_uid, rank_in_category, removed_at, item_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (*identity, row["season"], row["category_uid"], row["rank_in_category"], ts,
          json.dumps({**_item_dict(row), "created_at": row["created_at"]}, sort_keys=True)),
     )
 

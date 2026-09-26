@@ -122,6 +122,28 @@ class UnmarkingClearsLegacySpellingsTests(StateTestCase):
         await calendar_state.set_not_watching(self.user_id, key, True)
         self.assertEqual(await calendar_state.not_watching_ids(self.user_id), {key})
 
+    async def test_a_mark_survives_the_title_key_moving(self):
+        """MEASURED ON A REAL OCTOBER: a Simkl title arrives with no tmdb id and
+        keys as `show:tvdb:482228`; enrichment adds a tmdb id and the same card
+        keys as `show:tmdb:…`. A mark pressed on the first key has to go on
+        covering the card under the second."""
+        marks = {"show:tvdb:482228"}
+        self.assertTrue(calendar_state.marked_by_ids(
+            marks, mark_key="show:tmdb:777", ids={"tvdb": "482228", "tmdb": 777},
+            media="show"))
+        self.assertFalse(calendar_state.marked_by_ids(
+            marks, mark_key="show:tmdb:777", ids={"tvdb": "482228", "tmdb": 777},
+            media="movie"), "a tvdb id is a different title in another medium")
+
+    async def test_a_mark_made_before_the_key_moved_is_cleared_by_the_new_one(self):
+        """The mirror: the card now sends `show:tmdb:777`, the row is still filed
+        under its old title key, and the mark was made under that old key."""
+        await self._store_title("show:tvdb:482228",
+                                {"simkl": 3242587, "tvdb": "482228", "tmdb": 777})
+        await calendar_state.set_not_watching(self.user_id, "show:tvdb:482228", True)
+        await calendar_state.set_not_watching(self.user_id, "show:tmdb:777", False)
+        self.assertEqual(await calendar_state.not_watching_ids(self.user_id), set())
+
     async def test_a_title_nothing_stores_still_unmarks_by_its_own_key(self):
         """The 85 marks naming titles no calendar row can identify: there is
         nothing to expand, and the mark key alone must still come out."""

@@ -1,5 +1,6 @@
 {% extends '_base.html' %}
 {% import '_distrakt_modals.html' as modals %}
+{% import '_distrakt_import.html' as imports %}
 {% set site_suffix = false %}
 {% set progress_bar = true %}
 {% set body_class = 'distrakt-page' %}
@@ -30,11 +31,8 @@
                         calendar_href='/calendar?year=' ~ year ~ '&month=' ~ month,
                         calendar_available=calendar_available,
                         ranker_available=ranker_available, is_admin=is_admin) %}
-        <button type="button" class="pill-btn"
-                title="Pull this month's premieres from the Trakt calendar"
-                hx-post="/api/distrakt/import{{ month_query }}" hx-json-enc
-                hx-target="#distraktShowList"
-                hx-swap="innerHTML swapEmpty:false show:top showTarget:.row-marked">⤓ Import</button>
+        {#- Drawn plain; the month's own answer redraws it with its state. -#}
+        {{ imports.button(month_query) }}
         <button type="button" class="pill-btn" command="show-modal" commandfor="addShowModal">➕ Add show</button>
         <button type="button" class="pill-btn" command="show-modal" commandfor="addMovieModal">🎬 Add film</button>
 {% endcall %}

@@ -51,10 +51,10 @@ from . import enrich as calendar_enrich
 from . import entries
 from . import filter as calendar_filter
 from . import vocab
-from .. import db, providers
+from .. import cache, db, providers
 from ..endpoints import get_endpoint
 from ..perftrace import span
-from ..providers.base import (Item, Media, SourceUnavailable, epoch_moment,
+from ..providers.base import (Item, Media, Source, SourceUnavailable, epoch_moment,
                               render)
 
 logger = logging.getLogger(__name__)
@@ -118,10 +118,14 @@ class Airing:
         THE DAY ANCHOR WAS NOT WRONG, IT WAS TOO COARSE. It landed at the top of
         the right day, which on a day holding thirty titles is not the same as
         landing on the one somebody searched for.
+
+        `day=` NAMES WHICH AIRING, because `highlight=` names a title and a
+        weekly show is four rows in one month. Both are references the server
+        resolves against the month it draws, not data it is being handed.
         """
         return (f"/calendar?year={self.year}&month={self.month}"
                 f"&endpoint={quote(self.endpoint_key, safe='')}"
-                f"&highlight={quote(self.item.mark_key)}#jump-target")
+                f"&highlight={quote(self.item.mark_key)}&day={self.day}#jump-target")
 
 
 @dataclass(frozen=True)
@@ -360,6 +364,7 @@ async def catalogue(query: str, *, settings, prefs, tz: ZoneInfo,
         return Results()
 
     out: list[Elsewhere] = []
+    suppressed: list[Elsewhere] = []
     failed: set = set()
     with span("search.catalogue", sources=len(asked)) as sp:
         for media in (Media.SHOW, Media.MOVIE):
@@ -380,6 +385,7 @@ async def catalogue(query: str, *, settings, prefs, tz: ZoneInfo,
             for rows in described:
                 for row in rows:
                     if (row.item.mark_key, row.item.season) in known:
+                        suppressed.append(row)
                         continue
                     if not calendar_filter.filter_records(
                             [row.record], specs["genres"], specs["countries"],
@@ -387,14 +393,52 @@ async def catalogue(query: str, *, settings, prefs, tz: ZoneInfo,
                         continue
                     out.append(row)
         sp.set(found=len(out))
+        await _complete_known_seasons(suppressed)
 
     return Results(elsewhere=tuple(out[:RESULT_LIMIT]),
                    failed=frozenset(failed))
 
 
+async def _complete_known_seasons(rows: list[Elsewhere]) -> int:
+    """Store the airing each suppressed hit already built, where the stored season
+    holds no airing from THAT hit's service. Returns how many were stored.
+
+    THE SUPPRESSION IS A RENDERING DECISION AND THIS IS NOT, and keeping them
+    apart is the point. A season the calendar already draws is rightly not offered
+    as a second place to go — two jumps to one day is the thing that rule exists
+    to prevent. But the rule is keyed on the title and season, not the SOURCE, so
+    a Trakt hit for a season the calendar holds only Simkl's airing of was
+    dropped as a duplicate, and the one write that could have taught the calendar
+    Trakt's airing never happened. MEASURED: Groomed: The Truth Behind the Lie,
+    searched for, answered by Trakt, suppressed, and left Simkl-only.
+
+    COMPLETING A CARD, NOT ADDING ONE, which is why this may happen on a search
+    where fill_one_gap may not: the season is already on the calendar, so the
+    stored airing joins the card it matches (same title key) rather than drawing
+    a new one — no decision about the calendar is being made that the calendar
+    had not made already. It costs no request: each row's record was built by its
+    own source's lookup to draw the row at all.
+    """
+    now = db.now()
+    stored = 0
+    for row in rows:
+        drawn = await entries.sources_airing(row.endpoint_key, row.item.mark_key, row.item.season)
+        if str(row.source) in drawn:
+            continue
+        written = await entries.store_loose_airings(
+            row.endpoint_key, [row.record], now=now, stale_after=now + TITLE_STALE_SECONDS)
+        if written:
+            calendar_cache.forget_endpoint_spans(row.endpoint_key)
+        stored += written
+    if stored:
+        logger.info("calendar search: completed %d stored season(s) with a source's "
+                    "own airing", stored)
+    return stored
+
+
 async def fill_one_gap(settings, *, source, source_id: str, media: Media,
                       season: int | None, endpoint_key: str, tz: ZoneInfo,
-                      now: int) -> str:
+                      now: int, exact_season: bool = False) -> str:
     """Write ONE title's airing into the calendar and answer its mark key.
 
     WHAT THIS IS FOR. A service can be missing its own title: Trakt's show record
@@ -419,6 +463,14 @@ async def fill_one_gap(settings, *, source, source_id: str, media: Media,
 
     Returns the mark key to highlight, or "" when nothing could be written —
     which is not an error: the month is still worth opening.
+
+    `exact_season` REFUSES THE FALLBACK. A search jump may land on a show's own
+    first-air date when its season cannot be dated — the reader asked where the
+    title is. Completing a SEASON's card may not: measured on a live copy, three
+    of four asks got a service that could not date the season being completed
+    (a sixth, a second, a fourth), and the fallback wrote that show's premiere
+    from 2021, 2025 and 2024 into the shared premieres calendar with no season.
+    With `exact_season`, a season the service cannot date writes nothing.
     """
     provider = providers.get(source)
     if provider is None or provider.detail_port is None:
@@ -432,6 +484,8 @@ async def fill_one_gap(settings, *, source, source_id: str, media: Media,
                 when = premiere
                 break
     if not when:
+        if exact_season and season is not None and media is not Media.MOVIE:
+            return ""
         # The title's own first-air date: what a film always uses, and what a
         # show falls back to when the season could not be dated.
         when = await _first_aired_of(settings, provider, media, source_id)
@@ -445,7 +499,113 @@ async def fill_one_gap(settings, *, source, source_id: str, media: Media,
         return ""
     await entries.store_loose_airings(
         endpoint_key, records, now=now, stale_after=now + TITLE_STALE_SECONDS)
+    calendar_cache.forget_endpoint_spans(endpoint_key)
     return render(records[0], tz).mark_key
+
+
+# THE CALENDARS WHERE A CARD IS A SEASON'S PREMIERE OR A FILM'S RELEASE — the one
+# airing a service's own record can be built for (DetailPort.records_for), so the
+# only cards the other service's record can join. An All Episodes or Finales card
+# is some other episode, and nothing here can build that service's record of it.
+COMPLETABLE_ENDPOINTS = frozenset({"shows/new", "shows/premieres", "movies"})
+
+# How long an answer to "does the other service list this?" stands before a panel
+# open may ask again — found or not. A week, because a title the other service did
+# not list yet is usually one it has not got round to, and asking on every open
+# would put a lookup on every click for an answer that changes slowly.
+OTHER_SERVICE_ASK_SECONDS = 7 * 24 * 60 * 60
+
+
+def _asked_key(source: str, endpoint_key: str, title_key: str, season: int | None) -> str:
+    return f"calendar_other_service_asked:{source}:{endpoint_key}:{title_key}:{season}"
+
+
+async def other_service_to_ask(settings, *, endpoint_key: str, title_key: str,
+                               season: int | None) -> str:
+    """The service worth asking about a card whose calendar only ONE service
+    draws, or "" when there is none.
+
+    WHAT IT IS FOR. Most one-service cards are one service's alone — Simkl lists
+    far more daily serials and foreign titles — so asking about all of them on a
+    schedule would cost thousands of lookups a day to make a few cards two-sided
+    (measured on the owner's instance: 17,205 of 18,342 stored titles are one
+    service's). Opening a card's panel is somebody asking about THAT title, which
+    is when one lookup is worth paying.
+
+    EVERY CONDITION IS READ FROM WHAT THIS INSTANCE HOLDS, none from the request:
+    a calendar whose cards can be completed; exactly one service with a stored
+    airing of this title and season there; another service that publishes this
+    calendar here and can be searched; and no answer from it in the last week.
+    """
+    if endpoint_key not in COMPLETABLE_ENDPOINTS or not title_key:
+        return ""
+    drawn = await entries.sources_airing(endpoint_key, title_key, season)
+    if len(drawn) != 1:
+        return ""
+    on_calendar = {str(p.source) for p in providers.calendar_sources(settings=settings)
+                   if p.capabilities.answers(endpoint_key)
+                   and p.calendar_port.calendar_configured(settings)}
+    for source, _port in providers.for_catalogue_search(settings):
+        name = str(source)
+        if name in drawn or name not in on_calendar:
+            continue
+        if await cache.get(_asked_key(name, endpoint_key, title_key, season),
+                           OTHER_SERVICE_ASK_SECONDS) is None:
+            return name
+    return ""
+
+
+async def complete_from_other_service(settings, *, source: str, endpoint_key: str,
+                                      title_key: str, season: int | None,
+                                      tz: ZoneInfo, now: int) -> bool:
+    """Ask `source` whether it lists the title, by shared id, and store its own
+    airing of this season's premiere (or the film's release) on `endpoint_key`
+    if it does. Returns whether an airing was stored.
+
+    THE SAME TWO STEPS AS ELSEWHERE, NOT A THIRD WAY. The ask is the search port's
+    exact lookup (find_by_shared_id — an answer is taken only when that service's
+    own record states the id asked about), and the write is fill_one_gap, the
+    search's own gap fill: that service's own record, built by its own builder,
+    stored as its calendar feed would have stored it. So the airing joins this
+    card when the two services date it in the same week, and stands as that
+    service's card on its own date when they do not, exactly as its calendar
+    would draw it.
+
+    THE IDS COME FROM THE STORE (entries.group_identity), never from the request:
+    a write whose subject is a key the server resolves can only land on a title
+    this instance already holds.
+
+    AN ANSWER IS REMEMBERED FOR A WEEK, "not listed" included; a failure to ask
+    is not, so a service that was down is asked again on the next open.
+    """
+    identity = await entries.group_identity(title_key)
+    port = dict((str(s), p) for s, p in providers.for_catalogue_search(settings)).get(source)
+    if identity is None or port is None:
+        return False
+    media_name, ids, title = identity
+    media = Media(media_name)
+    try:
+        found = await port.find_by_shared_id(settings, media, dict(ids))
+    except SourceUnavailable as exc:
+        logger.info("calendar: %s could not be asked about %s (%s)", source, title_key, exc)
+        return False
+    await cache.set(_asked_key(source, endpoint_key, title_key, season), 1,
+                    retain_seconds=OTHER_SERVICE_ASK_SECONDS)
+    source_id = (found or {}).get(source)
+    if not source_id:
+        logger.info("calendar: %s does not list %s (%s)", source, title, title_key)
+        return False
+    try:
+        stored = await fill_one_gap(
+            settings, source=Source(source), source_id=str(source_id), media=media,
+            season=None if media is Media.MOVIE else season,
+            endpoint_key=endpoint_key, tz=tz, now=now, exact_season=True)
+    except SourceUnavailable as exc:
+        logger.info("calendar: %s's airing of %s not written (%s)", source, title_key, exc)
+        return False
+    logger.info("calendar: %s answered %s for %s (%s); %s", source, source_id, title,
+                title_key, "its airing stored" if stored else "no airing it could date")
+    return bool(stored)
 
 
 async def _describe(settings, hit, media: Media, tz: ZoneInfo) -> list[Elsewhere]:

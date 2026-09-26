@@ -661,6 +661,27 @@ class FilterExemptionThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase)
         self.assertIn("Moonshadow", titles)
         self.assertEqual(meta["unenriched"], 1)
 
+    async def test_with_no_filter_set_an_undescribed_title_is_not_counted_unjudged(self):
+        """The count backs a note saying the viewer's filters have not reached
+        these titles yet. With no filter set, that note would describe nothing,
+        and the tracker's import, which holds the same titles back, would be
+        holding them for nothing."""
+        await self._stored([_simkl_record(1, title="Moonshadow")])
+        _grouped, meta = await calendar_cache.assemble_range(
+            SHOWS, self.settings, tz=ZoneInfo("UTC"),
+            start_date=date(2026, 7, 7), end_date=date(2026, 7, 7), now=1000)
+        self.assertEqual(meta["unenriched"], 0)
+
+    def test_the_operators_floor_exempts_as_the_viewers_filters_do(self):
+        """The read gives an undescribed title the same benefit of the doubt
+        under the operator's filters, so they count as well."""
+        self.assertFalse(calendar_cache.exempts_undescribed("show", Settings()))
+        self.assertTrue(calendar_cache.exempts_undescribed(
+            "show", Settings(network_filter=["-Some Network"])))
+        self.assertTrue(calendar_cache.exempts_undescribed("show", Settings(), countries="us"))
+        self.assertFalse(calendar_cache.exempts_undescribed(
+            "show", Settings(), movie_certifications="PG", movie_release_types="theatrical"))
+
     async def test_once_enriched_the_same_filter_actually_applies(self):
         """The other half of the same claim: enrichment must not become a
         permanent bypass — once the drain has answered, the ordinary filter
@@ -850,7 +871,8 @@ class RoutedAnimeFilmThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase)
         await self._stored([self._film_record()])
         items, meta = await self._read(MOVIES)
         self.assertEqual(items, [("2026-07-07", "Shiranuhi")])
-        self.assertEqual(meta["unenriched"], 1)
+        # Unfiltered, so no filter was waiting on it and none is owed an apology.
+        self.assertEqual(meta["unenriched"], 0)
 
     async def test_a_trakt_movie_is_unaffected(self):
         """Nothing here may reach a record from another source: `anime_type`

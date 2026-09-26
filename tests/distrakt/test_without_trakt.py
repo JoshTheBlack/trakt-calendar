@@ -31,7 +31,7 @@ from unittest.mock import AsyncMock, patch
 from app import cache, db, distrakt as distrakt_store
 from app.config import Settings, save_settings
 from app.distrakt import live, routes as distrakt_routes
-from app.providers.base import PlayCounts
+from app.providers.base import PlayCounts, TitleFacts
 from app.providers.trakt import TraktError
 from app.providers.trakt import detail as trakt_detail, transport
 from tests.support import (AppTestCase, DetailsPanel, ORIGIN, migrated_db,
@@ -965,11 +965,15 @@ class ASimklOnlyAccountGetsAMonthAtAllTests(AppTestCase):
             seen.append(settings)
             return ([], None)
 
-        with patch("app.calendar.cache.read_month", _read),              patch("app.distrakt.watch_history.tracker_ports", AsyncMock(return_value=[])):
+        # THE READ MOVED, THE RULE DID NOT: a month is no longer filled from its
+        # calendar by being built, so the calendar is read by the Import dialog's
+        # offer — and it has to be read as the instance there for the same reason.
+        with patch("app.calendar.cache.read_month", _read), \
+             patch("app.distrakt.watch_history.tracker_ports", AsyncMock(return_value=[])):
             resp = self.client.get(
-                f"/distrakt/fragments/month?year={self.today.year}&month={self.today.month}")
+                f"/distrakt/fragments/import?year={self.today.year}&month={self.today.month}")
         self.assertEqual(resp.status_code, 200)
-        self.assertTrue(seen, "the month was built without reading a calendar at all")
+        self.assertTrue(seen, "the import offer did not read a calendar at all")
         for settings in seen:
             self.assertEqual(settings.trakt_access_token, "instance-token")
 
@@ -1041,10 +1045,17 @@ class AddRoutesAskWhoeverKnowsTheTitleTests(AppTestCase):
                 title=title, network=network, year=None, ids=dict(ids),
                 seasons=[], named_season=None, unkeyable=None)))
 
+    def _network(self):
+        """Every add asks the describing service for its words — see
+        arrival.describe. Stood in for; which service it asks is
+        live.title_facts' own question and tested there."""
+        return patch("app.distrakt.live.title_facts",
+                     AsyncMock(return_value=TitleFacts("", "Fuji TV")))
+
     def test_add_asks_simkl_for_a_title_trakt_does_not_name(self):
         simkl_call = AsyncMock(return_value=dict(self.SEASON))
         trakt_call = AsyncMock(return_value=dict(self.SEASON))
-        with _quiet_sources(), \
+        with _quiet_sources(), self._network() as network, \
              patch("app.providers.simkl.detail.fetch_season_detail", simkl_call), \
              patch("app.providers.trakt.detail.fetch_season_detail", trakt_call), \
              patch("app.distrakt.watch_history.baseline_show", AsyncMock(return_value=None)),              self._picked(self.SIMKL_ONLY_IDS, "Shingeki no Kyojin Season 3"):
@@ -1055,13 +1066,14 @@ class AddRoutesAskWhoeverKnowsTheTitleTests(AppTestCase):
         # THAT SERVICE'S OWN ID, never a shared one — the same rule /seasons
         # states for the identical lookup.
         self.assertEqual(simkl_call.await_args.args[1], 694485)
+        network.assert_awaited_once()
 
     def test_add_completed_asks_simkl_too_and_no_longer_demands_a_trakt_id(self):
         """It used to refuse outright unless `ids["trakt"]` was present, which
         made a Simkl-only title impossible to fill a past month in with."""
         simkl_call = AsyncMock(return_value=dict(self.SEASON))
         trakt_call = AsyncMock(return_value=dict(self.SEASON))
-        with _quiet_sources(), \
+        with _quiet_sources(), self._network(), \
              patch("app.providers.simkl.detail.fetch_season_detail", simkl_call), \
              patch("app.providers.trakt.detail.fetch_season_detail", trakt_call),              self._picked(self.SIMKL_ONLY_IDS, "Shingeki no Kyojin Season 3"):
             self.client.post("/api/distrakt/add-completed?year=2020&month=1",

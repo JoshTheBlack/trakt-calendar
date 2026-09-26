@@ -1,6 +1,7 @@
 {% import '_distrakt_rows.html' as row with context %}
 {% import '_toast.html' as toast %}
 {% import '_distrakt_modals.html' as modals %}
+{% import '_distrakt_import.html' as imports %}
 {# THE TRACKER'S MONTH, drawn from the payload `_distrakt_month_payload` has
    always built — the questions, the buckets with their weekday heads, the films,
    the notice, the read-only banner and the two copy blocks.
@@ -86,4 +87,7 @@
     every way of pressing one of these ends with the overlay having no business
     being open — see _distrakt_modals.html. -#}
 {{ modals.all(catalogue_sources, as_finished, film_day, film_max, month_query, oob=true) }}
+{#- The Import button's state is the month's: whether it has had anything
+    imported yet (see _distrakt_import.html). -#}
+{{ imports.button(month_query, import_due, oob=true) }}
 {{ toast.flash(message, message_ok) }}

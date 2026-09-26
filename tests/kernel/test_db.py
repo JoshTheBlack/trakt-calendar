@@ -339,6 +339,90 @@ class MigrationTests(DbTestCase):
             conn.close()
             path.unlink(missing_ok=True)
 
+    async def test_migration_44_gives_a_board_seasons_and_keeps_every_row_whole(self):
+        """tier_items is rebuilt to add `season`, NULL meaning the whole show, and
+        its uniqueness moves to an index over IFNULL(season, -1). Every existing
+        row must arrive as the whole show with its id, tier and rank; the old
+        rule (one whole show per board) must still hold; a season must be able
+        to sit beside it; and the foreign keys the rebuild re-declared must
+        still act."""
+        import sqlite3
+
+        from unittest.mock import patch
+
+        path = TMP / "migration-44-test.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        conn.execute("PRAGMA foreign_keys=ON")
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 43]):
+                db.migrate_sync(conn)
+            now = db.now()
+            conn.execute("INSERT INTO users (id, username, created_at, updated_at) "
+                         "VALUES (1, 'someone', ?, ?)", (now, now))
+            conn.execute("INSERT INTO tier_boards (id, user_id, uid, name, created_at, updated_at) "
+                         "VALUES (7, 1, 'b7', 'Shows', ?, ?)", (now, now))
+            conn.execute("INSERT INTO tier_categories (id, board_id, uid, label, created_at) "
+                         "VALUES (70, 7, 'c70', 'A', ?)", (now,))
+            conn.execute(
+                "INSERT INTO tier_items (id, board_id, category_id, media, match_source, "
+                "match_id, title, season_count, rank_in_category, created_at) VALUES "
+                "(501, 7, 70, 'show', 'tmdb', '95396', 'Severance', 2, 3, ?), "
+                "(502, 7, NULL, 'movie', 'tmdb', '550', 'Fight Club', NULL, 0, ?)",
+                (now, now))
+            conn.execute(
+                "INSERT INTO tier_item_removals (board_id, media, match_source, match_id, "
+                "removed_at, item_json) VALUES (7, 'show', 'tmdb', '1399', ?, '{}')", (now,))
+            conn.commit()
+
+            db.migrate_sync(conn)
+
+            rows = {r["id"]: dict(r) for r in conn.execute("SELECT * FROM tier_items")}
+            self.assertEqual(set(rows), {501, 502}, "a row was lost or renumbered")
+            self.assertEqual((rows[501]["category_id"], rows[501]["rank_in_category"],
+                              rows[501]["season_count"], rows[501]["season"]),
+                             (70, 3, 2, None), "a ranked row did not arrive whole")
+            self.assertIsNone(rows[502]["season"])
+
+            insert = ("INSERT INTO tier_items (board_id, media, match_source, match_id, "
+                      "season, created_at) VALUES (7, 'show', 'tmdb', '95396', ?, ?)")
+            with self.assertRaises(sqlite3.IntegrityError, msg="the whole show twice"):
+                conn.execute(insert, (None, now))
+            conn.execute(insert, (2, now))
+            conn.execute(insert, (0, now))  # the specials are a season like any other
+            with self.assertRaises(sqlite3.IntegrityError, msg="one season twice"):
+                conn.execute(insert, (2, now))
+            # A bare DO NOTHING is what the board's writer relies on.
+            cur = conn.execute(insert + " ON CONFLICT DO NOTHING",
+                               (None, now))
+            self.assertEqual(cur.rowcount, 0)
+
+            conn.execute("DELETE FROM tier_categories WHERE id = 70")
+            self.assertIsNone(conn.execute(
+                "SELECT category_id FROM tier_items WHERE id = 501").fetchone()[0],
+                "deleting a tier must return its titles to the pool")
+            conn.execute("DELETE FROM tier_boards WHERE id = 7")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM tier_items").fetchone()[0], 0,
+                             "deleting a board must take its titles with it")
+
+            indexes = {i["name"] for i in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tier_items'")}
+            self.assertTrue({"ux_tier_items_title", "ix_tier_items_category",
+                             "ix_tier_items_pool"} <= indexes, indexes)
+            self.assertIn("season", {c["name"] for c in
+                                     conn.execute("PRAGMA table_info(tier_item_removals)")})
+            self.assertEqual(
+                {c["name"] for c in conn.execute("PRAGMA table_info(season_posters)")},
+                {"media", "tmdb", "season", "source", "url", "first_seen_at", "last_seen_at",
+                 "last_ok_at", "last_failed_at", "fail_count"})
+            self.assertIn("covered_json", {c["name"] for c in conn.execute(
+                "PRAGMA table_info(distrakt_prompt_dismissals)")})
+            self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+        finally:
+            conn.close()
+            path.unlink(missing_ok=True)
+
     async def test_migration_21_opens_the_provider_column_and_keeps_every_row(self):
         """Both provider tables carried `CHECK (provider IN ('plex','trakt'))`,
         which made admitting a third service a table rebuild.

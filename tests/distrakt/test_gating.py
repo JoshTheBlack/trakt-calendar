@@ -50,6 +50,7 @@ DISTRAKT_GETS = (
     "/distrakt/fragments/seasons",
     "/api/distrakt/export",
     "/distrakt/fragments/search-movie",
+    "/distrakt/fragments/import",
 )
 
 DISTRAKT_POSTS = (
@@ -63,6 +64,9 @@ DISTRAKT_POSTS = (
     "/api/distrakt/unknown-add",
     "/api/distrakt/unknown-resume",
     "/api/distrakt/unknown-dismiss",
+    "/api/distrakt/unknown-snooze",
+    "/api/distrakt/rewatch-start",
+    "/api/distrakt/rewatch-complete",
     "/api/distrakt/restore",
     "/api/distrakt/share-link",
     "/api/distrakt/add-completed",

@@ -17,8 +17,9 @@ from datetime import date
 from ...config import Settings
 from ...endpoints import Endpoint
 from .. import register
-from ..base import Capabilities, Media, Record, SearchHit, SeasonsAnswer, Source
-from . import calendar, detail, search, sync, titles
+from ..base import (Capabilities, Media, Record, SearchHit, SeasonsAnswer, Source,
+                    TitleFacts)
+from . import by_id, calendar, detail, search, sync, titles
 from .transport import SimklBlockedError, SimklError, SimklRateLimitError
 
 __all__ = ["SimklError", "SimklRateLimitError", "SimklBlockedError"]
@@ -176,6 +177,10 @@ class _SimklDetailPort:
         return await detail.fetch_seasons(settings, source_id, media,
                                           cached_only=cached_only)
 
+    async def fetch_title_facts(self, settings: Settings, source_id,
+                                media: Media) -> TitleFacts:
+        return await detail.fetch_title_facts(settings, source_id, media)
+
 
 class _SimklSearchPort:
     """Simkl's answer to "search this catalogue" (app/providers/base.py's
@@ -189,6 +194,9 @@ class _SimklSearchPort:
                             cached_only: bool = False) -> list[SearchHit]:
         return await search.search_titles(settings, media, query,
                                           cached_only=cached_only)
+
+    async def find_by_shared_id(self, settings: Settings, media: Media, ids: dict) -> dict:
+        return await by_id.find_by_shared_id(settings, media, ids)
 
 
 class _SimklProvider:
