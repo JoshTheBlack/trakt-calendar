@@ -25,20 +25,6 @@ SETTINGS = SimpleNamespace(simkl_client_id="cid", simkl_access_token="tok",
                            cache_ttl_minutes=10)
 
 
-class _Response:
-    """Just enough of an httpx response for fetch_progress_details."""
-
-    def __init__(self, payload, status_code=200, text=""):
-        self._payload = payload
-        self.status_code = status_code
-        self.text = text
-
-    def json(self):
-        if isinstance(self._payload, Exception):
-            raise self._payload
-        return self._payload
-
-
 def _cached_get(*answers):
     """A stand-in for transport.cached_get that serves `answers` in order and
     records every call, so what was asked and how is inspectable.
@@ -81,36 +67,12 @@ class PrivacyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(call.kwargs["private"], True)
                 self.assertIs(call.kwargs["pool"], transport.SYNC_POOL)
 
-    async def test_the_batched_progress_read_is_a_post_and_is_never_cached(self):
-        """A POST whose meaning is entirely in its body cannot be expressed by a
-        URL key, and this one is also one person's viewing.
-
-        THE PERSONAL READ IS THE POST, AND IT IS THE ONE THAT MAY NOT BE CACHED.
-        This function also asks the PUBLIC per-title record whether an id names
-        one season of a series (`_speaks_for_one_season`), and that answer is
-        cached and travels on the catalogue pool exactly as every other catalogue
-        lookup does. So the assertion is not "nothing is cached" — it is that the
-        watch history goes out on `send`, to the sync pool, and never through the
-        cache, while everything that DOES reach the cache is public."""
-        send = AsyncMock(return_value=_Response([]))
-        cached = _cached_get({"ids": {"simkl": 1}}, {"ids": {"simkl": 2}})
-        with patch("app.providers.simkl.transport.send", new=send), \
-             patch("app.providers.simkl.transport.cached_get", new=cached):
-            await sync.fetch_progress_details(SETTINGS, [1, 2])
-        self.assertEqual(send.await_args.args[1], "POST")
-        self.assertIs(send.await_args.kwargs["pool"], transport.SYNC_POOL)
-        for call in cached.await_args_list:
-            with self.subTest(path=call.args[2]):
-                self.assertTrue(call.args[2].startswith("tv/"))
-                self.assertIsNot(call.kwargs.get("pool"), transport.SYNC_POOL)
-
     async def test_nothing_here_writes_to_simkl(self):
         """This build reads a person's viewing and never edits it. The write path
         is POST /sync/history, and no call in this module may name it."""
-        send = AsyncMock(return_value=_Response([]))
+        send = AsyncMock()
         with patch("app.providers.simkl.transport.send", new=send), \
              patch("app.providers.simkl.transport.cached_get", new=_cached_get(*[{}] * 13)):
-            await sync.fetch_progress_details(SETTINGS, [1])
             await sync.fetch_history(SETTINGS)
         for call in send.await_args_list:
             self.assertNotIn("sync/history", call.args[2])
@@ -712,94 +674,25 @@ class AnimeSeasonTitleTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ProgressTests(unittest.IsolatedAsyncioTestCase):
-    """One request for a whole roster, and what comes back matched to what was
-    asked."""
+    """The per-title progress read never speaks for anything and never asks
+    Simkl a question — see sync.fetch_progress_details for the measurement this
+    holds: `POST /sync/watched` never itemized a season for any title, so every
+    id was always coming back absent, and this now says so with no request."""
 
-    async def test_a_whole_roster_is_one_request(self):
-        """The 1 POST/second cap is what makes this essential rather than an
-        optimisation: seventy titles asked one at a time would take over a
-        minute."""
-        answers = [{"ids": {"simkl": n}, "seasons": [
-            {"number": 1, "episodes": [{"number": 1, "watched_at": "2026-07-01"}]}]}
-            for n in range(1, 71)]
-        send = AsyncMock(return_value=_Response(answers))
-        # Every title stands alone, so none of them declines the per-title read.
-        with patch("app.providers.simkl.transport.send", new=send),              patch("app.providers.simkl.transport.cached_get",
-                   new=_cached_get(*[{"ids": {"simkl": n}} for n in range(1, 71)])):
-            got = await sync.fetch_progress_details(SETTINGS, list(range(1, 71)))
-        self.assertEqual(send.await_count, 1)
-        self.assertEqual(len(got), 70)
-        self.assertEqual(got[1], {1: {1: "2026-07-01"}})
+    async def test_every_id_comes_back_absent_whatever_was_asked(self):
+        for show_ids in ([], [None, "x"], [1, 2, 3], list(range(1, 71))):
+            with self.subTest(show_ids=show_ids):
+                self.assertEqual(
+                    await sync.fetch_progress_details(SETTINGS, show_ids), {})
 
-    async def test_an_answer_is_matched_by_position_when_it_names_no_id(self):
-        """The response is a parallel array. An entry that names its own id is
-        believed over its position, because a service that started filtering its
-        answers would otherwise shift every row silently."""
-        answers = [{"seasons": [{"number": 2, "episodes": [{"number": 4}]}]}]
-        send = AsyncMock(return_value=_Response(answers))
-        with patch("app.providers.simkl.transport.send", new=send):
-            got = await sync.fetch_progress_details(SETTINGS, [91])
-        self.assertEqual(got, {91: {2: {4: ""}}})
-
-    async def test_a_season_with_no_breakdown_says_nothing_rather_than_zero(self):
-        """Turning a watched COUNT into "episodes 1..n" would invent both the
-        numbers and the dates — so there is nothing to report. What that means is
-        "I cannot say", NOT "none of it was watched", and the title is therefore
-        ABSENT: Simkl has just said four episodes of season 1 were seen, and
-        answering the caller with a zero would have it retire every season it had
-        stored for the title on the strength of a payload that says the opposite.
-        """
-        send = AsyncMock(return_value=_Response(
-            [{"ids": {"simkl": 5}, "seasons": [{"number": 1, "total_episodes_watched": 4}]}]))
-        with patch("app.providers.simkl.transport.send", new=send):
-            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [5]), {})
-
-    async def test_an_answer_with_no_seasons_at_all_says_nothing(self):
-        """THE SHAPE EVERY REAL ANSWER TAKES, measured 2026-08-21: this endpoint
-        reports WHETHER a title has been watched and never HOW MUCH, whatever
-        `episode_watched_at` asks for. Twin Peaks comes back like this while the
-        library read itemizes eight episodes of it."""
-        send = AsyncMock(return_value=_Response(
-            [{"simkl": 203, "result": True, "list": "watching",
-              "last_watched_at": "2020-02-02T19:07:39Z"}]))
-        with patch("app.providers.simkl.transport.send", new=send):
-            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [203]), {})
-
-    async def test_a_title_the_viewer_does_not_hold_is_a_real_zero(self):
-        """The ONE answer from here that means "seen none of it", and it has to
-        stay distinguishable from the rest: a title that has left the library is
-        how stored counts are correctly retired."""
-        send = AsyncMock(return_value=_Response([{"simkl": 9, "result": False}]))
-        with patch("app.providers.simkl.transport.send", new=send):
-            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [9]), {9: {}})
-
-    async def test_ids_simkl_could_not_resolve_say_nothing_rather_than_zero(self):
-        """`not_found` is Simkl saying it does not know what was asked about,
-        which is the opposite of "this viewer has watched none of it" — and this
-        app had the two the wrong way round."""
-        send = AsyncMock(return_value=_Response([{"simkl": 9, "result": "not_found"}]))
-        with patch("app.providers.simkl.transport.send", new=send):
-            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [9]), {})
-
-    async def test_a_batch_that_failed_names_none_of_its_ids(self):
-        """The other half of the same rule, and the one that protects stored
-        counts: a POST that came back refused says nothing about any title in it,
-        so every id stays absent and the caller leaves what it had alone."""
-        send = AsyncMock(return_value=_Response(None, status_code=500, text="boom"))
-        with patch("app.providers.simkl.transport.send", new=send):
-            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [5, 6]), {})
-
-    async def test_nothing_to_ask_about_costs_no_request(self):
+    async def test_it_never_makes_a_request(self):
         send = AsyncMock()
-        with patch("app.providers.simkl.transport.send", new=send):
-            self.assertEqual(await sync.fetch_progress_details(SETTINGS, []), {})
-            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [None, "x"]), {})
+        cached = AsyncMock()
+        with patch("app.providers.simkl.transport.send", new=send), \
+             patch("app.providers.simkl.transport.cached_get", new=cached):
+            await sync.fetch_progress_details(SETTINGS, [1, 2, 3])
         send.assert_not_awaited()
-
-    async def test_an_unreadable_answer_is_skipped_rather_than_fatal(self):
-        send = AsyncMock(return_value=_Response(ValueError("not json"), text="<html>"))
-        with patch("app.providers.simkl.transport.send", new=send):
-            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [5]), {})
+        cached.assert_not_awaited()
 
 
 class DerivationTests(unittest.TestCase):

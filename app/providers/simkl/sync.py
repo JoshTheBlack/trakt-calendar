@@ -45,7 +45,6 @@ never called: this app reads a person's viewing and never edits it.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote, urlencode
@@ -54,7 +53,7 @@ from ...config import Settings
 from ...perftrace import span
 from ..base import (LibraryEntry, LibraryRead, Media, UnlistedSeasons, collect_ids,
                     resolve_key)
-from . import _ids, _naming, transport
+from . import _ids, transport
 
 logger = logging.getLogger(__name__)
 
@@ -115,17 +114,6 @@ LIBRARY_TYPES = (*EPISODE_TYPES, "movies")
 # is what keeps the two halves of the same fact in one place.
 ACTIVITY_LISTS = {"shows": "tv_shows", "anime": "anime", "movies": "movies"}
 
-# How many POSTs one progress read may cost. `POST /sync/watched` is batched, so
-# a whole roster is normally ONE request — but the cap on a POST is one per
-# second, so an unbounded body on a very large roster would be one slow request
-# instead of several, and a timeout would lose all of it. Chunking bounds the
-# blast radius of a single failure without materially changing the cost.
-# SIMKL'S OWN CAP, NOT A CHOICE. A `POST /sync/watched` asking for episode data
-# takes at most 100 items; over that it answers `400 max_items`. (Without episode
-# data there is no documented limit, but this read always asks for episodes — the
-# counts alone are not what it is for.)
-PROGRESS_BATCH = 100
-
 # What every library read asks for, and each one earns its place:
 #
 #   extended=full            episodes at all. Without it a bucket carries summary
@@ -160,23 +148,6 @@ LIBRARY_PARAMS = {
 # `imdb`, `tmdb` and `tvdb`. Everything this package used to derive with a
 # per-title lookup is in the payload.
 ANIME_EXTENDED = "full_anime_seasons"
-
-# What `POST /sync/watched` puts in its `result` field, and the three values are
-# three different answers that must not be run together:
-#
-#   true          the viewer has watched or is watching this title.
-#   false         the title is IN SIMKL'S CATALOGUE and this viewer has not
-#                 watched it. A real, safe zero — the one answer from here that
-#                 may retire what the app had stored.
-#   "not_found"   the ids could not be resolved to a title at all. NOT a zero:
-#                 Simkl is saying it does not know what was asked about, which is
-#                 "I cannot say" and must leave stored counts alone.
-#
-# The middle one is easy to mistake for the last, and this app did: a `not_found`
-# was read as the safe zero and a `false` was not read at all.
-UNWATCHED = False
-UNRESOLVED = "not_found"
-
 
 def _api_url(path: str, settings: Settings, params: dict | None = None) -> str:
     """A URL for one of this module's calls, named for the TRACKER.
@@ -795,16 +766,16 @@ async def fetch_library(settings: Settings, *, start_at: str | None = None,
 
 
 def _progress_from_seasons(entry: dict) -> dict[int, dict[int, str]]:
-    """One /sync/watched answer as {season: {episode: watched_at}}.
+    """One library item's `seasons[]` block as {season: {episode: watched_at}}.
 
     A season with no episode breakdown contributes nothing rather than a guessed
-    set: Simkl reports a watched COUNT beside the breakdown, and turning "4
-    episodes" into "episodes 1-4" would invent four dates and four episode
-    numbers that may not be the ones actually seen. THAT CASE NO LONGER ARISES
-    ON THE LIBRARY PATH: `include_all_episodes=yes` has Simkl itemize the
-    completed and dropped buckets itself, so an episode list arrives where a bare
-    count used to (see LIBRARY_PARAMS). It still arises on the per-title read,
-    which is why the rule stays.
+    set: Simkl reports a watched COUNT beside the breakdown in the general case,
+    and turning "4 episodes" into "episodes 1-4" would invent four dates and four
+    episode numbers that may not be the ones actually seen. THAT CASE DOES NOT
+    ARISE HERE: `include_all_episodes=yes` (see LIBRARY_PARAMS) has Simkl itemize
+    the completed and dropped buckets itself, so an episode list arrives where a
+    bare count used to — but the rule stays rather than assuming every payload
+    this function is ever handed will keep honouring that parameter.
 
     THE SEASON AND EPISODE NUMBERS ARE `_coordinates`', not the payload's, so an
     anime season-title's own numbering is translated here exactly as it is for
@@ -907,174 +878,33 @@ async def fetch_library_ids(settings: Settings) -> dict[int, str] | None:
     return ids
 
 
-async def _speaks_for_one_season(settings: Settings, simkl_ids) -> set[int]:
-    """Which of `simkl_ids` name ONE SEASON of a series rather than a whole show.
-
-    THE CALLER TREATS THIS READ AS A SOURCE'S COMPLETE STATEMENT ABOUT A TITLE
-    and replaces everything it had stored for that source (see
-    watch_history._set_show_baseline). That is sound when the id names the whole
-    show, and destructive when it names one season of it: Simkl models each anime
-    season as its own title, so asking about Beastars' season-1 title answers
-    about season 1 and NOTHING about seasons 2 or 3 — which the caller then reads
-    as "this service has seen none of them" and retires. Observed twice on a live
-    account: re-adding a season left the other two showing one service's numbers
-    and none of Simkl's until a full refresh put them back.
-
-    SO SUCH AN ID IS ANSWERED FOR AT ALL, and the caller reads the library
-    instead — the one read that has every title of the series in it and files
-    each under the shared identity. `relations` is what says a title is one of a
-    family; a show that stands alone has none and takes the cheap per-title path,
-    which is every ordinary television title and Simkl's own documented case for
-    this endpoint.
-
-    ONE CACHED LOOKUP PER ID, on the edge-cached per-title record and held for a
-    day. A lookup that fails answers "not partial", which keeps a transient
-    failure from turning every add into a library read.
-    """
-    namings = await asyncio.gather(
-        *(_naming.fetch(settings, simkl_id) for simkl_id in simkl_ids),
-        return_exceptions=True)
-    partial = set()
-    for simkl_id, naming in zip(simkl_ids, namings):
-        if isinstance(naming, BaseException):
-            logger.warning("simkl could not be asked whether %s is one season of a series: %s",
-                           simkl_id, naming)
-            continue
-        if naming.siblings:
-            partial.add(int(simkl_id))
-    return partial
-
-
 async def fetch_progress_details(settings: Settings,
                                  show_ids) -> dict[int, dict[int, dict[int, str]]]:
-    """{simkl_id: {season: {episode: watched_at}}} for several shows at once.
+    """{simkl_id: {season: {episode: watched_at}}} for several shows at once —
+    always empty, and that is the measured, permanent shape of this call rather
+    than a placeholder for one still being built.
 
-    IN PRACTICE THIS ANSWERS ABOUT NOTHING, and that is a fact about the endpoint
-    rather than about this account. Measured 2026-08-21: `POST /sync/watched`
-    returns `{"simkl": id, "result": true, "list": ..., "last_watched_at": ...}`
-    and no `seasons` block for any title — finished or part-way through, anime or
-    television, `episode_watched_at=yes` notwithstanding. It says WHETHER a title
-    has been watched, never HOW MUCH. So every id comes back absent (see the loop
-    below for why absent and not empty), and a caller that needs Simkl's per-title
-    progress reads the library instead — which is the one read that has it, and
-    the only shape that can carry "finished, episode numbers unknown".
+    `POST /sync/watched` — the endpoint this answered from — returns
+    `{"simkl": id, "result": true, "list": ..., "last_watched_at": ...}` with no
+    `seasons` block for any title, measured 2026-08-21 across finished titles,
+    part-watched ones, anime and television alike, `episode_watched_at=yes`
+    notwithstanding: it says WHETHER a title has been watched, never HOW MUCH.
+    Every id therefore always came back absent under SyncPort's own contract (an
+    id this call could not speak to is left out, never reported as "watched by
+    nobody" — see SyncPort.fetch_progress_details), which is exactly what
+    returning nothing, with no request, now says. It also held Simkl's
+    documented 20-second per-user write lock on /sync/watched, spent the 1
+    POST/second budget the tracker's own writes need, and under Simkl's OAuth v2
+    scopes a POST needs media:write even to ask a question with a body that is
+    always the same non-answer.
 
-    KEPT RATHER THAN DELETED because SyncPort declares it and because the parsing
-    is what would be needed if the endpoint ever did itemize: a title that comes
-    back WITH a breakdown is still read and still answered for. What changed is
-    only that a title without one is no longer reported as a viewer having seen
-    none of it.
-
-    ONE REQUEST FOR A WHOLE ROSTER. `POST /sync/watched` takes the items you
-    already know about and answers about each of them, which makes it the batched
-    analogue of a per-show progress record — and the batching is not an
-    optimisation here but the only workable shape, because Simkl caps POSTs at
-    one per second and a seventy-title roster asked one at a time would take over
-    a minute.
-
-    THE ANSWER IS A PARALLEL ARRAY, so an entry is matched to the id that was
-    asked about by POSITION. An entry that names its own id is believed over the
-    position, because a service that starts filtering its answers would otherwise
-    shift every row silently.
-
-    AN ID THIS ANSWERED ABOUT IS PRESENT EVEN WHEN THE ANSWER IS "none of it", and
-    an id it could NOT answer about is absent — see SyncPort.fetch_progress_details,
-    where that distinction is declared. A batch whose request failed leaves every
-    id in it absent, which is what stops one refused POST being read as a whole
-    chunk of the roster having been watched by nobody.
+    A caller that needs Simkl's real per-title progress reads the library
+    instead (see watch_history.baseline_show, which falls back to one for a
+    source that answers here with nothing) — the one read that has it, and the
+    only shape that can carry "finished, episode numbers unknown"
+    (LibraryEntry.unlisted_seasons).
     """
-    unique = []
-    for value in show_ids or []:
-        if value in (None, ""):
-            continue
-        try:
-            number = int(value)
-        except (TypeError, ValueError):
-            continue
-        if number not in unique:
-            unique.append(number)
-    if not unique:
-        return {}
-    out: dict[int, dict[int, dict[int, str]]] = {}
-    partial = await _speaks_for_one_season(settings, unique)
-    client = transport.sync_client()
-    # `episodes` IS THE DOCUMENTED VALUE. This app sent `extended=full`, which
-    # Simkl accepts as an alias and answers identically — but `full` is not among
-    # the values this endpoint documents (`counters`, `episodes`, `specials`), and
-    # an undocumented spelling is one deprecation away from silently returning
-    # counts. `specials` is deliberately not asked for: season 0 has no place in a
-    # season's episode count and every reader here already drops it.
-    url = _api_url("sync/watched", settings, {"extended": "episodes",
-                                              "episode_watched_at": "yes"})
-    with span("simkl.progress_details", n=len(unique)):
-        for offset in range(0, len(unique), PROGRESS_BATCH):
-            batch = unique[offset:offset + PROGRESS_BATCH]
-            # NEVER CACHED, AND IT COULD NOT BE. This is a POST whose meaning is
-            # entirely in its body, and the response cache is keyed by URL — two
-            # different rosters would share one key. It is also one person's
-            # viewing, which is the other reason.
-            resp = await transport.send_or_unavailable(
-                client, "POST", url, pool=transport.SYNC_POOL,
-                headers=transport.api_headers(settings, private=True),
-                json=[{"simkl": show_id} for show_id in batch])
-            if resp.status_code != 200:
-                logger.warning("simkl fetch_progress_details -> HTTP %s: %s",
-                               resp.status_code, resp.text[:200])
-                continue
-            try:
-                answers = resp.json()
-            except ValueError:
-                logger.warning("simkl fetch_progress_details -> unreadable body")
-                continue
-            if not isinstance(answers, list):
-                continue
-            for position, entry in enumerate(answers):
-                if not isinstance(entry, dict):
-                    continue
-                stated = _entry_ids(entry).get("simkl")
-                if stated in (None, "") and position < len(batch):
-                    stated = batch[position]
-                if stated in (None, ""):
-                    continue
-                seasons = _progress_from_seasons(entry)
-                if int(stated) in partial:
-                    # SAYS NOTHING RATHER THAN SAYING PART. See `_speaks_for_one_season`.
-                    continue
-                if seasons:
-                    out[int(stated)] = seasons
-                elif entry.get("result") is UNWATCHED:
-                    # THE ONE ANSWER THAT REALLY IS A ZERO: Simkl knows the title
-                    # and this viewer has not watched it. Retiring what was stored
-                    # is exactly right. `not_found` is NOT this — see UNRESOLVED —
-                    # and neither is a title that answered with no breakdown.
-                    out[int(stated)] = {}
-                # OTHERWISE ABSENT, AND THAT IS THE WHOLE FIX. An answer with no
-                # episode numbers in it is not an answer of zero: Simkl HOLDS the
-                # title and has simply not said how much of it was watched. Absence
-                # is what says so — see SyncPort.fetch_progress_details, where it
-                # means "I have nothing to tell you about this one" and the caller
-                # leaves the stored counts alone, while an empty map means "seen
-                # none of it" and retires every season of the title.
-                #
-                # MEASURED 2026-08-21, AND IT IS EVERY TITLE THE VIEWER HOLDS.
-                # `POST /sync/watched` answers `{"simkl": id, "result": true,
-                # "list": ..., "last_watched_at": ...}` with no `seasons` block —
-                # for a finished title, for one part-way through, for anime and
-                # for television alike, `episode_watched_at=yes` notwithstanding.
-                # Twin Peaks, itemized down to eight episodes by the library read,
-                # comes back from here with nothing. So this endpoint says WHETHER
-                # a title has been watched and never HOW MUCH, and every answer it
-                # gave was being read as a count of none.
-                #
-                # NOT SOMETHING THIS SHAPE COULD CARRY ANYWAY, for the finished
-                # half of it: "all of it, episode numbers unknown" is a claim
-                # rather than a count, and the only shape in this app that holds
-                # one is LibraryEntry.unlisted_seasons, which fetch_library
-                # produces and this return type has no room for. A caller that
-                # needs a real answer reads the library — see
-                # watch_history.baseline_show, which falls back to one for a
-                # source that has it — and this says honestly that it cannot say.
-    return out
+    return {}
 
 
 async def fetch_watched_progress(settings: Settings, since_days: int | None = 60) -> list[dict]:

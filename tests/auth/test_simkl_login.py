@@ -503,9 +503,9 @@ class IdentityKeyTests(SimklOAuthTestCase):
         # equivalent: the shape now also carries a display-only `avatar`.
         self.assertEqual(account["id"], str(SIMKL_ID))
         self.assertEqual(account["name"], "Josh")
-        # A POST with no body, which is what Simkl documents for this endpoint,
-        # on the pool that serializes and paces /users/ traffic.
-        self.assertEqual(seen["method"], "POST")
+        # A GET, per Simkl's API reference (measured 2026-09-27: it also answers
+        # on a V1 token), on the pool that serializes and paces /users/ traffic.
+        self.assertEqual(seen["method"], "GET")
         self.assertIn("/users/settings", seen["url"])
         self.assertIs(seen["pool"], simkl_transport().SYNC_POOL)
         self.assertEqual(seen["headers"]["Authorization"], "Bearer the-token")

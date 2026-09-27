@@ -162,9 +162,13 @@ async def fetch_account(client_id: str, access_token: str) -> dict:
     account's connections and plan, which have no business in this app's database
     or its logs.
 
-    A POST with no body, because that is what Simkl documents for this endpoint.
-    It is under /users/, so it goes on the SYNC pool and is paced with every
-    other POST.
+    A GET, not the POST this endpoint used to be sent as. Simkl's own API
+    reference now lists /users/settings as GET only, and a live GET with a V1
+    token answers 200 with the identical `{account, user}` shape (measured
+    2026-09-27) — so the historical POST was never required, and staying on it
+    would need OAuth v2's media:write scope for a call that reads and changes
+    nothing. It is under /users/, so it goes on the SYNC pool and is paced with
+    every other request there.
 
     Raises AccountLookupError for every failure, including a network one, so the
     caller decides whether that is fatal.
@@ -178,11 +182,11 @@ async def fetch_account(client_id: str, access_token: str) -> dict:
     try:
         t0 = _time.perf_counter()
         resp = await transport.send(
-            transport.sync_client(), "POST", url,
+            transport.sync_client(), "GET", url,
             pool=transport.SYNC_POOL, timeout=15,
             headers={**_oauth_headers(), "Authorization": f"Bearer {access_token}"},
         )
-        _perf.debug("netPOST   %s -> %s  %.0fms", ACCOUNT_PATH, resp.status_code,
+        _perf.debug("netGET    %s -> %s  %.0fms", ACCOUNT_PATH, resp.status_code,
                     (_time.perf_counter() - t0) * 1000.0)
         if resp.status_code != 200:
             raise AccountLookupError(f"Simkl {ACCOUNT_PATH} returned HTTP {resp.status_code}.")

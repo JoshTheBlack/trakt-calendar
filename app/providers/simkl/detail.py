@@ -344,12 +344,21 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
     only one source's answer would read as a template bug rather than as
     something this source cannot say.
 
-    `cast` IS ALWAYS EMPTY AND THAT IS DELIBERATE. Simkl publishes no cast on any
-    endpoint this app can reach, and the app's TMDB key exists for network logos
-    — pulling a third metadata service in to fill one section of one modal is a
-    third source's failure modes, rate limit and staleness bought for a strip of
-    headshots. The renderer already omits the section on an empty list, which is
-    the same thing it does for a Trakt title served from a cold cache.
+    `cast` IS ALWAYS EMPTY, AND IT IS A FACT ABOUT SIMKL RATHER THAN A GAP HERE.
+    Measured 2026-09-26 against all 55 documented paths (openapi.json, V1 and V2
+    alike) and against the live API with a real token — `extended=full,cast`,
+    `cast`, `people`, `full,people,credits` on GET /tv, /movies and /anime all
+    answer with no cast, people, credits, actor or crew field anywhere; the only
+    person-shaped field in the whole surface is `director` (a string) on a movie.
+    simkl.com's own cast section is TMDB's credits, fetched by that page's script
+    from the title's TMDB id through an undocumented, unauthenticated website
+    endpoint this app does not call. This instance already holds a TMDB key and
+    could draw the same credits `GET /3/tv/{id}/aggregate_credits` provides — most
+    Simkl calendar titles carry a TMDB id — but that is a details-panel addition
+    of its own, not a fact this function can state, so the section stays empty
+    here rather than reaching into another provider package to fill it. The
+    renderer already omits the section on an empty list, which is the same thing
+    it does for a Trakt title served from a cold cache.
 
     TWO CALLS, NOT ONE, and they answer different questions: `titles.fetch_title`
     is the catalogue record (overview, genres, network, rating, trailers) and
@@ -513,12 +522,15 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         "season": answered,
         # TWO KEYS THIS SERVICE HAS NO SEASON-LEVEL ANSWER FOR, present and
         # honest. Checked against Simkl's own documentation rather than inferred:
-        # across all 48 documented endpoints there is no season metadata and no
-        # cast, credits or people anywhere, and `tv/{id}` states one overview and
-        # one poster for the whole title. So a Trakt-described season shows that
-        # season's own name and its own words while a Simkl-described one shows
-        # the title's — the same key set either way, which is the rule DetailPort
-        # states and tests/providers/test_protocol_conformance.py holds.
+        # across all 55 documented endpoints (V1 and V2 alike, measured
+        # 2026-09-26) there is no season metadata and no cast, credits or people
+        # anywhere — see fetch_details' own docstring for the fuller measurement
+        # and where simkl.com's displayed cast actually comes from — and `tv/{id}`
+        # states one overview and one poster for the whole title. So a
+        # Trakt-described season shows that season's own name and its own words
+        # while a Simkl-described one shows the title's — the same key set either
+        # way, which is the rule DetailPort states and
+        # tests/providers/test_protocol_conformance.py holds.
         "season_title": "",
         # Nor a season's own description — same documentation, same absence. The
         # panel draws the title's words above and nothing extra below.
