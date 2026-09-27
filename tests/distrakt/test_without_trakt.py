@@ -31,6 +31,7 @@ from unittest.mock import AsyncMock, patch
 from app import cache, db, distrakt as distrakt_store
 from app.config import Settings, save_settings
 from app.distrakt import live, routes as distrakt_routes
+from app.providers import title_search
 from app.providers.base import Media, PlayCounts, TitleFacts
 from app.providers.trakt import TraktError
 from app.providers.trakt import detail as trakt_detail, transport
@@ -1036,14 +1037,14 @@ class AddRoutesAskWhoeverKnowsTheTitleTests(AppTestCase):
 
     def _picked(self, ids, title, network=""):
         """The add routes NAME a search result now and read the title back out
-        of the cached answers themselves (`_resolve_pick`), so the pick is stood
-        in for here rather than seeding two caches: what these tests are about is
-        which service the SEASON lookup behind it asks, and that is a different
-        question from how the title got named."""
-        return patch.object(distrakt_routes, "_resolve_pick", AsyncMock(
-            return_value=distrakt_routes.Pick(
+        of the cached answers themselves (`title_search.resolve_pick`), so the
+        pick is stood in for here rather than seeding two caches: what these
+        tests are about is which service the SEASON lookup behind it asks, and
+        that is a different question from how the title got named."""
+        return patch.object(title_search, "resolve_pick", AsyncMock(
+            return_value=title_search.Pick(
                 title=title, network=network, year=None, ids=dict(ids),
-                seasons=[], named_season=None, unkeyable=None, media=Media.SHOW)))
+                seasons=[], named_season=None, media=Media.SHOW)))
 
     def _network(self):
         """Every add asks the describing service for its words — see

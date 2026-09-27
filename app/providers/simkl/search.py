@@ -76,7 +76,7 @@ def _hit(entry: dict, media: Media) -> SearchHit:
     `media` IS THE ENTRY'S OWN, NOT ALWAYS THE CALLER'S. A film hit answered
     by `/search/anime` (see `_FILM_SEARCH_TYPE`) is tagged Media.MOVIE
     regardless of the media a show search asked for — this is the one field on
-    SearchHit built to carry exactly that (app/distrakt/search.py's merge keys
+    SearchHit built to carry exactly that (app/providers/title_search.py's merge keys
     on it, `resolve_key(hit.media, hit.ids)`, precisely so a film mixed into a
     show search resolves under the film's own identity rather than a show's).
     `type: "special"` is deliberately NOT redirected here: the per-title

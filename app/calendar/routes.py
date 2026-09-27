@@ -1107,9 +1107,8 @@ async def search_the_calendar(request: Request):
     half's Simkl search now genuinely requires a user token (see
     providers.for_catalogue_search's docstring), so an instance-wide Settings
     object — which never carries a Simkl token — would read as "no Simkl" for
-    every viewer, linked or not. distrakt.viewer
-    is reached the same way distrakt/search.py's merge already is (see the
-    (CALENDAR, DISTRAKT) edge in tests/kernel/test_layering.py) — deferred so
+    every viewer, linked or not. distrakt.viewer is reached through the
+    (CALENDAR, DISTRAKT) edge in tests/kernel/test_layering.py — deferred so
     naming it at module level does not close the loop distrakt reading the
     calendar back already opens.
     """

@@ -14,7 +14,7 @@
    of the title. A show row fetches its season picker; a film row posts the add.
    Both send the QUERY that found them and their PLACE IN THE ANSWER, and
    nothing else about the title — the server reads the hit back out of the same
-   search (routes._resolve_pick), so what gets stored is the service's own answer
+   search (providers/title_search.py's resolve_pick), so what gets stored is the service's own answer
    and never a field a page handed back. The ids, the network and the per-source
    callback ids have all left the markup with the listener that read them.
 

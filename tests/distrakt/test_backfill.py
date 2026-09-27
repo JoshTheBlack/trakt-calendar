@@ -18,8 +18,8 @@ from fastapi.responses import Response
 from fastapi.testclient import TestClient
 
 from app import auth, db, distrakt
-from app.distrakt import routes as distrakt_routes
 from app.distrakt import backfill, watch_history
+from app.providers import title_search
 from app.calendar import state as calendar_state
 from app.providers.base import ItemKey, Media, PlayCounts
 from app.config import Settings, save_settings
@@ -572,11 +572,11 @@ class ManualCompletedRouteTests(unittest.TestCase):
         itself. What these tests are about is what the route WRITES, so the pick
         is stood in for rather than two caches seeded; the resolution has its own
         coverage in tests/distrakt/test_search_routes.py."""
-        return patch.object(distrakt_routes, "_resolve_pick", AsyncMock(
-            return_value=distrakt_routes.Pick(
+        return patch.object(title_search, "resolve_pick", AsyncMock(
+            return_value=title_search.Pick(
                 title=title, network=network, year=None,
                 ids=dict(ids or {"trakt": 321, "tmdb": 4321, "slug": "elsewhere"}),
-                seasons=[], named_season=None, unkeyable=None, media=Media.SHOW)))
+                seasons=[], named_season=None, media=Media.SHOW)))
 
     def _add(self, year, month, season=1, total=6):
         async def fake_season(settings, trakt_id, season_no, fresh=False, client=None):
@@ -844,11 +844,11 @@ class AddingAFilmByHandTests(unittest.TestCase):
         search. The pick is stood in for here because what these are about is
         where the play lands; the resolution has its own coverage in
         tests/distrakt/test_search_routes.py."""
-        picked = patch.object(distrakt_routes, "_resolve_pick", AsyncMock(
-            return_value=distrakt_routes.Pick(
+        picked = patch.object(title_search, "resolve_pick", AsyncMock(
+            return_value=title_search.Pick(
                 title=title, network="", year=2011,
                 ids={"trakt": trakt_id, "tmdb": trakt_id},
-                seasons=[], named_season=None, unkeyable=None, media=Media.MOVIE)))
+                seasons=[], named_season=None, media=Media.MOVIE)))
         with picked, patch("app.distrakt.routes._month_answer",
                            new=AsyncMock(return_value=Response(status_code=200))):
             return self.client.post("/api/distrakt/add-movie?year=2026&month=7",

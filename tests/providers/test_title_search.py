@@ -1,20 +1,24 @@
-"""The merge behind the tracker's manual add flow (app/distrakt/search.py).
+"""The catalogue search every searching feature shares
+(app/providers/title_search.py): the fan-out, the merge, and where it lives.
 
-Every case here is built out of hand-made SearchHits — no provider, no
+Every merge case here is built out of hand-made SearchHits — no provider, no
 settings that mean anything, no network — because the whole reason the merge
 is a pure function is that the dedupe rules can be trusted without any of
-those. See app/distrakt/search.py's own docstring for the shape being tested.
+those. See app/providers/title_search.py's own docstring for the shape being
+tested.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import logging
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from app.distrakt import search
+from app.providers import title_search as search
 from app.providers.base import ItemKey, Media, SearchHit, Source
+from tests.support import APP_DIR
 
 SETTINGS = SimpleNamespace()
 
@@ -308,8 +312,8 @@ class FieldMergeTests(unittest.TestCase):
         """A hit mixed into a show search that turns out to be a film (Simkl's
         anime search does this — see app/providers/simkl/search.py) has to
         carry its own media through the merge, not the caller's requested one:
-        distrakt/routes.py's _resolve_pick reads MergedSearchHit.media to
-        decide whether the pick is even addable from a season click."""
+        title_search.pick_from_hit reads MergedSearchHit.media to decide
+        whether the pick is even addable from a season click."""
         leader = hit(Source.SIMKL, "9", tmdb="1429", media=Media.MOVIE)
         result = search.merge_search_hits([(Source.SIMKL, [leader])])
         self.assertEqual(result.hits[0].media, Media.MOVIE)
@@ -318,7 +322,7 @@ class FieldMergeTests(unittest.TestCase):
         """Two hits should never actually land on one key with unrelated
         titles — this is the operator-facing tripwire if the dedupe unit
         ever behaves unexpectedly, not a refusal."""
-        with self.assertLogs("app.distrakt.search", level="WARNING") as logs:
+        with self.assertLogs("app.providers.title_search", level="WARNING") as logs:
             search.merge_search_hits([
                 (Source.TRAKT, [hit(Source.TRAKT, "1", tmdb="1429", title="Show One")]),
                 (Source.SIMKL, [hit(Source.SIMKL, "9", tmdb="1429", title="Totally Different")]),
@@ -402,6 +406,30 @@ class SearchCatalogueTests(unittest.IsolatedAsyncioTestCase):
         await search.search_catalogue(
             [(Source.TRAKT, trakt), (Source.SIMKL, simkl)], SETTINGS, Media.SHOW, "x")
         self.assertEqual(order, ["trakt-start", "simkl-start", "simkl-end", "trakt-end"])
+
+
+class OneCopyTests(unittest.TestCase):
+    """The search, the merge and reading a chosen result back live in providers/
+    and nowhere else. A copy left behind in a feature is the failure a move
+    invites: it goes on compiling, its callers go on passing, and the two drift
+    the first time a dedupe rule changes in one of them."""
+
+    MOVED = frozenset({"search_catalogue", "merge_search_hits", "MergedSearchHit",
+                       "SearchMergeResult", "Pick", "resolve_pick", "_resolve_pick",
+                       "pick_from_hit"})
+
+    def test_no_feature_package_defines_any_of_them(self):
+        for package in ("calendar", "distrakt", "ranker"):
+            for path in sorted((APP_DIR / package).rglob("*.py")):
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                defined = {node.name for node in ast.walk(tree)
+                           if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                                ast.ClassDef))}
+                with self.subTest(module=str(path.relative_to(APP_DIR))):
+                    self.assertFalse(defined & self.MOVED)
+
+    def test_the_trackers_old_module_is_gone(self):
+        self.assertFalse((APP_DIR / "distrakt" / "search.py").exists())
 
 
 if __name__ == "__main__":  # pragma: no cover

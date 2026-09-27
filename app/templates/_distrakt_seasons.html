@@ -22,11 +22,13 @@ hx-post="{{ '/api/distrakt/add-completed' if as_finished else '/api/distrakt/add
    A SEASON BUTTON NAMES THE RESULT AND NOTHING ELSE. It sends the query that
    found it, that result's key and the season picked; the route reads the title,
    the network and every id back out of the same two answers this fragment was
-   drawn from (routes._resolve_pick). No id the browser could edit reaches a
-   write.
+   drawn from (providers/title_search.py's resolve_pick). No id the browser
+   could edit reaches a write.
 
-   Context: `pick` (a routes.Pick, or None when nothing stored answers to that
-   name), `unavailable` (why the service could not be asked), `query`, `index`,
+   Context: `pick` (a title_search.Pick, or None when nothing stored answers to
+   that name), `unkeyable` (the tracker's own sentence for a pick it has no
+   shared id to file under, else None), `unavailable` (why the service could
+   not be asked), `query`, `index`,
    `month_query`, `as_finished` (this month is behind the clock, so an add
    records something as finished during it). #}
 <div id="addSeasonPick" class="distrakt-season-pick">
@@ -40,16 +42,16 @@ hx-post="{{ '/api/distrakt/add-completed' if as_finished else '/api/distrakt/add
    left open across a long enough gap, and the honest instruction is to ask
    again. #}
 <p class="distrakt-note distrakt-warn">That search has expired — search for it again.</p>
-{%- elif pick.unkeyable %}
+{%- elif unkeyable %}
 {# Said HERE, after the per-title lookup that had its chance to resolve an id,
    rather than on the row: a show hit arriving without a shared id is
    under-described, not unfileable, and refusing it up front would refuse the
    anime season-titles this flow exists to reach. The sentence is the server's
    own — the same one the add route's refusal uses. #}
-<p class="distrakt-note distrakt-warn">{{ pick.unkeyable }}</p>
+<p class="distrakt-note distrakt-warn">{{ unkeyable }}</p>
 {%- elif pick.media == 'movie' %}
 {# THIS ROW WAS ONLY EVER FOUND HERE BECAUSE SIMKL'S ANIME SEARCH MIXES FILMS
-   IN WITH TV (app/providers/simkl/search.py's _FILM_ANIME_TYPE) — this
+   IN WITH TV (app/providers/simkl/search.py's _FILM_SEARCH_TYPE) — this
    fragment is reached only from the show box's own season click, so a film
    pick always means that. It is not filed from here: a film has no roster the
    way a show does and needs a watched-on date this box never asked for, so

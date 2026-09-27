@@ -1,5 +1,17 @@
-"""The tracker's manual add flow asking every catalogue this instance has, and
-folding however many of them answer into one list.
+"""Asking every catalogue this instance has for a title, folding however many of
+them answer into one list, and reading a chosen result back out of that answer.
+
+WHY THIS LIVES IN providers/ AND NOT IN A FEATURE. The calendar's search, the
+tracker's add and the rankings board all ask the same services the same
+question, and the rules for folding their answers together carry measured
+findings (anime season-titles colliding on one identity, a source deduped
+against itself only where the season is known, whole shows absorbing their
+seasons) that a second implementation would get wrong from memory. Every
+feature may depend on providers/, which already owns the ports this asks
+(SearchPort, DetailPort.fetch_seasons) and the one function that decides who
+is asked (`providers.for_catalogue_search`); a feature owning it made every
+other searcher depend on that feature instead. What a result DOES once chosen
+stays each feature's own — this module ends at the chosen title.
 
 TWO THINGS HAPPEN HERE, DELIBERATELY KEPT APART. `search_catalogue` is the I/O
 edge: it fans a query out over whichever search ports its caller hands it,
@@ -10,11 +22,12 @@ reach of it. That split is what lets the dedupe rules below be tested with
 nothing but hand-built `SearchHit`s — which is the only way to trust them,
 given how easy the wrong dedupe unit is to get wrong (see `merge_search_hits`).
 
-THIS MODULE DOES NOT CALL THE REGISTRY. `search_catalogue` takes the list
+`search_catalogue` DOES NOT CALL THE REGISTRY. It takes the list
 `providers.for_catalogue_search(settings)` already returns rather than asking
 for it itself, so a caller owns the one place that decides which sources are
-reachable and this module only ever sees the answer to that question, never
-the question itself.
+reachable and the merge only ever sees the answer to that question, never the
+question itself. `resolve_pick` is the exception, and has to be: it re-reads a
+search the caller made, so it must ask the very same question the caller did.
 """
 from __future__ import annotations
 
@@ -24,7 +37,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
-from ..providers.base import ItemKey, Media, SearchHit, SearchPort, Source, resolve_key
+from .. import providers
+from .base import ItemKey, Media, SearchHit, SearchPort, Source, resolve_key
 
 logger = logging.getLogger(__name__)
 
@@ -154,12 +168,12 @@ class _Merging:
         wrong-looking row, and the guard belongs beside the field it protects.
         """
         if _titles_differ_materially(self.title, hit.title):
-            # See risk-3-shaped reasoning in the module docstring: the season
-            # unit is what tells apart titles that share one match id, and a
-            # mapping this thin (Simkl's own `season`/`mapped_tvdb_seasons`, or
-            # simply None on every source measured so far) is where that could
-            # go wrong first. This is an operator's signal, not the viewer's —
-            # nothing here refuses the merge over it.
+            # The season unit is what tells apart titles that share one match
+            # id, and a mapping this thin (Simkl's own `season` /
+            # `mapped_tvdb_seasons`, or simply None on every source measured so
+            # far) is where a wrong collapse would show up first. This is an
+            # operator's signal, not the viewer's — nothing here refuses the
+            # merge over it.
             logger.warning(
                 "Catalogue search merged %r (%s) and %r (%s) onto one row (%s, "
                 "season %s) — check whether the dedupe unit actually matched.",
@@ -185,9 +199,9 @@ class _Merging:
 
     def finish(self) -> MergedSearchHit:
         return MergedSearchHit(key=self.key, season=self.season,
-                                source_ids=dict(self.source_ids), ids=dict(self.ids),
-                                title=self.title, year=self.year, network=self.network,
-                                runtime=self.runtime, overview=self.overview, media=self.media)
+                               source_ids=dict(self.source_ids), ids=dict(self.ids),
+                               title=self.title, year=self.year, network=self.network,
+                               runtime=self.runtime, overview=self.overview, media=self.media)
 
 
 def merge_search_hits(
@@ -323,8 +337,8 @@ def _whole_shows_absorb_seasons(slots: list[_Merging]) -> list[_Merging]:
 
 
 async def search_catalogue(asked: Sequence[tuple[Source, SearchPort]], settings,
-                            media: Media, query: str, *,
-                            cached_only: bool = False) -> SearchMergeResult:
+                           media: Media, query: str, *,
+                           cached_only: bool = False) -> SearchMergeResult:
     """Ask every `(Source, SearchPort)` in `asked` for `query` at once, and
     merge whatever answers come back. `asked` is
     `providers.for_catalogue_search(settings)`'s own return — this function
@@ -339,9 +353,9 @@ async def search_catalogue(asked: Sequence[tuple[Source, SearchPort]], settings,
     even thinking about is down is exactly the failure this avoids.
 
     `cached_only=True` MAKES NO CALL AT ALL and re-reads what this exact search
-    already stored, merged again by the same rules. It is how the add flow acts
-    on a result the page NAMED: the picker searched moments ago, so the title,
-    the ids and the network that get written are the services' own answer rather
+    already stored, merged again by the same rules. It is how an add acts on a
+    result the page NAMED: the picker searched moments ago, so the title, the
+    ids and the network that get written are the services' own answer rather
     than fields a browser handed back — and a search the instance no longer
     holds answers with nothing, which the caller reads as "search for it again"
     rather than quietly spending a search nobody counted.
@@ -361,3 +375,124 @@ async def search_catalogue(asked: Sequence[tuple[Source, SearchPort]], settings,
             continue
         per_source.append((source, answer))
     return merge_search_hits(per_source, failed=frozenset(failed))
+
+
+class Pick(NamedTuple):
+    """A search result somebody chose, resolved the only way it may be resolved:
+    from answers a SERVICE gave — the stored search and the season lookup.
+
+    NOTHING HERE CAME OFF THE PAGE. The page names a result; the title, the
+    network and every id are the services' own words for it. That closes the
+    route through which a caller's ids could reach a write — and it matters
+    more than almost anywhere, because a wrong Trakt id SHADOWS a correct Simkl
+    one on a tracker roster row for ever, so an id a browser could influence is
+    an id that can permanently mis-file somebody's watch record.
+
+    WHETHER THE TITLE CAN BE FILED IS NOT ANSWERED HERE. That is a question
+    about the feature doing the filing — the tracker's refusal names the
+    tracker — so each caller asks it of `ids` itself; `resolve_key` is the
+    shared half of the answer, and it is already public.
+
+    `media` IS THE HIT'S OWN, which a show search cannot always assume — Simkl's
+    anime search mixes films in with TV (see app/providers/simkl/search.py's
+    _FILM_SEARCH_TYPE), so a result found from a SHOW box can still turn out to
+    be a film. A caller reads this to say so rather than filing a film as a
+    zero-progress show.
+    """
+    title: str
+    network: str
+    year: int | None
+    ids: dict
+    seasons: list[dict]
+    named_season: int | None
+    media: Media
+
+
+async def pick_from_hit(settings, hit: MergedSearchHit, *, cached_only: bool) -> Pick | None:
+    """`hit` as a Pick: for a show, its season list and every shared id the
+    per-title lookup adds; for a film, the hit alone. None when the source that
+    would be asked cannot be.
+
+    `cached_only` IS THE CALLER'S BECAUSE THE TWO KINDS OF CALLER DIFFER. A
+    picker may make the per-title lookup, because that lookup is what the click
+    is FOR; an add may not make anything, because an add that can search is an
+    add that spends a budget nobody is counting.
+
+    THE FIRST SOURCE IN THE HIT'S OWN ORDER IS WHO IS ASKED, and that order is
+    the registry's — whoever found a title is who can be asked about it, and a
+    Simkl-only instance has no Trakt entry to reach for.
+    """
+    # THE HIT'S OWN MEDIA DECIDES, NOT THE SEARCH THAT FOUND IT. Simkl's anime
+    # search mixes TV and film under one endpoint (see
+    # app/providers/simkl/search.py's _FILM_SEARCH_TYPE), so a "shows" search
+    # can turn up a hit that is really a film — MergedSearchHit.media already
+    # carries that answer, resolved from whichever hit led the merge.
+    if hit.media is Media.MOVIE:
+        # A film has no season to pick and so no second lookup: the search hit
+        # is the whole answer, which is also why an unfileable one is refused on
+        # the row it is drawn as rather than on the click.
+        return Pick(hit.title, hit.network, hit.year, dict(hit.ids), [], None, hit.media)
+    source, source_id = next(iter(hit.source_ids.items()))
+    provider = providers.get(source)
+    if not provider.detail_port.catalogue_configured(settings):
+        return None
+    answer = await provider.detail_port.fetch_seasons(settings, source_id, hit.media,
+                                                      cached_only=cached_only)
+    # THE LOOKUP WINS A CONFLICT and the hit's own ids fill in the rest. This
+    # answer's `season` was read off the per-title record `answer.ids` came from,
+    # so those two describe the same title by construction; an id that disagrees
+    # describes a different one, and keeping it would file the record with one
+    # title's season beside another title's id — which is exactly what a source
+    # listing one series as several titles produces, and a record nothing can
+    # then count. The hit's ids still travel because a lookup that surfaces
+    # nothing (Trakt, always — see SeasonsAnswer) must not read as "this hit had
+    # no ids after all".
+    return Pick(
+        title=hit.title,
+        year=hit.year,
+        # ONLY WHERE THE HIT HAD NONE. The hit's network came from whichever
+        # source led the merge; this one is the per-title record's, and it fills
+        # a gap rather than overriding a source that already answered — a Simkl
+        # search hit carries no network, so on a Simkl-only instance this is the
+        # only place a title added by hand ever gets one.
+        network=hit.network or answer.network or "",
+        ids={**hit.ids, **answer.ids},
+        seasons=answer.seasons,
+        named_season=answer.named_season,
+        media=hit.media,
+    )
+
+
+async def resolve_pick(settings, media: Media, query: str, index, *,
+                       cached_only: bool) -> Pick | None:
+    """The result at `index` of the search for `query`, or None when nothing
+    stored answers to that name.
+
+    A RESULT IS NAMED BY ITS QUERY AND ITS PLACE IN THE ANSWER, not by an
+    identity, and that is not a shortcut. A show hit CAN have no shared id at
+    all — that is the ordinary shape of a Simkl season-title before the per-title
+    lookup fills one in, and refusing those is exactly what a search-to-add
+    exists not to do — so there is no key to name it by until the pick has
+    already happened. The merge is a pure function of the stored answers, so the
+    same query lands on the same row.
+
+    TWO CACHED READS, AND BOTH OF THEM ARE ANSWERS THE CLICK ALREADY PAID FOR.
+    The merged search names the title, the network and the ids the hit carried;
+    the per-title season lookup (`pick_from_hit`) names the season list, the
+    season the hit IS where its source files seasons as titles, and every shared
+    id the search left out. Neither is a new question — the box searched a moment
+    ago and the picker looked the title up — so re-asking them is a read of the
+    shared response cache and no request at all. The SEARCH is re-read from the
+    store whatever `cached_only` says: the box's own request stored it seconds
+    earlier, and a result the store no longer holds is one to search for again
+    rather than one to guess at.
+    """
+    asked = providers.for_catalogue_search(settings)
+    if not asked:
+        return None
+    result = await search_catalogue(asked, settings, media, query, cached_only=True)
+    try:
+        hit = result.hits[int(index)]
+    except (TypeError, ValueError, IndexError):
+        return None
+    return await pick_from_hit(settings, hit, cached_only=cached_only)

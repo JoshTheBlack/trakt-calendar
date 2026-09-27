@@ -22,7 +22,6 @@ import calendar as _calendar
 import json
 import logging
 from datetime import date, datetime, timedelta, timezone
-from typing import NamedTuple
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request
@@ -30,10 +29,6 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from . import (arrival, backfill, counts, discord_fmt, episode_progress, lifecycle, live,
                rollover, slug_repair, unsettled, viewer, watch_history)
-# The catalogue-search merge (app/distrakt/search.py) — imported as `catalogue_search`
-# rather than bare `search` so a call site reads which module it is, the same
-# reason the six modules above are imported by name rather than star-imported.
-from . import search as catalogue_search
 # The data layer is reached through this package's own public surface, the same
 # names an outside caller uses, rather than through the six modules those names
 # are defined in: a route handler has no business knowing which half of the
@@ -46,7 +41,9 @@ from ..config import load_settings
 from ..endpoints import endpoint_choices
 from ..media import logos
 from ..perftrace import span
-from ..providers import detail_source
+# The catalogue search every feature shares — the fan-out, the merge and reading
+# a chosen result back out of it. What a result DOES once chosen is this file's.
+from ..providers import detail_source, title_search
 from ..providers.base import (ItemKey, Media, Source, SourceUnavailable,
                               parse_item_key, parse_media, resolve_key)
 from ..providers.trakt import TraktError
@@ -2148,7 +2145,7 @@ async def api_distrakt_remove(request: Request):
         message="Taken off this month" if month_key < _this_month() else "Removed")
 
 
-def _search_hit_payload(hit: catalogue_search.MergedSearchHit) -> dict:
+def _search_hit_payload(hit: title_search.MergedSearchHit) -> dict:
     """One merged search hit as the add flow's results row is built from.
 
     THE ONE PLACE A `MergedSearchHit` BECOMES THE ROW: the fragment template
@@ -2250,7 +2247,7 @@ async def _search_fragment(request: Request, media: Media):
                # the month is the one an add would land in.
                "query": query, "month_query": f"?year={year}&month={month}"}
     if asked:
-        result = await catalogue_search.search_catalogue(
+        result = await title_search.search_catalogue(
             asked, settings, media, query)
         context["hits"] = _search_rows(result.hits, media)
         context["failed"] = sorted(str(source) for source in result.failed)
@@ -2260,7 +2257,7 @@ async def _search_fragment(request: Request, media: Media):
 @guard.get("/distrakt/fragments/search", AuthLevel.DISTRAKT_APPROVED)
 async def distrakt_search_fragment(request: Request):
     """Show search for the add flow, merged across every catalogue this instance
-    can ask (app/distrakt/search.py's `search_catalogue`). See `_search_fragment`
+    can ask (app/providers/title_search.py's `search_catalogue`). See `_search_fragment`
     for what it renders and why it is a fragment rather than JSON."""
     return await _search_fragment(request, Media.SHOW)
 
@@ -2268,7 +2265,7 @@ async def distrakt_search_fragment(request: Request):
 @guard.get("/distrakt/fragments/search-movie", AuthLevel.DISTRAKT_APPROVED)
 async def distrakt_movie_search_fragment(request: Request):
     """Film search for the add-a-film flow, merged across every catalogue this
-    instance can ask (app/distrakt/search.py's `search_catalogue`) — the same
+    instance can ask (app/providers/title_search.py's `search_catalogue`) — the same
     machinery the show search uses, media-parameterized to MOVIE.
 
     ITS OWN ROUTE RATHER THAN A MEDIA FLAG ON THE SHOW SEARCH, and the reason
@@ -2319,14 +2316,14 @@ async def api_distrakt_add_movie(request: Request):
     if watched_on > clock.today():
         return _month_refusal(request, "That day hasn't happened yet.")
     # THE RESULT IS NAMED, NOT HANDED OVER — the ids, the title and the year are
-    # read back out of the search that found it (see `_resolve_pick`), so a play
-    # is filed under the identity the service issued and never one a page sent.
-    pick = await _resolve_pick(settings, Media.MOVIE, data.get("q") or "",
-                               data.get("i"), cached_only=True)
+    # read back out of the search that found it (title_search.resolve_pick), so a
+    # play is filed under the identity the service issued and never one a page sent.
+    pick = await title_search.resolve_pick(settings, Media.MOVIE, data.get("q") or "",
+                                           data.get("i"), cached_only=True)
     if pick is None:
         return _month_refusal(request, "That search has expired — search for it again.")
-    if pick.unkeyable:
-        return _month_refusal(request, pick.unkeyable)
+    if unkeyable := _unkeyable_reason(pick.media, pick.ids, pick.title):
+        return _month_refusal(request, unkeyable)
 
     recorded = await watch_history.record_movie_watches(user_id, [{
         "ids": pick.ids,
@@ -2442,135 +2439,14 @@ async def api_distrakt_remove_movie(request: Request):
                                message="Film removed")
 
 
-class Pick(NamedTuple):
-    """A search result somebody chose, resolved the only way it may be resolved:
-    by re-reading the answers the search and the season lookup already stored.
-
-    NOTHING HERE CAME OFF THE PAGE. The page names a query and a result key; the
-    title, the network and every id are the services' own words for it. That
-    closes the last route in this app that took a caller's ids into a write —
-    and it matters more here than almost anywhere, because a wrong Trakt id
-    SHADOWS a correct Simkl one on a roster row for ever (§7's Supernatural
-    finding), so an id a browser could influence is an id that can permanently
-    mis-file somebody's watch record.
-
-    `unkeyable` IS THE SERVER'S OWN SENTENCE for a title the tracker has no
-    shared id to file under, and it is None when there is one — the same
-    sentence the add's refusal uses, asked here BEFORE an add is offered.
-
-    `media` IS THE HIT'S OWN, which the show-search flow that resolves this
-    Pick cannot always assume — Simkl's anime search mixes films in with TV
-    (see app/providers/simkl/search.py's _FILM_ANIME_TYPE), so a result found
-    from the SHOW box can still turn out to be a film. The season fragment
-    reads this to say so rather than filing it as a zero-progress show: a film
-    has no roster the way a show does (api_distrakt_add_movie's own docstring),
-    and it needs a watched-on date the show search never collected, so there is
-    no safe way to add it from here — the honest answer is to send the viewer
-    to Add Film instead.
-    """
-    title: str
-    network: str
-    year: int | None
-    ids: dict
-    seasons: list[dict]
-    named_season: int | None
-    unkeyable: str | None
-    media: Media
-
-
-async def _resolve_pick(settings, media: Media, query: str, index, *,
-                        cached_only: bool) -> Pick | None:
-    """The chosen result, or None when nothing stored answers to that name.
-
-    A RESULT IS NAMED BY ITS QUERY AND ITS PLACE IN THE ANSWER, not by an
-    identity, and that is not a shortcut. A show hit CAN have no shared id at
-    all — that is the ordinary shape of a Simkl season-title before the per-title
-    lookup below fills one in, and refusing those is exactly what this flow
-    exists not to do — so there is no key to name it by until the pick has
-    already happened. The merge is a pure function of the stored answers, so the
-    same query lands on the same row.
-
-    TWO CACHED READS, AND BOTH OF THEM ARE ANSWERS THE CLICK ALREADY PAID FOR.
-    The merged search names the title, the network and the ids the hit carried;
-    the per-title season lookup names the season list, the season the hit IS
-    where its source files seasons as titles, and every shared id the search
-    left out. Neither is a new question — the box searched a moment ago and the
-    picker looked the title up — so re-asking them here is a read of the shared
-    response cache and no request at all.
-
-    `cached_only` IS THE CALLER'S BECAUSE THE TWO CALLERS DIFFER. The picker may
-    make the per-title lookup, because that lookup is what the click is FOR; the
-    add may not make anything, because an add that can search is an add that
-    spends a budget nobody is counting. Both re-read the SEARCH from the store
-    either way: the box's own request stored it seconds earlier, and a result
-    the store no longer holds is one to search for again rather than one to
-    guess at.
-
-    THE FIRST SOURCE IN THE HIT'S OWN ORDER IS WHO IS ASKED, and that order is
-    the registry's — whoever found a title is who can be asked about it, and a
-    Simkl-only instance has no Trakt entry to reach for.
-    """
-    asked = providers.for_catalogue_search(settings)
-    if not asked:
-        return None
-    result = await catalogue_search.search_catalogue(asked, settings, media, query,
-                                                     cached_only=True)
-    try:
-        hit = result.hits[int(index)]
-    except (TypeError, ValueError, IndexError):
-        return None
-    # THE HIT'S OWN MEDIA DECIDES, NOT THE SEARCH THAT FOUND IT. Simkl's anime
-    # search mixes TV and film under one endpoint (see
-    # app/providers/simkl/search.py's _FILM_ANIME_TYPE), so a "shows" search
-    # can turn up a hit that is really a film — MergedSearchHit.media already
-    # carries that answer, resolved from whichever hit led the merge.
-    if hit.media is Media.MOVIE:
-        # A film has no season to pick and so no second lookup: the search hit
-        # is the whole answer, which is also why an unfileable one is refused on
-        # the row it is drawn as rather than on the click.
-        return Pick(hit.title, hit.network, hit.year, dict(hit.ids), [], None,
-                    _unkeyable_reason(hit.media, hit.ids, hit.title), hit.media)
-    source, source_id = next(iter(hit.source_ids.items()))
-    provider = providers.get(source)
-    if not provider.detail_port.catalogue_configured(settings):
-        return None
-    answer = await provider.detail_port.fetch_seasons(settings, source_id, hit.media,
-                                                      cached_only=cached_only)
-    # THE LOOKUP WINS A CONFLICT and the hit's own ids fill in the rest. This
-    # answer's `season` was read off the per-title record `answer.ids` came from,
-    # so those two describe the same title by construction; an id that disagrees
-    # describes a different one, and keeping it would file the record with one
-    # title's season beside another title's id — which is exactly what a source
-    # listing one series as several titles produces, and a record nothing can
-    # then count. The hit's ids still travel because a lookup that surfaces
-    # nothing (Trakt, always — see SeasonsAnswer) must not read as "this hit had
-    # no ids after all".
-    ids = {**hit.ids, **answer.ids}
-    return Pick(
-        title=hit.title,
-        year=hit.year,
-        # ONLY WHERE THE HIT HAD NONE. The hit's network came from whichever
-        # source led the merge; this one is the per-title record's, and it fills
-        # a gap rather than overriding a source that already answered — a Simkl
-        # search hit carries no network, so on a Simkl-only instance this is the
-        # only place the roster ever gets one.
-        network=hit.network or answer.network or "",
-        ids=ids,
-        seasons=answer.seasons,
-        named_season=answer.named_season,
-        unkeyable=_unkeyable_reason(hit.media, ids, hit.title),
-        media=hit.media,
-    )
-
-
 @guard.get("/distrakt/fragments/seasons", AuthLevel.DISTRAKT_APPROVED)
 async def distrakt_seasons_fragment(request: Request):
     """The add flow's season picker for the result somebody clicked.
 
     THE ADDRESS NAMES THE RESULT, NOT THE TITLE. It carries the query that found
     it and that result's own key, which is all the server needs to read the hit
-    back — see `_resolve_pick`, and the ranker's own add for the rule this
-    follows.
+    back — see app/providers/title_search.py's `resolve_pick`, and the ranker's
+    own add for the rule this follows.
 
     ONE PARTIAL FOR EVERY STATE this can be in — a picker, a refusal, or a
     season that names itself and adds on sight — because each of them replaces
@@ -2588,12 +2464,16 @@ async def distrakt_seasons_fragment(request: Request):
     # somebody to retype a query that was never the problem.
     unavailable = ""
     try:
-        pick = await _resolve_pick(settings, Media.SHOW, query, index, cached_only=False)
+        pick = await title_search.resolve_pick(settings, Media.SHOW, query, index,
+                                               cached_only=False)
     except SourceUnavailable as exc:
         pick, unavailable = None, str(exc)
     return templates.TemplateResponse(request, "_distrakt_seasons.html", {
         "request": request,
         "pick": pick,
+        # ASKED HERE, AFTER the per-title lookup has had its chance to resolve
+        # an id, with the same sentence the add's own refusal uses.
+        "unkeyable": _unkeyable_reason(pick.media, pick.ids, pick.title) if pick else None,
         "unavailable": unavailable,
         "query": query,
         "index": index,
@@ -2675,15 +2555,15 @@ async def api_distrakt_add(request: Request):
     # used to take `ids` and `title` straight from the page, which was the last
     # reachable way for a browser to decide what identity somebody's watch record
     # is filed under — and a wrong Trakt id shadows a correct Simkl one for ever.
-    pick = await _resolve_pick(settings, Media.SHOW, data.get("q") or "",
-                               data.get("i"), cached_only=True)
+    pick = await title_search.resolve_pick(settings, Media.SHOW, data.get("q") or "",
+                                           data.get("i"), cached_only=True)
     if pick is None:
         return _month_refusal(request, "That search has expired — search for it again.")
-    if pick.unkeyable:
-        return _month_refusal(request, pick.unkeyable)
+    if unkeyable := _unkeyable_reason(pick.media, pick.ids, pick.title):
+        return _month_refusal(request, unkeyable)
     if pick.media is Media.MOVIE:
         # Simkl's anime search mixes films in with TV (see
-        # app/providers/simkl/search.py's _FILM_ANIME_TYPE), so a show-box
+        # app/providers/simkl/search.py's _FILM_SEARCH_TYPE), so a show-box
         # pick can resolve to a film — the season fragment already refuses to
         # offer this one a season for the same reason, but the check belongs
         # here too: this route writes a roster row on the strength of it, not
@@ -2952,12 +2832,12 @@ async def api_distrakt_add_completed(request: Request):
     except (KeyError, TypeError, ValueError):
         return _month_refusal(request, "Missing or invalid season")
     # The result is NAMED here too, for the reason api_distrakt_add gives.
-    pick = await _resolve_pick(settings, Media.SHOW, data.get("q") or "",
-                               data.get("i"), cached_only=True)
+    pick = await title_search.resolve_pick(settings, Media.SHOW, data.get("q") or "",
+                                           data.get("i"), cached_only=True)
     if pick is None:
         return _month_refusal(request, "That search has expired — search for it again.")
-    if pick.unkeyable:
-        return _month_refusal(request, pick.unkeyable)
+    if unkeyable := _unkeyable_reason(pick.media, pick.ids, pick.title):
+        return _month_refusal(request, unkeyable)
     if pick.media is Media.MOVIE:
         # See api_distrakt_add's identical guard for why: Simkl's anime search
         # mixes films in with TV, so a show-box pick can resolve to a film.

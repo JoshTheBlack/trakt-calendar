@@ -54,6 +54,9 @@ from . import vocab
 from .. import cache, db, providers
 from ..endpoints import get_endpoint
 from ..perftrace import span
+# The catalogue fan-out and merge every searching feature shares, whose dedupe
+# rules carry measured findings a second implementation would get wrong.
+from ..providers import title_search
 from ..providers.base import (Item, Media, Source, SourceUnavailable, epoch_moment,
                               render)
 
@@ -357,8 +360,6 @@ async def catalogue(query: str, *, settings, prefs, tz: ZoneInfo,
     if len(needle) < MIN_QUERY:
         return Results()
 
-    from ..distrakt import search as shared_search  # deferred: see DECLARED_EDGES
-
     asked = providers.for_catalogue_search(settings)
     if not asked:
         return Results()
@@ -368,7 +369,7 @@ async def catalogue(query: str, *, settings, prefs, tz: ZoneInfo,
     failed: set = set()
     with span("search.catalogue", sources=len(asked)) as sp:
         for media in (Media.SHOW, Media.MOVIE):
-            merged = await shared_search.search_catalogue(asked, settings, media, query)
+            merged = await title_search.search_catalogue(asked, settings, media, query)
             failed |= set(merged.failed)
             # THE SAME SPECS THE CALENDAR ITSELF READS, picked per media by the
             # one function that knows which column answers for which medium.

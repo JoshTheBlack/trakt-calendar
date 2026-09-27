@@ -32,6 +32,7 @@ from app import db
 from app.distrakt import routes as distrakt_routes
 from app.distrakt import viewer as distrakt_viewer
 from app.distrakt import store, watch_history
+from app.providers import title_search
 from app.providers.base import ItemKey, Media, TitleFacts
 
 from tests.support import RewatchPrompt, STATIC_DIR, migrated_db
@@ -151,10 +152,10 @@ class _RosterAddCase(DistraktTestCase):
         answer — and the route reads the title, the network and the ids back out
         of that search. Stood in for here because what these are about is the
         QUESTION the add asks before it writes anything."""
-        return patch.object(distrakt_routes, "_resolve_pick", AsyncMock(
-            return_value=distrakt_routes.Pick(
+        return patch.object(title_search, "resolve_pick", AsyncMock(
+            return_value=title_search.Pick(
                 title="Breaking Bad", network="AMC", year=None, ids=dict(self.IDS),
-                seasons=[], named_season=None, unkeyable=None, media=Media.SHOW)))
+                seasons=[], named_season=None, media=Media.SHOW)))
 
     def _search_add(self, *, history=None, source="trakt", sources=None,
                     detail=None, year=2026, month=9, **extra):

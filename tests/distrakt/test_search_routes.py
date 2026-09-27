@@ -23,9 +23,8 @@ from unittest.mock import AsyncMock, patch
 from datetime import date
 
 from app.config import Settings, save_settings
-from app.distrakt import routes as distrakt_routes
-from app.distrakt import search as catalogue_search
-from app.providers.base import Media, SearchHit, SeasonsAnswer, Source
+from app.providers import title_search as catalogue_search
+from app.providers.base import Media, SearchHit, SeasonsAnswer, Source, resolve_key
 from app.providers.simkl import detail as simkl_detail
 from app.providers.simkl import search as simkl_search
 from app.providers.trakt import TraktError
@@ -123,8 +122,8 @@ class SearchFragmentTests(AppTestCase):
         gets stored is the service's own answer and never a field a page sent.
 
         WHICH SOURCE LEADS is no longer a fact about the markup at all — it is
-        `next(iter(hit.source_ids))` inside `_resolve_pick`, and
-        SeasonPickerFragmentTests is where it is pinned."""
+        `next(iter(hit.source_ids))` inside title_search.pick_from_hit, and SeasonPickerFragmentTests is where it
+        is pinned."""
         with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[TRAKT_HIT])), \
              patch.object(simkl_search, "search_titles", AsyncMock(return_value=[])):
             html = self.client.get(
@@ -383,7 +382,7 @@ class SeasonPickerFragmentTests(AppTestCase):
 
         async def _run():
             settings = await viewer.settings_for_user(self.user_id)
-            return await distrakt_routes._resolve_pick(
+            return await catalogue_search.resolve_pick(
                 settings, Media.SHOW, query, index, cached_only=False)
 
         return asyncio.run(_run())
@@ -439,10 +438,10 @@ class SeasonPickerFragmentTests(AppTestCase):
         """Defense in depth beside the fragment's own refusal above: a client
         that posts directly (or one from before this guard existed) must not
         be able to write a film onto the roster as a zero-progress show."""
-        movie_pick = distrakt_routes.Pick(
+        movie_pick = catalogue_search.Pick(
             title="The Last Attack", network="", year=2024, ids={"tmdb": 1333100},
-            seasons=[], named_season=None, unkeyable=None, media=Media.MOVIE)
-        with patch.object(distrakt_routes, "_resolve_pick",
+            seasons=[], named_season=None, media=Media.MOVIE)
+        with patch.object(catalogue_search, "resolve_pick",
                           AsyncMock(return_value=movie_pick)):
             resp = self.client.post("/api/distrakt/add",
                                     json={"q": "a", "i": 0, "season": 1})
@@ -470,7 +469,7 @@ class SeasonPickerFragmentTests(AppTestCase):
         self.assertEqual(pick.named_season, 3)
         self.assertEqual(pick.ids, {"simkl": 694485, "tmdb": 1429, "tvdb": 99,
                                     "imdb": "tt1", "mal": 51019})
-        self.assertIsNone(pick.unkeyable)
+        self.assertIsNotNone(resolve_key(Media.SHOW, pick.ids))
 
     def test_a_season_that_names_itself_adds_on_sight(self):
         """Asking which season would be asking a question the row already
@@ -501,7 +500,7 @@ class SeasonPickerFragmentTests(AppTestCase):
              patch.object(trakt_detail, "fetch_show_seasons", AsyncMock(return_value=[])):
             pick = self._resolved()
         self.assertEqual(pick.ids, {"tmdb": 100})
-        self.assertIsNone(pick.unkeyable)
+        self.assertIsNotNone(resolve_key(Media.SHOW, pick.ids))
 
     def test_the_lookups_own_ids_win_a_disagreement_with_the_hits(self):
         """`season` is read off the same per-title record `ids` comes from, so

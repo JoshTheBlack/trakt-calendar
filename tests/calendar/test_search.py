@@ -243,7 +243,7 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         first real search. A double that reports a different type than the
         function it stands in for tests nothing about the caller.
         """
-        from app.distrakt.search import MergedSearchHit
+        from app.providers.title_search import MergedSearchHit
 
         sources = {Source.SIMKL: simkl_id}
         sources.update(also or {})
@@ -317,7 +317,7 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
                 return SimpleNamespace(hits=[self._hit()], failed=frozenset())
             return SimpleNamespace(hits=[], failed=frozenset())
 
-        with patch("app.distrakt.search.search_catalogue", new=_search), \
+        with patch("app.providers.title_search.search_catalogue", new=_search), \
              patch("app.providers.for_catalogue_search",
                    return_value=[(Source.SIMKL, object())]), \
              patch("app.providers.get", return_value=SimpleNamespace(
@@ -525,7 +525,7 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
             asked.append(source_id)
             return SimpleNamespace(seasons=[])
 
-        with patch("app.distrakt.search.search_catalogue", new=_search), \
+        with patch("app.providers.title_search.search_catalogue", new=_search), \
              patch("app.providers.for_catalogue_search",
                    return_value=[(Source.SIMKL, object())]), \
              patch("app.providers.get", return_value=SimpleNamespace(
@@ -606,7 +606,7 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
                                        failed=frozenset())
             return SimpleNamespace(hits=[], failed=frozenset())
 
-        with patch("app.distrakt.search.search_catalogue", new=_search), \
+        with patch("app.providers.title_search.search_catalogue", new=_search), \
              patch("app.providers.for_catalogue_search",
                    return_value=[(Source.SIMKL, object())]), \
              patch("app.providers.get", return_value=SimpleNamespace(
@@ -679,7 +679,7 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
             seen.append(source_id)
             return {"first_aired": "2026-11-04T20:00:00Z", "title": "Unseen Show"}
 
-        with patch("app.distrakt.search.search_catalogue", new=_search),              patch("app.providers.for_catalogue_search",
+        with patch("app.providers.title_search.search_catalogue", new=_search),              patch("app.providers.for_catalogue_search",
                    return_value=[(Source.SIMKL, object())]),              patch("app.providers.get", return_value=SimpleNamespace(
                  detail_port=SimpleNamespace(
                      fetch_details=_details,
@@ -697,13 +697,13 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         can call back with. There is nothing to describe and nothing to link
         to, so it is dropped — quietly, because it is not an error."""
         async def _search(asked, settings, media, query):
-            from app.distrakt.search import MergedSearchHit
+            from app.providers.title_search import MergedSearchHit
             return SimpleNamespace(hits=[MergedSearchHit(
                 key=None, season=None, source_ids={}, ids={}, title="Nameless",
                 year=None, network="", runtime=None, overview="", media=Media.SHOW)],
                 failed=frozenset())
 
-        with patch("app.distrakt.search.search_catalogue", new=_search),              patch("app.providers.for_catalogue_search",
+        with patch("app.providers.title_search.search_catalogue", new=_search),              patch("app.providers.for_catalogue_search",
                    return_value=[(Source.SIMKL, object())]):
             found = await calendar_search.catalogue(
                 "nameless", settings=self.settings, prefs=self.prefs, tz=self.tz,
