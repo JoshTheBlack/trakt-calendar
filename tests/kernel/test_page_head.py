@@ -374,18 +374,6 @@ class PublicPageTests(unittest.TestCase):
                   if re.search(r"\{%\s*set public = true\s*%\}", uncommented(name))]
         self.assertEqual(public, list(self.PUBLIC_PAGES))
 
-    def test_nothing_on_a_public_page_calls_a_script_the_public_list_lacks(self):
-        """An inline handler reaches the global scope only, so on a public page it
-        must be declared by one of the files that page actually loads."""
-        available = set()
-        for name in assets.PUBLIC_SCRIPTS:
-            if not name.endswith(VENDORED):
-                available |= declares(js_source(name))
-        for page in self.PUBLIC_PAGES:
-            for missing in sorted(handlers_in(expanded(page)) - available):
-                with self.subTest(page=page, handler=missing):
-                    self.fail(f"{page} calls {missing}() but the public list does not declare it")
-
 
 class SignInFormTests(unittest.TestCase):
     """The one form a password is typed into, and the window before htmx is ready.
@@ -585,22 +573,8 @@ def js_source(name: str) -> str:
     return (assets.BASE_DIR / name).read_text(encoding="utf-8")
 
 
-# `onclick="if(event.target===this) closeSettings()"` is the app's click-outside
-# idiom, so an attribute's calls are not all function calls of ours.
-JS_KEYWORDS = {"if", "for", "while", "switch", "catch", "return", "typeof", "new",
-               "do", "else", "function", "await", "delete", "void"}
-
-HANDLER_ATTR = re.compile(r"""\bon[a-z]+=(["'])(.*?)\1""", re.S)
 # Not preceded by a dot: `this.form.requestSubmit()` is the DOM's, not ours.
 CALL = re.compile(r"(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(")
-
-
-def handlers_in(source: str) -> set[str]:
-    """Every function an on*= attribute in `source` calls."""
-    called = set()
-    for _, value in HANDLER_ATTR.findall(source):
-        called.update(CALL.findall(value))
-    return called - JS_KEYWORDS
 
 
 def declares(source: str) -> set[str]:
@@ -791,39 +765,6 @@ class ScriptListTests(unittest.TestCase):
             with self.subTest(script=name):
                 self.assertIn("'page-arrived'", source)
                 self.assertNotIn("DOMContentLoaded", source)
-
-    def test_every_function_an_inline_handler_calls_is_in_the_app_list(self):
-        """The markup calls these functions from onclick/onerror attributes, which
-        reach the global scope only. Every signed-in page loads the whole list,
-        so a handler is answered if ANY file in it declares the name — and a name
-        none of them declares looks fine until somebody clicks. (A public page is
-        held to its shorter list by PublicPageTests.)
-
-        EVERY TEMPLATE, not only the pages and what they include: a fragment a
-        route draws later — the export readout is one — lands on a page that has
-        the same list as every other, so it is held to the same list."""
-        available = set()
-        for name in first_party():
-            available |= declares(js_source(name))
-        seen = set()
-        for path in sorted(TEMPLATES_DIR.glob("*.html")):
-            if path.name in STANDALONE:
-                continue
-            source = uncommented(path.name)
-            # A template's own inline <script> answers its own handlers. Scanned
-            # unanchored, since an inline script's declarations are indented — it
-            # over-counts nested names, which can only ever hide a problem here,
-            # never invent one.
-            local = set()
-            for inline in re.findall(r"<script>(.*?)</script>", source, re.S):
-                local |= set(re.findall(r"\bfunction\s+([A-Za-z_$][\w$]*)", inline))
-            called = handlers_in(source)
-            seen |= called
-            for missing in sorted(called - available - local):
-                with self.subTest(template=path.name, handler=missing):
-                    self.fail(f"{path.name} calls {missing}() from an attribute, but no "
-                              f"script in the app list declares it")
-        self.assertTrue(seen, "no inline handler was found; the scan is wrong")
 
 
 class LateArrivingDayBlockTests(unittest.TestCase):

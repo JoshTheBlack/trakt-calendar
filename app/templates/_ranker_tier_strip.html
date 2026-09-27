@@ -16,14 +16,26 @@
    per tier and an out-of-band swap needs to reach the right one. The value must
    contain no space for htmx to read it as a style and a selector;
    `.ranker-strip[data-tier='…']` has none, and a uid is `[A-Za-z0-9_-]` so it can
-   never close the quote. #}
+   never close the quote.
+
+   TEN ARE SHOWN, AND A FEW MORE ARE DRAWN SO THAT STAYS TRUE. Not every title
+   has a poster, and nobody knows which until a browser asks: one that fails
+   takes itself out of the strip (ranker/rows.js, `data-if-missing`), which used
+   to leave the strip one short for every miss among the first few. So the
+   strip draws STRIP_DRAWN pictures and style.css shows only the first ten
+   still standing (`.ranker-strip img:nth-of-type(n+11)`) — when one
+   removes itself, the next moves up into view with nothing measuring anything.
+   The spares are lazy, like every picture here. Only titles WITH a tmdb id are
+   counted, since one without has no picture to ask for and would otherwise
+   use up a place. #}
+{%- set STRIP_DRAWN = 14 %}
 {% macro strip(category, oob=False) -%}
 <span class="ranker-strip" aria-hidden="true" data-tier="{{ category.uid }}"
       {%- if oob %} hx-swap-oob="outerHTML:.ranker-strip[data-tier='{{ category.uid }}']"{% endif %}>
-    {%- for item in category['items'][:8] %}{% if item.tmdb %}
+    {%- for item in (category['items'] | selectattr('tmdb') | list)[:STRIP_DRAWN] %}
     <img loading="lazy" width="24" height="36" alt=""
          src="/api/rankings/poster?media={{ item.media }}&amp;tmdb={{ item.tmdb }}"
-         onerror="this.remove()">
-    {%- endif %}{% endfor %}
+         data-if-missing="remove">
+    {%- endfor %}
 </span>
 {%- endmacro %}

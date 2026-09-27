@@ -64,10 +64,13 @@ JSON_ENC = "static/js/htmx-json-enc.js"
 # session that started on one never swaps its way into a page expecting the other
 # list — it arrives there by a full load, which brings that page's own <head>.
 #
-# THEY ARE ORDINARY SCRIPTS, NOT MODULES. The templates call functions from
-# onclick attributes, which reach names in the global scope only, so a module
-# would have to publish every one of them onto window by hand. So every file on a
-# page shares ONE global scope, which means:
+# THEY ARE ORDINARY SCRIPTS, NOT MODULES. No template calls into them any more —
+# the Content-Security-Policy runs no script written in markup (app/csp.py), so
+# every control is a data- attribute a file listens for — but the files still
+# call EACH OTHER by name (a row's nudge schedules the board's save, the export
+# raises ui.js's toast), and that is what a module would have to turn into
+# imports and exports. So every file on a page shares ONE global scope, which
+# means:
 #   - a name may be declared at top level in exactly ONE file. A second
 #     `let`/`const` of it is a SyntaxError that stops that file dead; a second
 #     `function` is legal and silently hands the name to whichever file runs

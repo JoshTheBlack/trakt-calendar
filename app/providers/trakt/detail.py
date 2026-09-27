@@ -18,7 +18,7 @@ import httpx
 
 from ...config import Settings
 from .. import season as season_rules
-from ..base import MATCH_SOURCES, Media, TitleFacts
+from ..base import MATCH_SOURCES, Media, TitleFacts, proxied_image
 from . import _ids, transport
 from .transport import TraktError
 
@@ -26,10 +26,16 @@ logger = logging.getLogger(__name__)
 
 
 def _headshot(person: dict) -> str | None:
+    """A cast member's headshot, THROUGH THE SHARED IMAGE PROXY -- the same one
+    every poster this app draws addresses (see app/providers/base.py's
+    proxied_image). Trakt's own address was reaching the browser directly here,
+    which both hotlinks their CDN (against the terms proxied_image's docstring
+    quotes) and is unproxied by construction: a browser CSP that admits only the
+    proxy host, as this app's does, blocked every headshot until this wrapped it."""
     imgs = (person.get("images") or {}).get("headshot") or []
     if imgs:
         url = imgs[0]
-        return url if url.startswith("http") else "https://" + url
+        return proxied_image(url if url.startswith("http") else "https://" + url)
     return None
 
 
@@ -257,13 +263,18 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         # SERVICE rather than from the request is also what stops a hand-made
         # URL deciding what a shared calendar row is about.
         "ids": _ids.normalize(info.get("ids") or {}),
-        # THE POSTER, THROUGH THIS PACKAGE'S OWN ONE READING OF IT. A per-title
-        # lookup returns the same images the calendar feed does and this
-        # projection dropped them, so a card the calendar SEARCH wrote had no
-        # picture -- reported as "Half Man is missing the poster". Reusing the
-        # calendar module's reading rather than re-reading the field is what
-        # keeps its documented rule about these addresses in one place.
-        "poster": trakt_calendar.poster(info) or "",
+        # THE POSTER, THROUGH THIS PACKAGE'S OWN ONE READING OF IT, THEN THROUGH
+        # THE SHARED PROXY. A per-title lookup returns the same images the
+        # calendar feed does and this projection dropped them, so a card the
+        # calendar SEARCH wrote had no picture -- reported as "Half Man is
+        # missing the poster". Reusing the calendar module's reading rather than
+        # re-reading the field is what keeps its documented rule about these
+        # addresses in one place; `trakt_calendar.poster()` deliberately returns
+        # Trakt's own address unproxied (see its docstring) because most of its
+        # callers are server-side downloads, not a browser -- this caller IS a
+        # browser (the details panel), so it proxies here rather than asking
+        # every such caller to remember to.
+        "poster": proxied_image(trakt_calendar.poster(info)) or "",
         "network": info.get("network") or "",
         "runtime": info.get("runtime"),
         "genres": [g.replace("-", " ").title() for g in (info.get("genres") or [])],

@@ -495,6 +495,22 @@ class TierStripTests(_ActionTestCase):
         strip = re.search(r"data-tier=\"tier-s\".*?</span>", html, re.S).group(0)
         self.assertEqual(strip.count("<img"), 1)
 
+    def test_it_draws_spares_and_only_titles_with_a_picture_to_ask_for(self):
+        """Ten are shown and four more drawn, so a poster that fails and removes
+        itself is replaced by the next rather than leaving the strip short
+        (style.css hides everything past the tenth). A title with no tmdb id has
+        no picture to ask for, so it must not use up one of those places — here
+        two of them come FIRST in the tier and fourteen are still drawn."""
+        no_picture = [{"media": "show", "match_source": "imdb", "match_id": f"tt000000{n}",
+                       "title": f"No picture {n}", "year": 2026} for n in (1, 2)]
+        pictured = [show_ref(str(n)) for n in range(10, 30)]
+        asyncio.run(ranker.add_titles(self.user_id, BOARD, no_picture + pictured))
+        keys = ["show:imdb:tt0000001", "show:imdb:tt0000002"] + [key(str(n)) for n in range(10, 30)]
+        asyncio.run(ranker.move_items(self.user_id, BOARD, keys, "tier-a"))
+        strip = re.search(r"data-tier=\"tier-a\".*?</span>", self.strips(), re.S).group(0)
+        self.assertEqual(strip.count("<img"), 14)
+        self.assertEqual(re.findall(r"tmdb=(\d+)", strip), [str(n) for n in range(10, 24)])
+
     def test_the_inline_strip_and_the_fragment_are_one_renderer(self):
         """A second copy of this markup is how the header and the tier would come
         to disagree about what the tier holds."""

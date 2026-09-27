@@ -30,6 +30,7 @@ from . import cache
 from . import changelog
 from . import clock
 from . import config
+from . import csp
 from . import chrome
 from . import db
 from . import http_pool
@@ -373,6 +374,26 @@ async def boosted_failure_becomes_a_navigation(request: Request, call_next):
         return Response(status_code=204, headers={"HX-Redirect": str(request.url)})
     if response.status_code >= 400:
         return Response(status_code=204, headers={"HX-Redirect": str(request.url)})
+    return response
+
+
+@app.middleware("http")
+async def content_security_policy(request: Request, call_next):
+    """Set the Content-Security-Policy on every response — a page, a JSON
+    refusal, a static file — because a policy some responses carry and others
+    do not is the "invariant living in one call site" failure CLAUDE.md names.
+    What the policy says, and why, is app/csp.py's.
+
+    REGISTERED HERE, AFTER authz.install(app) ABOVE, beside
+    boosted_failure_becomes_a_navigation, for the same reason that one sits
+    here: Starlette's registration order is reversed, so a middleware added
+    after authz's own wraps OUTSIDE it and therefore still runs on authz's
+    short-circuit refusals and on the themed error pages, not only on a route
+    that reached its handler. Static files go through this same stack via
+    app.mount above and get it too.
+    """
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = csp.POLICY
     return response
 
 

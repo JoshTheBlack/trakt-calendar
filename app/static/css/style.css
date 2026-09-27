@@ -324,6 +324,7 @@ body:not(.hide-not-watching) .hide-toggle .hide-on { display: none; }
 
 /* ---- Sync + stats panels ---- */
 
+.stats-head { width: 100%; }
 .stats-bar { position: fixed; bottom: 20px; right: 20px; z-index: 9990; padding: 12px 16px; background: rgba(18,21,28,0.92); border: 1px solid var(--card-border); border-radius: 12px; min-width: 200px; font-size: 0.78rem; backdrop-filter: blur(6px); }
 .stats-row { display: flex; justify-content: space-between; width: 100%; margin-bottom: 4px; }
 .stats-row strong { color: var(--gold-soft); font-size: 0.92rem; }
@@ -471,9 +472,33 @@ body.hide-not-watching .day-block:has(.card:nth-child(6 of .card:is(:not(.not-wa
 /* A DAY THAT HAS NO CARDS TO COUNT answers from the two numbers the shell wrote
    onto it instead — see _day_skeleton.html. `max(1, …)` because a day this viewer
    sees none of is collapsed anyway, and a zero would leave the rows arithmetic
-   below dividing by it. */
-.day-block.is-skeleton { --cols: var(--held); }
-body.hide-not-watching .day-block.is-skeleton { --cols: max(1, var(--shown)); }
+   below dividing by it.
+   READ WITH TYPED attr(), not handed over in a style attribute: the app's
+   Content-Security-Policy applies no inline style (app/csp.py). Measured in
+   Chromium 153, Firefox 155 and WebKit 26.6.
+   GATED ON @supports, testing the typed form on a property it can actually
+   satisfy (z-index takes a plain <integer>) rather than on --cols itself — a
+   custom property stores whatever tokens it is given, unvalidated, so testing
+   there would report support that is not actually there. An engine that fails
+   this test must never run the declarations below: --cols would still be SET,
+   just to tokens that engine cannot resolve, and every consumer of it further
+   down (the placeholder's width and its row count) goes invalid right along
+   with it rather than falling back on its own. */
+@supports (z-index: attr(data-held type(<integer>), 1)) {
+    .day-block.is-skeleton { --cols: attr(data-held type(<integer>), 1); }
+    body.hide-not-watching .day-block.is-skeleton { --cols: max(1, attr(data-visible type(<integer>), 1)); }
+}
+/* FALLBACK for the engine that failed the test above: --cols still has to be
+   SOME number before the width and row-count arithmetic further down can run,
+   and the real count is exactly what that engine cannot read. --cap is the
+   widest a day of this style ever draws (min(--cols, --cap) is what actually
+   sizes a packed placeholder), so guessing the cap claims the whole row a busy
+   day would need — a placeholder later replaced by real cards can only narrow,
+   never jump wider, and a light day just leaves the extra width empty rather
+   than reflowing once its cards arrive. */
+@supports not (z-index: attr(data-held type(<integer>), 1)) {
+    .day-block.is-skeleton { --cols: var(--cap); }
+}
 /* An announced-but-not-yet-fetched day. It has nothing to skip, so the off-screen
    skip is turned off and it reserves its own height instead — a rough one, from
    the rows of cards the server already knows are coming, which is a far better
@@ -2658,7 +2683,13 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .ranker-result:hover { background: rgba(255,255,255,0.06); }
 .ranker-result img { width: 30px; height: 45px; object-fit: cover; border-radius: 3px; background: var(--card-border); }
 .ranker-result .ranker-name { flex: 1; min-width: 0; }
-.ranker-result.is-held { opacity: 0.45; cursor: default; }
+/* A RESULT ALREADY ON THE BOARD TAKES NO POINTER AT ALL, which is what stops a
+   click adding it twice — a drag can end in a click on the result it just added,
+   and ranker/dnd.js marks that one held the moment the drop is written. The
+   stylesheet, not a filter on the result's trigger: htmx builds `click[...]`
+   with the Function constructor, which the app's Content-Security-Policy
+   refuses. The drag library already declines to pick a held one up. */
+.ranker-result.is-held { opacity: 0.45; pointer-events: none; }
 
 /* ---- what a board could put back ----
    HIDDEN WHILE IT HOLDS NOTHING, by asking whether it holds an entry. The
@@ -2812,11 +2843,26 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .ranker-pool { flex: 1 0 auto; }
 
 /* Height reserved from a count the server already knew, so a page of cards or a
-   tier's rows slot into space made for them instead of shoving the page down. */
+   tier's rows slot into space made for them instead of shoving the page down.
+   The count is the element's own `data-skeleton-rows`, read with typed attr()
+   because the app's Content-Security-Policy applies no inline style.
+   attr() USED DIRECTLY IN A REGULAR PROPERTY (not stashed in a custom one first)
+   is invalid AT PARSE TIME in an engine without the typed form, which drops the
+   whole min-height declaration rather than merely failing to compute it — so
+   min-height is split out from the declarations that never depend on attr(),
+   and only it is gated. */
 .ranker-pool-sentinel, .ranker-rows:not([data-loaded]) {
-    min-height: calc(var(--skeleton-rows, 1) * 45px);
     border-radius: 9px;
     background: repeating-linear-gradient(180deg, rgba(255,255,255,0.03) 0 40px, transparent 40px 45px);
+    /* PLAIN FALLBACK: one row's worth, so an engine that dropped the rule below
+       still reserves something — a sentinel collapsed to 0 height would scroll
+       itself out of view before it could ever be asked to load the next page. */
+    min-height: 45px;
+}
+@supports (min-height: calc(attr(data-skeleton-rows type(<number>), 1) * 1px)) {
+    .ranker-pool-sentinel, .ranker-rows:not([data-loaded]) {
+        min-height: calc(attr(data-skeleton-rows type(<number>), 1) * 45px);
+    }
 }
 .ranker-pool-sentinel { display: flex; align-items: flex-start; justify-content: center; padding-top: 10px; }
 /* A title on its way from the server. Already a row as far as a save or a count
@@ -2829,6 +2875,24 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .ranker-sentinel-label { font-size: 0.74rem; color: var(--text-faint); }
 
 /* ---- tiers ---- */
+/* A TIER'S COLOUR IS ITS OWN `data-colour`, read with typed attr() because the
+   app's Content-Security-Policy applies no inline style, and set as a custom
+   property so the label inside inherits it. A tier with no colour has no
+   attribute, which leaves the property unset and every use below on its
+   fallback.
+   GATED ON @supports FOR THE SAME REASON AS --cols ABOVE, and it matters more
+   here: a custom property stores whatever tokens it is given without
+   validating them, so an engine without the typed form would still accept this
+   declaration and only discover the tokens do not resolve to a colour once
+   border-left tries to use them — at which point border-left itself goes
+   invalid at computed-value time, and the var(--tier-colour, …) fallback below
+   never runs, because --tier-colour is not actually EMPTY, just unusable.
+   Never assigning it in that engine is what lets the fallback see a genuinely
+   unset property and do its job: a coloured tier keeps no colour at all rather
+   than losing its border. */
+@supports (background-color: attr(data-colour type(<color>), red)) {
+    .ranker-tier[data-colour] { --tier-colour: attr(data-colour type(<color>)); }
+}
 .ranker-tier {
     border: 1px solid var(--card-border); border-left: 4px solid var(--tier-colour, var(--card-border));
     border-radius: 11px; background: var(--card); margin-bottom: 8px; overflow: hidden;
@@ -2851,6 +2915,9 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .ranker-iso { color: var(--accent-blue); }
 .ranker-strip { flex: 1; display: flex; gap: 2px; overflow: hidden; justify-content: flex-end; }
 .ranker-strip img { width: 24px; height: 36px; object-fit: cover; border-radius: 2px; }
+/* TEN SHOWN OF THE FEW MORE DRAWN (_ranker_tier_strip.html): a poster that fails
+   to load removes itself, and the next one is then within the first ten. */
+.ranker-strip img:nth-of-type(n+11) { display: none; }
 /* A TIER'S OWN CONTROLS SIT OUTSIDE ITS <summary> and are put back onto the
    header line here. A click on a button inside a summary still toggles the
    disclosure it is in, so ⚙ used to close the tier it was opened on unless an

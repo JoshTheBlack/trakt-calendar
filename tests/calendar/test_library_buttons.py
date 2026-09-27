@@ -364,7 +364,11 @@ class ThePanelDrawsWhatTheCardIsShowingTests(ThePanelHeaderCarriesTheSameButtons
     def test_the_three_fields_are_read_together(self):
         panel = self._panel_for(title="simkl", poster="trakt", overview="simkl")
         self.assertIn("Simkl words.", panel)
-        self.assertIn('src="/trakt.jpg"', panel)
+        # THROUGH THE SHARED IMAGE PROXY, not the stored column's raw address —
+        # this route reads calendar_titles.poster directly (stored_values, not
+        # render()) and has to proxy it itself before handing it to an <img src>,
+        # the same way render() already does for the calendar CARD's own poster.
+        self.assertIn('src="https://wsrv.nl/?url=%2Ftrakt.jpg&amp;q=90&amp;w=440&amp;we"', panel)
         self.assertIn('alt="Simkl Name poster"', panel)
 
     def test_no_parameter_draws_the_answers_own(self):

@@ -1,6 +1,6 @@
 // One title on the board: drawing a row that arrives after first paint, keeping a
-// page of the pool from drawing a title twice, and the two ways to move one that
-// are not a drag.
+// page of the pool from drawing a title twice, the two ways to move one that are
+// not a drag, and what stands in for a poster that does not load.
 //
 // TAKING A TITLE OFF IS NOT HERE ANY MORE. The ✕ on a row posts itself and is
 // answered with the board redrawn and a toast whose Undo is the removal history's
@@ -95,6 +95,49 @@ function nudgeItem(button, delta) {
     row.focus();
     scheduleSave();
 }
+
+// A row's ▲ and ▼ carry `data-nudge` with the step rather than an onclick
+// attribute, because the app's Content-Security-Policy runs no script written in
+// markup (app/csp.py). The button pressed is what nudgeItem is handed, as it was
+// when the attribute passed `this`. Delegated from the document because a board
+// redraws every row on every action that is not a drag.
+document.addEventListener('click', (e) => {
+    const button = e.target instanceof Element && e.target.closest('[data-nudge]');
+    if (button) nudgeItem(button, Number(button.dataset.nudge));
+});
+
+// ---------------------------------------------------------------------------
+// a poster that does not load
+// ---------------------------------------------------------------------------
+// A title's poster is asked for by tmdb id, and not every id has one. What takes
+// its place is the markup's to say: `data-if-missing="frame"` leaves a row's
+// empty frame, so the row keeps its shape, and `"remove"` takes a tier strip's
+// or a search result's picture away altogether.
+//
+// WHY THIS IS SCRIPT: no selector matches an image that failed to load, and the
+// server cannot know in advance — an uncached poster is fetched when a browser
+// asks for it. It used to be an onerror attribute on each <img>; the app's
+// Content-Security-Policy runs no script written in markup (app/csp.py).
+function posterMissing(img) {
+    if (img.dataset.ifMissing === 'remove') { img.remove(); return; }
+    img.classList.add('is-missing');
+    img.removeAttribute('src');
+}
+
+// `error` DOES NOT BUBBLE, so this listens in the capture phase, from the
+// document, which reaches an image in any fragment swapped in later.
+document.addEventListener('error', (e) => {
+    if (e.target instanceof HTMLImageElement && e.target.dataset.ifMissing) posterMissing(e.target);
+}, true);
+
+// AN ATTRIBUTE WAS ATTACHED AS THE IMAGE WAS PARSED; THIS LISTENER IS NOT. The
+// file is deferred, so a poster in the page as first sent can fail before it
+// runs — hence the sweep, once, for images already broken. A later swap needs no
+// sweep: htmx parses a response into a detached document (DOMParser), where an
+// image fetches nothing until it is inserted, and by then the listener is here.
+document.querySelectorAll('img[data-if-missing][src]').forEach(img => {
+    if (img.complete && img.naturalWidth === 0) posterMissing(img);
+});
 
 // MOVING A TITLE IS NOT HERE ANY MORE. Each row carries its own menu of places
 // to go and each choice posts itself to the route the bulk Move already used

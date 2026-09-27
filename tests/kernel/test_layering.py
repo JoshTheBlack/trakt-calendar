@@ -79,7 +79,7 @@ GROUPS: dict[str, str] = {
     # The kernel: configuration, storage, HTTP plumbing, rendering. Depends on
     # no feature, which is what makes it safe for every feature to depend on it.
     "assets": KERNEL, "cache": KERNEL, "changelog": KERNEL, "chrome": KERNEL,
-    "clock": KERNEL, "config": KERNEL, "db": KERNEL, "details_panel": KERNEL,
+    "clock": KERNEL, "config": KERNEL, "csp": KERNEL, "db": KERNEL, "details_panel": KERNEL,
     "endpoints": KERNEL, "http_pool": KERNEL,
     "perftrace": KERNEL, "route_params": KERNEL, "secrets_box": KERNEL,
     "templating": KERNEL, "timezones": KERNEL, "youtube": KERNEL,

@@ -968,7 +968,7 @@ class SourceSelectorTests(CalendarRouteTestCase):
         html = self._page("/calendar?year=2026&month=7")
         row = html[html.index('class="view-row tz"'):]
         row = row[:row.index("</div>")]
-        self.assertLess(row.index("useDeviceTimezone()"), row.index('id="tzSelect"'))
+        self.assertLess(row.index("data-device-timezone"), row.index('id="tzSelect"'))
 
     def test_the_endpoint_picker_stays_out_of_the_view_panel(self):
         """THE GROUPING RULE, PINNED. The four controls behind 👁️ View answer
@@ -1326,29 +1326,28 @@ class DayLayoutTests(CalendarRouteTestCase):
 
     def test_a_placeholder_says_how_many_cards_it_holds_and_how_many_show(self):
         html = self.client.get(self.PAGE).text
-        self.assertIn("--held: 3", _section(html, "2026-07-15"))
-        self.assertIn("--shown: 3", _section(html, "2026-07-15"))
-        self.assertIn("--held: 1", _section(html, "2026-07-16"))
+        self.assertIn('data-held="3"', _section(html, "2026-07-15"))
+        self.assertIn('data-visible="3"', _section(html, "2026-07-15"))
+        self.assertIn('data-held="1"', _section(html, "2026-07-16"))
 
     def test_a_placeholder_counts_a_marked_title_out_of_what_shows(self):
-        """`--shown` follows this viewer's marks and `--held` does not: the
+        """`data-visible` follows this viewer's marks and `data-held` does not: the
         stylesheet reserves space from one or the other depending on whether
         hiding is on, and the switch is thrown without a reload."""
         self.client.post("/api/state?year=2026&month=7&endpoint=shows",
                          json={"item_id": "show-0", "not_watching": True})
         block = _section(self.client.get(self.PAGE).text, "2026-07-15")
-        self.assertIn("--held: 3", block)
-        self.assertIn("--shown: 2", block)
+        self.assertIn('data-held="3"', block)
+        self.assertIn('data-visible="2"', block)
 
     def test_a_placeholder_this_viewer_sees_nothing_of_says_so(self):
-        """Zero is the selector the stylesheet collapses a placeholder on, so it
-        has to be an ATTRIBUTE as well as a number — see _day_skeleton.html."""
+        """Zero is the selector the stylesheet collapses a placeholder on, which is
+        why the count is an ATTRIBUTE — see _day_skeleton.html."""
         for show in ("show-0", "show-1", "show-2"):
             self.client.post("/api/state?year=2026&month=7&endpoint=shows",
                              json={"item_id": show, "not_watching": True})
         block = _section(self.client.get(self.PAGE).text, "2026-07-15")
         self.assertIn('data-visible="0"', block)
-        self.assertIn("--shown: 0", block)
         self.assertIn('data-visible="1"', _section(self.client.get(self.PAGE).text, "2026-07-16"))
 
     def test_a_day_that_arrives_late_carries_no_layout_at_all(self):
@@ -1358,7 +1357,7 @@ class DayLayoutTests(CalendarRouteTestCase):
         fragment = self.client.get(self.DAY).text
         block = _section(fragment, "2026-07-15")
         self.assertNotIn("--cols", block)
-        self.assertNotIn("--held", block)
+        self.assertNotIn("data-held", block)
         self.assertNotIn("is-empty-hidden", block)
 
     def test_a_late_day_draws_its_own_chip_again_out_of_band(self):
@@ -1456,7 +1455,7 @@ class CalendarShellTests(CalendarRouteTestCase):
         block = _section(html, "2026-07-10")
         self.assertIn('data-date="2026-07-10"', block)
         self.assertIn('data-visible="1"', block)
-        self.assertIn("--held: 1", block)
+        self.assertIn('data-held="1"', block)
         self.assertIn('hx-trigger="intersect once"', block)
         self.assertIn("Friday, 10 July", html)
 

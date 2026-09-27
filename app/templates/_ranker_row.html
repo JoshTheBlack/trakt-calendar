@@ -59,7 +59,7 @@
     {% if item.tmdb %}
     <img class="ranker-thumb" width="46" height="69" loading="lazy" alt=""
          src="/api/rankings/poster?media={{ item.media }}&amp;tmdb={{ item.tmdb }}"
-         onerror="this.classList.add('is-missing'); this.removeAttribute('src');">
+         data-if-missing="frame">
     {% else %}
     <span class="ranker-thumb is-missing" aria-hidden="true"></span>
     {% endif %}
@@ -89,9 +89,9 @@
                 data-details-open="/rankings/fragments/details?{{ {'board': board_uid, 'key': item.key} | urlencode }}"
                 data-details-heading="{{ item.title or 'Untitled' }}">ⓘ</button>
         <button type="button" class="ranker-act" title="Move up" aria-label="Move up"
-                onclick="nudgeItem(this, -1)">▲</button>
+                data-nudge="-1">▲</button>
         <button type="button" class="ranker-act" title="Move down" aria-label="Move down"
-                onclick="nudgeItem(this, 1)">▼</button>
+                data-nudge="1">▼</button>
         {# WHERE THIS TITLE CAN GO: a popover of its own, EMPTY until its ⇄ is first
            pressed. The press opens it natively (`popovertarget`) and, once, asks
            for its contents (_ranker_move_menu.html, a form posting to the route the

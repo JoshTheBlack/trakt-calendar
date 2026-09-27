@@ -38,6 +38,23 @@ route, and do not call `await request.json()` in one — `authz.json_body()` is
 the shared guard (413 over the size cap, 400 malformed, 400 non-object), and
 `authz.error()` is the refusal shape the front end reads.
 
+**The Content-Security-Policy is strict on script AND style, and it is enforced.**
+`app/csp.py` owns it; `content_security_policy` in `app/main.py` sets it on every
+response. Neither script-src nor style-src carries `'unsafe-inline'` or
+`'unsafe-eval'`, so four things a template may not do: an `on*=` attribute (a
+`data-` attribute and a listener instead — see the JavaScript section), a
+`style=""` attribute (a per-render value travels as a `data-` attribute that
+style.css reads with typed `attr()`, measured in Chromium, Firefox and WebKit),
+an htmx expression it builds with the Function constructor (an `hx-trigger`
+filter, `hx-on`, a `js:` value), and an inline `<script>` or `<style>` outside
+`csp.INLINE_BLOCKS` — the two there are admitted by hashes derived from what the
+templates RENDER, once per start, so there is no second copy of their text.
+`tests/kernel/test_inline_script.py` fails on all four, because a browser only
+logs one console line and a button silently does nothing. img-src admits one
+remote host, the image proxy: a blocked picture is a read that skipped
+`proxied_image`, fixed there, never by widening the header. There is no
+report-only header and no reporting endpoint.
+
 **The session ROW is the authority on expiry, not the cookie.**
 `app/auth/cookies.py` issues it HttpOnly, SameSite=Lax, Path=/, no Domain, and
 Secure with the `__Host-` name unless the Secure policy says otherwise; its
@@ -212,14 +229,19 @@ back carrying entries two months past its end. Windows are trimmed before
 storage; without the trim a month read shows the same airing several times.
 
 **JavaScript is for what ONLY JavaScript can do, and the floor is MEASURED.**
-The whole first-party surface is **676 code lines across 15 .js files, 24 lines
-of inline `<script>` and 10 inline `on*=` handlers** — 694 when the audit ended,
-702 after the rankings board's multi-select, and 676 once every page extended
-one base template and the per-page script loader went; from 4,024 lines when the
-audit began, and from 1,213 / 26 / 30 at its last conversion. The WATCH TRACKER
-has no script of its own at all. Those three numbers are the point of this
-paragraph: they are what somebody adding a file is adding to, and a number that
-has drifted is a signal to go and ask why.
+The whole first-party surface is **703 code lines across 15 .js files, 27 lines
+of inline `<script>` and NO inline `on*=` handlers** — the inline figure is
+every non-blank line inside the two blocks `csp.INLINE_BLOCKS` names
+(`_nav_head.html`'s 3, `error_lobby.html`'s 24), counted that way so the next
+person reproduces it the same way — 694 when the audit ended,
+702 after the rankings board's multi-select, 676 once every page extended one
+base template and the per-page script loader went, and 703 when the
+Content-Security-Policy moved the last ten handlers out of markup into listeners
+in the files that own them; from 4,024 lines when the audit began, and from
+1,213 / 26 / 30 at its last conversion. The WATCH TRACKER has no script of its
+own at all. Those three numbers are the point of this paragraph: they are what
+somebody adding a file is adding to, and a number that has drifted is a signal
+to go and ask why.
 
 `app/assets.py` owns which scripts exist, in two lists — `PUBLIC_SCRIPTS` and
 `APP_SCRIPTS`, the second beginning with the first — so adding one is a visible
@@ -255,7 +277,8 @@ a button posting itself, answered with every card for that title redrawn out of
 band. Adding a title a search found is the RESULT posting itself, answered with the page
 and that same search redrawn from the cache its own request filled — so a second
 title from one search costs no second search, and whether a result is already
-held is drawn rather than swept on afterwards.
+held is drawn rather than swept on afterwards — and a held one refusing the
+click is `pointer-events: none`, not an event filter on its trigger.
 Moving a title between tiers is one button per destination ON THE ROW, posting to the
 same route a bulk move already used — a menu shared by the whole board is what
 made "which row opened it" a question the browser had to answer.
@@ -288,7 +311,19 @@ rather than what was hoped for:
   - switching a button on once htmx has wired its form, because before then
     the form would be sent the browser's own way (the sign-in form);
   - reading something the server is deliberately not told: the device's timezone,
-    and whether this browser has found the tracker.
+    and whether this browser has found the tracker;
+  - noticing that an image did not load — no selector matches a broken image,
+    and the server cannot know before a browser asks (the ranker's posters).
+
+WHERE A SURVIVOR LIVES IS DECIDED TOO: in a FILE, never in markup. The policy
+runs no event-handler attribute, so a control that needs script carries a
+`data-` attribute and the file that owns the function listens for it on
+`document` — a listener bound to the element would be lost to the next swap.
+`static/js/ui.js`'s details-panel opener is the pattern. The one listener that
+cannot rely on being there in time is an `error` one: an attribute was attached
+as the element was parsed, a deferred file is not, so ranker/rows.js also sweeps
+for images that failed before it ran — MEASURED, Chromium failed every forced
+404 on the board before the file had loaded.
 
 EVERYTHING ELSE IS THE SERVER'S. The reason is not taste: markup and stylesheet
 rules are right the moment anything changes them and cannot drift from the data,

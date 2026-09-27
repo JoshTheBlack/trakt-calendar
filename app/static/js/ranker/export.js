@@ -61,6 +61,15 @@ async function downloadExport() {
     }
 }
 
+// Both Download buttons — the one the dialog opens with and the one every readout
+// redraws out of band — carry `data-export-download` rather than an onclick
+// attribute, because the app's Content-Security-Policy runs no script written in
+// markup (app/csp.py). A disabled button dispatches no click, so the server's
+// refusal still holds.
+document.addEventListener('click', (e) => {
+    if (e.target instanceof Element && e.target.closest('[data-export-download]')) downloadExport();
+});
+
 function filenameFrom(disposition) {
     const match = /filename="([^"]+)"/.exec(disposition || '');
     return match ? match[1] : null;

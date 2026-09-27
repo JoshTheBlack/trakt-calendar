@@ -27,8 +27,7 @@
 {# Click to see it at rendered size and move the pointer to look around it — the
    header is a few percent of a tall grid, and shrunk into this column it cannot
    be judged at all. #}
-<div class="ranker-preview-frame" id="exPreview"
-     onclick="togglePreviewZoom()" onmousemove="panPreview(event)"
+<div class="ranker-preview-frame" id="exPreview" data-preview-zoom
      title="Click to zoom, then move the pointer to look around">
     <img alt="Preview of the poster grid" src="{{ preview_url }}">
 </div>
@@ -43,4 +42,4 @@
      {% if header_thumb %}src="{{ header_thumb }}"{% else %}hidden{% endif %}>
 
 <button type="button" class="btn-primary" id="exportGo" hx-swap-oob="outerHTML"
-        onclick="downloadExport()"{% if over or not count %} disabled{% endif %}>Download</button>
+        data-export-download{% if over or not count %} disabled{% endif %}>Download</button>

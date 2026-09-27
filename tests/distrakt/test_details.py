@@ -300,7 +300,13 @@ class ThePanelIsTheSameOneEverywhereTests(_DetailsRouteTestCase):
         self._settle(_month_back(0))
 
     def test_a_roster_row_gets_the_describing_services_own_poster(self):
-        self.assertIn('src="https://walter.trakt.tv/agency.jpg"', self._panel().html)
+        # THROUGH THE SHARED IMAGE PROXY — this route passes no poster of its
+        # own (a roster row has no picture), so the panel falls back to the
+        # describing service's answer, and that answer is proxied at the
+        # source (app/providers/trakt/detail.py) rather than hotlinked.
+        self.assertIn(
+            'src="https://wsrv.nl/?url=https%3A%2F%2Fwalter.trakt.tv%2Fagency.jpg&amp;q=90&amp;w=440&amp;we"',
+            self._panel().html)
 
     def test_and_not_the_text_only_hero_it_used_to_get(self):
         """The class that laid the hero out without a picture. Its stylesheet rule

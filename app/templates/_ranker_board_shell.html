@@ -143,7 +143,7 @@
             {%- set drawn = rows_open or (open_tier and category.uid == open_tier) %}
             <details class="ranker-tier{% if category.is_isolated %} is-isolated{% endif %}"
                      data-uid="{{ category.uid }}"{% if drawn %} open{% endif %}
-                     {% if category.colour %}style="--tier-colour: {{ category.colour }}"{% endif %}>
+                     {% if category.colour %}data-colour="{{ category.colour }}"{% endif %}>
                 <summary class="ranker-tier-head"
                          {% if not drawn %}hx-get="{{ rows_url(board.uid, category.uid) }}"
                          hx-trigger="click once"
@@ -165,7 +165,7 @@
                    opening a tier does not lurch the page while its rows arrive. #}
                 <div class="ranker-rows" id="tierBody-{{ category.uid }}" role="list"
                      data-uid="{{ category.uid }}"
-                     {% if drawn %}data-loaded="1"{% else %}style="--skeleton-rows: {{ category['items'] | length }}"{% endif %}>
+                     {% if drawn %}data-loaded="1"{% else %}data-skeleton-rows="{{ category['items'] | length }}"{% endif %}>
                     {% if drawn %}{% with items = category['items'] %}{% include "_ranker_category_rows.html" %}{% endwith %}{% endif %}
                 </div>
             </details>
