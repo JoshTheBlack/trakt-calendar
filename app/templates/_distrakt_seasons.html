@@ -47,6 +47,15 @@ hx-post="{{ '/api/distrakt/add-completed' if as_finished else '/api/distrakt/add
    anime season-titles this flow exists to reach. The sentence is the server's
    own — the same one the add route's refusal uses. #}
 <p class="distrakt-note distrakt-warn">{{ pick.unkeyable }}</p>
+{%- elif pick.media == 'movie' %}
+{# THIS ROW WAS ONLY EVER FOUND HERE BECAUSE SIMKL'S ANIME SEARCH MIXES FILMS
+   IN WITH TV (app/providers/simkl/search.py's _FILM_ANIME_TYPE) — this
+   fragment is reached only from the show box's own season click, so a film
+   pick always means that. It is not filed from here: a film has no roster the
+   way a show does and needs a watched-on date this box never asked for, so
+   the honest answer is to send the viewer to the flow that does. #}
+<p class="distrakt-note distrakt-warn">{{ pick.title }} is a film, not a show —
+    search for it from ➕ Add Film instead.</p>
 {%- elif pick.named_season is not none %}
 {# THE HIT IS A SEASON — a source that files each season of a series as its own
    title knows which season of the underlying show it is. Asking which season

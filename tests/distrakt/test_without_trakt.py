@@ -31,7 +31,7 @@ from unittest.mock import AsyncMock, patch
 from app import cache, db, distrakt as distrakt_store
 from app.config import Settings, save_settings
 from app.distrakt import live, routes as distrakt_routes
-from app.providers.base import PlayCounts, TitleFacts
+from app.providers.base import Media, PlayCounts, TitleFacts
 from app.providers.trakt import TraktError
 from app.providers.trakt import detail as trakt_detail, transport
 from tests.support import (AppTestCase, DetailsPanel, ORIGIN, migrated_db,
@@ -1043,7 +1043,7 @@ class AddRoutesAskWhoeverKnowsTheTitleTests(AppTestCase):
         return patch.object(distrakt_routes, "_resolve_pick", AsyncMock(
             return_value=distrakt_routes.Pick(
                 title=title, network=network, year=None, ids=dict(ids),
-                seasons=[], named_season=None, unkeyable=None)))
+                seasons=[], named_season=None, unkeyable=None, media=Media.SHOW)))
 
     def _network(self):
         """Every add asks the describing service for its words — see

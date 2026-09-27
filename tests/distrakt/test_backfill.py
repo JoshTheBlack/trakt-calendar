@@ -21,7 +21,7 @@ from app import auth, db, distrakt
 from app.distrakt import routes as distrakt_routes
 from app.distrakt import backfill, watch_history
 from app.calendar import state as calendar_state
-from app.providers.base import ItemKey, PlayCounts
+from app.providers.base import ItemKey, Media, PlayCounts
 from app.config import Settings, save_settings
 from app.main import app
 from tests.support import ORIGIN, migrated_db, tracker_month
@@ -576,7 +576,7 @@ class ManualCompletedRouteTests(unittest.TestCase):
             return_value=distrakt_routes.Pick(
                 title=title, network=network, year=None,
                 ids=dict(ids or {"trakt": 321, "tmdb": 4321, "slug": "elsewhere"}),
-                seasons=[], named_season=None, unkeyable=None)))
+                seasons=[], named_season=None, unkeyable=None, media=Media.SHOW)))
 
     def _add(self, year, month, season=1, total=6):
         async def fake_season(settings, trakt_id, season_no, fresh=False, client=None):
@@ -848,7 +848,7 @@ class AddingAFilmByHandTests(unittest.TestCase):
             return_value=distrakt_routes.Pick(
                 title=title, network="", year=2011,
                 ids={"trakt": trakt_id, "tmdb": trakt_id},
-                seasons=[], named_season=None, unkeyable=None)))
+                seasons=[], named_season=None, unkeyable=None, media=Media.MOVIE)))
         with picked, patch("app.distrakt.routes._month_answer",
                            new=AsyncMock(return_value=Response(status_code=200))):
             return self.client.post("/api/distrakt/add-movie?year=2026&month=7",

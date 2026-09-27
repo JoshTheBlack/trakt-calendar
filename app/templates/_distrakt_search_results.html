@@ -30,9 +30,8 @@
    flow has no picker.
 
    Context: `hits` (each `_search_hit_payload` plus `unkeyable`), `failed` (the
-   sources that could not be asked), `marked` (whether there is more than one
-   catalogue, so a mark disambiguates anything), `media`, `no_catalogue`, `query`
-   and `month_query`. #}
+   sources that could not be asked), `media`, `no_catalogue`, `query` and
+   `month_query`. #}
 
 {%- if media != 'movie' %}
 <div id="addSeasonPick" class="distrakt-season-pick" hx-swap-oob="outerHTML"></div>
@@ -89,12 +88,14 @@
      hx-target="#addSeasonPick" hx-swap="outerHTML"
      {%- endif %}
      {%- endif %}>
-    {%- if marked and hit.source_ids %}
-    {# A MARK PER SOURCE THAT RETURNED IT, and only where two catalogues were
-       asked: with one there is nothing to disambiguate and the row should look
-       exactly as it did before this instance had a second service. The row is
-       something to press, which is the test _source_logo.html sets for drawing
-       a mark at all. #}
+    {%- if hit.source_ids %}
+    {# A MARK PER SOURCE THAT RETURNED IT, ALWAYS — not only when more than one
+       catalogue was askable. It is attribution as much as disambiguation: which
+       service's own answer a row is drawn from is worth seeing even with one
+       catalogue linked, and it is the one thing on the row that can tell a
+       viewer which of several services actually found this title, which matters
+       for debugging a source's own data (a mis-shaped hit, a missing network)
+       as much as for telling two services' answers apart. #}
     <span class="distrakt-search-marks">
         {%- for source in hit.source_ids %}{{ src.mark(source, 'search-mark') }}{% endfor -%}
     </span>

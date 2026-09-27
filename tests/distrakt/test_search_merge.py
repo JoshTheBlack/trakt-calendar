@@ -20,13 +20,13 @@ SETTINGS = SimpleNamespace()
 
 
 def hit(source, source_id, *, tmdb=None, mal=None, season=None, title="Title",
-        year=2020, network="", runtime=None, overview="") -> SearchHit:
+        year=2020, network="", runtime=None, overview="", media=Media.SHOW) -> SearchHit:
     ids = {}
     if tmdb is not None:
         ids["tmdb"] = tmdb
     if mal is not None:
         ids["mal"] = mal
-    return SearchHit(source=source, source_id=source_id, media=Media.SHOW, ids=ids,
+    return SearchHit(source=source, source_id=source_id, media=media, ids=ids,
                      title=title, year=year, season=season, network=network,
                      runtime=runtime, overview=overview)
 
@@ -58,6 +58,21 @@ class DedupeTests(unittest.TestCase):
             (ItemKey("show", "tmdb", "1429"), 2),
             (ItemKey("show", "tmdb", "1429"), 3),
         })
+
+    def test_a_film_and_a_show_sharing_a_tmdb_id_never_merge(self):
+        """A recap film and its parent series can share a tmdb id (Attack on
+        Titan's "The Last Attack" does) — resolve_key(hit.media, hit.ids) puts
+        them in different id spaces (show:tmdb:X vs movie:tmdb:X), so they
+        must land as two separate rows rather than one merged into the wrong
+        media."""
+        result = search.merge_search_hits([
+            (Source.SIMKL, [
+                hit(Source.SIMKL, "1", tmdb="1429", media=Media.SHOW, title="Attack on Titan"),
+                hit(Source.SIMKL, "2", tmdb="1429", media=Media.MOVIE, title="The Last Attack"),
+            ]),
+        ])
+        self.assertEqual(len(result.hits), 2)
+        self.assertEqual({h.media for h in result.hits}, {Media.SHOW, Media.MOVIE})
 
     def test_a_hit_with_no_resolvable_key_stands_alone(self):
         result = search.merge_search_hits([
@@ -288,6 +303,16 @@ class FieldMergeTests(unittest.TestCase):
             (Source.SIMKL, [simkl_hit]),
         ])
         self.assertEqual(result.hits[0].ids, {"tmdb": "1429", "mal": "5678"})
+
+    def test_media_comes_from_the_leader(self):
+        """A hit mixed into a show search that turns out to be a film (Simkl's
+        anime search does this — see app/providers/simkl/search.py) has to
+        carry its own media through the merge, not the caller's requested one:
+        distrakt/routes.py's _resolve_pick reads MergedSearchHit.media to
+        decide whether the pick is even addable from a season click."""
+        leader = hit(Source.SIMKL, "9", tmdb="1429", media=Media.MOVIE)
+        result = search.merge_search_hits([(Source.SIMKL, [leader])])
+        self.assertEqual(result.hits[0].media, Media.MOVIE)
 
     def test_a_merge_of_materially_different_titles_is_logged(self):
         """Two hits should never actually land on one key with unrelated

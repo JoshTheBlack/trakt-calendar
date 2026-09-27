@@ -230,7 +230,7 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
     and whether a card then appears depends on whether any source lists that
     title on that calendar, which nothing here can promise."""
 
-    def _hit(self, title="Unseen Show", simkl_id="4242", also=None):
+    def _hit(self, title="Unseen Show", simkl_id="4242", also=None, media=Media.SHOW):
         """A REAL `MergedSearchHit`, and the reason that matters is a bug this
         file did not catch.
 
@@ -249,7 +249,8 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         sources.update(also or {})
         return MergedSearchHit(key=None, season=None, source_ids=sources,
                                ids={"simkl": simkl_id, "tmdb": 777}, title=title,
-                               year=2026, network="", runtime=None, overview="")
+                               year=2026, network="", runtime=None, overview="",
+                               media=media)
 
     def _port(self, described, seasons=None):
         """A detail port that answers all three halves of what a row needs.
@@ -699,7 +700,7 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
             from app.distrakt.search import MergedSearchHit
             return SimpleNamespace(hits=[MergedSearchHit(
                 key=None, season=None, source_ids={}, ids={}, title="Nameless",
-                year=None, network="", runtime=None, overview="")],
+                year=None, network="", runtime=None, overview="", media=Media.SHOW)],
                 failed=frozenset())
 
         with patch("app.distrakt.search.search_catalogue", new=_search),              patch("app.providers.for_catalogue_search",
