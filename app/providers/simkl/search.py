@@ -104,7 +104,7 @@ async def _search_one(settings: Settings, path: str, query: str, media: Media, *
         transport.catalog_client(), settings, path,
         {"q": query, "limit": str(PAGE_SIZE)},
         pool=transport.CATALOG_POOL, raise_errors=True, max_pages=MAX_PAGES,
-        cache_only=cache_only,
+        cache_only=cache_only, private=True,
     )
     return [_hit(entry, media) for entry in results]
 

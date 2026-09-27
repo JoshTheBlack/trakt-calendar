@@ -355,54 +355,6 @@ async def _add_to_past_month(request: Request, user_id, month_key: str, show: di
         point_at=((stored or {}).get("key") or "", int(show["season"])))
 
 
-async def _distrakt_settings(user_id: int):
-    """The app-wide settings with EVERY source's credential swapped for
-    `user_id`'s own.
-
-    The tracker reads one person's private watch history — their progress, their
-    plays, their movies — so every call it makes has to authenticate as THEM. The
-    tokens in settings.json belong to the operator and would hand every user the
-    operator's viewing instead of their own. Everything else on the object (the
-    network emoji map, the TMDB key, the genre/country strings) is genuinely
-    app-wide and is carried through untouched.
-
-    BOTH TOKENS RIDE ON THE ONE SETTINGS OBJECT rather than each source being
-    handed a credential of its own. Each port already reads its own field off
-    `settings` — that is what `is_configured` asks about — so a per-source
-    credential object would be a second mechanism for something this one already
-    expresses, and the SyncPort protocol would have to grow an argument for it.
-    A user with no Simkl identity gets an empty Simkl token, `simkl_configured`
-    goes false, and that port is simply never asked; the same has always been
-    true of Trakt.
-
-    Trakt's refresh token is cleared as well: nothing downstream on this object
-    refreshes with it (that happens once, up front, inside
-    trakt_routes.access_token_for_user — this function only ever hands out the
-    resulting access token), and leaving the operator's beside somebody else's
-    access token would be a pairing that means nothing. Simkl's refresh token
-    never reaches this object at all for the same reason: simkl_routes'
-    equivalent already refreshed and returned only the access token, and
-    Settings has no `simkl_refresh_token` field for it to occupy. The access
-    level guarantees SOME linked identity that can read a history, but a row can
-    still hold an empty token, in which case that source's `*_configured` goes
-    false and the handlers take their existing "not configured" path.
-
-    The network->emoji map is per-user too, but it is NOT on this object: it was
-    removed from Settings entirely when it stopped being app-wide, so the
-    renderers take it as an argument (see _distrakt_month_payload). Keeping it off
-    `settings` is deliberate — there is no longer an app-wide value for a caller
-    to reach for by mistake.
-    """
-    trakt_token, simkl_token = await asyncio.gather(
-        trakt_routes.access_token_for_user(user_id),
-        simkl_routes.access_token_for_user(user_id),
-    )
-    return dataclasses.replace(
-        load_settings(), trakt_access_token=trakt_token or "", trakt_refresh_token="",
-        simkl_access_token=simkl_token or "",
-    )
-
-
 async def _distrakt_post_link(user_id: int, settings, year: int, month: int) -> str | None:
     """The public calendar link this user's announcement post embeds, or None when
     they have nothing publishable — no configured public base URL, or every link
@@ -475,6 +427,7 @@ async def distrakt(request: Request):
     month = route_params.valid_month(request.query_params.get("month"), today.month)
     network_emojis, default_network_emoji = await distrakt_store.get_emoji_prefs(user.user_id)
     backfill_start, backfill_end = backfill.default_range(today)
+    settings = await viewer.settings_for_user(user.user_id)
     context = {
         "request": request,
         "year": year,
@@ -506,7 +459,7 @@ async def distrakt(request: Request):
         # Which share-link forms would actually resolve, so the selector offers
         # only the ones that produce a working link.
         "post_link": await _post_link_choices(user.user_id),
-        **_modal_context(year, month),
+        **_modal_context(settings, year, month),
     }
     return templates.TemplateResponse(request, "distrakt.html", context)
 
@@ -1369,10 +1322,17 @@ _BANNERS = {
 }
 
 
-def _modal_context(year: int, month: int) -> dict:
+def _modal_context(settings, year: int, month: int) -> dict:
     """What the add flow's three overlays need drawing: which catalogues the
     search fields may name, whether an add into this month records something as
     FINISHED, and the day a film defaults to.
+
+    `settings` MUST BE THE VIEWER'S OWN, not the instance-wide one — Simkl's
+    catalogue search now genuinely requires a user token (see
+    providers.for_catalogue_search's docstring for why that predicate is no
+    longer symmetric across sources), so an instance-wide Settings object would
+    read as "no Simkl" for every viewer, linked or not, once D3 removes the
+    operator's own instance-wide Simkl token setting.
 
     THE MONTH BEING PAST IS THE ONE TEST, and it is the clock's alone. A month
     behind the clock is filled in by hand and is what `add-completed` is for; the
@@ -1391,7 +1351,7 @@ def _modal_context(year: int, month: int) -> dict:
     viewing_now = (today.year, today.month) == (year, month)
     return {
         "catalogue_sources": [str(source) for source, _
-                              in providers.for_catalogue_search(load_settings())],
+                              in providers.for_catalogue_search(settings)],
         "as_finished": distrakt_store.month_key(year, month) < _this_month(),
         "film_day": today.isoformat() if viewing_now else f"{year:04d}-{month:02d}-01",
         "film_max": today.isoformat(),
@@ -1409,7 +1369,7 @@ def _modal_context(year: int, month: int) -> dict:
 
 
 def _month_context(request: Request, payload: dict, year: int, month: int,
-                   emojis: dict, default_emoji: str, *,
+                   emojis: dict, default_emoji: str, settings, *,
                    message: str = "", ok: bool = True) -> dict:
     """The month fragment's whole context, out of the payload and nothing else.
 
@@ -1448,7 +1408,7 @@ def _month_context(request: Request, payload: dict, year: int, month: int,
         "emoji_for": lambda network: emojis.get(network or "", default_emoji),
         "logo_for": lambda network: (
             f"/api/network-logo?name={quote(network or '')}" if network in with_logos else ""),
-        **_modal_context(year, month),
+        **_modal_context(settings, year, month),
     }
 
 
@@ -1479,7 +1439,7 @@ async def _month_answer(request: Request, user_id: int, year: int, month: int,
     emojis, default_emoji = await distrakt_store.get_emoji_prefs(user_id)
     return templates.TemplateResponse(
         request, "_distrakt_month.html",
-        _month_context(request, payload, year, month, emojis, default_emoji,
+        _month_context(request, payload, year, month, emojis, default_emoji, settings,
                        message=message, ok=ok))
 
 

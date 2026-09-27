@@ -205,7 +205,7 @@ class TheQuestionsAboveTheListTests(MonthFragmentTestCase):
         emojis, default_emoji = asyncio.run(distrakt_store.get_emoji_prefs(self.user_id))
         context = distrakt_routes._month_context(
             None, {"ok": True, "shows": [], **payload}, *self.current,
-            emojis, default_emoji)
+            emojis, default_emoji, Settings())
         from app.templating import templates
         return templates.get_template("_distrakt_month.html").render(**context)
 

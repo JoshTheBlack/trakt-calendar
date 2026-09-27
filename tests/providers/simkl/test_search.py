@@ -185,6 +185,20 @@ class SearchTitlesTests(unittest.IsolatedAsyncioTestCase):
         for call in spy.await_args_list:
             self.assertIs(call.kwargs["pool"], transport.CATALOG_POOL)
 
+    async def test_every_call_carries_the_callers_own_token(self):
+        """Simkl's v2 search requires a user token (401 user_token_required
+        otherwise) — every call here must ask cached_paged_get to attach one,
+        which is what `private=True` means to that function (see its own
+        docstring: unlike cached_get's flag of the same name, it does not skip
+        the shared cache — search answers identically under any viewer's own
+        token, measured live during the v2 cutover's Phase 1)."""
+        spy = _cached_get({"search/tv": [], "search/anime": [], "search/movie": []})
+        with _patched(spy):
+            await search.search_titles(SETTINGS, Media.SHOW, "x")
+            await search.search_titles(SETTINGS, Media.MOVIE, "x")
+        for call in spy.await_args_list:
+            self.assertTrue(call.kwargs.get("private"))
+
 
 class CollidingSeasonTests(unittest.IsolatedAsyncioTestCase):
     """Filling in `SearchHit.season` for the hits of one answer that share an

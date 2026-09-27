@@ -249,6 +249,13 @@ class AddingWhatOnlyTheOtherServiceListsTests(AddFlowTestCase):
                         simkl_client_id="scid",
                         simkl_public_calendar_enabled=False)
 
+    def setUp(self):
+        super().setUp()
+        # Simkl's v2 search now requires THIS viewer's own token (see
+        # providers.for_catalogue_search's docstring) — a client id alone no
+        # longer makes it askable, which is what this class is testing.
+        self.link_identity(self.user_id, "simkl", 4343, "simkl-token")
+
     def test_a_film_only_the_second_catalogue_lists_is_added_from_its_own_answer(self):
         self.warm(
             # Trakt answers, and answers nothing — the ordinary shape of a title

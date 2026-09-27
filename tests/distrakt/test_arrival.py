@@ -30,7 +30,13 @@ from tests.distrakt.test_naming import a_calendar_record, store_calendar
 from tests.distrakt.test_rewatch import KEY, _RosterAddCase
 from tests.distrakt.test_store import DistraktTestCase
 
-SETTINGS = Settings(trakt_client_id="cid", simkl_client_id="scid")
+# A VIEWER'S OWN TOKEN, NOT JUST A CLIENT ID: arrival.describe's callers
+# (calendar_import, rollover, the tracker's own routes) are always processing
+# one account, and Simkl's v2 search/redirect now require that account's own
+# token (see providers.for_catalogue_search's docstring) — a client id alone
+# is no longer enough to make find_by_shared_id askable.
+SETTINGS = Settings(trakt_client_id="cid", simkl_client_id="scid",
+                   simkl_access_token="viewer-simkl-token")
 SEASON = {"total": 10, "cadence": "w", "premiere": "2026-01-05", "finale": "2026-03-09",
           "started_airing": True, "finished_airing": True}
 

@@ -30,7 +30,7 @@ import unittest
 from app import providers
 from app.config import Settings
 from app.providers.base import (CalendarPort, DetailPort, LibraryPort, Media,
-                                PlayCountPort, Provider, SearchPort, SyncPort)
+                                PlayCountPort, Provider, SearchPort, Source, SyncPort)
 from app.providers.trakt import detail as trakt_detail
 from tests.support import DatabaseTestCase
 
@@ -379,18 +379,26 @@ class EverySourceCanBeSearchedTests(unittest.TestCase):
                 self.assertIsInstance(port, SearchPort)
 
     def test_the_catalogue_question_is_not_the_private_one(self):
-        """A public search must not be gated on a token it never sends.
+        """A public search must not be gated on a token it never sends —
+        true of every registered source EXCEPT Simkl, whose v2 search and
+        /redirect genuinely DO require a user token (401 user_token_required
+        otherwise), where its per-title DetailPort lookups stay anonymous —
+        see app/providers/simkl/__init__.py._SimklProvider.catalogue_is_configured.
         Asserted against a Settings carrying each source's ID and nothing
-        else, which is the live instance's own shape for Simkl — the same
-        check `EverySourceCanDescribeATitleTests` makes for DetailPort, aimed
-        at `Provider.catalogue_is_configured` rather than the detail port's
-        own predicate.
+        else, which is the live instance's own shape for a Simkl catalogue
+        that answers detail lookups but not search — the same check
+        `EverySourceCanDescribeATitleTests` makes for DetailPort, aimed at
+        `Provider.catalogue_is_configured` rather than the detail port's own
+        predicate.
         """
         for source, provider in providers.registered().items():
             with self.subTest(source=source):
                 settings = Settings(**{f"{source}_client_id": "an-id"})
-                self.assertTrue(provider.catalogue_is_configured(settings))
                 self.assertFalse(provider.is_configured(settings))
+                if source is Source.SIMKL:
+                    self.assertFalse(provider.catalogue_is_configured(settings))
+                else:
+                    self.assertTrue(provider.catalogue_is_configured(settings))
 
 
 class TheCheckWouldActuallyFailTests(unittest.TestCase):

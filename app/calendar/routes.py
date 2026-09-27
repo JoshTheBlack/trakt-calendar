@@ -1102,9 +1102,21 @@ async def search_the_calendar(request: Request):
 
     A FRAGMENT, NOT A PAGE. It renders the same results partial the shell embeds,
     so the typing path and a full submit produce identical markup.
+
+    SETTINGS IS THIS VIEWER'S OWN, not the instance-wide one — the catalogue
+    half's Simkl search now genuinely requires a user token (see
+    providers.for_catalogue_search's docstring), so an instance-wide Settings
+    object would read as "no Simkl" for every viewer once D3 of the v2 cutover
+    removes the operator's own instance-wide Simkl token setting. distrakt.viewer
+    is reached the same way distrakt/search.py's merge already is (see the
+    (CALENDAR, DISTRAKT) edge in tests/kernel/test_layering.py) — deferred so
+    naming it at module level does not close the loop distrakt reading the
+    calendar back already opens.
     """
+    from ..distrakt import viewer as distrakt_viewer  # deferred: see DECLARED_EDGES
+
     user = await auth.current_user(request)
-    settings = load_settings()
+    settings = await distrakt_viewer.settings_for_user(user.user_id)
     query = (request.query_params.get("q") or "").strip()
     live = request.query_params.get("live") in ("1", "true", "yes")
     everywhere = request.query_params.get("all") in ("1", "true", "yes")
@@ -1673,6 +1685,9 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     this app's own distrakt_show_progress for the signed-in viewer, which costs no
     call, no token and no id translation.
     """
+    from ..distrakt import viewer as distrakt_viewer  # deferred: see DECLARED_EDGES
+
+    user = await auth.current_user(request)
     params = request.query_params
     settings = load_settings()
     media = params.get("media", "show")
@@ -1746,7 +1761,15 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
         # addressed by it. Nothing else does — a parameter this route does not
         # read has no business being rendered back into the page.
         carry=details_query_names() + ("key",),
-        follow_up=await _completion_follow_up(settings, params, season))
+        # THIS VIEWER'S OWN SETTINGS, NOT THE INSTANCE-WIDE ONE ABOVE. Everything
+        # else in this route deliberately reads the public/shared `settings` —
+        # see the route's own docstring — but deciding whether to ask Simkl
+        # about a card its calendar is missing is the one question here that is
+        # NOT public any more: Simkl's v2 search and /redirect require this
+        # viewer's own token (providers.for_catalogue_search's docstring), so an
+        # instance-wide object would silently never ask, for anybody.
+        follow_up=await _completion_follow_up(
+            await distrakt_viewer.settings_for_user(user.user_id), params, season))
 
 
 async def _completion_follow_up(settings, params, season: int | None) -> str:
@@ -1987,7 +2010,17 @@ async def complete_card(request: Request):
     month, out of band, from the same assembly the page came from. Nothing stored
     — the other service does not list it, could not be asked, or was asked this
     week — answers empty, and the page is left as it is.
+
+    SETTINGS IS THIS VIEWER'S OWN. The service being asked may be Simkl, whose
+    v2 search and /redirect require a user token (see
+    providers.for_catalogue_search's docstring) — an instance-wide Settings
+    object carries no such token at all past D3 of the v2 cutover, which would
+    make this ask silently never happen for anybody, linked or not. Reached the
+    same deferred way the calendar's search fragment reaches distrakt.viewer
+    (see (CALENDAR, DISTRAKT) in tests/kernel/test_layering.py).
     """
+    from ..distrakt import viewer as distrakt_viewer  # deferred: see DECLARED_EDGES
+
     user = await auth.current_user(request)
     today = clock.today()
     year = route_params.valid_year(request.query_params.get("year"), today.year)
@@ -1996,7 +2029,7 @@ async def complete_card(request: Request):
     payload = await authz.json_body(request)
     key = str(payload.get("key") or "")
     season = route_params.season(payload.get("season"))
-    settings = load_settings()
+    settings = await distrakt_viewer.settings_for_user(user.user_id)
     source = await calendar_search.other_service_to_ask(
         settings, endpoint_key=endpoint.key, title_key=key, season=season)
     if not source:
