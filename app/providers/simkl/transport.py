@@ -117,9 +117,13 @@ class SimklBlockedError(SimklError):
 # that happened to be called first: the same token on any other path gets the
 # same answer. A caller that tolerates one call failing must NOT tolerate one of
 # these, because "this list could not be read" and "nothing this token asks for
-# can be read" are different facts with opposite consequences — and Simkl issues
-# no refresh token (a grant is revoked, a password is reset, a token expires), so
-# this is an ordinary expected state rather than an exotic one.
+# can be read" are different facts with opposite consequences. A v2 token DOES
+# refresh (app/auth/simkl.py.refresh_access_token, proactively, ~1 day before
+# its 7-day expiry — see simkl_routes.access_token_for_user), so this status
+# ordinarily means the grant itself was revoked, or the stored token predates
+# this app's cutover to v2 (a legacy token is never sent at all — see
+# simkl_routes._is_v2_token) — either way an ordinary expected state, not an
+# exotic one, and the fix is the same: reconnect.
 CREDENTIAL_STATUSES = (401, 403)
 
 
@@ -669,8 +673,17 @@ async def _claim_catalog_slot() -> None:
 
 async def send(client: httpx.AsyncClient, method: str, url: str, *,
                pool: http_pool.Pool, headers: dict | None = None,
-               json=None, timeout: float | None = None) -> httpx.Response:
+               json=None, data: dict | None = None,
+               timeout: float | None = None) -> httpx.Response:
     """Issue one Simkl request under that pool's rules, and return its response.
+
+    `data`, NOT `json`, FOR THE OAUTH TOKEN ENDPOINT. RFC 6749 specifies
+    application/x-www-form-urlencoded for a token request, and Simkl's own docs
+    give form-encoded examples — measured 2026-09-27, the live endpoint also
+    parses a JSON body just as well (both answer `invalid_grant` for a bogus
+    code, meaning both were read), but there is no reason to send the
+    undocumented shape when the documented one works. Every other Simkl call in
+    this app is JSON; `data` exists for this one caller (app/auth/simkl.py).
 
     `pool` IS NOT OPTIONAL AND MUST BE THE POOL `client` CAME FROM. The two
     travel together because they are two halves of one budget: the client owns
@@ -698,7 +711,7 @@ async def send(client: httpx.AsyncClient, method: str, url: str, *,
     hops = 0
     while True:
         resp = await _send_once(client, method, url, pool=pool, headers=headers,
-                                json=json, timeout=timeout)
+                                json=json, data=data, timeout=timeout)
         if resp.status_code not in REDIRECT_STATUSES:
             return resp
         location = resp.headers.get("location")
@@ -812,7 +825,8 @@ async def redirect_target(settings: Settings, path: str, params: dict) -> str:
 
 async def _send_once(client: httpx.AsyncClient, method: str, url: str, *,
                      pool: http_pool.Pool, headers: dict | None = None,
-                     json=None, timeout: float | None = None) -> httpx.Response:
+                     json=None, data: dict | None = None,
+                     timeout: float | None = None) -> httpx.Response:
     """One request to one URL under one pool's gate, with the 412 breaker and
     the 429 retry loop — everything that is about THIS request and not about
     where its answer might point.
@@ -861,7 +875,7 @@ async def _send_once(client: httpx.AsyncClient, method: str, url: str, *,
                 await _pace_post()
                 try:
                     resp = await client.post(url, headers=headers, json=json,
-                                             timeout=attempt_timeout)
+                                             data=data, timeout=attempt_timeout)
                 finally:
                     # Recorded even when the request failed. The cap counts
                     # requests Simkl received, and a call that timed out on our
@@ -937,8 +951,9 @@ async def _fetch_json(client: httpx.AsyncClient, settings: Settings, url: str, p
         if raise_errors:
             if resp.status_code == 401:
                 raise SimklError(
-                    "Simkl rejected the credentials (401). Simkl issues no refresh "
-                    "token, so the link has to be made again.", 401)
+                    "Simkl rejected the credentials (401). This token is either "
+                    "revoked or a legacy one that predates this app's v2 cutover — "
+                    "either way the link has to be made again.", 401)
             raise SimklError(f"Simkl API returned HTTP {resp.status_code}.", resp.status_code)
         return None, pages
     try:

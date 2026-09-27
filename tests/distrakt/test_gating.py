@@ -269,12 +269,15 @@ class RequestingUsersTokenTests(DistraktTestCase):
         second mechanism for something this one already expresses, and the port
         protocol would have to grow an argument for it."""
         user_id = self.tracker_user(token="THE-USERS-TOKEN")
+        # V2-shaped (see app/auth/simkl.py.V2_ACCESS_TOKEN_PREFIX): a token
+        # missing this prefix reads as a legacy v1 grant and is never sent
+        # (simkl_routes._is_v2_token), which is not what this test is about.
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=user_id, provider="simkl", provider_user_id=90210,
-            access_token="THEIR-SIMKL-TOKEN")))
+            access_token="simkl_at_THEIR-SIMKL-TOKEN")))
         settings = asyncio.run(distrakt_viewer.settings_for_user(user_id))
         self.assertEqual(settings.trakt_access_token, "THE-USERS-TOKEN")
-        self.assertEqual(settings.simkl_access_token, "THEIR-SIMKL-TOKEN")
+        self.assertEqual(settings.simkl_access_token, "simkl_at_THEIR-SIMKL-TOKEN")
 
     def test_an_account_with_no_simkl_link_carries_no_simkl_token(self):
         """`simkl_configured` then goes false and that port is simply not asked,

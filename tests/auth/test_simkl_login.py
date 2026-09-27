@@ -1,5 +1,6 @@
-"""Log in with Simkl — handshake binding, the sign-in/register/link outcomes,
-identity keying, and the absence of any refresh path.
+"""Log in with Simkl v2 — handshake binding with PKCE, the sign-in/register/link
+outcomes, identity keying, the scope check, legacy-token handling, and
+token-refresh serialization.
 
 THIS FILE IS ALSO THE FIRST REAL TEST OF app/auth/provider_login.py. The shared
 completion was extracted from two near-identical copies and, at that point,
@@ -23,8 +24,12 @@ from __future__ import annotations
 import asyncio
 import re
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
+
+import httpx
 
 from app import auth, db
 from app.auth import routes as auth_routes, simkl as simkl_auth, trakt_routes
@@ -51,12 +56,12 @@ def _settings(**overrides) -> Settings:
 
 
 class _Token(dict):
-    """A Simkl token payload. No refresh_token, because Simkl issues none — the
-    field is absent from the real response rather than null."""
+    """A Simkl v2 token payload — access AND refresh, both scopes granted."""
 
-    def __init__(self, access="simkl-access-1", expires_in=157_680_000):
-        super().__init__(access_token=access, token_type="bearer", scope="public",
-                         expires_in=expires_in)
+    def __init__(self, access="simkl_at_access-1", refresh="simkl_rt_refresh-1",
+                expires_in=604_800, scope="media:read media:write"):
+        super().__init__(access_token=access, refresh_token=refresh, token_type="Bearer",
+                         scope=scope, expires_in=expires_in)
 
 
 class SimklOAuthTestCase(AppTestCase):
@@ -251,6 +256,15 @@ class StartRouteTests(SimklOAuthTestCase):
         # Built from the configured origin, never from the Host header — Simkl
         # compares it against the registered value byte for byte.
         self.assertEqual(query["redirect_uri"], [f"{ORIGIN}/auth/simkl/callback"])
+        self.assertEqual(query["scope"], [simkl_auth.SCOPE])
+        self.assertEqual(query["code_challenge_method"], ["S256"])
+        # The verifier itself must never appear here — only its S256 challenge.
+        challenge = query["code_challenge"][0]
+        state = query["state"][0]
+        row = asyncio.run(db.fetch_one(
+            "SELECT pkce_verifier FROM auth_handshakes WHERE state = ?", (state,)))
+        self.assertNotEqual(challenge, row["pkce_verifier"])
+        self.assertNotIn(row["pkce_verifier"], resp.headers["location"])
 
     def test_the_redirect_uri_ignores_a_spoofed_host_header(self):
         resp = self.client.get("/auth/simkl/start", follow_redirects=False,
@@ -281,6 +295,8 @@ class StartRouteTests(SimklOAuthTestCase):
         self.assertEqual(row["invite_token"], token)
         self.assertIsNone(row["session_id"])
         self.assertEqual(row["provider"], "simkl")
+        # The PKCE verifier rides the same row, generated fresh per handshake.
+        self.assertTrue(row["pkce_verifier"])
 
 
 class SignInOutcomeTests(SimklOAuthTestCase):
@@ -303,7 +319,7 @@ class SignInOutcomeTests(SimklOAuthTestCase):
         rows = self.identities()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["display_name"], "New Name")
-        self.assertEqual(rows[0]["access_token"], "simkl-access-1")
+        self.assertEqual(rows[0]["access_token"], "simkl_at_access-1")
 
     def test_an_unknown_identity_with_no_invite_creates_no_account(self):
         """Registration through the provider path is invite-gated exactly as
@@ -428,10 +444,10 @@ class LinkOutcomeTests(SimklOAuthTestCase):
         user = self.make_user("linker", calendar_approved=True)
         self.sign_in_as(user)
         self.callback(self.start("/auth/simkl/link"))
-        self.callback(self.start("/auth/simkl/link"), token=_Token(access="simkl-access-2"))
+        self.callback(self.start("/auth/simkl/link"), token=_Token(access="simkl_at_access-2"))
         rows = self.identities()
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["access_token"], "simkl-access-2")
+        self.assertEqual(rows[0]["access_token"], "simkl_at_access-2")
 
     def test_a_link_is_refused_while_encryption_is_unhealthy(self):
         user = self.make_user("linker", calendar_approved=True)
@@ -527,86 +543,234 @@ class IdentityKeyTests(SimklOAuthTestCase):
             seen["method"] = method
             seen["url"] = url
             seen["pool"] = kwargs.get("pool")
-            seen["json"] = kwargs.get("json")
+            seen["data"] = kwargs.get("data")
             return _StubResponse(_Token())
 
         with patch("app.providers.simkl.transport.send", side_effect=_send):
             token = asyncio.run(simkl_auth.exchange_code(
-                "cid", "secret", "the-code", ORIGIN))
-        self.assertEqual(token["access_token"], "simkl-access-1")
+                "cid", "secret", "the-code", ORIGIN, "the-verifier"))
+        self.assertEqual(token["access_token"], "simkl_at_access-1")
         self.assertEqual(seen["method"], "POST")
         self.assertEqual(seen["url"], simkl_auth.TOKEN_URL)
         # The pacer and the 412 breaker cover the sign-in exchange too, which is
         # the whole reason it goes through the source's transport.
         self.assertIs(seen["pool"], simkl_transport().SYNC_POOL)
-        self.assertEqual(seen["json"]["redirect_uri"], f"{ORIGIN}/auth/simkl/callback")
-        self.assertEqual(seen["json"]["grant_type"], "authorization_code")
+        # FORM-ENCODED, per RFC 6749 and Simkl's own examples — sent as `data`,
+        # never `json`, so httpx sets application/x-www-form-urlencoded itself.
+        self.assertEqual(seen["data"]["redirect_uri"], f"{ORIGIN}/auth/simkl/callback")
+        self.assertEqual(seen["data"]["grant_type"], "authorization_code")
+        self.assertEqual(seen["data"]["code_verifier"], "the-verifier")
+
+    def test_refresh_access_token_is_also_form_encoded_and_on_the_sync_pool(self):
+        seen = {}
+
+        async def _send(client, method, url, **kwargs):
+            seen["url"] = url
+            seen["data"] = kwargs.get("data")
+            seen["pool"] = kwargs.get("pool")
+            return _StubResponse(_Token(access="refreshed"))
+
+        with patch("app.providers.simkl.transport.send", side_effect=_send):
+            token = asyncio.run(simkl_auth.refresh_access_token(
+                "cid", "secret", "old-refresh"))
+        self.assertEqual(token["access_token"], "refreshed")
+        self.assertEqual(seen["url"], simkl_auth.TOKEN_URL)
+        self.assertEqual(seen["data"]["grant_type"], "refresh_token")
+        self.assertEqual(seen["data"]["refresh_token"], "old-refresh")
+        self.assertIs(seen["pool"], simkl_transport().SYNC_POOL)
+
+    def test_revoke_token_posts_to_the_v2_revoke_endpoint(self):
+        seen = {}
+
+        async def _send(client, method, url, **kwargs):
+            seen["url"] = url
+            seen["data"] = kwargs.get("data")
+            return _StubResponse({})
+
+        with patch("app.providers.simkl.transport.send", side_effect=_send):
+            asyncio.run(simkl_auth.revoke_token("cid", "secret", "a-token"))
+        self.assertEqual(seen["url"], simkl_auth.REVOKE_URL)
+        self.assertEqual(seen["data"]["token"], "a-token")
+
+    def test_generate_pkce_pair_challenge_is_s256_of_the_verifier(self):
+        import base64
+        import hashlib
+
+        verifier, challenge = simkl_auth.generate_pkce_pair()
+        expected = base64.urlsafe_b64encode(
+            hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
+        self.assertEqual(challenge, expected)
+        self.assertNotEqual(verifier, challenge)
+        # Two calls never collide — this is what makes a stolen code useless
+        # without the verifier that produced its challenge.
+        other_verifier, _ = simkl_auth.generate_pkce_pair()
+        self.assertNotEqual(verifier, other_verifier)
 
 
-class NoRefreshTests(SimklOAuthTestCase):
-    """Simkl issues no refresh token, so nothing may ever try to renew one.
+class ScopeRefusalTests(SimklOAuthTestCase):
+    """Simkl grants access on request SHAPE, and a scope missing media:write is
+    refused before anything is stored — see simkl_routes.simkl_callback."""
 
-    The failure this guards against is not loud: a renewal attempt against a
-    Simkl identity would post a NULL refresh token to Trakt's token endpoint and
-    get back a refusal, and the visible symptom would be a working link that
-    stops working for no reason a log explains.
-    """
+    def test_a_read_only_grant_is_refused_and_nothing_is_stored(self):
+        resp = self.callback(self.start(), token=_Token(scope="media:read"))
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn(simkl_routes.SCOPE_REFUSED, resp.text)
+        self.assertEqual(self.identities(), [])
 
-    def test_a_simkl_identity_stores_no_refresh_token_and_no_expiry(self):
+    def test_a_missing_scope_field_entirely_is_also_refused(self):
+        token = _Token()
+        del token["scope"]
+        resp = self.callback(self.start(), token=token)
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.identities(), [])
+
+    def test_a_link_refusal_sends_the_visitor_back_to_their_account(self):
         user = self.make_user("linker", calendar_approved=True)
         self.sign_in_as(user)
-        self.callback(self.start("/auth/simkl/link"))
-        row = self.identities()[0]
-        self.assertEqual(row["access_token"], "simkl-access-1")
-        self.assertIsNone(row["refresh_token"])
-        # The exchange DOES report an expires_in of about five years. It is
-        # deliberately not stored: there is no renewal path it could trigger, so
-        # recording it would only invent a deadline nothing can meet.
-        self.assertIsNone(row["token_expires_at"])
+        resp = self.callback(self.start("/auth/simkl/link"), token=_Token(scope="media:read"))
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('href="/me"', resp.text)
 
-    def test_the_simkl_login_module_offers_no_refresh_entry_point(self):
-        """There is no refresh_access_token here, and its absence is the design
-        rather than an oversight — see the module docstring."""
-        self.assertFalse([name for name in dir(simkl_auth) if "refresh" in name])
 
-    def test_the_refresh_path_never_touches_a_simkl_identity(self):
-        """The only token renewal in this app is Trakt's, and it is scoped to
-        Trakt rows. An account with a Simkl link and no Trakt one has no token
-        there and nothing is exchanged looking for one."""
-        user = self.make_user("simkl_only", calendar_approved=True)
-        self.sign_in_as(user)
-        self.callback(self.start("/auth/simkl/link"))
-        # Make the row look as expired as an identity can, so any renewal that
-        # was going to happen would happen now.
-        asyncio.run(db.execute(
-            "UPDATE linked_identities SET token_expires_at = ?, refresh_token = ?",
-            (db.now() - 3600, "not-a-real-refresh-token")))
+class LegacyTokenTests(SimklOAuthTestCase):
+    """A V1 token predates this cutover (D1: hard cutover, no dual token paths)
+    and is told apart from a V2 one purely by shape — Simkl gives no other
+    signal. It is read as "reconnect needed" everywhere, and the identity row
+    is KEPT rather than dropped."""
 
-        from app.auth import trakt as trakt_auth
+    def _v1_shaped_identity(self, user_id: int) -> int:
+        def _insert(conn):
+            return auth.insert_linked_identity(
+                conn, user_id=user_id, provider="simkl", provider_user_id=SIMKL_ID,
+                access_token="a" * 64, refresh_token=None, token_expires_at=None)
+
+        return asyncio.run(db.transaction(_insert))
+
+    def test_a_legacy_token_reads_as_reconnect_needed(self):
+        user = self.make_user("legacy", calendar_approved=True)
+        self._v1_shaped_identity(user)
+        self.assertIsNone(asyncio.run(simkl_routes.access_token_for_user(user)))
+
+    def test_a_legacy_token_is_never_sent_through_refresh(self):
+        """No refresh_token sits beside a V1-shaped access token (it predates V2
+        entirely), so a refresh attempt would only fail — but the point is that
+        _is_v2_token stops it before that failure is even attempted."""
+        user = self.make_user("legacy", calendar_approved=True)
+        self._v1_shaped_identity(user)
 
         def _explode(*a, **kw):  # pragma: no cover — asserting it isn't called
-            raise AssertionError("a Simkl identity was sent through Trakt's refresh")
+            raise AssertionError("a legacy Simkl token reached the v2 refresh endpoint")
 
-        with patch.object(trakt_auth, "refresh_access_token", side_effect=_explode):
-            self.assertIsNone(asyncio.run(trakt_routes.access_token_for_user(user)))
-        self.assertEqual(self.identities()[0]["refresh_token"], "not-a-real-refresh-token")
+        with patch.object(simkl_auth, "refresh_access_token", side_effect=_explode):
+            self.assertIsNone(asyncio.run(simkl_routes.access_token_for_user(user)))
+
+    def test_reconnecting_replaces_the_token_on_the_same_row(self):
+        user = self.make_user("legacy", calendar_approved=True)
+        identity_id = self._v1_shaped_identity(user)
+        self.sign_in_as(user)
+        self.callback(self.start("/auth/simkl/link"))
+        rows = self.identities()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(int(rows[0]["id"]), identity_id)
+        self.assertEqual(rows[0]["access_token"], "simkl_at_access-1")
+
+
+class RefreshSerializationTests(SimklOAuthTestCase):
+    """Simkl v2 issues a real refresh token (180 days, sliding, non-rotating)
+    where v1 issued none — see app/auth/simkl.py's module docstring. One grant
+    is one live access token, so two concurrent refreshes of the same identity
+    would each succeed and then cut each other off; the identity row's lease
+    (the same one Trakt's refresh already serializes through) is what stops
+    that."""
+
+    def _expired_identity(self) -> int:
+        user = self.make_user("watcher", calendar_approved=True)
+
+        def _insert(conn):
+            return auth.insert_linked_identity(
+                conn, user_id=user, provider="simkl", provider_user_id=SIMKL_ID,
+                access_token=simkl_auth.V2_ACCESS_TOKEN_PREFIX + "old",
+                refresh_token="old-refresh", token_expires_at=db.now() - 10)
+
+        asyncio.run(db.transaction(_insert))
+        return user
+
+    def test_only_one_of_two_concurrent_refreshes_spends_the_token(self):
+        user = self._expired_identity()
+        identity_id = int(asyncio.run(db.fetch_value("SELECT id FROM linked_identities")))
+        barrier = Barrier(2)
+        spent = []
+
+        async def _refresh(*a, **kw):
+            spent.append(a)
+            # Holds the lease while the other request tries to take it — without
+            # the pause the winner would finish and release before the loser
+            # even looked, and the test would pass whether or not the lease
+            # existed at all.
+            await asyncio.sleep(0.5)
+            return _Token(access=simkl_auth.V2_ACCESS_TOKEN_PREFIX + "new",
+                         refresh="new-refresh")
+
+        def _work():
+            barrier.wait(timeout=5)
+            try:
+                with patch.object(simkl_auth, "refresh_access_token", side_effect=_refresh):
+                    return asyncio.run(simkl_routes.access_token_for_user(user))
+            finally:
+                db.close_thread_connection()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            tokens = sorted(f.result() for f in [pool.submit(_work), pool.submit(_work)])
+
+        self.assertEqual(len(spent), 1)
+        self.assertEqual(tokens, sorted([simkl_auth.V2_ACCESS_TOKEN_PREFIX + "new",
+                                         simkl_auth.V2_ACCESS_TOKEN_PREFIX + "old"]))
+        row = asyncio.run(db.fetch_one("SELECT * FROM linked_identities WHERE id = ?",
+                                       (identity_id,)))
+        self.assertEqual(row["access_token"], simkl_auth.V2_ACCESS_TOKEN_PREFIX + "new")
+        self.assertEqual(row["refresh_token"], "new-refresh")
+        self.assertIsNone(row["refreshing_until"])
+
+    def test_a_failed_refresh_leaves_reconnect_needed_and_never_loops(self):
+        """Trakt's equivalent falls back to the stale access token; Simkl's does
+        not, DELIBERATELY — a revoked v2 grant does not recover by being asked
+        again, and returning the stale token would let every caller keep
+        retrying a dead credential instead of the tracker's "reconnect" path
+        taking over."""
+        user = self._expired_identity()
+        with patch.object(simkl_auth, "refresh_access_token",
+                          side_effect=httpx.ConnectError("down")):
+            self.assertIsNone(asyncio.run(simkl_routes.access_token_for_user(user)))
+        self.assertIsNone(asyncio.run(db.fetch_value(
+            "SELECT refreshing_until FROM linked_identities")))
+
+    def test_a_token_that_is_still_valid_is_not_refreshed(self):
+        user = self.make_user("watcher", calendar_approved=True)
+        asyncio.run(db.transaction(lambda conn: auth.insert_linked_identity(
+            conn, user_id=user, provider="simkl", provider_user_id=SIMKL_ID,
+            access_token=simkl_auth.V2_ACCESS_TOKEN_PREFIX + "fine",
+            token_expires_at=db.now() + 3600)))
+
+        def _explode(*a, **kw):  # pragma: no cover — asserting it isn't called
+            raise AssertionError("refreshed a token that had not expired")
+
+        with patch.object(simkl_auth, "refresh_access_token", side_effect=_explode):
+            self.assertEqual(asyncio.run(simkl_routes.access_token_for_user(user)),
+                             simkl_auth.V2_ACCESS_TOKEN_PREFIX + "fine")
 
 
 class PerUserTokenTests(SimklOAuthTestCase):
-    """Reading back the token the tracker authenticates one person's reads with.
-
-    The whole of it is a row lookup: no expiry check, no lease, no refresh. A
-    branch on `token_expires_at` could only ever take the "no expiry" path,
-    because it is NULL on every Simkl row this app writes, and dead code that
-    looks like a safety check is worse than the plain read.
-    """
+    """Reading back the token the tracker authenticates one person's reads
+    with. A linked account's stored token round-trips through sealing exactly
+    the way Trakt's does — see tests/encryption/ for the sealed round trip
+    itself, which is provider-agnostic."""
 
     def test_a_linked_account_reads_back_its_own_token(self):
         user = self.make_user("linker", calendar_approved=True)
         self.sign_in_as(user)
         self.callback(self.start("/auth/simkl/link"))
         self.assertEqual(asyncio.run(simkl_routes.access_token_for_user(user)),
-                         "simkl-access-1")
+                         "simkl_at_access-1")
 
     def test_an_account_with_no_simkl_link_has_no_token(self):
         """Which is what makes `simkl_configured` false on that request's
@@ -623,8 +787,23 @@ class PerUserTokenTests(SimklOAuthTestCase):
 
 
 class UnlinkTests(SimklOAuthTestCase):
-    """Answered with the account card at 200; the sentence, if any, sits under the
+    """Unlinking now also asks Simkl to forget the authorization (v2 documents
+    POST /oauth2/revoke where v1 documented none), so every test here patches
+    that call — without it they reach the real api.simkl.com.
+
+    Answered with the account card at 200; the sentence, if any, sits under the
     linked services."""
+
+    def setUp(self):
+        super().setUp()
+        self.revoked: list[str] = []
+
+        async def _revoke(client_id, client_secret, access_token):
+            self.revoked.append(access_token)
+
+        patcher = patch.object(simkl_auth, "revoke_token", side_effect=_revoke)
+        self.revoke_mock = patcher.start()
+        self.addCleanup(patcher.stop)
 
     def said(self, resp) -> str:
         self.assertEqual(resp.status_code, 200, resp.text)
@@ -634,14 +813,45 @@ class UnlinkTests(SimklOAuthTestCase):
     def unlink(self):
         return self.client.post("/me/identities/unlink", json={"provider": "simkl"})
 
+    def test_unlinking_revokes_the_token_at_simkl(self):
+        user = self.make_user("linker", calendar_approved=True)
+        self.sign_in_as(user)
+        self.callback(self.start("/auth/simkl/link"))
+        stored = self.identities()[0]["access_token"]
+        resp = self.unlink()
+        self.assertEqual(self.identities(), [])
+        self.assertEqual(self.said(resp), "")
+        self.assertEqual(self.revoked, [stored])
+
+    def test_a_legacy_token_is_not_sent_to_the_v2_revoke_endpoint(self):
+        """A V1-shaped token was never issued by the v2 endpoint this revoke
+        call is for, and D1 already treats it as unusable everywhere else — so
+        there is nothing to send, and nothing to warn the visitor about either."""
+        user = self.make_user("legacy", calendar_approved=True)
+        asyncio.run(db.transaction(lambda conn: auth.insert_linked_identity(
+            conn, user_id=user, provider="simkl", provider_user_id=SIMKL_ID,
+            access_token="a" * 64)))
+        self.sign_in_as(user)
+        resp = self.unlink()
+        self.assertEqual(self.identities(), [])
+        self.assertEqual(self.said(resp), "")
+        self.assertEqual(self.revoked, [])
+
+    def test_a_failed_revocation_still_unlinks_and_says_so(self):
+        user = self.make_user("warned", calendar_approved=True)
+        self.sign_in_as(user)
+        self.callback(self.start("/auth/simkl/link"))
+        self.revoke_mock.side_effect = simkl_transport().SimklError("down")
+        resp = self.unlink()
+        self.assertEqual(self.identities(), [])
+        self.assertIn("simkl.com", self.said(resp))
+
     def test_a_linked_simkl_account_can_be_unlinked(self):
         user = self.make_user("linker", calendar_approved=True)
         self.sign_in_as(user)
         self.callback(self.start("/auth/simkl/link"))
         resp = self.unlink()
         self.assertEqual(self.identities(), [])
-        # Simkl documents no revocation endpoint, so there is nothing this app
-        # could have failed to do and nothing to warn about.
         self.assertEqual(self.said(resp), "")
 
     def test_the_last_login_method_cannot_be_unlinked(self):

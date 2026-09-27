@@ -20,7 +20,7 @@ import secrets
 
 from fastapi import Request, Response
 
-from .. import db
+from .. import db, secrets_box
 from ..config import Settings
 from . import cookies
 
@@ -62,6 +62,11 @@ async def create_handshake(
     `invite_token` is how an invite reaches a registration that happens through
     a provider: it travels in this row rather than in a cookie or the redirect
     URL, neither of which the visitor is prevented from editing.
+
+    `pkce_verifier` IS SEALED AT REST like every other secret this app stores —
+    it is a genuine anti-replay credential (a stolen authorization code is
+    useless without it), even though its own blast radius is already small: it
+    lives at most HANDSHAKE_TTL_SECONDS and is scoped to one handshake row.
     """
     if purpose == "link" and not session_id:
         raise ValueError("A link handshake must be bound to the session that started it.")
@@ -70,8 +75,8 @@ async def create_handshake(
     await db.execute(
         "INSERT INTO auth_handshakes (state, provider, purpose, session_id, invite_token, "
         "pkce_verifier, plex_pin_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (state, provider, purpose, session_id, invite_token, pkce_verifier, plex_pin_id,
-         ts, ts + HANDSHAKE_TTL_SECONDS),
+        (state, provider, purpose, session_id, invite_token, secrets_box.seal(pkce_verifier),
+         plex_pin_id, ts, ts + HANDSHAKE_TTL_SECONDS),
     )
     return state
 

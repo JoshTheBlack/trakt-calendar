@@ -228,8 +228,23 @@ class AppTestCase(unittest.TestCase):
         Written straight to the table rather than through a flow: the flows have
         their own tests, and everything that gates on "has this person linked
         Trakt?" only needs the row to exist.
+
+        A SIMKL TOKEN IS NORMALIZED TO LOOK LIKE A V2 ONE, unless it is already
+        empty (a test deliberately asking for "linked, but no usable token") or
+        already carries the real prefix. simkl_routes.access_token_for_user
+        reads a token's local SHAPE to tell a v2 grant from a legacy v1 one it
+        must never send (D1's hard cutover) — see app/auth/simkl.py's
+        V2_ACCESS_TOKEN_PREFIX — and every caller here is asking for an
+        ordinarily-working link, not testing that specific legacy-token path
+        (tests/auth/test_simkl_login.py's LegacyTokenTests does that directly,
+        against auth.insert_linked_identity, bypassing this helper).
         """
         from app import auth, db
+        from app.auth import simkl as simkl_auth
+
+        if (provider == "simkl" and access_token
+                and not access_token.startswith(simkl_auth.V2_ACCESS_TOKEN_PREFIX)):
+            access_token = simkl_auth.V2_ACCESS_TOKEN_PREFIX + access_token
 
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=user_id, provider=provider,

@@ -56,7 +56,7 @@ class FakeClient:
     async def get(self, url, headers=None, timeout=None):
         return await self._next("GET", url, timeout)
 
-    async def post(self, url, headers=None, json=None, timeout=None):
+    async def post(self, url, headers=None, json=None, data=None, timeout=None):
         return await self._next("POST", url, timeout)
 
 
