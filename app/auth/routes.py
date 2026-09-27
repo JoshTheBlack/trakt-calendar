@@ -703,7 +703,8 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
     # is asked for rather than stored as a flag — a row's true state is
     # whatever access_token_for_user answers right now. Simkl is the one
     # source this applies to today: a legacy v1-shaped token is never sent
-    # (D1's hard cutover) and reads as "reconnect needed" exactly like a
+    # (this app moved to Simkl's AUTH V2 in one cutover and keeps no V1
+    # registration to send it with) and reads as "reconnect needed" exactly like a
     # refresh that failed (simkl_routes.access_token_for_user), and both cases
     # are indistinguishable from here, on purpose — see the template's wording.
     # NEUTRAL WORDING, DELIBERATELY: a 401 can also mean the person themselves

@@ -127,7 +127,7 @@ class IdentityToProviderCallTests(EncryptionIntegrationTestCase):
 
 
 class SimklIdentityAndPkceSealingTests(EncryptionIntegrationTestCase):
-    """The v2 cutover's own sealed values: a linked identity's access AND
+    """The sealed values Simkl's AUTH V2 introduced: a linked identity's access AND
     refresh token (Trakt's counterpart is proven above; Simkl's is new since
     v2 issues a refresh token where v1 issued none), and the PKCE verifier
     a handshake row carries only for the seconds between redirecting the

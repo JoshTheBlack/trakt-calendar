@@ -164,6 +164,24 @@ class SecretClearingTests(SettingsFileTestCase):
         self.assertEqual(load_settings().trakt_access_token, "")
 
 
+class RetiredOperatorSimklTokenTests(SettingsFileTestCase):
+    """An operator-pasted Simkl token from before the move to Simkl's AUTH V2
+    stays in storage but must never reach an instance-wide Settings object:
+    there it would make `simkl_configured` read true for a caller with no
+    viewer, and be sent with a V2 client id it was never issued for."""
+
+    def test_a_stored_operator_token_is_not_loaded(self):
+        save_settings(Settings(public_base_url=ORIGIN, simkl_client_id="v2-client",
+                               simkl_access_token="a" * 64))
+        settings = load_settings()
+        self.assertEqual(settings.simkl_access_token, "")
+        self.assertFalse(settings.simkl_configured)
+
+    def test_a_hand_edited_file_cannot_put_one_back(self):
+        self.hand_edit(public_base_url=ORIGIN, simkl_access_token="a" * 64)
+        self.assertEqual(load_settings().simkl_access_token, "")
+
+
 class PublicBaseUrlBootstrapTests(SettingsFileTestCase):
     """The way back into an instance that cannot be signed into, which is what
     the hand-editing was for in the first place."""

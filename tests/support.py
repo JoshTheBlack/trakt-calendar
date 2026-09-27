@@ -233,7 +233,7 @@ class AppTestCase(unittest.TestCase):
         empty (a test deliberately asking for "linked, but no usable token") or
         already carries the real prefix. simkl_routes.access_token_for_user
         reads a token's local SHAPE to tell a v2 grant from a legacy v1 one it
-        must never send (D1's hard cutover) — see app/auth/simkl.py's
+        must never send (the app keeps no V1 registration to send it with) — see app/auth/simkl.py's
         V2_ACCESS_TOKEN_PREFIX — and every caller here is asking for an
         ordinarily-working link, not testing that specific legacy-token path
         (tests/auth/test_simkl_login.py's LegacyTokenTests does that directly,

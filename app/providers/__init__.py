@@ -272,11 +272,11 @@ def for_catalogue_search(settings) -> list[tuple[Source, SearchPort]]:
     user token for search and /redirect (its per-title lookups by id stay
     anonymous), so ITS `catalogue_is_configured` is `settings.simkl_configured`
     — client id AND a token — which only reads true on a per-viewer Settings
-    object (see app/providers/simkl/__init__.py._SimklProvider). Every caller
-    of this function already hands it one, per Phase 1's audit of the v2
-    cutover, with one flagged exception whose own gate is that instance-wide
-    Settings simply carries no Simkl token any more once D3 removed the
-    operator's pasted one.
+    object (see app/providers/simkl/__init__.py._SimklProvider). A caller
+    with a viewer in scope hands it that viewer's Settings
+    (distrakt.viewer.settings_for_user); a caller with no viewer hands it the
+    instance-wide one, which carries no Simkl token at all — config.load_settings
+    leaves any stored operator token out — so Simkl simply drops out for it.
 
     NO ACCOUNT PREFERENCE, UNLIKE `for_tracker_ports`. `prefs.admits_tracker`
     governs whose DATA a read touches, and a catalogue search touches nobody's

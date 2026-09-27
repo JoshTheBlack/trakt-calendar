@@ -312,9 +312,9 @@ class CalendarTemplateTests(GatingTestCase):
         `trakt_refresh_token` has no input by design — it is only ever issued by
         Trakt during authorization, never typed. `simkl_access_token` also has
         none any more: it stays in SECRET_FIELDS so a value the operator stored
-        before the v2 cutover is still sealed and still redacted if anything
-        ever reads it back, but D2's gating leaves no non-public Simkl call for
-        an instance-wide token to authenticate, so the panel offers no way to
+        before the move to Simkl's AUTH V2 is still sealed and still redacted if
+        anything ever reads it back, but no non-public Simkl call is made
+        without a viewer's own token any more, so the panel offers no way to
         set one — see config.py's own comment beside the field.
         """
         self.sign_in_as(self.admin_id)
@@ -420,8 +420,9 @@ class SettingsRedactionTests(GatingTestCase):
         self.assertEqual(set(json.loads(on_disk)), {"cookie_secure", "allow_open_registration"})
 
     def test_the_panel_says_which_credentials_are_stored(self):
-        # simkl_access_token has no panel input any more (D2/D3 of the v2
-        # cutover) — see test_every_credential_input_is_drawn_write_only.
+        # simkl_access_token has no panel input any more (no instance-wide
+        # Simkl token exists under AUTH V2) — see
+        # test_every_credential_input_is_drawn_write_only.
         typed = config.SECRET_FIELDS - {"trakt_refresh_token", "simkl_access_token"}
         body = self.client.get(self.PANEL).text
         for name in typed:

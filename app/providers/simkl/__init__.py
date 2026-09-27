@@ -259,11 +259,10 @@ class _SimklProvider:
         # user token — 401 user_token_required otherwise — where the per-title
         # lookups that DetailPort answers with stay anonymous. THIS is the one
         # method for_catalogue_search calls (see app/providers/__init__.py),
-        # which is what makes every caller reached through it a per-viewer
-        # settings object (Phase 1's audit of the v2 cutover found exactly one
-        # exception, a caller with no viewer in scope, and its own gate is
-        # `settings.simkl_access_token` going empty once the operator's pasted
-        # instance-wide token setting is gone — see D3). So `simkl_configured`
+        # and it is handed the VIEWER's settings wherever a viewer is in scope.
+        # A caller with no viewer hands it the instance-wide Settings, whose
+        # `simkl_access_token` is always empty (config.load_settings leaves any
+        # stored operator token out), so Simkl drops out there. So `simkl_configured`
         # (client id AND a token) is the right question here: a viewer with no
         # linked Simkl account gets nothing from this source, and every Simkl
         # search surface falls back to whatever else `for_catalogue_search`

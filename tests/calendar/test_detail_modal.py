@@ -503,8 +503,8 @@ class OpeningAOneServiceCardAsksTheOtherTests(AppTestCase):
     def setUp(self):
         super().setUp()
         user_id = self.make_user("viewer", calendar_approved=True)
-        # Simkl's own search/redirect now require THIS viewer's own token (the
-        # v2 cutover's D2) — an instance client id alone is no longer enough to
+        # Simkl's own search/redirect now require THIS viewer's own token (Simkl
+        # AUTH V2 refuses them without one) — an instance client id alone is no longer enough to
         # offer "ask Simkl", so the ask this class is about needs a real link.
         self.link_identity(user_id, "simkl", 5501, "simkl-token")
         self.sign_in_as(user_id)

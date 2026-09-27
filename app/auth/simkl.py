@@ -102,7 +102,8 @@ CALLBACK_PATH = "/auth/simkl/callback"
 
 # V2 access and refresh tokens are told apart from a V1 token BY SHAPE, locally
 # — Simkl gives no other signal. A V1 token is 64 lowercase hex; a V2 one carries
-# this prefix (measured against the plan's own research: `simkl_at_`, 43 chars).
+# this prefix (`simkl_at_`, 43 chars — Simkl's migration guide documents the
+# shape, and a real V2 grant on this instance confirmed it on 2026-09-27).
 # See simkl_routes.access_token_for_user, where a token failing this check is
 # read as a legacy grant and treated as "reconnect needed" rather than sent.
 V2_ACCESS_TOKEN_PREFIX = "simkl_at_"

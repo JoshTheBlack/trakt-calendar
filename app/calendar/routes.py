@@ -1106,8 +1106,8 @@ async def search_the_calendar(request: Request):
     SETTINGS IS THIS VIEWER'S OWN, not the instance-wide one — the catalogue
     half's Simkl search now genuinely requires a user token (see
     providers.for_catalogue_search's docstring), so an instance-wide Settings
-    object would read as "no Simkl" for every viewer once D3 of the v2 cutover
-    removes the operator's own instance-wide Simkl token setting. distrakt.viewer
+    object — which never carries a Simkl token — would read as "no Simkl" for
+    every viewer, linked or not. distrakt.viewer
     is reached the same way distrakt/search.py's merge already is (see the
     (CALENDAR, DISTRAKT) edge in tests/kernel/test_layering.py) — deferred so
     naming it at module level does not close the loop distrakt reading the
@@ -2014,8 +2014,9 @@ async def complete_card(request: Request):
     SETTINGS IS THIS VIEWER'S OWN. The service being asked may be Simkl, whose
     v2 search and /redirect require a user token (see
     providers.for_catalogue_search's docstring) — an instance-wide Settings
-    object carries no such token at all past D3 of the v2 cutover, which would
-    make this ask silently never happen for anybody, linked or not. Reached the
+    object carries no such token at all (config.load_settings leaves any stored
+    operator token out), which would make this ask silently never happen for
+    anybody, linked or not. Reached the
     same deferred way the calendar's search fragment reaches distrakt.viewer
     (see (CALENDAR, DISTRAKT) in tests/kernel/test_layering.py).
     """

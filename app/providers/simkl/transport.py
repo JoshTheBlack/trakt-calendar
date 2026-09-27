@@ -1110,8 +1110,8 @@ async def cached_paged_get(
     the caller's own bearer to the request (search now requires a user token
     under Simkl's v2 API — see app/providers/simkl/search.py, the only caller
     that ever passes it), but it does NOT skip the shared cache the way
-    `cached_get`'s same-named flag does. Phase 1 of the v2 cutover measured a
-    search live under the owner's two linked tokens and found byte-identical
+    `cached_get`'s same-named flag does. A search measured live on 2026-09-27
+    under two different linked accounts' tokens came back byte-identical
     results — the answer does not depend on whose token asked, only whether one
     was required to get an answer at all — so the shared cache stays correct
     exactly as `cached_get`'s own `private` docstring reasons about, and this

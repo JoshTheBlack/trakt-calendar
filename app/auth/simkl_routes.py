@@ -27,9 +27,10 @@ and hands it to `exchange_code`, which is the only place it is ever used again.
 THE SCOPE CHECK IS HERE, NOT IN app/auth/simkl.py, because only this module
 knows whether a link is happening for the first time — the exchange itself has
 no notion of "first" vs "routine". A token whose returned `scope` lacks
-`media:write` is refused rather than stored: Simkl's watchlist write
-(Plans/BUILD_TRACKER_WATCHLIST.txt, not built here) needs it, and a scope can
-only be widened by the user authorizing again, never by a silent retry.
+`media:write` is refused rather than stored: writing a viewer's Simkl
+watchlist (POST /sync/add-to-list) needs it, and a scope can only be widened
+by the user authorizing again, never by a silent retry — so asking for less
+now would cost every linked user a second reconnect the day anything writes.
 
 WHAT IS DECIDED HERE AND WHAT IS NOT. Who may sign in, who may register, and how
 each refusal is worded to avoid becoming an oracle all live in
@@ -374,8 +375,9 @@ def _is_v2_token(access_token: str | None) -> bool:
     LOCAL SHAPE, NOT A SERVER ROUND TRIP: Simkl gives no other signal to tell a
     V2 access token from a V1 one (both are opaque bearer strings to every other
     part of this app) — see app/auth/simkl.py.V2_ACCESS_TOKEN_PREFIX. A legacy
-    V1 token on an identity row predates this build's cutover (D1: hard cutover,
-    no dual token paths) and is never sent — it is read the same way a failed
+    V1 token on an identity row predates the move to Simkl's AUTH V2, which this
+    app made as a single cutover with no second V1 registration kept alive, so a
+    V1 token has nothing it may be sent with and is never sent — it is read the same way a failed
     refresh reads, "reconnect needed", and the identity row itself is KEPT: a
     missing usable token is not a missing account, and the next successful link
     replaces the token on this same row rather than minting a new one.
@@ -483,7 +485,8 @@ async def revoke_token_value(token: str | None, settings: Settings | None = None
     cfg = settings or load_settings()
     if not _is_v2_token(token):
         # A legacy token, or none at all: nothing Simkl's v2 revoke would
-        # recognise, and D1 already treats it as unusable everywhere else.
+        # recognise, and _is_v2_token already treats it as unusable everywhere
+        # else.
         return None
     if not (cfg.simkl_client_id and cfg.simkl_client_secret):
         return REVOKE_FAILED_NOTICE

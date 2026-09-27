@@ -1,7 +1,7 @@
 """The tracker's monthly import, across the calendar's move to rows.
 
-THE CHEAPEST GUARANTEE IN THE WHOLE STORAGE CHANGE, and the one the plan asked
-for by name: import a month and diff the roster. `app/distrakt/calendar_import.py`
+THE CHEAPEST GUARANTEE IN THE WHOLE STORAGE CHANGE, and the one worth having
+first: import a month and diff the roster. `app/distrakt/calendar_import.py`
 reads the calendar through `cache.read_month` and consumes `Item` objects —
 `_keyable` reads `item.season`, `calendar_record(item)` reads the rest — so the
 import keeps working IF AND ONLY IF read_month goes on returning `list[Item]`

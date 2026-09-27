@@ -1330,9 +1330,9 @@ def _modal_context(settings, year: int, month: int) -> dict:
     `settings` MUST BE THE VIEWER'S OWN, not the instance-wide one — Simkl's
     catalogue search now genuinely requires a user token (see
     providers.for_catalogue_search's docstring for why that predicate is no
-    longer symmetric across sources), so an instance-wide Settings object would
-    read as "no Simkl" for every viewer, linked or not, once D3 removes the
-    operator's own instance-wide Simkl token setting.
+    longer symmetric across sources), and an instance-wide Settings object never
+    carries a Simkl token, so it would read as "no Simkl" for every viewer,
+    linked or not.
 
     THE MONTH BEING PAST IS THE ONE TEST, and it is the clock's alone. A month
     behind the clock is filled in by hand and is what `add-completed` is for; the

@@ -232,7 +232,7 @@ class SearchTitlesTests(unittest.IsolatedAsyncioTestCase):
         which is what `private=True` means to that function (see its own
         docstring: unlike cached_get's flag of the same name, it does not skip
         the shared cache — search answers identically under any viewer's own
-        token, measured live during the v2 cutover's Phase 1)."""
+        token, measured live against two linked accounts on 2026-09-27)."""
         spy = _cached_get({"search/tv": [], "search/anime": [], "search/movie": []})
         with _patched(spy):
             await search.search_titles(SETTINGS, Media.SHOW, "x")

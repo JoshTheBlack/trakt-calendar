@@ -633,8 +633,9 @@ class ScopeRefusalTests(SimklOAuthTestCase):
 
 
 class LegacyTokenTests(SimklOAuthTestCase):
-    """A V1 token predates this cutover (D1: hard cutover, no dual token paths)
-    and is told apart from a V2 one purely by shape — Simkl gives no other
+    """A V1 token predates the move to Simkl's AUTH V2, which kept no V1
+    registration alive to send it with, and is told apart from a V2 one purely
+    by shape — Simkl gives no other
     signal. It is read as "reconnect needed" everywhere, and the identity row
     is KEPT rather than dropped."""
 
@@ -838,7 +839,7 @@ class UnlinkTests(SimklOAuthTestCase):
 
     def test_a_legacy_token_is_not_sent_to_the_v2_revoke_endpoint(self):
         """A V1-shaped token was never issued by the v2 endpoint this revoke
-        call is for, and D1 already treats it as unusable everywhere else — so
+        call is for, and the app already treats it as unusable everywhere else — so
         there is nothing to send, and nothing to warn the visitor about either."""
         user = self.make_user("legacy", calendar_approved=True)
         asyncio.run(db.transaction(lambda conn: auth.insert_linked_identity(
