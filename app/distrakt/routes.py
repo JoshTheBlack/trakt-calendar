@@ -355,50 +355,6 @@ async def _add_to_past_month(request: Request, user_id, month_key: str, show: di
         point_at=((stored or {}).get("key") or "", int(show["season"])))
 
 
-async def _distrakt_settings(user_id: int):
-    """The app-wide settings with EVERY source's credential swapped for
-    `user_id`'s own.
-
-    The tracker reads one person's private watch history — their progress, their
-    plays, their movies — so every call it makes has to authenticate as THEM. The
-    tokens in settings.json belong to the operator and would hand every user the
-    operator's viewing instead of their own. Everything else on the object (the
-    network emoji map, the TMDB key, the genre/country strings) is genuinely
-    app-wide and is carried through untouched.
-
-    BOTH TOKENS RIDE ON THE ONE SETTINGS OBJECT rather than each source being
-    handed a credential of its own. Each port already reads its own field off
-    `settings` — that is what `is_configured` asks about — so a per-source
-    credential object would be a second mechanism for something this one already
-    expresses, and the SyncPort protocol would have to grow an argument for it.
-    A user with no Simkl identity gets an empty Simkl token, `simkl_configured`
-    goes false, and that port is simply never asked; the same has always been
-    true of Trakt.
-
-    The refresh token is cleared as well: nothing downstream refreshes, and
-    leaving the operator's beside somebody else's access token would be a pairing
-    that means nothing. (There is no Simkl counterpart to clear — Simkl issues no
-    refresh token.) The access level guarantees SOME linked identity that can
-    read a history, but a row can still hold an empty token, in which case that
-    source's `*_configured` goes false and the handlers take their existing "not
-    configured" path.
-
-    The network->emoji map is per-user too, but it is NOT on this object: it was
-    removed from Settings entirely when it stopped being app-wide, so the
-    renderers take it as an argument (see _distrakt_month_payload). Keeping it off
-    `settings` is deliberate — there is no longer an app-wide value for a caller
-    to reach for by mistake.
-    """
-    trakt_token, simkl_token = await asyncio.gather(
-        trakt_routes.access_token_for_user(user_id),
-        simkl_routes.access_token_for_user(user_id),
-    )
-    return dataclasses.replace(
-        load_settings(), trakt_access_token=trakt_token or "", trakt_refresh_token="",
-        simkl_access_token=simkl_token or "",
-    )
-
-
 async def _distrakt_post_link(user_id: int, settings, year: int, month: int) -> str | None:
     """The public calendar link this user's announcement post embeds, or None when
     they have nothing publishable — no configured public base URL, or every link
@@ -471,6 +427,7 @@ async def distrakt(request: Request):
     month = route_params.valid_month(request.query_params.get("month"), today.month)
     network_emojis, default_network_emoji = await distrakt_store.get_emoji_prefs(user.user_id)
     backfill_start, backfill_end = backfill.default_range(today)
+    settings = await viewer.settings_for_user(user.user_id)
     context = {
         "request": request,
         "year": year,
@@ -502,7 +459,7 @@ async def distrakt(request: Request):
         # Which share-link forms would actually resolve, so the selector offers
         # only the ones that produce a working link.
         "post_link": await _post_link_choices(user.user_id),
-        **_modal_context(year, month),
+        **_modal_context(settings, year, month),
     }
     return templates.TemplateResponse(request, "distrakt.html", context)
 
@@ -1365,10 +1322,17 @@ _BANNERS = {
 }
 
 
-def _modal_context(year: int, month: int) -> dict:
+def _modal_context(settings, year: int, month: int) -> dict:
     """What the add flow's three overlays need drawing: which catalogues the
     search fields may name, whether an add into this month records something as
     FINISHED, and the day a film defaults to.
+
+    `settings` MUST BE THE VIEWER'S OWN, not the instance-wide one — Simkl's
+    catalogue search now genuinely requires a user token (see
+    providers.for_catalogue_search's docstring for why that predicate is no
+    longer symmetric across sources), so an instance-wide Settings object would
+    read as "no Simkl" for every viewer, linked or not, once D3 removes the
+    operator's own instance-wide Simkl token setting.
 
     THE MONTH BEING PAST IS THE ONE TEST, and it is the clock's alone. A month
     behind the clock is filled in by hand and is what `add-completed` is for; the
@@ -1387,7 +1351,7 @@ def _modal_context(year: int, month: int) -> dict:
     viewing_now = (today.year, today.month) == (year, month)
     return {
         "catalogue_sources": [str(source) for source, _
-                              in providers.for_catalogue_search(load_settings())],
+                              in providers.for_catalogue_search(settings)],
         "as_finished": distrakt_store.month_key(year, month) < _this_month(),
         "film_day": today.isoformat() if viewing_now else f"{year:04d}-{month:02d}-01",
         "film_max": today.isoformat(),
@@ -1405,7 +1369,7 @@ def _modal_context(year: int, month: int) -> dict:
 
 
 def _month_context(request: Request, payload: dict, year: int, month: int,
-                   emojis: dict, default_emoji: str, *,
+                   emojis: dict, default_emoji: str, settings, *,
                    message: str = "", ok: bool = True) -> dict:
     """The month fragment's whole context, out of the payload and nothing else.
 
@@ -1444,7 +1408,7 @@ def _month_context(request: Request, payload: dict, year: int, month: int,
         "emoji_for": lambda network: emojis.get(network or "", default_emoji),
         "logo_for": lambda network: (
             f"/api/network-logo?name={quote(network or '')}" if network in with_logos else ""),
-        **_modal_context(year, month),
+        **_modal_context(settings, year, month),
     }
 
 
@@ -1475,7 +1439,7 @@ async def _month_answer(request: Request, user_id: int, year: int, month: int,
     emojis, default_emoji = await distrakt_store.get_emoji_prefs(user_id)
     return templates.TemplateResponse(
         request, "_distrakt_month.html",
-        _month_context(request, payload, year, month, emojis, default_emoji,
+        _month_context(request, payload, year, month, emojis, default_emoji, settings,
                        message=message, ok=ok))
 
 
@@ -2280,10 +2244,7 @@ async def _search_fragment(request: Request, media: Media):
     query = request.query_params.get("q", "")
     year, month = _viewed_month(request)
     context = {"request": request, "media": str(media), "hits": [], "failed": [],
-               # A MARK DISAMBIGUATES, so with one catalogue there is nothing for
-               # it to do — the rule _source_logo.html states and the reason a
-               # single-source instance looks like this app always did.
-               "marked": len(asked) > 1, "no_catalogue": not asked,
+               "no_catalogue": not asked,
                # Each row carries its own request, so it needs to be able to spell
                # one: the query that found it names the search to read back, and
                # the month is the one an add would land in.
@@ -2496,6 +2457,16 @@ class Pick(NamedTuple):
     `unkeyable` IS THE SERVER'S OWN SENTENCE for a title the tracker has no
     shared id to file under, and it is None when there is one — the same
     sentence the add's refusal uses, asked here BEFORE an add is offered.
+
+    `media` IS THE HIT'S OWN, which the show-search flow that resolves this
+    Pick cannot always assume — Simkl's anime search mixes films in with TV
+    (see app/providers/simkl/search.py's _FILM_ANIME_TYPE), so a result found
+    from the SHOW box can still turn out to be a film. The season fragment
+    reads this to say so rather than filing it as a zero-progress show: a film
+    has no roster the way a show does (api_distrakt_add_movie's own docstring),
+    and it needs a watched-on date the show search never collected, so there is
+    no safe way to add it from here — the honest answer is to send the viewer
+    to Add Film instead.
     """
     title: str
     network: str
@@ -2504,6 +2475,7 @@ class Pick(NamedTuple):
     seasons: list[dict]
     named_season: int | None
     unkeyable: str | None
+    media: Media
 
 
 async def _resolve_pick(settings, media: Media, query: str, index, *,
@@ -2547,17 +2519,22 @@ async def _resolve_pick(settings, media: Media, query: str, index, *,
         hit = result.hits[int(index)]
     except (TypeError, ValueError, IndexError):
         return None
-    if media is Media.MOVIE:
+    # THE HIT'S OWN MEDIA DECIDES, NOT THE SEARCH THAT FOUND IT. Simkl's anime
+    # search mixes TV and film under one endpoint (see
+    # app/providers/simkl/search.py's _FILM_ANIME_TYPE), so a "shows" search
+    # can turn up a hit that is really a film — MergedSearchHit.media already
+    # carries that answer, resolved from whichever hit led the merge.
+    if hit.media is Media.MOVIE:
         # A film has no season to pick and so no second lookup: the search hit
         # is the whole answer, which is also why an unfileable one is refused on
         # the row it is drawn as rather than on the click.
         return Pick(hit.title, hit.network, hit.year, dict(hit.ids), [], None,
-                    _unkeyable_reason(media, hit.ids, hit.title))
+                    _unkeyable_reason(hit.media, hit.ids, hit.title), hit.media)
     source, source_id = next(iter(hit.source_ids.items()))
     provider = providers.get(source)
     if not provider.detail_port.catalogue_configured(settings):
         return None
-    answer = await provider.detail_port.fetch_seasons(settings, source_id, media,
+    answer = await provider.detail_port.fetch_seasons(settings, source_id, hit.media,
                                                       cached_only=cached_only)
     # THE LOOKUP WINS A CONFLICT and the hit's own ids fill in the rest. This
     # answer's `season` was read off the per-title record `answer.ids` came from,
@@ -2581,7 +2558,8 @@ async def _resolve_pick(settings, media: Media, query: str, index, *,
         ids=ids,
         seasons=answer.seasons,
         named_season=answer.named_season,
-        unkeyable=_unkeyable_reason(media, ids, hit.title),
+        unkeyable=_unkeyable_reason(hit.media, ids, hit.title),
+        media=hit.media,
     )
 
 
@@ -2703,6 +2681,15 @@ async def api_distrakt_add(request: Request):
         return _month_refusal(request, "That search has expired — search for it again.")
     if pick.unkeyable:
         return _month_refusal(request, pick.unkeyable)
+    if pick.media is Media.MOVIE:
+        # Simkl's anime search mixes films in with TV (see
+        # app/providers/simkl/search.py's _FILM_ANIME_TYPE), so a show-box
+        # pick can resolve to a film — the season fragment already refuses to
+        # offer this one a season for the same reason, but the check belongs
+        # here too: this route writes a roster row on the strength of it, not
+        # on whatever a form happened to show.
+        return _month_refusal(
+            request, f"{pick.title} is a film, not a show — add it from ➕ Add Film instead.")
     show = {
         "media": Media.SHOW,
         "ids": pick.ids,
@@ -2971,6 +2958,11 @@ async def api_distrakt_add_completed(request: Request):
         return _month_refusal(request, "That search has expired — search for it again.")
     if pick.unkeyable:
         return _month_refusal(request, pick.unkeyable)
+    if pick.media is Media.MOVIE:
+        # See api_distrakt_add's identical guard for why: Simkl's anime search
+        # mixes films in with TV, so a show-box pick can resolve to a film.
+        return _month_refusal(
+            request, f"{pick.title} is a film, not a show — add it from ➕ Add Film instead.")
     try:
         # WHAT THE SEASON IS FILED AS is arrival.describe's, as for every way
         # onto the tracker. STRICT: the episode total has to be REAL here — a

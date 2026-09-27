@@ -264,12 +264,19 @@ def for_catalogue_search(settings) -> list[tuple[Source, SearchPort]]:
     TWO CONDITIONS, DELIBERATELY NOT THREE. The source carries a
     `search_port` — one usable for something else and with no search port is
     simply not askable — and its CATALOGUE credential is present, asked
-    through `catalogue_is_configured` and NOT `is_configured`. A catalogue
-    search authenticates with the INSTANCE's own client id on both sources
-    registered today, never with a viewer's token, so asking the private
-    question here would repeat the exact fault `for_calendar_sources` above
-    already refuses to: an instance-wide, publicly-answerable question hinging
-    on whether one particular account happens to have linked something.
+    through `catalogue_is_configured`. That predicate answers a DIFFERENT
+    question per source rather than one fixed rule: Trakt's catalogue search
+    authenticates with the instance's own client id, the same as every other
+    Trakt catalogue read, so its `catalogue_is_configured` is `is_configured`
+    in spirit and asks nothing about any one viewer. Simkl's v2 API requires a
+    user token for search and /redirect (its per-title lookups by id stay
+    anonymous), so ITS `catalogue_is_configured` is `settings.simkl_configured`
+    — client id AND a token — which only reads true on a per-viewer Settings
+    object (see app/providers/simkl/__init__.py._SimklProvider). Every caller
+    of this function already hands it one, per Phase 1's audit of the v2
+    cutover, with one flagged exception whose own gate is that instance-wide
+    Settings simply carries no Simkl token any more once D3 removed the
+    operator's pasted one.
 
     NO ACCOUNT PREFERENCE, UNLIKE `for_tracker_ports`. `prefs.admits_tracker`
     governs whose DATA a read touches, and a catalogue search touches nobody's

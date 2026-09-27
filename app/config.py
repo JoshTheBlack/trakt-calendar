@@ -109,14 +109,29 @@ class Settings:
     trakt_refresh_token: str = ""
     trakt_token_expires_at: int = 0  # unix timestamp; 0 = unknown/never obtained via OAuth
     simkl_client_id: str = ""
+    # NO LONGER AN OPERATOR-PASTED SETTING (D2/D3 of the v2 cutover): the
+    # Settings panel offers no field for this any more, because D2 leaves no
+    # non-public Simkl call for an operator-wide token to authenticate — search
+    # and /redirect need a real PERSON's own v2 grant, never an instance-wide
+    # one. The field itself stays, because it is still how that person's own
+    # token travels: distrakt.viewer.settings_for_user swaps it in per request,
+    # exactly as it swaps in Trakt's. A value an operator saved before this
+    # cutover is left in storage untouched (nothing here migrates or clears
+    # it) — it simply stops being reachable through the panel and is never
+    # read for an instance-wide Settings object again.
     simkl_client_secret: str = ""
     simkl_access_token: str = ""
-    # NO simkl_refresh_token AND NO simkl_token_expires_at, and their absence is
-    # a fact about Simkl rather than an omission: its token exchange issues no
-    # refresh token and the access token stays valid until the user revokes the
-    # application. There is nothing to put in either field, and a refresh path
-    # built on one would silently do nothing. A 401 from Simkl means the link has
-    # to be made again.
+    # STILL NO simkl_refresh_token AND NO simkl_token_expires_at, even though
+    # Simkl's v2 API does issue a refresh token now (where v1 issued none) —
+    # this object was never where a Simkl refresh token would live. Trakt's
+    # pair above exists for the OPERATOR's own app-wide device-code link, which
+    # Simkl has no equivalent of and D1's hard cutover leaves it with: one
+    # shared client id/secret, no per-instance Simkl token at all past Phase 3
+    # of the v2 cutover. Every PERSON's own refresh token lives on their
+    # linked_identities row (app/auth/simkl_routes.py.access_token_for_user),
+    # exactly where Trakt's per-user one already lived beside these two
+    # app-wide fields — so adding a Simkl pair here would duplicate a fact this
+    # object was never the home for.
     #
     # WHETHER SIMKL CONTRIBUTES TO THIS INSTANCE'S CALENDAR AT ALL. ON BY
     # DEFAULT, which is exactly the behaviour every existing instance already

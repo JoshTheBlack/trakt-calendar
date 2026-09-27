@@ -57,6 +57,17 @@ class MergedSearchHit(NamedTuple):
     network, runtime or overview (measured — see `SearchHit`'s own docstring);
     a merge with Trakt is what fills them in, on a Simkl-only instance they
     simply stay at the empty default `SearchHit` already uses.
+
+    `media` IS THE LEADER'S, not the caller's requested media, and the two can
+    genuinely differ: Simkl's anime search mixes TV and film under one
+    endpoint (`entry.get("anime_type")`, read in app/providers/simkl/search.py),
+    so a "shows" search can turn up a hit that is really a film — measured,
+    "Shingeki no Kyojin: The Last Attack" (a 2024 recap movie) answers a show
+    query alongside its parent series' TV seasons. Every hit in one slot
+    necessarily agrees on media already, because the dedupe key itself is
+    `resolve_key(hit.media, hit.ids)` — a show and a film can never resolve to
+    the same key — so taking it from whichever hit calls `start()` is safe
+    rather than a guess.
     """
     key: ItemKey | None
     season: int | None
@@ -67,6 +78,7 @@ class MergedSearchHit(NamedTuple):
     network: str
     runtime: int | None
     overview: str
+    media: Media
 
 
 class SearchMergeResult(NamedTuple):
@@ -116,13 +128,14 @@ class _Merging:
     runtime: int | None
     overview: str
     ids: dict[str, Any]
+    media: Media
     source_ids: dict[Source, str] = field(default_factory=dict)
 
     @classmethod
     def start(cls, hit: SearchHit, key: ItemKey | None) -> "_Merging":
         slot = cls(key=key, season=hit.season, title=hit.title, year=hit.year,
                    network=hit.network, runtime=hit.runtime, overview=hit.overview,
-                   ids=dict(hit.ids))
+                   ids=dict(hit.ids), media=hit.media)
         slot.source_ids[hit.source] = hit.source_id
         return slot
 
@@ -174,7 +187,7 @@ class _Merging:
         return MergedSearchHit(key=self.key, season=self.season,
                                 source_ids=dict(self.source_ids), ids=dict(self.ids),
                                 title=self.title, year=self.year, network=self.network,
-                                runtime=self.runtime, overview=self.overview)
+                                runtime=self.runtime, overview=self.overview, media=self.media)
 
 
 def merge_search_hits(

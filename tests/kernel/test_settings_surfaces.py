@@ -360,7 +360,7 @@ class SettingsTabsTests(SettingsSurfaceTestCase):
                      "pagination_limit", "cache_ttl_minutes", "calendar_cache_ttl_minutes",
                      "api_cache_max_bytes", "hide_not_watching", "sonarr_url", "sonarr_api_key",
                      "radarr_url", "radarr_api_key", "seer_url", "seer_api_key", "tmdb_api_key",
-                     "simkl_client_id", "simkl_client_secret", "simkl_access_token",
+                     "simkl_client_id", "simkl_client_secret",
                      "simkl_public_calendar_enabled"):
             with self.subTest(field=name):
                 self.assertRegex(body, rf'id="s_{name}" name="{name}"[^>]*form="settingsForm"')

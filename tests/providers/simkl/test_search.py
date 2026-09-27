@@ -113,6 +113,47 @@ class SearchTitlesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hits[0].ids, {"simkl": 1203662, "slug": "severance", "simkl_slug": "severance",
                           "tmdb": "95396"})
 
+    async def test_a_search_hit_typed_movie_is_dropped_from_a_show_search(self):
+        """GET /search/anime mixes films in with TV — measured LIVE against the
+        search endpoint itself 2026-09-27 (not the per-title record, which
+        spells the same fact `anime_type` instead — this app read that field
+        here first, by mistake, and a live search still misrouted the title
+        until this was corrected): searching "attack on titan" as a SHOW
+        returns "Shingeki no Kyojin: The Last Attack" (a 2024 recap film,
+        `type: "movie"`) beside the TV seasons, from the same endpoint. A film
+        has nowhere useful to go from a shows search — no season to pick, and
+        the show flow's add has no watched-on date to record one with — so it
+        is dropped rather than offered and then refused."""
+        film = {**SEVERANCE, "title": "Shingeki no Kyojin: The Last Attack",
+                "type": "movie",
+                "ids": {"simkl_id": 2544548, "slug": "shingeki-no-kyojin-the-last-attack"}}
+        spy = _cached_get({"search/tv": [], "search/anime": [film]})
+        with _patched(spy):
+            hits = await search.search_titles(SETTINGS, Media.SHOW, "attack on titan")
+        self.assertEqual(hits, [])
+
+    async def test_a_search_hit_typed_special_is_kept_in_a_show_search(self):
+        """A special's PER-TITLE record can still carry a real season mapping
+        and episode count (Attack on Titan's own 2023 special does) — the
+        season-picker's ordinary case, not a film's, so only `type == "movie"`
+        on the search hit is dropped."""
+        special = {**SEVERANCE, "type": "special"}
+        spy = _cached_get({"search/tv": [], "search/anime": [special]})
+        with _patched(spy):
+            hits = await search.search_titles(SETTINGS, Media.SHOW, "x")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].media, Media.SHOW)
+
+    async def test_a_search_hit_with_no_type_field_is_kept_in_a_show_search(self):
+        """`/search/tv`'s own entries carry no `type` field at all (measured
+        live: every one reads None) — this must not accidentally match
+        anything, so an ordinary show hit is unaffected."""
+        spy = _cached_get({"search/tv": [SEVERANCE], "search/anime": []})
+        with _patched(spy):
+            hits = await search.search_titles(SETTINGS, Media.SHOW, "severance")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].media, Media.SHOW)
+
     async def test_a_bare_hit_carries_no_shared_id_but_is_still_returned(self):
         """Measured live: a season-title's hit often carries only simkl_id and
         slug. It is under-described, not dropped — the port's job is to hand
@@ -184,6 +225,20 @@ class SearchTitlesTests(unittest.IsolatedAsyncioTestCase):
             await search.search_titles(SETTINGS, Media.SHOW, "x")
         for call in spy.await_args_list:
             self.assertIs(call.kwargs["pool"], transport.CATALOG_POOL)
+
+    async def test_every_call_carries_the_callers_own_token(self):
+        """Simkl's v2 search requires a user token (401 user_token_required
+        otherwise) — every call here must ask cached_paged_get to attach one,
+        which is what `private=True` means to that function (see its own
+        docstring: unlike cached_get's flag of the same name, it does not skip
+        the shared cache — search answers identically under any viewer's own
+        token, measured live during the v2 cutover's Phase 1)."""
+        spy = _cached_get({"search/tv": [], "search/anime": [], "search/movie": []})
+        with _patched(spy):
+            await search.search_titles(SETTINGS, Media.SHOW, "x")
+            await search.search_titles(SETTINGS, Media.MOVIE, "x")
+        for call in spy.await_args_list:
+            self.assertTrue(call.kwargs.get("private"))
 
 
 class CollidingSeasonTests(unittest.IsolatedAsyncioTestCase):

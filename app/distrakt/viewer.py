@@ -41,13 +41,17 @@ async def settings_for_user(user_id: int):
     goes false, and that port is simply never asked; the same has always been
     true of Trakt.
 
-    The refresh token is cleared as well: nothing downstream refreshes, and
-    leaving the operator's beside somebody else's access token would be a pairing
-    that means nothing. (There is no Simkl counterpart to clear — Simkl issues no
-    refresh token.) The access level guarantees SOME linked identity that can
-    read a history, but a row can still hold an empty token, in which case that
-    source's `*_configured` goes false and the handlers take their existing "not
-    configured" path.
+    Trakt's refresh token is cleared as well: nothing downstream on this object
+    refreshes with it (that happens once, up front, inside
+    trakt_routes.access_token_for_user — this function only ever hands out the
+    resulting access token), and leaving the operator's beside somebody else's
+    access token would be a pairing that means nothing. Simkl's refresh token
+    never reaches this object at all for the same reason: simkl_routes'
+    equivalent already refreshed and returned only the access token, and
+    Settings has no `simkl_refresh_token` field for it to occupy. The access
+    level guarantees SOME linked identity that can read a history, but a row can
+    still hold an empty token, in which case that source's `*_configured` goes
+    false and the handlers take their existing "not configured" path.
 
     The network->emoji map is per-user too, but it is NOT on this object: it was
     removed from Settings entirely when it stopped being app-wide, so the

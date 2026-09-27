@@ -254,12 +254,21 @@ class _SimklProvider:
         return settings.simkl_configured
 
     def catalogue_is_configured(self, settings: Settings) -> bool:
-        # The client id alone, same question `_SimklDetailPort.catalogue_configured`
-        # asks and for the same reason: Simkl's search endpoints take the
-        # client id as a query parameter and no bearer, so a token this
-        # instance has never issued cannot be what decides whether its
-        # catalogue can be searched.
-        return settings.simkl_catalogue_configured
+        # NOT THE SAME QUESTION `_SimklDetailPort.catalogue_configured` ASKS,
+        # not any more. Under Simkl's v2 API, search and /redirect require a
+        # user token — 401 user_token_required otherwise — where the per-title
+        # lookups that DetailPort answers with stay anonymous. THIS is the one
+        # method for_catalogue_search calls (see app/providers/__init__.py),
+        # which is what makes every caller reached through it a per-viewer
+        # settings object (Phase 1's audit of the v2 cutover found exactly one
+        # exception, a caller with no viewer in scope, and its own gate is
+        # `settings.simkl_access_token` going empty once the operator's pasted
+        # instance-wide token setting is gone — see D3). So `simkl_configured`
+        # (client id AND a token) is the right question here: a viewer with no
+        # linked Simkl account gets nothing from this source, and every Simkl
+        # search surface falls back to whatever else `for_catalogue_search`
+        # returns — Trakt, on this instance.
+        return settings.simkl_configured
 
 
 register(_SimklProvider())

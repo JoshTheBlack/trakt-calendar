@@ -79,10 +79,11 @@ class _Client:
     is a count of requests rather than an inference."""
 
     def __init__(self, answer):
-        self.answer, self.requests = answer, []
+        self.answer, self.requests, self.headers = answer, [], []
 
     async def get(self, url, headers=None, timeout=None):
         self.requests.append(url)
+        self.headers.append(headers or {})
         if isinstance(self.answer, Exception):
             raise self.answer
         return self.answer
@@ -117,6 +118,16 @@ class RedirectTargetTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(answer=repr(answer)):
                 with self.assertRaises(SimklError):
                     await self._ask(answer)
+
+    async def test_the_callers_own_token_is_attached(self):
+        """/redirect requires a user token under Simkl's v2 API (fact 3 of the
+        cutover) — the caller's own bearer must ride every request, never the
+        instance's, which is what `private=True` on api_headers means."""
+        with_token = Settings(simkl_client_id="scid", simkl_access_token="viewer-tok")
+        client = _Client(httpx.Response(200))
+        with patch.object(transport, "sync_client", return_value=client):
+            await transport.redirect_target(with_token, "redirect", {"tmdb": 1})
+        self.assertEqual(client.headers[0].get("Authorization"), "Bearer viewer-tok")
 
 
 class TitleFactsTests(unittest.IsolatedAsyncioTestCase):

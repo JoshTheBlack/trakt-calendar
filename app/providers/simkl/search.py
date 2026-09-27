@@ -53,16 +53,43 @@ _SHOW_PATHS = ("search/tv", "search/anime")
 _MOVIE_PATHS = ("search/movie",)
 
 
+# `GET /search/anime` ANSWERS WITH FILMS AS WELL AS TV, and nothing else in the
+# payload says so except this field — measured live 2026-09-27 against the
+# SEARCH RESULT ITSELF (not the per-title record, which spells the same fact
+# `anime_type` instead — a distinct field this app first read here by mistake,
+# confirmed live when a real search still misrouted the fixed title): a query
+# for "attack on titan" against /search/anime returns entries with
+# `type: "tv"`, `"movie"`, `"special"` and `"ova"` all in the one response —
+# "Shingeki no Kyojin: The Last Attack" (2024, a recap film) answers with
+# `type: "movie"` beside its parent series' `type: "tv"` seasons.
+# `/search/tv`'s own entries carry no `type` field at all (every one of them
+# reads None), so `.get` never fires outside the anime endpoint.
+_FILM_SEARCH_TYPE = "movie"
+
+
 def _hit(entry: dict, media: Media) -> SearchHit:
     """One Simkl search result as a SearchHit. `network`, `runtime` and
     `overview` are left at their SearchHit default (see module docstring for
     why) so a caller merging this against another source's answer can fill
-    the gap from whichever source did say."""
+    the gap from whichever source did say.
+
+    `media` IS THE ENTRY'S OWN, NOT ALWAYS THE CALLER'S. A film hit answered
+    by `/search/anime` (see `_FILM_SEARCH_TYPE`) is tagged Media.MOVIE
+    regardless of the media a show search asked for — this is the one field on
+    SearchHit built to carry exactly that (app/distrakt/search.py's merge keys
+    on it, `resolve_key(hit.media, hit.ids)`, precisely so a film mixed into a
+    show search resolves under the film's own identity rather than a show's).
+    `type: "special"` is deliberately NOT redirected here: the per-title
+    record for a special can still carry `mapped_tvdb_seasons` and a real
+    episode count (Attack on Titan's own 2023 special does), which is the
+    season-picker's ordinary case, not a film's — only `"movie"` is.
+    """
     raw_ids = entry.get("ids") or {}
+    hit_media = Media.MOVIE if entry.get("type") == _FILM_SEARCH_TYPE else media
     return SearchHit(
         source=Source.SIMKL,
         source_id=str(raw_ids.get("simkl_id") or raw_ids.get("simkl") or ""),
-        media=media,
+        media=hit_media,
         ids=_ids.normalize(raw_ids),
         title=str(entry.get("title") or ""),
         year=entry.get("year"),
@@ -104,7 +131,7 @@ async def _search_one(settings: Settings, path: str, query: str, media: Media, *
         transport.catalog_client(), settings, path,
         {"q": query, "limit": str(PAGE_SIZE)},
         pool=transport.CATALOG_POOL, raise_errors=True, max_pages=MAX_PAGES,
-        cache_only=cache_only,
+        cache_only=cache_only, private=True,
     )
     return [_hit(entry, media) for entry in results]
 
@@ -228,12 +255,22 @@ async def search_titles(settings: Settings, media: Media, query: str, *,
         raise failures[0]
     for exc in failures:
         logger.warning("Simkl search %s(%r) failed: %s", "/".join(paths), q, exc)
-    # SHOWS ONLY. A film has no season to name, and Simkl's film catalogue does
-    # not follow the season-title convention its anime catalogue does —
-    # measured, 41 film hits across six queries and not one of them a season of
-    # something else. So a movie query has nothing to resolve, and the lookup
-    # this would make reads `/tv/{id}`, which is the wrong question to ask about
-    # a film id even when it is cheap.
+    # A SHOW QUERY NEVER RETURNS A FILM. /search/anime answers with both under
+    # one endpoint (see _hit's own docstring for the measured mixing), and a
+    # film hit mixed in has nowhere useful to go from a shows search: it has no
+    # season to pick, and the show flow's own add has no watched-on date to
+    # record one with, so surfacing it there was a row that could only ever be
+    # refused. Dropped here rather than left for the caller to filter, so
+    # nothing downstream has to know this endpoint mixes media at all — the
+    # port's contract stays "asked for shows, got shows".
+    if media is Media.SHOW:
+        hits = [hit for hit in hits if hit.media is Media.SHOW]
+    # SHOWS ONLY, past this point. A film has no season to name, and Simkl's
+    # film catalogue does not follow the season-title convention its anime
+    # catalogue does — measured, 41 film hits across six queries and not one
+    # of them a season of something else. So a movie query has nothing to
+    # resolve, and the lookup this would make reads `/tv/{id}`, which is the
+    # wrong question to ask about a film id even when it is cheap.
     if media is Media.MOVIE:
         return hits
     return await _name_the_seasons_that_collide(settings, hits,

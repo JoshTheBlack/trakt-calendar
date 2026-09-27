@@ -1,4 +1,4 @@
-"""Log in with Simkl — the redirect authorization flow.
+"""Log in with Simkl — the redirect authorization flow, with PKCE.
 
 Three entry points and one exit, the same shape Trakt's flow has:
 
@@ -18,6 +18,19 @@ its cookie, both handled in app.auth, are what make that impossible; this module
 refuses with one generic message the moment either fails, and never falls back
 to treating an unrecognized callback as an ordinary sign-in.
 
+PKCE RIDES THE SAME HANDSHAKE ROW: `_begin` generates a (verifier, challenge)
+pair, sends the challenge to Simkl, and stores the verifier server-side on the
+row `auth.create_handshake` already creates — never in the browser, a cookie,
+or the redirect URL. The callback reads the verifier back off the consumed row
+and hands it to `exchange_code`, which is the only place it is ever used again.
+
+THE SCOPE CHECK IS HERE, NOT IN app/auth/simkl.py, because only this module
+knows whether a link is happening for the first time — the exchange itself has
+no notion of "first" vs "routine". A token whose returned `scope` lacks
+`media:write` is refused rather than stored: Simkl's watchlist write
+(Plans/BUILD_TRACKER_WATCHLIST.txt, not built here) needs it, and a scope can
+only be widened by the user authorizing again, never by a silent retry.
+
 WHAT IS DECIDED HERE AND WHAT IS NOT. Who may sign in, who may register, and how
 each refusal is worded to avoid becoming an oracle all live in
 app/auth/provider_login.py, shared with Plex and Trakt. What is left in this
@@ -35,6 +48,7 @@ it on simkl.com is the only remedy.
 from __future__ import annotations
 
 import logging
+import time
 
 import httpx
 from fastapi import APIRouter, Request
@@ -83,6 +97,15 @@ UPSTREAM_FAILED = (
 
 TOO_MANY_STARTS = (
     "Too many sign-in attempts from this address. Try again in a few minutes."
+)
+
+# Shown when Simkl grants a token but not the write scope this app asked for.
+# Addressed to the person authorizing, not the operator: nothing here is
+# misconfigured, Simkl (or the person) simply did not grant everything asked
+# for, and re-authorizing is the only way to widen it.
+SCOPE_REFUSED = (
+    "Simkl did not grant this app write access, which the tracker needs. "
+    "Please try connecting again and approve the full request."
 )
 
 # Refusing a LINK rather than a sign-in: the visitor already has an account and
@@ -166,12 +189,17 @@ async def _begin(
         return _notice(request, "Too many attempts", TOO_MANY_STARTS, status=429)
     if not settings.simkl_login_configured:
         return _notice(request, "Not available", NOT_CONFIGURED, status=503)
+    # PKCE is mandatory under Simkl's v2 authorization — see app/auth/simkl.py's
+    # docstring. The verifier is stored on THIS handshake row and never leaves
+    # the server; only the challenge derived from it goes to Simkl.
+    verifier, challenge = simkl_auth.generate_pkce_pair()
     state = await auth.create_handshake(
         provider=PROVIDER, purpose=purpose, session_id=session_id,
-        invite_token=invite_token or None,
+        invite_token=invite_token or None, pkce_verifier=verifier,
     )
     response = RedirectResponse(
-        simkl_auth.authorize_url(settings.simkl_client_id, settings.public_base_url, state),
+        simkl_auth.authorize_url(
+            settings.simkl_client_id, settings.public_base_url, state, challenge),
         status_code=303,
     )
     # Pins the handshake to this browser as well as to this row, so a callback
@@ -240,17 +268,42 @@ async def simkl_callback(request: Request):
     if not settings.simkl_login_configured:  # pragma: no cover — cleared mid-flow
         return _notice(request, "Not available", NOT_CONFIGURED, status=503)
 
+    # The verifier for THIS handshake, and only this one — read off the row
+    # consume_handshake just claimed, never regenerated or reused across rows.
+    # Sealed at rest like every other stored secret; opened here, at the point
+    # of use.
+    verifier = secrets_box.open_(handshake["pkce_verifier"]) or ""
+
     try:
         token = await simkl_auth.exchange_code(
             settings.simkl_client_id, settings.simkl_client_secret, code,
-            settings.public_base_url,
+            settings.public_base_url, verifier,
         )
+    except (httpx.HTTPError, simkl_transport.SimklError) as exc:
+        # Deliberately vague to the visitor and specific in the log: the
+        # exception text can carry the request URL, and that carries the code.
+        logger.warning("Simkl authorization exchange failed: %s", type(exc).__name__)
+        return _notice(request, "Sign-in failed", UPSTREAM_FAILED, status=502)
+
+    # THE SCOPE CHECK, BEFORE ANYTHING IS STORED. See this module's docstring:
+    # a token this app cannot use to write later must be refused now, while
+    # re-authorizing costs the visitor one more click rather than a silent
+    # failure on the first watchlist write. Simkl documents scopes
+    # space-separated in one string, so this is a substring test rather than an
+    # exact match — a future third scope must not make an already-sufficient
+    # grant read as refused.
+    granted_scope = str(token.get("scope") or "")
+    if simkl_auth.REQUIRED_SCOPE not in granted_scope.split():
+        logger.warning("Simkl granted a token without %s (got %r)",
+                       simkl_auth.REQUIRED_SCOPE, granted_scope)
+        back = _BACK_TO_ACCOUNT if handshake["purpose"] == "link" else {}
+        return _notice(request, "Access not granted", SCOPE_REFUSED, status=400, **back)
+
+    try:
         account = await simkl_auth.fetch_account(
             settings.simkl_client_id, token.get("access_token") or "",
         )
-    except (httpx.HTTPError, simkl_transport.SimklError, simkl_auth.AccountLookupError) as exc:
-        # Deliberately vague to the visitor and specific in the log: the
-        # exception text can carry the request URL, and that carries the code.
+    except simkl_auth.AccountLookupError as exc:
         logger.warning("Simkl authorization exchange failed: %s", type(exc).__name__)
         return _notice(request, "Sign-in failed", UPSTREAM_FAILED, status=502)
 
@@ -263,19 +316,26 @@ async def simkl_callback(request: Request):
         display_name=account.get("name"),
         avatar_url=account.get("avatar"),
         access_token=token.get("access_token"),
-        # BOTH NULL, AND DELIBERATELY SO. Simkl issues no refresh token and the
-        # grant it does issue stands until the user revokes the application, so
-        # there is no expiry worth recording and nothing that could act on one.
-        # Writing the exchange's nominal `expires_in` here would invent a
-        # deadline that nothing can meet: the renewal path it implies does not
-        # exist at Simkl. A 401 means link again.
-        refresh_token=None,
-        token_expires_at=None,
+        refresh_token=token.get("refresh_token") or None,
+        token_expires_at=_expires_at(token),
     )
 
     if handshake["purpose"] == "link":
         return await _finish_link(request, settings, identity, current)
     return await _finish_login(request, settings, identity, handshake)
+
+
+def _expires_at(token: dict) -> int | None:
+    """When the access token stops working, as a unix timestamp.
+
+    Simkl's exchange carries no `created_at` the way Trakt's does, so `now` is
+    the base — the exchange just happened, and any clock skew this introduces is
+    swallowed by access_token_for_user's ~1-day refresh margin against a 7-day
+    token life."""
+    expires_in = token.get("expires_in")
+    if not expires_in:
+        return None
+    return int(time.time()) + int(expires_in)
 
 
 async def _finish_link(request: Request, settings: Settings,
@@ -308,28 +368,128 @@ async def _finish_login(request: Request, settings: Settings,
     return response
 
 
-async def access_token_for_user(user_id: int) -> str | None:
-    """This user's own Simkl access token, or None when they have not linked one.
+def _is_v2_token(access_token: str | None) -> bool:
+    """Whether a stored token is a V2 grant this app may actually send.
 
-    THE WHOLE OF IT. Trakt's counterpart carries an expiry check and a serialized
-    refresh lease; Simkl issues no refresh token at all and its tokens are valid
-    until the person revokes the app, so `token_expires_at` is NULL on every row
-    this app writes. A branch on it could only ever take the "no expiry" path, so
-    there is none — dead code that looks like a safety check is worse than the
-    plain read, because the next reader has to work out that it never runs.
+    LOCAL SHAPE, NOT A SERVER ROUND TRIP: Simkl gives no other signal to tell a
+    V2 access token from a V1 one (both are opaque bearer strings to every other
+    part of this app) — see app/auth/simkl.py.V2_ACCESS_TOKEN_PREFIX. A legacy
+    V1 token on an identity row predates this build's cutover (D1: hard cutover,
+    no dual token paths) and is never sent — it is read the same way a failed
+    refresh reads, "reconnect needed", and the identity row itself is KEPT: a
+    missing usable token is not a missing account, and the next successful link
+    replaces the token on this same row rather than minting a new one.
+    """
+    return bool(access_token) and access_token.startswith(simkl_auth.V2_ACCESS_TOKEN_PREFIX)
 
-    A 401 later is what a revoked grant looks like, and the transport's message
-    for it already says the link has to be made again.
 
-    The token is stored sealed and is opened here, at the point of use. With no
-    key set it passes through unchanged; a sealed value whose key is missing
-    opens to None, so the row degrades to "no usable token" and the tracker takes
-    its existing not-configured path rather than sending ciphertext to Simkl.
+async def access_token_for_user(user_id: int, settings: Settings | None = None) -> str | None:
+    """A currently-valid Simkl access token for `user_id`, or None when they have
+    not linked one, hold only a legacy V1 token, or a refresh has failed.
+
+    THE SAME SHAPE AS trakt_routes.access_token_for_user, now that Simkl issues
+    a real refresh token (V2) where V1 issued none — see app/auth/simkl.py's
+    module docstring for the tokens' actual lifetimes. Renewal is serialized
+    through the identity row's refresh lease (the same one Trakt's refresh
+    uses), so two concurrent requests can't both spend the same still-valid
+    access token into a race and invalidate each other.
+
+    A LEGACY V1 TOKEN NEVER REACHES THE REFRESH PATH AT ALL: `_is_v2_token`
+    reads it as "reconnect needed" up front, the same answer a refresh that
+    failed gives, rather than attempting to refresh a grant Simkl's v2 token
+    endpoint was never issued for.
+    """
+    cfg = settings or load_settings()
+    row = await db.fetch_one(
+        "SELECT * FROM linked_identities WHERE user_id = ? AND provider = ?",
+        (user_id, PROVIDER),
+    )
+    if row is None:
+        return None
+    # Both tokens are stored sealed; open them here, at the point they are used.
+    # With no key set they pass through unchanged; a sealed value whose key is
+    # missing opens to None, so the row degrades to "no usable token" (fail open)
+    # and — because the refresh guard below then short-circuits — nothing is
+    # written back over the intact ciphertext. A wrong key raises out of open_().
+    access_token = secrets_box.open_(row["access_token"])
+    if not _is_v2_token(access_token):
+        return None
+    expires_at = row["token_expires_at"]
+    # ~1 DAY OF MARGIN AGAINST A ~7-DAY TOKEN LIFE, wider than Trakt's 60-second
+    # one: Trakt's access tokens last 90 days and a missed proactive refresh
+    # costs nothing until the next request tries again within the same window,
+    # while a Simkl token's whole life is 7 days, so the same relative slack
+    # needs a much bigger absolute margin to stay meaningfully "proactive".
+    if not expires_at or time.time() < int(expires_at) - 86400:
+        return access_token
+    refresh_token = secrets_box.open_(row["refresh_token"])
+    if not (refresh_token and cfg.simkl_client_id and cfg.simkl_client_secret):
+        return access_token
+    if not await auth.claim_identity_refresh(int(row["id"])):
+        return access_token
+    try:
+        token = await simkl_auth.refresh_access_token(
+            cfg.simkl_client_id, cfg.simkl_client_secret, refresh_token,
+        )
+    except (httpx.HTTPError, simkl_transport.SimklError) as exc:
+        logger.warning("Simkl token refresh failed for a linked account: %s", exc)
+        await auth.release_identity_refresh(int(row["id"]))
+        # A FAILED REFRESH LEAVES THE ROW AS "RECONNECT NEEDED" AND NEVER LOOPS.
+        # A revoked grant does not recover by being asked again — returning the
+        # stale access_token here would let every caller keep trying it and
+        # keep failing, rather than the tracker's existing "not configured" path
+        # taking over once this returns None. The identity row itself is left
+        # exactly as it was: the operator did not lose the account link, only
+        # its ability to answer right now, and a fresh sign-in overwrites it.
+        return None
+    await auth.store_identity_tokens(
+        int(row["id"]),
+        access_token=token.get("access_token"),
+        refresh_token=token.get("refresh_token") or None,
+        token_expires_at=_expires_at(token),
+    )
+    return token.get("access_token")
+
+
+async def stored_access_token(user_id: int) -> str | None:
+    """`user_id`'s Simkl token exactly as stored, with no refresh attempted.
+
+    Read this BEFORE unlinking — the token lives on the row an unlink deletes,
+    so afterwards there is nothing left to revoke.
     """
     row = await db.fetch_one(
         "SELECT access_token FROM linked_identities WHERE user_id = ? AND provider = ?",
         (user_id, PROVIDER),
     )
-    if row is None:
+    token = secrets_box.open_(row["access_token"]) if row else None
+    return token or None
+
+
+REVOKE_FAILED_NOTICE = (
+    "Unlinked here, but this instance could not tell Simkl to forget the "
+    "authorization. Remove it yourself under Settings > Connected apps on simkl.com."
+)
+
+
+async def revoke_token_value(token: str | None, settings: Settings | None = None) -> str | None:
+    """Invalidate a Simkl token at Simkl's end. Returns None on success (or when
+    there was nothing to revoke, or the stored token is a legacy V1 one Simkl's
+    v2 revoke endpoint was never issued for), else a notice to show the user.
+
+    Call this only once the unlink has actually gone through — see
+    trakt_routes.revoke_token_value, which this mirrors exactly: a failure here
+    is never allowed to undo the local unlink.
+    """
+    cfg = settings or load_settings()
+    if not _is_v2_token(token):
+        # A legacy token, or none at all: nothing Simkl's v2 revoke would
+        # recognise, and D1 already treats it as unusable everywhere else.
         return None
-    return secrets_box.open_(row["access_token"])
+    if not (cfg.simkl_client_id and cfg.simkl_client_secret):
+        return REVOKE_FAILED_NOTICE
+    try:
+        await simkl_auth.revoke_token(cfg.simkl_client_id, cfg.simkl_client_secret, token)
+    except (httpx.HTTPError, simkl_transport.SimklError) as exc:
+        logger.warning("Simkl token revocation failed for a linked account: %s", exc)
+        return REVOKE_FAILED_NOTICE
+    return None

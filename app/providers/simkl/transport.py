@@ -90,7 +90,8 @@ class SimklError(SourceUnavailable):
 
 
 class SimklRateLimitError(SimklError):
-    """Simkl returned 429 and send's retry/backoff budget was exhausted.
+    """Simkl returned 429 `rate_limit` and send's retry/backoff budget was
+    exhausted.
 
     "You went too fast just now" — a condition about THIS burst of requests,
     which clears on its own in seconds. A distinct type for the same reason
@@ -98,6 +99,32 @@ class SimklRateLimitError(SimklError):
     the one affected month deliberately, instead of treating a temporary
     slow-down as a hard failure of the source.
     """
+
+
+class SimklUserQuotaError(SimklRateLimitError):
+    """Simkl returned 429 `user_limit_exceeded` — THIS user's daily quota under
+    v2 (resources/rate-limits: 500/day Free, 1,000 PRO, 10,000 VIP) is spent.
+
+    NEVER RETRIED WITHIN `send`, unlike the per-second `rate_limit` 429 this
+    subclasses: retrying within the request's ~30s budget cannot help a quota
+    that resets once a day, so send raises this the moment it is recognised
+    rather than burning attempts and elapsed time on backoff that cannot
+    succeed. `retry_after` carries Simkl's own stated seconds to the daily
+    reset, for a caller that wants to say when to try again — but nothing here
+    sleeps on it, and it is never confused with the per-second 429's
+    Retry-After, which states the same kind of number for an unrelated reason
+    and must be ignored (see `_send_once`).
+
+    MUST NEVER TRIP THE INSTANCE-WIDE 412 BREAKER. That breaker exists for a
+    refusal of this instance's CLIENT ID, which stops every user at once; this
+    is one user's own allowance, and conflating the two would let a single
+    heavy account's write flow lock every other viewer out of Simkl for the
+    breaker's whole cooldown.
+    """
+
+    def __init__(self, message: str, status: int, *, retry_after: float | None = None):
+        super().__init__(message, status)
+        self.retry_after = retry_after
 
 
 class SimklBlockedError(SimklError):
@@ -117,9 +144,13 @@ class SimklBlockedError(SimklError):
 # that happened to be called first: the same token on any other path gets the
 # same answer. A caller that tolerates one call failing must NOT tolerate one of
 # these, because "this list could not be read" and "nothing this token asks for
-# can be read" are different facts with opposite consequences — and Simkl issues
-# no refresh token (a grant is revoked, a password is reset, a token expires), so
-# this is an ordinary expected state rather than an exotic one.
+# can be read" are different facts with opposite consequences. A v2 token DOES
+# refresh (app/auth/simkl.py.refresh_access_token, proactively, ~1 day before
+# its 7-day expiry — see simkl_routes.access_token_for_user), so this status
+# ordinarily means the grant itself was revoked, or the stored token predates
+# this app's cutover to v2 (a legacy token is never sent at all — see
+# simkl_routes._is_v2_token) — either way an ordinary expected state, not an
+# exotic one, and the fix is the same: reconnect.
 CREDENTIAL_STATUSES = (401, 403)
 
 
@@ -606,6 +637,46 @@ def _retry_after_seconds(resp: httpx.Response) -> float | None:
     return secs
 
 
+def _quota_error_code(resp: httpx.Response) -> str | None:
+    """The `error` field of a 429's JSON body, or None when the body is not
+    readable as one — a 429 with no parseable body is treated as the ordinary
+    per-second `rate_limit` case (see `_send_once`), which is the safer of the
+    two failure modes to assume: it retries rather than raising a quota error
+    the response never actually stated."""
+    try:
+        payload = resp.json()
+    except ValueError:
+        return None
+    return (payload or {}).get("error") if isinstance(payload, dict) else None
+
+
+# Simkl's two DOCUMENTED 429 causes, and they are answered with opposite
+# strategies — see SimklUserQuotaError and _send_once for why.
+_QUOTA_EXCEEDED = "user_limit_exceeded"
+_PER_SECOND_LIMIT = "rate_limit"
+
+# Close enough to the daily cap to be worth a line in the log before the
+# viewer sees a hard 429, not a threshold Simkl states anywhere itself. V1
+# responses and the anonymous catalogue paths carry no X-RateLimit-Remaining
+# at all (resources/rate-limits), which is why this only fires when the
+# header is actually PRESENT — an absent header is not a quota of zero.
+_QUOTA_WARN_BELOW = 10
+
+
+def _warn_if_quota_low(path: str, resp: httpx.Response) -> None:
+    remaining = resp.headers.get("x-ratelimit-remaining")
+    if remaining is None:
+        return
+    try:
+        left = int(remaining)
+    except ValueError:
+        return
+    if left <= _QUOTA_WARN_BELOW:
+        logger.warning("Simkl %s answered with only %d of %s request(s) left on "
+                       "this user's daily quota (X-RateLimit-Remaining)",
+                       path, left, resp.headers.get("x-ratelimit-limit") or "?")
+
+
 async def _pace_post() -> None:
     """Hold until this POST is allowed to leave under the 1/second cap."""
     wait = _post_ready_at - _time.monotonic()
@@ -669,8 +740,17 @@ async def _claim_catalog_slot() -> None:
 
 async def send(client: httpx.AsyncClient, method: str, url: str, *,
                pool: http_pool.Pool, headers: dict | None = None,
-               json=None, timeout: float | None = None) -> httpx.Response:
+               json=None, data: dict | None = None,
+               timeout: float | None = None) -> httpx.Response:
     """Issue one Simkl request under that pool's rules, and return its response.
+
+    `data`, NOT `json`, FOR THE OAUTH TOKEN ENDPOINT. RFC 6749 specifies
+    application/x-www-form-urlencoded for a token request, and Simkl's own docs
+    give form-encoded examples — measured 2026-09-27, the live endpoint also
+    parses a JSON body just as well (both answer `invalid_grant` for a bogus
+    code, meaning both were read), but there is no reason to send the
+    undocumented shape when the documented one works. Every other Simkl call in
+    this app is JSON; `data` exists for this one caller (app/auth/simkl.py).
 
     `pool` IS NOT OPTIONAL AND MUST BE THE POOL `client` CAME FROM. The two
     travel together because they are two halves of one budget: the client owns
@@ -698,7 +778,7 @@ async def send(client: httpx.AsyncClient, method: str, url: str, *,
     hops = 0
     while True:
         resp = await _send_once(client, method, url, pool=pool, headers=headers,
-                                json=json, timeout=timeout)
+                                json=json, data=data, timeout=timeout)
         if resp.status_code not in REDIRECT_STATUSES:
             return resp
         location = resp.headers.get("location")
@@ -793,13 +873,20 @@ async def redirect_target(settings: Settings, path: str, params: dict) -> str:
     SYNC_POOL, because /redirect is outside the parallel-safe family and so under
     the 10 GET/second ceiling — the same budget `redirect_pool` gives such a path.
 
+    `private=True` ON THE HEADERS, NOT ON THE CALL: /redirect requires a user
+    token under Simkl's v2 API (fact 3 of the cutover — everything but the
+    per-title catalogue lookups does), so this attaches the caller's own bearer
+    the same way search does. This function makes no cache decision of its own —
+    by_id.find_by_shared_id owns that, under its own key — so there is nothing
+    here for the flag to skip.
+
     Raises SimklError when Simkl could not be reached or answered an error; a
     404 or a non-redirect 200 reads as "no such title", which is an answer.
     """
     url = f"{API_BASE}/{path}?{urlencode(api_params(settings, params))}"
     try:
         resp = await _send_once(sync_client(), "GET", url, pool=SYNC_POOL,
-                                headers=api_headers(settings))
+                                headers=api_headers(settings, private=True))
     except httpx.HTTPError as exc:
         logger.warning("Simkl GET /%s failed: %s", path, exc)
         raise SimklError(f"Could not reach Simkl: {exc}") from exc
@@ -812,7 +899,8 @@ async def redirect_target(settings: Settings, path: str, params: dict) -> str:
 
 async def _send_once(client: httpx.AsyncClient, method: str, url: str, *,
                      pool: http_pool.Pool, headers: dict | None = None,
-                     json=None, timeout: float | None = None) -> httpx.Response:
+                     json=None, data: dict | None = None,
+                     timeout: float | None = None) -> httpx.Response:
     """One request to one URL under one pool's gate, with the 412 breaker and
     the 429 retry loop — everything that is about THIS request and not about
     where its answer might point.
@@ -861,7 +949,7 @@ async def _send_once(client: httpx.AsyncClient, method: str, url: str, *,
                 await _pace_post()
                 try:
                     resp = await client.post(url, headers=headers, json=json,
-                                             timeout=attempt_timeout)
+                                             data=data, timeout=attempt_timeout)
                 finally:
                     # Recorded even when the request failed. The cap counts
                     # requests Simkl received, and a call that timed out on our
@@ -875,11 +963,26 @@ async def _send_once(client: httpx.AsyncClient, method: str, url: str, *,
                 raise SimklBlockedError(
                     f"Simkl refused this instance's client id on {path} (HTTP 412).", 412)
             if resp.status_code != 429:
+                _warn_if_quota_low(path, resp)
                 return resp
+            error_code = _quota_error_code(resp)
+            if error_code == _QUOTA_EXCEEDED:
+                # A DAILY quota, not a burst — see SimklUserQuotaError. Raised
+                # immediately, on the first sighting, rather than spending this
+                # call's attempt count and elapsed-time budget on backoff that
+                # cannot succeed before tomorrow.
+                raise SimklUserQuotaError(
+                    f"This user's Simkl daily quota is exhausted on {path}.", 429,
+                    retry_after=_retry_after_seconds(resp))
             if attempt >= _SEND_MAX_ATTEMPTS:
                 raise SimklRateLimitError(
                     f"Simkl still rate-limiting after {attempt} attempt(s) for {path}.", 429)
-            wait = _retry_after_seconds(resp)
+            # `rate_limit`'s OWN Retry-After STATES THE DAILY RESET, not a
+            # sensible per-second wait — measured against Simkl's docs, which
+            # is why it is never trusted here even though it is present and
+            # numeric. Every other 429 (including one with no readable body)
+            # uses Retry-After when Simkl sent a usable one.
+            wait = None if error_code == _PER_SECOND_LIMIT else _retry_after_seconds(resp)
             if wait is None:
                 wait = float(2 ** (attempt - 1))  # 1s, 2s, 4s — one storm's worth
             # Don't begin a sleep that would carry elapsed past the budget: stop
@@ -937,8 +1040,9 @@ async def _fetch_json(client: httpx.AsyncClient, settings: Settings, url: str, p
         if raise_errors:
             if resp.status_code == 401:
                 raise SimklError(
-                    "Simkl rejected the credentials (401). Simkl issues no refresh "
-                    "token, so the link has to be made again.", 401)
+                    "Simkl rejected the credentials (401). This token is either "
+                    "revoked or a legacy one that predates this app's v2 cutover — "
+                    "either way the link has to be made again.", 401)
             raise SimklError(f"Simkl API returned HTTP {resp.status_code}.", resp.status_code)
         return None, pages
     try:
@@ -967,6 +1071,7 @@ async def cached_paged_get(
     ttl_seconds: int | None = None,
     raise_errors: bool = False,
     cache_only: bool = False,
+    private: bool = False,
     app: str = DEFAULT_APP_NAME,
     max_pages: int = MAX_PAGES,
 ) -> list:
@@ -999,6 +1104,18 @@ async def cached_paged_get(
     past its TTL — or an empty one, the same meaning `cached_get` gives the flag.
     It is how a route acts on a result the page NAMED rather than handed over,
     without the naming becoming a second search (see base.SearchPort).
+
+    `private=True` MEANS SOMETHING NARROWER HERE THAN IT DOES ON `cached_get`,
+    and that difference is deliberate rather than a naming accident: it attaches
+    the caller's own bearer to the request (search now requires a user token
+    under Simkl's v2 API — see app/providers/simkl/search.py, the only caller
+    that ever passes it), but it does NOT skip the shared cache the way
+    `cached_get`'s same-named flag does. Phase 1 of the v2 cutover measured a
+    search live under the owner's two linked tokens and found byte-identical
+    results — the answer does not depend on whose token asked, only whether one
+    was required to get an answer at all — so the shared cache stays correct
+    exactly as `cached_get`'s own `private` docstring reasons about, and this
+    function has no need to duplicate the skip.
     """
     key = cache_key(path, params)
     ttl = ttl_seconds if ttl_seconds is not None else settings.cache_ttl_minutes * 60
@@ -1017,7 +1134,8 @@ async def cached_paged_get(
         query = {**(params or {}), "page": str(page)}
         url = f"{API_BASE}/{path}?{urlencode(api_params(settings, query, app=app))}"
         data, pages = await _fetch_json(client, settings, url, path, pool,
-                                        fresh=False, raise_errors=raise_errors)
+                                        fresh=False, raise_errors=raise_errors,
+                                        private=private)
         if not isinstance(data, list):
             break
         out.extend(data)

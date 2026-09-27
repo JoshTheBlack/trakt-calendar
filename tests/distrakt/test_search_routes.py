@@ -134,13 +134,16 @@ class SearchFragmentTests(AppTestCase):
         self.assertNotIn("data-ids", html)
         self.assertNotIn("data-source-ids", html)
 
-    def test_a_single_source_instance_draws_no_marks(self):
-        """With one catalogue there is nothing to disambiguate, so the row looks
-        exactly as it did before this instance had a second service."""
+    def test_a_single_source_instance_still_draws_a_mark(self):
+        """The mark is attribution as much as disambiguation — which service's
+        own answer a row is drawn from is worth seeing even with one catalogue
+        linked, and it is what tells apart a service's own data quirks (a
+        mis-shaped hit, a missing network) from the merge's. Always drawn now,
+        not only when more than one catalogue was askable."""
         save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="cid"))
         with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[TRAKT_HIT])):
             html = self.client.get("/distrakt/fragments/search?q=a").text
-        self.assertNotIn("source-logo", html)
+        self.assertIn("trakt-circlemark-dark.svg", html)
 
     def test_one_source_failing_is_named_and_does_not_fail_the_search(self):
         async def _boom(*args, **kwargs):
@@ -361,10 +364,11 @@ class SeasonPickerFragmentTests(AppTestCase):
             return_value=catalogue_search.SearchMergeResult(
                 hits=list(hits), failed=frozenset())))
 
-    def _hit(self, source, source_id, ids, title="A Show", season=None, network=""):
+    def _hit(self, source, source_id, ids, title="A Show", season=None, network="",
+            media=Media.SHOW):
         return catalogue_search.MergedSearchHit(
             key=None, season=season, source_ids={source: source_id}, ids=dict(ids),
-            title=title, year=2022, network=network, runtime=None, overview="")
+            title=title, year=2022, network=network, runtime=None, overview="", media=media)
 
     def _pick(self, index=0, query="a", month=None):
         month = month or self.ahead
@@ -412,6 +416,37 @@ class SeasonPickerFragmentTests(AppTestCase):
         self.assertIn('"q": "a"', html)
         self.assertIn('"season": 1', html)
         self.assertNotIn("tmdb", html)
+
+    def test_a_hit_that_resolves_to_a_film_is_not_offered_a_season(self):
+        """DEFENSE IN DEPTH: app/providers/simkl/search.py now drops a
+        movie-typed anime hit from a show search outright (_FILM_SEARCH_TYPE),
+        so this shape should not reach the fragment in ordinary use any more —
+        but `_found` below stands in for the merge directly, bypassing that
+        filter, to pin what happens if one ever does (a stale cached search
+        from before the filter existed, say). It gets no season list and no
+        auto-add — a film has no roster the way a show does and needs a
+        watched-on date this box never collected — so the fragment says what
+        it is rather than filing it wrong or silently doing nothing."""
+        with self._found(self._hit(Source.SIMKL, "2544548", {"simkl": 2544548, "tmdb": 1333100},
+                                   title="The Last Attack", media=Media.MOVIE)):
+            html = self._pick()
+        self.assertIn("is a film, not a show", html)
+        self.assertIn("The Last Attack", html)
+        self.assertNotIn("hx-trigger=\"load\"", html)
+        self.assertNotIn("distrakt-season-list", html)
+
+    def test_the_add_routes_refuse_a_pick_that_resolved_to_a_film(self):
+        """Defense in depth beside the fragment's own refusal above: a client
+        that posts directly (or one from before this guard existed) must not
+        be able to write a film onto the roster as a zero-progress show."""
+        movie_pick = distrakt_routes.Pick(
+            title="The Last Attack", network="", year=2024, ids={"tmdb": 1333100},
+            seasons=[], named_season=None, unkeyable=None, media=Media.MOVIE)
+        with patch.object(distrakt_routes, "_resolve_pick",
+                          AsyncMock(return_value=movie_pick)):
+            resp = self.client.post("/api/distrakt/add",
+                                    json={"q": "a", "i": 0, "season": 1})
+        self.assertIn("is a film, not a show", resp.text)
 
     def test_a_month_behind_the_clock_records_something_as_finished_instead(self):
         """Which of the two add routes a season button posts to is the server's

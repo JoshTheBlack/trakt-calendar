@@ -32,7 +32,7 @@ from app import db
 from app.distrakt import routes as distrakt_routes
 from app.distrakt import viewer as distrakt_viewer
 from app.distrakt import store, watch_history
-from app.providers.base import ItemKey, TitleFacts
+from app.providers.base import ItemKey, Media, TitleFacts
 
 from tests.support import RewatchPrompt, STATIC_DIR, migrated_db
 from tests.distrakt.test_gating import DistraktTestCase
@@ -154,7 +154,7 @@ class _RosterAddCase(DistraktTestCase):
         return patch.object(distrakt_routes, "_resolve_pick", AsyncMock(
             return_value=distrakt_routes.Pick(
                 title="Breaking Bad", network="AMC", year=None, ids=dict(self.IDS),
-                seasons=[], named_season=None, unkeyable=None)))
+                seasons=[], named_season=None, unkeyable=None, media=Media.SHOW)))
 
     def _search_add(self, *, history=None, source="trakt", sources=None,
                     detail=None, year=2026, month=9, **extra):

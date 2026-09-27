@@ -22,6 +22,7 @@ import httpx
 
 from app import changelog
 from app.providers.simkl import SimklBlockedError, SimklRateLimitError
+from app.providers.simkl.transport import SimklUserQuotaError
 from app.providers.simkl import transport
 
 # Enough of a Settings to satisfy api_headers()/api_params(); no real credential
@@ -35,6 +36,10 @@ URL = transport.API_BASE + "/tv/1234"
 
 def _resp(status: int, headers: dict | None = None):
     return httpx.Response(status, headers=headers or {})
+
+
+def _json_resp(status: int, body: dict, headers: dict | None = None):
+    return httpx.Response(status, headers=headers or {}, json=body)
 
 
 class FakeClient:
@@ -56,7 +61,7 @@ class FakeClient:
     async def get(self, url, headers=None, timeout=None):
         return await self._next("GET", url, timeout)
 
-    async def post(self, url, headers=None, json=None, timeout=None):
+    async def post(self, url, headers=None, json=None, data=None, timeout=None):
         return await self._next("POST", url, timeout)
 
 
@@ -326,6 +331,52 @@ class RetryTests(TransportStateTestCase):
             with self.assertRaises(SimklRateLimitError):
                 await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
         self.assertEqual(transport.blocked_seconds_remaining(), 0.0)
+
+    async def test_a_user_limit_exceeded_429_raises_immediately_with_no_retry(self):
+        """A DAILY quota, not a burst — retrying inside this call's budget
+        cannot help, so it must not even try, unlike an ordinary 429."""
+        sleep = RecordingSleep()
+        client = FakeClient([_json_resp(429, {"error": "user_limit_exceeded"},
+                                        {"Retry-After": "43200"})])
+        with _patch_sleep(sleep):
+            with self.assertRaises(SimklUserQuotaError) as ctx:
+                await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
+        self.assertEqual(sleep.durations, [])
+        self.assertEqual(len(client.requests), 1)
+        self.assertEqual(ctx.exception.retry_after, 43200.0)
+
+    async def test_a_user_limit_exceeded_429_does_not_open_the_breaker(self):
+        """One user's exhausted daily allowance must not stop every other
+        viewer's Simkl reads for the 412 breaker's whole cooldown."""
+        client = FakeClient([_json_resp(429, {"error": "user_limit_exceeded"})])
+        with self.assertRaises(SimklUserQuotaError):
+            await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
+        self.assertEqual(transport.blocked_seconds_remaining(), 0.0)
+
+    async def test_rate_limits_own_retry_after_is_ignored(self):
+        """`rate_limit`'s Retry-After states the DAILY reset, not a sensible
+        per-second wait, so it must never be slept on — the exponential
+        schedule is used even though a numeric Retry-After is present."""
+        sleep = RecordingSleep()
+        client = FakeClient([
+            _json_resp(429, {"error": "rate_limit"}, {"Retry-After": "254"}),
+            _resp(200),
+        ])
+        with _patch_sleep(sleep), _no_catalog_pacing():
+            resp = await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(sleep.durations, [1.0])  # exponential, not 254s
+
+    async def test_a_429_with_no_readable_body_still_honours_retry_after(self):
+        """The safer of the two assumptions when Simkl's body cannot be read at
+        all: treat it as the ordinary per-second case rather than inventing a
+        quota error the response never actually stated."""
+        sleep = RecordingSleep()
+        client = FakeClient([_resp(429, {"Retry-After": "2"}), _resp(200)])
+        with _patch_sleep(sleep), _no_catalog_pacing():
+            resp = await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(sleep.durations, [2.0])
 
     async def test_a_non_429_comes_back_untouched(self):
         for status in (200, 401, 404, 500):

@@ -1613,11 +1613,13 @@ async def baseline_show(settings, user_id: int, record: dict) -> None:
     One service can hold a tracker title's seasons under SEVERAL of its own
     titles — Simkl files each anime season separately — and a per-title read that
     can only speak for one of them must not be handed to the baseline, which
-    replaces everything that source had stored. The provider says so by leaving
-    the id out (simkl.sync._speaks_for_one_season); the library read is what has
-    every title of the series in it. Ordinary television never reaches this: the
-    id names the whole show, the POST answers for it, and the expensive read
-    stays unspent.
+    replaces everything that source had stored. Simkl's per-title read always
+    declines now (simkl.sync.fetch_progress_details answers every id absent,
+    measured to never itemize a season either way — see that function), so every
+    Simkl title falls through to the library read, which is what has every title
+    of a series in it under the shared identity. A per-show endpoint that DID
+    answer for one season of a series and not the others would have the same
+    obligation to decline.
     """
     from ..perftrace import span
     ports = await tracker_ports(settings, user_id)

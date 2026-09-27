@@ -699,6 +699,20 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
     settings = load_settings()
     identities = await auth.list_identities(user.user_id)
     linked = {row["provider"]: row["display_name"] for row in identities}
+    # WHICH LINKED SERVICES NEED RECONNECTING, drawn fresh each time this page
+    # is asked for rather than stored as a flag — a row's true state is
+    # whatever access_token_for_user answers right now. Simkl is the one
+    # source this applies to today: a legacy v1-shaped token is never sent
+    # (D1's hard cutover) and reads as "reconnect needed" exactly like a
+    # refresh that failed (simkl_routes.access_token_for_user), and both cases
+    # are indistinguishable from here, on purpose — see the template's wording.
+    # NEUTRAL WORDING, DELIBERATELY: a 401 can also mean the person themselves
+    # revoked this app on simkl.com, so this never claims a specific cause it
+    # has not verified, only that reconnecting is needed.
+    from . import simkl_routes
+    needs_reconnect = set()
+    if "simkl" in linked and await simkl_routes.access_token_for_user(user.user_id) is None:
+        needs_reconnect.add("simkl")
     account = await auth.get_user(user.user_id)
     orders = await _account_orders(user.user_id, linked, settings)
     tracker_prefs = orders.prefs
@@ -714,6 +728,7 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
         "distrakt_available": bool(user and user.distrakt_approved and user.has_tracker_identity),
         "user": user,
         "linked": linked,
+        "needs_reconnect": needs_reconnect,
         # WHETHER THIS ACCOUNT'S SHARE LINKS PUBLISH ITS WATCH HISTORY. It is on
         # this page rather than in the Share panel because it is an account
         # decision and not a per-link view option: switching it off has to reach
@@ -892,21 +907,26 @@ async def unlink_identity(request: Request):
     provider = str(data.get("provider") or "").strip().lower()
     if provider not in ("trakt", "plex", "simkl"):
         return await _card(request, user.session_id, link_message="Unknown provider.")
-    # Imported here rather than at module scope: trakt_routes.py reads this
-    # module's message constants, so the dependency only runs one way at import
-    # time.
-    from . import trakt_routes
+    # Imported here rather than at module scope: trakt_routes.py and
+    # simkl_routes.py read this module's message constants, so the dependency
+    # only runs one way at import time.
+    from . import simkl_routes, trakt_routes
 
     # Read before the unlink (the token lives on the row it deletes), spent only
     # after one actually happened — an unlink that gets refused below must not
     # leave the account linked to a token this app just killed.
     #
-    # TRAKT ONLY, and not for want of trying at the others: Plex's token is
-    # invalidated by the user on plex.tv, and Simkl documents no revocation
-    # endpoint at all. For those two, deleting the local row is the whole of what
-    # this app can do, and the grant is removed by the user on the service's own
-    # settings page.
-    token = await trakt_routes.stored_access_token(user.user_id) if provider == "trakt" else None
+    # TRAKT AND SIMKL BOTH REVOKE NOW. Plex's token is invalidated by the user
+    # on plex.tv — there is no revocation endpoint to call for it, so it stays
+    # local-only. Simkl's v1 tokens documented no revocation at all, but v2
+    # does (app/auth/simkl.py.revoke_token); simkl_routes.revoke_token_value
+    # already reads a legacy-shaped stored token as nothing to revoke, so this
+    # call site does not need to tell the two apart itself.
+    stored_token = None
+    if provider == "trakt":
+        stored_token = await trakt_routes.stored_access_token(user.user_id)
+    elif provider == "simkl":
+        stored_token = await simkl_routes.stored_access_token(user.user_id)
     try:
         removed = await auth.unlink_identity(user.user_id, provider)
     except auth.LastLoginMethod:
@@ -917,7 +937,11 @@ async def unlink_identity(request: Request):
         return await _card(request, user.session_id, link_message="That account isn't linked.")
     # The unlink succeeded either way; a warning is about the part only the user
     # can finish, on the provider's own site, so it is said beside the rows.
-    warning = await trakt_routes.revoke_token_value(token)
+    warning = None
+    if provider == "trakt":
+        warning = await trakt_routes.revoke_token_value(stored_token)
+    elif provider == "simkl":
+        warning = await simkl_routes.revoke_token_value(stored_token)
     return await _card(request, user.session_id, link_message=warning or "",
                        link_ok=not warning)
 
