@@ -17,19 +17,20 @@
    other day block answers that by being asked about its own cards (style.css
    counts them with `:nth-child(k of …)`), and a placeholder has none to count —
    so the two numbers the shell already worked out ride along and the stylesheet
-   does the same arithmetic on them: `--held` is everything on the day and
-   `--shown` is what this viewer would see of it with not-watching titles hidden,
-   because the hide switch is thrown without a reload and the space reserved has
-   to follow it.
+   does the same arithmetic on them: `data-held` is everything on the day and
+   `data-visible` is what this viewer would see of it with not-watching titles
+   hidden, because the hide switch is thrown without a reload and the space
+   reserved has to follow it.
 
-   `data-visible` IS `--shown` AGAIN, and the repetition is the price of one
-   thing CSS cannot do: a selector can test an attribute's value but nothing can
-   read a custom property's, and it takes a SELECTOR to collapse the day when the
-   number is zero. #}
+   ATTRIBUTES, NOT CUSTOM PROPERTIES IN A style ATTRIBUTE, and that serves two
+   readers at once: style.css reads the numbers with typed attr() for the
+   arithmetic, and a selector tests `data-visible="0"` to collapse the day. (It
+   was once a style attribute plus a copy of the second number, because a
+   selector cannot read a custom property; the app's Content-Security-Policy now
+   applies no inline style at all.) #}
 <section class="day-block is-skeleton"
          id="day-{{ group.date }}" data-date="{{ group.date }}"
-         data-visible="{{ group.visible }}"
-         style="--held: {{ group['items']|length }}; --shown: {{ group.visible }}"
+         data-held="{{ group['items']|length }}" data-visible="{{ group.visible }}"
          hx-get="{{ group.url }}" hx-trigger="intersect once" hx-swap="outerHTML">
     <div class="day-header">
         <div class="day-title">📅 {{ group.label }}</div>

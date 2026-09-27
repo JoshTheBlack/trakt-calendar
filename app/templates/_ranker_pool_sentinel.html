@@ -26,7 +26,7 @@
    swap removes the sentinel that asked, and that is what ends the chain — there
    is no count for the client to keep and no off-by-one for it to get wrong. #}
 {% if next_url %}
-<div class="ranker-pool-sentinel" style="--skeleton-rows: {{ next_rows }}"
+<div class="ranker-pool-sentinel" data-skeleton-rows="{{ next_rows }}"
      hx-get="{{ next_url }}" hx-trigger="intersect once" hx-swap="outerHTML">
     <span class="ranker-sentinel-label">Loading more…</span>
 </div>

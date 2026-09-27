@@ -187,7 +187,7 @@
                       hx-trigger="change" hx-swap="none">
                     <label for="tzSelect">🌐 Timezone</label>
                     <span class="view-control">
-                        <button type="button" class="btn-ghost small" onclick="useDeviceTimezone()" title="Use my device's timezone">📍</button>
+                        <button type="button" class="btn-ghost small" data-device-timezone title="Use my device's timezone">📍</button>
                         <select id="tzSelect" name="timezone" autocomplete="off">
                             {% for tzgroup in viewer_timezone_groups %}
                             <optgroup label="{{ tzgroup.group }}">

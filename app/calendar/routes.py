@@ -130,7 +130,7 @@ def _count_visible(grouped: list[dict], not_watching: set[str]) -> None:
     or the scrollbar and the jump-to strip land somewhere other than where the day
     really is. So the shell, which assembled the whole month anyway, writes the
     number onto the placeholder and the stylesheet does the rest of the arithmetic
-    from it (_day_skeleton.html, style.css's `--shown`).
+    from it (_day_skeleton.html's `data-held` and `data-visible`).
 
     The column CAPS are not here and never come back: they are a fact about how
     each card style looks, they live beside the styles in style.css, and they used

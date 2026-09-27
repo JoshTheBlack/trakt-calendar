@@ -68,3 +68,15 @@ function panPreview(event) {
     const overflowY = Math.max(0, img.offsetHeight - rect.height);
     img.style.transform = 'translate(' + (-overflowX * fx) + 'px, ' + (-overflowY * fy) + 'px)';
 }
+
+// Only a preview with a picture in it carries `data-preview-zoom`; the empty
+// frame the readout draws otherwise has nothing to look at. Attributes rather
+// than onclick/onmousemove because the app's Content-Security-Policy runs no
+// script written in markup (app/csp.py), and delegated from the document because
+// every change to the export's options redraws the readout under it.
+document.addEventListener('click', (e) => {
+    if (e.target instanceof Element && e.target.closest('[data-preview-zoom]')) togglePreviewZoom();
+});
+document.addEventListener('mousemove', (e) => {
+    if (e.target instanceof Element && e.target.closest('[data-preview-zoom]')) panPreview(e);
+});

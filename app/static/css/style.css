@@ -324,6 +324,7 @@ body:not(.hide-not-watching) .hide-toggle .hide-on { display: none; }
 
 /* ---- Sync + stats panels ---- */
 
+.stats-head { width: 100%; }
 .stats-bar { position: fixed; bottom: 20px; right: 20px; z-index: 9990; padding: 12px 16px; background: rgba(18,21,28,0.92); border: 1px solid var(--card-border); border-radius: 12px; min-width: 200px; font-size: 0.78rem; backdrop-filter: blur(6px); }
 .stats-row { display: flex; justify-content: space-between; width: 100%; margin-bottom: 4px; }
 .stats-row strong { color: var(--gold-soft); font-size: 0.92rem; }
@@ -471,9 +472,12 @@ body.hide-not-watching .day-block:has(.card:nth-child(6 of .card:is(:not(.not-wa
 /* A DAY THAT HAS NO CARDS TO COUNT answers from the two numbers the shell wrote
    onto it instead — see _day_skeleton.html. `max(1, …)` because a day this viewer
    sees none of is collapsed anyway, and a zero would leave the rows arithmetic
-   below dividing by it. */
-.day-block.is-skeleton { --cols: var(--held); }
-body.hide-not-watching .day-block.is-skeleton { --cols: max(1, var(--shown)); }
+   below dividing by it.
+   READ WITH TYPED attr(), not handed over in a style attribute: the app's
+   Content-Security-Policy applies no inline style (app/csp.py). Measured in
+   Chromium 153, Firefox 155 and WebKit 26.6. */
+.day-block.is-skeleton { --cols: attr(data-held type(<integer>), 1); }
+body.hide-not-watching .day-block.is-skeleton { --cols: max(1, attr(data-visible type(<integer>), 1)); }
 /* An announced-but-not-yet-fetched day. It has nothing to skip, so the off-screen
    skip is turned off and it reserves its own height instead — a rough one, from
    the rows of cards the server already knows are coming, which is a far better
@@ -2658,7 +2662,13 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .ranker-result:hover { background: rgba(255,255,255,0.06); }
 .ranker-result img { width: 30px; height: 45px; object-fit: cover; border-radius: 3px; background: var(--card-border); }
 .ranker-result .ranker-name { flex: 1; min-width: 0; }
-.ranker-result.is-held { opacity: 0.45; cursor: default; }
+/* A RESULT ALREADY ON THE BOARD TAKES NO POINTER AT ALL, which is what stops a
+   click adding it twice — a drag can end in a click on the result it just added,
+   and ranker/dnd.js marks that one held the moment the drop is written. The
+   stylesheet, not a filter on the result's trigger: htmx builds `click[...]`
+   with the Function constructor, which the app's Content-Security-Policy
+   refuses. The drag library already declines to pick a held one up. */
+.ranker-result.is-held { opacity: 0.45; pointer-events: none; }
 
 /* ---- what a board could put back ----
    HIDDEN WHILE IT HOLDS NOTHING, by asking whether it holds an entry. The
@@ -2812,9 +2822,11 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .ranker-pool { flex: 1 0 auto; }
 
 /* Height reserved from a count the server already knew, so a page of cards or a
-   tier's rows slot into space made for them instead of shoving the page down. */
+   tier's rows slot into space made for them instead of shoving the page down.
+   The count is the element's own `data-skeleton-rows`, read with typed attr()
+   because the app's Content-Security-Policy applies no inline style. */
 .ranker-pool-sentinel, .ranker-rows:not([data-loaded]) {
-    min-height: calc(var(--skeleton-rows, 1) * 45px);
+    min-height: calc(attr(data-skeleton-rows type(<number>), 1) * 45px);
     border-radius: 9px;
     background: repeating-linear-gradient(180deg, rgba(255,255,255,0.03) 0 40px, transparent 40px 45px);
 }
@@ -2829,6 +2841,12 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .ranker-sentinel-label { font-size: 0.74rem; color: var(--text-faint); }
 
 /* ---- tiers ---- */
+/* A TIER'S COLOUR IS ITS OWN `data-colour`, read with typed attr() because the
+   app's Content-Security-Policy applies no inline style, and set as a custom
+   property so the label inside inherits it. A tier with no colour has no
+   attribute, which leaves the property unset and every use below on its
+   fallback. */
+.ranker-tier[data-colour] { --tier-colour: attr(data-colour type(<color>)); }
 .ranker-tier {
     border: 1px solid var(--card-border); border-left: 4px solid var(--tier-colour, var(--card-border));
     border-radius: 11px; background: var(--card); margin-bottom: 8px; overflow: hidden;
@@ -2851,6 +2869,9 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .ranker-iso { color: var(--accent-blue); }
 .ranker-strip { flex: 1; display: flex; gap: 2px; overflow: hidden; justify-content: flex-end; }
 .ranker-strip img { width: 24px; height: 36px; object-fit: cover; border-radius: 2px; }
+/* TEN SHOWN OF THE FEW MORE DRAWN (_ranker_tier_strip.html): a poster that fails
+   to load removes itself, and the next one is then within the first ten. */
+.ranker-strip img:nth-of-type(n+11) { display: none; }
 /* A TIER'S OWN CONTROLS SIT OUTSIDE ITS <summary> and are put back onto the
    header line here. A click on a button inside a summary still toggles the
    disclosure it is in, so ⚙ used to close the tier it was opened on unless an

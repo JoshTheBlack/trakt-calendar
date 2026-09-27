@@ -20,9 +20,12 @@
 
    CLICKING A RESULT POSTS IT, and the answer is the page with this search still
    on it — drawn again from the cache the search box's own request filled, so
-   adding a second title from one search costs no second search. The trigger
-   refuses a held result rather than the page checking afterwards, because a
-   drag can end in a click on the result it just added.
+   adding a second title from one search costs no second search. A HELD result
+   cannot be clicked at all, because a drag can end in a click on the result it
+   just added: style.css gives `.ranker-result.is-held` no pointer events, so the
+   click never reaches it. That rule, not a filter on the trigger, because htmx
+   builds an event filter (`click[...]`) with the Function constructor, which the
+   app's Content-Security-Policy refuses (app/csp.py).
 
    Nothing at all for a query too short to search, which the stylesheet reads as
    "hide the list". #}
@@ -34,9 +37,9 @@
      title="Drag into a tier, or click to add to the pool"
      hx-post="/rankings/boards/{{ board_uid }}/items/add" hx-json-enc
      hx-vals='{{ {"key": hit.key, "query": query, "media": hit.media} | tojson }}'
-     hx-trigger="click[!this.classList.contains('is-held')]"
+     hx-trigger="click"
      hx-target="body" hx-swap="innerHTML">
-    {%- if hit.tmdb %}<img loading="lazy" alt="" src="/api/rankings/poster?media={{ hit.media }}&amp;tmdb={{ hit.tmdb }}" onerror="this.remove()">{% endif %}
+    {%- if hit.tmdb %}<img loading="lazy" alt="" src="/api/rankings/poster?media={{ hit.media }}&amp;tmdb={{ hit.tmdb }}" data-if-missing="remove">{% endif %}
     <span class="ranker-name"><span class="ranker-title">{{ hit.title or "Untitled" }}</span><span class="ranker-year">{{ [hit.year, hit.network, (hit.runtime ~ "m") if hit.runtime else ""] | select | map("string") | join(" · ") }}</span></span>
 </div>
 {%- else %}<span class="ranker-preview-hint">Nothing found.</span>

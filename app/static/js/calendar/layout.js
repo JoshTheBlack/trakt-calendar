@@ -62,6 +62,14 @@ function useDeviceTimezone() {
     select.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
+// The 📍 button carries `data-device-timezone` rather than an onclick attribute,
+// because the app's Content-Security-Policy runs no script written in markup
+// (app/csp.py). Delegated from the document so the settings panel can be
+// redrawn under it.
+document.addEventListener('click', (e) => {
+    if (e.target instanceof Element && e.target.closest('[data-device-timezone]')) useDeviceTimezone();
+});
+
 // ---- Jump-to strip: pinned under the header, tucked behind it once scrolled ----
 // The strip sticks below the sticky header, so it needs the header's real height
 // — it wraps to a second row when narrow — published as --header-h for the CSS to
