@@ -15,6 +15,16 @@
 <div class="row">
   <span class="label">{{ label }}</span>
   {% if provider in linked %}
+  {% if provider in needs_reconnect %}
+  {# NEUTRAL WORDING: a stored token that no longer works could be a legacy
+     one from before a cutover, an expired grant, or the person revoking this
+     app on the service's own site — this app has not verified which, so it
+     never claims one. #}
+  <span class="auth-badge off" title="This account's {{ label }} connection needs to be made again.">Needs reconnecting</span>
+  <span class="row-actions">
+    <a class="btn-ghost tiny" href="{{ link_path }}" hx-boost="false">Reconnect</a>
+  </span>
+  {% else %}
   <span class="auth-badge ok">{{ linked.get(provider) or "Linked" }}</span>
   {# FETCH THIS SERVICE'S PICTURE WITHOUT DISCONNECTING FIRST. A picture
      arrives on its own when an account registers with a service or links
@@ -39,6 +49,7 @@
     {% endcall %}
     {% endif %}
   </span>
+  {% endif %}
   {% elif link_path is none %}
   {{ plex.button('Connect', '/auth/plex/link', face='btn-ghost tiny') }}
   {% elif login_configured %}

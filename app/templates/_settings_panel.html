@@ -185,9 +185,10 @@
                credentials are only about the parts that belong to a PERSON: signing
                in with Simkl, and reading your own library. #}
             <div class="stab-panel" data-tab-panel="simkl" role="tabpanel">
-                <p class="hint">A developer application at
+                <p class="hint">A "Server apps &amp; services" application at
                     <a href="https://simkl.com/settings/developer/" target="_blank" rel="noopener">simkl.com/settings/developer</a>
-                    — free, and approved on the spot.</p>
+                    — free, and approved on the spot. A V1 application's credentials will not
+                    work here: Simkl's OAuth v2 needs its own registration.</p>
                 {{ settings_fields.text('simkl_client_id', 'Simkl Client ID', settings.simkl_client_id,
                                         hint='From your Simkl developer application.') }}
                 {{ settings_fields.secret('simkl_client_secret', 'Simkl Client Secret',
@@ -196,10 +197,6 @@
                 {{ settings_fields.copyable('s_simkl_redirect_uri', 'Simkl redirect URI', simkl_redirect_uri,
                                             "Paste this exactly into your Simkl application's Redirect URI field — the whole path, not just the site address.") }}
                 {% endif %}
-                {# Simkl issues no refresh token: the value stands until the user
-                   revokes the application on Simkl's side. #}
-                {{ settings_fields.secret('simkl_access_token', 'Simkl Access Token',
-                                          'The instance-wide token, for anything read with nobody signed in. It does not expire, and there is nothing to refresh — if Simkl starts refusing it, authorize the application again.') }}
                 {{ settings_fields.checkbox('simkl_public_calendar_enabled', 'Include Simkl results on the calendar',
                                             settings.simkl_public_calendar_enabled,
                                             'On by default, and it applies whether or not the credentials above are filled in. Simkl\'s calendar files sit on a public CDN and need none of them, so this instance reads them even with this tab left blank — turn this off if you would rather it never asked. It does not affect the watch tracker, which reads each person\'s own Simkl account through their own link.') }}

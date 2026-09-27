@@ -126,6 +126,52 @@ class IdentityToProviderCallTests(EncryptionIntegrationTestCase):
         self.assertEqual(recorder.authorizations, ["Bearer alice-token"])
 
 
+class SimklIdentityAndPkceSealingTests(EncryptionIntegrationTestCase):
+    """The v2 cutover's own sealed values: a linked identity's access AND
+    refresh token (Trakt's counterpart is proven above; Simkl's is new since
+    v2 issues a refresh token where v1 issued none), and the PKCE verifier
+    a handshake row carries only for the seconds between redirecting the
+    browser and the callback consuming it."""
+
+    def test_a_simkl_identitys_tokens_are_ciphertext_at_rest_and_plaintext_on_read(self):
+        from app.auth import simkl_routes
+
+        _set_key(KEY)
+        user_id = asyncio.run(auth.create_user(
+            username="bob", password=None, settings=Settings()))
+
+        def _link(conn):
+            return auth.insert_linked_identity(
+                conn, user_id=user_id, provider="simkl", provider_user_id="9999",
+                display_name="Bob", access_token="simkl_at_bob", refresh_token="simkl_rt_bob",
+            )
+
+        identity_id = asyncio.run(db.transaction(_link))
+
+        row = asyncio.run(db.fetch_one(
+            "SELECT access_token, refresh_token FROM linked_identities WHERE id = ?",
+            (identity_id,)))
+        self.assertTrue(row["access_token"].startswith(secrets_box.PREFIX))
+        self.assertTrue(row["refresh_token"].startswith(secrets_box.PREFIX))
+        self.assertNotIn("simkl_at_bob", row["access_token"])
+        self.assertNotIn("simkl_rt_bob", row["refresh_token"])
+
+        # The read path a real Simkl call goes through resolves both back.
+        token = asyncio.run(simkl_routes.access_token_for_user(user_id))
+        self.assertEqual(token, "simkl_at_bob")
+        self.assertEqual(asyncio.run(simkl_routes.stored_access_token(user_id)), "simkl_at_bob")
+
+    def test_the_pkce_verifier_is_sealed_on_the_handshake_row(self):
+        _set_key(KEY)
+        state = asyncio.run(auth.create_handshake(
+            provider="simkl", purpose="login", pkce_verifier="the-real-verifier"))
+        stored = asyncio.run(db.fetch_value(
+            "SELECT pkce_verifier FROM auth_handshakes WHERE state = ?", (state,)))
+        self.assertTrue(stored.startswith(secrets_box.PREFIX))
+        self.assertNotIn("the-real-verifier", stored)
+        self.assertEqual(secrets_box.open_(stored), "the-real-verifier")
+
+
 class AppLevelTraktTokenTests(EncryptionIntegrationTestCase):
     """The operator's own Trakt token, sealed in app_secrets and read through
     load_settings() on the highest-traffic path: every calendar fetch."""

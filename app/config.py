@@ -109,6 +109,16 @@ class Settings:
     trakt_refresh_token: str = ""
     trakt_token_expires_at: int = 0  # unix timestamp; 0 = unknown/never obtained via OAuth
     simkl_client_id: str = ""
+    # NO LONGER AN OPERATOR-PASTED SETTING (D2/D3 of the v2 cutover): the
+    # Settings panel offers no field for this any more, because D2 leaves no
+    # non-public Simkl call for an operator-wide token to authenticate — search
+    # and /redirect need a real PERSON's own v2 grant, never an instance-wide
+    # one. The field itself stays, because it is still how that person's own
+    # token travels: distrakt.viewer.settings_for_user swaps it in per request,
+    # exactly as it swaps in Trakt's. A value an operator saved before this
+    # cutover is left in storage untouched (nothing here migrates or clears
+    # it) — it simply stops being reachable through the panel and is never
+    # read for an instance-wide Settings object again.
     simkl_client_secret: str = ""
     simkl_access_token: str = ""
     # STILL NO simkl_refresh_token AND NO simkl_token_expires_at, even though

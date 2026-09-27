@@ -674,6 +674,19 @@ class LegacyTokenTests(SimklOAuthTestCase):
         self.assertEqual(int(rows[0]["id"]), identity_id)
         self.assertEqual(rows[0]["access_token"], "simkl_at_access-1")
 
+    def test_the_account_page_offers_reconnect_not_linked(self):
+        """Neutral wording: a 401 can also mean the person revoked the app on
+        simkl.com, so the page never claims a specific cause — only that
+        reconnecting is needed. A working link (RefreshSerializationTests'
+        shape) draws the ordinary "Linked" badge instead — see that class."""
+        user = self.make_user("legacy", calendar_approved=True)
+        self._v1_shaped_identity(user)
+        self.sign_in_as(user)
+        body = self.client.get("/me").text
+        self.assertIn("Needs reconnecting", body)
+        self.assertIn('href="/auth/simkl/link"', body)
+        self.assertNotIn(">Linked<", body)
+
 
 class RefreshSerializationTests(SimklOAuthTestCase):
     """Simkl v2 issues a real refresh token (180 days, sliding, non-rotating)

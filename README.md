@@ -224,7 +224,7 @@ for why it's split that way and what's still in the file.
 | Setting | What it does |
 |---|---|
 | **Trakt Client ID / Access Token** | Your Trakt API credentials |
-| **Simkl Client ID / Secret / Access Token** | Optional — see [Simkl](#simkl--an-optional-second-source) for which of the three each feature needs |
+| **Simkl Client ID / Secret** | Optional — see [Simkl](#simkl--an-optional-second-source) for which of the two each feature needs. No instance-wide access token any more: each person links their own |
 | **Include Simkl results on the calendar** | Instance-wide, on by default. Untick and Simkl leaves the calendar immediately, including months already cached; tick it again and they come back without clearing anything |
 | **Timezone** | Air times are converted to this zone (grouped IANA dropdown) |
 | **Default endpoint** | Which calendar to show by default |
@@ -330,11 +330,13 @@ capabilities are gated separately**, so how much you set up depends on how much 
 | Simkl titles on the calendar | **Nothing.** The calendar comes from public CDN files that take no id and no token |
 | Details for a Simkl-only title (overview, episodes, trailer) | **Client ID** — Simkl's per-title endpoints take it as a query parameter |
 | **Log in with Simkl** / linking a Simkl account | **Client ID + Secret + Public base URL** |
-| Reading a linked account's own Simkl history | **Client ID + Access Token** |
+| Reading a linked account's own Simkl history, searching Simkl's catalogue | Each person's **own** Simkl link — there is no instance-wide credential for these any more |
 
 To create the application, go to [simkl.com/settings/developer](https://simkl.com/settings/developer)
-and add one. The **redirect URI must match byte for byte** — Simkl compares it exactly, and
-unlike Trakt there is no device-code flow to fall back on if it is wrong. It is:
+and add one, choosing **"Server apps & services"** as the application type — Simkl's OAuth v2
+needs its own registration; a v1 application's credentials will not work here. The **redirect
+URI must match byte for byte** — Simkl compares it exactly, and unlike Trakt there is no
+device-code flow to fall back on if it is wrong. It is:
 
 ```
 <your public base URL>/auth/simkl/callback
@@ -342,8 +344,10 @@ unlike Trakt there is no device-code flow to fall back on if it is wrong. It is:
 
 Settings ▸ **Simkl** shows the exact string to paste once a public base URL is saved, so
 copy it from there rather than typing it. Then paste the client id and secret back into the
-same tab. Simkl issues no refresh tokens, so an access token here is entered once and
-stays until you change it.
+same tab. There is no access token field to fill in here any more: each person authorizes
+their own by signing in with Simkl from their **Account** page, and that grant refreshes
+itself for as long as it is used — Simkl issues a real refresh token under this version of
+its API, unlike the version this app used before.
 
 ### What Simkl's calendar does and does not cover
 
@@ -472,7 +476,7 @@ app/
     provider_avatars.py  Seeding an account's picture from the service it signed in with
     trakt.py          The Trakt OAuth flows and refresh-token renewal
     trakt_routes.py   "Log in with Trakt" (OAuth redirect flow)
-    simkl.py          The Simkl OAuth flow (no refresh tokens — Simkl issues none)
+    simkl.py          The Simkl OAuth v2 flow, with PKCE, refresh and revoke
     simkl_routes.py   "Log in with Simkl"
     plex.py           The Plex PIN flow
     plex_routes.py    "Log in with Plex" (PIN flow)

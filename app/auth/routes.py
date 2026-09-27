@@ -699,6 +699,20 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
     settings = load_settings()
     identities = await auth.list_identities(user.user_id)
     linked = {row["provider"]: row["display_name"] for row in identities}
+    # WHICH LINKED SERVICES NEED RECONNECTING, drawn fresh each time this page
+    # is asked for rather than stored as a flag — a row's true state is
+    # whatever access_token_for_user answers right now. Simkl is the one
+    # source this applies to today: a legacy v1-shaped token is never sent
+    # (D1's hard cutover) and reads as "reconnect needed" exactly like a
+    # refresh that failed (simkl_routes.access_token_for_user), and both cases
+    # are indistinguishable from here, on purpose — see the template's wording.
+    # NEUTRAL WORDING, DELIBERATELY: a 401 can also mean the person themselves
+    # revoked this app on simkl.com, so this never claims a specific cause it
+    # has not verified, only that reconnecting is needed.
+    from . import simkl_routes
+    needs_reconnect = set()
+    if "simkl" in linked and await simkl_routes.access_token_for_user(user.user_id) is None:
+        needs_reconnect.add("simkl")
     account = await auth.get_user(user.user_id)
     orders = await _account_orders(user.user_id, linked, settings)
     tracker_prefs = orders.prefs
@@ -714,6 +728,7 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
         "distrakt_available": bool(user and user.distrakt_approved and user.has_tracker_identity),
         "user": user,
         "linked": linked,
+        "needs_reconnect": needs_reconnect,
         # WHETHER THIS ACCOUNT'S SHARE LINKS PUBLISH ITS WATCH HISTORY. It is on
         # this page rather than in the Share panel because it is an account
         # decision and not a per-link view option: switching it off has to reach
