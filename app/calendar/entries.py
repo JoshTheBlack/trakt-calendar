@@ -33,8 +33,11 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from .. import db
-from ..providers.base import (Media, Record, Source, collect_ids,
-                              epoch_moment)
+# The hit type and the field-folding rules a service search answers with, so a
+# title read from storage is described exactly as a service's answer would be.
+from ..providers import title_search
+from ..providers.base import (ItemKey, Media, Record, SearchHit, Source, collect_ids,
+                              epoch_moment, parse_item_key)
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +65,15 @@ def _utc_date(air_ts: float) -> str:
     # record's air time, including on a platform whose C library refuses dates
     # before 1970 — see providers/base.epoch_moment.
     return epoch_moment(air_ts).strftime("%Y-%m-%d")
+
+
+# THE SHORTEST QUERY WORTH ASKING ABOUT, measured in FOLDED characters. One
+# character matches most of the stored titles and answers nothing anybody
+# wanted; two is where a substring starts to mean something. Beside the folding
+# because it is a rule about the folded needle, and here rather than in any one
+# search so the calendar's search and the stored-title search a tracker or a
+# board asks cannot disagree about it.
+MIN_QUERY = 2
 
 
 def fold_title(title: str) -> str:
@@ -590,6 +602,15 @@ _BY_KEY_SQL = _READ_SQL.replace(
     "WHERE a.endpoint = ? AND a.title_key IN (__KEYS__)")
 
 
+def _like_escaped(folded: str) -> str:
+    """A folded string with LIKE's own wildcards neutralised — see `like_needle`
+    for why a search box needs that. The backslash is escaped first so it cannot
+    smuggle the escape character itself."""
+    for char in ("\\", "%", "_"):
+        folded = folded.replace(char, "\\" + char)
+    return folded
+
+
 def like_needle(query: str) -> str:
     """`query` folded and wrapped for a LIKE, with the wildcards it may contain
     itself neutralised.
@@ -597,13 +618,9 @@ def like_needle(query: str) -> str:
     A SEARCH BOX IS UNTRUSTED INPUT AND `%` IS A CHARACTER IN TITLES. Left
     unescaped, a query of `%` matches the whole table and one of `100%` silently
     matches far more than it should; both are ordinary things to type rather
-    than attacks — this instance holds `100% Footy` and `The 1% Club (US)`. The
-    backslash is escaped first so it cannot smuggle the escape character itself.
+    than attacks — this instance holds `100% Footy` and `The 1% Club (US)`.
     """
-    folded = fold_title(query)
-    for char in ("\\", "%", "_"):
-        folded = folded.replace(char, "\\" + char)
-    return f"%{folded}%"
+    return f"%{_like_escaped(fold_title(query))}%"
 
 
 async def groups_matching(endpoint_key: str, query: str, limit: int) -> list[str]:
@@ -632,6 +649,161 @@ async def read_groups(endpoint_key: str, title_keys) -> list[Record]:
     sql = _BY_KEY_SQL.replace("__KEYS__", ", ".join("?" * len(keys)))
     rows = await db.fetch_all(sql, (endpoint_key, *keys))
     return _in_fetch_order(rows)
+
+
+# WHICH STORED TITLES A QUERY MATCHES, whatever calendar they sit on. Grouped by
+# `title_key` because a TITLE is the answer — a search for a show to add is not
+# a search for its airings — and ranked so the answer reads as a person expects:
+# a title that STARTS with what was typed before one that merely contains it,
+# then the shorter title (the show itself before its spin-offs), then a stable
+# tie-break so the same query lists the same titles in the same order.
+# `{film_rows}` is filled in by the caller — see `_KEEP_FILM_ROWS`.
+#
+# THE MATCH IS FOUND IN THE INDEX, THEN THE ROWS ARE READ, and the subquery is
+# what makes the planner do it in that order. A title row is wide — an overview,
+# a whole id map — so filtering it directly scans the table: measured on a copy
+# of a real instance (21,247 rows) at ~72ms a keystroke whatever was typed, even
+# a query matching nothing, because the GROUP BY walked the title_key index and
+# visited every row. `ix_calendar_titles_fold` holds only the folded title and
+# the rowid, so scanning IT for the substring is ~2ms, and only the matches are
+# then looked up: 2-3ms for a query naming a title, ~21ms for two letters that
+# match thousands of rows.
+_TITLES_MATCHING_SQL = r"""
+SELECT title_key,
+       MIN(CASE WHEN title_fold LIKE ? ESCAPE '\' THEN 0 ELSE 1 END) AS starts,
+       MIN(length(title_fold)) AS span
+FROM calendar_titles
+WHERE rowid IN (SELECT rowid FROM calendar_titles WHERE title_fold LIKE ? ESCAPE '\')
+  AND media = ? {film_rows}
+GROUP BY title_key
+ORDER BY starts, span, title_key
+LIMIT ?
+"""
+
+# EVERY ROW OF THE TITLES NAMED, not just the rows whose spelling matched: two
+# services may spell one title differently, and a title is described by all of
+# its services or it reads differently here from how the calendar draws it.
+# Ordered the way `known_about` orders one title's rows — a row stating a
+# network before one that does not, then the lowest id — so which of a service's
+# several rows speaks for it never depends on scan order.
+_TITLE_ROWS_SQL = """
+SELECT source, source_id, title_key, title, ids_json, year, network, runtime, overview
+FROM calendar_titles
+WHERE media = ? AND title_key IN ({keys}) {film_rows}
+ORDER BY title_key, network = '', source_id
+"""
+
+# SIMKL FILES SOME FILMS ON ITS ANIME SERIES CALENDAR, and `anime_type` is the
+# only thing that says so (see the column's own comment in app/db.py). A show
+# search never offers one: the same rule app/providers/simkl/search.py applies
+# to a service's answer — asked for shows, get shows — because a film found
+# from a show box has no season to pick and no watched-on day to be filed with.
+_KEEP_FILM_ROWS = {Media.SHOW: "AND anime_type != 'movie'", Media.MOVIE: ""}
+
+
+def _stored_hit(title_key: str, rows, media: Media) -> title_search.MergedSearchHit:
+    """One stored title's rows as the hit a service search would have answered
+    with — one row per service, registry order leading, folded by the service
+    merge's own rules (title_search.fold_one_title) so the two halves of a
+    search cannot describe one title two ways.
+
+    THE SERVICE'S OWN ID IS WHAT A PICK CALLS BACK WITH, read from `ids_json`
+    under the name the service answers to (`_ID_NAMESPACE`) and falling back to
+    `source_id` — the same reading `stored_titles` gives, because a Simkl row
+    written before its storage key became the numeric id is filed under a slug
+    the per-title lookup is not addressed by.
+    """
+    first_per_source: dict[str, Any] = {}
+    for row in rows:
+        first_per_source.setdefault(str(row["source"]), row)
+    hits = []
+    for name in sorted(first_per_source, key=lambda s: _SOURCE_ORDER.get(s, 99)):
+        row = first_per_source[name]
+        ids = json.loads(row["ids_json"] or "{}") if row["ids_json"] else {}
+        year = _as_year(row["year"])
+        hits.append(SearchHit(
+            source=Source(name),
+            source_id=str(ids.get(_ID_NAMESPACE.get(name, name)) or row["source_id"]),
+            media=media, ids=ids, title=str(row["title"] or ""),
+            year=year if isinstance(year, int) else None, season=None,
+            network=str(row["network"] or ""), runtime=row["runtime"],
+            overview=str(row["overview"] or "")))
+    return title_search.fold_one_title(hits, _item_key_of(title_key), title_key=title_key)
+
+
+def _item_key_of(title_key: str) -> ItemKey | None:
+    """The shared identity a stored title was grouped under, or None when the
+    waterfall could not key it and it was stored under a per-source identity
+    instead (app/calendar/cache.py's `group_base`)."""
+    try:
+        return parse_item_key(title_key)
+    except ValueError:
+        return None
+
+
+async def _hits_for(title_keys: list[str], media: Media) -> list[title_search.MergedSearchHit]:
+    """`title_keys`' stored rows as hits, in the order the keys were given."""
+    if not title_keys:
+        return []
+    sql = _TITLE_ROWS_SQL.format(keys=", ".join("?" * len(title_keys)),
+                                 film_rows=_KEEP_FILM_ROWS[media])
+    rows = await db.fetch_all(sql, (str(media), *title_keys))
+    by_key: dict[str, list] = {}
+    for row in rows:
+        by_key.setdefault(str(row["title_key"]), []).append(row)
+    return [_stored_hit(key, by_key[key], media) for key in title_keys if key in by_key]
+
+
+async def titles_matching(query: str, media: Media, limit: int) -> list[title_search.MergedSearchHit]:
+    """Every stored title of `media` whose name matches `query`, ONE HIT PER
+    TITLE, as the same hit type a service search answers with.
+
+    WHAT "STORED" MEANS. A title is here because some calendar month this
+    instance loaded carried it — whoever's month, on whichever calendar. So this
+    answers "does this app already know a title by that name", which is what a
+    person typing into an ADD box is asking, and NOT "where on my calendar is
+    it": there are no viewer filters here, no source selection and no calendar
+    endpoint, and a title somebody's filters hide is still a title they can add.
+    app/calendar/search.py's `stored` is the other question, and it confirms its
+    answers through the read path because it promises a card.
+
+    ONE HIT PER TITLE, whoever stored it. A title Trakt and Simkl both list is
+    one hit carrying both services' marks and the union of their ids — the
+    service merge's own rule for two services answering one query.
+
+    NO NETWORK AND NO BUDGET. This is two reads over one table, which is what
+    lets it run on every keystroke — measured on a copy of a real instance
+    (21,247 stored titles), 2-3.5ms for a query naming a title and ~21ms for two
+    letters that match thousands; see `_TITLES_MATCHING_SQL` for why its shape
+    is what buys that.
+
+    Shorter than `MIN_QUERY` answers nothing, the same rule the calendar's own
+    search keeps, because it is the same rule.
+    """
+    folded = fold_title(query)
+    if len(folded) < MIN_QUERY:
+        return []
+    escaped = _like_escaped(folded)
+    rows = await db.fetch_all(
+        _TITLES_MATCHING_SQL.format(film_rows=_KEEP_FILM_ROWS[media]),
+        (f"{escaped}%", f"%{escaped}%", str(media), int(limit)))
+    return await _hits_for([str(row["title_key"]) for row in rows], media)
+
+
+async def stored_title(title_key: str, media: Media) -> title_search.MergedSearchHit | None:
+    """The one stored title `title_key` names, as `titles_matching` would have
+    listed it, or None when nothing of `media` is stored under it.
+
+    THIS IS HOW A TYPED PICK IS RESOLVED, and it is the whole of what makes one
+    safe to add from. The page names a title by the identity it was listed
+    under and nothing else; the title, the ids and the network are read back
+    out of the rows the services wrote. A key this instance does not hold
+    answers None, never a title built from what the request said.
+    """
+    if not title_key:
+        return None
+    hits = await _hits_for([str(title_key)], media)
+    return hits[0] if hits else None
 
 
 # The fields a surface can be showing one service's answer for while another

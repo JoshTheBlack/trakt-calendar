@@ -196,7 +196,9 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "asks providers/detail_source.py which service can describe it, and the "
         "search's catalogue half asks the services through "
         "providers/title_search.py — the one fan-out and merge every searching "
-        "feature shares"),
+        "feature shares. The stored-title search (entries.titles_matching) "
+        "answers with that module's hit type, folded by its rules, so a title "
+        "reads the same whichever half of a search found it"),
     (DISTRAKT, PROVIDERS): Edge(
         "the tracker reads the viewer's own history and progress. Its add flow "
         "searches the catalogues and reads a chosen result back through "

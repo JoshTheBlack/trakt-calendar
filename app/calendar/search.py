@@ -62,12 +62,6 @@ from ..providers.base import (Item, Media, Source, SourceUnavailable, epoch_mome
 
 logger = logging.getLogger(__name__)
 
-# THE SHORTEST QUERY WORTH ASKING ABOUT. One character matches most of the
-# calendar and answers nothing anybody wanted; two is where a substring starts
-# to mean something. Enforced here rather than in the route so the typing path
-# and the Enter path cannot disagree about it.
-MIN_QUERY = 2
-
 # HOW MANY MATCHING GROUPS ONE ENDPOINT MAY CONTRIBUTE. A group is a title, so
 # this is a ceiling on titles rather than on airings — one title airing weekly
 # for a year is one group and fifty rows.
@@ -245,8 +239,10 @@ async def stored(query: str, *, settings, prefs, tz: ZoneInfo,
     month nobody has opened is a job for the catalogue half, which the viewer has
     to ask for.
     """
+    # entries.MIN_QUERY, enforced here rather than in the route so the typing
+    # path and the Enter path cannot disagree about it.
     needle = entries.fold_title(query)
-    if len(needle) < MIN_QUERY:
+    if len(needle) < entries.MIN_QUERY:
         return Results()
 
     found: list[Airing] = []
@@ -357,7 +353,7 @@ async def catalogue(query: str, *, settings, prefs, tz: ZoneInfo,
     result list.
     """
     needle = entries.fold_title(query)
-    if len(needle) < MIN_QUERY:
+    if len(needle) < entries.MIN_QUERY:
         return Results()
 
     asked = providers.for_catalogue_search(settings)

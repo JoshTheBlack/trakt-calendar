@@ -82,6 +82,17 @@ class MergedSearchHit(NamedTuple):
     `resolve_key(hit.media, hit.ids)` — a show and a film can never resolve to
     the same key — so taking it from whichever hit calls `start()` is safe
     rather than a guess.
+
+    `title_key` IS WHERE A HIT READ FROM THIS INSTANCE'S STORED CALENDAR CAME
+    FROM, and None for a hit a service answered just now. It is the one field
+    that differs between the two halves of a search, and it is what a pick
+    NAMES each by: a stored hit by that identity, which the server reads the
+    stored rows back by (app/calendar/entries.py's `stored_title`); a service
+    hit by its query and its place in the answer (`resolve_pick`), because a
+    service hit can have no shared identity at all until it is looked up.
+    Carried rather than re-derived from `key`, because a stored title the
+    identity waterfall could not key still has a stored identity — a per-source
+    one — and re-deriving it would be a second statement of that rule.
     """
     key: ItemKey | None
     season: int | None
@@ -93,6 +104,7 @@ class MergedSearchHit(NamedTuple):
     runtime: int | None
     overview: str
     media: Media
+    title_key: str | None = None
 
 
 class SearchMergeResult(NamedTuple):
@@ -167,18 +179,6 @@ class _Merging:
         a different title from the one it draws is a wrong ADD rather than a
         wrong-looking row, and the guard belongs beside the field it protects.
         """
-        if _titles_differ_materially(self.title, hit.title):
-            # The season unit is what tells apart titles that share one match
-            # id, and a mapping this thin (Simkl's own `season` /
-            # `mapped_tvdb_seasons`, or simply None on every source measured so
-            # far) is where a wrong collapse would show up first. This is an
-            # operator's signal, not the viewer's — nothing here refuses the
-            # merge over it.
-            logger.warning(
-                "Catalogue search merged %r (%s) and %r (%s) onto one row (%s, "
-                "season %s) — check whether the dedupe unit actually matched.",
-                self.title, next(iter(self.source_ids)), hit.title, hit.source,
-                self.key, self.season)
         # THE LEADER'S ID SURVIVES, exactly as its title and its ids do — see
         # the docstring for why this one is guarded rather than assigned.
         # Observed before it was: a "frieren" search drew "Sousou no Frieren
@@ -197,11 +197,32 @@ class _Merging:
         if self.runtime is None:
             self.runtime = hit.runtime
 
-    def finish(self) -> MergedSearchHit:
+    def finish(self, title_key: str | None = None) -> MergedSearchHit:
         return MergedSearchHit(key=self.key, season=self.season,
                                source_ids=dict(self.source_ids), ids=dict(self.ids),
                                title=self.title, year=self.year, network=self.network,
-                               runtime=self.runtime, overview=self.overview, media=self.media)
+                               runtime=self.runtime, overview=self.overview, media=self.media,
+                               title_key=title_key)
+
+
+def fold_one_title(hits: Sequence[SearchHit], key: ItemKey | None, *,
+                   title_key: str | None = None) -> MergedSearchHit:
+    """Hits ALREADY KNOWN to name one title, at most one per source and in
+    registry order, folded into one hit by the same rules a merge folds a slot
+    with — the first leads, the rest fill what it left blank, the ids union.
+
+    FOR A CALLER THAT HAS DECIDED IDENTITY ITSELF, which is why it takes `key`
+    rather than resolving one: the stored calendar groups its rows by the
+    identity it wrote them under (`calendar_titles.title_key`), and asking the
+    waterfall again of ids enrichment has since added to could split one stored
+    title in two. What this shares with `merge_search_hits` is how a row's
+    FIELDS are chosen, so a title reads the same whichever half of a search
+    found it.
+    """
+    slot = _Merging.start(hits[0], key)
+    for hit in hits[1:]:
+        slot.absorb(hit)
+    return slot.finish(title_key)
 
 
 def merge_search_hits(
@@ -282,6 +303,21 @@ def merge_search_hits(
             slot = next((s for s in open_slots
                          if hit.season is not None or hit.source not in s.source_ids), None)
             if slot is not None:
+                if _titles_differ_materially(slot.title, hit.title):
+                    # The season unit is what tells apart titles that share one
+                    # match id, and a mapping this thin (Simkl's own `season` /
+                    # `mapped_tvdb_seasons`, or simply None on every source
+                    # measured so far) is where a wrong collapse would show up
+                    # first. This is an operator's signal, not the viewer's —
+                    # nothing here refuses the merge over it. It lives HERE,
+                    # where the dedupe is decided, and not in the fold every
+                    # caller shares: a caller folding rows it already knows are
+                    # one title (fold_one_title) has decided nothing to check.
+                    logger.warning(
+                        "Catalogue search merged %r (%s) and %r (%s) onto one row "
+                        "(%s, season %s) — check whether the dedupe unit actually "
+                        "matched.", slot.title, next(iter(slot.source_ids)),
+                        hit.title, hit.source, slot.key, slot.season)
                 slot.absorb(hit)
                 continue
             slot = _Merging.start(hit, key)
@@ -418,9 +454,18 @@ async def pick_from_hit(settings, hit: MergedSearchHit, *, cached_only: bool) ->
     is FOR; an add may not make anything, because an add that can search is an
     add that spends a budget nobody is counting.
 
-    THE FIRST SOURCE IN THE HIT'S OWN ORDER IS WHO IS ASKED, and that order is
-    the registry's — whoever found a title is who can be asked about it, and a
-    Simkl-only instance has no Trakt entry to reach for.
+    THE FIRST SOURCE IN THE HIT'S OWN ORDER THAT THIS INSTANCE CAN DESCRIBE WITH
+    IS WHO IS ASKED, and that order is the registry's — whoever found a title is
+    who can be asked about it, and a Simkl-only instance has no Trakt entry to
+    reach for. For a hit a service answered just now the first source always
+    qualifies: it was searchable, and describing asks strictly less of an
+    instance than searching does. A hit read from the stored calendar is where
+    the difference shows: its rows were written by whichever services filled a
+    month, perhaps long before this instance stopped being able to ask one of
+    them, and a title another source also holds should still be addable.
+    Describing is a public per-title read on every source (DetailPort
+    .catalogue_configured), so a viewer who never linked the service that
+    leads still gets its season list.
     """
     # THE HIT'S OWN MEDIA DECIDES, NOT THE SEARCH THAT FOUND IT. Simkl's anime
     # search mixes TV and film under one endpoint (see
@@ -432,10 +477,13 @@ async def pick_from_hit(settings, hit: MergedSearchHit, *, cached_only: bool) ->
         # is the whole answer, which is also why an unfileable one is refused on
         # the row it is drawn as rather than on the click.
         return Pick(hit.title, hit.network, hit.year, dict(hit.ids), [], None, hit.media)
-    source, source_id = next(iter(hit.source_ids.items()))
-    provider = providers.get(source)
-    if not provider.detail_port.catalogue_configured(settings):
+    asked = next(((provider, source_id) for source, source_id in hit.source_ids.items()
+                  if (provider := providers.get(source)) is not None
+                  and provider.detail_port is not None
+                  and provider.detail_port.catalogue_configured(settings)), None)
+    if asked is None:
         return None
+    provider, source_id = asked
     answer = await provider.detail_port.fetch_seasons(settings, source_id, hit.media,
                                                       cached_only=cached_only)
     # THE LOOKUP WINS A CONFLICT and the hit's own ids fill in the rest. This

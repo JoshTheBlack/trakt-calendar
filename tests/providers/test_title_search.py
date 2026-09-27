@@ -13,6 +13,7 @@ import ast
 import asyncio
 import logging
 import unittest
+import unittest.mock
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -406,6 +407,69 @@ class SearchCatalogueTests(unittest.IsolatedAsyncioTestCase):
         await search.search_catalogue(
             [(Source.TRAKT, trakt), (Source.SIMKL, simkl)], SETTINGS, Media.SHOW, "x")
         self.assertEqual(order, ["trakt-start", "simkl-start", "simkl-end", "trakt-end"])
+
+
+class FoldOneTitleTests(unittest.TestCase):
+    """For a caller that has already decided the hits name one title — the
+    stored calendar, which groups its rows by the identity it wrote them under."""
+
+    def test_the_first_leads_and_the_rest_fill_its_gaps(self):
+        folded = search.fold_one_title([
+            hit(Source.TRAKT, "1", tmdb="1429", title="Attack on Titan", network=""),
+            hit(Source.SIMKL, "9", tmdb="1429", mal="16498", title="Shingeki no Kyojin",
+                network="MBS", overview="Walls."),
+        ], ItemKey("show", "tmdb", "1429"), title_key="show:tmdb:1429")
+        self.assertEqual(folded.title, "Attack on Titan")
+        self.assertEqual(folded.network, "MBS")
+        self.assertEqual(folded.overview, "Walls.")
+        self.assertEqual(folded.ids, {"tmdb": "1429", "mal": "16498"})
+        self.assertEqual(list(folded.source_ids), [Source.TRAKT, Source.SIMKL])
+        self.assertEqual(folded.title_key, "show:tmdb:1429")
+
+    def test_two_spellings_of_a_title_it_was_told_is_one_are_not_a_warning(self):
+        """Services name one show differently all the time ("Frieren: Beyond
+        Journey's End" and "Sousou no Frieren"); the merge's warning is about ITS
+        dedupe decision, and a caller folding a known title decided nothing."""
+        with self.assertNoLogs("app.providers.title_search", level="WARNING"):
+            search.fold_one_title([
+                hit(Source.TRAKT, "1", tmdb="1", title="Frieren: Beyond Journey's End"),
+                hit(Source.SIMKL, "9", tmdb="1", title="Sousou no Frieren"),
+            ], ItemKey("show", "tmdb", "1"))
+
+    def test_a_service_search_hit_carries_no_stored_identity(self):
+        result = search.merge_search_hits([(Source.TRAKT, [hit(Source.TRAKT, "1", tmdb="1")])])
+        self.assertIsNone(result.hits[0].title_key)
+
+
+class PickFromHitTests(unittest.IsolatedAsyncioTestCase):
+    def _hit(self, source_ids):
+        return search.MergedSearchHit(
+            key=None, season=None, source_ids=source_ids, ids={"tmdb": 1},
+            title="A Show", year=2020, network="", runtime=None, overview="",
+            media=Media.SHOW)
+
+    async def test_the_first_source_this_instance_can_describe_with_is_asked(self):
+        """A stored title may lead with a service this instance can no longer
+        ask; the next one that can answers instead of the pick failing."""
+        from app.config import Settings
+        from app.providers.base import SeasonsAnswer
+        from app.providers.simkl import detail as simkl_detail
+
+        seasons = AsyncMock(return_value=SeasonsAnswer(
+            seasons=[{"season": 1, "episode_count": 3}], named_season=None, ids={},
+            network=""))
+        with unittest.mock.patch.object(simkl_detail, "fetch_seasons", seasons):
+            pick = await search.pick_from_hit(
+                Settings(simkl_client_id="scid"),
+                self._hit({Source.TRAKT: "1", Source.SIMKL: "2"}), cached_only=False)
+        self.assertEqual(seasons.await_args.args[1], "2")
+        self.assertEqual(pick.seasons, [{"season": 1, "episode_count": 3}])
+
+    async def test_nobody_able_to_describe_it_is_no_pick(self):
+        from app.config import Settings
+
+        self.assertIsNone(await search.pick_from_hit(
+            Settings(), self._hit({Source.TRAKT: "1", Source.SIMKL: "2"}), cached_only=False))
 
 
 class OneCopyTests(unittest.TestCase):
