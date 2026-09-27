@@ -36,7 +36,7 @@ from . import (arrival, backfill, counts, discord_fmt, episode_progress, lifecyc
 from .. import distrakt as distrakt_store
 from .. import auth, authz, chrome, clock, db, details_panel, providers, route_params
 from ..auth import AuthLevel, viewer
-from ..calendar import share_links
+from ..calendar import entries as calendar_entries, share_links
 from ..config import load_settings
 from ..endpoints import endpoint_choices
 from ..media import logos
@@ -2161,9 +2161,14 @@ def _search_hit_payload(hit: title_search.MergedSearchHit) -> dict:
     `source_ids` names both which sources found it (the marks) and, per source,
     the id a season lookup calls back with — see MergedSearchHit's own
     docstring for why one field carries both.
+
+    `title_key` IS HOW A ROW NAMES ITSELF when it came from the stored calendar
+    rather than from a service just now — see `_named_pick` for the two ways a
+    pick is named and why they differ.
     """
     return {
         "key": str(hit.key) if hit.key is not None else None,
+        "title_key": hit.title_key,
         "season": hit.season,
         "source_ids": {str(source): source_id for source, source_id in hit.source_ids.items()},
         "ids": hit.ids,
@@ -2192,6 +2197,45 @@ def _unkeyable_reason(media: Media, ids: dict, title: str) -> str | None:
     except distrakt_store.UnkeyableRecord as exc:
         return str(exc)
     return None
+
+
+async def _named_pick(settings, media: Media, named, *,
+                      cached_only: bool) -> title_search.Pick | None:
+    """The search result `named` names, resolved from what a SERVICE said, or
+    None when nothing this instance holds answers to that name.
+
+    TWO WAYS TO NAME A RESULT, ONE PER HALF OF THE SEARCH, and neither carries a
+    title. A row a service answered just now names its query and its place in
+    that answer (`q`, `i`), and the answer is re-read from where the search
+    stored it (title_search.resolve_pick) — it may have no shared identity to be
+    named by until it is looked up. A row read from the stored calendar names
+    the identity it is stored under (`t`, a calendar_titles.title_key), and the
+    title, the ids and the network are read back out of the rows the services
+    wrote (calendar/entries.py's stored_title) — so a key this instance does not
+    hold is a refusal, never a title built from what the page sent. Either way
+    the per-title season lookup then runs exactly as it always has
+    (title_search.pick_from_hit).
+
+    `named` IS WHAT THE REQUEST CARRIED — a GET's query parameters or a POST's
+    JSON body — because the fragment that draws the season picker and the add
+    that follows it name the same result the same way.
+    """
+    title_key = str(named.get("t") or "")
+    if title_key:
+        hit = await calendar_entries.stored_title(title_key, media)
+        if hit is None:
+            return None
+        return await title_search.pick_from_hit(settings, hit, cached_only=cached_only)
+    return await title_search.resolve_pick(settings, media, str(named.get("q") or ""),
+                                           named.get("i"), cached_only=cached_only)
+
+
+def _pick_gone(named) -> str:
+    """What to say when `_named_pick` finds nothing — which of the two ways the
+    result was named says what went away, and so what to do about it."""
+    if named.get("t"):
+        return "That title is no longer stored here — search for it again."
+    return "That search has expired — search for it again."
 
 
 def _search_rows(hits, media: Media) -> list[dict]:
@@ -2241,7 +2285,7 @@ async def _search_fragment(request: Request, media: Media):
     query = request.query_params.get("q", "")
     year, month = _viewed_month(request)
     context = {"request": request, "media": str(media), "hits": [], "failed": [],
-               "no_catalogue": not asked,
+               "no_catalogue": not asked, "typed": False,
                # Each row carries its own request, so it needs to be able to spell
                # one: the query that found it names the search to read back, and
                # the month is the one an add would land in.
@@ -2254,12 +2298,64 @@ async def _search_fragment(request: Request, media: Media):
     return templates.TemplateResponse(request, "_distrakt_search_results.html", context)
 
 
+# How many stored titles one keystroke lists. Past this a person is still
+# typing, not choosing, and a longer list is a slower one to read.
+STORED_RESULT_LIMIT = 20
+
+
+async def _stored_fragment(request: Request, media: Media):
+    """The titles this app already knows that match what is being TYPED, as the
+    same results list a submitted search swaps in.
+
+    TYPING READS STORAGE AND NOTHING ELSE; ENTER ASKS THE SERVICES. Every title
+    some calendar month on this instance has loaded is in reach of an index read
+    (calendar/entries.py's titles_matching), which is cheap enough to run as
+    somebody types; asking a service spends somebody else's rate limit and is
+    left to a deliberate act, the form's own submit (`_search_fragment`). So this
+    builds no per-viewer settings at all — building them can refresh a token,
+    which is a request — and it is not counted against anything.
+
+    UNFILTERED, because adding a show is not asking where it is on somebody's
+    calendar: a title a viewer's filters hide, or that only another viewer's
+    month loaded, is still one they can add.
+
+    A ROW NAMES ITSELF BY THE IDENTITY IT IS STORED UNDER, and the season picker
+    and the add read the title back out of storage by it (`_named_pick`).
+    """
+    query = request.query_params.get("q", "")
+    year, month = _viewed_month(request)
+    hits = await calendar_entries.titles_matching(query, media, STORED_RESULT_LIMIT)
+    return templates.TemplateResponse(request, "_distrakt_search_results.html", {
+        "request": request, "media": str(media), "hits": _search_rows(hits, media),
+        "failed": [], "no_catalogue": False, "typed": True,
+        # Under the shortest query the calendar's own search accepts there is
+        # nothing to say yet — not "no matches", which would be an answer to a
+        # question nobody has finished asking.
+        "too_short": len(calendar_entries.fold_title(query)) < calendar_entries.MIN_QUERY,
+        "query": query, "month_query": f"?year={year}&month={month}"})
+
+
 @guard.get("/distrakt/fragments/search", AuthLevel.DISTRAKT_APPROVED)
 async def distrakt_search_fragment(request: Request):
     """Show search for the add flow, merged across every catalogue this instance
     can ask (app/providers/title_search.py's `search_catalogue`). See `_search_fragment`
     for what it renders and why it is a fragment rather than JSON."""
     return await _search_fragment(request, Media.SHOW)
+
+
+@guard.get("/distrakt/fragments/search-stored", AuthLevel.DISTRAKT_APPROVED)
+async def distrakt_stored_search_fragment(request: Request):
+    """The show box's as-you-type list: stored titles only, no service asked.
+    See `_stored_fragment`."""
+    return await _stored_fragment(request, Media.SHOW)
+
+
+@guard.get("/distrakt/fragments/search-movie-stored", AuthLevel.DISTRAKT_APPROVED)
+async def distrakt_stored_movie_search_fragment(request: Request):
+    """The film box's as-you-type list: stored films only, no service asked.
+    Its own route beside the show one for the reason the two submitted searches
+    are (distrakt_movie_search_fragment). See `_stored_fragment`."""
+    return await _stored_fragment(request, Media.MOVIE)
 
 
 @guard.get("/distrakt/fragments/search-movie", AuthLevel.DISTRAKT_APPROVED)
@@ -2316,12 +2412,12 @@ async def api_distrakt_add_movie(request: Request):
     if watched_on > clock.today():
         return _month_refusal(request, "That day hasn't happened yet.")
     # THE RESULT IS NAMED, NOT HANDED OVER — the ids, the title and the year are
-    # read back out of the search that found it (title_search.resolve_pick), so a
-    # play is filed under the identity the service issued and never one a page sent.
-    pick = await title_search.resolve_pick(settings, Media.MOVIE, data.get("q") or "",
-                                           data.get("i"), cached_only=True)
+    # read back out of the search that found it or the stored title it was
+    # listed as (`_named_pick`), so a play is filed under the identity a service
+    # issued and never one a page sent.
+    pick = await _named_pick(settings, Media.MOVIE, data, cached_only=True)
     if pick is None:
-        return _month_refusal(request, "That search has expired — search for it again.")
+        return _month_refusal(request, _pick_gone(data))
     if unkeyable := _unkeyable_reason(pick.media, pick.ids, pick.title):
         return _month_refusal(request, unkeyable)
 
@@ -2443,10 +2539,10 @@ async def api_distrakt_remove_movie(request: Request):
 async def distrakt_seasons_fragment(request: Request):
     """The add flow's season picker for the result somebody clicked.
 
-    THE ADDRESS NAMES THE RESULT, NOT THE TITLE. It carries the query that found
-    it and that result's own key, which is all the server needs to read the hit
-    back — see app/providers/title_search.py's `resolve_pick`, and the ranker's
-    own add for the rule this follows.
+    THE ADDRESS NAMES THE RESULT, NOT THE TITLE. It carries either the query
+    that found it and its place in that answer, or — for a row the typed list
+    drew — the identity it is stored under, which is all the server needs to
+    read the hit back (`_named_pick`). The season buttons name it the same way.
 
     ONE PARTIAL FOR EVERY STATE this can be in — a picker, a refusal, or a
     season that names itself and adds on sight — because each of them replaces
@@ -2456,16 +2552,18 @@ async def distrakt_seasons_fragment(request: Request):
     user_id = await _distrakt_user_id(request)
     settings = await viewer.settings_for_user(user_id)
     year, month = _viewed_month(request)
-    query = request.query_params.get("q", "")
-    index = request.query_params.get("i", "")
+    params = request.query_params
+    # THE REFERENCE IS PASSED ON, NOT REBUILT: what named the result here is
+    # exactly what the season button will name it by, and nothing else rides.
+    named = ({"t": params["t"]} if params.get("t")
+             else {"q": params.get("q", ""), "i": params.get("i", "")})
     # A SERVICE THAT COULD NOT BE ASKED IS ITS OWN STATE, drawn rather than
     # answered with a status: a non-200 is never swapped, so the slot would stay
     # empty with nothing to explain it — and "search for it again" would send
     # somebody to retype a query that was never the problem.
     unavailable = ""
     try:
-        pick = await title_search.resolve_pick(settings, Media.SHOW, query, index,
-                                               cached_only=False)
+        pick = await _named_pick(settings, Media.SHOW, named, cached_only=False)
     except SourceUnavailable as exc:
         pick, unavailable = None, str(exc)
     return templates.TemplateResponse(request, "_distrakt_seasons.html", {
@@ -2475,8 +2573,8 @@ async def distrakt_seasons_fragment(request: Request):
         # an id, with the same sentence the add's own refusal uses.
         "unkeyable": _unkeyable_reason(pick.media, pick.ids, pick.title) if pick else None,
         "unavailable": unavailable,
-        "query": query,
-        "index": index,
+        "gone": _pick_gone(named),
+        "named": named,
         "month_query": f"?year={year}&month={month}",
         # WHICH ROUTE A SEASON BUTTON POSTS TO, decided here rather than in the
         # browser. A month behind the clock is filled in by hand and records
@@ -2555,10 +2653,11 @@ async def api_distrakt_add(request: Request):
     # used to take `ids` and `title` straight from the page, which was the last
     # reachable way for a browser to decide what identity somebody's watch record
     # is filed under — and a wrong Trakt id shadows a correct Simkl one for ever.
-    pick = await title_search.resolve_pick(settings, Media.SHOW, data.get("q") or "",
-                                           data.get("i"), cached_only=True)
+    # A result the typed list offered names its stored identity instead, and is
+    # read back from the rows the services wrote (`_named_pick`).
+    pick = await _named_pick(settings, Media.SHOW, data, cached_only=True)
     if pick is None:
-        return _month_refusal(request, "That search has expired — search for it again.")
+        return _month_refusal(request, _pick_gone(data))
     if unkeyable := _unkeyable_reason(pick.media, pick.ids, pick.title):
         return _month_refusal(request, unkeyable)
     if pick.media is Media.MOVIE:
@@ -2832,10 +2931,9 @@ async def api_distrakt_add_completed(request: Request):
     except (KeyError, TypeError, ValueError):
         return _month_refusal(request, "Missing or invalid season")
     # The result is NAMED here too, for the reason api_distrakt_add gives.
-    pick = await title_search.resolve_pick(settings, Media.SHOW, data.get("q") or "",
-                                           data.get("i"), cached_only=True)
+    pick = await _named_pick(settings, Media.SHOW, data, cached_only=True)
     if pick is None:
-        return _month_refusal(request, "That search has expired — search for it again.")
+        return _month_refusal(request, _pick_gone(data))
     if unkeyable := _unkeyable_reason(pick.media, pick.ids, pick.title):
         return _month_refusal(request, unkeyable)
     if pick.media is Media.MOVIE:

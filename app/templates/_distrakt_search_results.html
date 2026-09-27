@@ -24,26 +24,49 @@
    pure function of the stored answers, so the same query lands on the same
    row.
 
+   A TYPED ROW NAMES ITS STORED IDENTITY INSTEAD (`hit.title_key`). The list
+   drawn as somebody types is read from titles this app already stores
+   (routes._stored_fragment), which change as calendar months fill — so a place
+   in that list is not a stable name for anything, while the identity a title
+   is stored under is, and the server reads the title back out of storage by it
+   (routes._named_pick). Enter still asks the services, and those rows name
+   their place as before.
+
    A NEW SEARCH TAKES DOWN THE LAST PICK'S ANSWER, out of band, because the
    season picker sits outside the list this fragment replaces and would otherwise
    go on describing a title nobody is looking at any more. Shows only: the film
    flow has no picker.
 
    Context: `hits` (each `_search_hit_payload` plus `unkeyable`), `failed` (the
-   sources that could not be asked), `media`, `no_catalogue`, `query` and
+   sources that could not be asked), `media`, `no_catalogue`, `typed` (these are
+   stored titles listed as somebody types, not a service's answer),
+   `too_short` (typed only: nothing worth listing yet), `query` and
    `month_query`. #}
 
 {%- if media != 'movie' %}
 <div id="addSeasonPick" class="distrakt-season-pick" hx-swap-oob="outerHTML"></div>
 {%- endif %}
 
-{% if no_catalogue %}
+{% if typed and too_short %}
+{# Nothing to say yet: the box is still being typed into, and "no matches"
+   would answer a question nobody has finished asking. #}
+{% elif no_catalogue %}
 {# NOT "search failed" — nothing was searched. An instance with neither client
    id is a different situation from one query that went wrong, and saying so is
    the difference between an operator fixing it and a viewer retyping. #}
 <div class="distrakt-empty">No catalogue is configured, so there is nothing to
     search. An operator adds a Trakt or Simkl client id in Settings.</div>
 {% else %}
+
+{% if typed %}
+{# WHERE THESE CAME FROM, SAID ONCE ABOVE THEM. A typed list is what this app
+   already knows, and the services know more — so the way to reach the rest is
+   named where somebody is looking when the list is short or empty. #}
+<p class="distrakt-note distrakt-typed-note">
+    {%- if hits %}Titles this app already knows. Press Enter to search the services too.
+    {%- else %}Nothing this app already knows matches. Press Enter to search the services.
+    {%- endif %}</p>
+{% endif %}
 
 {% if failed %}
 {# QUIET, NOT BLOCKING: whoever did answer returned real results, and burying
@@ -54,10 +77,19 @@
     showing what the rest found.</div>
 {% endif %}
 
-{% if not hits %}
+{% if not hits and not typed %}
 <div class="distrakt-empty">No matches.</div>
 {% endif %}
 
+{#- EVERY ROW JOINS THE BOX'S OWN QUEUE (`hx-sync`, see
+    _distrakt_add_show.html for why the box queues rather than replaces). A
+    typed answer still waiting when a row is pressed would otherwise land after
+    the row's own answer — and a typed answer takes the season picker down out
+    of band, so the picker the press asked for vanished. Measured in Chromium:
+    a press made the moment the row appeared, while the box's last answer was
+    still on its way. In the queue the waiting typed answer lands first, or is
+    dropped for the press, and never after it. -#}
+{%- set results_queue = ('#addMovieResults' if media == 'movie' else '#addSearchResults') ~ ':queue last' %}
 {% for hit in hits %}
 {# A hit the tracker has no id to file under is shown and refused rather than
    hidden — with the SERVER's own sentence for it, so this and the add route's
@@ -72,6 +104,7 @@
 <button type="button" class="distrakt-search-row{{ ' is-unkeyable' if hit.unkeyable }}"
      {%- if hit.unkeyable %} disabled{% endif %}
      {%- if not hit.unkeyable %}
+     hx-sync="{{ results_queue }}"
      {%- if media == 'movie' %}
      {#- A film has no season to pick, so the row IS the add. It names the day
          by INCLUDING the field rather than carrying a copy of it: a new search
@@ -80,11 +113,13 @@
      hx-include="#addMovieDate"
      hx-target="#distraktShowList"
      hx-swap="innerHTML swapEmpty:false show:top showTarget:.row-marked"
-     hx-vals='{{ {"q": query, "i": loop.index0} | tojson }}'
+     hx-vals='{{ ({"t": hit.title_key} if hit.title_key else {"q": query, "i": loop.index0}) | tojson }}'
      {%- else %}
      {#- A show row fetches its season picker. A read that changes nothing, so it
          is a GET, and the address names the result rather than describing it. -#}
-     hx-get="/distrakt/fragments/seasons{{ month_query }}&amp;q={{ query | urlencode }}&amp;i={{ loop.index0 }}"
+     hx-get="/distrakt/fragments/seasons{{ month_query }}&amp;
+             {%- if hit.title_key %}t={{ hit.title_key | urlencode }}
+             {%- else %}q={{ query | urlencode }}&amp;i={{ loop.index0 }}{% endif %}"
      hx-target="#addSeasonPick" hx-swap="outerHTML"
      {%- endif %}
      {%- endif %}>

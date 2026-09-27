@@ -5,7 +5,7 @@
     _distrakt_month.html. -#}
 {% macro season_post(season) -%}
 hx-post="{{ '/api/distrakt/add-completed' if as_finished else '/api/distrakt/add' }}{{ month_query }}"
-    hx-json-enc hx-vals='{{ {"q": query, "i": index, "season": season} | tojson }}'
+    hx-json-enc hx-vals='{{ dict(named, season=season) | tojson }}'
     hx-target="#distraktShowList"
     hx-swap="innerHTML swapEmpty:false show:top showTarget:.row-marked"
 {%- endmacro %}
@@ -19,29 +19,30 @@ hx-post="{{ '/api/distrakt/add-completed' if as_finished else '/api/distrakt/add
    picker, hidden and unhidden by hand, which is two places for one answer to
    live.
 
-   A SEASON BUTTON NAMES THE RESULT AND NOTHING ELSE. It sends the query that
-   found it, that result's key and the season picked; the route reads the title,
-   the network and every id back out of the same two answers this fragment was
-   drawn from (providers/title_search.py's resolve_pick). No id the browser
+   A SEASON BUTTON NAMES THE RESULT AND NOTHING ELSE. It sends the reference
+   this fragment was asked with — the query that found it and its place in the
+   answer, or the identity a typed row is stored under — and the season picked;
+   the route reads the title, the network and every id back out of the same
+   answers this fragment was drawn from (routes._named_pick). No id the browser
    could edit reaches a write.
 
    Context: `pick` (a title_search.Pick, or None when nothing stored answers to
    that name), `unkeyable` (the tracker's own sentence for a pick it has no
    shared id to file under, else None), `unavailable` (why the service could
-   not be asked), `query`, `index`,
-   `month_query`, `as_finished` (this month is behind the clock, so an add
-   records something as finished during it). #}
+   not be asked), `gone` (what to say when nothing answers), `named` (the
+   reference, posted back as it came), `month_query`, `as_finished` (this month
+   is behind the clock, so an add records something as finished during it). #}
 <div id="addSeasonPick" class="distrakt-season-pick">
 {%- if unavailable %}
 {# The service that knows this title could not be reached. Its own sentence,
    because the reason it gives is more use than a fixed one. #}
 <p class="distrakt-note distrakt-warn">That season could not be looked up: {{ unavailable }}</p>
 {%- elif pick is none %}
-{# NOT "search failed": the search itself is gone from the store, which is a
-   different thing from a title that cannot be described. It happens to a modal
-   left open across a long enough gap, and the honest instruction is to ask
-   again. #}
-<p class="distrakt-note distrakt-warn">That search has expired — search for it again.</p>
+{# NOT "search failed": the search itself is gone from the store (or, for a
+   typed row, the stored title is), which is a different thing from a title that
+   cannot be described. It happens to a modal left open across a long enough
+   gap, and the honest instruction is to ask again. #}
+<p class="distrakt-note distrakt-warn">{{ gone }}</p>
 {%- elif unkeyable %}
 {# Said HERE, after the per-title lookup that had its chance to resolve an id,
    rather than on the row: a show hit arriving without a shared id is

@@ -47,6 +47,8 @@ DISTRAKT_GETS = (
     "/distrakt/fragments/details",
     "/distrakt/fragments/details/season",
     "/distrakt/fragments/search",
+    "/distrakt/fragments/search-stored",
+    "/distrakt/fragments/search-movie-stored",
     "/distrakt/fragments/seasons",
     "/api/distrakt/export",
     "/distrakt/fragments/search-movie",

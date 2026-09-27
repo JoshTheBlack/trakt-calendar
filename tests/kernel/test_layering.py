@@ -305,7 +305,10 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "request being spent on asking. And a title added to a tracker by hand "
         "writes the premiere airing no feed carried, through the calendar "
         "search's own fill_one_gap — the same one-title write a followed search "
-        "result makes"),
+        "result makes. The add modals' as-you-type list is the titles the "
+        "calendar already stores (entries.titles_matching), and a pick from it "
+        "is read back out of those stored rows by identity (entries.stored_title) "
+        "— the calendar owns those rows, so it owns the verbs that read them"),
     (RANKER, DISTRAKT): Edge(
         "one adapter module imports the tracker's public surface so a board can "
         "be seeded from what the viewer finished. THE ONLY ranker module allowed "

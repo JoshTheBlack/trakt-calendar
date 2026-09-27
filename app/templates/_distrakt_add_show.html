@@ -11,9 +11,36 @@
 
    THE SEARCH IS A FORM. `required` is the empty check the browser already knows
    how to make, Enter is submit, and the button is submit — three lines of
-   script for what a <form> element is. SUBMITTED AND NOT TYPED, deliberately:
-   this is not a discovery UI, you open it already knowing what you came to add,
-   and a catalogue fan-out at every prefix buys nothing for it.
+   script for what a <form> element is.
+
+   TWO TRIGGERS BECAUSE THERE ARE TWO COSTS, the split the calendar's own search
+   box makes. TYPING lists the titles this app already stores
+   (/distrakt/fragments/search-stored): an index read, no service asked, so it
+   can run as somebody types. SUBMITTING asks the services, which spends
+   somebody else's rate limit and so waits for a deliberate act — and a
+   catalogue fan-out at every prefix would buy nothing for somebody who opened
+   this already knowing what they came to add. `input changed`, not `keyup`,
+   because a paste or the browser's own clear button changes the value and
+   presses nothing; index.html's search box records the Firefox measurement.
+
+   WHAT MAKES ENTER'S ANSWER THE ONE LEFT ON SCREEN, two measured choices:
+     - NO DEBOUNCE. A delayed trigger keeps its own timer that nothing else can
+       cancel (read in the vendored htmx), so Enter pressed within the delay of
+       the last keystroke sent the services' request FIRST and the typed one
+       after it, and the typed answer landed over the services' — taking the
+       season picker down with its out-of-band reset. Measured with a 180ms
+       delay, in Chromium and Firefox: 5 of 5 type-then-Enter left the stored
+       list on screen. With no delay the last keystroke's request always starts
+       before Enter's. Each keystroke is an index read of a few milliseconds
+       (calendar/entries.py's titles_matching), which is the cost of that.
+     - `queue last`, NOT `replace`, on the TARGET, on both. The vendored htmx's
+       `replace` loses track of the request that replaced another — the aborted
+       one's own completion clears it — so the NEXT request aborts nothing, and
+       typing had every other keystroke's answer arriving late: measured, the
+       answer for "se" finished after Enter's and overwrote it. `queue last`
+       aborts nothing at all: one request runs, only the newest waits, and each
+       arrival replaces the one waiting — so Enter queues behind at most one
+       typed read and is always the last to land.
 
    NOTHING INSIDE THE FORM POSTS. Read in the vendored htmx: a request's verb is
    found by walking `get, post, put, patch, delete` in that order, with each one
@@ -47,10 +74,14 @@
                 of recording it as finished on the month they were looking at. -#}
             <form class="field distrakt-search-submit" hx-boost="false"
                   hx-get="/distrakt/fragments/search{{ month_query }}"
-                  hx-target="#addSearchResults" hx-indicator="#addSearchBusy">
+                  hx-target="#addSearchResults" hx-indicator="#addSearchBusy"
+                  hx-sync="#addSearchResults:queue last">
                 <label for="addSearchInput">{{ search_label }}</label>
                 <input type="text" id="addSearchInput" name="q" placeholder="Type a show title…"
-                       autocomplete="off" spellcheck="false" required autofocus>
+                       autocomplete="off" spellcheck="false" required autofocus
+                       hx-get="/distrakt/fragments/search-stored{{ month_query }}"
+                       hx-trigger="input changed"
+                       hx-sync="#addSearchResults:queue last">
                 <button type="submit" class="btn-ghost small">Search</button>
                 <span id="addSearchBusy" class="htmx-indicator distrakt-empty">Searching…</span>
             </form>
