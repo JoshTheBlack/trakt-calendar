@@ -96,7 +96,7 @@ SECRET_FIELDS = frozenset({
 # STORED SECRETS THAT MUST NEVER REACH AN INSTANCE-WIDE Settings OBJECT.
 # `simkl_access_token` was once an operator-pasted AUTH V1 token. Under AUTH V2
 # the instance holds no Simkl token of its own — only a signed-in person's own
-# grant is ever sent, swapped in per request by distrakt.viewer
+# grant is ever sent, swapped in per request by auth.viewer
 # .settings_for_user — so a value stored before the move would otherwise ride
 # along on every load_settings() call, make `simkl_configured` read true for a
 # caller with no viewer, and be sent with the V2 client id it was never issued
@@ -124,7 +124,7 @@ class Settings:
     # PERSON's own grant, and every other Simkl call this app makes is public,
     # so there is nothing left for an instance-wide token to authenticate. The
     # field itself stays, because it is still how that person's own token
-    # travels: distrakt.viewer.settings_for_user swaps it in per request,
+    # travels: auth.viewer.settings_for_user swaps it in per request,
     # exactly as it swaps in Trakt's. A value an operator saved before the move
     # to AUTH V2 is left in storage untouched (nothing here migrates or clears
     # it), and load_settings deliberately leaves it OUT of the instance-wide

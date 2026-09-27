@@ -378,7 +378,7 @@ class SeasonPickerFragmentTests(AppTestCase):
     def _resolved(self, index=0, query="a"):
         """The Pick the fragment was drawn from — for the facts that are about
         the RESOLUTION rather than about the markup."""
-        from app.distrakt import viewer
+        from app.auth import viewer
 
         async def _run():
             settings = await viewer.settings_for_user(self.user_id)

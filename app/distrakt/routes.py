@@ -3,9 +3,9 @@ whole /api/distrakt/* API.
 
 Every route here is DISTRAKT_APPROVED, and every one of them reads ONE person's
 private Trakt history — their progress, their plays, their films. That is why
-`viewer.settings_for_user` exists and why nothing here uses the app-wide token:
-the operator's token would hand every user the operator's viewing instead of
-their own.
+every route builds its settings with auth/viewer.py's `settings_for_user` and
+nothing here uses the app-wide token: the operator's token would hand every
+user the operator's viewing instead of their own.
 
 Most of the mutating routes end by returning the whole recomputed month, so the
 page never has to guess what its change did. That shared body is
@@ -28,14 +28,14 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from . import (arrival, backfill, counts, discord_fmt, episode_progress, lifecycle, live,
-               rollover, slug_repair, unsettled, viewer, watch_history)
+               rollover, slug_repair, unsettled, watch_history)
 # The data layer is reached through this package's own public surface, the same
 # names an outside caller uses, rather than through the six modules those names
 # are defined in: a route handler has no business knowing which half of the
 # tracker `load_month` or `compute_live_shows` lives in.
 from .. import distrakt as distrakt_store
 from .. import auth, authz, chrome, clock, db, details_panel, providers, route_params
-from ..auth import AuthLevel
+from ..auth import AuthLevel, viewer
 from ..calendar import share_links
 from ..config import load_settings
 from ..endpoints import endpoint_choices
@@ -1164,7 +1164,7 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
     standing = distrakt_store.month_standing(month_key, today)
     link_url = await _distrakt_post_link(user_id, settings, year, month)
     # This user's own map, fetched once and handed to every render below. It is
-    # not on `settings` any more — see app/distrakt/viewer.py's settings_for_user.
+    # not on `settings` any more — see app/auth/viewer.py's settings_for_user.
     emojis, default_emoji = await distrakt_store.get_emoji_prefs(user_id)
     existing = await distrakt_store.load_month(user_id, month_key)
     if existing is None:

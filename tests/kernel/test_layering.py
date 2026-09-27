@@ -223,8 +223,15 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         deferred=True),
 
     # --- into auth. auth is a layer: every feature may depend on it ---------
-    (CALENDAR, AUTH): Edge("the calendar is per-viewer, and share links are per-owner"),
-    (DISTRAKT, AUTH): Edge("a tracker month belongs to one signed-in person"),
+    (CALENDAR, AUTH): Edge(
+        "the calendar is per-viewer, and share links are per-owner. Its search, "
+        "its details panel's follow-up and its card completion ask services that "
+        "answer only with the viewer's own token, so they build the viewer's "
+        "settings through auth/viewer.py — the one builder of that object, in the "
+        "layer every feature may depend on rather than in the tracker"),
+    (DISTRAKT, AUTH): Edge(
+        "a tracker month belongs to one signed-in person, and every read of their "
+        "viewing authenticates as them through auth/viewer.py's settings_for_user"),
     (RANKER, AUTH): Edge("a board belongs to one signed-in person"),
     (SETTINGS, AUTH): Edge("the Settings screen is admin-only and links the app's own account"),
     (KERNEL, AUTH): Edge(

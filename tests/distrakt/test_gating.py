@@ -31,7 +31,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 from app import auth, cache, db
 from app.distrakt import routes as distrakt_routes
-from app.distrakt import viewer as distrakt_viewer
+from app.auth import viewer as auth_viewer
 from app.calendar import share_code, share_links
 from app.config import Settings, save_settings
 from app.main import app
@@ -239,7 +239,8 @@ class RequestingUsersTokenTests(DistraktTestCase):
 
     settings.json's Trakt token is deliberately given a value here, so "the
     user's token was used" and "no token at all was used" cannot be confused
-    with each other.
+    with each other. What the settings object itself carries is
+    tests/auth/test_viewer.py's; this is about the tracker's routes using it.
     """
 
     APP_WIDE = "APP-WIDE-OPERATOR-TOKEN"
@@ -251,54 +252,6 @@ class RequestingUsersTokenTests(DistraktTestCase):
             trakt_access_token=self.APP_WIDE,
             trakt_refresh_token="APP-WIDE-REFRESH",
         ))
-
-    def test_the_settings_object_carries_the_users_token_not_the_instances(self):
-        user_id = self.tracker_user(token="THE-USERS-TOKEN")
-        settings = asyncio.run(distrakt_viewer.settings_for_user(user_id))
-        self.assertEqual(settings.trakt_access_token, "THE-USERS-TOKEN")
-        self.assertNotEqual(settings.trakt_access_token, self.APP_WIDE)
-        # The operator's refresh token has no business travelling next to
-        # somebody else's access token.
-        self.assertEqual(settings.trakt_refresh_token, "")
-        # Everything genuinely app-wide still comes through.
-        self.assertEqual(settings.trakt_client_id, "client-id")
-
-    def test_both_services_tokens_ride_on_the_one_settings_object(self):
-        """Each source reads its own field off `settings` — that is what
-        `is_configured` asks about — so a per-source credential object would be a
-        second mechanism for something this one already expresses, and the port
-        protocol would have to grow an argument for it."""
-        user_id = self.tracker_user(token="THE-USERS-TOKEN")
-        # V2-shaped (see app/auth/simkl.py.V2_ACCESS_TOKEN_PREFIX): a token
-        # missing this prefix reads as a legacy v1 grant and is never sent
-        # (simkl_routes._is_v2_token), which is not what this test is about.
-        asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
-            conn, user_id=user_id, provider="simkl", provider_user_id=90210,
-            access_token="simkl_at_THEIR-SIMKL-TOKEN")))
-        settings = asyncio.run(distrakt_viewer.settings_for_user(user_id))
-        self.assertEqual(settings.trakt_access_token, "THE-USERS-TOKEN")
-        self.assertEqual(settings.simkl_access_token, "simkl_at_THEIR-SIMKL-TOKEN")
-
-    def test_an_account_with_no_simkl_link_carries_no_simkl_token(self):
-        """`simkl_configured` then goes false and that port is simply not asked,
-        which is exactly what has always been true of Trakt."""
-        settings = asyncio.run(distrakt_viewer.settings_for_user(self.tracker_user()))
-        self.assertEqual(settings.simkl_access_token, "")
-        self.assertFalse(settings.simkl_configured)
-
-    def test_it_comes_from_the_per_user_token_source(self):
-        """Pinned to the function that knows how to renew a user's token, rather
-        than to a direct read of the identity row, so an expired token is
-        refreshed on this path exactly as it is everywhere else."""
-        user_id = self.tracker_user(token="STORED")
-        with patch("app.auth.trakt_routes.access_token_for_user", return_value="FROM-THE-SOURCE") as spy:
-            async def _fake(uid, settings=None):
-                return "FROM-THE-SOURCE"
-            spy.side_effect = _fake
-            settings = asyncio.run(distrakt_viewer.settings_for_user(user_id))
-        spy.assert_awaited_once()
-        self.assertEqual(spy.await_args.args[0], user_id)
-        self.assertEqual(settings.trakt_access_token, "FROM-THE-SOURCE")
 
     def test_every_trakt_call_a_month_read_makes_carries_the_users_token(self):
         user_id = self.tracker_user(token="USER-A-TOKEN")
@@ -371,7 +324,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
         """
         user_id = self._make_user("tokenless", calendar_approved=True, distrakt_approved=True)
         self._link_trakt(user_id, provider_user_id=4242, access_token=None)
-        settings = asyncio.run(distrakt_viewer.settings_for_user(user_id))
+        settings = asyncio.run(auth_viewer.settings_for_user(user_id))
         self.assertEqual(settings.trakt_access_token, "")
         self.assertFalse(settings.trakt_configured)
 
@@ -391,7 +344,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
 
         user_id = self.tracker_user(token="PRIVATE-TOKEN")
         recorder = RecordingClient()
-        settings = asyncio.run(distrakt_viewer.settings_for_user(user_id))
+        settings = asyncio.run(auth_viewer.settings_for_user(user_id))
         with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
             asyncio.run(trakt_sync.fetch_show_progress_detail(settings, 7))
         self.assertTrue(recorder.urls)

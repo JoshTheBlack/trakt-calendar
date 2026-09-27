@@ -39,7 +39,7 @@ from . import (cache as calendar_cache, enrich as calendar_enrich,
                share_links, state as calendar_state, vocab)
 from .. import (auth, authz, cache, chrome, clock, db, details_panel,
                 route_params)
-from ..auth import AuthLevel
+from ..auth import AuthLevel, viewer
 from ..config import load_settings
 from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, endpoint_choices, get_endpoint
 from ..integrations import routes as integrations_routes
@@ -1107,15 +1107,10 @@ async def search_the_calendar(request: Request):
     half's Simkl search now genuinely requires a user token (see
     providers.for_catalogue_search's docstring), so an instance-wide Settings
     object — which never carries a Simkl token — would read as "no Simkl" for
-    every viewer, linked or not. distrakt.viewer is reached through the
-    (CALENDAR, DISTRAKT) edge in tests/kernel/test_layering.py — deferred so
-    naming it at module level does not close the loop distrakt reading the
-    calendar back already opens.
+    every viewer, linked or not. auth/viewer.py builds it.
     """
-    from ..distrakt import viewer as distrakt_viewer  # deferred: see DECLARED_EDGES
-
     user = await auth.current_user(request)
-    settings = await distrakt_viewer.settings_for_user(user.user_id)
+    settings = await viewer.settings_for_user(user.user_id)
     query = (request.query_params.get("q") or "").strip()
     live = request.query_params.get("live") in ("1", "true", "yes")
     everywhere = request.query_params.get("all") in ("1", "true", "yes")
@@ -1684,8 +1679,6 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     this app's own distrakt_show_progress for the signed-in viewer, which costs no
     call, no token and no id translation.
     """
-    from ..distrakt import viewer as distrakt_viewer  # deferred: see DECLARED_EDGES
-
     user = await auth.current_user(request)
     params = request.query_params
     settings = load_settings()
@@ -1768,7 +1761,7 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
         # viewer's own token (providers.for_catalogue_search's docstring), so an
         # instance-wide object would silently never ask, for anybody.
         follow_up=await _completion_follow_up(
-            await distrakt_viewer.settings_for_user(user.user_id), params, season))
+            await viewer.settings_for_user(user.user_id), params, season))
 
 
 async def _completion_follow_up(settings, params, season: int | None) -> str:
@@ -2015,12 +2008,8 @@ async def complete_card(request: Request):
     providers.for_catalogue_search's docstring) — an instance-wide Settings
     object carries no such token at all (config.load_settings leaves any stored
     operator token out), which would make this ask silently never happen for
-    anybody, linked or not. Reached the
-    same deferred way the calendar's search fragment reaches distrakt.viewer
-    (see (CALENDAR, DISTRAKT) in tests/kernel/test_layering.py).
+    anybody, linked or not — auth/viewer.py builds the viewer's own.
     """
-    from ..distrakt import viewer as distrakt_viewer  # deferred: see DECLARED_EDGES
-
     user = await auth.current_user(request)
     today = clock.today()
     year = route_params.valid_year(request.query_params.get("year"), today.year)
@@ -2029,7 +2018,7 @@ async def complete_card(request: Request):
     payload = await authz.json_body(request)
     key = str(payload.get("key") or "")
     season = route_params.season(payload.get("season"))
-    settings = await distrakt_viewer.settings_for_user(user.user_id)
+    settings = await viewer.settings_for_user(user.user_id)
     source = await calendar_search.other_service_to_ask(
         settings, endpoint_key=endpoint.key, title_key=key, season=season)
     if not source:

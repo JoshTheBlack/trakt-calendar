@@ -29,7 +29,7 @@ from tests.support import ORIGIN, migrated_db, tracker_month
 # The two credential flags the tracker's source selection reads. A fake
 # settings object has to answer both, because the selector asks every
 # registered source whether this request carries a usable credential for it
-# — see app/distrakt/viewer.py's settings_for_user.
+# — see app/auth/viewer.py's settings_for_user.
 #
 # THE CATALOGUE PAIR IS A DIFFERENT QUESTION AND HAS TO BE ANSWERED TOO: before
 # a season is looked up, live.detail_source asks which of the sources a record

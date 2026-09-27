@@ -31,7 +31,7 @@ from tests.support import import_offered, migrated_db
 # The credential flags the tracker reads, all of which a fake settings object has
 # to answer. The first two are the source selection's: it asks every registered
 # source whether this request carries a usable credential for it — see
-# app/distrakt/viewer.py's settings_for_user. The third is a different question
+# app/auth/viewer.py's settings_for_user. The third is a different question
 # and belongs to the instance rather than to the account: whether there is a
 # CALENDAR to build a month's premieres from, which is what rollover asks before
 # it will create one.

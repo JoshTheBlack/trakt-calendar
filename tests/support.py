@@ -416,7 +416,8 @@ def tracker_month(user_id: int, year: int, month: int, *, fresh: bool = False) -
     about what a VIEWER is told asks the fragment and reads its markup, the way
     every details-panel test already does.
     """
-    from app.distrakt import routes as distrakt_routes, viewer
+    from app.auth import viewer
+    from app.distrakt import routes as distrakt_routes
 
     async def _run() -> dict:
         settings = await viewer.settings_for_user(user_id)

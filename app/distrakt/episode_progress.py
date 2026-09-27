@@ -27,8 +27,9 @@ import json
 from typing import Mapping, NamedTuple, Sequence
 from urllib.parse import quote
 
-from . import viewer, watch_history
+from . import watch_history
 from .. import db
+from ..auth import viewer
 from ..providers.base import ItemKey
 
 

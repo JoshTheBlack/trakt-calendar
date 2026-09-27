@@ -217,7 +217,7 @@ def for_tracker_ports(prefs, linked, settings) -> list[tuple[Source, SyncPort]]:
       - the SOURCE can answer at all (private data, and a port to read it with);
       - the ACCOUNT wants it (`prefs.admits_tracker`, given what it has linked);
       - the CREDENTIAL is there (`is_configured` against a Settings carrying that
-        account's own tokens — see app/distrakt/viewer.py's settings_for_user).
+        account's own tokens — see app/auth/viewer.py's settings_for_user).
 
     THE ORDER HERE IS REGISTRY ORDER, WHICH IS NOT THE ORDER THE TRACKER USES.
     This function knows which sources are ELIGIBLE; it has no account context
@@ -274,7 +274,7 @@ def for_catalogue_search(settings) -> list[tuple[Source, SearchPort]]:
     — client id AND a token — which only reads true on a per-viewer Settings
     object (see app/providers/simkl/__init__.py._SimklProvider). A caller
     with a viewer in scope hands it that viewer's Settings
-    (distrakt.viewer.settings_for_user); a caller with no viewer hands it the
+    (auth.viewer.settings_for_user); a caller with no viewer hands it the
     instance-wide one, which carries no Simkl token at all — config.load_settings
     leaves any stored operator token out — so Simkl simply drops out for it.
 
