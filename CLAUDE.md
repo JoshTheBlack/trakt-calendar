@@ -229,8 +229,11 @@ back carrying entries two months past its end. Windows are trimmed before
 storage; without the trim a month read shows the same airing several times.
 
 **JavaScript is for what ONLY JavaScript can do, and the floor is MEASURED.**
-The whole first-party surface is **703 code lines across 15 .js files, 24 lines
-of inline `<script>` and NO inline `on*=` handlers** — 694 when the audit ended,
+The whole first-party surface is **703 code lines across 15 .js files, 27 lines
+of inline `<script>` and NO inline `on*=` handlers** — the inline figure is
+every non-blank line inside the two blocks `csp.INLINE_BLOCKS` names
+(`_nav_head.html`'s 3, `error_lobby.html`'s 24), counted that way so the next
+person reproduces it the same way — 694 when the audit ended,
 702 after the rankings board's multi-select, 676 once every page extended one
 base template and the per-page script loader went, and 703 when the
 Content-Security-Policy moved the last ten handlers out of markup into listeners

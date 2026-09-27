@@ -21,7 +21,7 @@ import re
 import unittest
 from pathlib import Path
 
-from app import assets, csp
+from app import assets, changelog, csp
 
 from tests.support import AppTestCase
 
@@ -123,6 +123,28 @@ class OnlyTheListedInlineBlocksTests(unittest.TestCase):
                     if "src=" not in attrs and 'type="application/json"' not in attrs:
                         self.assertEqual(attrs.strip(), "")
                 self.assertNotRegex(text, r"<style\s+[^>]")
+
+
+class ChangelogMarkupTests(unittest.TestCase):
+    """CHANGELOG.md is real content a maintainer edits, not a template, so the
+    scan above — which reads app/templates — cannot see what it renders. It
+    goes through markdown-it instead (app/changelog.py), and markdown-it's
+    table extension renders an aligned column as
+    `<th style="text-align:left">`: the same style-src refusal as a template's
+    style attribute, from a source this file otherwise never looks at.
+    """
+
+    def test_the_rendered_changelog_carries_no_refused_markup(self):
+        text = changelog.CHANGELOG_PATH.read_text(encoding="utf-8")
+        for release in changelog.parse(text):
+            for pattern, what in ((STYLE_ATTR, "a style attribute"), (HANDLER, "an event-handler attribute")):
+                match = pattern.search(release.html)
+                self.assertIsNone(
+                    match,
+                    f"{release.version} renders {what} ({match and match.group(0)!r}) via "
+                    "markdown-it. The Content-Security-Policy refuses it (app/csp.py) — for "
+                    "a style attribute, an aligned table column (`:---`/`---:`) is the known "
+                    "way markdown-it produces one; CHANGELOG.md must not use column alignment.")
 
 
 class ServedBlocksMatchTheHeaderTests(AppTestCase):
