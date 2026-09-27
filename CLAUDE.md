@@ -341,6 +341,18 @@ and `closedby="any"` dismisses nothing on a dialog that fills the viewport,
 because there is no outside left to press. Both read as unsupported. Drive it in
 both browsers before believing either answer.
 
+THE SAME GOES FOR htmx's REQUEST ORDERING, and a search box is where it bites.
+Two measured facts about the vendored htmx decide how a box that lists as you
+type and asks the services on Enter must be wired (`_distrakt_add_show.html`
+carries the measurements): a DEBOUNCED trigger's timer cannot be cancelled by
+anything else, so a debounced typed request fires after an immediate Enter and
+lands over its answer; and `hx-sync`'s `replace` loses track of the request that
+did the replacing once the aborted one settles, so the NEXT request aborts
+nothing and stale answers arrive late. What held in both engines is no debounce
+and `queue last` on the results target, shared by the box, the form and every
+result row. The calendar's own box (index.html) still debounces and replaces,
+and was measured cancelling its services' request on a quick Enter in both.
+
 ## Conventions for code you add or change
 
 **No references to planning documents in shipped code** — not in comments,
