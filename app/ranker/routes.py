@@ -332,8 +332,10 @@ async def _sources(user_id: int) -> dict[str, object]:
 
 @guard.get("/rankings", AuthLevel.RANKER_APPROVED)
 async def rankings_page(request: Request):
-    """The ranker's own page. Standalone: it needs nothing from the calendar or
-    from any other feature to be useful.
+    """The ranker's own page. Standalone: it needs no other feature's approval
+    to be useful. Its search's as-you-type list reads the titles calendar months
+    on this instance have stored, and where there are none Enter still asks the
+    services for everything.
 
     `board` selects which one is open, so the switcher is a set of real links
     that work without any script at all — and with htmx they boost into a body

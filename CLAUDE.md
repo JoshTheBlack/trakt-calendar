@@ -245,7 +245,7 @@ back carrying entries two months past its end. Windows are trimmed before
 storage; without the trim a month read shows the same airing several times.
 
 **JavaScript is for what ONLY JavaScript can do, and the floor is MEASURED.**
-The whole first-party surface is **703 code lines across 15 .js files, 27 lines
+The whole first-party surface is **706 code lines across 15 .js files, 27 lines
 of inline `<script>` and NO inline `on*=` handlers** — the inline figure is
 every non-blank line inside the two blocks `csp.INLINE_BLOCKS` names
 (`_nav_head.html`'s 3, `error_lobby.html`'s 24), counted that way so the next
@@ -253,7 +253,9 @@ person reproduces it the same way — 694 when the audit ended,
 702 after the rankings board's multi-select, 676 once every page extended one
 base template and the per-page script loader went, and 703 when the
 Content-Security-Policy moved the last ten handlers out of markup into listeners
-in the files that own them; from 4,024 lines when the audit began, and from
+in the files that own them, and 706 when the rankings board moved onto the shared
+title search and a dragged result began inserting its row under the key the
+server answers with; from 4,024 lines when the audit began, and from
 1,213 / 26 / 30 at its last conversion. The WATCH TRACKER has no script of its
 own at all. Those three numbers are the point of this paragraph: they are what
 somebody adding a file is adding to, and a number that has drifted is a signal
@@ -294,7 +296,11 @@ band. Adding a title a search found is the RESULT posting itself, answered with 
 and that same search redrawn from the cache its own request filled — so a second
 title from one search costs no second search, and whether a result is already
 held is drawn rather than swept on afterwards — and a held one refusing the
-click is `pointer-events: none`, not an event filter on its trigger.
+click is `pointer-events: none`, not an event filter on its trigger. Adding
+several SEASONS of it at once is a checklist beside the row — a `<details>` whose
+`<summary>` asks for it `click once`, one checkbox per season, one json-enc post
+naming the result by reference — a sibling of the row and never inside it,
+because attribute inheritance would hand the row's request to the form.
 Moving a title between tiers is one button per destination ON THE ROW, posting to the
 same route a bulk move already used — a menu shared by the whole board is what
 made "which row opened it" a question the browser had to answer. Setting which
@@ -374,8 +380,8 @@ it aborted the services' request outright, 64 of 64 type-then-Enter trials in
 each engine. What held in both is no debounce and `queue last` on the results
 target, shared by the box, the form and every control inside the results that
 asks for them again. THAT RULE HAS ONE HOME, `templates/_title_search.html`:
-its `box` macro is every title search's box (the calendar's and the tracker's
-two), its `row` macro every result row, with the surface filling the ACTION
+its `box` macro is every title search's box (the calendar's, the tracker's two
+and the rankings board's), its `row` macro every result row, with the surface filling the ACTION
 SLOT (the element and what pressing it does), and its `queue`/`sync` are the one
 spelling of the policy for anything else that re-asks. A new search box is a
 call to that macro, not a copy of its attributes.
