@@ -3305,6 +3305,24 @@ CREATE TABLE season_posters (
 CREATE INDEX ix_season_posters_seen ON season_posters(last_seen_at);
 """
 
+MIGRATION_45 = """
+-- WHAT A BOARD'S SEASON ROW IS CALLED, where the season has a name of its own.
+--
+-- A season row reads "Show — Season 3", and an anthology's does not: its seasons
+-- are titled (True Detective's "Night Country", Twin Peaks' "The Return"), and
+-- the number alone is not how anybody refers to them. The name is on the season
+-- list a row's season control and the board search already read, at the moment
+-- the row becomes that season, and nowhere a board could read it back from when
+-- it draws: the response cache that holds the list is evicted, and a board draws
+-- up to two thousand rows. So it is kept on the row, written when the row's
+-- season is, like the row's counts.
+--
+-- NULL FOR EVERY EXISTING ROW, and NULL means "no name of its own": a whole-show
+-- row, or a season whose service only restates the number. The removal history
+-- needs no column — it keeps the whole row in item_json.
+ALTER TABLE tier_items ADD COLUMN season_name TEXT;
+"""
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -3350,6 +3368,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (42, MIGRATION_42),
     (43, MIGRATION_43),
     (44, MIGRATION_44),
+    (45, MIGRATION_45),
 ]
 
 

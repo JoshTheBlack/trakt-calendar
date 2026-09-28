@@ -53,5 +53,31 @@ class TraktSeasonsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(answer, SeasonsAnswer(seasons=[], named_season=None, ids={}, network=""))
 
 
+class SeasonListProjectionTests(unittest.IsolatedAsyncioTestCase):
+    """fetch_show_seasons over Trakt's /shows/{id}/seasons?extended=full, whose
+    entries carry a `title` and `images` beside the counts — measured on 258
+    cached lists. A name that only restates the number is not a name."""
+
+    RAW = [
+        {"number": 0, "title": "Specials", "episode_count": 3,
+         "images": {"poster": ["media.trakt.tv/s0.jpg"]}},
+        {"number": 1, "title": "Season 1", "episode_count": 8, "first_aired": "2014-01-12T02:00:00.000Z",
+         "images": {"poster": ["media.trakt.tv/s1.jpg.webp"]}},
+        {"number": 4, "title": "Night Country", "episode_count": 6, "first_aired": "",
+         "images": {"poster": []}},
+    ]
+
+    async def test_each_season_carries_its_name_and_its_poster(self):
+        from app.providers.trakt import transport
+        with patch.object(transport, "cached_get", AsyncMock(return_value=self.RAW)):
+            got = await detail.fetch_show_seasons(SETTINGS, "123")
+        self.assertEqual(got, [
+            {"season": 1, "episode_count": 8, "first_aired": "2014-01-12T02:00:00.000Z",
+             "name": "", "poster": "https://media.trakt.tv/s1.jpg.webp"},
+            {"season": 4, "episode_count": 6, "first_aired": "",
+             "name": "Night Country", "poster": ""},
+        ])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -2786,14 +2786,18 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 }
 .ranker-thumb.is-missing { background: repeating-linear-gradient(45deg, #1c1f22, #1c1f22 6px, #23272b 6px, #23272b 12px); }
 .ranker-name { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.ranker-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A ROW'S LABEL IN TWO HALVES — the show, and for a season row "— Season 3" or
+   the season's own name — so a long show name is what the ellipsis takes and
+   the season, which is what tells the row from its whole show beside it, is
+   what stays. The season half gives way too, but only after the show has
+   (a season named "The Trial of a Time Lord" can be long on its own). */
+.ranker-title { font-weight: 600; display: flex; gap: 0.3em; min-width: 0; white-space: nowrap; }
+.ranker-show { min-width: 0; flex-shrink: 1; overflow: hidden; text-overflow: ellipsis; }
+.ranker-season { min-width: 3em; flex-shrink: 0.001; overflow: hidden; text-overflow: ellipsis; }
 .ranker-year { color: var(--text-faint); font-size: 0.72rem; }
 .ranker-facts { display: flex; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
 .ranker-fact { font-size: 0.68rem; color: var(--text-dim); background: rgba(255,255,255,0.05); border-radius: 5px; padding: 1px 5px; }
 .ranker-fact.rating { color: var(--gold-soft); }
-/* Which season the row is: the one fact that tells it from its whole show on
-   the same board, so it reads before the rest. */
-.ranker-fact.season { color: var(--text); font-weight: 600; }
 .ranker-actions { display: flex; gap: 2px; flex-shrink: 0; }
 .ranker-act {
     cursor: pointer; background: none; border: none; color: var(--text-faint);

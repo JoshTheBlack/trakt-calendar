@@ -385,6 +385,15 @@ async def season_pick(settings: Settings,
     return await title_search.pick_from_hit(settings, hit, cached_only=False)
 
 
+async def stored_seasons(settings: Settings,
+                         hit: title_search.MergedSearchHit) -> list[dict]:
+    """The season list a hit's checklist was drawn from, read back from the
+    cache — never a request, for board_item's reason. [] when nothing is stored.
+    What a ticked season's episode total and name are read from."""
+    pick = await title_search.pick_from_hit(settings, hit, cached_only=True)
+    return list(pick.seasons) if pick is not None else []
+
+
 async def board_item(settings: Settings,
                      hit: title_search.MergedSearchHit) -> dict[str, Any] | None:
     """The whole title a hit names, as the board data layer stores it, or None

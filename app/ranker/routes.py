@@ -754,7 +754,7 @@ async def _item_details(request: Request, *, season_only: bool) -> Response:
         return details_panel.season_pane(request, details, media=media, season=season)
     return details_panel.panel(
         request, details, media=media, season=season,
-        title=item["title"] or "", poster=_tile_url(item),
+        title=item["label"], poster=_tile_url(item),
         # The row's ids first and the answer's beside them: which services know a
         # title is a fact about the row, and a Trakt-described answer carries no
         # Simkl id to build that button from.
@@ -793,7 +793,7 @@ def _described_by_the_board(request: Request, item: dict, season_only: bool, *,
              "runtime": item["runtime"]}
     return details_panel.panel(
         request, facts, media=media, season=None,
-        title=item["title"] or "", poster=_tile_url(item),
+        title=item["label"], poster=_tile_url(item),
         links=detail_source.outbound_links(item["ids"], media),
         note=f"{lead}: {reason}.")
 
@@ -1127,6 +1127,60 @@ async def move_board_items(board_uid: str, request: Request):
                                     notice_ok=ok, open_tier=landed)
 
 
+async def _stored_season_list(settings, ids: Mapping[str, Any]) -> list[dict]:
+    """The season list of the show `ids` names, AS THIS INSTANCE ALREADY HOLDS IT
+    — never a request. [] when nobody can describe the show or nothing is stored.
+
+    WHAT A ROW BECOMING A SEASON READS ITS COUNT AND NAME FROM. Every way a row
+    gets a season follows a moment that fetched this list anyway — the season
+    control's opening, a search result's checklist — or is a bulk arrival (an
+    import, a ratings seed) where a lookup per show would be a request per row. So
+    this reads the store, asked of the service that describes the title
+    (detail_source.choose), and a list nobody fetched leaves the facts blank.
+    """
+    chosen = detail_source.choose(settings, ids)
+    if chosen is None:
+        return []
+    try:
+        return (await detail_source.seasons(settings, chosen, Media.SHOW,
+                                            cached_only=True)).seasons
+    except SourceUnavailable:
+        return []
+
+
+async def _with_season_facts(settings, items: list[dict]) -> list[dict]:
+    """`items` with each SEASON's episode total and name filled in from the stored
+    season list (seasons.season_facts), where the item did not bring its own —
+    an import's count is the tracker's record of that season and stays. One read
+    per show, however many of its seasons arrive."""
+    lists: dict[str, list[dict]] = {}
+    out = []
+    for item in items:
+        if item.get("season") in (None, ""):
+            out.append(item)
+            continue
+        show = json.dumps(item.get("ids") or {}, sort_keys=True)
+        if show not in lists:
+            lists[show] = await _stored_season_list(settings, item.get("ids") or {})
+        out.append(_season_item(item, item.get("season"), lists[show]))
+    return out
+
+
+def _season_item(item: Mapping[str, Any], season: Any, listed: list[dict]) -> dict:
+    """`item` as one season of its show, carrying that season's episode total and
+    name from `listed` (seasons.season_facts) where the item did not bring its own.
+    A season that is not one a row could be is passed on untouched, so the add
+    refuses it in the data layer's own words rather than here."""
+    try:
+        number = item_keys.valid_season(season, item.get("media", Media.SHOW))
+    except ValueError:
+        return {**item, "season": season}
+    facts = ranker_seasons.season_facts(listed, number)
+    return {**item, "season": season,
+            "episode_count": item.get("episode_count") or facts["episode_count"],
+            "season_name": item.get("season_name") or facts["season_name"]}
+
+
 @guard.post("/rankings/boards/{board_uid}/items/season", AuthLevel.RANKER_APPROVED)
 async def set_board_item_season(board_uid: str, request: Request):
     """Make one show row the whole show or one of its seasons — the choice its
@@ -1147,11 +1201,16 @@ async def set_board_item_season(board_uid: str, request: Request):
     # row now has — the old one when the change was refused.
     row_key = str(data.get("key") or "")
     try:
+        # The list the control was drawn from, read back from the store, so the
+        # row's counts and name follow its new season with no second request.
+        item = await ranker.fetch_item(user.user_id, board_uid, data.get("key"))
+        listed = (await _stored_season_list(load_settings(), item["ids"])
+                  if item["media"] == Media.SHOW else [])
         row_key = await ranker.set_item_season(user.user_id, board_uid, data.get("key"),
-                                               data.get("season"))
+                                               data.get("season"), listed)
         season = ranker.parse_key(row_key).season
         notice = ("This row is the whole show now." if season is None else
-                  f"This row is {ranker_seasons.SeasonOption(season).label} now.")
+                  f"This row is {ranker_seasons.season_word(season)} now.")
     except ranker.RankerError as exc:
         notice, ok = str(exc), False
     return await _rankings_response(request, user, board_uid, notice=notice, notice_ok=ok,
@@ -1571,7 +1630,9 @@ async def _add_named(user, board_uid: str, data: Mapping[str, Any]) -> _Added:
         seasons = _ticked_seasons(data)
         if not seasons:
             raise ranker.ValidationError("Tick at least one season to add.")
-        items = [{**item, "season": season} for season in seasons]
+        # Each season's count and name, from the list its checklist was drawn from.
+        listed = await ranker_sources.stored_seasons(settings, hit)
+        items = [_season_item(item, season, listed) for season in seasons]
     arrived = await ranker.add_titles(user.user_id, board_uid, items, added_from="manual")
     # Every season was validated by the add itself, so reading the first back
     # cannot fail here.
@@ -1781,7 +1842,8 @@ async def import_finished_titles(board_uid: str, request: Request):
     refs = await source.finished_titles(user.user_id, media=media, year=year)
     try:
         arrived = await ranker.add_titles(
-            user.user_id, board_uid, ranker_sources.items_from_refs(refs),
+            user.user_id, board_uid,
+            await _with_season_facts(load_settings(), ranker_sources.items_from_refs(refs)),
             added_from="tracker",
         )
         notice, ok = f"Found {len(refs)}, added {arrived.added}{_converted(arrived.converted)}.", True
@@ -1819,10 +1881,10 @@ async def seed_from_ratings(board_uid: str, request: Request):
         rated = await source.fetch_ratings(user.user_id)
     except ranker_sources.SourceUnavailable as exc:
         return _seed_answer(request, board_uid, message=str(exc), ok=False)
-    entries = [
+    entries = await _with_season_facts(load_settings(), [
         item for rating in rated
         if (item := rating.title.as_item(user_rating=rating.rating)) is not None
-    ]
+    ])
     try:
         summary = await ranker.seed_ratings(user.user_id, board_uid, entries, commit=commit)
     except ranker.RankerError as exc:

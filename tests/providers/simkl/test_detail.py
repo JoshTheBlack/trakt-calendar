@@ -240,9 +240,13 @@ class SeasonPickerTests(unittest.IsolatedAsyncioTestCase):
         # `first_aired` rides along: the episode list being grouped here already
         # carries every date, so a season's premiere day costs no extra call and
         # is the same field Trakt's own season list returns.
+        # `name` and `poster` are stated and empty: Simkl publishes neither for a
+        # season, and the keys keep one shape whichever service answered.
         self.assertEqual(got.seasons,
-                         [{"season": 1, "episode_count": 3, "first_aired": "2026-07-07"},
-                          {"season": 2, "episode_count": 1, "first_aired": "2026-09-01"}])
+                         [{"season": 1, "episode_count": 3, "first_aired": "2026-07-07",
+                           "name": "", "poster": ""},
+                          {"season": 2, "episode_count": 1, "first_aired": "2026-09-01",
+                           "name": "", "poster": ""}])
 
     async def test_both_lookups_run_and_stay_on_the_catalog_pool(self):
         _got, calls = await self._seasons({"ids": {"simkl": 55}})

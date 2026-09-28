@@ -65,15 +65,19 @@
     {% else %}
     <span class="ranker-thumb is-missing" aria-hidden="true"></span>
     {% endif %}
+    {# WHAT THE ROW IS CALLED, which for a season is "Show — Season 3" or the
+       season's own name ("True Detective — Night Country"): a board may hold a
+       show and its seasons side by side, and the label is how they are told
+       apart. app/ranker/seasons.py's row_label is the one spelling of it, shared
+       with the details heading and the exports; drawn here in its two halves
+       (`season_label` is season_part's) so a long show name is what gets cut
+       short, never the season. The counts beside it are the row's own — a
+       season row has no season count and its own episode total. #}
     <span class="ranker-name">
-        <span class="ranker-title">{{ item.title or "Untitled" }}</span>
+        <span class="ranker-title"><span class="ranker-show">{{ item.title or "Untitled" }}</span>{% if item.season_label %}<span class="ranker-season">— {{ item.season_label }}</span>{% endif %}</span>
         {% if item.year %}<span class="ranker-year">{{ item.year }}</span>{% endif %}
     </span>
     <span class="ranker-facts">
-        {# WHICH SEASON THIS ROW IS, so it can be told from its whole show beside
-           it — a board may hold both. The number alone, beside the other terse
-           facts; 0 is the specials. #}
-        {% if item.season is not none %}<span class="ranker-fact season">{{ 'Specials' if item.season == 0 else 'Season ' ~ item.season }}</span>{% endif %}
         {% if item.season_count %}<span class="ranker-fact">{{ item.season_count }}S</span>{% endif %}
         {% if item.episode_count %}<span class="ranker-fact">{{ item.episode_count }}E</span>{% endif %}
         {% if item.runtime %}<span class="ranker-fact">{{ item.runtime }}m</span>{% endif %}
@@ -93,7 +97,7 @@
            filters out (`.ranker-act`) can never be read as the start of a drag. #}
         <button type="button" class="ranker-act" title="Details" aria-label="Details"
                 data-details-open="/rankings/fragments/details?{{ {'board': board_uid, 'key': item.key} | urlencode }}"
-                data-details-heading="{{ item.title or 'Untitled' }}">ⓘ</button>
+                data-details-heading="{{ item.label }}">ⓘ</button>
         <button type="button" class="ranker-act" title="Move up" aria-label="Move up"
                 data-nudge="-1">▲</button>
         <button type="button" class="ranker-act" title="Move down" aria-label="Move down"

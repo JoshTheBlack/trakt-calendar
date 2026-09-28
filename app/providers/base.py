@@ -1128,13 +1128,16 @@ class SeasonsAnswer(NamedTuple):
     that already names its season skips a picker with nothing left to ask. A
     caller that wanted this as two verbs would pay for the same lookup twice.
 
-    `seasons` is [{season, episode_count, first_aired}] — a show's seasons this
-    source has populated with episodes, for a picker to offer. Empty for a
-    source or a media kind that has none to offer (a movie, or a lookup that
-    found nothing). `first_aired` is the season's premiere as the source states
-    it — a full ISO instant from Trakt, a bare YYYY-MM-DD from Simkl (its
-    earliest dated episode) — and "" when the source has not dated it; a date
-    in the future is a season announced but not yet aired.
+    `seasons` is [{season, episode_count, first_aired, name, poster}] — a show's
+    seasons this source has populated with episodes, for a picker to offer.
+    Empty for a source or a media kind that has none to offer (a movie, or a
+    lookup that found nothing). `first_aired` is the season's premiere as the
+    source states it — a full ISO instant from Trakt, a bare YYYY-MM-DD from
+    Simkl (its earliest dated episode) — and "" when the source has not dated
+    it; a date in the future is a season announced but not yet aired. `name` is
+    the season's own title where it has one ("" where the source only restates
+    the number, or states none), and `poster` its own artwork as an ORIGIN
+    address, "" where the source publishes none — the caller proxies it.
 
     `named_season` is the season THIS hit's own per-title record already names,
     or None — either because the source never says a hit is one season of a

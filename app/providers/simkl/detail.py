@@ -572,9 +572,11 @@ def seasons_known(episodes: list[dict]) -> list[int]:
 
 
 def _season_counts(episodes: list[dict]) -> list[dict]:
-    """[{season, episode_count, first_aired}] over `episodes`, one entry per
-    season the episode list actually contains, in order — the picker's
-    candidate list.
+    """[{season, episode_count, first_aired, name, poster}] over `episodes`, one
+    entry per season the episode list actually contains, in order — the picker's
+    candidate list. `name` and `poster` are always "": Simkl publishes neither a
+    season's own title nor its own artwork (its episode list carries episode
+    stills only), and stating the keys keeps one shape whichever service answered.
 
     GROUPED THE SAME WAY `seasons_known` GROUPS SEASON NUMBERS: an episode with
     no season number counts as season 1, which is how anime arrives (Simkl
@@ -599,7 +601,8 @@ def _season_counts(episodes: list[dict]) -> list[dict]:
         if when is not None and (season not in earliest or when < earliest[season]):
             earliest[season] = when
     return [{"season": season, "episode_count": count,
-             "first_aired": earliest[season].isoformat() if season in earliest else ""}
+             "first_aired": earliest[season].isoformat() if season in earliest else "",
+             "name": "", "poster": ""}
             for season, count in sorted(counts.items())]
 
 

@@ -127,8 +127,20 @@ class SearchAndImportArrivalTests(_ArrivalTestCase):
             self.user_id, BOARD, [show_ref(SHOW, "Show S3", season=3, episode_count=8)]))
         season = self.row(season_key(SHOW, 3))
         self.assertEqual((season["title"], season["episode_count"]), ("Show S3", 8))
-        # Nothing arrived about these, so the row keeps its own.
-        self.assertEqual((season["season_count"], season["user_rating"]), (5, 9))
+        # Nothing arrived about the rating, so the row keeps its own.
+        self.assertEqual(season["user_rating"], 9)
+        # But the whole show's season count describes the whole show: a season
+        # row has none, rather than "5S 8E" beside Season 3.
+        self.assertIsNone(season["season_count"])
+
+    def test_a_season_that_knows_no_episode_total_drops_the_shows(self):
+        """A seed or a search add that could not read the season's total arrives
+        with none, and the converted row shows no count rather than the whole
+        show's episodes as if they were the season's."""
+        asyncio.run(ranker.add_titles(
+            self.user_id, BOARD, [show_ref(SHOW, "Show", season=3)]))
+        season = self.row(season_key(SHOW, 3))
+        self.assertEqual((season["season_count"], season["episode_count"]), (None, None))
 
     def test_a_held_season_adds_nothing_and_bumps_nothing(self):
         asyncio.run(ranker.add_titles(self.user_id, BOARD, [show_ref(SHOW, season=3)]))

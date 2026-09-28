@@ -1,8 +1,10 @@
-"""What a show row's season control offers, and which choice it suggests.
+"""What a show row's season control offers, which choice it suggests, what a
+season row is called and what it counts.
 
 PURE: it is handed what the services, the board and (optionally) the viewer's
-finished seasons already said, and answers with the options to draw. No database,
-no HTTP, no provider — the route gathers those, this decides.
+finished seasons already said, and answers with the options to draw, the label to
+print and the facts to store. No database, no HTTP, no provider — the route
+gathers those, this decides.
 
 THE CONTROL SETS WHAT ONE BOARD ROW IS: the whole show, or one season of it. So it
 offers "Whole show" and every season a service lists, and:
@@ -29,6 +31,65 @@ from typing import Any
 SPECIALS = 0
 
 
+def season_word(season: int) -> str:
+    """One season, as the board says it: "Season 3", or "Specials" for 0."""
+    return "Specials" if season == SPECIALS else f"Season {season}"
+
+
+def row_label(title: str | None, season: int | None, season_name: str | None = None) -> str:
+    """WHAT A BOARD ROW IS CALLED — the row itself, its details heading and both
+    exports, so the four cannot come to call one row two things.
+
+    The whole show is its title. A season is "Show — Season N" ("Show — Specials"
+    for 0), and a season with a name of its own is "Show — <name>" (True Detective
+    — Night Country): an anthology's seasons are known by their names, not their
+    numbers. The details panel's rule for what counts as a name is the service's
+    (`SeasonsAnswer`'s `name`: a title that only restates the number is dropped
+    there), so a stored name is used as it is.
+    """
+    part = season_part(season, season_name)
+    return f"{title or 'Untitled'} — {part}" if part else (title or "Untitled")
+
+
+def season_part(season: int | None, season_name: str | None = None) -> str:
+    """The half of `row_label` after the dash: the season's name, else "Season
+    N", and "" for the whole show. On its own because the board row draws the two
+    halves apart — a long show name may be cut short there, and the season is the
+    half that must survive it."""
+    if season is None:
+        return ""
+    return season_name or season_word(season)
+
+
+def season_facts(listed: Iterable[Mapping[str, Any]], season: int | None) -> dict[str, Any]:
+    """What a row that IS `season` of a show (None: the whole show) counts and is
+    called, out of one service's season list — the three tier_items columns that
+    describe what the row is rather than which title it is.
+
+    A ROW'S COUNTS DESCRIBE THE ROW. A season row has no season count at all and
+    its own episode total; the whole show has the list's seasons and their
+    episodes summed. Whatever the list does not say comes back None, never the
+    other shape's number: a season row that showed the show's "5S 38E" beside
+    "Season 3" read as the season having 38 episodes. Specials are not in a
+    service's season list, so the whole show's count is its numbered seasons.
+    """
+    by_season: dict[int, Mapping[str, Any]] = {}
+    for entry in listed:
+        try:
+            by_season[int(entry["season"])] = entry
+        except (KeyError, TypeError, ValueError):
+            continue
+    if season is None:
+        numbered = [entry for number, entry in by_season.items() if number != SPECIALS]
+        episodes = sum(int(entry.get("episode_count") or 0) for entry in numbered)
+        return {"season_count": len(numbered) or None, "episode_count": episodes or None,
+                "season_name": None}
+    entry = by_season.get(season) or {}
+    return {"season_count": None,
+            "episode_count": int(entry.get("episode_count") or 0) or None,
+            "season_name": str(entry.get("name") or "").strip() or None}
+
+
 @dataclass(frozen=True)
 class SeasonOption:
     """One choice in the control. `season` None is the whole show."""
@@ -45,11 +106,7 @@ class SeasonOption:
 
     @property
     def label(self) -> str:
-        if self.season is None:
-            return "Whole show"
-        if self.season == SPECIALS:
-            return "Specials"
-        return f"Season {self.season}"
+        return "Whole show" if self.season is None else season_word(self.season)
 
     @property
     def notes(self) -> tuple[str, ...]:

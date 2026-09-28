@@ -217,17 +217,22 @@ def _says_anything(details: dict) -> bool:
     return bool(details.get("title") or details.get("overview") or details.get("episodes"))
 
 
-async def seasons(settings, chosen: Answerer, media) -> SeasonsAnswer:
+async def seasons(settings, chosen: Answerer, media, *,
+                  cached_only: bool = False) -> SeasonsAnswer:
     """The chosen source's season list for one title — DetailPort.fetch_seasons,
     asked of whoever `choose` picked, so "which service lists this title's
     seasons" is the same answer as "which service describes it".
 
-    A stored-only answerer is asked of its store alone (`cached_only`), for the
-    reason `describe` ORs it in: it is a fact about this instance that the
-    source cannot be reached, not a caller's policy.
+    A stored-only answerer is asked of its store alone, for the reason `describe`
+    ORs it in: it is a fact about this instance that the source cannot be
+    reached, not a caller's policy. `cached_only` is the caller's policy, ORed in
+    beside it: a moment that must not spend a request — a rankings row becoming
+    a season reads the list its control already fetched — asks the store alone
+    and takes an empty answer as "not known".
     """
     return await providers.get(chosen.source).detail_port.fetch_seasons(
-        settings, chosen.source_id, Media(media), cached_only=chosen.stored_only)
+        settings, chosen.source_id, Media(media),
+        cached_only=chosen.stored_only or cached_only)
 
 
 async def fetch(settings, source: Source, media, source_id: str,

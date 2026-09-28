@@ -423,6 +423,48 @@ class MigrationTests(DbTestCase):
             conn.close()
             path.unlink(missing_ok=True)
 
+    async def test_migration_45_names_a_season_row_and_leaves_every_row_unnamed(self):
+        """tier_items gains `season_name`, NULL meaning no name of its own. Every
+        existing row — a whole show, a season and a film — keeps its id, season,
+        tier and counts and arrives unnamed."""
+        import sqlite3
+
+        from unittest.mock import patch
+
+        path = TMP / "migration-45-test.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        conn.execute("PRAGMA foreign_keys=ON")
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 44]):
+                db.migrate_sync(conn)
+            now = db.now()
+            conn.execute("INSERT INTO users (id, username, created_at, updated_at) "
+                         "VALUES (1, 'someone', ?, ?)", (now, now))
+            conn.execute("INSERT INTO tier_boards (id, user_id, uid, name, created_at, updated_at) "
+                         "VALUES (7, 1, 'b7', 'Shows', ?, ?)", (now, now))
+            conn.execute(
+                "INSERT INTO tier_items (id, board_id, media, match_source, match_id, season, "
+                "title, episode_count, rank_in_category, created_at) VALUES "
+                "(1, 7, 'show', 'tmdb', '31911', NULL, 'True Detective', 30, 0, ?), "
+                "(2, 7, 'show', 'tmdb', '31911', 4, 'True Detective', 6, 1, ?), "
+                "(3, 7, 'movie', 'tmdb', '550', NULL, 'Fight Club', NULL, 2, ?)",
+                (now, now, now))
+            before = [dict(r) for r in conn.execute("SELECT * FROM tier_items ORDER BY id")]
+
+            db.migrate_sync(conn)
+
+            after = [dict(r) for r in conn.execute("SELECT * FROM tier_items ORDER BY id")]
+            self.assertEqual([row.pop("season_name") for row in after], [None, None, None])
+            self.assertEqual(after, before, "a row changed on the way through")
+            conn.execute("UPDATE tier_items SET season_name = 'Night Country' WHERE id = 2")
+            self.assertEqual(conn.execute(
+                "SELECT season_name FROM tier_items WHERE id = 2").fetchone()[0], "Night Country")
+        finally:
+            conn.close()
+            path.unlink(missing_ok=True)
+
     async def test_migration_21_opens_the_provider_column_and_keeps_every_row(self):
         """Both provider tables carried `CHECK (provider IN ('plex','trakt'))`,
         which made admitting a third service a table rebuild.

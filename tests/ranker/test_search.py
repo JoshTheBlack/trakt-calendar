@@ -378,6 +378,22 @@ class SeasonChecklistTests(_SearchTestCase):
         self.assertIn("Added 2 seasons to the pool.", html)
         self.assertEqual(self.keys(), ["show:tmdb:1:s1", "show:tmdb:1:s3"])
 
+    def test_each_ticked_season_counts_its_own_episodes_from_the_stored_list(self):
+        """The list the checklist was drawn from, read back cache-only — each
+        season row counts its own episodes and no seasons, and a named season
+        arrives called by its name."""
+        named = self.PICK._replace(seasons=[*self.PICK.seasons[:2], {
+            **self.PICK.seasons[2], "name": "The Return"}])
+        self.enter("title")
+        with mock.patch.object(self, "PICK", named):
+            self.add({"q": "title", "i": "0", "media": "show", "want": "seasons",
+                      "season:1": "1", "season:3": "1"})
+        self.assertEqual(
+            [(r["season"], r["season_count"], r["episode_count"], r["season_name"])
+             for r in self.rows("SELECT * FROM tier_items ORDER BY season")],
+            [(1, None, 8, None), (3, None, 10, "The Return")])
+        self.assertIn(("Title 1", True), self.picks, "the list must be read from the cache")
+
     def test_seasons_over_a_whole_show_row_convert_it_and_add_the_rest(self):
         asyncio.run(ranker.add_titles(self.user_id, "b1", [show_ref("1")]))
         whole = self.value("SELECT id FROM tier_items")

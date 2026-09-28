@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 from . import item_keys
+from . import seasons as ranker_seasons
 from .. import db
 # The identity a board row is keyed on is the app's notion of "the same title",
 # not this feature's — the tracker files its own rows under the same triple — so
@@ -298,6 +299,12 @@ def _item_dict(row) -> dict[str, Any]:
         "match_source": row["match_source"],
         "match_id": row["match_id"],
         "season": row["season"],
+        "season_name": row["season_name"],
+        # What the row is CALLED, which for a season row is not its title alone —
+        # seasons.row_label is the one spelling, so the row, its details heading
+        # and the exports read the same words.
+        "label": ranker_seasons.row_label(row["title"], row["season"], row["season_name"]),
+        "season_label": ranker_seasons.season_part(row["season"], row["season_name"]),
         "tmdb": row["tmdb"],
         "ids": ids if isinstance(ids, dict) else {},
         "title": row["title"],
@@ -494,12 +501,13 @@ async def clone_board(
         # in, with no id map to build in Python.
         conn.execute(
             "INSERT INTO tier_items (board_id, category_id, media, match_source, match_id, "
-            "season, tmdb, ids_json, title, year, network, season_count, episode_count, "
-            "runtime, user_rating, added_from, rank_in_category, created_at) "
+            "season, season_name, tmdb, ids_json, title, year, network, season_count, "
+            "episode_count, runtime, user_rating, added_from, rank_in_category, created_at) "
             "SELECT ?, (SELECT c.id FROM tier_categories c "
             "             JOIN tier_categories o ON o.uid = c.uid "
             "            WHERE c.board_id = ? AND o.id = i.category_id), "
-            "       i.media, i.match_source, i.match_id, i.season, i.tmdb, i.ids_json, i.title, i.year, "
+            "       i.media, i.match_source, i.match_id, i.season, i.season_name, i.tmdb, "
+            "       i.ids_json, i.title, i.year, "
             "       i.network, i.season_count, i.episode_count, i.runtime, i.user_rating, "
             "       i.added_from, i.rank_in_category, ? "
             "  FROM tier_items i WHERE i.board_id = ?",
@@ -787,29 +795,38 @@ def _redefine_row(conn: db.Connection, board_id: int, item_id: int, season: int 
     row, shared by the row's own season control (`set_item_season`) and by a
     season arriving over its whole show (`_plan_arrivals`).
 
-    `facts` is the arriving row, when there is one: what it knows about the
-    season (its counts, its rating) replaces what the row said about the
-    whole show, and anything it does not know leaves the row's own value alone.
-    The season control passes none, because choosing a season teaches nothing
-    about it.
+    WHAT THE ROW COUNTS AND IS CALLED IS ALWAYS REWRITTEN (_DEFINING_FACTS),
+    from `facts` where it states them and cleared where it does not. Those
+    describe what the row IS, so a number that belonged to its old definition
+    describes something else: a row made into Season 3 used to go on showing the
+    whole show's "5S 38E" beside its new season. Nothing is better than that.
+
+    The rest of `facts` — the arriving row's title, network, rating and the like
+    (_ARRIVING_FACTS) — replaces the row's own value only where it knows one,
+    because an arrival that does not know a title's network has not learned that
+    it has none. The season control passes only the defining facts it read off
+    the season list, since choosing a season teaches nothing else about it.
     """
-    if facts is None:
-        conn.execute("UPDATE tier_items SET season = ? WHERE id = ? AND board_id = ?",
-                     (season, item_id, board_id))
-        return
+    facts = facts or {}
+    defining = {column: facts.get(column) for column in _DEFINING_FACTS}
+    if season is None:
+        defining["season_name"] = None
     known = {column: facts[column] for column in _ARRIVING_FACTS
              if facts.get(column) not in (None, "")}
-    assignments = "".join(f", {column} = ?" for column in known)
+    assignments = "".join(f", {column} = ?" for column in (*defining, *known))
     conn.execute(
         f"UPDATE tier_items SET season = ?{assignments} WHERE id = ? AND board_id = ?",
-        (season, *known.values(), item_id, board_id))
+        (season, *defining.values(), *known.values(), item_id, board_id))
 
 
-# What a season arriving over its whole-show row may say about itself. Not the
-# identity (it is the same title), not where the row sits and not who added it
-# first. Constants, never input, which is what makes naming them in SQL safe.
-_ARRIVING_FACTS = ("tmdb", "title", "year", "network", "season_count", "episode_count",
-                   "runtime", "user_rating")
+# What describes the row's DEFINITION — rewritten whenever it changes. Constants,
+# never input, which is what makes naming them in SQL safe (and the same below).
+_DEFINING_FACTS = ("season_count", "episode_count", "season_name")
+
+# What a season arriving over its whole-show row may otherwise say about itself.
+# Not the identity (it is the same title), not where the row sits and not who
+# added it first.
+_ARRIVING_FACTS = ("tmdb", "title", "year", "network", "runtime", "user_rating")
 
 
 def _insert_item(conn: db.Connection, board_id: int, row: Mapping[str, Any],
@@ -824,17 +841,17 @@ def _insert_item(conn: db.Connection, board_id: int, row: Mapping[str, Any],
     """
     cur = conn.execute(
         "INSERT INTO tier_items (board_id, category_id, media, match_source, match_id, "
-        "season, tmdb, ids_json, title, year, network, season_count, episode_count, "
-        "runtime, user_rating, added_from, rank_in_category, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "season, season_name, tmdb, ids_json, title, year, network, season_count, "
+        "episode_count, runtime, user_rating, added_from, rank_in_category, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         # NO CONFLICT TARGET: the board's uniqueness is an index over
         # IFNULL(season, -1) (migration 44), and a named target must match an
         # index exactly. Any unique index satisfies a bare DO NOTHING.
         "ON CONFLICT DO NOTHING",
         (board_id, category_id, row["media"], row["match_source"], row["match_id"],
-         row["season"], row["tmdb"], row["ids_json"], row["title"], row["year"], row["network"],
-         row["season_count"], row["episode_count"], row["runtime"],
-         row["user_rating"], added_from, rank, ts),
+         row["season"], row["season_name"], row["tmdb"], row["ids_json"], row["title"],
+         row["year"], row["network"], row["season_count"], row["episode_count"],
+         row["runtime"], row["user_rating"], added_from, rank, ts),
     )
     return 1 if cur.rowcount > 0 else 0
 
@@ -866,6 +883,10 @@ def _normalize_ref(ref: Mapping[str, Any]) -> dict[str, Any]:
         # Which season of the show this row is, None for the whole show. Part of
         # the row's identity (its key and the unique index), not a description.
         "season": season,
+        # A season's own name (seasons.row_label). Only a season has one, so a
+        # whole-show row stores none whatever it was handed.
+        "season_name": (_name(ref.get("season_name"), 200, "season name") or None
+                        if season is not None else None),
         "tmdb": _optional_int(ref.get("tmdb")),
         # Unknown keys are omitted rather than stored as nulls, so the map stays
         # a record of what was actually known about this title.
@@ -874,7 +895,10 @@ def _normalize_ref(ref: Mapping[str, Any]) -> dict[str, Any]:
         "title": _name(ref.get("title"), 300, "title"),
         "year": _optional_int(ref.get("year")),
         "network": _name(ref.get("network"), 120, "network"),
-        "season_count": _optional_int(ref.get("season_count")),
+        # A season has no season count: a number there could only be the whole
+        # show's, drawn beside "Season 3" as if it were the season's.
+        "season_count": (_optional_int(ref.get("season_count"))
+                         if season is None else None),
         "episode_count": _optional_int(ref.get("episode_count")),
         "runtime": _optional_int(ref.get("runtime")),
         "user_rating": _optional_int(ref.get("user_rating")),
@@ -933,13 +957,16 @@ async def held_seasons(user_id: int, board_uid: str, key: Any) -> set[int | None
     return await db.run(_work)
 
 
-async def set_item_season(user_id: int, board_uid: str, key: Any, season: Any) -> str:
+async def set_item_season(user_id: int, board_uid: str, key: Any, season: Any,
+                          listed: list[Mapping[str, Any]] | None = None) -> str:
     """Make the row `key` names a different season of its show, or the whole
     show (`season` None or ""), and return the row's new key.
 
     THE ROW IS CHANGED IN PLACE: the same id, the same tier and the same rank, so
-    redefining what a row is never reshuffles the board around it. Its facts
-    (title, counts, rating) are left as they are; only what the row IS changes.
+    redefining what a row is never reshuffles the board around it. Its title and
+    rating stay as they are; what it COUNTS and is called follow the new
+    definition, read off `listed` — the service's season list the control was
+    drawn from — by seasons.season_facts, and blank where the list is not known.
 
     A SEASON THE BOARD ALREADY HOLDS IS REFUSED, not merged: the control greys
     those out, so arriving here with one means another tab put it there since,
@@ -969,7 +996,8 @@ async def set_item_season(user_id: int, board_uid: str, key: Any, season: Any) -
             raise ValidationError(
                 "This board already holds the whole show." if wanted is None else
                 "This board already holds that season.")
-        _redefine_row(conn, board_id, known[str(parsed)], wanted)
+        _redefine_row(conn, board_id, known[str(parsed)], wanted,
+                      ranker_seasons.season_facts(listed or [], wanted))
         _touch(conn, board_id, user_id, ts)
         return str(target)
 
@@ -1129,7 +1157,10 @@ async def fetch_removals(user_id: int, board_uid: str, *,
             {
                 "kind": "title",
                 "key": item_keys.row_key(row),
-                "title": str(_json_object(row["item_json"]).get("title") or ""),
+                # Named as the row was, so a removed season is not listed as its show.
+                "title": ranker_seasons.row_label(
+                    str((record := _json_object(row["item_json"])).get("title") or ""),
+                    row["season"], record.get("season_name")),
                 "category_uid": row["category_uid"],
                 "tier_label": None if row["tier_uid"] is None else (row["tier_label"] or ""),
                 "removed_at": row["removed_at"],
@@ -2030,7 +2061,9 @@ _BACKUP_CATEGORY_FIELDS = ("uid", "label", "rank_priority", "is_isolated",
 # safe is the other direction: a build that predates it ignores the field, reads
 # a season and its show as one title twice, and refuses the board whole (the
 # "appears twice" check below) rather than restoring it smaller.
-_BACKUP_ITEM_FIELDS = ("media", "match_source", "match_id", "season", "tmdb", "ids_json",
+# `season_name` rides beside it the same way: absent reads as no name of its own.
+_BACKUP_ITEM_FIELDS = ("media", "match_source", "match_id", "season", "season_name",
+                       "tmdb", "ids_json",
                        "title", "year", "network", "season_count", "episode_count",
                        "runtime", "user_rating", "added_from", "rank_in_category",
                        "created_at")

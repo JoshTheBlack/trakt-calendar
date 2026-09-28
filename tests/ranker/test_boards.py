@@ -1088,6 +1088,34 @@ class TrackerImportTests(RankerTestCase):
         self.assertIsNotNone(converted["category_id"])
         self.assertIsNone(rows[0]["category_id"])
 
+    def test_an_imported_season_is_named_from_the_stored_list_and_keeps_its_count(self):
+        """The tracker's count is its record of the season and stays; a name only
+        the service knows is read from the season list this instance already
+        holds — cache only, so an import of a year's viewing asks nobody."""
+        from app.providers import detail_source
+        from app.providers.base import SeasonsAnswer, Source
+
+        asked = []
+
+        async def _seasons(settings, chosen, media, *, cached_only=False):
+            asked.append(cached_only)
+            return SeasonsAnswer(seasons=[
+                {"season": 3, "episode_count": 18, "first_aired": "", "name": "The Return",
+                 "poster": ""}], named_season=None, ids={}, network="")
+
+        self.month("2026-01", closed=True)
+        self.show("2026-01", 10, 3, watched=0, total=17, kind="completed")
+        with mock.patch.object(detail_source, "choose",
+                               lambda settings, ids: detail_source.Answerer(
+                                   Source.TRAKT, "10", stored_only=False)), \
+                mock.patch.object(detail_source, "seasons", _seasons):
+            self.client.post("/rankings/boards/b1/import", json={"media": "show"})
+        row = asyncio.run(db.fetch_one(
+            "SELECT season, season_count, episode_count, season_name FROM tier_items"))
+        self.assertEqual(dict(row), {"season": 3, "season_count": None, "episode_count": 17,
+                                     "season_name": "The Return"})
+        self.assertEqual(asked, [True])
+
     def test_the_year_list_is_a_fragment_of_its_own(self):
         """Not two lists drawn and one chosen by CSS: a `display: none` <select>
         still submits its value, so the answer would be whichever the browser

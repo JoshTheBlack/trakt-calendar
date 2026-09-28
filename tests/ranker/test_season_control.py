@@ -135,11 +135,15 @@ def answer(listed=LISTED) -> SeasonsAnswer:
     return SeasonsAnswer(seasons=list(listed), named_season=None, ids={}, network="")
 
 
-def stub_seasons(listed=LISTED):
+def stub_seasons(listed=LISTED, cached=None):
+    """A season list answering `listed`; `cached`, when given, collects the
+    `cached_only` each call was made with."""
     calls = []
 
-    async def _seasons(settings, chosen, media):
+    async def _seasons(settings, chosen, media, *, cached_only=False):
         calls.append((chosen.source, chosen.source_id))
+        if cached is not None:
+            cached.append(cached_only)
         return answer(listed)
 
     return calls, _seasons
@@ -330,13 +334,127 @@ class WhatChoosingDoesTests(_ControlTestCase):
         asyncio.run(ranker.restore_removal(self.user_id, BOARD, season_key(SHOW, 3)))
         self.assertEqual(self.keys_in("s"), [season_key(SHOW, 3), season_key(SHOW, 2), key("8")])
 
-    def test_a_season_row_is_marked_on_the_board(self):
+    def test_a_season_row_is_labelled_on_the_board(self):
         self.build_with_seasons()
         body = self.client.get(f"/rankings/fragments/row?board={BOARD}"
                                f"&key={season_key(SHOW, 2)}").text
-        self.assertIn('<span class="ranker-fact season">Season 2</span>', body)
+        self.assertIn('<span class="ranker-show">Title 7</span>'
+                      '<span class="ranker-season">— Season 2</span>', body)
+        self.assertIn('data-details-heading="Title 7 — Season 2"', body)
         whole = self.client.get(f"/rankings/fragments/row?board={BOARD}&key={key(SHOW)}").text
-        self.assertNotIn("ranker-fact season", whole)
+        self.assertIn('<span class="ranker-show">Title 7</span></span>', whole)
+        self.assertNotIn("ranker-season", whole)
+
+
+NAMED = [
+    {"season": 1, "episode_count": 8, "first_aired": "2014-01-12", "name": ""},
+    {"season": 4, "episode_count": 6, "first_aired": "2024-01-14", "name": "Night Country"},
+]
+
+
+class WhatAChoiceWritesTests(_ControlTestCase):
+    """Choosing a season writes what the row now COUNTS and is CALLED, read from
+    the season list the control was drawn from — out of the store, never a
+    second request — and never leaves the old definition's numbers behind."""
+
+    def facts(self, row_key: str) -> tuple:
+        season = None if row_key == key(SHOW) else int(row_key.rsplit(":s", 1)[1])
+        row = asyncio.run(db.fetch_one(
+            "SELECT season_count, episode_count, season_name FROM tier_items "
+            " WHERE match_id = ? AND IFNULL(season, -1) = ?",
+            (SHOW, -1 if season is None else season)))
+        return row["season_count"], row["episode_count"], row["season_name"]
+
+    def choose(self, row_key: str, season, listed=LISTED) -> tuple[str, list, list]:
+        cached: list = []
+        calls, fake = stub_seasons(listed, cached)
+        with mock.patch.object(detail_source, "seasons", fake):
+            body = self.set_season(row_key, season)
+        return body, calls, cached
+
+    def test_a_season_counts_its_own_episodes_and_no_seasons(self):
+        self.build_with_seasons()
+        asyncio.run(db.execute("UPDATE tier_items SET season_count = 5, episode_count = 38 "
+                               " WHERE match_id = ? AND season IS NULL", (SHOW,)))
+        _, calls, cached = self.choose(key(SHOW), 3)
+        self.assertEqual(self.facts(season_key(SHOW, 3)), (None, 9, None))
+        self.assertEqual(calls, [(Source.TRAKT, "70")])
+        self.assertEqual(cached, [True], "the list must be read from the store, not asked for")
+
+    def test_back_to_the_whole_show_counts_the_list(self):
+        self.build_with_seasons()
+        self.choose(key(SHOW), 3)
+        body, _, _ = self.choose(season_key(SHOW, 3), "")
+        self.assertIn("This row is the whole show now.", body)
+        # Four listed seasons, 8 + 10 + 9 + 10 episodes.
+        self.assertEqual(self.facts(key(SHOW)), (4, 37, None))
+
+    def test_a_list_nobody_stored_leaves_the_counts_blank_not_stale(self):
+        self.build_with_seasons()
+        asyncio.run(db.execute("UPDATE tier_items SET season_count = 5, episode_count = 38 "
+                               " WHERE match_id = ? AND season IS NULL", (SHOW,)))
+        self.choose(key(SHOW), 3, listed=[])
+        self.assertEqual(self.facts(season_key(SHOW, 3)), (None, None, None))
+
+    def test_a_named_season_is_called_by_its_name(self):
+        self.build_with_seasons()
+        body, _, _ = self.choose(key(SHOW), 4, listed=NAMED)
+        self.assertEqual(self.facts(season_key(SHOW, 4)), (None, 6, "Night Country"))
+        self.assertIn('<span class="ranker-season">— Night Country</span>', body)
+        self.choose(season_key(SHOW, 4), "", listed=NAMED)
+        self.assertIsNone(self.facts(key(SHOW))[2], "the name goes with the season")
+
+    def test_a_named_season_keeps_its_name_through_removal_and_restore(self):
+        self.build_with_seasons()
+        self.choose(key(SHOW), 4, listed=NAMED)
+        asyncio.run(ranker.remove_items(self.user_id, BOARD, [season_key(SHOW, 4)]))
+        removed = asyncio.run(ranker.fetch_removals(self.user_id, BOARD))
+        self.assertEqual(removed[0]["title"], "Title 7 — Night Country")
+        asyncio.run(ranker.restore_removal(self.user_id, BOARD, season_key(SHOW, 4)))
+        self.assertEqual(self.facts(season_key(SHOW, 4)), (None, 6, "Night Country"))
+
+
+class TheLabelTests(unittest.TestCase):
+    """seasons.row_label — the one spelling of what a board row is called, for
+    the row, its details heading and the exports."""
+
+    def test_the_whole_show_is_its_title(self):
+        self.assertEqual(seasons.row_label("The Bear", None), "The Bear")
+        self.assertEqual(seasons.row_label("", None), "Untitled")
+
+    def test_a_numbered_season(self):
+        self.assertEqual(seasons.row_label("The Bear", 3), "The Bear — Season 3")
+
+    def test_a_named_season_reads_by_its_name(self):
+        self.assertEqual(seasons.row_label("True Detective", 4, "Night Country"),
+                         "True Detective — Night Country")
+
+    def test_the_specials(self):
+        self.assertEqual(seasons.row_label("Doctor Who", 0), "Doctor Who — Specials")
+
+    def test_the_two_halves_the_row_draws_apart(self):
+        self.assertEqual(seasons.season_part(None), "")
+        self.assertEqual(seasons.season_part(2), "Season 2")
+        self.assertEqual(seasons.season_part(4, "Night Country"), "Night Country")
+
+
+class TheFactsTests(unittest.TestCase):
+    """seasons.season_facts — a row's counts describe what the row is."""
+
+    def test_a_season(self):
+        self.assertEqual(seasons.season_facts(NAMED, 4),
+                         {"season_count": None, "episode_count": 6,
+                          "season_name": "Night Country"})
+
+    def test_the_whole_show_counts_numbered_seasons_only(self):
+        listed = [{"season": 0, "episode_count": 3}, *LISTED]
+        self.assertEqual(seasons.season_facts(listed, None),
+                         {"season_count": 4, "episode_count": 37, "season_name": None})
+
+    def test_nothing_known_is_none_not_zero(self):
+        blank = {"season_count": None, "episode_count": None, "season_name": None}
+        self.assertEqual(seasons.season_facts([], 3), blank)
+        self.assertEqual(seasons.season_facts([], None), blank)
 
 
 if __name__ == "__main__":
