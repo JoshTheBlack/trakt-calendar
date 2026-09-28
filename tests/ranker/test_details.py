@@ -2,9 +2,10 @@
 
 WHAT IS PARTICULAR TO THE BOARD, and so what this file holds:
 
-  A BOARD TITLE HAS NO SEASON, so its panel opens on the first one and the season
-  picker reaches the rest — as wide as the row's own count, the season opened or
-  the describing service's count, whichever is largest.
+  A SEASON ROW OPENS ON ITS SEASON; a whole-show row has none of its own, so its
+  panel opens on the first one. Either way the season picker reaches the rest —
+  as wide as the row's own count, the season opened or the describing service's
+  count, whichever is largest.
 
   THE TITLE IS NAMED BY BOARD AND KEY, and everything else comes from the stored
   row. A request cannot point the lookup at a title the board does not hold, and
@@ -164,6 +165,37 @@ class ABoardTitleOpensThePanelTests(_BoardPanelTestCase):
         key = self.add(ids={"trakt": 7, "tmdb": 1})
         html, _ = self.get(self.panel_url(key))
         self.assertIn("details-links", html)
+
+
+class ASeasonRowOpensOnItsSeasonTests(_BoardPanelTestCase):
+    """A board row can BE a season, and its panel opens on that season — through
+    the same one panel and renderer; a whole-show row still opens on the first."""
+
+    def test_a_season_row_opens_on_its_own_season(self):
+        key = self.add(ids={"trakt": 7, "tmdb": 1}, season=2)
+        self.assertEqual(key, "show:tmdb:1")
+        html, client = self.get(self.panel_url("show:tmdb:1:s2"))
+        panel = DetailsPanel(html)
+        self.assertEqual(panel.open_tab, 2)
+        self.assertEqual(panel.season_tabs, [1, 2, 3])
+        self.assertIn("What season 2 is about.", html)
+        self.assertIn("S2 Ep 1", html)
+        self.assertIn("shows/7/seasons/2", client.asked)
+        self.assertNotIn("shows/7/seasons/1", client.asked)
+
+    def test_its_tabs_still_reach_the_other_seasons(self):
+        self.add(ids={"trakt": 7, "tmdb": 1}, season=2)
+        panel = DetailsPanel(self.get(self.panel_url("show:tmdb:1:s2"))[0])
+        url = urlsplit(panel.tab_urls[3])
+        self.assertEqual(parse_qs(url.query),
+                         {"board": [BOARD], "key": ["show:tmdb:1:s2"], "season": ["3"]})
+        html, _ = self.get(panel.tab_urls[3])
+        self.assertIn("What season 3 is about.", html)
+
+    def test_a_whole_show_row_beside_it_still_opens_on_the_first(self):
+        self.add(ids={"trakt": 7, "tmdb": 1}, season=2)
+        self.add(ids={"trakt": 7, "tmdb": 1})
+        self.assertEqual(DetailsPanel(self.get(self.panel_url("show:tmdb:1"))[0]).open_tab, 1)
 
 
 class ATitleNobodyCanDescribeTests(_BoardPanelTestCase):

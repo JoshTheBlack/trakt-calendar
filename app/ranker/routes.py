@@ -681,12 +681,12 @@ async def seasons_fragment(request: Request):
 # a title's details panel
 # ---------------------------------------------------------------------------
 
-# THE SEASON A BOARD TITLE'S PANEL OPENS ON. A board holds a TITLE, not a season,
-# so there is no season of its own to open on — and asking with none at all is
-# not an option: a Trakt lookup naming no season answers no episode list and no
-# season count, which leaves the panel nothing to build a picker from. The first
-# season is the one every show with seasons has, and it is where the title
-# begins; the picker reaches the rest.
+# THE SEASON A WHOLE-SHOW ROW'S PANEL OPENS ON. A season row opens on its own
+# season — that is what the row is. A whole-show row has no season of its own to
+# open on, and asking with none at all is not an option: a Trakt lookup naming no
+# season answers no episode list and no season count, which leaves the panel
+# nothing to build a picker from. The first season is the one every show with
+# seasons has, and it is where the title begins; the picker reaches the rest.
 _OPENING_SEASON = 1
 
 
@@ -737,8 +737,13 @@ async def _item_details(request: Request, *, season_only: bool) -> Response:
     except ranker.RankerError:
         return details_panel.gap(request, "That title is no longer on this board.")
     media = item["media"]
-    season = (None if media == Media.MOVIE
-              else route_params.season(params.get("season")) or _OPENING_SEASON)
+    # A tab names the season it asks about; the panel itself opens on the row's
+    # own season, and a whole-show row on the first.
+    season = None
+    if media != Media.MOVIE:
+        season = route_params.season(params.get("season"))
+        if season is None:
+            season = item["season"] if item["season"] is not None else _OPENING_SEASON
     settings = load_settings()
     chosen = detail_source.choose(settings, item["ids"])
     if chosen is None:
