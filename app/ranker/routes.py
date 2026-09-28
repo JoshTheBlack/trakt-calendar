@@ -346,8 +346,8 @@ async def rankings_page(request: Request):
 async def _rankings_response(request: Request, user, wanted: str | None, *,
                              notice: str = "", notice_ok: bool = True,
                              removals_open: bool = False, undo: dict | None = None,
-                             open_tier: str = "", search: dict | None = None,
-                             pool_first: str = ""):
+                             open_tier: str = "", open_for: str = "",
+                             search: dict | None = None, pool_first: str = ""):
     """The rankings page for the board `wanted`, or for the account's first.
 
     ONE BUILDER FOR EVERY ANSWER THAT IS THE WHOLE PAGE, and that is now every
@@ -370,6 +370,12 @@ async def _rankings_response(request: Request, user, wanted: str | None, *,
     whatever the board's size says: a move answers with the page, so a closed
     destination would take the title out of the pool and show it landing nowhere.
     It costs no extra read — the rows are already in `board`.
+    `open_for` is the key of the ROW this request acted on, and draws open
+    whichever tier that row is in — or, for a row this request took off, the tier
+    it was taken out of (`_tier_of`). Changing a row's season, taking it off and
+    putting it back all answer with the page, and on a board big enough to draw
+    its tiers closed the tier the reader was working in would otherwise come back
+    shut around the row they had just changed.
     `search` is a search to draw the page WITH — the query, what it was over, and
     its results. Adding a title answers with the page like everything else here,
     and a page that came back with the search box empty would make adding a second
@@ -441,11 +447,34 @@ async def _rankings_response(request: Request, user, wanted: str | None, *,
         first = board["pool"][:POOL_PAGE_SIZE]
         context.update(_pool_context(board["uid"], first, len(board["pool"]) - len(first)))
         context.update(await _removals_context(user.user_id, board["uid"]))
+        if open_for and not open_tier:
+            context["open_tier"] = _tier_of(board, context["removals"], open_for)
         context.update(_export_context(user.user_id, board))
         context["strips_url"] = _strips_url(board["uid"])
         # The bulk Move's destinations, in the order the tiers are drawn.
         context["tiers"] = _move_choices(board)
     return templates.TemplateResponse(request, "ranker.html", context)
+
+
+def _tier_of(board: dict, removals: list[dict], key: str) -> str:
+    """The uid of the tier the row `key` names is in, or was taken out of — ""
+    for the pool, a tier deleted since, or a key nothing mentions.
+
+    FROM WHAT THE PAGE HAS ALREADY READ, in that order: the board's own tiers
+    first, because a row on the board is where it is now; then the removal
+    history, newest first, because a row this request took off is on the board
+    no longer and the history is the one record of which tier it left.
+    `tier_label` None is a tier deleted since, which is not there to open.
+    """
+    for category in board["categories"]:
+        if any(item["key"] == key for item in category["items"]):
+            return category["uid"]
+    for entry in removals:
+        if entry.get("kind") == "title" and entry.get("key") == key:
+            if entry["tier_label"] is None:
+                return ""
+            return entry["category_uid"] or ""
+    return ""
 
 
 @guard.get("/rankings/fragments/pool", AuthLevel.RANKER_APPROVED)
@@ -1054,7 +1083,7 @@ async def remove_board_item(board_uid: str, request: Request):
     except ranker.RankerError as exc:
         notice, ok = str(exc), False
     return await _rankings_response(request, user, board_uid, notice=notice,
-                                    notice_ok=ok, undo=undo)
+                                    notice_ok=ok, undo=undo, open_for=key)
 
 
 # The prefix a bulk move names each chosen title with. ONE FIELD PER KEY, the
@@ -1112,15 +1141,19 @@ async def set_board_item_season(board_uid: str, request: Request):
     user = await auth.current_user(request)
     data = await authz.json_body(request)
     notice, ok = "", True
+    # The row keeps its tier, so that tier comes back open under whichever key the
+    # row now has — the old one when the change was refused.
+    row_key = str(data.get("key") or "")
     try:
-        new_key = await ranker.set_item_season(user.user_id, board_uid, data.get("key"),
+        row_key = await ranker.set_item_season(user.user_id, board_uid, data.get("key"),
                                                data.get("season"))
-        season = ranker.parse_key(new_key).season
+        season = ranker.parse_key(row_key).season
         notice = ("This row is the whole show now." if season is None else
                   f"This row is {ranker_seasons.SeasonOption(season).label} now.")
     except ranker.RankerError as exc:
         notice, ok = str(exc), False
-    return await _rankings_response(request, user, board_uid, notice=notice, notice_ok=ok)
+    return await _rankings_response(request, user, board_uid, notice=notice, notice_ok=ok,
+                                    open_for=row_key)
 
 
 @guard.get("/api/rankings/boards/{board_uid}", AuthLevel.RANKER_APPROVED)
@@ -1451,7 +1484,8 @@ async def restore_board_item(board_uid: str, request: Request):
     except ranker.RankerError as exc:
         notice, notice_ok = str(exc), False
     return await _rankings_response(request, user, board_uid, notice=notice,
-                                    notice_ok=notice_ok, removals_open=True)
+                                    notice_ok=notice_ok, removals_open=True,
+                                    open_for=str(data.get("key") or ""))
 
 
 @guard.post("/rankings/boards/{board_uid}/removals/tier/restore", AuthLevel.RANKER_APPROVED)
