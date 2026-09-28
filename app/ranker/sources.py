@@ -266,30 +266,47 @@ class TraktRatingsSource:
             entries = await trakt_sync.fetch_ratings(settings)
         rated = []
         for entry in entries:
-            media_key = entry.get("type")
-            if media_key not in ("show", "movie"):
-                # Season and episode ratings exist too; neither is a title a
-                # board can hold.
-                continue
-            media = Media(media_key)
-            item = entry.get(media_key) or {}
-            ids = trakt_detail.ids_map(item) if isinstance(item, dict) else {}
+            ref = _ref_from_rating(entry)
             score = int_or_none(entry.get("rating"))
-            if not ids or score is None:
+            if ref is None or score is None:
                 continue
-            rated.append(RatedTitle(
-                title=TitleRef(
-                    media=media,
-                    title=item.get("title") or "",
-                    ids=ids,
-                    year=int_or_none(item.get("year")),
-                    network=item.get("network") or "",
-                    runtime=int_or_none(item.get("runtime")),
-                ),
-                rating=score,
-                rated_at=entry.get("rated_at"),
-            ))
+            rated.append(RatedTitle(title=ref, rating=score, rated_at=entry.get("rated_at")))
         return rated
+
+
+def _ref_from_rating(entry: Mapping[str, Any]) -> TitleRef | None:
+    """One Trakt ratings entry as the title a board would hold, or None.
+
+    A SHOW OR A FILM is that title whole. A SEASON is a season row of its show:
+    Trakt's entry carries the parent `show` beside `season.number`, and the row
+    is keyed on the show's ids with the season beside them, exactly as a board
+    keys any season — so a rated season arrives as that season, and over a
+    whole-show row it takes that row over (ranker.seed_ratings). An EPISODE is
+    not something a board can hold, and nothing else is recognised.
+    """
+    kind = entry.get("type")
+    season = None
+    if kind == "season":
+        number = (entry.get("season") or {}).get("number")
+        season = number if isinstance(number, int) and not isinstance(number, bool) else None
+        if season is None:
+            return None
+        kind = "show"
+    elif kind not in ("show", "movie"):
+        return None
+    item = entry.get(kind) or {}
+    ids = trakt_detail.ids_map(item) if isinstance(item, dict) else {}
+    if not ids:
+        return None
+    return TitleRef(
+        media=Media(kind),
+        title=item.get("title") or "",
+        ids=ids,
+        year=int_or_none(item.get("year")),
+        network=item.get("network") or "",
+        runtime=int_or_none(item.get("runtime")),
+        season=season,
+    )
 
 
 async def user_trakt_settings(user_id: int) -> Settings | None:

@@ -1621,19 +1621,20 @@ async def seed_from_ratings(board_uid: str, request: Request):
     return _seed_answer(
         request, board_uid,
         confirm=f"This would add {summary['titles_added']} title(s)"
-                f"{_converted(summary['titles_converted'])}, place "
+                f"{_converted(summary['titles_converted'], 'make')}, place "
                 f"{summary['titles_placed']} and create {summary['tiers_created']} "
                 f"tier(s). {summary['already_placed']} are already in a tier and "
                 "will not be moved.")
 
 
-def _converted(count: int) -> str:
+def _converted(count: int, verb: str = "made") -> str:
     """The clause an add's sentence gains for whole-show rows that became the
     season arriving over them (ranker.add_titles), or nothing when there were
-    none — a count nobody's board has any of is noise in every other answer."""
+    none — a count nobody's board has any of is noise in every other answer.
+    `verb` is "make" for a dry run's "this would…" sentence."""
     if not count:
         return ""
-    return f", and made {count} whole-show row{'s' if count != 1 else ''} into the season"
+    return f", and {verb} {count} whole-show row{'s' if count != 1 else ''} into the season"
 
 
 def _seed_answer(request: Request, board_uid: str, *, confirm: str = "",
