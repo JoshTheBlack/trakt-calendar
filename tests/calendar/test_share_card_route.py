@@ -33,6 +33,10 @@ from app.calendar import (cache as calendar_cache, share_card, share_card_cache,
                           state as calendar_state)
 from app.config import Settings
 from app.media import posters, user_images
+
+# The real warm, kept before ShareCardTestCase stubs it out, for the tests that
+# have to run the whole chain.
+REAL_ENSURE_POSTERS = posters.ensure_posters
 from tests.support import APP_DIR, AppTestCase, ORIGIN, calendar_records
 
 # Artwork with the frequency content of a real poster, which is what the encoded
@@ -406,6 +410,37 @@ class CardPosterBoundTests(ShareCardTestCase):
                           side_effect=AssertionError("re-rendered a complete card")):
             second = self.client.get(f"/s/{self.token}/og.jpg?year=2026&month=8")
         self.assertEqual(second.content, first.content)
+
+    def test_a_title_with_no_picture_anywhere_settles_too(self):
+        """A title every service answers with no artwork is as good as it will
+        ever look: its card caches, and the next crawl neither re-renders it nor
+        asks a service again. It used to stay "pending" for ever — the negative
+        marker is written against the order's first source only, and pending
+        asked whether EVERY source had one — so the card re-rendered, and
+        re-paid the lookup, on every crawl."""
+        from app.providers.trakt import transport as trakt_transport
+        searched = []
+        # The card this stores and the tile directory's marker outlive the test's
+        # database, so they go with it: another test drawing this same month
+        # would otherwise be served this one's render.
+        before = self.cached_cards()
+        self.addCleanup(lambda: [path.unlink(missing_ok=True)
+                                 for path in self.cached_cards() - before])
+        self.addCleanup(lambda: [path.unlink(missing_ok=True)
+                                 for path in posters.POSTER_DIR.glob("show/789.*")])
+
+        async def _no_artwork(*args, **kwargs):
+            searched.append(args[2])
+            return []
+
+        with patch.object(trakt_transport, "cached_get", _no_artwork),                 patch.object(posters, "ensure_posters", REAL_ENSURE_POSTERS):
+            first = self.client.get(f"/s/{self.token}/og.jpg?year=2026&month=8")
+            self.assertEqual(first.status_code, 200)
+            with patch.object(share_card, "build_card",
+                              side_effect=AssertionError("re-rendered a settled card")):
+                second = self.client.get(f"/s/{self.token}/og.jpg?year=2026&month=8")
+        self.assertEqual(second.content, first.content)
+        self.assertEqual(searched, ["search/tmdb/789"])
 
     def test_artwork_that_outruns_the_budget_still_produces_a_card(self):
         """An unfurler gives up in a handful of seconds, so a card that arrives

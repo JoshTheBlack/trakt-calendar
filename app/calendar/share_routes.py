@@ -49,7 +49,7 @@ from ..auth import AuthLevel
 from ..authz import Guard
 from ..config import load_settings
 from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, Endpoint, endpoint_choices, get_endpoint
-from ..media import logos, posters, user_images
+from ..media import artwork, logos, posters, user_images
 from ..perftrace import span
 from ..providers import detail_source
 from ..providers.base import (Item, Media, Source, parse_item_key,
@@ -942,9 +942,16 @@ async def _resolve_tiles(settings, visible: Sequence[Item], order: tuple[str, ..
     # poster that would only displace an equally good tile would re-render it on
     # every crawl for nothing. Short of full, anything still on its way is a
     # reason to render again later — which is what makes a thin card heal.
+    # A title whose one lookup found no picture at all (artwork.record_miss) is
+    # SETTLED, not pending. The negative marker alone could not say so: it is
+    # written against an order's first source, and is_negative asks whether every
+    # source has one — so a title nothing had a picture for held its card open,
+    # re-rendered on every crawl.
+    missed = (await artwork.known((media, int(tmdb), None) for _, (media, tmdb) in wanted)).missed
     pending = any(
         posters.cached_poster(*ref, _item_order(item, order)) is None
         and not posters.is_negative(*ref, _item_order(item, order))
+        and (ref[0], int(ref[1])) not in missed
         for item, ref in wanted)
     return arrange_tiles(drawn), len(drawn) >= MAX_CARD_TILES or not pending
 
