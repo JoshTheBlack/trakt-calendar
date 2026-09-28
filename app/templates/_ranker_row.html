@@ -77,7 +77,7 @@
        short, never the season. The counts beside it are the row's own — a
        season row has no season count and its own episode total. #}
     <span class="ranker-name">
-        <span class="ranker-title"><span class="ranker-show">{{ item.title or "Untitled" }}</span>{% if item.season_label %}<span class="ranker-season">— {{ item.season_label }}</span>{% endif %}</span>
+        <span class="ranker-title"><span class="ranker-title-show">{{ item.title or "Untitled" }}</span>{% if item.season_label %}<span class="ranker-title-season">— {{ item.season_label }}</span>{% endif %}</span>
         {% if item.year %}<span class="ranker-year">{{ item.year }}</span>{% endif %}
     </span>
     <span class="ranker-facts">

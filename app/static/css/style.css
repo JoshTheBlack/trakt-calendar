@@ -2799,13 +2799,19 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .ranker-thumb.is-missing { background: repeating-linear-gradient(45deg, #1c1f22, #1c1f22 6px, #23272b 6px, #23272b 12px); }
 .ranker-name { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 /* A ROW'S LABEL IN TWO HALVES — the show, and for a season row "— Season 3" or
-   the season's own name — so a long show name is what the ellipsis takes and
-   the season, which is what tells the row from its whole show beside it, is
-   what stays. The season half gives way too, but only after the show has
-   (a season named "The Trial of a Time Lord" can be long on its own). */
-.ranker-title { font-weight: 600; display: flex; gap: 0.3em; min-width: 0; white-space: nowrap; }
-.ranker-show { min-width: 0; flex-shrink: 1; overflow: hidden; text-overflow: ellipsis; }
-.ranker-season { min-width: 3em; flex-shrink: 0.001; overflow: hidden; text-overflow: ellipsis; }
+   the season's own name — which share a line when they fit and otherwise put
+   the season on a line of its own under the show. The season is what tells the
+   row from its whole show beside it, so it must never be the half that is cut;
+   MEASURED at 390px, keeping both on one line left most show names at three
+   letters and the season cut as well. Each half still ends in an ellipsis if it
+   is wider than the whole cell on its own. */
+.ranker-title {
+    font-weight: 600; display: flex; flex-wrap: wrap; column-gap: 0.3em;
+    min-width: 0; white-space: nowrap;
+}
+.ranker-title-show, .ranker-title-season {
+    min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+}
 .ranker-year { color: var(--text-faint); font-size: 0.72rem; }
 .ranker-facts { display: flex; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
 .ranker-fact { font-size: 0.68rem; color: var(--text-dim); background: rgba(255,255,255,0.05); border-radius: 5px; padding: 1px 5px; }

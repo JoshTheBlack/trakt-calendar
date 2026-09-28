@@ -338,12 +338,12 @@ class WhatChoosingDoesTests(_ControlTestCase):
         self.build_with_seasons()
         body = self.client.get(f"/rankings/fragments/row?board={BOARD}"
                                f"&key={season_key(SHOW, 2)}").text
-        self.assertIn('<span class="ranker-show">Title 7</span>'
-                      '<span class="ranker-season">— Season 2</span>', body)
+        self.assertIn('<span class="ranker-title-show">Title 7</span>'
+                      '<span class="ranker-title-season">— Season 2</span>', body)
         self.assertIn('data-details-heading="Title 7 — Season 2"', body)
         whole = self.client.get(f"/rankings/fragments/row?board={BOARD}&key={key(SHOW)}").text
-        self.assertIn('<span class="ranker-show">Title 7</span></span>', whole)
-        self.assertNotIn("ranker-season", whole)
+        self.assertIn('<span class="ranker-title-show">Title 7</span></span>', whole)
+        self.assertNotIn("ranker-title-season", whole)
 
 
 NAMED = [
@@ -400,7 +400,7 @@ class WhatAChoiceWritesTests(_ControlTestCase):
         self.build_with_seasons()
         body, _, _ = self.choose(key(SHOW), 4, listed=NAMED)
         self.assertEqual(self.facts(season_key(SHOW, 4)), (None, 6, "Night Country"))
-        self.assertIn('<span class="ranker-season">— Night Country</span>', body)
+        self.assertIn('<span class="ranker-title-season">— Night Country</span>', body)
         self.choose(season_key(SHOW, 4), "", listed=NAMED)
         self.assertIsNone(self.facts(key(SHOW))[2], "the name goes with the season")
 
