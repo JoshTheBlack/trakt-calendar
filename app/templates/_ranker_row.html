@@ -20,10 +20,12 @@
    reaches the page only once the title is on the board. A JavaScript copy of this
    markup used to sit beside it, kept in step by hand.
 
-   `data-key` is the composite "{media}:{match_source}:{match_id}" the API names
-   items by; it is what the client reads back out of the DOM when it builds a
-   save. Everything interpolated here is third-party text and is escaped by the
-   template engine, which is the only thing on this page that draws a row.
+   `data-key` is the board key the API names items by (app/ranker/item_keys.py:
+   "{media}:{match_source}:{match_id}", plus ":s{season}" on a season row); it is
+   what the client reads back out of the DOM when it builds a save, and the
+   scripts treat it as an opaque string. Everything interpolated here is
+   third-party text and is escaped by the template engine, which is the only
+   thing on this page that draws a row.
 
    NO COPY OF THE TITLE RIDES ON THE ROW. It used to carry the whole item as a
    JSON attribute, on every row of every board, for the single case that needed

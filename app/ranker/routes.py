@@ -1229,7 +1229,7 @@ async def search_fragment(request: Request):
     except ranker_sources.SourceUnavailable as exc:
         return _search_results(request, message=str(exc))
     results = [
-        {**item, "key": ranker.item_key(item["media"], item["match_source"], item["match_id"])}
+        {**item, "key": ranker_sources.result_key(item)}
         for item in ranker_sources.items_from_refs(refs)
     ][:MAX_SEARCH_RESULTS]
     board_uid = request.query_params.get("board") or ""
@@ -1259,7 +1259,7 @@ async def _add_searched_title(user, board_uid: str, data: dict):
     """
     query = str(data.get("query") or "").strip()
     try:
-        wanted = ranker.parse_item_key(data.get("key"))
+        wanted = ranker.parse_key(data.get("key"))
         media = ranker_sources.parse_media(wanted.media)
     except (ranker.RankerError, ValueError) as exc:
         return 0, authz.error(str(exc))
@@ -1296,8 +1296,7 @@ async def add_searched_title(board_uid: str, request: Request):
         media = ranker_sources.parse_media(media_name, Media.SHOW)
         refs = await ranker_sources.search_source().search(query, media, cached_only=True)
         results = [
-            {**item, "key": ranker.item_key(item["media"], item["match_source"],
-                                            item["match_id"])}
+            {**item, "key": ranker_sources.result_key(item)}
             for item in ranker_sources.items_from_refs(refs)
         ][:MAX_SEARCH_RESULTS]
     except (ValueError, ranker_sources.SourceUnavailable):
@@ -1306,7 +1305,7 @@ async def add_searched_title(board_uid: str, request: Request):
         query = ""
     return await _rankings_response(
         request, user, board_uid, notice="Added to the pool.",
-        pool_first=str(ranker.parse_item_key(data.get("key"))),
+        pool_first=str(ranker.parse_key(data.get("key"))),
         search={"query": query, "media": media_name, "results": results,
                 "held": await ranker.board_keys(user.user_id, board_uid)})
 

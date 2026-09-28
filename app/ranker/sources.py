@@ -32,6 +32,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from . import item_keys
 from ..auth import trakt_routes
 from ..providers.trakt import TraktError, detail as trakt_detail, sync as trakt_sync
 from ..config import Settings, load_settings
@@ -43,7 +44,7 @@ from ..config import Settings, load_settings
 # `resolve_identity` comes from there too, and is CALLED here rather than
 # re-exported: the tracker keys its own rows on the same waterfall's answer, so a
 # second copy would be two definitions of what makes two titles the same one.
-from ..providers.base import Media, item_key, parse_media, resolve_identity  # noqa: F401
+from ..providers.base import Media, parse_media, resolve_identity  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -333,9 +334,14 @@ async def title_from_search(query: str, media: Media, key: str) -> dict[str, Any
     that the search budget never sees.
     """
     refs = await search_source().search(query, media, cached_only=True)
-    return next((item for item in items_from_refs(refs)
-                 if item_key(item["media"], item["match_source"], item["match_id"]) == key),
-                None)
+    return next((item for item in items_from_refs(refs) if result_key(item) == key), None)
+
+
+def result_key(item: Mapping[str, Any]) -> str:
+    """The board key a search result is named by — the key of the row adding it
+    would make, which is how a result is drawn as already held."""
+    return item_keys.board_key(item["media"], item["match_source"], item["match_id"],
+                               item.get("season"))
 
 
 def ratings_source() -> RatingsSource:

@@ -24,7 +24,7 @@ from urllib.parse import urlencode
 from fastapi.testclient import TestClient
 
 from app import auth, authz, db
-from app.ranker import core as ranker, routes as ranker_routes
+from app.ranker import core as ranker, item_keys, routes as ranker_routes
 from app.config import Settings, save_settings
 from app.media import user_images
 from app.main import app
@@ -82,7 +82,7 @@ class FragmentTestCase(unittest.TestCase):
         refs = [title_ref(str(1000 + n), f"Title {n}") for n in range(pool + tiered)]
         asyncio.run(ranker.add_titles(self.user_id, uid, refs))
         if tiered:
-            keys = [ranker.item_key("show", "tmdb", str(1000 + n)) for n in range(tiered)]
+            keys = [item_keys.board_key("show", "tmdb", str(1000 + n)) for n in range(tiered)]
             asyncio.run(ranker.save_layout(self.user_id, uid, {
                 "version": 1,
                 "categories": [{"uid": "tier-s", "label": "S", "rank_priority": 60,
@@ -101,7 +101,7 @@ class FragmentTestCase(unittest.TestCase):
 
 def nth_key(n: int) -> str:
     """The key board_with gives its n-th title."""
-    return ranker.item_key("show", "tmdb", str(1000 + n))
+    return item_keys.board_key("show", "tmdb", str(1000 + n))
 
 
 def keys_drawn(html: str) -> list[str]:
@@ -441,7 +441,7 @@ class MoveShowsWhereItWentTests(FragmentTestCase):
                 {"uid": "tier-a", "label": "A", "rank_priority": 60, "items": []},
                 {"uid": "tier-b", "label": "B", "rank_priority": 50, "items": []},
             ],
-            "pool": [ranker.item_key("show", "tmdb", str(1000 + n)) for n in range(3)],
+            "pool": [item_keys.board_key("show", "tmdb", str(1000 + n)) for n in range(3)],
         }))
         return "b1"
 
@@ -455,7 +455,7 @@ class MoveShowsWhereItWentTests(FragmentTestCase):
 
     def test_the_tier_a_title_moved_into_comes_back_open_with_its_rows(self):
         board = self.board_with_two_tiers()
-        key = ranker.item_key("show", "tmdb", "1000")
+        key = item_keys.board_key("show", "tmdb", "1000")
         html = self.move_into(board, key, "tier-a")
         opened = re.search(r'<details class="ranker-tier"\s+data-uid="tier-a"( open)?', html)
         self.assertIsNotNone(opened, "the destination tier should be in the answer")
@@ -468,7 +468,7 @@ class MoveShowsWhereItWentTests(FragmentTestCase):
         """The complement, without which the test above would pass against a
         board that simply drew everything open."""
         board = self.board_with_two_tiers()
-        key = ranker.item_key("show", "tmdb", "1000")
+        key = item_keys.board_key("show", "tmdb", "1000")
         html = self.move_into(board, key, "tier-a")
         other = re.search(r'<details class="ranker-tier"\s+data-uid="tier-b"( open)?', html)
         self.assertIsNotNone(other)
@@ -487,9 +487,9 @@ class MoveShowsWhereItWentTests(FragmentTestCase):
         would pass without the code under it doing a thing.
         """
         board = self.board_with_two_tiers()
-        key = ranker.item_key("show", "tmdb", "1000")
+        key = item_keys.board_key("show", "tmdb", "1000")
         self.move_into(board, key, "tier-a")
-        self.move_into(board, ranker.item_key("show", "tmdb", "1001"), "tier-b")
+        self.move_into(board, item_keys.board_key("show", "tmdb", "1001"), "tier-b")
         html = self.move_into(board, key, "")
         for uid in ("tier-a", "tier-b"):
             with self.subTest(tier=uid):

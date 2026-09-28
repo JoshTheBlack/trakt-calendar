@@ -18,11 +18,16 @@ in its WHERE clause, so a mistake in the resolution step still cannot write
 across accounts.
 
 ITEM ADDRESSING. Items have no uid column of their own. Their identity within a
-board is the triple (media, match_source, match_id), which is also their UNIQUE
-constraint, so the composite key "{media}:{match_source}:{match_id}" is what a
+board is the title's triple (media, match_source, match_id) plus which of its
+seasons the row is — NULL for the whole title — which is also their unique
+index, so the board key (app/ranker/item_keys.py:
+"{media}:{match_source}:{match_id}", with ":s{season}" on a season row) is what a
 client refers to an item by. Like a uid it survives a restore into a database
 whose rowids came out different, and like a uid it is meaningless outside the
-board it was resolved against.
+board it was resolved against. Every lookup
+by key below matches the season as `IFNULL(season, -1)`, the unique index's own
+expression, so a whole-show row and a season row of one show are never mistaken
+for each other and the index serves the lookup.
 
 WHAT A SAVE MAY DO. save_layout() is targeted upserts and updates inside one
 transaction, never a wipe-and-reinsert: reinserting loses whatever a second tab
@@ -39,13 +44,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from . import item_keys
 from .. import db
-# Re-exported deliberately (the same reasoning MEDIA_VALUES below carries): the
-# identity a board row is keyed on is the app's notion of "the same title", not
-# this feature's — the tracker files its own rows under the same triple. One
-# definition, read from where it lives.
-from ..providers.base import MATCH_SOURCES, ItemKey, Media, item_key  # noqa: F401
-from ..providers.base import parse_item_key as base_parse_item_key
+# The identity a board row is keyed on is the app's notion of "the same title",
+# not this feature's — the tracker files its own rows under the same triple — so
+# the vocabulary is read from where it lives. What a BOARD adds to it, the
+# season, is app/ranker/item_keys.py's, and every key in this module is spelled
+# and read there.
+from ..providers.base import MATCH_SOURCES, Media
 
 # Caps. Every one of these is enforced by rejecting the whole request, never by
 # quietly truncating: a user who pasted a 90-character board name should be told
@@ -123,18 +129,36 @@ class VersionConflict(RankerError):
     first. The caller reloads rather than guessing which write wins."""
 
 
-def parse_item_key(value: Any) -> ItemKey:
-    """Parse the composite item key a client names a board item by.
+def parse_key(value: Any) -> item_keys.BoardKey:
+    """Parse the board key a client names a board item by.
 
-    The parsing itself is shared (the tracker addresses its own rows the same
-    way); what belongs to this module is that a bad key is a ValidationError, which
-    the route layer already maps to a 400. Re-raising rather than letting a
-    ValueError escape keeps that mapping in the one place that knows about HTTP.
+    The parsing itself is item_keys.py's; what belongs to this module is that a
+    bad key is a ValidationError, which the route layer already maps to a 400.
+    Re-raising rather than letting a ValueError escape keeps that mapping in the
+    one place that knows about HTTP.
     """
     try:
-        return base_parse_item_key(value)
+        return item_keys.parse_board_key(value)
     except ValueError as exc:
         raise ValidationError(str(exc)) from None
+
+
+def _key_match(alias: str = "") -> str:
+    """The WHERE clause that names one row by its key: the title's triple, and
+    the season as the unique index spells it — IFNULL(season, -1) — so NULL, the
+    whole show, compares equal to itself and the index can serve the lookup.
+    `_key_params` supplies the values in this order; the two go together.
+
+    `alias` is the table's alias in a query that joins another table, so the
+    columns are never left to resolve by luck."""
+    at = f"{alias}." if alias else ""
+    return (f"{at}media = ? AND {at}match_source = ? AND {at}match_id = ? "
+            f"AND IFNULL({at}season, -1) = ?")
+
+
+def _key_params(key: item_keys.BoardKey) -> tuple[str, str, str, int]:
+    return (key.media, key.match_source, key.match_id,
+            -1 if key.season is None else key.season)
 
 
 # ---------------------------------------------------------------------------
@@ -245,11 +269,12 @@ def _category_ids(conn: db.Connection, board_id: int) -> dict[str, int]:
 
 
 def _item_ids(conn: db.Connection, board_id: int) -> dict[str, int]:
-    """Composite item key -> id, for one already-owned board."""
+    """Board key -> id, for one already-owned board."""
     return {
-        item_key(row["media"], row["match_source"], row["match_id"]): int(row["id"])
+        item_keys.row_key(row): int(row["id"])
         for row in conn.execute(
-            "SELECT id, media, match_source, match_id FROM tier_items WHERE board_id = ?",
+            "SELECT id, media, match_source, match_id, season FROM tier_items "
+            " WHERE board_id = ?",
             (board_id,),
         )
     }
@@ -268,10 +293,11 @@ def _item_dict(row) -> dict[str, Any]:
         # what the feature actually ranks by.
         ids = {}
     return {
-        "key": item_key(row["media"], row["match_source"], row["match_id"]),
+        "key": item_keys.row_key(row),
         "media": row["media"],
         "match_source": row["match_source"],
         "match_id": row["match_id"],
+        "season": row["season"],
         "tmdb": row["tmdb"],
         "ids": ids if isinstance(ids, dict) else {},
         "title": row["title"],
@@ -595,16 +621,15 @@ async def fetch_pool_after(user_id: int, board_uid: str, after: Any,
     starts from the beginning, for the same reason: a repeat is dropped, a gap is
     not visible at all.
     """
-    parsed = parse_item_key(after) if after else None
+    parsed = parse_key(after) if after else None
 
     def _work(conn: db.Connection) -> tuple[list[dict[str, Any]], int]:
         board_id = int(_resolve_board(conn, user_id, board_uid)["id"])
         after_id = 0
         if parsed is not None:
             found = conn.execute(
-                "SELECT id FROM tier_items WHERE board_id = ? AND media = ? "
-                "   AND match_source = ? AND match_id = ?",
-                (board_id, parsed.media, parsed.match_source, parsed.match_id),
+                f"SELECT id FROM tier_items WHERE board_id = ? AND {_key_match()}",
+                (board_id, *_key_params(parsed)),
             ).fetchone()
             after_id = int(found["id"]) if found else 0
         rows = conn.execute(
@@ -658,9 +683,9 @@ async def add_titles(
         ).fetchone()[0])
         # Counted against the cap before inserting rather than after, so a
         # request that would overflow is refused whole rather than half applied.
-        keys = {item_key(r["media"], r["match_source"], r["match_id"]) for r in rows}
+        wanted = {item_keys.row_key(r) for r in rows}
         known = set(_item_ids(conn, board_id))
-        if existing + len(keys - known) > MAX_ITEMS_PER_BOARD:
+        if existing + len(wanted - known) > MAX_ITEMS_PER_BOARD:
             raise ValidationError(f"A board holds at most {MAX_ITEMS_PER_BOARD} titles.")
         added = sum(_insert_item(conn, board_id, row, added_from, ts) for row in rows)
         if added:
@@ -690,7 +715,7 @@ def _insert_item(conn: db.Connection, board_id: int, row: Mapping[str, Any],
         # index exactly. Any unique index satisfies a bare DO NOTHING.
         "ON CONFLICT DO NOTHING",
         (board_id, category_id, row["media"], row["match_source"], row["match_id"],
-         row.get("season"), row["tmdb"], row["ids_json"], row["title"], row["year"], row["network"],
+         row["season"], row["tmdb"], row["ids_json"], row["title"], row["year"], row["network"],
          row["season_count"], row["episode_count"], row["runtime"],
          row["user_rating"], added_from, rank, ts),
     )
@@ -713,10 +738,17 @@ def _normalize_ref(ref: Mapping[str, Any]) -> dict[str, Any]:
     ids = ref.get("ids") or {}
     if not isinstance(ids, Mapping):
         raise ValidationError("A title's ids must be an object.")
+    try:
+        season = item_keys.valid_season(ref.get("season"), media)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from None
     return {
         "media": media,
         "match_source": match_source,
         "match_id": match_id,
+        # Which season of the show this row is, None for the whole show. Part of
+        # the row's identity (its key and the unique index), not a description.
+        "season": season,
         "tmdb": _optional_int(ref.get("tmdb")),
         # Unknown keys are omitted rather than stored as nulls, so the map stays
         # a record of what was actually known about this title.
@@ -749,14 +781,13 @@ async def fetch_item(user_id: int, board_uid: str, key: Any) -> dict[str, Any]:
     its owner first, so no key a client can name reaches past it. A title the
     board does not hold is a ValidationError, like every other unknown key here.
     """
-    parsed = parse_item_key(key)
+    parsed = parse_key(key)
 
     def _work(conn: db.Connection) -> dict[str, Any]:
         board = _resolve_board(conn, user_id, board_uid)
         row = conn.execute(
-            "SELECT * FROM tier_items "
-            " WHERE board_id = ? AND media = ? AND match_source = ? AND match_id = ?",
-            (int(board["id"]), parsed.media, parsed.match_source, parsed.match_id),
+            f"SELECT * FROM tier_items WHERE board_id = ? AND {_key_match()}",
+            (int(board["id"]), *_key_params(parsed)),
         ).fetchone()
         if row is None:
             raise ValidationError(f"No title {str(parsed)!r} on this board.")
@@ -778,7 +809,7 @@ async def remove_items(user_id: int, board_uid: str, keys: list[Any]) -> int:
     and is not yet recoverable, and no failure that leaves one without the other.
     `restore_removal` is the way back.
     """
-    parsed = [parse_item_key(key) for key in keys]
+    parsed = [parse_key(key) for key in keys]
 
     def _work(conn: db.Connection) -> int:
         board = _resolve_board(conn, user_id, board_uid)
@@ -832,11 +863,13 @@ _TIER_HISTORY = "tier_category_removals"
 def _remember_removal(conn: db.Connection, board_id: int, item_id: int, ts: int) -> None:
     """Write one title into its board's removal history, just before it goes.
 
-    ONE ROW PER TITLE. A title removed, re-added by hand and removed again keeps
-    only its newest removal: restoring the older one would put it back where it
-    sat before an arrangement that has since been superseded, which is not what
+    ONE ROW PER BOARD KEY — a title, or one season of it, exactly as the board
+    holds them. A title removed, re-added by hand and removed again keeps only
+    its newest removal: restoring the older one would put it back where it sat
+    before an arrangement that has since been superseded, which is not what
     anybody pressing Restore on it means. That is also what lets a restore be
-    addressed by the title's key rather than by a history row's integer id.
+    addressed by the row's key rather than by a history row's integer id. A
+    season and its whole show are two keys, so removing both keeps both.
 
     THE RECORD IS `_item_dict`'s PROJECTION, plus `created_at`: the shape every
     reader of a board already gets, so a column added to tier_items and to that
@@ -850,23 +883,23 @@ def _remember_removal(conn: db.Connection, board_id: int, item_id: int, ts: int)
     ).fetchone()
     if row is None:
         return
-    identity = (board_id, row["media"], row["match_source"], row["match_id"])
-    _forget_removal(conn, identity)
+    _forget_removal(conn, board_id, item_keys.of_row(row))
     conn.execute(
         "INSERT INTO tier_item_removals (board_id, media, match_source, match_id, "
         "season, category_uid, rank_in_category, removed_at, item_json) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (*identity, row["season"], row["category_uid"], row["rank_in_category"], ts,
+        (board_id, row["media"], row["match_source"], row["match_id"], row["season"],
+         row["category_uid"], row["rank_in_category"], ts,
          json.dumps({**_item_dict(row), "created_at": row["created_at"]}, sort_keys=True)),
     )
 
 
-def _forget_removal(conn: db.Connection, identity: tuple) -> None:
-    """Drop a title's history row, by (board_id, media, match_source, match_id)."""
+def _forget_removal(conn: db.Connection, board_id: int, key: item_keys.BoardKey) -> None:
+    """Drop one board row's history entry — a season's and its whole show's are
+    two entries, as they are two rows."""
     conn.execute(
-        "DELETE FROM tier_item_removals "
-        " WHERE board_id = ? AND media = ? AND match_source = ? AND match_id = ?",
-        identity,
+        f"DELETE FROM tier_item_removals WHERE board_id = ? AND {_key_match()}",
+        (board_id, *_key_params(key)),
     )
 
 
@@ -915,15 +948,15 @@ async def fetch_removals(user_id: int, board_uid: str, *,
         titles = [
             {
                 "kind": "title",
-                "key": item_key(row["media"], row["match_source"], row["match_id"]),
+                "key": item_keys.row_key(row),
                 "title": str(_json_object(row["item_json"]).get("title") or ""),
                 "category_uid": row["category_uid"],
                 "tier_label": None if row["tier_uid"] is None else (row["tier_label"] or ""),
                 "removed_at": row["removed_at"],
             }
             for row in conn.execute(
-                "SELECT r.media, r.match_source, r.match_id, r.category_uid, r.removed_at, "
-                "       r.item_json, c.uid AS tier_uid, c.label AS tier_label "
+                "SELECT r.media, r.match_source, r.match_id, r.season, r.category_uid, "
+                "       r.removed_at, r.item_json, c.uid AS tier_uid, c.label AS tier_label "
                 "  FROM tier_item_removals r "
                 "  LEFT JOIN tier_categories c "
                 "         ON c.board_id = r.board_id AND c.uid = r.category_uid "
@@ -986,27 +1019,26 @@ async def restore_removal(user_id: int, board_uid: str, key: Any) -> bool:
     THE IDENTITY WRITTEN IS THE HISTORY ROW'S OWN COLUMNS, not the stored
     record's copy of them: those columns are what was looked up by, and a record
     that somehow disagreed must not put a different title on the board than the
-    one the viewer asked for.
+    one the viewer asked for. The season is one of them, so a removed season
+    comes back as that season and never as its whole show.
     """
-    parsed = parse_item_key(key)
+    parsed = parse_key(key)
     ts = db.now()
 
     def _work(conn: db.Connection) -> bool:
         board = _resolve_board(conn, user_id, board_uid)
         board_id = int(board["id"])
-        identity = (board_id, parsed.media, parsed.match_source, parsed.match_id)
         found = conn.execute(
             "SELECT r.*, c.id AS category_id FROM tier_item_removals r "
             "  LEFT JOIN tier_categories c "
             "         ON c.board_id = r.board_id AND c.uid = r.category_uid "
-            " WHERE r.board_id = ? AND r.media = ? AND r.match_source = ? AND r.match_id = ? "
-            "   AND r.removed_at >= ?",
-            (*identity, ts - REMOVAL_HISTORY_SECONDS),
+            f" WHERE r.board_id = ? AND {_key_match('r')} AND r.removed_at >= ?",
+            (board_id, *_key_params(parsed), ts - REMOVAL_HISTORY_SECONDS),
         ).fetchone()
         if found is None:
             raise ValidationError("That title is no longer in this board's removal history.")
         if str(parsed) in _item_ids(conn, board_id):
-            _forget_removal(conn, identity)
+            _forget_removal(conn, board_id, parsed)
             return False
         held = int(conn.execute(
             "SELECT COUNT(*) FROM tier_items WHERE board_id = ?", (board_id,)
@@ -1017,7 +1049,8 @@ async def restore_removal(user_id: int, board_uid: str, key: Any) -> bool:
         record = _json_object(found["item_json"])
         row = _normalize_ref({**record, "media": found["media"],
                               "match_source": found["match_source"],
-                              "match_id": found["match_id"]})
+                              "match_id": found["match_id"],
+                              "season": found["season"]})
         category_id = found["category_id"]
         rank = 0
         if category_id is not None:
@@ -1032,7 +1065,7 @@ async def restore_removal(user_id: int, board_uid: str, key: Any) -> bool:
                      added_from if added_from in ADDED_FROM_VALUES else "manual",
                      _optional_int(record.get("created_at")) or ts,
                      category_id=category_id, rank=rank)
-        _forget_removal(conn, identity)
+        _forget_removal(conn, board_id, parsed)
         _touch(conn, board_id, user_id, ts)
         return True
 
@@ -1180,13 +1213,12 @@ def _point_removal_at_tier(conn: db.Connection, board_id: int, key: str,
     naming another tier is a later decision about that title, which this must not
     overrule any more than the tier restore overrules a title placed elsewhere.
     """
-    parsed = parse_item_key(key)
+    parsed = parse_key(key)
     conn.execute(
         "UPDATE tier_item_removals SET category_uid = ?, rank_in_category = ? "
-        " WHERE board_id = ? AND media = ? AND match_source = ? AND match_id = ? "
+        f" WHERE board_id = ? AND {_key_match()} "
         "   AND category_uid IS NULL AND removed_at >= ?",
-        (category_uid, rank, board_id, parsed.media, parsed.match_source,
-         parsed.match_id, since),
+        (category_uid, rank, board_id, *_key_params(parsed), since),
     )
 
 
@@ -1283,9 +1315,9 @@ def _remember_tier_removal(conn: db.Connection, board_id: int, row, ts: int) -> 
     position is what a restore can clamp to the tiers there are by then.
     """
     keys = [
-        item_key(item["media"], item["match_source"], item["match_id"])
+        item_keys.row_key(item)
         for item in conn.execute(
-            "SELECT media, match_source, match_id FROM tier_items "
+            "SELECT media, match_source, match_id, season FROM tier_items "
             " WHERE board_id = ? AND category_id = ? ORDER BY rank_in_category, id",
             (board_id, row["id"]),
         )
@@ -1410,7 +1442,7 @@ async def move_items(user_id: int, board_uid: str, keys: list[Any],
     its reason: writing the part we understood leaves the board in a state the
     caller did not ask for and cannot see.
     """
-    wanted = [str(parse_item_key(key)) for key in keys]
+    wanted = [str(parse_key(key)) for key in keys]
     if not wanted:
         raise ValidationError("Nothing was selected to move.")
     if len(set(wanted)) != len(wanted):
@@ -1485,7 +1517,7 @@ async def save_layout(user_id: int, board_uid: str, payload: Mapping[str, Any]) 
     wanted = [_normalize_category(entry) for entry in categories]
     if len({entry["uid"] for entry in wanted}) != len(wanted):
         raise ValidationError("Two tiers cannot share an id.")
-    pool_keys = [parse_item_key(key) for key in pool]
+    pool_keys = [parse_key(key) for key in pool]
     ts = db.now()
 
     def _work(conn: db.Connection) -> dict[str, Any]:
@@ -1575,7 +1607,7 @@ def _normalize_category(entry: Any) -> dict[str, Any]:
         "rank_priority": _rank_priority(entry.get("rank_priority", 0)),
         "is_isolated": bool(entry.get("is_isolated")),
         "colour": _colour(entry.get("colour")),
-        "items": [parse_item_key(key) for key in items],
+        "items": [parse_key(key) for key in items],
     }
 
 
@@ -1656,7 +1688,7 @@ async def seed_ratings(
         already_placed = 0
         seen: set[str] = set()
         for row, score in ordered:
-            key = item_key(row["media"], row["match_source"], row["match_id"])
+            key = item_keys.row_key(row)
             if key in seen:
                 # The same title twice in one payload — a show rated under two
                 # ids, say. The first (highest) score has already claimed it, and
@@ -1740,14 +1772,13 @@ def _rating(value: Any) -> int:
 
 
 def _item_placements(conn: db.Connection, board_id: int) -> dict[str, tuple[int, int | None]]:
-    """Composite item key -> (id, category_id), for one already-owned board. The
+    """Board key -> (id, category_id), for one already-owned board. The
     category is what tells an unplaced title apart from one the user has already
     put somewhere."""
     return {
-        item_key(row["media"], row["match_source"], row["match_id"]):
-            (int(row["id"]), row["category_id"])
+        item_keys.row_key(row): (int(row["id"]), row["category_id"])
         for row in conn.execute(
-            "SELECT id, category_id, media, match_source, match_id FROM tier_items "
+            "SELECT id, category_id, media, match_source, match_id, season FROM tier_items "
             " WHERE board_id = ?", (board_id,),
         )
     }
@@ -1793,7 +1824,14 @@ _BACKUP_BOARD_FIELDS = ("uid", "name", "year", "media_scope", "sort_order",
                         "created_at", "updated_at")
 _BACKUP_CATEGORY_FIELDS = ("uid", "label", "rank_priority", "is_isolated",
                            "sort_order", "colour", "created_at")
-_BACKUP_ITEM_FIELDS = ("media", "match_source", "match_id", "tmdb", "ids_json",
+# `season` is part of a title's identity on a board (NULL is the whole show), so
+# it travels with the triple. A document written before a board could hold a
+# season has no `season` on any title, which reads back as the whole show — what
+# every row was then — so this reader takes both. What the field does NOT make
+# safe is the other direction: a build that predates it ignores the field, reads
+# a season and its show as one title twice, and refuses the board whole (the
+# "appears twice" check below) rather than restoring it smaller.
+_BACKUP_ITEM_FIELDS = ("media", "match_source", "match_id", "season", "tmdb", "ids_json",
                        "title", "year", "network", "season_count", "episode_count",
                        "runtime", "user_rating", "added_from", "rank_in_category",
                        "created_at")
@@ -1955,8 +1993,7 @@ def _validate_backup_board(entry: Any) -> dict[str, Any]:
         raise ValidationError("Two tiers on one board share an id.")
 
     items = [_validate_backup_item(row, uids) for row in raw_items]
-    keys = {item_key(item["row"]["media"], item["row"]["match_source"],
-                     item["row"]["match_id"]) for item in items}
+    keys = {item_keys.row_key(item["row"]) for item in items}
     if len(keys) != len(items):
         # The UNIQUE would drop the second copy silently, which would restore a
         # board that is quietly smaller than the one that was backed up.

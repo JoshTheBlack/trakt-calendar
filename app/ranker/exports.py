@@ -34,8 +34,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import item_keys
 from ..media import user_images
-from ..providers.base import item_key
 
 logger = logging.getLogger(__name__)
 
@@ -79,17 +79,20 @@ class RankedTitle:
     tier_uid: str
     tier_label: str
     colour: str | None
+    # Which season of the show this entry is, None for the whole show — a
+    # season and its show are two entries, ranked like any two titles.
+    season: int | None = None
 
     @property
     def key(self) -> str:
-        """This title's flat item key.
+        """This entry's board key.
 
-        Built by the shared identity helper rather than formatted here: an export
-        row addresses the same title the ranker and the tracker do, and a second
-        spelling of the separator would come apart silently the day one of them
-        changed it.
+        Built by the board's own key module rather than formatted here: an export
+        row addresses the same board row the page does, and a second spelling of
+        the separator or the season suffix would come apart silently the day one
+        of them changed.
         """
-        return item_key(self.media, self.match_source, self.match_id)
+        return item_keys.board_key(self.media, self.match_source, self.match_id, self.season)
 
 
 def consolidate(
@@ -139,6 +142,7 @@ def consolidate(
             media=str(item.get("media") or "show"),
             match_source=str(item.get("match_source") or ""),
             match_id=str(item.get("match_id") or ""),
+            season=item.get("season"),
             tmdb=item.get("tmdb"),
             title=str(item.get("title") or ""),
             year=item.get("year"),
@@ -257,8 +261,8 @@ def render_key(
     payload = {
         "renderer": renderer_version,
         "titles": [
-            [entry.rank, entry.media, entry.match_id, entry.tmdb, entry.colour,
-             entry.title]
+            [entry.rank, entry.media, entry.match_id, entry.season, entry.tmdb,
+             entry.colour, entry.title]
             for entry in ranked
         ],
         "columns": columns,
