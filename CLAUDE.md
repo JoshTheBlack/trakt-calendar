@@ -252,11 +252,20 @@ scripts on the board treat a key as an opaque string and must go on doing so.
 WHAT A ROW IS CALLED AND COUNTS follows what it is. `app/ranker/seasons.py`'s
 `row_label` is the one spelling of its name ("Show — Season 3", or the season's
 own name, `tier_items.season_name`) for the row, its details heading, the
-removal history and the exports; and a row's counts describe the row — a season
+removal history and both exports (`exports.RankedTitle.label`, which the image
+caption, the text and the render cache's key all read); and a row's counts
+describe the row — a season
 has no season count and its own episode total. `core._redefine_row` REWRITES
 those (`_DEFINING_FACTS`) whenever a row's season changes, from the season list
 already read (`seasons.season_facts`) or blank, never carrying the old
 definition's numbers across.
+A BOARD BACKUP says which it is in fields rather than a key: version 2
+(`core.EXPORT_SCHEMA`) lists `season` and `season_name` on every title and
+refuses a title that leaves either out, because in a file that can hold seasons
+an absent season is lost identity, not "the whole show"; a version-1 file — every
+title the whole show — restores exactly as it always did. Why each version reads
+what it reads is written at `EXPORT_SCHEMA`; a change to what a title carries is
+a new version there, with the older ones still read.
 
 **Migrations are append-only, and migration 19 is the one recorded exception.**
 `app/db.py` owns the rule; this is the note it points at. 19 shipped classifying an
