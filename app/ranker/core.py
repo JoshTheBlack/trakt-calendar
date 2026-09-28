@@ -796,6 +796,72 @@ async def fetch_item(user_id: int, board_uid: str, key: Any) -> dict[str, Any]:
     return await db.run(_work)
 
 
+async def held_seasons(user_id: int, board_uid: str, key: Any) -> set[int | None]:
+    """Every season of the title `key` names that this board holds — None for the
+    whole show — whichever season `key` itself is.
+
+    WHAT A ROW'S SEASON CONTROL GREYS OUT. One read of the title's rows through
+    the unique index's leading columns, rather than the whole board.
+    """
+    parsed = parse_key(key)
+
+    def _work(conn: db.Connection) -> set[int | None]:
+        board_id = int(_resolve_board(conn, user_id, board_uid)["id"])
+        return {row["season"] for row in conn.execute(
+            "SELECT season FROM tier_items WHERE board_id = ? AND media = ? "
+            "   AND match_source = ? AND match_id = ?",
+            (board_id, parsed.media, parsed.match_source, parsed.match_id),
+        )}
+
+    return await db.run(_work)
+
+
+async def set_item_season(user_id: int, board_uid: str, key: Any, season: Any) -> str:
+    """Make the row `key` names a different season of its show, or the whole
+    show (`season` None or ""), and return the row's new key.
+
+    THE ROW IS CHANGED IN PLACE: the same id, the same tier and the same rank, so
+    redefining what a row is never reshuffles the board around it. Its facts
+    (title, counts, rating) are left as they are; only what the row IS changes.
+
+    A SEASON THE BOARD ALREADY HOLDS IS REFUSED, not merged: the control greys
+    those out, so arriving here with one means another tab put it there since,
+    and silently discarding either row would be the kind of loss the removal
+    history exists to prevent. Choosing what the row already is changes nothing
+    and bumps nothing.
+
+    A film has no seasons, and asking to give one a season is refused.
+    """
+    parsed = parse_key(key)
+    try:
+        wanted = item_keys.valid_season(season, parsed.media)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from None
+    target = item_keys.BoardKey(parsed.title, wanted)
+    ts = db.now()
+
+    def _work(conn: db.Connection) -> str:
+        board = _resolve_board(conn, user_id, board_uid)
+        board_id = int(board["id"])
+        known = _item_ids(conn, board_id)
+        if str(parsed) not in known:
+            raise ValidationError(f"No title {str(parsed)!r} on this board.")
+        if target == parsed:
+            return str(target)
+        if str(target) in known:
+            raise ValidationError(
+                "This board already holds the whole show." if wanted is None else
+                "This board already holds that season.")
+        conn.execute(
+            "UPDATE tier_items SET season = ? WHERE id = ? AND board_id = ?",
+            (wanted, known[str(parsed)], board_id),
+        )
+        _touch(conn, board_id, user_id, ts)
+        return str(target)
+
+    return await db.transaction(_work)
+
+
 async def remove_items(user_id: int, board_uid: str, keys: list[Any]) -> int:
     """Delete titles from a board entirely — the only true delete in this
     module. Returns how many rows went.

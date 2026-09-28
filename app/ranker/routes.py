@@ -31,7 +31,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from . import (core as ranker, exports as ranker_export, grid_builder,
-               imports as ranker_import, sources as ranker_sources)
+               imports as ranker_import, seasons as ranker_seasons,
+               sources as ranker_sources)
 from .sources import Media
 from .. import auth, authz, chrome, details_panel, route_params
 from ..auth import AuthLevel
@@ -570,6 +571,69 @@ async def move_menu_fragment(request: Request):
     return templates.TemplateResponse(request, "_ranker_move_menu.html", {
         "request": request, "board_uid": board_uid, "key": item["key"],
         "tiers": _move_choices(board),
+        # A show row's menu also sets which season the row is; a film has none.
+        "seasons_url": (_seasons_url(board_uid, item["key"])
+                        if item["media"] == Media.SHOW else ""),
+    })
+
+
+def _seasons_url(board_uid: str, key: str) -> str:
+    return f"/rankings/fragments/seasons?{urlencode({'board': board_uid, 'key': key})}"
+
+
+@guard.get("/rankings/fragments/seasons", AuthLevel.RANKER_APPROVED)
+async def seasons_fragment(request: Request):
+    """What one show row can be set to: the whole show, or any of its seasons.
+
+    ASKED FOR WHEN THE ROW'S "Season" CHOICE IS OPENED, never with the row or its
+    menu: listing a show's seasons is a lookup at a service, a board draws up to a
+    thousand rows, and the ⇄ menu is opened far more often to move a title than
+    to change what it is. The first opening pays for it; the answer is cached
+    upstream like every other per-title read.
+
+    WHICH SERVICE LISTS THE SEASONS IS THE ONE THAT DESCRIBES THE TITLE
+    (detail_source.choose, as the details panel asks), with the instance's
+    catalogue credential for the reason the panel gives: a season list is public
+    and the same for everybody.
+
+    WHAT IS OFFERED, GREYED AND SUGGESTED is app/ranker/seasons.py's; this only
+    gathers its inputs. A lookup that fails or has nobody to ask still draws the
+    whole show and whatever the board and the viewer already know of, and says
+    why the rest is missing — the control is never an empty box.
+
+    A TITLE THE BOARD DOES NOT HOLD, OR A FILM, DRAWS AS NOTHING, at 200 like
+    every fragment here.
+    """
+    user = await auth.current_user(request)
+    board_uid = request.query_params.get("board") or ""
+    try:
+        item = await ranker.fetch_item(user.user_id, board_uid, request.query_params.get("key"))
+        held = await ranker.held_seasons(user.user_id, board_uid, item["key"])
+    except ranker.RankerError:
+        return HTMLResponse("")
+    if item["media"] != Media.SHOW:
+        return HTMLResponse("")
+    parsed = ranker.parse_key(item["key"])
+    listed, note = [], ""
+    settings = load_settings()
+    chosen = detail_source.choose(settings, item["ids"])
+    if chosen is None:
+        note = "No service here can list this show's seasons."
+    else:
+        try:
+            listed = (await detail_source.seasons(settings, chosen, Media.SHOW)).seasons
+        except SourceUnavailable:
+            logger.warning("Season list failed for %s", chosen.source, exc_info=True)
+            note = "Couldn't list this show's seasons just now."
+        if not listed and not note:
+            note = "No seasons are listed for this show yet."
+    options = ranker_seasons.season_options(
+        listed, held=held, current=item["season"],
+        finished=await ranker_import.latest_finished_season(user.user_id, parsed.title),
+        now=datetime.now(timezone.utc))
+    return templates.TemplateResponse(request, "_ranker_season_menu.html", {
+        "request": request, "board_uid": board_uid, "key": item["key"],
+        "options": options, "note": note,
     })
 
 
@@ -1030,6 +1094,33 @@ async def move_board_items(board_uid: str, request: Request):
         landed = ""
     return await _rankings_response(request, user, board_uid, notice=notice,
                                     notice_ok=ok, open_tier=landed)
+
+
+@guard.post("/rankings/boards/{board_uid}/items/season", AuthLevel.RANKER_APPROVED)
+async def set_board_item_season(board_uid: str, request: Request):
+    """Make one show row the whole show or one of its seasons — the choice its
+    season list posts (_ranker_season_menu.html) — and answer with the page.
+
+    THE ROW KEEPS ITS PLACE (ranker.set_item_season), so this is a change to what
+    a row is and not a layout change; it still bumps the board's version, and the
+    page that comes back carries the row under its new key.
+
+    ALWAYS 200 WITH THE OUTCOME SAID ON THE PAGE, for the restore's reason: this
+    answer replaces the page, and a status would leave the viewer on a page that
+    did nothing and said nothing.
+    """
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+    notice, ok = "", True
+    try:
+        new_key = await ranker.set_item_season(user.user_id, board_uid, data.get("key"),
+                                               data.get("season"))
+        season = ranker.parse_key(new_key).season
+        notice = ("This row is the whole show now." if season is None else
+                  f"This row is {ranker_seasons.SeasonOption(season).label} now.")
+    except ranker.RankerError as exc:
+        notice, ok = str(exc), False
+    return await _rankings_response(request, user, board_uid, notice=notice, notice_ok=ok)
 
 
 @guard.get("/api/rankings/boards/{board_uid}", AuthLevel.RANKER_APPROVED)

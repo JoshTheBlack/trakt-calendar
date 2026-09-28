@@ -1,0 +1,32 @@
+{#- dedent -#}
+{# What one show row can be: the whole show, or one of its seasons. Asked for when
+   the row's "Whole show or season…" is opened (_ranker_move_menu.html) and drawn
+   from app/ranker/seasons.py's options.
+
+   THE MOVE MENU'S OWN SHAPE: one form carrying the address, the encoder and the
+   row's key; each choice is only its own `name="season"` and value, which the
+   browser adds to the form's fields when that button is the one pressed. An
+   empty value is the whole show. The answer is the page, with the row under its
+   new key in the place it already had.
+
+   HELD CHOICES ARE DISABLED, NOT LEFT OUT — including what this row is now — so
+   the list still reads as the show's seasons, says which of them the board
+   already has, and can never make a second row for one of them. A disabled
+   button is never a form's submitter, so nothing here has to refuse one.
+
+   THE SUGGESTION IS SAID IN WORDS beside its choice rather than only coloured,
+   and it is never a season that has not aired yet — those are listed, dated,
+   and can still be chosen. #}
+<form hx-boost="false" hx-post="/rankings/boards/{{ board_uid }}/items/season" hx-json-enc
+      hx-target="body" hx-swap="innerHTML">
+    <input type="hidden" name="key" value="{{ key }}">
+    {%- for option in options %}
+    <button name="season" value="{{ option.value }}"
+            class="ranker-season-choice{% if option.suggested %} is-suggested{% endif %}"
+            {%- if option.held %} disabled{% endif %}>
+        <span class="ranker-season-label">{{ option.label }}</span>
+        {%- if option.notes %}<span class="ranker-season-note">{{ option.notes | join(' · ') }}</span>{% endif %}
+    </button>
+    {%- endfor %}
+</form>
+{%- if note %}<p class="ranker-season-wait">{{ note }}</p>{% endif %}

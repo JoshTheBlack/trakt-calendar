@@ -45,7 +45,7 @@ from typing import NamedTuple
 # test double installed on app.providers is the one these functions call (see
 # CLAUDE.md's rule about names bound at import time).
 from .. import providers
-from .base import Media, Source
+from .base import Media, SeasonsAnswer, Source
 
 
 def ports():
@@ -215,6 +215,19 @@ def _says_anything(details: dict) -> bool:
     it. A card with none of them is a blank the reader cannot act on.
     """
     return bool(details.get("title") or details.get("overview") or details.get("episodes"))
+
+
+async def seasons(settings, chosen: Answerer, media) -> SeasonsAnswer:
+    """The chosen source's season list for one title — DetailPort.fetch_seasons,
+    asked of whoever `choose` picked, so "which service lists this title's
+    seasons" is the same answer as "which service describes it".
+
+    A stored-only answerer is asked of its store alone (`cached_only`), for the
+    reason `describe` ORs it in: it is a fact about this instance that the
+    source cannot be reached, not a caller's policy.
+    """
+    return await providers.get(chosen.source).detail_port.fetch_seasons(
+        settings, chosen.source_id, Media(media), cached_only=chosen.stored_only)
 
 
 async def fetch(settings, source: Source, media, source_id: str,

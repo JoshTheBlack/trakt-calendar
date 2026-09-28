@@ -2773,6 +2773,9 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .ranker-facts { display: flex; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
 .ranker-fact { font-size: 0.68rem; color: var(--text-dim); background: rgba(255,255,255,0.05); border-radius: 5px; padding: 1px 5px; }
 .ranker-fact.rating { color: var(--gold-soft); }
+/* Which season the row is: the one fact that tells it from its whole show on
+   the same board, so it reads before the rest. */
+.ranker-fact.season { color: var(--text); font-weight: 600; }
 .ranker-actions { display: flex; gap: 2px; flex-shrink: 0; }
 .ranker-act {
     cursor: pointer; background: none; border: none; color: var(--text-faint);
@@ -2968,6 +2971,22 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     padding: 6px 10px; border-radius: 6px; font-family: inherit; font-size: 0.8rem;
 }
 .ranker-menu button:hover { background: rgba(255,255,255,0.08); }
+/* A show row's "whole show or season" choice, below the destinations
+   (_ranker_move_menu.html). Its list arrives when it is opened, and a long-running
+   show lists dozens of seasons, so the list scrolls inside the menu rather than
+   pushing it off the screen. */
+.ranker-season { border-top: 1px solid var(--card-border); margin-top: 3px; padding-top: 3px; }
+.ranker-season > summary {
+    cursor: pointer; padding: 6px 10px; border-radius: 6px; font-size: 0.8rem; color: var(--text-dim);
+}
+.ranker-season > summary:hover { background: rgba(255,255,255,0.08); color: var(--text); }
+.ranker-season-list { display: flex; flex-direction: column; gap: 2px; max-height: min(50vh, 320px); overflow-y: auto; }
+.ranker-season-list > form { display: contents; }
+.ranker-menu .ranker-season-choice { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.ranker-season-choice.is-suggested .ranker-season-label { color: var(--gold-soft); font-weight: 600; }
+.ranker-menu .ranker-season-choice:disabled { cursor: default; opacity: 0.45; background: none; }
+.ranker-season-note { font-size: 0.7rem; color: var(--text-faint); white-space: nowrap; }
+.ranker-season-wait { padding: 6px 10px; font-size: 0.75rem; color: var(--text-faint); margin: 0; }
 @position-try --move-menu-shove { left: 8px; right: auto; top: anchor(bottom); margin: 4px 0 0 0; }
 @position-try --move-menu-above { bottom: anchor(top); top: auto; right: anchor(right); margin: 0 0 4px 0; }
 

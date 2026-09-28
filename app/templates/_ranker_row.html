@@ -70,6 +70,10 @@
         {% if item.year %}<span class="ranker-year">{{ item.year }}</span>{% endif %}
     </span>
     <span class="ranker-facts">
+        {# WHICH SEASON THIS ROW IS, so it can be told from its whole show beside
+           it — a board may hold both. The number alone, beside the other terse
+           facts; 0 is the specials. #}
+        {% if item.season is not none %}<span class="ranker-fact season">{{ 'Specials' if item.season == 0 else 'Season ' ~ item.season }}</span>{% endif %}
         {% if item.season_count %}<span class="ranker-fact">{{ item.season_count }}S</span>{% endif %}
         {% if item.episode_count %}<span class="ranker-fact">{{ item.episode_count }}E</span>{% endif %}
         {% if item.runtime %}<span class="ranker-fact">{{ item.runtime }}m</span>{% endif %}

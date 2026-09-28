@@ -32,6 +32,7 @@ from typing import Any
 
 from .sources import Media, TitleRef, int_or_none
 from .. import auth, db, distrakt
+from ..providers.base import ItemKey
 from ..providers.trakt import TraktError, calendar as trakt_calendar, detail as trakt_detail
 from ..config import load_settings
 from ..media import artwork
@@ -106,6 +107,33 @@ async def available_years(user_id: int, media: Media) -> list[int]:
         )
     years = {int(row["y"]) for row in rows if (row["y"] or "").isdigit()}
     return sorted(years, reverse=True)
+
+
+async def latest_finished_season(user_id: int, title: ItemKey) -> int | None:
+    """The newest numbered season of one show this account has finished, or None.
+
+    WHAT A SHOW ROW'S SEASON CONTROL SUGGESTS FIRST: a season somebody has
+    finished is the one they are most likely ranking. It lives here for the
+    reason everything in this file does — an account without the other feature
+    gets None, exactly as an account that has finished nothing does, and the
+    control falls back to the latest aired season without knowing why.
+
+    The same stored verdict the import reads (a COMPLETED record per season, in
+    whatever month it was finished), matched on the identity triple both
+    features key a title on. Specials are not "the latest season" and are left
+    out.
+    """
+    user = await auth.get_user(user_id)
+    if user is None or not user["distrakt_approved"]:
+        return None
+    season = await db.fetch_value(
+        "SELECT MAX(season) FROM distrakt_month_records "
+        " WHERE user_id = ? AND kind = ? AND media = ? AND match_source = ? "
+        "   AND match_id = ? AND season > 0",
+        (user_id, str(distrakt.RecordKind.COMPLETED), title.media, title.match_source,
+         title.match_id),
+    )
+    return None if season is None else int(season)
 
 
 class TrackerFinishedTitles:
