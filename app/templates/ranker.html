@@ -246,11 +246,21 @@
         <div class="modal-head"><h2>Export a poster grid</h2>
             <button type="button" class="modal-close" command="close" commandfor="exportModal">×</button></div>
         <div class="modal-body ranker-export-body">
+            {# ONE TRIGGER FOR AN OPTION CHANGING, AND IT IS `input`. Every control
+               here fires it — text, number, select and checkbox alike, in Chromium
+               and Firefox — so `change` beside it only sent the same readout twice:
+               a checkbox or a select fires both, two debounce timers ran out in the
+               same millisecond, and the second request aborted the first, logging
+               an htmx error on every change (measured, both engines). `queue last`
+               rather than `replace` for the one change that can still overlap a
+               request in flight: `replace` loses track of the request that did the
+               replacing (see CLAUDE.md's note on htmx's request ordering), and a
+               queue never aborts, so the readout always ends on the last options. #}
             <form class="ranker-export-opts" id="exportForm" hx-boost="false"
                   hx-get="/rankings/fragments/export?board={{ board.uid | urlencode }}"
-                  hx-trigger="input delay:450ms, change delay:450ms, submit, export-changed from:body"
+                  hx-trigger="input delay:450ms, submit, export-changed from:body"
                   hx-target="#exportReadout" hx-swap="innerHTML"
-                  hx-sync="this:replace">
+                  hx-sync="this:queue last">
                 <div class="field"><label for="exTitle">Title</label>
                     <input type="text" id="exTitle" name="title" maxlength="{{ max_export_text }}"
                            value="{{ export_title }}" autocomplete="off"></div>

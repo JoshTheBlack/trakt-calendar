@@ -607,6 +607,18 @@ class ExportOptionsAreMarkupTests(_ActionTestCase):
         self.assertIn("nothing tiered to export", html)
         self.assertIn("disabled", re.search(r'<button[^>]*id="exportGo"[^>]*>', html).group(0))
 
+    def test_an_option_changing_asks_for_one_readout_and_queues_it(self):
+        """A checkbox or a select fires `input` AND `change`; triggering on both
+        sent every readout twice and the second aborted the first, logging an
+        htmx error each time. One trigger, and a queue that never aborts."""
+        page = self.client.get(f"/rankings?board={BOARD}").text
+        form = re.search(r'<form class="ranker-export-opts"[^>]*>', page).group(0)
+        trigger = re.search(r'hx-trigger="([^"]*)"', form).group(1)
+        events = [entry.split()[0] for entry in trigger.split(",")]
+        self.assertIn("input", events)
+        self.assertNotIn("change", events)
+        self.assertIn('hx-sync="this:queue last"', form)
+
     def test_the_preview_address_carries_the_options_it_was_drawn_from(self):
         html = self.readout(title="Top Shows")
         src = re.search(r'<img alt="Preview of the poster grid" src="([^"]+)"', html).group(1)
