@@ -287,6 +287,15 @@ class FieldMergeTests(unittest.TestCase):
         self.assertEqual(merged.runtime, 53)
         self.assertEqual(merged.overview, "A workplace.")
 
+    def test_the_poster_is_the_leaders_and_a_missing_one_is_filled(self):
+        with_art = hit(Source.TRAKT, "1", tmdb="1429")._replace(poster="https://t/a.jpg")
+        other_art = hit(Source.SIMKL, "9", tmdb="1429")._replace(poster="https://s/b.jpg")
+        no_art = hit(Source.TRAKT, "1", tmdb="1429")
+        led = search.merge_search_hits([(Source.TRAKT, [with_art]), (Source.SIMKL, [other_art])])
+        filled = search.merge_search_hits([(Source.TRAKT, [no_art]), (Source.SIMKL, [other_art])])
+        self.assertEqual(led.hits[0].poster, "https://t/a.jpg")
+        self.assertEqual(filled.hits[0].poster, "https://s/b.jpg")
+
     def test_a_field_the_leader_already_has_is_not_overwritten(self):
         leader = hit(Source.TRAKT, "1", tmdb="1429", network="Apple TV+", runtime=53)
         follower = hit(Source.SIMKL, "9", tmdb="1429", network="Somewhere Else", runtime=99)

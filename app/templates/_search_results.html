@@ -1,4 +1,7 @@
-{# The calendar search's results, as a fragment.
+{% import '_title_search.html' as title_search with context %}
+{# The calendar search's results, as a fragment. Each row is the shared result
+   row (_title_search.html); what this file decides is what a row SAYS about an
+   airing and that pressing it JUMPS.
 
    ONE PARTIAL FOR EVERY PATH — typing, Enter, and either of the widening
    buttons all swap this in — so a result cannot look different depending on how
@@ -41,19 +44,12 @@
         {% if everywhere %}On your calendars{% else %}On {{ endpoint.label }}{% endif %}
     </h3>
     {% for hit in airings %}
-    <a class="search-row" href="{{ hit.url }}">
-        <img class="search-poster" src="{{ hit.item.poster or '/static/images/nopostertv.png' }}"
-             alt="" loading="lazy" width="46" height="69">
-        <span class="search-main">
-            <span class="search-title">{{ hit.item.title }}{% if hit.item.year %} <span class="search-year">{{ hit.item.year }}</span>{% endif %}</span>
-            <span class="search-meta">
-                {% if hit.item.episode_label %}{{ hit.item.episode_label }} · {% endif %}
-                {{ hit.item.air_display }}{% if hit.item.air_time %} · {{ hit.item.air_time }}{% endif %}
-                {% if everywhere %} · {{ hit.endpoint_label }}{% endif %}
-            </span>
-        </span>
-        <span class="search-go">Jump →</span>
-    </a>
+    {% call title_search.row('a', {'href': hit.url}, hit.item.title, hit.item.year,
+                             hit.item.poster, go='Jump →') %}
+        {% if hit.item.episode_label %}{{ hit.item.episode_label }} · {% endif %}
+        {{ hit.item.air_display }}{% if hit.item.air_time %} · {{ hit.item.air_time }}{% endif %}
+        {% if everywhere %} · {{ hit.endpoint_label }}{% endif %}
+    {% endcall %}
     {% endfor %}
     {% if truncated %}
     <p class="search-hint">More than these matched — narrow the title to see the rest.</p>
@@ -68,30 +64,22 @@
         airs — including titles the services describe but leave off their own calendars,
         which is the only way those ever show up here.</p>
     {% for hit in elsewhere %}
-    <a class="search-row" href="{{ hit.url }}">
-        <img class="search-poster" src="{{ hit.item.poster or '/static/images/nopostertv.png' }}"
-             alt="" loading="lazy" width="46" height="69">
-        <span class="search-main">
-            <span class="search-title">{{ hit.item.title }}{% if hit.item.year %} <span class="search-year">{{ hit.item.year }}</span>{% endif %}</span>
-            {# THE SEASON IS NAMED FIRST because it is what distinguishes these
-               rows from each other: one show's premieres share a title, a
-               poster and a description, and the number plus the date is the
-               only thing saying which month a row goes to. A film has no
-               season and shows its release date alone. #}
-            <span class="search-meta">
-                {% if hit.item.season is not none %}Season {{ hit.item.season }} · {% endif %}
-                {{ hit.item.air_display }} · {{ hit.endpoint_label }}
-                {% if hit.item.network %} · {{ hit.item.network }}{% endif %}
-                {# THE COUNTRY, BECAUSE ONE FORMAT IS MANY SHOWS. A franchise
-                   like The Traitors returns a row per national version, all
-                   sharing a title and several sharing a network, and the
-                   country is the only thing on the row that tells them
-                   apart. #}
-                {% if hit.item.country %} · {{ hit.item.country }}{% endif %}
-            </span>
-        </span>
-        <span class="search-go">Jump →</span>
-    </a>
+    {% call title_search.row('a', {'href': hit.url}, hit.item.title, hit.item.year,
+                             hit.item.poster, go='Jump →') %}
+        {# THE SEASON IS NAMED FIRST because it is what distinguishes these
+           rows from each other: one show's premieres share a title, a poster
+           and a description, and the number plus the date is the only thing
+           saying which month a row goes to. A film has no season and shows its
+           release date alone. #}
+        {% if hit.item.season is not none %}Season {{ hit.item.season }} · {% endif %}
+        {{ hit.item.air_display }} · {{ hit.endpoint_label }}
+        {% if hit.item.network %} · {{ hit.item.network }}{% endif %}
+        {# THE COUNTRY, BECAUSE ONE FORMAT IS MANY SHOWS. A franchise like The
+           Traitors returns a row per national version, all sharing a title and
+           several sharing a network, and the country is the only thing on the
+           row that tells them apart. #}
+        {% if hit.item.country %} · {{ hit.item.country }}{% endif %}
+    {% endcall %}
     {% endfor %}
 </div>
 {% endif %}
@@ -110,7 +98,7 @@
 <p class="search-hint search-widen">
     <button type="button" class="btn-ghost small" hx-get="/calendar/search"
             hx-target="#searchResults" hx-include="#searchInput, #searchEndpoint"
-            hx-sync="#searchResults:queue last"
+            {{ title_search.sync('#searchResults') }}
             hx-vals='{"all": "1"{% if live %}, "live": "1"{% endif %}}'>Search every calendar</button>
 </p>
 {% endif %}

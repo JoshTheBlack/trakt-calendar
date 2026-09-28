@@ -33,7 +33,7 @@ from app.calendar import entries
 from app.config import Settings, save_settings
 from app.distrakt import watch_history
 from app import distrakt as distrakt_store
-from app.providers.base import Media, Record, SeasonsAnswer, Source
+from app.providers.base import Media, Record, SeasonsAnswer, Source, proxied_image
 from app.providers.simkl import detail as simkl_detail
 from app.providers.simkl import search as simkl_search
 from app.providers.trakt import detail as trakt_detail
@@ -44,8 +44,8 @@ AIR = 1783540800.0  # 2026-07-08 20:00Z
 SEVERANCE_KEY = "show:tmdb:95396"
 HEAT_KEY = "movie:tmdb:949"
 
-_ROW = re.compile(r'<button type="button" class="distrakt-search-row[^"]*"(.*?)>', re.S)
-_TITLE = re.compile(r'<span class="distrakt-title">([^<]*)</span>')
+_ROW = re.compile(r'<button class="search-row[^"]*"(.*?)>', re.S)
+_TITLE = re.compile(r'<span class="search-title">([^<]*)')
 
 
 def _severance(**overrides) -> Record:
@@ -76,12 +76,12 @@ def store(*records, endpoint="shows/premieres"):
 def rows(html: str) -> list[dict]:
     """Every result row as what it would SEND if pressed: a show row's GET
     parameters or a film row's JSON body, with its title beside it."""
-    titles = _TITLE.findall(html)
+    titles = [title.strip() for title in _TITLE.findall(html)]
     out = []
     for index, attrs in enumerate(_ROW.findall(html)):
         found = {"title": titles[index] if index < len(titles) else ""}
         get = re.search(r'hx-get="([^"]*)"', attrs)
-        vals = re.search(r"hx-vals='([^']*)'", attrs)
+        vals = re.search(r'hx-vals="([^"]*)"', attrs)
         if get:
             found["names"] = {k: v[0] for k, v in
                               parse_qs(urlsplit(unescape(get.group(1))).query).items()}
@@ -115,6 +115,27 @@ class TypingTests(AddFlowTestCase):
         trakt.assert_not_awaited()
         simkl.assert_not_awaited()
         viewer_settings.assert_not_awaited()
+
+    def test_a_typed_row_draws_the_poster_its_calendar_card_draws(self):
+        """Read from the same stored row, through the one image host the
+        Content-Security-Policy admits."""
+        store(_severance(poster="https://media.trakt.tv/severance.jpg"))
+        html = self.typed("sever")
+        src = unescape(re.search(r'<img class="search-poster" src="([^"]*)"', html).group(1))
+        self.assertEqual(src, proxied_image("https://media.trakt.tv/severance.jpg"))
+
+    def test_every_row_queues_on_the_box_s_own_results(self):
+        """A server test cannot run htmx, so this pins the attribute the browser
+        measurement was made with — see _title_search.html."""
+        store(_severance())
+        store(_heat(), endpoint="movies")
+        for query, path, results in (
+                ("sever", "/distrakt/fragments/search-stored", "#addSearchResults"),
+                ("heat", "/distrakt/fragments/search-movie-stored", "#addMovieResults")):
+            with self.subTest(path=path):
+                attrs = _ROW.findall(self.typed(query, path))
+                self.assertEqual(len(attrs), 1)
+                self.assertIn(f'hx-sync="{results}:queue last"', attrs[0])
 
     def test_a_typed_row_names_its_stored_identity_and_nothing_else(self):
         store(_severance())

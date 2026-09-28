@@ -758,7 +758,8 @@ LIMIT ?
 # network before one that does not, then the lowest id — so which of a service's
 # several rows speaks for it never depends on scan order.
 _TITLE_ROWS_SQL = """
-SELECT source, source_id, title_key, title, ids_json, year, network, runtime, overview
+SELECT source, source_id, title_key, title, ids_json, year, network, runtime, overview,
+       poster
 FROM calendar_titles
 WHERE media = ? AND title_key IN ({keys}) {film_rows}
 ORDER BY title_key, network = '', source_id
@@ -798,7 +799,10 @@ def _stored_hit(title_key: str, rows, media: Media) -> title_search.MergedSearch
             media=media, ids=ids, title=str(row["title"] or ""),
             year=year if isinstance(year, int) else None, season=None,
             network=str(row["network"] or ""), runtime=row["runtime"],
-            overview=str(row["overview"] or "")))
+            overview=str(row["overview"] or ""),
+            # The service's own address, as the fill stored it for the card —
+            # so a typed row shows the picture the calendar draws, for nothing.
+            poster=str(row["poster"] or "")))
     return title_search.fold_one_title(hits, _item_key_of(title_key), title_key=title_key)
 
 

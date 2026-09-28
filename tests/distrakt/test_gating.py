@@ -302,7 +302,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
         # it names has to be in the shared cache for the lookup to be reached at
         # all — the pick re-reads it rather than taking ids off the page.
         asyncio.run(cache.set(
-            "https://api.trakt.tv/search/show?query=seeded&extended=full",
+            "https://api.trakt.tv/search/show?query=seeded&extended=full%2Cimages",
             [{"show": {"title": "Test", "year": 2026,
                        "ids": {"trakt": 7, "tmdb": 7, "slug": "test"}}}]))
         for path in ("/distrakt/fragments/search?q=test",

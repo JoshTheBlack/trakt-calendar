@@ -32,7 +32,7 @@ SETTINGS = SimpleNamespace(trakt_client_id="id", trakt_access_token="", cache_tt
 WITH_TRAKT_ID = {
     "media": "show", "ids": {"trakt": 123, "slug": "a-show", "tmdb": 456},
     "title": "A Show", "year": 2022, "network": "HBO", "runtime": None,
-    "overview": "An overview.",
+    "overview": "An overview.", "poster": "https://media.trakt.tv/a-show.jpg",
 }
 
 # search_titles keeps any hit with SOME shared id, whether or not Trakt is
@@ -41,7 +41,7 @@ WITH_TRAKT_ID = {
 # contract must not assume that stays true.
 NO_TRAKT_ID = {
     "media": "show", "ids": {"tmdb": 789}, "title": "No Trakt Id", "year": 2021,
-    "network": "", "runtime": None, "overview": "",
+    "network": "", "runtime": None, "overview": "", "poster": "",
 }
 
 
@@ -75,6 +75,24 @@ class TraktSearchPortTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hit.year, 2022)
         self.assertEqual(hit.network, "HBO")
         self.assertIsNone(hit.season)
+
+    async def test_the_poster_travels_as_trakts_own_address(self):
+        with patch.object(detail, "search_titles", AsyncMock(return_value=[WITH_TRAKT_ID])):
+            hits = await _TraktSearchPort().search_titles(SETTINGS, Media.SHOW, "a show")
+        self.assertEqual(hits[0].poster, "https://media.trakt.tv/a-show.jpg")
+
+    async def test_the_search_asks_for_images_and_reads_the_poster_from_them(self):
+        """One request buys the row its picture: measured live, a search asked
+        for `full,images` carries the same images block the calendar's does."""
+        raw = [{"show": {"ids": {"trakt": 1, "tmdb": 2}, "title": "A Show", "year": 2022,
+                         "images": {"poster": ["media.trakt.tv/images/a.jpg.webp"]}}},
+               {"show": {"ids": {"trakt": 3}, "title": "No Art", "year": 2022}}]
+        spy = AsyncMock(return_value=raw)
+        with patch.object(detail.transport, "cached_get", spy):
+            out = await detail.search_titles(SETTINGS, "show", "a show")
+        self.assertEqual(spy.await_args.args[3], {"query": "a show", "extended": "full,images"})
+        self.assertEqual([e["poster"] for e in out],
+                         ["https://media.trakt.tv/images/a.jpg.webp", ""])
 
     async def test_the_whole_id_map_travels_not_just_trakt(self):
         with patch.object(detail, "search_titles", AsyncMock(return_value=[WITH_TRAKT_ID])):

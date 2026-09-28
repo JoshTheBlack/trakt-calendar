@@ -1,4 +1,5 @@
 {% import '_source_logo.html' as src with context %}
+{% import '_title_search.html' as title_search with context %}
 {# One submitted catalogue search, rendered on the server for the add flow's
    show and film modals alike (app/distrakt/routes.py's `_search_fragment`).
 
@@ -81,82 +82,77 @@
 <div class="distrakt-empty">No matches.</div>
 {% endif %}
 
-{#- EVERY ROW JOINS THE BOX'S OWN QUEUE (`hx-sync`, see
-    _distrakt_add_show.html for why the box queues rather than replaces). A
-    typed answer still waiting when a row is pressed would otherwise land after
-    the row's own answer — and a typed answer takes the season picker down out
-    of band, so the picker the press asked for vanished. Measured in Chromium:
-    a press made the moment the row appeared, while the box's last answer was
-    still on its way. In the queue the waiting typed answer lands first, or is
-    dropped for the press, and never after it. -#}
-{%- set results_queue = ('#addMovieResults' if media == 'movie' else '#addSearchResults') ~ ':queue last' %}
+{#- EVERY ROW JOINS THE BOX'S OWN QUEUE (`title_search.sync`; the box's own
+    reasons are in _title_search.html). A typed answer still waiting when a row
+    is pressed would otherwise land after the row's own answer — and a typed
+    answer takes the season picker down out of band, so the picker the press
+    asked for vanished. Measured in Chromium: a press made the moment the row
+    appeared, while the box's last answer was still on its way. In the queue
+    the waiting typed answer lands first, or is dropped for the press, and
+    never after it. -#}
+{%- set results = '#addMovieResults' if media == 'movie' else '#addSearchResults' %}
 {% for hit in hits %}
-{# A hit the tracker has no id to file under is shown and refused rather than
-   hidden — with the SERVER's own sentence for it, so this and the add route's
-   400 cannot drift into two explanations of one rule. It only ever happens on
-   the film path: a show hit with no shared id is under-described rather than
-   unfileable, and the season click it is about to get resolves it. #}
-{#- A ROW IS A BUTTON, so it is one — which is also what gives it the keyboard
-    for free. It used to be a div wearing `role="button"` with a listener
-    translating Enter and Space into a click, because the row's click had to be
-    delegated to a container that outlived it. Each row carries its own request
-    now, so nothing outlives anything. -#}
-<button type="button" class="distrakt-search-row{{ ' is-unkeyable' if hit.unkeyable }}"
-     {%- if hit.unkeyable %} disabled{% endif %}
-     {%- if not hit.unkeyable %}
-     hx-sync="{{ results_queue }}"
-     {%- if media == 'movie' %}
-     {#- A film has no season to pick, so the row IS the add. It names the day
-         by INCLUDING the field rather than carrying a copy of it: a new search
-         replaces this list and the date input is not in it. -#}
-     hx-post="/api/distrakt/add-movie{{ month_query }}" hx-json-enc
-     hx-include="#addMovieDate"
-     hx-target="#distraktShowList"
-     hx-swap="innerHTML swapEmpty:false show:top showTarget:.row-marked"
-     hx-vals='{{ ({"t": hit.title_key} if hit.title_key else {"q": query, "i": loop.index0}) | tojson }}'
-     {%- else %}
-     {#- A show row fetches its season picker. A read that changes nothing, so it
-         is a GET, and the address names the result rather than describing it. -#}
-     hx-get="/distrakt/fragments/seasons{{ month_query }}&amp;
-             {%- if hit.title_key %}t={{ hit.title_key | urlencode }}
-             {%- else %}q={{ query | urlencode }}&amp;i={{ loop.index0 }}{% endif %}"
-     hx-target="#addSeasonPick" hx-swap="outerHTML"
-     {%- endif %}
-     {%- endif %}>
-    {%- if hit.source_ids %}
-    {# A MARK PER SOURCE THAT RETURNED IT, ALWAYS — not only when more than one
-       catalogue was askable. It is attribution as much as disambiguation: which
-       service's own answer a row is drawn from is worth seeing even with one
-       catalogue linked, and it is the one thing on the row that can tell a
-       viewer which of several services actually found this title, which matters
-       for debugging a source's own data (a mis-shaped hit, a missing network)
-       as much as for telling two services' answers apart. #}
-    <span class="distrakt-search-marks">
-        {%- for source in hit.source_ids %}{{ src.mark(source, 'search-mark') }}{% endfor -%}
-    </span>
-    {%- endif %}
-    <span class="distrakt-title">{{ hit.title }}</span>
+{#- THE ACTION SLOT OF THE SHARED ROW (_title_search.html's `row`): a <button>,
+    which gives the row the keyboard for free — it used to be a div wearing
+    `role="button"` with a listener translating Enter and Space into a click —
+    and the request it makes when pressed. Each row names its pick BY
+    REFERENCE and nothing else: a typed row the identity it is stored under
+    (`t`), a service row the query that found it and its place in the answer
+    (`q`, `i`); the server reads the title back out of what a service said.
+
+    A hit the tracker has no id to file under is shown and refused rather than
+    hidden — `disabled`, with the SERVER's own sentence for it as the row's
+    note, so this and the add route's 400 cannot drift into two explanations of
+    one rule. It only ever happens on the film path: a show hit with no shared
+    id is under-described rather than unfileable, and the season click it is
+    about to get resolves it. -#}
+{%- set pick = {"t": hit.title_key} if hit.title_key else {"q": query, "i": loop.index0} %}
+{%- if hit.unkeyable %}
+{%- set action = {"type": "button", "disabled": ""} %}
+{%- elif media == 'movie' %}
+{#- A film has no season to pick, so the row IS the add. It names the day by
+    INCLUDING the field rather than carrying a copy of it: a new search replaces
+    this list and the date input is not in it. `forceescape` because `tojson`
+    answers markup Jinja will not escape again, and this value sits inside a
+    double-quoted attribute. -#}
+{%- set action = {"type": "button", "hx-sync": title_search.queue(results),
+                  "hx-post": "/api/distrakt/add-movie" ~ month_query, "hx-json-enc": "",
+                  "hx-include": "#addMovieDate", "hx-target": "#distraktShowList",
+                  "hx-swap": "innerHTML swapEmpty:false show:top showTarget:.row-marked",
+                  "hx-vals": pick | tojson | forceescape} %}
+{%- else %}
+{#- A show row fetches its season picker. A read that changes nothing, so it is
+    a GET, and the address names the result rather than describing it. -#}
+{%- set action = {"type": "button", "hx-sync": title_search.queue(results),
+                  "hx-get": "/distrakt/fragments/seasons" ~ month_query ~ "&" ~ (pick | urlencode),
+                  "hx-target": "#addSeasonPick", "hx-swap": "outerHTML"} %}
+{%- endif %}
+{#- A MARK PER SOURCE THAT RETURNED IT, ALWAYS — not only when more than one
+    catalogue was askable. It is attribution as much as disambiguation: which
+    service's own answer a row is drawn from is worth seeing even with one
+    catalogue linked, and it is the one thing on the row that can tell a viewer
+    which of several services actually found this title, which matters for
+    debugging a source's own data (a mis-shaped hit, a missing network) as much
+    as for telling two services' answers apart. -#}
+{% call title_search.row('button', action, hit.title, hit.year, hit.poster,
+                         sources=hit.source_ids, note=hit.unkeyable or '',
+                         go='' if hit.unkeyable else ('Add →' if media == 'movie' else 'Seasons →'),
+                         extra_class='is-unkeyable' if hit.unkeyable else '') %}
     {%- if hit.season is not none %}
-    {# WHICH SEASON THIS ROW IS, where the source said so. A catalogue that
-       files each season of a series as its own title answers one search with
-       several rows sharing a name — three "Sousou no Frieren", two "Beastars" —
-       and without this they are told apart only by a year, which says when a
-       season aired rather than which season it is. Drawn only when the source
-       named one: a row that gets a picker on click must not claim a season it
-       is about to ask about. #}
-    <span class="chip distrakt-search-season">Season {{ hit.season }}</span>
+    {#- WHICH SEASON THIS ROW IS, where the source said so. A catalogue that
+        files each season of a series as its own title answers one search with
+        several rows sharing a name — three "Sousou no Frieren", two "Beastars"
+        — and without this they are told apart only by a year, which says when a
+        season aired rather than which season it is. Drawn only when the source
+        named one: a row that gets a picker on click must not claim a season it
+        is about to ask about. -#}
+    <span class="chip search-season">Season {{ hit.season }}</span>
     {%- endif %}
-    <span class="distrakt-year">{{ hit.year if hit.year else '' }}</span>
-    {# Films have no network and shows no runtime worth showing, so each row's
-       third column carries whichever its media actually has. #}
-    <span class="distrakt-network">
-        {%- if media == 'movie' %}{{ (hit.runtime ~ ' min') if hit.runtime else '' }}
-        {%- else %}{{ hit.network }}{% endif -%}
-    </span>
-    {%- if hit.unkeyable %}
-    <span class="distrakt-unkeyable">{{ hit.unkeyable }}</span>
-    {%- endif %}
-</button>
+    {#- Films have no network and shows no runtime worth showing, so the line
+        carries whichever its media actually has. -#}
+    {%- if media == 'movie' %}{{ (hit.runtime ~ ' min') if hit.runtime else '' }}
+    {%- else %}{{ hit.network }}{% endif -%}
+{% endcall %}
 {% endfor %}
 
 {% endif %}

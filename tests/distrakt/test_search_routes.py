@@ -24,7 +24,8 @@ from datetime import date
 
 from app.config import Settings, save_settings
 from app.providers import title_search as catalogue_search
-from app.providers.base import Media, SearchHit, SeasonsAnswer, Source, resolve_key
+from app.providers.base import (Media, SearchHit, SeasonsAnswer, Source, proxied_image,
+                                resolve_key)
 from app.providers.simkl import detail as simkl_detail
 from app.providers.simkl import search as simkl_search
 from app.providers.trakt import TraktError
@@ -34,15 +35,15 @@ from tests.support import AppTestCase, ORIGIN
 TRAKT_HIT = {
     "media": "show", "ids": {"trakt": 1, "tmdb": 100, "slug": "a-show"},
     "title": "A Show", "year": 2022, "network": "HBO", "runtime": None,
-    "overview": "An overview.",
+    "overview": "An overview.", "poster": "https://media.trakt.tv/a-show.jpg",
 }
 
 BOTH_CONFIGURED = dict(public_base_url=ORIGIN, trakt_client_id="cid",
                        simkl_client_id="scid", simkl_client_secret="ssecret")
 
-_ROW = re.compile(r'<button type="button" class="distrakt-search-row[^"]*"(.*?)>', re.S)
+_ROW = re.compile(r'<button class="search-row[^"]*"(.*?)>', re.S)
 _GET = re.compile(r'hx-get="([^"]*)"')
-_TITLE = re.compile(r'<span class="distrakt-title">([^<]*)</span>')
+_TITLE = re.compile(r'<span class="search-title">([^<]*)')
 
 
 def rows(html: str) -> list[dict]:
@@ -53,7 +54,7 @@ def rows(html: str) -> list[dict]:
     and the server resolves the title from that. A row carrying a title, or an
     id, or nothing at all would each look fine in a substring match.
     """
-    titles = _TITLE.findall(html)
+    titles = [title.strip() for title in _TITLE.findall(html)]
     out = []
     for index, attrs in enumerate(_ROW.findall(html)):
         found = {"disabled": "disabled" in attrs, "names": {}}
@@ -84,6 +85,17 @@ class SearchFragmentTests(AppTestCase):
         with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[TRAKT_HIT])):
             html = self.client.get("/distrakt/fragments/search?q=a").text
         self.assertEqual(rows(html)[0]["title"], "A Show")
+
+    def test_a_service_row_draws_the_poster_its_answer_carried_through_the_proxy(self):
+        """The Content-Security-Policy admits one image host, the proxy, so a
+        service's own address may never reach the page as itself."""
+        save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="cid"))
+        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[TRAKT_HIT])):
+            html = self.client.get("/distrakt/fragments/search?q=a").text
+        self.assertEqual(unescape(re.search(r'<img class="search-poster" src="([^"]*)"',
+                                         html).group(1)),
+                      proxied_image("https://media.trakt.tv/a-show.jpg"))
+        self.assertNotIn('src="https://media.trakt.tv', html)
 
     def test_a_simkl_only_instance_can_still_search(self):
         save_settings(Settings(public_base_url=ORIGIN, simkl_client_id="scid",
@@ -204,7 +216,7 @@ class SearchFragmentTests(AppTestCase):
 TRAKT_MOVIE_HIT = {
     "media": "movie", "ids": {"trakt": 1, "tmdb": 200, "slug": "a-movie"},
     "title": "A Movie", "year": 2022, "network": "", "runtime": 118,
-    "overview": "A movie overview.",
+    "overview": "A movie overview.", "poster": "",
 }
 
 

@@ -1,5 +1,6 @@
 {% extends '_base.html' %}
 {% import '_calendar_meta.html' as calendar_meta with context %}
+{% import '_title_search.html' as title_search with context %}
 {% set site_suffix = false %}
 {% set progress_bar = true %}
 {# Body classes are per-account view prefs (card style, packing, hide) that don't
@@ -283,64 +284,21 @@
             <button type="button" class="modal-close" command="close" commandfor="searchModal">&times;</button>
         </div>
         <div class="modal-body">
-            {# EVERY REQUEST THIS PANEL MAKES IS AN `hx-get`, and nothing here
-               has a submit handler. The first version did, and it was wrong in
-               a way worth recording: an async function returns a PROMISE, which
-               is truthy, so `onsubmit="return search()"` handed the browser a
-               go-ahead — the page reloaded mid-request and the cancelled fetch
-               surfaced as "could not reach the server".
+            {# THE SHARED SEARCH BOX (_title_search.html, which holds why typing
+               and Enter are two requests and how they are ordered). One route
+               answers both here: typing reads what this calendar already holds,
+               and Enter adds `live`, which asks the services.
 
-               TWO TRIGGERS BECAUSE THERE ARE TWO COSTS. Typing reads what this
-               instance already holds: an index lookup, no outbound call, so it
-               can run on every keystroke. Enter and the button ask the SERVICES,
-               which spends requests against somebody else's rate limit, so it
-               takes a deliberate act. That is the only difference between them —
-               same route, same fragment, one extra value.
-
-               ENTER IS THE FORM'S OWN SUBMIT, handled by htmx rather than by
-               script. A form carrying `hx-get` intercepts its submit, which is
-               what makes Enter and the button one behaviour instead of two, and
-               is why neither can reload the page. #}
-            {# `hx-boost="false"` BECAUSE THIS FORM IS NOT A NAVIGATION. A
-               boosted form under a boosted body is turned into a page
-               navigation, which would replace the calendar with a fragment;
-               the app-wide rule and the reason are in
-               tests/kernel/test_page_head.py. #}
-            <form class="search-bar" hx-boost="false" hx-get="/calendar/search"
-                  hx-target="#searchResults"
-                  {# ONE ANSWER AT A TIME, ACROSS BOTH TRIGGERS, AND ENTER'S
-                     LANDS LAST. Syncing on the TARGET rather than on each
-                     control is what makes that true between them, and the two
-                     choices below are measured, not preferred — the rule and
-                     its numbers are _distrakt_add_show.html's:
-                       - NO DEBOUNCE on the box. A delayed trigger keeps a timer
-                         nothing else cancels, so Enter within the delay of the
-                         last keystroke went out FIRST and the typed read after
-                         it.
-                       - `queue last`, NOT `replace`. `replace` aborted the
-                         services' request outright: measured here, every one of
-                         64 type-then-Enter trials in Chromium and in Firefox
-                         lost it, left the typed list on screen and logged an
-                         htmx abort to the console. `queue last` aborts nothing:
-                         one request runs and only the newest waits. #}
-                  hx-sync="#searchResults:queue last">
-                {# `input`, NOT `keyup`, BECAUSE TEXT ARRIVES WITHOUT KEYS. A paste
-                   from the mouse, a cut from the context menu and a browser's own
-                   clear button all change the value and press nothing, so a box
-                   listening for keyup sat on its old results — measured in Firefox,
-                   where a pasted title searched for nothing. `input` fires for
-                   every way the value changes and for nothing else, and `changed`
-                   still ignores the keys that move the caret. The non-standard
-                   `search` event that used to ride beside it is gone with it:
-                   Firefox never fires it, and everywhere else it only repeated a
-                   request `input` had already made. #}
-                <input type="text" id="searchInput" name="q" autocomplete="off" spellcheck="false"
-                       autofocus placeholder="Title…"
-                       hx-get="/calendar/search"
-                       hx-trigger="input changed"
-                       hx-target="#searchResults"
-                       hx-include="#searchEndpoint"
-                       hx-sync="#searchResults:queue last">
+               NO SUBMIT HANDLER, and the first version's is worth remembering:
+               an async function returns a PROMISE, which is truthy, so
+               `onsubmit="return search()"` handed the browser a go-ahead — the
+               page reloaded mid-request and the cancelled fetch surfaced as
+               "could not reach the server". The form's own submit, intercepted
+               by htmx, is Enter and the button in one. #}
+            {% call title_search.box('#searchResults', '/calendar/search', '/calendar/search',
+                                     'searchInput', 'Title…', 'Search the services',
+                                     include='#searchEndpoint',
+                                     button_class='btn-primary small') %}
                 {# WHICH CALENDAR IS BEING SEARCHED, carried as a value rather
                    than read back out of the address bar: it is the same fact the
                    toolbar's picker renders from, so the two cannot disagree. #}
@@ -354,8 +312,7 @@
                    names, so typing stays a local read by construction rather
                    than by remembering to override an inherited value. #}
                 <input type="hidden" name="live" value="1">
-                <button type="submit" class="btn-primary small">Search the services</button>
-            </form>
+            {% endcall %}
             <p class="hint">Results from {{ endpoint.label }} appear as you type and cost nothing —
                 they come from what your calendar already holds. Two letters is the shortest
                 search. Searching the services also finds titles your calendar hasn't loaded yet.</p>

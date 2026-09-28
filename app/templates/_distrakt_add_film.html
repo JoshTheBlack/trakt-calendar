@@ -1,3 +1,4 @@
+{% import '_title_search.html' as title_search with context %}
 {# THE ADD-A-FILM MODAL, drawn by the server and redrawn closed and empty with
    every month answer, for the reason _distrakt_add_show.html gives.
 
@@ -31,23 +32,16 @@
                 <input type="date" id="addMovieDate" name="watched_on"
                        value="{{ default_day }}" max="{{ max_day }}">
             </div>
-            <form class="field distrakt-search-submit" hx-boost="false"
-                  hx-get="/distrakt/fragments/search-movie{{ month_query }}"
-                  hx-target="#addMovieResults" hx-indicator="#addMovieBusy"
-                  hx-sync="#addMovieResults:queue last">
-                <label for="addMovieSearch">{{ search_label }}</label>
-                {#- Typing lists the films this app already stores; Enter asks
-                    the services — the show modal says why there are two, why
-                    typing is not debounced and why both queue rather than
-                    replace. -#}
-                <input type="text" id="addMovieSearch" name="q" placeholder="Type a film title…"
-                       autocomplete="off" spellcheck="false" required autofocus
-                       hx-get="/distrakt/fragments/search-movie-stored{{ month_query }}"
-                       hx-trigger="input changed"
-                       hx-sync="#addMovieResults:queue last">
-                <button type="submit" class="btn-ghost small">Search</button>
-                <span id="addMovieBusy" class="htmx-indicator distrakt-empty">Searching…</span>
-            </form>
+            {#- Typing lists the films this app already stores; Enter asks the
+                services — the shared box, for the reasons _title_search.html
+                gives. -#}
+            {{ title_search.box('#addMovieResults',
+                                '/distrakt/fragments/search-movie-stored' ~ month_query,
+                                '/distrakt/fragments/search-movie' ~ month_query,
+                                'addMovieSearch', 'Type a film title…', 'Search',
+                                form_class='field distrakt-search-submit',
+                                label=search_label, required=true,
+                                busy_id='addMovieBusy') }}
             <div id="addMovieResults" class="distrakt-search-results"></div>
         </div>
         <div class="modal-foot">

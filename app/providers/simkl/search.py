@@ -43,6 +43,7 @@ import logging
 from ...config import Settings
 from ..base import Media, SearchHit, Source, resolve_key
 from . import _ids, _naming, transport
+from . import calendar as simkl_calendar
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,10 @@ def _hit(entry: dict, media: Media) -> SearchHit:
         network="",
         runtime=None,
         overview="",
+        # The entry's poster PATH made an address by the same function the
+        # calendar's entries use, so a search row and a card for one title
+        # point at one picture.
+        poster=simkl_calendar.poster_url(entry.get("poster")) or "",
     )
 
 

@@ -184,6 +184,7 @@ class _TraktSearchPort:
                 network=entry["network"],
                 runtime=entry["runtime"],
                 overview=entry["overview"],
+                poster=entry["poster"],
             )
             for entry in raw
         ]

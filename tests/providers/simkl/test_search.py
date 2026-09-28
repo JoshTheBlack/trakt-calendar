@@ -103,6 +103,18 @@ class SearchTitlesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hit.title, "Severance")
         self.assertEqual(hit.year, 2022)
 
+    async def test_the_poster_path_becomes_simkls_own_address(self):
+        """Every entry measured live carried a poster path; the address is built
+        by the calendar's own function, so a row and a card share one picture."""
+        spy = _cached_get({"search/tv": [dict(SEVERANCE, poster="12/12301659c2620e9486")],
+                           "search/anime": [BARE_ANIME]})
+        with _patched(spy):
+            hits = await search.search_titles(SETTINGS, Media.SHOW, "x")
+        posters = {h.title: h.poster for h in hits}
+        self.assertEqual(posters["Severance"],
+                         "https://simkl.in/posters/12/12301659c2620e9486_m.jpg")
+        self.assertEqual(posters["Shingeki no Kyojin Season 3"], "")
+
     async def test_simkl_id_is_remapped_onto_the_apps_own_id_spelling(self):
         """Simkl writes its own id as `simkl_id` in a search hit's ids block;
         `collect_ids` only knows `simkl`. Un-mapped, a Simkl-only hit would

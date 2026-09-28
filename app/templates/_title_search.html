@@ -1,0 +1,124 @@
+{% import '_source_logo.html' as src with context %}
+{# ONE TITLE SEARCH, DRAWN ONE WAY, for every surface that has a box to find a
+   title in — the calendar's "Find a title" and the tracker's add-a-show and
+   add-a-film. What a surface decides is WHERE its two requests go and what a
+   result DOES when pressed; everything else is here, so the surfaces cannot
+   drift into three ways of looking or, worse, three ways of ordering requests.
+
+   TWO REQUESTS, TWO COSTS. TYPING asks the surface's typed route, which reads
+   only what this instance already stores — an index read, no service asked —
+   so it runs on every keystroke. SUBMITTING (Enter, or the button) is the
+   form's own submit to the surface's live route, which asks the services and
+   so waits for a deliberate act. `input changed`, not `keyup`: a paste, a cut
+   from the context menu and a browser's own clear button change the value and
+   press nothing (measured in Firefox, where a keyup box searched a pasted
+   title for nothing), and `changed` ignores the keys that only move the caret.
+
+   HOW THE REQUESTS ARE ORDERED IS THE RULE THIS FILE EXISTS TO HOLD, and it is
+   measured against the vendored htmx rather than read off its documentation:
+     - NO DEBOUNCE on the box. A delayed trigger keeps a timer of its own that
+       nothing else cancels, so Enter pressed within the delay of the last
+       keystroke went out FIRST and the typed read AFTER it, and the typed list
+       landed over the services' answer — 5 of 5 in the tracker's box, in
+       Chromium and Firefox, with a 180ms delay.
+     - `queue last` ON THE RESULTS TARGET — `sync` below — from the box, the
+       form AND every control inside the results that asks for them again (a
+       result row, a widening button). `replace` loses track of the request
+       that did the replacing once the aborted one settles, so the next request
+       aborts nothing and stale answers arrive late; and it aborted the
+       services' request outright on the calendar, whose box debounced and
+       replaced: 64 of 64 type-then-Enter trials in each engine lost Enter's
+       answer and logged an htmx abort to the console. `queue last` aborts
+       nothing: one request runs, only the newest waits, and each arrival
+       replaces the one waiting — so Enter queues behind at most one typed read
+       and is always the last to land. After the change: 0 of 64 per engine.
+   A row joining the queue matters for the same reason: a typed answer still
+   waiting when a row is pressed would otherwise land after the row's own
+   answer.
+
+   NO SCRIPT, and nothing here needs one: the form is Enter and the button, and
+   `required` (where a surface asks for it) is the browser's own empty check. #}
+
+{# The one spelling of "queue on this target", so a control that asks for the
+   results again cannot pick a different policy from the box that drew them:
+   `queue` is the value (for an attribute dict handed to `row`), `sync` the
+   attribute written out. #}
+{% macro queue(results) %}{{ results }}:queue last{% endmacro %}
+{% macro sync(results) %}hx-sync="{{ queue(results) }}"{% endmacro %}
+
+{#- THE BOX. `results` is the target's selector; `typed_url` and `live_url` the
+    two routes (they may be one route told apart by a field — the calendar's
+    `live` is a hidden field of the FORM, so the box's own request never carries
+    it). `include` names fields outside the form the typed read also needs, and
+    anything the surface puts between `{% call %}` and `{% endcall %}` lands
+    inside the form, submitted with Enter and never with a keystroke.
+
+    `hx-boost="false"` BECAUSE THE FORM IS NOT A NAVIGATION: a boosted form under
+    a boosted body becomes a page load that replaces the page with a fragment
+    (tests/kernel/test_page_head.py holds the rule). `hx-json-enc="false"` ON
+    THE FORM AND THE BOX BECAUSE BOTH ARE GETS and the json-enc extension reads
+    that attribute from ANY ancestor — a GET under a json-enc element throws in
+    the browser, which no server test can see; each says so itself, the shape
+    tests/kernel/test_settings_panel.py asks of every read inside a form that
+    names the encoder. -#}
+{% macro box(results, typed_url, live_url, input_id, placeholder, button,
+             form_class='search-bar', label='', required=false, include='',
+             busy_id='', button_class='btn-ghost small') -%}
+<form class="{{ form_class }}" hx-boost="false" hx-json-enc="false"
+      hx-get="{{ live_url }}" hx-target="{{ results }}"
+      {%- if busy_id %} hx-indicator="#{{ busy_id }}"{% endif %}
+      {{ sync(results) }}>
+    {%- if label %}
+    <label for="{{ input_id }}">{{ label }}</label>
+    {%- endif %}
+    <input type="text" id="{{ input_id }}" name="q" placeholder="{{ placeholder }}"
+           autocomplete="off" spellcheck="false" autofocus{% if required %} required{% endif %}
+           hx-get="{{ typed_url }}" hx-json-enc="false" hx-trigger="input changed" hx-target="{{ results }}"
+           {%- if include %} hx-include="{{ include }}"{% endif %}
+           {{ sync(results) }}>
+    {%- if caller %}{{ caller() }}{% endif %}
+    <button type="submit" class="{{ button_class }}">{{ button }}</button>
+    {%- if busy_id %}
+    <span id="{{ busy_id }}" class="htmx-indicator search-busy">Searching…</span>
+    {%- endif %}
+</form>
+{%- endmacro %}
+
+{#- ONE RESULT ROW. What it DOES is the surface's — the ACTION SLOT is the
+    element (`tag`) and its attributes (`action`, a dict rendered by Jinja's own
+    `xmlattr`, which escapes every value, so an hx-vals holding JSON needs no
+    hand quoting): an `<a href>` that jumps on the calendar, a `<button>` that
+    asks for a season picker or posts a film add in the tracker. A `<button>`
+    because a row that IS a button gets Enter and Space for free.
+
+    What it SHOWS is the same everywhere: the poster when there is one — a
+    stored title's is the one its calendar card draws, a service's comes in its
+    search answer, and either way it is already proxied, since the policy
+    admits no other image host — then the title and year, a line the surface
+    fills between `{% call %}` and `{% endcall %}`, a mark per service that
+    found it (`sources`; attribution as much as disambiguation, so drawn even
+    when one service was asked), `note` for a sentence the row has to carry
+    (why it cannot be added), and `go` for the word that says what pressing it
+    does. -#}
+{% macro row(tag, action, title, year=none, poster='', sources=(), go='', note='',
+             extra_class='') -%}
+<{{ tag }} class="search-row{{ ' ' ~ extra_class if extra_class }}"{{ action | xmlattr }}>
+    <img class="search-poster" src="{{ poster or '/static/images/nopostertv.png' }}"
+         alt="" loading="lazy" width="46" height="69">
+    <span class="search-main">
+        <span class="search-title">{{ title }}{% if year %} <span class="search-year">{{ year }}</span>{% endif %}</span>
+        <span class="search-meta">
+            {%- if sources %}<span class="search-marks">
+                {%- for source in sources %}{{ src.mark(source, 'search-mark') }}{% endfor -%}
+            </span>{% endif %}
+            {%- if caller %}{{ caller() }}{% endif -%}
+        </span>
+        {%- if note %}
+        <span class="search-note">{{ note }}</span>
+        {%- endif %}
+    </span>
+    {%- if go %}
+    <span class="search-go">{{ go }}</span>
+    {%- endif %}
+</{{ tag }}>
+{%- endmacro %}

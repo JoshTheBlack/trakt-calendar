@@ -1481,6 +1481,32 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 .search-meta { color: var(--text-dim); font-size: 0.8rem; }
 .search-go { color: var(--text-faint); font-size: 0.8rem; white-space: nowrap; }
 .search-row:hover .search-go { color: var(--text); }
+/* THE SAME ROW IS A <button> WHERE PRESSING IT ASKS FOR SOMETHING (the
+   tracker's season picker, a film add) and an <a> where it goes somewhere (a
+   calendar jump) — _title_search.html's `row`. A button brings a background, a
+   border colour, a font and centred text a row does not want, so they are
+   undone here once for every surface. */
+button.search-row { width: 100%; background: none; font: inherit; text-align: left; cursor: pointer; }
+/* A row nothing can be filed under: still readable, visibly not a button, and
+   carrying its own reason rather than a tooltip nobody hovers for. `disabled`
+   is what refuses it — the element already knows how to be unpressable. */
+.search-row.is-unkeyable { cursor: default; opacity: 0.62; }
+.search-row.is-unkeyable:hover { background: none; border-color: transparent; }
+.search-note { color: var(--gold-soft); font-size: 0.78rem; }
+/* Which service(s) returned a row, before the rest of its line. */
+.search-marks { display: inline-flex; align-items: center; gap: 3px; margin-right: 6px;
+                vertical-align: middle; }
+.search-marks .search-mark { width: 14px; height: 14px; }
+/* Which season a row IS, where its source said so — a `.chip` like the ones the
+   details modal draws a title's facts with, so only what DIFFERS is stated:
+   smaller, and never wrapped. */
+.search-meta .search-season { padding: 1px 8px; font-size: 0.74rem; white-space: nowrap;
+                              margin-right: 6px; }
+/* The busy note beside a box's button: out of the flow entirely when idle
+   rather than merely transparent, so the field does not carry a gap the width
+   of a word it is not saying; htmx's own indicator class does the showing. */
+.search-busy { color: var(--text-faint); font-size: 0.82rem; display: none; }
+.search-busy.htmx-request { display: inline; }
 /* THE CARD A JUMP LANDED ON, said once and then let go: it means "this is the
    one you asked for", which stops being true as soon as the reader looks
    around. */
@@ -2499,49 +2525,12 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     font-family: 'Consolas', 'Menlo', monospace; font-size: 0.85rem; line-height: 1.5;
 }
 
-.distrakt-search-results { display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow-y: auto; }
-/* A ROW IS A <button> NOW, because a row IS a button — which is what gives it
-   Enter and Space without a listener translating them into a click. The
-   element's own appearance has to be undone for that: a button brings a
-   background, a border, a font and a centred, non-wrapping text flow that a row
-   does not want. */
-.distrakt-search-row {
-    display: flex; align-items: center; gap: 10px; cursor: pointer;
-    padding: 9px 12px; border: 1px solid var(--card-border); border-radius: 8px;
-    width: 100%; background: none; color: inherit; font: inherit; text-align: left;
-}
-.distrakt-search-row:hover { border-color: var(--gold); }
-.distrakt-search-row .distrakt-title { flex: 1; font-weight: 600; }
-.distrakt-search-row .distrakt-year, .distrakt-search-row .distrakt-network { color: var(--text-faint); font-size: 0.82rem; }
-/* Which season a row IS, where its source said so — a `.chip` like the ones the
-   details modal draws a title's facts with, since that is what this is, so only
-   what DIFFERS is stated here: smaller, and never wrapped or shrunk. It is not
-   given a column of its own because most rows have no season to put in one, and
-   an empty column draws a gap the width of a word nobody is saying. */
-.distrakt-search-row .distrakt-search-season {
-    flex: 0 0 auto; padding: 1px 8px; font-size: 0.74rem; white-space: nowrap;
-}
-/* A row nothing can be filed under: still readable, visibly not a button, and
-   carrying its own reason rather than a tooltip nobody hovers for. */
-.distrakt-search-row.is-unkeyable { cursor: default; opacity: 0.62; flex-wrap: wrap; }
-.distrakt-search-row.is-unkeyable:hover { border-color: var(--card-border); }
-/* `disabled` IS WHAT REFUSES IT NOW, rather than `aria-disabled` plus a click
-   handler that checked for the attribute: the element the row became already
-   knows how to be unpressable. */
-.distrakt-search-row:disabled { cursor: default; }
-.distrakt-search-row .distrakt-unkeyable { flex: 1 0 100%; color: var(--gold-soft); font-size: 0.78rem; }
-/* Which service(s) returned a row, drawn only where two catalogues were asked. */
-.distrakt-search-marks { display: inline-flex; align-items: center; gap: 3px; }
-.distrakt-search-marks .search-mark { width: 14px; height: 14px; }
-/* The search field and its submit sit on one line; the busy note follows them
-   and reserves nothing when idle, htmx's own indicator class doing the hiding. */
+/* Taller than it was, because every row now carries its poster (the shared
+   `.search-row`): at 240px a list showed three titles. */
+.distrakt-search-results { display: flex; flex-direction: column; gap: 2px; max-height: 360px; overflow-y: auto; }
+/* The search field and its submit sit on one line, the busy note after them. */
 .distrakt-search-submit { display: flex; align-items: center; gap: 8px; }
 .distrakt-search-submit input { flex: 1; }
-.distrakt-search-submit .distrakt-empty { padding: 0; font-size: 0.82rem; }
-/* Out of the flow entirely when idle rather than merely transparent, so the
-   field does not carry a gap the width of a word it is not saying. */
-.distrakt-search-submit .htmx-indicator { display: none; }
-.distrakt-search-submit .htmx-indicator.htmx-request { display: inline; }
 /* Narrower than the calendar's page-wide banner: this one sits inside a modal. */
 .distrakt-search-warn { margin: 0 0 8px 0; padding: 8px 12px; font-size: 0.82rem; }
 

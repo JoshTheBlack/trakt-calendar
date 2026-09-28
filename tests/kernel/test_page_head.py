@@ -652,11 +652,18 @@ class ScriptListTests(unittest.TestCase):
         somebody has to remember.
         """
         page = markup("index.html")
-        box = re.search(r'<input[^>]*id="searchInput"[^>]*>', page, re.S)
-        self.assertIsNotNone(box, "the calendar search box is gone")
+        # THE BOX IS THE SHARED ONE (_title_search.html's `box` macro), so its
+        # <input> is read there and the calendar's call is what names it.
+        self.assertRegex(page, r"title_search\.box\([^)]*'searchInput'",
+                         "the calendar search box is gone")
+        box = re.search(r'<input type="text" id="\{\{ input_id \}\}"[^>]*>',
+                        markup("_title_search.html"), re.S)
+        self.assertIsNotNone(box, "the shared search box has no text input")
         box = box.group(0)
         self.assertNotIn("live", box,
                          "the search box itself names the live flag")
+        self.assertNotIn("hx-vals", box,
+                         "the search box itself carries values of its own")
         self.assertIn('name="live"', page,
                       "nothing carries the live flag to the services")
         # The flag must not sit on any ANCESTOR as an hx-vals either, which is

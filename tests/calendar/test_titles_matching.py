@@ -12,6 +12,7 @@ for one, which is exactly the assertion a keystroke path needs.
 """
 from __future__ import annotations
 
+import dataclasses
 import unittest
 
 from app import db
@@ -76,6 +77,16 @@ class OneHitPerTitleTests(StoredTitleTestCase):
                     source_id="3003"))
         hit, = await entries.titles_matching("severance", Media.SHOW, 20)
         self.assertEqual(hit.network, "Apple TV+")
+
+    async def test_the_poster_is_the_stored_one_and_a_missing_one_is_filled(self):
+        """The picture the calendar's card draws, from the same row, for free."""
+        await self.store(
+            _record("Severance", tmdb=95396),
+            dataclasses.replace(_record("Severance", source=Source.SIMKL, tmdb=95396,
+                                        source_id="3003"),
+                                poster="https://simkl.in/posters/12/x_m.jpg"))
+        hit, = await entries.titles_matching("severance", Media.SHOW, 20)
+        self.assertEqual(hit.poster, "https://simkl.in/posters/12/x_m.jpg")
 
     async def test_a_title_stored_on_two_calendars_is_still_one_hit(self):
         await self.store(_record("The Rig", tmdb=112581), endpoint="shows/premieres")

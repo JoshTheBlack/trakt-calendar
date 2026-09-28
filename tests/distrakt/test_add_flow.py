@@ -40,8 +40,8 @@ from tests.support import AppTestCase, ORIGIN
 # pinned is that the route re-reads THE SAME REQUEST the page's search made, and
 # a test that derived the key the same way the code does could not tell a
 # changed key from a matching one.
-SEARCH_URL = "https://api.trakt.tv/search/show?query=severance&extended=full"
-MOVIE_SEARCH_URL = "https://api.trakt.tv/search/movie?query=heat&extended=full"
+SEARCH_URL = "https://api.trakt.tv/search/show?query=severance&extended=full%2Cimages"
+MOVIE_SEARCH_URL = "https://api.trakt.tv/search/movie?query=heat&extended=full%2Cimages"
 SEASONS_URL = "https://api.trakt.tv/shows/95396/seasons?extended=full"
 
 SHOW_HIT = {"show": {"title": "Severance", "year": 2022, "network": "Apple TV+",
@@ -300,7 +300,7 @@ class TheSeasonPickerNamesTheResultTooTests(AddFlowTestCase):
         self.assertIn(f"/distrakt/fragments/seasons?year={year}&amp;month={month}"
                       "&amp;q=severance&amp;i=0", html)
         # Nothing about the title travels: not its ids, not its network.
-        self.assertNotIn("95396", html.split("<span class=\"distrakt-title\">")[0])
+        self.assertNotIn("95396", html.split("<span class=\"search-title\">")[0])
 
 
 if __name__ == "__main__":  # pragma: no cover

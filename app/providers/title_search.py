@@ -93,6 +93,10 @@ class MergedSearchHit(NamedTuple):
     Carried rather than re-derived from `key`, because a stored title the
     identity waterfall could not key still has a stored identity — a per-source
     one — and re-deriving it would be a second statement of that rule.
+
+    `poster` FOLLOWS THE SAME LEADER-THEN-GAPS RULE as the fields above, and is
+    the service's own address — see `SearchHit.poster` for why it is proxied only
+    where it is drawn.
     """
     key: ItemKey | None
     season: int | None
@@ -105,6 +109,7 @@ class MergedSearchHit(NamedTuple):
     overview: str
     media: Media
     title_key: str | None = None
+    poster: str = ""
 
 
 class SearchMergeResult(NamedTuple):
@@ -155,13 +160,14 @@ class _Merging:
     overview: str
     ids: dict[str, Any]
     media: Media
+    poster: str = ""
     source_ids: dict[Source, str] = field(default_factory=dict)
 
     @classmethod
     def start(cls, hit: SearchHit, key: ItemKey | None) -> "_Merging":
         slot = cls(key=key, season=hit.season, title=hit.title, year=hit.year,
                    network=hit.network, runtime=hit.runtime, overview=hit.overview,
-                   ids=dict(hit.ids), media=hit.media)
+                   ids=dict(hit.ids), media=hit.media, poster=hit.poster)
         slot.source_ids[hit.source] = hit.source_id
         return slot
 
@@ -192,6 +198,8 @@ class _Merging:
             self.network = hit.network
         if _blank(self.overview):
             self.overview = hit.overview
+        if _blank(self.poster):
+            self.poster = hit.poster
         if self.year is None:
             self.year = hit.year
         if self.runtime is None:
@@ -202,7 +210,7 @@ class _Merging:
                                source_ids=dict(self.source_ids), ids=dict(self.ids),
                                title=self.title, year=self.year, network=self.network,
                                runtime=self.runtime, overview=self.overview, media=self.media,
-                               title_key=title_key)
+                               title_key=title_key, poster=self.poster)
 
 
 def fold_one_title(hits: Sequence[SearchHit], key: ItemKey | None, *,

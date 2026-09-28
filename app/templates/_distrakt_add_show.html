@@ -1,4 +1,5 @@
 {% import '_source_logo.html' as src with context %}
+{% import '_title_search.html' as title_search with context %}
 {# THE ADD-SHOW MODAL, DRAWN BY THE SERVER IN THE ONE STATE IT IS EVER IN:
    closed, empty, and worded for the month being looked at.
 
@@ -9,38 +10,15 @@
    left behind, tidied up. Redrawn on every answer it is simply never in a state
    anybody has to undo, and "what an empty add modal looks like" is written once.
 
-   THE SEARCH IS A FORM. `required` is the empty check the browser already knows
-   how to make, Enter is submit, and the button is submit — three lines of
-   script for what a <form> element is.
-
-   TWO TRIGGERS BECAUSE THERE ARE TWO COSTS, the split the calendar's own search
-   box makes. TYPING lists the titles this app already stores
-   (/distrakt/fragments/search-stored): an index read, no service asked, so it
-   can run as somebody types. SUBMITTING asks the services, which spends
-   somebody else's rate limit and so waits for a deliberate act — and a
-   catalogue fan-out at every prefix would buy nothing for somebody who opened
-   this already knowing what they came to add. `input changed`, not `keyup`,
-   because a paste or the browser's own clear button changes the value and
-   presses nothing; index.html's search box records the Firefox measurement.
-
-   WHAT MAKES ENTER'S ANSWER THE ONE LEFT ON SCREEN, two measured choices:
-     - NO DEBOUNCE. A delayed trigger keeps its own timer that nothing else can
-       cancel (read in the vendored htmx), so Enter pressed within the delay of
-       the last keystroke sent the services' request FIRST and the typed one
-       after it, and the typed answer landed over the services' — taking the
-       season picker down with its out-of-band reset. Measured with a 180ms
-       delay, in Chromium and Firefox: 5 of 5 type-then-Enter left the stored
-       list on screen. With no delay the last keystroke's request always starts
-       before Enter's. Each keystroke is an index read of a few milliseconds
-       (calendar/entries.py's titles_matching), which is the cost of that.
-     - `queue last`, NOT `replace`, on the TARGET, on both. The vendored htmx's
-       `replace` loses track of the request that replaced another — the aborted
-       one's own completion clears it — so the NEXT request aborts nothing, and
-       typing had every other keystroke's answer arriving late: measured, the
-       answer for "se" finished after Enter's and overwrote it. `queue last`
-       aborts nothing at all: one request runs, only the newest waits, and each
-       arrival replaces the one waiting — so Enter queues behind at most one
-       typed read and is always the last to land.
+   THE SEARCH IS THE SHARED BOX (_title_search.html, which holds why typing and
+   Enter are two requests and how they are ordered). TYPING lists the titles
+   this app already stores (/distrakt/fragments/search-stored), an index read of
+   a few milliseconds (calendar/entries.py's titles_matching); SUBMITTING asks
+   the services — and a catalogue fan-out at every prefix would buy nothing for
+   somebody who opened this already knowing what they came to add. `required`
+   is the empty check the browser already knows how to make. A typed answer
+   landing over the services' would also take the season picker down with its
+   out-of-band reset, which is this modal's own reason the order matters.
 
    NOTHING INSIDE THE FORM POSTS. Read in the vendored htmx: a request's verb is
    found by walking `get, post, put, patch, delete` in that order, with each one
@@ -72,19 +50,13 @@
                 so filling in a past month quietly ran the current month's
                 re-watch evaluation and put the row on the viewer's list instead
                 of recording it as finished on the month they were looking at. -#}
-            <form class="field distrakt-search-submit" hx-boost="false"
-                  hx-get="/distrakt/fragments/search{{ month_query }}"
-                  hx-target="#addSearchResults" hx-indicator="#addSearchBusy"
-                  hx-sync="#addSearchResults:queue last">
-                <label for="addSearchInput">{{ search_label }}</label>
-                <input type="text" id="addSearchInput" name="q" placeholder="Type a show title…"
-                       autocomplete="off" spellcheck="false" required autofocus
-                       hx-get="/distrakt/fragments/search-stored{{ month_query }}"
-                       hx-trigger="input changed"
-                       hx-sync="#addSearchResults:queue last">
-                <button type="submit" class="btn-ghost small">Search</button>
-                <span id="addSearchBusy" class="htmx-indicator distrakt-empty">Searching…</span>
-            </form>
+            {{ title_search.box('#addSearchResults',
+                                '/distrakt/fragments/search-stored' ~ month_query,
+                                '/distrakt/fragments/search' ~ month_query,
+                                'addSearchInput', 'Type a show title…', 'Search',
+                                form_class='field distrakt-search-submit',
+                                label=search_label, required=true,
+                                busy_id='addSearchBusy') }}
             {#- The rows arrive from the server and each one carries its own
                 request, so nothing here has to know how many there are or where
                 in a list each one sits. -#}

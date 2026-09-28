@@ -601,7 +601,13 @@ def ids_map(media: dict) -> dict:
 async def search_titles(settings: Settings, media: str, query: str, *,
                         cache_only: bool = False) -> list[dict]:
     """/search/{show|movie}?query=... -> [{media, ids, title, year, network,
-    runtime, overview}], newest-match-first as Trakt orders it.
+    runtime, overview, poster}], newest-match-first as Trakt orders it.
+
+    `images` IS ASKED FOR, so a result row can show the title's poster from
+    this one answer rather than a lookup per row — measured live 2026-09-27,
+    `extended=full,images` on a search carries the same `images` block the
+    calendar's does. `poster` is Trakt's own address (see
+    calendar.poster), "" when there is none.
 
     ONE implementation for both media types. The two searches differ only in the
     path segment and in which key the result object hangs under, so a second
@@ -618,8 +624,12 @@ async def search_titles(settings: Settings, media: str, query: str, *,
     q = (query or "").strip()
     if not q:
         return []
+    # Deferred for the reason `fetch_details`'s own import of it gives.
+    from . import calendar as trakt_calendar
+
     results = await transport.cached_get(
-        transport.shared_client(), settings, f"search/{media}", {"query": q, "extended": "full"},
+        transport.shared_client(), settings, f"search/{media}",
+        {"query": q, "extended": "full,images"},
         raise_errors=True, cache_only=cache_only,
     )
 
@@ -642,6 +652,7 @@ async def search_titles(settings: Settings, media: str, query: str, *,
             "network": item.get("network") or "",
             "runtime": item.get("runtime"),
             "overview": (item.get("overview") or "").strip(),
+            "poster": trakt_calendar.poster(item) or "",
         })
     logger.info("search_titles(%s, %r) -> %d raw / %d usable result(s)", media, q,
                 len(results) if isinstance(results, list) else 0, len(out))

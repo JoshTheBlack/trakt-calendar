@@ -1360,6 +1360,15 @@ class SearchHit(NamedTuple):
     use — the same reasoning trakt/detail.py's `ids_map` states for its own
     per-title lookups, and it matters more here: a caller merging two sources'
     hits for one title dedupes and unions on exactly these ids.
+
+    `poster` IS THE SERVICE'S OWN ADDRESS, NOT THE PROXY'S, and "" when the
+    answer carried none — the same rule `Record.poster` follows, so whatever
+    draws a hit proxies it through `proxied_image` at that one moment. Both
+    services put a picture in the search answer itself, measured live
+    2026-09-27: Simkl's every entry carries a poster path (15 of 15 across its
+    tv, anime and film searches), and Trakt's carries `images` once the search
+    asks for them — the same `extended=full,images` its calendar already asks.
+    So a row can show one without a request per row.
     """
     source: Source
     source_id: str
@@ -1371,6 +1380,7 @@ class SearchHit(NamedTuple):
     network: str
     runtime: int | None
     overview: str
+    poster: str = ""
 
 
 @runtime_checkable  # see the note on SyncPort above

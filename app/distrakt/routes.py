@@ -45,7 +45,7 @@ from ..perftrace import span
 # a chosen result back out of it. What a result DOES once chosen is this file's.
 from ..providers import detail_source, title_search
 from ..providers.base import (ItemKey, Media, Source, SourceUnavailable,
-                              parse_item_key, parse_media, resolve_key)
+                              parse_item_key, parse_media, proxied_image, resolve_key)
 from ..providers.trakt import TraktError
 # Reached through the MODULE rather than by importing the functions off it. A name
 # bound at import time is a second reference to the same function that patching
@@ -2177,6 +2177,11 @@ def _search_hit_payload(hit: title_search.MergedSearchHit) -> dict:
         "network": hit.network,
         "runtime": hit.runtime,
         "overview": hit.overview,
+        # Through the image proxy HERE, where a hit becomes something a browser
+        # draws: the Content-Security-Policy admits no other image host, and
+        # the hit carries the service's own address for the reason
+        # SearchHit.poster gives.
+        "poster": proxied_image(hit.poster) or "",
     }
 
 
