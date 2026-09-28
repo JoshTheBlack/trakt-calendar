@@ -1,17 +1,33 @@
-"""Poster tiles on disk. Fetch through the shared image proxy, cache, sweep — no
-DB schema knowledge beyond calling app/media/artwork.py for the URL registry.
+"""Which picture a title has, and — for the two things that composite real bytes
+— the tile of it on disk. No DB schema knowledge beyond calling
+app/media/artwork.py for the URL registry.
+
+TWO HALVES. `find_address` / `ensure_addresses` answer with an ORIGIN ADDRESS and
+write nothing to disk: a page draws that through the image proxy, which is how
+the rankings board, its details panel and the tracker's rows show pictures.
+`ensure_poster` / `ensure_posters` / `cached_poster` are the TILES, 500x750
+files the share card and a board's exported image composite — written when one
+of those is being made, and only for what it draws. Both halves resolve through
+the same registry in the same order, so an export shows the picture its board
+did.
 
 Mirrors app/media/logos.py's shape: disk cache, negative markers, best-effort
-degradation. Never called on a render path — warming is explicit (ensure_poster
-/ ensure_posters), and a render resolves whatever is already on disk.
+degradation. Never called on a render path — warming is explicit, and a render
+resolves whatever is already known.
 
 STORAGE, KEYED ON (media, tmdb, SOURCE). TMDB ids are namespaced per media type
 — movie 550 and TV 550 are different titles — and the SOURCE is here because two
 viewers with opposite artwork precedence want different pictures for the same
 title. A key that could not tell them apart would be a per-viewer value reaching
 shared storage, which is exactly what the calendar's own storage rules forbid.
-    DATA_DIR/posters/<media>/<tmdb>.<source>.jpg    500x750, from the proxy
-    DATA_DIR/posters/<media>/<tmdb>.<source>.none   negative marker
+    DATA_DIR/posters/<media>/<tmdb>.<source>.jpg       500x750, from the proxy
+    DATA_DIR/posters/<media>/<tmdb>.s<N>.<source>.jpg  season N's own
+    DATA_DIR/posters/<media>/<tmdb>.<source>.none      negative marker
+
+A SEASON IS TRIED FOR ITS OWN ARTWORK FIRST — the season registry, which a
+season list somebody already read filled (only Trakt publishes season artwork,
+measured) — and falls back to its show's through the chain below. A season has
+no lookup of its own.
 
 THE PROXY DOES THE RESIZING, and that is why there is no Pillow pipeline here
 any more. wsrv.nl is asked for the exact 500x750 canvas the compositor wants
@@ -26,13 +42,15 @@ RESOLUTION CHAIN, in order, each one falling through to the next on failure:
     2. every source in that order given up on (no calls)
     3. the show_posters registry, tried in the CALLER'S order — which is what
        makes a link preview draw the same picture as the page it previews
-    4. TMDB /tv or /movie -> poster_path -> w500, if TMDB is in the order
-    5. a fresh Trakt id-lookup by tmdb, recorded into the registry for next time
-    6. negative marker against the order's first source
-Stages 4 and 5 used to come FIRST, which spent a request to learn something a
-calendar fill had already written down and decided the picture would be TMDB's
-whatever the page was showing. They are the fallback now: they exist for titles
-nobody's calendar has ever named, which is the ranker's imported ones.
+    4. THE TITLE'S ONE LOOKUP (`_look_up_address`), unless one already found
+       nothing (artwork.record_miss): TMDB /tv or /movie -> poster_path -> w500
+       if TMDB is configured and in the order, else a Trakt id-lookup by tmdb;
+       an answer is recorded into the registry, and so is a miss
+    5. negative marker against the order's first source
+Stage 4 used to come FIRST, which spent a request to learn something a calendar
+fill had already written down and decided the picture would be TMDB's whatever
+the page was showing. It is the fallback now: it exists for titles nobody's
+calendar has ever named, which is the ranker's imported ones.
 A registry URL that fails is not deleted — its fail_count increments and
 resolution falls through to the next source, because a dead URL should trigger
 rediscovery, not a permanent hole.
@@ -107,7 +125,12 @@ def _dir(media: str) -> Path:
     return POSTER_DIR / media
 
 
-def _tile_path(media: str, tmdb: int, source: str) -> Path:
+def _tile_path(media: str, tmdb: int, source: str, season: int | None = None) -> Path:
+    """A season's own tile carries the season in its name ({tmdb}.s{N}.{source}),
+    beside its show's ({tmdb}.{source}), so the two can never overwrite each
+    other and a season with no artwork of its own is simply absent."""
+    if season is not None:
+        return _dir(media) / f"{tmdb}.s{season}.{source}.jpg"
     return _dir(media) / f"{tmdb}.{source}.jpg"
 
 
@@ -115,23 +138,40 @@ def _none_path(media: str, tmdb: int, source: str) -> Path:
     return _dir(media) / f"{tmdb}.{source}.none"
 
 
-def cached_poster(media: str, tmdb: object, order: tuple[str, ...] = DEFAULT_ORDER
-                  ) -> Path | None:
-    """The on-disk tile for (media, tmdb) under the first source in `order` that
-    has one, else None.
+def order_for(preferred) -> tuple[str, ...]:
+    """Whose artwork a viewer's pictures come from, most preferred first:
+    `preferred` (their metadata preference over the app's sources —
+    sources.prefs' source_order) with TMDB behind it.
 
-    SYNCHRONOUS AND STAT-ONLY, WHICH IS A CONSTRAINT AND NOT AN ACCIDENT. The
-    ranker's board builds every row through this while assembling a page, so it
-    may not touch the database — which is also why the source is resolved by
-    trying the order on disk rather than by asking the registry who has a URL.
+    TMDB IS APPENDED RATHER THAN ORDERED, because it is not a calendar source
+    and an account cannot have an opinion about it in those preferences. It is
+    the backstop for a title no calendar named. One spelling of this, for the
+    share card, the rankings board and the tracker, so the three cannot come to
+    prefer different pictures of one title.
+    """
+    ordered = tuple(str(source) for source in preferred)
+    return ordered if "tmdb" in ordered else ordered + ("tmdb",)
+
+
+def cached_poster(media: str, tmdb: object, order: tuple[str, ...] = DEFAULT_ORDER,
+                  season: int | None = None) -> Path | None:
+    """The on-disk tile for (media, tmdb) under the first source in `order` that
+    has one, else None — for a `season`, its own tile first and its show's after.
+
+    SYNCHRONOUS AND STAT-ONLY, WHICH IS A CONSTRAINT AND NOT AN ACCIDENT. An
+    export resolves every tile of its grid through this while building the
+    render, so it may not touch the database — which is also why the source is
+    resolved by trying the order on disk rather than by asking the registry who
+    has a URL.
     """
     tid = _valid(media, tmdb)
     if tid is None:
         return None
-    for source in order:
-        path = _tile_path(media, tid, source)
-        if path.exists():
-            return path
+    for which in ((season, None) if season is not None else (None,)):
+        for source in order:
+            path = _tile_path(media, tid, source, which)
+            if path.exists():
+                return path
     return None
 
 
@@ -207,6 +247,10 @@ async def _fresh_provider_lookup(settings, media: str, tmdb: int) -> str | None:
     results = await trakt_transport.cached_get(
         trakt_transport.shared_client(), settings, f"search/tmdb/{tmdb}",
         {"type": media_type, "extended": "full,images"},
+        # A failure RAISES rather than reading as an empty answer: "Trakt knows
+        # no picture for this" is remembered for good (artwork.record_miss), and
+        # an unreachable Trakt must not be taken for it.
+        raise_errors=True,
     )
     for entry in results if isinstance(results, list) else []:
         obj = entry.get(media_type) or {}
@@ -217,11 +261,95 @@ async def _fresh_provider_lookup(settings, media: str, tmdb: int) -> str | None:
     return None
 
 
+async def _look_up_address(settings, media: str, tmdb: int,
+                           order: tuple[str, ...]) -> tuple[str, str] | None:
+    """A TITLE'S ONE LOOKUP: (source, address) of a poster nothing had recorded,
+    recorded now for every later reader — or None, and then the title is
+    recorded as a miss (artwork.record_miss) so nothing asks again.
+
+    Only the services that answer by the tmdb id already in hand: TMDB's own
+    record where TMDB is configured and in `order`, then Trakt's search by tmdb
+    id. The caller has already checked the registry and the miss.
+    """
+    if "tmdb" in order and getattr(settings, "tmdb_configured", False):
+        path = f"/tv/{tmdb}" if media == "show" else f"/movie/{tmdb}"
+        data = await tmdb_client.get_json(settings, path, "posters.tmdb_detail")
+        poster_path = (data or {}).get("poster_path")
+        if poster_path:
+            fresh = f"{tmdb_client.IMG}/w500{poster_path}"
+            await artwork.record_poster_url(media, tmdb, "tmdb", fresh)
+            return "tmdb", fresh
+    try:
+        fresh = await _fresh_provider_lookup(settings, media, tmdb)
+    except Exception as exc:
+        # A lookup that FAILED is not a lookup that found nothing: no miss is
+        # recorded, so the next reader may try again.
+        logger.warning("poster[%s/%s]: lookup failed: %s", media, tmdb, exc)
+        return None
+    if fresh:
+        return "trakt", fresh
+    await artwork.record_miss(media, tmdb)
+    return None
+
+
+async def find_address(settings, media: str, tmdb: object, order: tuple[str, ...],
+                       season: int | None = None) -> str:
+    """THE ORIGIN ADDRESS of the picture a viewer should see for one title or
+    season, or "" — no bytes, nothing on disk. What a page draws through the
+    image proxy (providers.base.proxied_image).
+
+    What is recorded first (artwork.pick over the season's registry and the
+    show's, in `order`); a title recorded as having none is "" with no call; and
+    only a title nobody has recorded anything for costs its one lookup
+    (`_look_up_address`), whose answer or miss is recorded for every later load.
+    """
+    tid = _valid(media, tmdb)
+    if tid is None:
+        return ""
+    known = await artwork.known([(media, tid, season)])
+    address = known.address(media, tid, season, order)
+    if address or (media, tid) in known.missed:
+        return address
+    found = await _look_up_address(settings, media, tid, order)
+    return found[1] if found else ""
+
+
+async def ensure_addresses(settings, refs, order: tuple[str, ...]) -> int:
+    """Best-effort: give every (media, tmdb) in `refs` that nothing has recorded
+    its one lookup, fanned out under the semaphore ensure_posters uses. Returns
+    how many were looked up. One registry read for the whole batch, so a page
+    whose titles are all known costs exactly that and no request."""
+    pairs = {(media, tid) for media, tmdb in refs if (tid := _valid(media, tmdb))}
+    if not pairs:
+        return 0
+    known = await artwork.known((media, tid, None) for media, tid in pairs)
+    want = [pair for pair in pairs if pair not in known.shows and pair not in known.missed]
+    if not want:
+        return 0
+    sem = asyncio.Semaphore(_FAN_OUT)
+
+    async def _one(pair):
+        async with sem:
+            return await _look_up_address(settings, pair[0], pair[1], order)
+
+    with span("posters.ensure_addresses", n=len(want)):
+        await asyncio.gather(*(_one(pair) for pair in want), return_exceptions=True)
+    return len(want)
+
+
 async def ensure_poster(settings, media: str, tmdb: object,
-                        order: tuple[str, ...] = DEFAULT_ORDER) -> Path | None:
+                        order: tuple[str, ...] = DEFAULT_ORDER,
+                        season: int | None = None) -> Path | None:
     """The tile for (media, tmdb) under `order`, generating it if needed. None
     (and a negative marker) when nothing worked — a missing poster degrades one
     tile, it never fails the caller.
+
+    A `season` is tried for ITS OWN ARTWORK FIRST — a tile already on disk, else
+    an address the season registry holds — and falls back to its show's tile
+    through everything below. There is no season lookup and no season marker:
+    the only season artwork there is arrives on a season list somebody already
+    read (app/media/artwork.py's season_posters), so a season with nothing
+    recorded costs one database read and nothing else.
 
     ONE LOOP, MOST-PREFERRED SOURCE FIRST, and each source gets the same two
     chances in turn: the tile it already has, or the tile it can be made to
@@ -244,6 +372,20 @@ async def ensure_poster(settings, media: str, tmdb: object,
     tid = _valid(media, tmdb)
     if tid is None:
         return None
+
+    if season is not None:
+        for source in order:
+            tile = _tile_path(media, tid, source, season)
+            if tile.exists():
+                return tile
+        own = await artwork.season_urls_for(media, tid, season)
+        for source in order:
+            if not own.get(source):
+                continue
+            raw = await _try_source(own[source])
+            if raw is not None:
+                return _store(media, tid, source, raw, season)
+            await artwork.record_season_failure(media, tid, season, source)
 
     # EVERY SOURCE GIVEN UP ON MEANS NO CALLS AT ALL, checked before the loop
     # rather than inside it. Falling out of the loop with every source marked
@@ -275,32 +417,18 @@ async def ensure_poster(settings, media: str, tmdb: object,
                 await artwork.record_failure(media, tid, source)
                 continue
 
-            # NOTHING RECORDED FOR THIS SOURCE, so pay for a lookup — but only
-            # for the one service that answers by the id already in hand. TMDB
-            # is asked here rather than ahead of the registry, which is the
-            # reverse of what this module used to do: asking first spent a
-            # request to learn something a calendar fill had already written
-            # down, and decided the picture would be TMDB's whatever the page
-            # was showing.
-            if source == "tmdb" and getattr(settings, "tmdb_configured", False):
-                path = f"/tv/{tid}" if media == "show" else f"/movie/{tid}"
-                data = await tmdb_client.get_json(settings, path, "posters.tmdb_detail")
-                poster_path = (data or {}).get("poster_path")
-                if poster_path:
-                    fresh = f"{tmdb_client.IMG}/w500{poster_path}"
-                    raw = await _try_source(fresh)
-                    if raw is not None:
-                        await artwork.record_poster_url(media, tid, "tmdb", fresh)
-                        return _store(media, tid, "tmdb", raw)
-
-        # LAST RESORT, AND IT BELONGS OUTSIDE THE LOOP because it is a search
-        # rather than a lookup: it asks Trakt which title carries this tmdb id,
-        # which is one question for the title and not one per source.
-        fresh_url = await _fresh_provider_lookup(settings, media, tid)
-        if fresh_url:
-            raw = await _try_source(fresh_url)
-            if raw is not None:
-                return _store(media, tid, "trakt", raw)
+        # NOTHING RECORDED WORKED, so pay for the title's one lookup — unless it
+        # has been paid for already and found nothing (artwork.record_miss).
+        # After the registry rather than ahead of it, which is the reverse of
+        # what this module used to do: asking first spent a request to learn
+        # something a calendar fill had already written down, and decided the
+        # picture would be TMDB's whatever the page was showing.
+        if (media, tid) not in (await artwork.known([(media, tid, None)])).missed:
+            found = await _look_up_address(settings, media, tid, order)
+            if found:
+                raw = await _try_source(found[1])
+                if raw is not None:
+                    return _store(media, tid, found[0], raw)
 
         logger.info("poster[%s/%s]: nothing resolved -> negative marker", media, tid)
         _dir(media).mkdir(parents=True, exist_ok=True)
@@ -308,10 +436,10 @@ async def ensure_poster(settings, media: str, tmdb: object,
         return None
 
 
-def _store(media: str, tmdb: int, source: str, raw: bytes) -> Path:
+def _store(media: str, tmdb: int, source: str, raw: bytes, season: int | None = None) -> Path:
     """Write one verified tile and answer where it went."""
     _dir(media).mkdir(parents=True, exist_ok=True)
-    tile = _tile_path(media, tmdb, source)
+    tile = _tile_path(media, tmdb, source, season)
     tile.write_bytes(raw)
     logger.info("poster[%s/%s]: GENERATED from %s -> %s", media, tmdb, source, tile.name)
     return tile
@@ -334,33 +462,34 @@ async def ensure_posters(settings, refs, order: tuple[str, ...] = DEFAULT_ORDER)
     # Materialized because `refs` is documented as any iterable and the span below
     # reports how many there were; a generator would be counted by consuming it.
     refs = list(refs)
-    want: set[tuple[str, int]] = set()
+    want: set[tuple[str, int, int | None]] = set()
     with span("posters.disk_scan", refs=len(refs)) as sp:
-        for media, tmdb in refs:
+        for ref in refs:
+            # (media, tmdb), or (media, tmdb, season) for a season's own artwork.
+            media, tmdb, season = (*ref, None)[:3]
             tid = _valid(media, tmdb)
             if tid is None:
                 continue
-            pair = (media, tid)
             # THE FIRST SOURCE'S TILE, NOT ANY TILE. A hit further down the
             # order is a picture this viewer would accept but has not asked
             # for, and skipping on it would leave them permanently on somebody
             # else's preference — see ensure_poster, which is what upgrades it.
             # The cost of being wrong here is one database read per title, which
             # is what ensure_poster does before deciding there is nothing to do.
-            if _tile_path(media, tid, order[0]).exists():
+            if _tile_path(media, tid, order[0], season).exists():
                 continue
-            if is_negative(media, tid, order):
+            if season is None and is_negative(media, tid, order):
                 continue
-            want.add(pair)
+            want.add((media, tid, season))
         sp.set(missing=len(want))
     if not want:
         return 0
 
     sem = asyncio.Semaphore(_FAN_OUT)
 
-    async def _one(pair: tuple[str, int]) -> Path | None:
+    async def _one(ref: tuple[str, int, int | None]) -> Path | None:
         async with sem:
-            return await ensure_poster(settings, pair[0], pair[1], order)
+            return await ensure_poster(settings, ref[0], ref[1], order, season=ref[2])
 
     with span("posters.ensure_posters", n=len(want)):
         results = await asyncio.gather(*(_one(pair) for pair in want), return_exceptions=True)

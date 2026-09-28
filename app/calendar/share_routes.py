@@ -850,13 +850,10 @@ def _poster_order(source_preferences) -> tuple[str, ...]:
     how they came to disagree: the card advertised a picture of a show the page
     was not showing a picture of.
 
-    TMDB IS APPENDED RATHER THAN ORDERED, because it is not a calendar source
-    and an account cannot have an opinion about it in these preferences. It is
-    the backstop for a title no calendar named — which on a share page is rare,
-    and on the ranker is most of them.
+    TMDB GOES BEHIND THEM (posters.order_for, the one spelling of that rule,
+    shared with the rankings board and the tracker).
     """
-    ordered = source_preferences.source_order([s for s in Source])
-    return tuple(ordered) + ("tmdb",)
+    return posters.order_for(source_preferences.source_order([s for s in Source]))
 
 
 async def _warm_posters(settings, refs, order, *, budget: float | None) -> None:

@@ -15,6 +15,7 @@ decides which of two open tabs wins.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import re
 import shutil
@@ -30,6 +31,7 @@ from app import auth, authz, db, distrakt
 from app.ranker import core as ranker, exports as ranker_export
 from app.ranker import imports as ranker_import, routes as ranker_routes
 from app.ranker import sources as ranker_sources
+from app.providers.base import proxied_image
 from app.providers.trakt import TraktError
 from app.providers.trakt import detail as trakt_detail
 from app.media import posters, user_images
@@ -57,6 +59,26 @@ def _explode(reason: str):
     async def _call(*args, **kwargs):
         raise AssertionError(reason)
     return _call
+
+
+def no_artwork(test: unittest.TestCase) -> list:
+    """Every title's one poster lookup finds nothing, for a test whose titles are
+    invented: an export fetches the tiles it composites, and a title nothing has
+    a picture for settles as a placeholder rather than reaching a service.
+    Answers the list of (media, tmdb) looked up."""
+    from app.media import artwork
+    asked: list = []
+
+    async def _nothing(settings, media, tmdb, order):
+        # As the real lookup does when a service answers with nothing.
+        asked.append((media, tmdb))
+        await artwork.record_miss(media, tmdb)
+        return None
+
+    patch = mock.patch.object(posters, "_look_up_address", _nothing)
+    patch.start()
+    test.addCleanup(patch.stop)
+    return asked
 
 
 def show_ref(match_id: str, title: str = "A Show", **extra) -> dict:
@@ -886,23 +908,93 @@ class WarmRouteTests(RankerTestCase):
         self.assertNotIn(
             "/warm", {str(getattr(r, "path", "")) for r in authz.iter_routes(app)})
         html = self.client.get("/rankings").text
-        self.assertIn("/api/rankings/poster?media=show&amp;tmdb=1", html)
+        self.assertIn("/api/rankings/poster?board=b1&amp;key=show%3Atmdb%3A1", html)
         self.assertIn('loading="lazy"', html)
         for script in sorted((STATIC_DIR / "js" / "ranker").glob("*.js")):
             with self.subTest(script=script.name):
                 self.assertNotIn("warm", script.read_text(encoding="utf-8"))
 
-    def test_the_poster_route_generates_a_tile_it_has_not_got(self):
+    def poster(self, key="show:tmdb:1"):
+        return self.client.get("/api/rankings/poster?" + urlencode({"board": "b1", "key": key}),
+                               follow_redirects=False)
+
+    def test_a_recorded_address_is_a_redirect_through_the_proxy_with_no_lookup(self):
+        from app.media import artwork
+        asyncio.run(artwork.record_poster_url("show", 1, "trakt", "https://media.trakt.tv/1.jpg"))
+        asked = no_artwork(self)
+        resp = self.poster()
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.headers["location"], proxied_image("https://media.trakt.tv/1.jpg"))
+        self.assertEqual(asked, [])
+        self.assertFalse(list(posters.POSTER_DIR.rglob("*.jpg")), "a page's picture is never a tile")
+
+    def test_a_title_nobody_knows_costs_one_lookup_ever(self):
+        from app.media import artwork
         asked = []
 
-        async def _ensure(settings, media, tmdb, *args, **kwargs):
+        async def _found(settings, media, tmdb, order):
             asked.append((media, tmdb))
-            return None
+            await artwork.record_poster_url(media, tmdb, "trakt", "https://media.trakt.tv/f.jpg")
+            return "trakt", "https://media.trakt.tv/f.jpg"
 
-        with patched(posters, "ensure_poster", _ensure):
-            self.assertEqual(
-                self.client.get("/api/rankings/poster?media=show&tmdb=1").status_code, 404)
-        self.assertEqual(asked, [("show", "1")])
+        with patched(posters, "_look_up_address", _found):
+            first, second = self.poster(), self.poster()
+        self.assertEqual((first.status_code, second.status_code), (302, 302))
+        self.assertEqual(asked, [("show", 1)])
+
+    def test_a_title_with_no_picture_anywhere_is_remembered(self):
+        """The miss is recorded (artwork.record_miss) and the next load asks
+        nobody — with the real lookup, a Trakt search answering nothing."""
+        from app.providers.trakt import transport as trakt_transport
+        searched = []
+
+        async def _nothing(*args, **kwargs):
+            searched.append(args[2])
+            return []
+
+        with patched(trakt_transport, "cached_get", _nothing):
+            self.assertEqual(self.poster().status_code, 404)
+            self.assertEqual(self.poster().status_code, 404)
+        self.assertEqual(searched, ["search/tmdb/1"])
+        self.assertEqual(self.value("SELECT url FROM show_posters WHERE tmdb = 1"), "")
+
+    def test_a_lookup_that_fails_is_not_remembered_as_a_miss(self):
+        from app.providers.trakt import transport as trakt_transport
+
+        with patched(trakt_transport, "cached_get", _explode("Trakt is down")):
+            self.assertEqual(self.poster().status_code, 404)
+        self.assertIsNone(self.value("SELECT url FROM show_posters WHERE tmdb = 1"))
+
+    def test_a_season_row_draws_its_seasons_own_artwork_else_its_shows(self):
+        from app.media import artwork
+        asyncio.run(ranker.add_titles(self.user_id, "b1", [show_ref("1", season=2),
+                                                           show_ref("1", season=3)]))
+        asyncio.run(artwork.record_poster_url("show", 1, "trakt", "https://media.trakt.tv/show.jpg"))
+        asyncio.run(artwork.record_season_poster_urls(
+            [("show", 1, 2, "trakt", "https://media.trakt.tv/s2.jpg")]))
+        no_artwork(self)
+        self.assertEqual(self.poster("show:tmdb:1:s2").headers["location"],
+                         proxied_image("https://media.trakt.tv/s2.jpg"))
+        self.assertEqual(self.poster("show:tmdb:1:s3").headers["location"],
+                         proxied_image("https://media.trakt.tv/show.jpg"))
+
+    def test_the_viewers_own_order_picks_the_picture(self):
+        from app.media import artwork
+        from app.sources import prefs as source_prefs
+        for source in ("trakt", "simkl"):
+            asyncio.run(artwork.record_poster_url("show", 1, source, f"https://x.test/{source}.jpg"))
+        prefs = asyncio.run(source_prefs.load(self.user_id))
+        asyncio.run(source_prefs.save(dataclasses.replace(prefs, metadata_order=["simkl"])))
+        no_artwork(self)
+        self.assertEqual(self.poster().headers["location"], proxied_image("https://x.test/simkl.jpg"))
+
+    def test_a_title_on_somebody_elses_board_is_not_drawn(self):
+        other = self.ranker_user("neighbour")
+        asyncio.run(ranker.create_board(other, uid="theirs"))
+        asyncio.run(ranker.add_titles(other, "theirs", [show_ref("5")]))
+        resp = self.client.get("/api/rankings/poster?board=theirs&key=show%3Atmdb%3A5",
+                               follow_redirects=False)
+        self.assertEqual(resp.status_code, 404)
 
 
 class TrackerImportTests(RankerTestCase):
@@ -1250,6 +1342,10 @@ class ExportRouteTests(RankerTestCase):
         self.user_id = self.ranker_user()
         self.sign_in_as(self.user_id)
         asyncio.run(ranker.create_board(self.user_id, uid="b1", name="Top 2026", year=2026))
+        no_artwork(self)
+        # Tiles are exactly what an export writes, so none may be left from
+        # another test for it to find.
+        shutil.rmtree(posters.POSTER_DIR, ignore_errors=True)
 
     def fill(self, count: int, *, tier: str = "S", priority: int = 50,
              isolated: bool = False) -> None:
@@ -1423,13 +1519,54 @@ class ExportRouteTests(RankerTestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn("nothing tiered", resp.json()["error"])
 
-    def test_a_missing_poster_does_not_stop_an_export(self):
-        """Nothing in these fixtures has a cached poster, so every tile in every
-        export above is the placeholder — which is the point: the render path
-        never goes looking for artwork."""
+    def test_a_poster_that_cannot_be_fetched_does_not_stop_an_export(self):
+        """Every tile fails to arrive: the image still comes back, drawn with
+        placeholders — and is NOT kept, because those tiles could still arrive,
+        so the next export draws them rather than the cache serving the gap."""
         self.fill(3)
-        with patched(posters, "ensure_poster", _explode("the render path is offline")):
+        with patched(posters, "ensure_poster", _explode("the artwork host is down")):
             self.assertEqual(self.export(top_x=3, columns=3, fmt="jpeg").status_code, 200)
+        self.assertFalse(list(_generated_root(self.user_id).rglob("*.jpeg")))
+
+    def test_an_export_fetches_the_tiles_it_draws_and_no_others(self):
+        """THE ONLY PLACE A BOARD PUTS A POSTER ON DISK. Exactly the titles in the
+        image, each as its row is — a season as its season — in the viewer's
+        order, with the season's own artwork named by its season."""
+        self.fill(4)
+        asyncio.run(ranker.add_titles(self.user_id, "b1", [show_ref("99", season=2)]))
+        asked = []
+
+        async def _ensure(settings, media, tmdb, order, season=None):
+            asked.append((media, tmdb, season, order[-1]))
+            return None
+
+        with patched(posters, "ensure_poster", _ensure):
+            self.export(top_x=3, columns=3, fmt="jpeg")
+        # Title 0 has tmdb 0, which is no artwork id at all: nothing to fetch.
+        self.assertEqual(sorted(asked), [("show", 1, None, "tmdb"), ("show", 2, None, "tmdb")])
+
+    def test_a_season_tile_is_its_own_file_and_the_export_draws_it(self):
+        from app.media import artwork
+
+        self.fill(2)
+        # Make the tiered title with an artwork id season 3, with its own
+        # artwork recorded.
+        asyncio.run(db.execute("UPDATE tier_items SET season = 3 WHERE match_id = '1'"))
+        asyncio.run(artwork.record_season_poster_urls(
+            [("show", 1, 3, "trakt", "https://media.trakt.tv/s3.jpg")]))
+        fetched = []
+
+        async def _bytes(url):
+            fetched.append(url)
+            buffer = BytesIO()
+            Image.new("RGB", (500, 750), (200, 30, 30)).save(buffer, "JPEG")
+            return buffer.getvalue()
+
+        with patched(posters, "_try_source", _bytes):
+            self.assertEqual(self.export(top_x=2, columns=3, fmt="jpeg").status_code, 200)
+        self.assertEqual(fetched, ["https://media.trakt.tv/s3.jpg"])
+        self.assertTrue((posters.POSTER_DIR / "show" / "1.s3.trakt.jpg").exists())
+        self.assertFalse((posters.POSTER_DIR / "show" / "1.trakt.jpg").exists())
 
 
 class PreviewRouteTests(RankerTestCase):
@@ -1438,6 +1575,7 @@ class PreviewRouteTests(RankerTestCase):
         self.user_id = self.ranker_user()
         self.sign_in_as(self.user_id)
         asyncio.run(ranker.create_board(self.user_id, uid="b1", name="Top"))
+        no_artwork(self)
         asyncio.run(ranker.add_titles(
             self.user_id, "b1", [show_ref(str(n)) for n in range(6)]))
         asyncio.run(ranker.save_layout(self.user_id, "b1", {

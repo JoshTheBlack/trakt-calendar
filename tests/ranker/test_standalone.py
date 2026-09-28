@@ -42,6 +42,7 @@ from app.auth import trakt_routes
 from app.providers.trakt import detail as trakt_detail, sync as trakt_sync
 from app.config import Settings, save_settings
 from app.main import app
+from app.media import posters
 from app.ranker import core as ranker
 from app.ranker import routes as ranker_routes, sources as ranker_sources
 from app.providers import title_search
@@ -214,9 +215,12 @@ class JourneyTests(StandaloneTestCase):
         # And out the other end, which is the half of "end to end" that matters
         # most here: an account with nothing but this feature can take its
         # ranking away as both an image and a text block.
-        image = self.client.post(f"/api/rankings/boards/{board}/export", json={
-            "top_x": 1, "columns": 3, "fmt": "jpeg", "title": "Top Shows",
-            "username": "ranker_only"})
+        # The export fetches the one tile it draws; nothing here has a picture,
+        # so the title's lookup is answered with none rather than a network call.
+        with mock.patch.object(posters, "_look_up_address", mock.AsyncMock(return_value=None)):
+            image = self.client.post(f"/api/rankings/boards/{board}/export", json={
+                "top_x": 1, "columns": 3, "fmt": "jpeg", "title": "Top Shows",
+                "username": "ranker_only"})
         self.assertEqual(image.status_code, 200, image.text)
         self.assertEqual(image.headers["content-type"], "image/jpeg")
 

@@ -56,11 +56,14 @@
     <span class="ranker-grip" aria-hidden="true">⠿</span>
     {# width/height and loading="lazy" on every poster, so the browser's own
        deferral backs up the fragment-level laziness and the row reserves its
-       space before the image lands. A title with no tmdb has no artwork to ask
-       for at all and renders the empty frame directly. #}
+       space before the image lands. ASKED BY BOARD AND KEY, and answered with a
+       redirect to the picture through the image proxy — the season's own
+       artwork on a season row, else the show's (routes.rankings_poster says
+       why the address is not written here). A title with no tmdb has no artwork
+       to ask for at all and renders the empty frame directly. #}
     {% if item.tmdb %}
     <img class="ranker-thumb" width="46" height="69" loading="lazy" alt=""
-         src="/api/rankings/poster?media={{ item.media }}&amp;tmdb={{ item.tmdb }}"
+         src="/api/rankings/poster?{{ {'board': board_uid, 'key': item.key} | urlencode }}"
          data-if-missing="frame">
     {% else %}
     <span class="ranker-thumb is-missing" aria-hidden="true"></span>

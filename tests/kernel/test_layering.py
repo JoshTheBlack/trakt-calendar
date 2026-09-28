@@ -263,8 +263,16 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "loop",
         deferred=True),
     (CALENDAR, MEDIA): Edge("a day block, and the picture a share link unfurls into, show posters"),
-    (DISTRAKT, MEDIA): Edge("a tracked show is shown with its poster"),
-    (RANKER, MEDIA): Edge("an exported board is drawn from posters with the shared image primitives"),
+    (DISTRAKT, MEDIA): Edge(
+        "a tracked show is shown with its poster, and a network with its logo; "
+        "the month warms both"),
+    (RANKER, MEDIA): Edge(
+        "a board row, its details panel and an exported board all draw a title's "
+        "picture from the shared poster registry and its tiles"),
+    (RANKER, SOURCES): Edge(
+        "whose artwork a board draws is the viewer's own metadata preference — "
+        "the same order the calendar and a share card resolve a picture in — so "
+        "the board reads it from the preference store"),
     (CALENDAR, INTEGRATIONS): Edge(
         "the calendar page renders the add-to-library buttons, so for an admin it "
         "has to know which of the three services is alive"),

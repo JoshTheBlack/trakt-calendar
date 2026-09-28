@@ -28,7 +28,8 @@ from urllib.parse import quote, urlencode
 import anyio
 import anyio.to_thread
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import (HTMLResponse, JSONResponse, RedirectResponse,
+                               Response)
 
 from . import (core as ranker, exports as ranker_export, grid_builder,
                imports as ranker_import, item_keys, seasons as ranker_seasons,
@@ -37,14 +38,15 @@ from .sources import Media
 from .. import auth, authz, chrome, details_panel, route_params
 from ..auth import AuthLevel
 from ..config import load_settings
-from ..media import posters, user_images
+from ..media import artwork, posters, user_images
 from ..perftrace import span
 from ..providers import detail_source
+from ..sources import prefs as source_prefs
 # THE DETAIL PORTS' failure type, which is not `ranker_sources.SourceUnavailable`:
 # that one is this feature's own translation for the search and ratings seams,
 # while a details panel asks the shared detail ports directly (see
 # app/providers/detail_source.py) and they raise the app-wide one.
-from ..providers.base import SourceUnavailable, proxied_image
+from ..providers.base import Source, SourceUnavailable, proxied_image
 from ..templating import templates
 
 logger = logging.getLogger(__name__)
@@ -278,15 +280,15 @@ def _pool_context(board_uid: str, items: list[dict], remaining: int) -> dict:
     }
 
 
-# NOTHING PRE-WARMS A POSTER ANY MORE, and that is a deletion rather than a move.
-# The page used to post back the keys of the rows it had just drawn and ask for
-# their tiles, which is a second statement of what is on screen — and it raced the
+# NOTHING PRE-WARMS A POSTER, and that is a deletion rather than a move. The page
+# used to post back the keys of the rows it had just drawn and ask for their
+# tiles, which is a second statement of what is on screen — and it raced the
 # browser's own requests for the same pictures rather than getting ahead of them.
-# GET /api/rankings/poster already generates a tile it has not got, every row's
-# <img> carries `loading="lazy"` so only what is on screen is asked for, and a
-# browser opens about six connections to one origin at a time, which is the same
-# pacing the batch warm's own semaphore gave (posters._FAN_OUT is eight). So the
-# requests the page makes anyway are the warm.
+# GET /api/rankings/poster answers each row with its picture's address through
+# the image proxy, spending the title's one lookup there if nothing is recorded,
+# and every row's <img> carries `loading="lazy"` so only what is on screen is
+# asked for. So the requests the page makes anyway are the warm — and nothing
+# lands on disk: tiles are an export's (`_warm_tiles`).
 
 
 async def _removals_context(user_id: int, board_uid: str) -> dict:
@@ -653,6 +655,7 @@ async def seasons_fragment(request: Request):
     else:
         try:
             listed = (await detail_source.seasons(settings, chosen, Media.SHOW)).seasons
+            await _remember_season_art(item["tmdb"], chosen.source, listed)
         except SourceUnavailable:
             logger.warning("Season list failed for %s", chosen.source, exc_info=True)
             note = "Couldn't list this show's seasons just now."
@@ -739,7 +742,8 @@ async def _item_details(request: Request, *, season_only: bool) -> Response:
     settings = load_settings()
     chosen = detail_source.choose(settings, item["ids"])
     if chosen is None:
-        return _described_by_the_board(request, item, season_only, reachable=False)
+        return await _described_by_the_board(request, user.user_id, item, season_only,
+                                             reachable=False)
     try:
         details = await detail_source.describe(settings, chosen, media, season)
     except SourceUnavailable:
@@ -749,12 +753,13 @@ async def _item_details(request: Request, *, season_only: bool) -> Response:
         logger.warning("Detail lookup failed for %s", chosen.source, exc_info=True)
         return details_panel.gap(request, "⚠️ Could not load details for this item.")
     if details is None:
-        return _described_by_the_board(request, item, season_only, reachable=True)
+        return await _described_by_the_board(request, user.user_id, item, season_only,
+                                             reachable=True)
     if season_only:
         return details_panel.season_pane(request, details, media=media, season=season)
     return details_panel.panel(
         request, details, media=media, season=season,
-        title=item["label"], poster=_tile_url(item),
+        title=item["label"], poster=await _panel_picture(user.user_id, item),
         # The row's ids first and the answer's beside them: which services know a
         # title is a fact about the row, and a Trakt-described answer carries no
         # Simkl id to build that button from.
@@ -763,8 +768,8 @@ async def _item_details(request: Request, *, season_only: bool) -> Response:
         carry=("board", "key"))
 
 
-def _described_by_the_board(request: Request, item: dict, season_only: bool, *,
-                            reachable: bool) -> Response:
+async def _described_by_the_board(request: Request, user_id: int, item: dict,
+                                  season_only: bool, *, reachable: bool) -> Response:
     """The panel drawn from what the board's own row knows, for a title nobody
     here can describe.
 
@@ -793,24 +798,22 @@ def _described_by_the_board(request: Request, item: dict, season_only: bool, *,
              "runtime": item["runtime"]}
     return details_panel.panel(
         request, facts, media=media, season=None,
-        title=item["label"], poster=_tile_url(item),
+        title=item["label"], poster=await _panel_picture(user_id, item),
         links=detail_source.outbound_links(item["ids"], media),
         note=f"{lead}: {reason}.")
 
 
-def _tile_url(item: dict) -> str:
-    """The picture the row itself is drawn with, when there is one to show.
+async def _panel_picture(user_id: int, item: dict) -> str:
+    """The picture the row itself is drawn with, through the image proxy, when
+    one is recorded — the season's own on a season row.
 
-    ONLY A TILE ALREADY ON DISK. A row's <img> hides itself when its tile turns
-    out not to exist; the panel's does not, so an address that will 404 would
-    draw a broken picture where the empty string — which the panel reads as
-    "use the describing service's own poster" — would have drawn a real one.
+    ONLY AN ADDRESS ALREADY RECORDED, never a lookup and never the row's own
+    redirect. A row's <img> hides itself when its picture turns out not to
+    exist; the panel's does not, so an address that might 404 would draw a
+    broken picture where the empty string — which the panel reads as "use the
+    describing service's own poster" — draws a real one.
     """
-    tmdb = item["tmdb"]
-    path = posters.cached_poster(item["media"], tmdb) if tmdb else None
-    if path is None or not path.exists():
-        return ""
-    return f"/api/rankings/poster?media={quote(str(item['media']))}&tmdb={tmdb}"
+    return proxied_image(await _row_address(user_id, item, look_up=False)) or ""
 
 
 def _fragment_failure(request: Request, message: str, retry_url: str, target: str):
@@ -1127,7 +1130,7 @@ async def move_board_items(board_uid: str, request: Request):
                                     notice_ok=ok, open_tier=landed)
 
 
-async def _stored_season_list(settings, ids: Mapping[str, Any]) -> list[dict]:
+async def _stored_season_list(settings, ids: Mapping[str, Any], tmdb: Any = None) -> list[dict]:
     """The season list of the show `ids` names, AS THIS INSTANCE ALREADY HOLDS IT
     — never a request. [] when nobody can describe the show or nothing is stored.
 
@@ -1142,10 +1145,26 @@ async def _stored_season_list(settings, ids: Mapping[str, Any]) -> list[dict]:
     if chosen is None:
         return []
     try:
-        return (await detail_source.seasons(settings, chosen, Media.SHOW,
-                                            cached_only=True)).seasons
+        listed = (await detail_source.seasons(settings, chosen, Media.SHOW,
+                                              cached_only=True)).seasons
     except SourceUnavailable:
         return []
+    await _remember_season_art(tmdb or ids.get("tmdb"), chosen.source, listed)
+    return listed
+
+
+async def _remember_season_art(tmdb: Any, source: Source, listed: list[dict]) -> None:
+    """File each season's own artwork from a season list just read — which the
+    list carries anyway (SeasonsAnswer's `poster`) — in the season registry, so a
+    season row draws its season's picture and not its show's. Keyed by tmdb like
+    every poster here; a show with none has nowhere to file it."""
+    try:
+        tmdb = int(tmdb)
+    except (TypeError, ValueError):
+        return
+    await artwork.record_season_poster_urls(
+        (Media.SHOW, tmdb, entry.get("season"), str(source), entry.get("poster") or "")
+        for entry in listed)
 
 
 async def _with_season_facts(settings, items: list[dict]) -> list[dict]:
@@ -1204,7 +1223,7 @@ async def set_board_item_season(board_uid: str, request: Request):
         # The list the control was drawn from, read back from the store, so the
         # row's counts and name follow its new season with no second request.
         item = await ranker.fetch_item(user.user_id, board_uid, data.get("key"))
-        listed = (await _stored_season_list(load_settings(), item["ids"])
+        listed = (await _stored_season_list(load_settings(), item["ids"], item["tmdb"])
                   if item["media"] == Media.SHOW else [])
         row_key = await ranker.set_item_season(user.user_id, board_uid, data.get("key"),
                                                data.get("season"), listed)
@@ -1329,21 +1348,66 @@ async def restore_backup(request: Request):
 # posters
 # ---------------------------------------------------------------------------
 
+async def _poster_order(user_id: int) -> tuple[str, ...]:
+    """Whose artwork this viewer's board draws: their own metadata preference,
+    the question the calendar and a share card ask (posters.order_for)."""
+    return posters.order_for((await source_prefs.load(user_id)).source_order(list(Source)))
+
+
 @guard.get("/api/rankings/poster", AuthLevel.RANKER_APPROVED)
 async def rankings_poster(request: Request):
-    """A cached 500x750 poster tile for (media, tmdb). Mirrors /api/network-logo:
-    serves the disk cache, generating it from the resolution chain on first
-    request; 404 -> the caller falls back to the placeholder tile."""
-    media = (request.query_params.get("media") or "").strip()
-    tmdb = request.query_params.get("tmdb")
-    if media not in posters.MEDIA_VALUES or not tmdb:
+    """One board row's picture: a REDIRECT to its address through the image
+    proxy, or 404 — and nothing written to disk.
+
+    THE ROW NAMES ITSELF BY BOARD AND KEY, so what is looked up is a title the
+    caller's own board holds, and its season is the row's. The picture is the
+    season's own artwork where one is recorded, else its show's, in the viewer's
+    order (posters.find_address). A season nothing has filed artwork for yet
+    reads the season list this instance already holds, cache only, and files
+    what it carries first.
+
+    ASKED BY THE ROW'S OWN <img>, which is what keeps a lookup off the board's
+    render: a board draws up to two thousand rows, `loading="lazy"` asks only for
+    the ones on screen, and a title nobody has a picture recorded for costs its
+    one lookup here, once, recorded for every later load — as a miss, too. The
+    redirect is cached like the tile it replaces, and a 404 turns the row's
+    picture into its empty frame (static/js/ranker/rows.js).
+
+    TILES ON DISK ARE THE EXPORT'S ALONE (`_warm_tiles`): nothing a page shows
+    needs bytes of its own here, and the image proxy the browser is sent to is
+    the host that resizes it.
+    """
+    user = await auth.current_user(request)
+    try:
+        item = await ranker.fetch_item(user.user_id, request.query_params.get("board") or "",
+                                       request.query_params.get("key"))
+    except ranker.RankerError:
         return Response(status_code=404)
-    path = posters.cached_poster(media, tmdb)
-    if path is None and not posters.is_negative(media, tmdb):
-        path = await posters.ensure_poster(load_settings(), media, tmdb)
-    if path is None or not path.exists():
+    address = await _row_address(user.user_id, item, look_up=True)
+    if not address:
         return Response(status_code=404, headers=_POSTER_CACHE_HEADERS)
-    return FileResponse(path, media_type="image/jpeg", headers=_POSTER_CACHE_HEADERS)
+    return RedirectResponse(proxied_image(address), status_code=302,
+                            headers=_POSTER_CACHE_HEADERS)
+
+
+async def _row_address(user_id: int, item: Mapping[str, Any], *, look_up: bool) -> str:
+    """A board row's picture as an ORIGIN address, or "". `look_up` False answers
+    from what is recorded alone — the details panel, which has the describing
+    service's own picture to fall back on and so never needs to spend a lookup."""
+    if not item.get("tmdb"):
+        return ""
+    order = await _poster_order(user_id)
+    media, tmdb, season = item["media"], int(item["tmdb"]), item.get("season")
+    known = await artwork.known([(media, tmdb, season)])
+    if season is not None and not known.seasons.get((media, tmdb, season)):
+        # Nothing filed for the season yet: the list its row was made from may be
+        # stored, and carries the season's own artwork.
+        await _stored_season_list(load_settings(), item.get("ids") or {}, tmdb)
+        known = await artwork.known([(media, tmdb, season)])
+    address = known.address(media, tmdb, season, order)
+    if address or not look_up:
+        return address
+    return await posters.find_address(load_settings(), media, tmdb, order, season)
 
 
 # ---------------------------------------------------------------------------
@@ -2090,23 +2154,64 @@ def _header_bytes(user_id: int, spec: Any) -> bytes | None:
         return None
 
 
-def _grid_entries(ranked: list[ranker_export.RankedTitle]) -> list[grid_builder.GridEntry]:
+def _grid_entries(ranked: list[ranker_export.RankedTitle],
+                  order: tuple[str, ...]) -> list[grid_builder.GridEntry]:
     """The ranking as the renderer wants it, with each poster resolved from the
-    cache on disk.
+    tiles on disk — a season's own first, in the viewer's order, which is the
+    picture its board row draws.
 
-    NO NETWORK HERE, and none inside the renderer either. A title whose poster
-    has not been warmed renders the placeholder tile; warming is its own
-    explicit step, so an export never waits on a provider.
+    NO NETWORK HERE, and none inside the renderer either. A title whose tile
+    `_warm_tiles` could not fetch in time renders the placeholder tile.
     """
     return [
         grid_builder.GridEntry(
             rank=entry.rank,
             title=entry.title,
-            poster=posters.cached_poster(entry.media, entry.tmdb) if entry.tmdb else None,
+            poster=(posters.cached_poster(entry.media, entry.tmdb, order, entry.season)
+                    if entry.tmdb else None),
             colour=entry.colour,
         )
         for entry in ranked
     ]
+
+
+# How long an image may wait for its tiles. A preview is asked for as options
+# change, so it gets the shorter wait and draws what has landed; the download
+# is asked for once and is worth waiting longer for.
+PREVIEW_TILE_BUDGET = 6.0
+EXPORT_TILE_BUDGET = 30.0
+
+
+async def _warm_tiles(ranked: list[ranker_export.RankedTitle], order: tuple[str, ...],
+                      *, budget: float) -> bool:
+    """Put on disk the poster tiles THIS image composites, and answer whether any
+    is still missing that could yet arrive.
+
+    THE ONLY PLACE A BOARD WRITES A POSTER TO DISK. A page draws its pictures
+    through the image proxy (rankings_poster) and needs no bytes here; an
+    exported image composites real ones, so it fetches exactly the tiles it
+    draws — through the same proxy, at the canvas size (posters.ensure_poster) —
+    when it is made. Tiles already there cost a stat each.
+
+    Bounded by `budget` wall-clock seconds: whatever landed stays landed, and
+    the rest draw as placeholders this once. True means one of those could still
+    arrive, so the caller must not keep the render — the next export draws it
+    whole, the share card's self-healing rule.
+    """
+    refs = [(entry.media, int(entry.tmdb), entry.season) for entry in ranked if entry.tmdb]
+    if not refs:
+        return False
+    settings = load_settings()
+    with span("ranker.export_tiles", refs=len(refs), budget=budget):
+        with anyio.move_on_after(budget):
+            await posters.ensure_posters(settings, refs, order)
+    # SETTLED is a tile on disk, or a title whose one lookup found no picture
+    # (artwork.record_miss) — the placeholder is then the best it will ever look.
+    # Anything else missing timed out or failed, and may yet arrive.
+    missed = (await artwork.known(refs)).missed
+    return any(posters.cached_poster(media, tmdb, order, season) is None
+               and (media, tmdb) not in missed
+               for media, tmdb, season in refs)
 
 
 async def _render(entries: list[grid_builder.GridEntry], options: _ExportOptions, *,
@@ -2341,8 +2446,10 @@ async def preview_grid(request: Request):
         return Response(status_code=404)
 
     scale = PREVIEW_WIDTH / (options.columns * grid_builder.TILE_W)
+    order = await _poster_order(user.user_id)
+    await _warm_tiles(ranked, order, budget=PREVIEW_TILE_BUDGET)
     try:
-        payload = await _render(_grid_entries(ranked), options, scale=scale,
+        payload = await _render(_grid_entries(ranked, order), options, scale=scale,
                                 fmt=PREVIEW_FORMAT, header=header)
     except grid_builder.GridError:
         # A preview is small enough that no allowed request reaches a format
@@ -2413,9 +2520,14 @@ async def export_grid(board_uid: str, request: Request):
         # Recorded HERE, where the render is actually about to happen, so the
         # cooldown measures work done rather than requests made.
         await auth.record_attempt("ranker_export", str(user.user_id), True)
-        payload = await _render(_grid_entries(ranked), options,
+        order = await _poster_order(user.user_id)
+        pending = await _warm_tiles(ranked, order, budget=EXPORT_TILE_BUDGET)
+        payload = await _render(_grid_entries(ranked, order), options,
                                 scale=options.scale, fmt=options.fmt, header=header)
-        await anyio.to_thread.run_sync(ranker_export.store_render, path, payload)
+        # A render still short of a tile that could yet arrive is not kept, so
+        # the next export draws it whole rather than serving the gap for ever.
+        if not pending:
+            await anyio.to_thread.run_sync(ranker_export.store_render, path, payload)
 
     filename = ranker_export.download_name(
         (board["name"], options.title), options.fmt,

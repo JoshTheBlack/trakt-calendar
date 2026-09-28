@@ -391,6 +391,128 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await posters.ensure_poster(CONFIGURED, "show", "not-a-number"))
 
 
+class SeasonRegistryTests(ArtworkTestCase):
+    """season_posters, the known miss, the batched read and the one picker."""
+
+    def test_a_season_address_is_its_own_row_beside_its_shows(self):
+        asyncio.run(artwork.record_poster_url("show", 7, "trakt", "https://x/show.jpg"))
+        asyncio.run(artwork.record_season_poster_urls([
+            ("show", 7, 2, "trakt", "https://x/s2.jpg"),
+            ("show", 7, 3, "trakt", ""),                 # no artwork: nothing filed
+        ]))
+        self.assertEqual(asyncio.run(artwork.season_urls_for("show", 7, 2)),
+                         {"trakt": "https://x/s2.jpg"})
+        self.assertEqual(asyncio.run(artwork.season_urls_for("show", 7, 3)), {})
+        self.assertEqual(asyncio.run(artwork.urls_for("show", 7)), {"trakt": "https://x/show.jpg"})
+
+    def test_pick_takes_the_season_first_then_the_show_in_the_viewers_order(self):
+        show = {"trakt": "t.jpg", "simkl": "s.jpg"}
+        self.assertEqual(artwork.pick(show, {"trakt": "s2.jpg"}, ("simkl", "trakt")), "s2.jpg")
+        self.assertEqual(artwork.pick(show, {}, ("simkl", "trakt")), "s.jpg")
+        self.assertEqual(artwork.pick(show, {}, ("trakt", "simkl")), "t.jpg")
+        self.assertEqual(artwork.pick({}, {}, ("trakt",)), "")
+
+    def test_a_miss_is_invisible_to_every_address_reader_and_known_to_known(self):
+        asyncio.run(artwork.record_miss("show", 8))
+        self.assertEqual(asyncio.run(artwork.urls_for("show", 8)), {})
+        self.assertIsNone(asyncio.run(artwork.best_url("show", 8)))
+        known = asyncio.run(artwork.known([("show", 8, None)]))
+        self.assertEqual((known.shows, known.missed), ({}, {("show", 8)}))
+
+    def test_a_real_sighting_after_a_miss_is_found_first(self):
+        asyncio.run(artwork.record_miss("show", 8))
+        asyncio.run(artwork.record_poster_url("show", 8, "trakt", "https://x/8.jpg"))
+        known = asyncio.run(artwork.known([("show", 8, None)]))
+        self.assertEqual(known.address("show", 8, None, ("trakt", "tmdb")), "https://x/8.jpg")
+
+    def test_known_reads_a_batch_in_two_queries_and_keeps_media_apart(self):
+        asyncio.run(artwork.record_poster_url("show", 550, "trakt", "https://x/show550.jpg"))
+        asyncio.run(artwork.record_poster_url("movie", 550, "trakt", "https://x/film550.jpg"))
+        asyncio.run(artwork.record_season_poster_urls([("show", 550, 1, "trakt", "https://x/s1.jpg")]))
+        known = asyncio.run(artwork.known([("show", 550, 1), ("movie", 550, None)]))
+        self.assertEqual(known.address("show", 550, 1, ("trakt",)), "https://x/s1.jpg")
+        self.assertEqual(known.address("show", 550, 2, ("trakt",)), "https://x/show550.jpg")
+        self.assertEqual(known.address("movie", 550, None, ("trakt",)), "https://x/film550.jpg")
+
+    def test_the_sweep_ages_out_both_registries(self):
+        asyncio.run(artwork.record_poster_url("show", 1, "trakt", "u"))
+        asyncio.run(artwork.record_season_poster_urls([("show", 1, 1, "trakt", "u")]))
+        removed = asyncio.run(artwork.sweep(now=db.now() + artwork.POSTER_URL_RETENTION_SECONDS + 1))
+        self.assertEqual(removed, 2)
+
+
+class FindAddressTests(ArtworkTestCase):
+    """posters.find_address: what a page draws, with AT MOST ONE LOOKUP per title
+    ever, and nothing written to disk."""
+
+    ORDER = ("trakt", "tmdb")
+
+    def setUp(self):
+        super().setUp()
+        posters.POSTER_DIR = TMP / f"posters-address-{id(self)}"
+
+    def find(self, tmdb=9, season=None):
+        return asyncio.run(posters.find_address(NOT_CONFIGURED, "show", tmdb, self.ORDER, season))
+
+    def test_a_recorded_address_costs_no_lookup(self):
+        asyncio.run(artwork.record_poster_url("show", 9, "trakt", "https://x/9.jpg"))
+        with patch.object(posters, "_fresh_provider_lookup",
+                          AsyncMock(side_effect=AssertionError("looked up"))):
+            self.assertEqual(self.find(), "https://x/9.jpg")
+        self.assertFalse(posters.POSTER_DIR.exists(), "an address writes no tile")
+
+    def test_an_unknown_title_is_looked_up_once_and_recorded(self):
+        lookup = AsyncMock(return_value="https://x/found.jpg")
+
+        async def _recording(settings, media, tmdb):
+            url = await lookup(settings, media, tmdb)
+            await artwork.record_poster_url(media, tmdb, "trakt", url)
+            return url
+
+        with patch.object(posters, "_fresh_provider_lookup", _recording):
+            self.assertEqual(self.find(), "https://x/found.jpg")
+            self.assertEqual(self.find(), "https://x/found.jpg")
+        self.assertEqual(lookup.await_count, 1)
+
+    def test_a_known_miss_costs_no_lookup(self):
+        lookup = AsyncMock(return_value=None)
+        with patch.object(posters, "_fresh_provider_lookup", lookup):
+            self.assertEqual(self.find(), "")
+            self.assertEqual(self.find(), "")
+        self.assertEqual(lookup.await_count, 1)
+
+    def test_a_failed_lookup_is_tried_again_next_time(self):
+        lookup = AsyncMock(side_effect=RuntimeError("unreachable"))
+        with patch.object(posters, "_fresh_provider_lookup", lookup):
+            self.assertEqual(self.find(), "")
+            self.assertEqual(self.find(), "")
+        self.assertEqual(lookup.await_count, 2)
+
+    def test_a_season_takes_its_own_then_its_shows(self):
+        asyncio.run(artwork.record_poster_url("show", 9, "trakt", "https://x/9.jpg"))
+        asyncio.run(artwork.record_season_poster_urls([("show", 9, 2, "trakt", "https://x/9s2.jpg")]))
+        self.assertEqual(self.find(season=2), "https://x/9s2.jpg")
+        self.assertEqual(self.find(season=3), "https://x/9.jpg")
+
+    def test_ensure_addresses_looks_up_only_what_nothing_knows(self):
+        asyncio.run(artwork.record_poster_url("show", 1, "trakt", "https://x/1.jpg"))
+        asyncio.run(artwork.record_miss("show", 2))
+        asked = []
+
+        async def _look(settings, media, tmdb, order):
+            asked.append((media, tmdb))
+            return None
+
+        with patch.object(posters, "_look_up_address", _look):
+            count = asyncio.run(posters.ensure_addresses(
+                NOT_CONFIGURED, [("show", 1), ("show", 2), ("show", 3), ("show", 3)], self.ORDER))
+        self.assertEqual((count, asked), (1, [("show", 3)]))
+
+    def test_the_viewers_order_puts_tmdb_behind_it(self):
+        self.assertEqual(posters.order_for(["simkl", "trakt"]), ("simkl", "trakt", "tmdb"))
+        self.assertEqual(posters.order_for(["tmdb"]), ("tmdb",))
+
+
 class EnsurePostersTests(unittest.IsolatedAsyncioTestCase):
     ORDER = ("trakt", "tmdb")
 
@@ -406,7 +528,7 @@ class EnsurePostersTests(unittest.IsolatedAsyncioTestCase):
 
         seen = []
 
-        async def fake_ensure(settings, media, tmdb, order=posters.DEFAULT_ORDER):
+        async def fake_ensure(settings, media, tmdb, order=posters.DEFAULT_ORDER, season=None):
             seen.append((media, tmdb))
             return posters._tile_path(media, tmdb, order[0])
 
@@ -421,7 +543,7 @@ class EnsurePostersTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(generated, 2)
 
     async def test_a_failure_on_one_does_not_sink_the_rest(self):
-        async def fake_ensure(settings, media, tmdb, order=posters.DEFAULT_ORDER):
+        async def fake_ensure(settings, media, tmdb, order=posters.DEFAULT_ORDER, season=None):
             if tmdb == 1:
                 raise RuntimeError("boom")
             return posters._tile_path(media, tmdb, order[0])
