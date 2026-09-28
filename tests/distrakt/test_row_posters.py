@@ -265,6 +265,25 @@ class FilmRowPosterTests(MonthFragmentTestCase):
         asyncio.run(artwork.record_poster_url("movie", 603, "trakt", "https://x/reg.jpg"))
         self.assertEqual(self.pictures(year, month), [proxied_image("https://x/reg.jpg")])
 
+    def test_a_month_no_service_answers_still_draws_its_films_and_their_pictures(self):
+        """The degraded page draws last-known everything, films included: a month
+        under way keeps its films in the stored watch state, not in a snapshot, so
+        reading them from the snapshot alone emptied its Films on every refresh a
+        service could not answer."""
+        from unittest.mock import AsyncMock
+
+        from app.providers.base import SourceUnavailable
+        asyncio.run(artwork.record_poster_url("movie", 603, "trakt", "https://x/reg.jpg"))
+        self.watch_one()
+        down = patch.object(watch_history, "sync_and_baseline",
+                            AsyncMock(side_effect=SourceUnavailable("Could not reach Trakt")))
+        calls, patched = self.lookups("https://x/found.jpg")
+        with down, patched:
+            row = self.film_row()
+        self.assertIn("The Matrix", row)
+        self.assertIn(proxied_image("https://x/reg.jpg").replace("&", "&amp;"), row)
+        self.assertEqual(calls, [])
+
     def test_the_film_badge_stays_after_the_picture(self):
         asyncio.run(artwork.record_poster_url("movie", 603, "trakt", "https://x/reg.jpg"))
         self.watch_one()

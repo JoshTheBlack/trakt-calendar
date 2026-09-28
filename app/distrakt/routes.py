@@ -595,8 +595,22 @@ async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, defau
     ONLY FOR THE MONTH UNDER WAY, the same rule the live path follows: what
     somebody is keeping up with belongs to no month, so a month that is over or
     has not begun has no list to show.
+
+    THE FILMS WATCHED IN THE MONTH ARE RENDERED TOO, for the same reason. A month
+    that has frozen carries them in its own snapshot; one that has not keeps them
+    only in the stored watch state, which is what the live path reads them from
+    (watch_history.movies_in_range) — so they are read from there, with no call,
+    rather than from a snapshot that does not exist yet. Taking them from the
+    snapshot alone emptied the month's Films on every refresh a service could not
+    answer, and filled it again on the next one that could.
     """
     doc = await distrakt_store.load_month(user_id, month_key)
+    movies = (doc or {}).get("movies")
+    if movies is None:
+        mstart, mend = watch_history.month_bounds(month_key)
+        movies = watch_history.movies_in_range(
+            await watch_history.load_state(user_id), mstart, mend,
+            watch_history.viewer_tz(settings))
     listed = (await distrakt_store.user_records(user_id)
               if standing is distrakt_store.MonthStanding.CURRENT else [])
     shape = lifecycle.shape_of(distrakt_store.frozen_shows(doc) if doc else [],
@@ -625,14 +639,14 @@ async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, defau
         # The films watched that month travel WITH the month, not just inside the
         # POST 2 text: they were being recorded, counted and imported while never
         # appearing anywhere on the page, which reads as them not being there.
-        "movies": (doc or {}).get("movies") or [],
+        "movies": movies or [],
         # The first notice gets the month's PREMIERE records and nothing else: it
         # announces what began in the month, which is true of a month in any
         # standing and whatever each of those titles has since become.
         "post1": discord_fmt.render_post1(shape.series_premieres, shape.season_premieres,
                                           emojis, default_emoji, link_url=link_url),
         "post2": discord_fmt.render_post2(shows, emojis, default_emoji,
-                                          movies=(doc or {}).get("movies"), standing=standing),
+                                          movies=movies, standing=standing),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         # Reports the ACTUAL cause: True only when Trakt rate-limited us, False when
         # it was simply unreachable. The client shows the banner off `notice`
