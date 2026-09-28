@@ -494,6 +494,26 @@ class FindAddressTests(ArtworkTestCase):
         self.assertEqual(self.find(season=2), "https://x/9s2.jpg")
         self.assertEqual(self.find(season=3), "https://x/9.jpg")
 
+    def test_two_requests_arriving_together_share_one_lookup(self):
+        """Measured in the browser: a row's picture and a second request for the
+        same title arrived together and each paid for a lookup."""
+        calls = []
+
+        async def _slow(settings, media, tmdb, order):
+            calls.append(tmdb)
+            await asyncio.sleep(0.05)
+            await artwork.record_poster_url(media, tmdb, "trakt", "https://x/9.jpg")
+            return "trakt", "https://x/9.jpg"
+
+        async def _both():
+            return await asyncio.gather(
+                posters.find_address(NOT_CONFIGURED, "show", 9, self.ORDER),
+                posters.find_address(NOT_CONFIGURED, "show", 9, self.ORDER, 2))
+
+        with patch.object(posters, "_look_up_address", _slow):
+            self.assertEqual(asyncio.run(_both()), ["https://x/9.jpg", "https://x/9.jpg"])
+        self.assertEqual(calls, [9])
+
     def test_ensure_addresses_looks_up_only_what_nothing_knows(self):
         asyncio.run(artwork.record_poster_url("show", 1, "trakt", "https://x/1.jpg"))
         asyncio.run(artwork.record_miss("show", 2))

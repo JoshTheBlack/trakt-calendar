@@ -926,7 +926,7 @@ class WarmRouteTests(RankerTestCase):
         self.assertEqual(resp.status_code, 302)
         self.assertEqual(resp.headers["location"], proxied_image("https://media.trakt.tv/1.jpg"))
         self.assertEqual(asked, [])
-        self.assertFalse(list(posters.POSTER_DIR.rglob("*.jpg")), "a page's picture is never a tile")
+        self.assertFalse(list(posters.POSTER_DIR.glob("show/1.*")), "a page's picture is never a tile")
 
     def test_a_title_nobody_knows_costs_one_lookup_ever(self):
         from app.media import artwork

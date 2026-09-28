@@ -261,6 +261,26 @@ async def _fresh_provider_lookup(settings, media: str, tmdb: int) -> str | None:
     return None
 
 
+# The lookups under way, by title, so two requests for one title's picture that
+# arrive together — a board row and its season row drawing the same show, a page
+# and a second tab — share one lookup rather than making two. In process: one
+# worker is what this app runs, and a second one would cost one lookup more.
+_LOOKUPS_UNDER_WAY: dict[tuple[str, int], asyncio.Task] = {}
+
+
+async def _look_up_once(settings, media: str, tmdb: int,
+                        order: tuple[str, ...]) -> tuple[str, str] | None:
+    """`_look_up_address`, joined by anyone asking about the same title while it
+    runs."""
+    key = (media, tmdb)
+    task = _LOOKUPS_UNDER_WAY.get(key)
+    if task is None:
+        task = asyncio.ensure_future(_look_up_address(settings, media, tmdb, order))
+        _LOOKUPS_UNDER_WAY[key] = task
+        task.add_done_callback(lambda _done: _LOOKUPS_UNDER_WAY.pop(key, None))
+    return await asyncio.shield(task)
+
+
 async def _look_up_address(settings, media: str, tmdb: int,
                            order: tuple[str, ...]) -> tuple[str, str] | None:
     """A TITLE'S ONE LOOKUP: (source, address) of a poster nothing had recorded,
@@ -310,7 +330,7 @@ async def find_address(settings, media: str, tmdb: object, order: tuple[str, ...
     address = known.address(media, tid, season, order)
     if address or (media, tid) in known.missed:
         return address
-    found = await _look_up_address(settings, media, tid, order)
+    found = await _look_up_once(settings, media, tid, order)
     return found[1] if found else ""
 
 
@@ -330,7 +350,7 @@ async def ensure_addresses(settings, refs, order: tuple[str, ...]) -> int:
 
     async def _one(pair):
         async with sem:
-            return await _look_up_address(settings, pair[0], pair[1], order)
+            return await _look_up_once(settings, pair[0], pair[1], order)
 
     with span("posters.ensure_addresses", n=len(want)):
         await asyncio.gather(*(_one(pair) for pair in want), return_exceptions=True)
@@ -424,7 +444,7 @@ async def ensure_poster(settings, media: str, tmdb: object,
         # something a calendar fill had already written down, and decided the
         # picture would be TMDB's whatever the page was showing.
         if (media, tid) not in (await artwork.known([(media, tid, None)])).missed:
-            found = await _look_up_address(settings, media, tid, order)
+            found = await _look_up_once(settings, media, tid, order)
             if found:
                 raw = await _try_source(found[1])
                 if raw is not None:

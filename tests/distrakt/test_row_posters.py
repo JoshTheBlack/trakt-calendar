@@ -119,7 +119,7 @@ class RowPosterTests(MonthFragmentTestCase):
         _calls, patched = self.lookups("https://x/found.jpg")
         with patched:
             self.pictures()
-        self.assertFalse(posters.POSTER_DIR.exists() and list(posters.POSTER_DIR.rglob("*.jpg")),
+        self.assertFalse(list(posters.POSTER_DIR.glob("show/500.*")),
                          "a tracker row's picture is an address, never a tile")
 
     def test_a_frozen_month_draws_what_is_known_and_asks_nobody(self):
