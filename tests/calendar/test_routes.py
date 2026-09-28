@@ -1459,6 +1459,22 @@ class CalendarShellTests(CalendarRouteTestCase):
         self.assertIn('hx-trigger="intersect once"', block)
         self.assertIn("Friday, 10 July", html)
 
+    def test_the_search_box_types_unbounced_and_queues_behind_enter(self):
+        """NOT DEBOUNCED and QUEUED, not replaced, on the box, the form and the
+        widening button: measured in Chromium and Firefox, the debounce plus
+        `replace` aborted the services' request on every one of 64 type-then-Enter
+        trials each, and this shape lost none. A server test cannot run htmx, so
+        this pins the attributes the measurement was made with."""
+        html = self.client.get("/calendar?year=2026&month=7").text
+        box = re.search(r'<input[^>]*id="searchInput"[^>]*>', html, re.S).group(0)
+        form = re.search(r'<form[^>]*hx-get="/calendar/search"[^>]*>', html, re.S).group(0)
+        widen = re.search(r'<button[^>]*hx-get="/calendar/search"[^>]*>',
+                          self.client.get("/calendar/search?q=show").text, re.S).group(0)
+        self.assertIn('hx-trigger="input changed"', box)
+        for element in (box, form, widen):
+            with self.subTest(element=element[:40]):
+                self.assertIn('hx-sync="#searchResults:queue last"', element)
+
     def test_the_shell_still_states_the_whole_months_numbers(self):
         """The tiles, the chip strip and the is-new answer are claims about the
         month, so they must not shrink to the days that happen to be rendered."""

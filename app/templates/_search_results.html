@@ -110,7 +110,7 @@
 <p class="search-hint search-widen">
     <button type="button" class="btn-ghost small" hx-get="/calendar/search"
             hx-target="#searchResults" hx-include="#searchInput, #searchEndpoint"
-            hx-sync="#searchResults:replace"
+            hx-sync="#searchResults:queue last"
             hx-vals='{"all": "1"{% if live %}, "live": "1"{% endif %}}'>Search every calendar</button>
 </p>
 {% endif %}

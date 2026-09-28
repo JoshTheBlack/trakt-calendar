@@ -292,7 +292,7 @@
 
                TWO TRIGGERS BECAUSE THERE ARE TWO COSTS. Typing reads what this
                instance already holds: an index lookup, no outbound call, so it
-               can run on a debounce. Enter and the button ask the SERVICES,
+               can run on every keystroke. Enter and the button ask the SERVICES,
                which spends requests against somebody else's rate limit, so it
                takes a deliberate act. That is the only difference between them —
                same route, same fragment, one extra value.
@@ -308,12 +308,22 @@
                tests/kernel/test_page_head.py. #}
             <form class="search-bar" hx-boost="false" hx-get="/calendar/search"
                   hx-target="#searchResults"
-                  {# ONE ANSWER AT A TIME, ACROSS BOTH TRIGGERS. Syncing on the
-                     TARGET rather than on each control is what makes that true
-                     between them: without it a debounced read for "sev" can
-                     land after the service answer for "severance" and overwrite
-                     the better result with the staler one. #}
-                  hx-sync="#searchResults:replace">
+                  {# ONE ANSWER AT A TIME, ACROSS BOTH TRIGGERS, AND ENTER'S
+                     LANDS LAST. Syncing on the TARGET rather than on each
+                     control is what makes that true between them, and the two
+                     choices below are measured, not preferred — the rule and
+                     its numbers are _distrakt_add_show.html's:
+                       - NO DEBOUNCE on the box. A delayed trigger keeps a timer
+                         nothing else cancels, so Enter within the delay of the
+                         last keystroke went out FIRST and the typed read after
+                         it.
+                       - `queue last`, NOT `replace`. `replace` aborted the
+                         services' request outright: measured here, every one of
+                         64 type-then-Enter trials in Chromium and in Firefox
+                         lost it, left the typed list on screen and logged an
+                         htmx abort to the console. `queue last` aborts nothing:
+                         one request runs and only the newest waits. #}
+                  hx-sync="#searchResults:queue last">
                 {# `input`, NOT `keyup`, BECAUSE TEXT ARRIVES WITHOUT KEYS. A paste
                    from the mouse, a cut from the context menu and a browser's own
                    clear button all change the value and press nothing, so a box
@@ -327,10 +337,10 @@
                 <input type="text" id="searchInput" name="q" autocomplete="off" spellcheck="false"
                        autofocus placeholder="Title…"
                        hx-get="/calendar/search"
-                       hx-trigger="input changed delay:180ms"
+                       hx-trigger="input changed"
                        hx-target="#searchResults"
                        hx-include="#searchEndpoint"
-                       hx-sync="#searchResults:replace">
+                       hx-sync="#searchResults:queue last">
                 {# WHICH CALENDAR IS BEING SEARCHED, carried as a value rather
                    than read back out of the address bar: it is the same fact the
                    toolbar's picker renders from, so the two cannot disagree. #}
