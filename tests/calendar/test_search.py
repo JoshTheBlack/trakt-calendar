@@ -225,6 +225,90 @@ class TheNeedleIsEscapedTests(unittest.TestCase):
         self.assertEqual(calendar_entries.like_needle("Pokémon"), "%pokemon%")
 
 
+class WhichGroupsAQueryLoadsTests(SearchTestCase):
+    """How the stored half finds its groups changed shape for speed — matches
+    first, through the fold index — and WHAT it finds must not have: every
+    matching group when there are fewer than the limit, and, when there are
+    more, the same earliest-airing ones the endpoint-first read always chose."""
+
+    async def titles_of(self, keys, endpoint=SHOWS):
+        records = await calendar_entries.read_groups(endpoint, keys)
+        return sorted({r.title for r in records})
+
+    async def test_fewer_matches_than_the_limit_are_every_match(self):
+        await self.store(_record("Severance"), _record("Severed Ties"),
+                         _record("Unsevered"), _record("Andor"))
+        keys = await calendar_entries.groups_matching(SHOWS, "sever", 40)
+        self.assertEqual(await self.titles_of(keys),
+                         ["Severance", "Severed Ties", "Unsevered"])
+
+    async def test_a_broad_query_loads_the_earliest_airing_groups_as_it_always_has(self):
+        """Stored latest-airing first, so the titles' own order is the opposite
+        of their air dates: a matches-first read cut at the limit would keep A
+        and B, and the endpoint-first read this search has always made keeps C
+        and B."""
+        await self.store(_record("Sev A", air_ts=AIR + 86400),
+                         _record("Sev B", air_ts=AIR),
+                         _record("Sev C", air_ts=AIR - 86400))
+        keys = await calendar_entries.groups_matching(SHOWS, "sev", 2)
+        self.assertEqual(await self.titles_of(keys), ["Sev B", "Sev C"])
+
+    async def test_a_title_airing_only_on_another_calendar_is_not_a_match(self):
+        await self.store(_record("Severance"), endpoint="shows")
+        self.assertEqual(await calendar_entries.groups_matching(SHOWS, "severance", 40), [])
+        self.assertEqual(len(await calendar_entries.groups_matching("shows", "severance", 40)), 1)
+
+    async def test_a_group_is_read_from_the_calendar_asked_about_only(self):
+        await self.store(_record("Severance"))
+        await self.store(_record("Severance", air_ts=AIR + 86400), endpoint="shows")
+        keys = await calendar_entries.groups_matching(SHOWS, "severance", 40)
+        records = await calendar_entries.read_groups(SHOWS, keys)
+        self.assertEqual([r.air_ts for r in records], [AIR])
+
+    async def plan(self, sql, params):
+        rows = await db.run(lambda conn: conn.execute("EXPLAIN QUERY PLAN " + sql,
+                                                      params).fetchall())
+        return " | ".join(str(row["detail"]) for row in rows)
+
+    async def test_the_matches_are_found_in_the_fold_index_before_any_airing_is_read(self):
+        """THE SHAPE IS THE SPEED. Measured on a copy of a real instance, the
+        planner left to itself walked the endpoint's every airing — 38-112ms a
+        keystroke for a query naming one title — and this order is 2ms."""
+        plan = await self.plan(calendar_entries._SEARCH_SQL, (SHOWS, "%x%", 40))
+        self.assertIn("ix_calendar_titles_fold", plan)
+        self.assertNotIn("ix_calendar_airings_month", plan)
+        self.assertLess(plan.index("ix_calendar_titles_fold"),
+                        plan.index("sqlite_autoindex_calendar_airings_1"))
+
+    async def test_a_group_is_read_through_its_key_and_not_the_endpoints_month(self):
+        sql = calendar_entries._BY_KEY_SQL.replace("__KEYS__", "?, ?")
+        plan = await self.plan(sql, (SHOWS, "a", "b"))
+        self.assertIn("ix_calendar_airings_key", plan)
+        self.assertNotIn("ix_calendar_airings_month", plan)
+
+
+class WhichGroupsABigCalendarLoadsTests(WhichGroupsAQueryLoadsTests):
+    """The same answers when the calendar is big enough to be read matches-first.
+    A test calendar holds a handful of airings, so it is SMALL and read
+    endpoint-first; lowering the threshold is what puts the other read, and its
+    fall back to the endpoint-first read for a broad query, under the same
+    assertions."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        patcher = patch.object(calendar_entries, "_SMALL_CALENDAR", 1)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_a_big_calendar_asks_the_fold_index_first(self):
+        await self.store(_record("Severance"))
+        with patch.object(calendar_entries.db, "fetch_all",
+                          wraps=calendar_entries.db.fetch_all) as spy:
+            await calendar_entries.groups_matching(SHOWS, "severance", 40)
+        self.assertEqual([c.args[0] for c in spy.call_args_list],
+                         [calendar_entries._SEARCH_SQL])
+
+
 class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
     """It links to a MONTH, never to a day, because visiting a month FILLS it —
     and whether a card then appears depends on whether any source lists that

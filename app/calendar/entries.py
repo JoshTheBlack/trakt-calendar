@@ -586,7 +586,46 @@ _ALL_SQL = _READ_SQL.replace(
 # spell it differently, so matching on the title alone can find one source's
 # record and miss the other's, and a group missing a source resolves to a
 # different card than the calendar draws.
+#
+# TWO SHAPES OF ONE QUESTION, because each is fast exactly where the other is
+# slow; `groups_matching` says which it asks when. Both answer the same set
+# whenever fewer than the limit match, which is what lets it choose on cost.
+#
+# THE MATCHES FIRST (`_SEARCH_SQL`): the folded titles are scanned in
+# `ix_calendar_titles_fold`, which holds nothing else, and only the rows that
+# matched are looked up on this endpoint through the airings' own primary key.
+# `CROSS JOIN` is what fixes that order — SQLite never reorders one — and it has
+# to be fixed: left to itself the planner starts from the endpoint's airings,
+# every one of them, and checks each title as it goes. MEASURED on a copy of a
+# real instance (28,005 airings on `shows`, 14,761 on `shows/premieres`, 21,247
+# titles): a query naming a title took 38ms on premieres, 57ms on `shows` and
+# 112ms across every calendar that way, even when nothing matched; matches
+# first, 2ms per calendar.
+# `INDEXED BY` RATHER THAN A `rowid IN (...)` SUBQUERY, which is the shape
+# `_TITLES_MATCHING_SQL` uses, because this one stops at the limit and that one
+# cannot: the subquery collects EVERY matching rowid before the first airing is
+# read, 3-10ms for two letters that match thousands of titles, while a scan of
+# the index itself hands matches over as it finds them.
 _SEARCH_SQL = r"""
+SELECT DISTINCT a.title_key
+FROM calendar_titles t INDEXED BY ix_calendar_titles_fold
+CROSS JOIN calendar_airings a
+  ON a.source = t.source AND a.media = t.media AND a.source_id = t.source_id
+ AND a.endpoint = ?
+WHERE t.title_fold LIKE ? ESCAPE '\'
+LIMIT ?
+"""
+
+# THE ENDPOINT FIRST (`_SEARCH_BY_AIRING_SQL`), in air-date order: the shape this
+# search has always had, and still the right one twice over. On a SMALL calendar
+# it costs next to nothing whatever is typed, because the whole calendar is a
+# few hundred airings — under a millisecond measured on `shows/new` (438) and
+# `shows/finales` (249) — while matches-first has to walk every title that
+# matches anywhere, 16-24ms for two letters there. And for a query BROAD enough
+# to match more groups than the limit takes, it is the one that decides WHICH
+# groups a search loads — the earliest-airing ones, as it always has — so it is
+# asked for that case too, and stops within a few hundred airings doing it.
+_SEARCH_BY_AIRING_SQL = r"""
 SELECT DISTINCT a.title_key
 FROM calendar_airings a
 JOIN calendar_titles t
@@ -597,9 +636,15 @@ LIMIT ?
 
 # The same three-level read the span path uses, addressed by group instead of by
 # date range. One placeholder per key, which is why the caller's limit matters.
+# `+a.endpoint` KEEPS THE ENDPOINT OFF THE INDEX, which is SQLite's own spelling
+# for "do not use an index for this term": the planner otherwise walks the
+# endpoint's whole month index and tests each airing's key, when the keys are a
+# handful and `ix_calendar_airings_key` goes straight to their rows. Measured on
+# the same copy, forty groups: 6.1ms -> 0.8ms on premieres, 17ms -> 9.6ms on
+# `shows`, the same rows either way.
 _BY_KEY_SQL = _READ_SQL.replace(
     "WHERE a.endpoint = ? AND a.air_date >= ? AND a.air_date < ?",
-    "WHERE a.endpoint = ? AND a.title_key IN (__KEYS__)")
+    "WHERE +a.endpoint = ? AND a.title_key IN (__KEYS__)")
 
 
 def _like_escaped(folded: str) -> str:
@@ -623,15 +668,41 @@ def like_needle(query: str) -> str:
     return f"%{_like_escaped(fold_title(query))}%"
 
 
+# HOW MANY AIRINGS MAKE A CALENDAR BIG ENOUGH TO SEARCH MATCHES-FIRST. Reading
+# every airing of the endpoint costs about 2ms a thousand on the measured copy
+# (0.5ms for 438, 15ms for 7,770, 40ms for 14,761), and the matches-first read
+# costs about 2ms for a query naming a title — so a thousand is where the two
+# meet. Counting up to it is a walk of at most this many index entries.
+_SMALL_CALENDAR = 1000
+
+_CALENDAR_SIZE_SQL = """
+SELECT COUNT(*) FROM (SELECT 1 FROM calendar_airings WHERE endpoint = ? LIMIT ?)
+"""
+
+
 async def groups_matching(endpoint_key: str, query: str, limit: int) -> list[str]:
     """The `title_key`s on `endpoint_key` whose title matches `query`.
 
     MATCHED ON `title_fold`, the same folding a stored title was written with —
     case-folded and accent-stripped, so "pokemon" finds "Pokemon". The index on
     that column is what makes this a lookup rather than a scan.
+
+    WHICH READ IS ASKED IS A COST DECISION AND NEVER CHANGES THE ANSWER. A small
+    calendar is read endpoint-first, whatever was typed. A big one is read
+    matches-first, and fewer than `limit` back is the whole answer — the same
+    set the endpoint-first read would have found. `limit` or more means the
+    query matched more groups than a search loads, and which of them is the
+    endpoint-first read's to say, so it is asked again that way. The two shapes
+    and their measurements are beside `_SEARCH_SQL`. The keys come back in no
+    particular order: `read_groups` sorts what it loads.
     """
-    rows = await db.fetch_all(
-        _SEARCH_SQL, (endpoint_key, like_needle(query), limit))
+    needle = like_needle(query)
+    size = await db.fetch_value(_CALENDAR_SIZE_SQL, (endpoint_key, _SMALL_CALENDAR), 0)
+    if size >= _SMALL_CALENDAR:
+        rows = await db.fetch_all(_SEARCH_SQL, (endpoint_key, needle, limit))
+        if len(rows) < limit:
+            return [str(r["title_key"]) for r in rows]
+    rows = await db.fetch_all(_SEARCH_BY_AIRING_SQL, (endpoint_key, needle, limit))
     return [str(r["title_key"]) for r in rows]
 
 
