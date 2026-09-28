@@ -164,13 +164,35 @@ because this paragraph was written about counts and read as being about the
 view: the page draws `Record.poster` — whatever service filled that calendar —
 while artwork resolved TMDB-first regardless, so a link could advertise a
 different picture of a different-looking show. Poster tiles are now keyed on
-`(media, tmdb, SOURCE)` and resolved in the OWNER's own `field_order("poster")`,
-which is the identical question the calendar asks (`app/media/posters.py`). The
+`(media, tmdb, SOURCE)` and resolved in the OWNER's own metadata order
+(`posters.order_for`), which is the identical question the calendar asks
+(`app/media/posters.py`). The
 card is one of the TWO public paths that may make an outbound call (the details
 panel, below, is the other): it warms poster ARTWORK, bounded to what the grid
 draws and to a wall clock, for titles the calendar cache already holds. It never
 fetches the CALENDAR (`allow_fetch=False`), so an empty cached month stays an
 empty card.
+
+**A page draws a picture's ADDRESS; a tile on disk is for compositing only, and
+a title costs at most one lookup, ever.** `app/media/posters.py` owns both halves
+and `app/media/artwork.py` the bookkeeping under them. The rankings board, its
+details panel and the tracker's rows draw an origin address through the image
+proxy (`posters.find_address`, `artwork.known` for a whole page) — the board's
+row `<img>` asks `/api/rankings/poster` by board and key and is REDIRECTED there,
+nothing written. Tiles (`ensure_poster`/`ensure_posters`) are fetched only by
+what composites real bytes — the share card, and a board's export at export
+time (`_warm_tiles` in `app/ranker/routes.py`). Which picture is ONE function,
+`artwork.pick`: a season's own artwork (`season_posters`, filed from season
+lists already read — only Trakt publishes it, measured) before its show's, each
+in the viewer's order; a later "choose or upload a poster" feature stands in
+front of it rather than beside it. A title nothing has recorded a picture for
+gets ONE lookup (`posters._look_up_address`, joined by any concurrent asker) and
+its answer is recorded — and so is a miss (`artwork.record_miss`, a
+`show_posters` row with source `missing`, an empty url and fail_count at the
+cap, which every address reader already skips). A lookup that FAILS is not a
+miss. Anything that decides "settled" for a cached render — the share card, an
+export — treats a recorded miss as settled; the per-source negative marker
+alone cannot say so, since it is written against an order's first source.
 
 **There is one details panel, and one way of opening it.** `templates/_details.html`
 draws what a title is, rendered through `app/details_panel.py` — which names the
@@ -227,6 +249,14 @@ shared `parse_item_key` or `item_key` — the shared parser reads
 `tests/ranker/test_item_keys.py` holds the second rule; `tests/ranker/test_seasons.py`
 walks a show and its season through every operation that names a row. The
 scripts on the board treat a key as an opaque string and must go on doing so.
+WHAT A ROW IS CALLED AND COUNTS follows what it is. `app/ranker/seasons.py`'s
+`row_label` is the one spelling of its name ("Show — Season 3", or the season's
+own name, `tier_items.season_name`) for the row, its details heading, the
+removal history and the exports; and a row's counts describe the row — a season
+has no season count and its own episode total. `core._redefine_row` REWRITES
+those (`_DEFINING_FACTS`) whenever a row's season changes, from the season list
+already read (`seasons.season_facts`) or blank, never carrying the old
+definition's numbers across.
 
 **Migrations are append-only, and migration 19 is the one recorded exception.**
 `app/db.py` owns the rule; this is the note it points at. 19 shipped classifying an

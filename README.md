@@ -509,15 +509,19 @@ app/
                        board keeps of the titles and tiers taken off it
     routes.py         The rankings page and its board API
     item_keys.py      What a board row is called: a title, or one season of it
-    seasons.py        What a show row's season choice offers and suggests
+    seasons.py        What a show row's season choice offers and suggests, and
+                       what a season row is called and counts
     sources.py        Where rankable titles come from
     imports.py        Seeding a board from what the viewer has finished
     exports.py        Turning a board into the thing a user takes away
     grid_builder.py   The exported poster grid: pixels, and nothing else
   media/
-    posters.py        Poster tiles on disk (fetch, normalize, cache)
+    posters.py        Which picture a title has (an address a page draws through
+                       the image proxy), and the tiles on disk that the share
+                       card and a board export composite
     logos.py          Network logo tiles
-    artwork.py        Poster URL bookkeeping (show_posters); no downloads
+    artwork.py        Poster URL bookkeeping (show_posters, season_posters, a
+                       title known to have none); no downloads
     user_images.py    Per-user avatar and grid-header images
     imaging.py        Font, text-in-a-box and circular-mask primitives, shared by
                        every renderer that draws a string

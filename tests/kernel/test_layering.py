@@ -321,7 +321,10 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "result makes. The add modals' as-you-type list is the titles the "
         "calendar already stores (entries.titles_matching), and a pick from it "
         "is read back out of those stored rows by identity (entries.stored_title) "
-        "— the calendar owns those rows, so it owns the verbs that read them"),
+        "— the calendar owns those rows, so it owns the verbs that read them. A "
+        "row's picture is first the one the calendar's own record of the title "
+        "carries (entries.posters_for), so a title a month has loaded costs no "
+        "lookup"),
     (RANKER, CALENDAR): Edge(
         "the board's search lists, as somebody types, the titles this instance "
         "already stores (entries.titles_matching), and a result picked from that "
