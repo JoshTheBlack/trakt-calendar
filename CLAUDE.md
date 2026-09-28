@@ -212,6 +212,22 @@ answer redraws it. The add-to-library rule lives in one place per question:
 (`app/integrations/routes.py`) for what state each is in, `add_title` beside it
 for the add itself.
 
+**A rankings board row is a title OR one season of it, and its key says which.**
+`app/ranker/item_keys.py` owns the one spelling and the one parser:
+`show:tmdb:1234` is the whole show — exactly the shared ItemKey's flat form, so
+every key already stored (a removal, a deleted tier's `items_json`, a backup, a
+page open in another tab) still names the row it always did — and
+`show:tmdb:1234:s2` is its season 2. A show and any of its seasons sit on one
+board as separate rows (`tier_items.season`, unique over `IFNULL(season, -1)`),
+so a lookup that leaves the season out does not fail: it names the wrong row, or
+none. That is why `app/ranker/core.py` matches every key with the unique index's
+own expression (`_key_match`), and why no module in `app/ranker/` may call the
+shared `parse_item_key` or `item_key` — the shared parser reads
+`show:tmdb:1234:s2` as the id `1234:s2` and quietly matches nothing.
+`tests/ranker/test_item_keys.py` holds the second rule; `tests/ranker/test_seasons.py`
+walks a show and its season through every operation that names a row. The
+scripts on the board treat a key as an opaque string and must go on doing so.
+
 **Migrations are append-only, and migration 19 is the one recorded exception.**
 `app/db.py` owns the rule; this is the note it points at. 19 shipped classifying an
 unfrozen month's rows by comparing their month against the CLOCK, which turned a
@@ -281,7 +297,13 @@ held is drawn rather than swept on afterwards — and a held one refusing the
 click is `pointer-events: none`, not an event filter on its trigger.
 Moving a title between tiers is one button per destination ON THE ROW, posting to the
 same route a bulk move already used — a menu shared by the whole board is what
-made "which row opened it" a question the browser had to answer.
+made "which row opened it" a question the browser had to answer. Setting which
+season a show row is lives in that same menu: a `<details>` whose `<summary>`
+asks for the season list `click once`, and one button per season posting
+itself, a season the board already holds being `disabled` rather than refused
+afterwards. The request is on the summary and never the `<details>`, because
+htmx's attribute inheritance is on (static/js/boost.js) and a trigger on an
+ancestor becomes the trigger of the form inside it.
 A saved view preference is `hx-post` plus `hx-json-enc` on the control
 itself, answered with the page's own `#pageMeta` out of band — which is how a
 class reaches <body>, the one element a swap can never replace. And a title

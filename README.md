@@ -508,6 +508,8 @@ app/
     core.py           The board data layer: tiers, entries, ordering, and what a
                        board keeps of the titles and tiers taken off it
     routes.py         The rankings page and its board API
+    item_keys.py      What a board row is called: a title, or one season of it
+    seasons.py        What a show row's season choice offers and suggests
     sources.py        Where rankable titles come from
     imports.py        Seeding a board from what the viewer has finished
     exports.py        Turning a board into the thing a user takes away
