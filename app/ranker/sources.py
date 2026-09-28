@@ -1,24 +1,28 @@
 """Where titles come from, behind seams the rest of the ranker cannot see past.
 
 The ranker takes titles from three kinds of place: a search, a ratings list, and
-(optionally) the tracker. Each is a Protocol here with one implementation today,
-because a second service is a question of when rather than whether — and the
-cost of finding that out late is a provider's name threaded through routes,
-templates and stored rows.
+(optionally) the tracker. Routes ask this module and get back board items and
+`TitleRef`s, which say nothing about which service produced them, so nothing
+downstream names a provider.
 
-THE RULE THIS MODULE EXISTS TO ENFORCE: nothing outside a provider
-implementation calls a provider function. Routes ask this module for a source
-and get back `TitleRef`s, which say nothing about who produced them. Adding a
-service means adding a class here (and, for the tracker seam, in imports.py) —
-not editing anything downstream.
+THE SEARCH IS THE APP'S, NOT THIS FEATURE'S. The board asks exactly what the
+calendar's and the tracker's add boxes ask: TYPING reads the titles this instance
+already stores (app/calendar/entries.py's titles_matching — the calendar owns
+those rows, so it owns the verb), and ENTER asks the services through
+app/providers/title_search.py, the one fan-out and merge every searching feature
+shares. What is the ranker's is what a chosen result BECOMES — a board item,
+named by reference and read back from what a service said (`named_hit`,
+`board_item`).
 
-CREDENTIALS ARE NOT THE SAME FOR ALL THREE, and getting it backwards is the easy
-mistake:
-  - SEARCH uses the instance's own credential. The rankings grant does not imply
-    a linked account of any kind, so a search that reached for the caller's token
-    would break for exactly the accounts this feature is designed to serve. What
-    it asks for is public catalogue data, so the operator's credential is the
-    right one.
+CREDENTIALS ARE NOT THE SAME FOR BOTH SERVICE READS, and getting it backwards is
+the easy mistake:
+  - SEARCH builds the viewer's settings (auth/viewer.py), which is how "who is
+    asked" is answered for every searching feature: Trakt authenticates a
+    catalogue search with the instance's own client id, so it answers for every
+    account — the rankings grant implies no linked account at all — while Simkl
+    searches only with the viewer's OWN token and so only for a viewer who has
+    linked one (`providers.for_catalogue_search`). Nobody's search is made with
+    the operator's token.
   - RATINGS are private to one person and need THEIR token. With no linked
     identity there is no such token, and the action is hidden rather than
     offered and then failed.
@@ -33,7 +37,12 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from . import item_keys
-from ..auth import trakt_routes
+from .. import providers
+from ..auth import trakt_routes, viewer
+# The stored-title half of every search. See the module docstring for why the
+# ranker reads it through the calendar's verb rather than a query of its own.
+from ..calendar import entries as calendar_entries
+from ..providers import title_search
 from ..providers.trakt import TraktError, detail as trakt_detail, sync as trakt_sync
 from ..config import Settings, load_settings
 # Re-exported deliberately: `sources.Media` and `sources.parse_media` are what
@@ -169,17 +178,6 @@ class NoLinkedIdentity(SourceUnavailable):
 # the seams
 # ---------------------------------------------------------------------------
 
-class TitleSearchSource(Protocol):
-    """Find titles by name. Public catalogue data — see the credential note in
-    the module docstring.
-
-    `cached_only` answers only from what an identical search already stored, and
-    never asks the service: an empty answer means nothing is stored, not that
-    nothing matches. `title_from_search` below is what it is for."""
-    async def search(self, query: str, media: Media, *,
-                     cached_only: bool = False) -> list[TitleRef]: ...
-
-
 class RatingsSource(Protocol):
     """One person's own scores, read with their own credential."""
     async def fetch_ratings(self, user_id: int) -> list[RatedTitle]: ...
@@ -210,44 +208,6 @@ def _translating_failures():
         yield
     except TraktError as exc:
         raise SourceUnavailable(str(exc), getattr(exc, "status", None)) from exc
-
-
-class TraktSearchSource:
-    """`TitleSearchSource` over Trakt's /search, using the instance credential."""
-
-    def __init__(self, settings: Settings | None = None):
-        self._settings = settings or load_settings()
-
-    @property
-    def configured(self) -> bool:
-        # The catalogue credential, because /search is a public read that
-        # authenticates with the client id alone — this source can answer for an
-        # instance that has never held an access token.
-        return bool(self._settings.trakt_catalogue_configured)
-
-    async def search(self, query: str, media: Media, *,
-                     cached_only: bool = False) -> list[TitleRef]:
-        with _translating_failures():
-            entries = await trakt_detail.search_titles(
-                self._settings, str(media), query, cache_only=cached_only)
-        return [_ref_from_search(entry, media) for entry in entries]
-
-
-def _ref_from_search(entry: Mapping[str, Any], media: Media) -> TitleRef:
-    """One Trakt search result as a TitleRef.
-
-    Season and episode counts stay None: a search result does not carry them,
-    and a lookup per result to fill them in would spend a call apiece on
-    information the picker does not show.
-    """
-    return TitleRef(
-        media=media,
-        title=entry.get("title") or "",
-        ids=dict(entry.get("ids") or {}),
-        year=int_or_none(entry.get("year")),
-        network=entry.get("network") or "",
-        runtime=int_or_none(entry.get("runtime")),
-    )
 
 
 class TraktRatingsSource:
@@ -334,36 +294,117 @@ async def user_trakt_settings(user_id: int) -> Settings | None:
 # Routes call these rather than naming an implementation, which is both the seam
 # and what lets a test drive the whole path with a fake source.
 
-def search_source() -> TitleSearchSource:
-    """The search seam, credentialled instance-wide."""
-    return TraktSearchSource()
+async def search_settings(user_id: int) -> Settings:
+    """The settings a board search asks the services with — the viewer's own
+    (auth/viewer.py), which decides who is asked. See the module docstring."""
+    return await viewer.settings_for_user(user_id)
 
 
-async def title_from_search(query: str, media: Media, key: str) -> dict[str, Any] | None:
-    """The title a search already answered, read back out of that answer, in the
-    shape the board stores — or None when that answer is not stored any more or
-    does not contain `key`.
+async def typed_search(query: str, media: Media, limit: int) -> list[title_search.MergedSearchHit]:
+    """The stored titles matching what is being TYPED, whoever's calendar
+    loaded them. UNFILTERED — adding a title is not asking where it is on
+    anybody's calendar — and no service is asked and nothing is budgeted: it is
+    an index read (app/calendar/entries.py's titles_matching)."""
+    return await calendar_entries.titles_matching(query, media, limit)
 
-    HOW A RESULT IS ADDED WITHOUT THE PAGE CARRYING THE TITLE. The page names the
-    query it searched for and the key of the result picked; this reads the same
-    search again from the shared response cache, where the search box's own
-    request put it moments before, and takes the title from the service's answer.
-    So what a board stores is what the service said about the title — never
-    fields a page handed back — and adding it costs no second lookup.
 
-    CACHE ONLY, AND DELIBERATELY. An answer that has aged out is refused rather
-    than fetched again: re-asking here would make adding a title a way to search
-    that the search budget never sees.
+def too_short(query: str) -> bool:
+    """Whether a typed query is still too short to list anything for — the rule
+    the stored-title search itself keeps, asked of it rather than restated."""
+    return len(calendar_entries.fold_title(query)) < calendar_entries.MIN_QUERY
+
+
+def searchable(settings: Settings) -> bool:
+    """Whether any service can be asked at all with these settings."""
+    return bool(providers.for_catalogue_search(settings))
+
+
+async def catalogue_search(settings: Settings, query: str, media: Media, *,
+                           cached_only: bool = False) -> title_search.SearchMergeResult:
+    """Enter's search: every service these settings can ask, merged into one
+    list, each hit marked with who found it. The shared fan-out stores each
+    service's answer, which is what lets a pick be read back later by its place
+    in this list (`named_hit`). `cached_only` re-reads that stored answer and
+    asks nobody — how a page answering an add redraws the search it came from.
     """
-    refs = await search_source().search(query, media, cached_only=True)
-    return next((item for item in items_from_refs(refs) if result_key(item) == key), None)
+    return await title_search.search_catalogue(
+        providers.for_catalogue_search(settings), settings, media, query,
+        cached_only=cached_only)
 
 
-def result_key(item: Mapping[str, Any]) -> str:
-    """The board key a search result is named by — the key of the row adding it
-    would make, which is how a result is drawn as already held."""
-    return item_keys.board_key(item["media"], item["match_source"], item["match_id"],
-                               item.get("season"))
+async def named_hit(settings: Settings, media: Media,
+                    named: Mapping[str, Any]) -> title_search.MergedSearchHit | None:
+    """The result a request NAMES, read back from what a service said, or None
+    when nothing this instance holds answers to that name.
+
+    TWO WAYS OF NAMING, ONE PER HALF OF THE SEARCH, and neither carries a title:
+    a stored title by the identity it is stored under (`t`, a
+    calendar_titles.title_key — app/calendar/entries.py's stored_title), and a
+    service's hit by the query that found it and its place in that answer (`q`
+    and `i` — title_search.resolve_hit, which re-reads the stored search and
+    asks nobody). So what a board stores is what a service said, never fields a
+    page handed back, and a key this instance does not hold is a refusal.
+    """
+    title_key = str(named.get("t") or "")
+    if title_key:
+        return await calendar_entries.stored_title(title_key, media)
+    query = str(named.get("q") or "").strip()
+    if not query:
+        return None
+    return await title_search.resolve_hit(settings, media, query, named.get("i"))
+
+
+def gone_sentence(named: Mapping[str, Any]) -> str:
+    """What to say when `named_hit` finds nothing: which way the result was
+    named says what went away, and so what to do about it."""
+    if named.get("t"):
+        return "That title is no longer stored here — search for it again."
+    return "That search has expired — search for it again."
+
+
+def hit_key(hit: title_search.MergedSearchHit,
+            looked_up: Mapping[str, Any] | None = None) -> str | None:
+    """The board key of the WHOLE title a hit is, or None for a hit that shares
+    no id the identity waterfall keys on (a service's season-title before its
+    per-title lookup). It is how a result is drawn as already held, and what a
+    dragged result's row is inserted under. `looked_up` is the ids a season
+    lookup surfaced, filling what the hit left out — the same union
+    `board_item` stores."""
+    identity = resolve_identity({**(looked_up or {}), **hit.ids})
+    if identity is None:
+        return None
+    return item_keys.board_key(str(hit.media), *identity)
+
+
+async def season_pick(settings: Settings,
+                      hit: title_search.MergedSearchHit) -> title_search.Pick | None:
+    """A show hit's season list — the per-title lookup a result's checklist is
+    opened for — plus every id it surfaces and the season a season-title names.
+    The shared picker verb, so a title's seasons read the same here as in the
+    tracker's add."""
+    return await title_search.pick_from_hit(settings, hit, cached_only=False)
+
+
+async def board_item(settings: Settings,
+                     hit: title_search.MergedSearchHit) -> dict[str, Any] | None:
+    """The whole title a hit names, as the board data layer stores it, or None
+    for one with no id a board can key it on.
+
+    A HIT THE SEARCH LEFT KEYLESS IS READ AGAIN THROUGH ITS SEASON LOOKUP, cache
+    only: a service that files each season as a title of its own often answers a
+    search with no shared id, and opening the result's season list is what
+    fetched the ids that key it. Never a request here — an add that could look
+    something up would be a search nobody counted.
+    """
+    ids = dict(hit.ids)
+    network = hit.network
+    if resolve_identity(ids) is None and hit.media is Media.SHOW:
+        pick = await title_search.pick_from_hit(settings, hit, cached_only=True)
+        if pick is not None:
+            ids = {**pick.ids, **ids}
+            network = network or pick.network
+    return TitleRef(media=hit.media, title=hit.title, ids=ids, year=hit.year,
+                    network=network or "", runtime=hit.runtime).as_item()
 
 
 def ratings_source() -> RatingsSource:

@@ -17,10 +17,11 @@ breaking it:
     run today; this cannot.
 
 The credential rules are here too, because they are the pair most easily got
-backwards: a SEARCH must use the instance credential (this grant implies no
-linked account, so reaching for a per-user token would break the very accounts
-this file is about), while a RATINGS read must use the caller's own and hide
-itself entirely when there is none.
+backwards: a SEARCH asks with the viewer's own settings, which for this account
+carry no token at all — Trakt answers a catalogue search on the instance's client
+id alone, so the search still works, and the operator's token is never borrowed —
+while a RATINGS read must use the caller's own and hide itself entirely when
+there is none.
 
 No network. Every provider call is a stand-in, and the tests that matter assert
 the real provider functions were never reached.
@@ -31,6 +32,7 @@ import asyncio
 import json
 import re
 import unittest
+from html import unescape
 from unittest import mock
 
 from fastapi.testclient import TestClient
@@ -42,6 +44,8 @@ from app.config import Settings, save_settings
 from app.main import app
 from app.ranker import core as ranker
 from app.ranker import routes as ranker_routes, sources as ranker_sources
+from app.providers import title_search
+from app.providers.base import Source
 from app.ranker.sources import Media, RatedTitle, TitleRef
 from tests.support import APP_DIR, ORIGIN, migrated_db
 
@@ -49,30 +53,35 @@ from tests.support import APP_DIR, ORIGIN, migrated_db
 OPERATOR_TOKEN = "operator-instance-token"
 USER_TOKEN = "this-users-own-token"
 
-class FakeSearchSource:
-    """A `TitleSearchSource` that answers from a canned list.
-
-    Its existence is half the point: the route talks to a Protocol, so a source
-    that has never heard of any provider drives the whole path.
-    """
-
-    def __init__(self, refs: list[TitleRef]):
-        self.refs = refs
-        self.calls: list[tuple[str, Media]] = []
-
-    async def search(self, query: str, media: Media, *,
-                     cached_only: bool = False) -> list[TitleRef]:
-        self.calls.append((query, media, cached_only))
-        return [ref for ref in self.refs if ref.media == media]
-
-
-def result_keys(html: str) -> list[str]:
-    """The keys of the results a search fragment drew."""
-    return re.findall(r'class="ranker-result[^"]*"\s+data-key="([^"]+)"', html)
+def result_rows(html: str) -> list[dict]:
+    """The results a search fragment drew, each as the reference it posts."""
+    return [json.loads(unescape(vals)) for vals in
+            re.findall(r'<div class="search-row ranker-result"[^>]*?hx-vals="([^"]*)"', html)]
 
 
 def result_titles(html: str) -> list[str]:
-    return re.findall(r'<span class="ranker-title">([^<]*)</span>', html)
+    return [t.strip() for t in re.findall(r'<span class="search-title">([^<]*)', html)]
+
+
+def canned(*hits):
+    """The services' fan-out, answering `hits` for a matching medium and
+    recording each call — the seam the board's search goes through
+    (providers/title_search.py), so no provider function runs."""
+    calls = []
+
+    async def _search(asked, settings, media, query, *, cached_only=False):
+        calls.append((query, media, cached_only))
+        return title_search.SearchMergeResult(
+            hits=[hit for hit in hits if hit.media == media], failed=frozenset())
+    return _search, calls
+
+
+def a_hit(title_ref: "TitleRef") -> title_search.MergedSearchHit:
+    return title_search.MergedSearchHit(
+        key=None, season=None, source_ids={Source.TRAKT: "1"}, ids=dict(title_ref.ids),
+        title=title_ref.title, year=title_ref.year, network=title_ref.network,
+        runtime=title_ref.runtime, overview="", media=title_ref.media)
+
 
 class FakeRatingsSource:
     def __init__(self, rated: list[RatedTitle]):
@@ -171,19 +180,20 @@ class JourneyTests(StandaloneTestCase):
         self.assertHasNothingElse()
         self.assertEqual(self.client.get("/rankings").status_code, 200)
 
-        source = FakeSearchSource([a_show(1396, "Breaking Bad"), a_movie(550, "Fight Club")])
+        search, calls = canned(a_hit(a_show(1396, "Breaking Bad")),
+                               a_hit(a_movie(550, "Fight Club")))
         made = self.client.post("/rankings/boards/new", json={"name": "Top 2026"})
         board = made.headers["HX-Location"].split("board=")[1]
-        with mock.patch.object(ranker_sources, "search_source", lambda: source):
-            found = self.client.get("/rankings/fragments/search?q=brea&media=show").text
+        with mock.patch.object(title_search, "search_catalogue", search):
+            found = self.client.get(
+                f"/rankings/fragments/search?board={board}&q=brea&media=show").text
             self.assertEqual(result_titles(found), ["Breaking Bad"])
-            key, = result_keys(found)
-            self.assertEqual(key, "show:tmdb:1396")
-            added = self.client.post(f"/api/rankings/boards/{board}/items",
-                                     json={"query": "brea", "key": key})
+            named, = result_rows(found)
+            added = self.client.post(f"/api/rankings/boards/{board}/items", json=named)
         self.assertEqual(added.json()["added"], 1)
+        self.assertEqual(added.json()["key"], "show:tmdb:1396")
         # One real search, and the add read that search back rather than asking.
-        self.assertEqual([call[2] for call in source.calls], [False, True])
+        self.assertEqual([call[2] for call in calls], [False, True])
 
         tiered = self.client.post(f"/rankings/boards/{board}/tiers/new", json={"label": "S"})
         tier_uid = re.search(r'<details class="ranker-tier"[^>]*data-uid="([^"]+)"',
@@ -216,28 +226,33 @@ class JourneyTests(StandaloneTestCase):
         self.assertHasNothingElse()
 
     def test_a_movie_only_board_works_the_same_way(self):
-        source = FakeSearchSource([a_movie(550, "Fight Club")])
+        search, calls = canned(a_hit(a_movie(550, "Fight Club")))
         asyncio.run(ranker.create_board(self.user_id, uid="m1", media_scope="movie"))
-        with mock.patch.object(ranker_sources, "search_source", lambda: source):
-            found = self.client.get("/rankings/fragments/search?q=figh&media=movie").text
-            for key in result_keys(found):
-                self.client.post("/api/rankings/boards/m1/items",
-                                 json={"query": "figh", "key": key})
-        self.assertEqual({call[1] for call in source.calls}, {Media.MOVIE})
+        with mock.patch.object(title_search, "search_catalogue", search):
+            found = self.client.get("/rankings/fragments/search?board=m1&q=figh&media=movie").text
+            for named in result_rows(found):
+                self.client.post("/api/rankings/boards/m1/items", json=named)
+        self.assertEqual({call[1] for call in calls}, {Media.MOVIE})
         self.assertEqual(self.value("SELECT media FROM tier_items"), "movie")
         self.assertEqual(self.value("SELECT match_id FROM tier_items"), "550")
 
-    def test_a_title_with_no_shared_id_is_dropped_rather_than_stored(self):
+    def test_a_title_with_no_shared_id_is_refused_rather_than_stored(self):
         """It could not be told apart from another title of the same name, so
         there is nothing to rank — but it must not take the other results with
-        it."""
-        source = FakeSearchSource([
-            TitleRef(media=Media.SHOW, title="Nameless", ids={"slug": "nameless"}),
-            a_show(1396, "Breaking Bad"),
-        ])
-        with mock.patch.object(ranker_sources, "search_source", lambda: source):
-            found = self.client.get("/rankings/fragments/search?q=na").text
-        self.assertEqual(result_titles(found), ["Breaking Bad"])
+        it. Shown, because a season lookup may yet key it; refused on the add
+        when nothing does."""
+        search, _ = canned(
+            a_hit(TitleRef(media=Media.MOVIE, title="Nameless", ids={"slug": "nameless"})),
+            a_hit(a_movie(550, "Fight Club")))
+        asyncio.run(ranker.create_board(self.user_id, uid="m1", media_scope="movie"))
+        with mock.patch.object(title_search, "search_catalogue", search):
+            found = self.client.get("/rankings/fragments/search?board=m1&q=na&media=movie").text
+            self.assertEqual(result_titles(found), ["Nameless", "Fight Club"])
+            nameless, _ = result_rows(found)
+            refused = self.client.post("/api/rankings/boards/m1/items", json=nameless)
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn("no id a board can hold it by", refused.json()["error"])
+        self.assertEqual(self.value("SELECT COUNT(*) FROM tier_items"), 0)
 
 
 class AbsenceTests(StandaloneTestCase):
@@ -263,21 +278,24 @@ class AbsenceTests(StandaloneTestCase):
 class CredentialTests(StandaloneTestCase):
     """The two rules that are easy to get backwards."""
 
-    def test_search_uses_the_instance_credential_and_never_a_per_user_token(self):
+    def test_search_reaches_trakt_on_the_client_id_and_never_the_operators_token(self):
+        """This account has linked nothing, so its settings carry no token — and
+        Trakt still answers, because a catalogue search authenticates with the
+        instance's client id. What must never happen is the operator's own token
+        standing in for the viewer's."""
         seen = {}
 
         async def _search(settings, media, query, cache_only=False):
             seen["token"] = settings.trakt_access_token
+            seen["client"] = settings.trakt_client_id
             return []
 
         # The real Trakt adapter runs here — only the call at its edge is
         # replaced — so this pins what the adapter actually reaches for.
-        with mock.patch.object(trakt_detail, "search_titles", _search), \
-             mock.patch.object(trakt_routes, "access_token_for_user",
-                               exploding("a search reached for the caller's token")):
+        with mock.patch.object(trakt_detail, "search_titles", _search):
             resp = self.client.get("/rankings/fragments/search?q=test")
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(seen["token"], OPERATOR_TOKEN)
+        self.assertEqual(seen, {"token": "", "client": "instance-client"})
 
     def test_a_ratings_read_uses_the_callers_own_token(self):
         seen = {}
@@ -311,13 +329,13 @@ class ProtocolTests(StandaloneTestCase):
     """Both paths go through their seam, so a source that is not this app's
     current provider drives them without any provider function running."""
 
-    def test_a_fake_source_drives_search_with_no_provider_call(self):
-        source = FakeSearchSource([a_show(1396, "Breaking Bad")])
-        with mock.patch.object(ranker_sources, "search_source", lambda: source), \
+    def test_a_fake_fan_out_drives_search_with_no_provider_call(self):
+        search, calls = canned(a_hit(a_show(1396, "Breaking Bad")))
+        with mock.patch.object(title_search, "search_catalogue", search), \
              mock.patch.object(trakt_detail, "search_titles", exploding("the provider was called")):
             resp = self.client.get("/rankings/fragments/search?q=brea")
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(source.calls, [("brea", Media.SHOW, False)])
+        self.assertEqual(calls, [("brea", Media.SHOW, False)])
 
     def test_a_fake_source_drives_the_ratings_seed_with_no_provider_call(self):
         source = FakeRatingsSource([

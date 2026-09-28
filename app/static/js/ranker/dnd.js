@@ -100,7 +100,9 @@ function initSearchDrag() {
         // place titles live.
         group: { name: 'ranker', pull: 'clone', put: false },
         sort: false,
-        draggable: '.ranker-result:not(.is-held)',
+        // A result with no key names no row yet (the add has to look it up), so
+        // there is nothing to insert where it drops; it is added by clicking.
+        draggable: '.ranker-hit[data-key]:not(.is-held)',
         animation: 140,
         onEnd: onSearchDragEnd,
     }));
@@ -132,15 +134,16 @@ async function onSearchDragEnd(evt) {
     const target = dropped.parentElement;
     const index = Array.from(target.children).indexOf(dropped);
     dropped.remove();
-    // The clone still carries what the result did — its key and its query — which
-    // is all an add sends (search.js's addFoundTitle).
+    // The clone still carries what the result did — the reference it was drawn
+    // with — which is all an add sends (search.js's addFoundTitle).
+    let added;
     try {
-        await addFoundTitle(dropped);
+        added = await addFoundTitle(dropped);
     } catch (e) {
         toast(e.message, false);
         return;
     }
-    insertRow(target, target.children[index], key);
+    insertRow(target, target.children[index], added || key);
     // THE ONE RESULT THIS JUST ADDED, and only that one. The list is the server's
     // and arrives with the board's holdings already marked
     // (_ranker_search_results.html); a drop is the single way of adding that does
@@ -148,7 +151,7 @@ async function onSearchDragEnd(evt) {
     // drawn list could not have had. The clone was removed above — the original
     // is still in the list and is what has to stop being draggable.
     const offered = document.querySelector(
-        '#searchResults .ranker-result[data-key="' + CSS.escape(key) + '"]');
+        '#searchResults .ranker-hit[data-key="' + CSS.escape(key) + '"]');
     if (offered) offered.classList.add('is-held');
     refreshCounts();
     scheduleSave();

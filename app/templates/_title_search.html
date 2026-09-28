@@ -60,10 +60,16 @@
     that attribute from ANY ancestor — a GET under a json-enc element throws in
     the browser, which no server test can see; each says so itself, the shape
     tests/kernel/test_settings_panel.py asks of every read inside a form that
-    names the encoder. -#}
+    names the encoder.
+
+    `value` is the query to draw the box holding, for a surface whose answer to
+    a press is the whole page (the rankings board): a box that came back empty
+    would lose the search somebody is part-way through adding from. `autofocus`
+    is off for that surface for the same reason — every whole-page answer would
+    otherwise pull the reader's focus, and the page, back up to the box. -#}
 {% macro box(results, typed_url, live_url, input_id, placeholder, button,
              form_class='search-bar', label='', required=false, include='',
-             busy_id='', button_class='btn-ghost small') -%}
+             busy_id='', button_class='btn-ghost small', value='', autofocus=true) -%}
 <form class="{{ form_class }}" hx-boost="false" hx-json-enc="false"
       hx-get="{{ live_url }}" hx-target="{{ results }}"
       {%- if busy_id %} hx-indicator="#{{ busy_id }}"{% endif %}
@@ -72,7 +78,9 @@
     <label for="{{ input_id }}">{{ label }}</label>
     {%- endif %}
     <input type="text" id="{{ input_id }}" name="q" placeholder="{{ placeholder }}"
-           autocomplete="off" spellcheck="false" autofocus{% if required %} required{% endif %}
+           autocomplete="off" spellcheck="false"
+           {%- if value %} value="{{ value }}"{% endif %}
+           {%- if autofocus %} autofocus{% endif %}{% if required %} required{% endif %}
            hx-get="{{ typed_url }}" hx-json-enc="false" hx-trigger="input changed" hx-target="{{ results }}"
            {%- if include %} hx-include="{{ include }}"{% endif %}
            {{ sync(results) }}>

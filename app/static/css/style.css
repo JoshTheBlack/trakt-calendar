@@ -2671,20 +2671,38 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow-y: auto;
     border: 1px solid var(--card-border); border-radius: 10px; padding: 6px; background: var(--card);
 }
-.ranker-result {
-    display: flex; align-items: center; gap: 8px; padding: 5px 7px; border-radius: 8px;
-    cursor: grab; font-size: 0.8rem;
+/* A RESULT IS THE SHARED SEARCH ROW (_title_search.html's `row`, `.search-row`
+   above) with the board's own two additions: it can be dragged into a tier, and a
+   show's season checklist opens under it. The poster is smaller than the
+   calendar's because the pool column is narrow. */
+.ranker-hit { display: flex; flex-direction: column; }
+.ranker-hit .ranker-result { cursor: pointer; }
+.ranker-hit[data-key] .ranker-result { cursor: grab; }
+.ranker-results .search-poster { width: 34px; height: 51px; }
+/* A RESULT WHOSE WHOLE TITLE IS ALREADY ON THE BOARD TAKES NO POINTER AT ALL,
+   which is what stops a click adding it twice — a drag can end in a click on the
+   result it just added, and ranker/dnd.js marks that one held the moment the drop
+   is written. The stylesheet, not a filter on the result's trigger: htmx builds
+   `click[...]` with the Function constructor, which the app's
+   Content-Security-Policy refuses. The drag library already declines to pick a
+   held one up. Only the ROW: a held show's seasons can still be opened and added. */
+.ranker-hit.is-held > .ranker-result { opacity: 0.45; pointer-events: none; }
+.ranker-hit-seasons { margin: 0 8px 4px 52px; font-size: 0.76rem; }
+.ranker-hit-seasons > summary {
+    cursor: pointer; color: var(--text-faint); width: fit-content; padding: 1px 4px;
+    border-radius: 6px;
 }
-.ranker-result:hover { background: rgba(255,255,255,0.06); }
-.ranker-result img { width: 30px; height: 45px; object-fit: cover; border-radius: 3px; background: var(--card-border); }
-.ranker-result .ranker-name { flex: 1; min-width: 0; }
-/* A RESULT ALREADY ON THE BOARD TAKES NO POINTER AT ALL, which is what stops a
-   click adding it twice — a drag can end in a click on the result it just added,
-   and ranker/dnd.js marks that one held the moment the drop is written. The
-   stylesheet, not a filter on the result's trigger: htmx builds `click[...]`
-   with the Function constructor, which the app's Content-Security-Policy
-   refuses. The drag library already declines to pick a held one up. */
-.ranker-result.is-held { opacity: 0.45; pointer-events: none; }
+.ranker-hit-seasons > summary:hover { color: var(--text); background: rgba(255,255,255,0.06); }
+.ranker-hit-form { display: flex; flex-direction: column; gap: 2px; padding: 4px 0; }
+.ranker-hit-choice {
+    display: flex; align-items: baseline; gap: 8px; padding: 2px 4px; border-radius: 6px;
+    cursor: pointer;
+}
+.ranker-hit-choice:hover { background: rgba(255,255,255,0.05); }
+.ranker-hit-choice.is-suggested .ranker-season-label { color: var(--gold-soft); font-weight: 600; }
+.ranker-hit-choice.is-held { cursor: default; opacity: 0.45; }
+.ranker-hit-choice .ranker-season-note { margin-left: auto; }
+.ranker-hit-form > button { align-self: flex-start; margin-top: 4px; }
 
 /* ---- what a board could put back ----
    HIDDEN WHILE IT HOLDS NOTHING, by asking whether it holds an entry. The

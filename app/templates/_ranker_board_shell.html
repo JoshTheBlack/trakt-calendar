@@ -10,6 +10,7 @@
    longer the ability to change it. #}
 {% import '_confirm.html' as confirm_box %}
 {% import '_ranker_tier_strip.html' as tier_strip %}
+{% import '_title_search.html' as title_search with context %}
 <div class="ranker-board" id="rankerBoard" data-board="{{ board.uid }}">
 
     <section class="ranker-pool-col">
@@ -18,49 +19,50 @@
             <span class="ranker-count" id="poolCount">{{ board.pool | length }}</span>
         </div>
 
-        {# THE SEARCH IS MARKUP. The box and the media choice each ask
-           /rankings/fragments/search for the results and swap them in — the
-           house pattern the calendar's own search box uses, debounce and all.
-           Not a form: a GET fragment needs none. THE BOARD IS NAMED IN THE
-           ADDRESS because a result has to be drawn knowing whether this board
-           already holds it, and has to carry the button that adds it here.
-           ONE ANSWER AT A TIME, ACROSS BOTH CONTROLS: syncing on the results
-           rather than on each control stops a slow answer for "sev" landing after
-           the one for "severance" and overwriting it. #}
+        {# THE SEARCH IS THE APP'S ONE TITLE SEARCH (_title_search.html's `box`,
+           whose comment holds the measured request ordering): TYPING lists the
+           titles this instance already stores and asks no service; ENTER, or the
+           button, asks the viewer's services. THE BOARD IS NAMED IN BOTH ADDRESSES
+           because a result has to be drawn knowing whether this board already
+           holds it, and has to carry the request that adds it here.
+           THE QUERY COMES BACK WITH THE PAGE (`value`), and nothing takes focus
+           when it does (`autofocus=false`): adding a title answers with the whole
+           page, and a box that redrew empty — or pulled the reader back up to it —
+           would lose the search somebody is part-way through adding from. #}
         <div class="ranker-add">
-            <div class="ranker-search-row">
-                {# `input changed`, the calendar search box's trigger and for its
-                   reason (index.html): a pasted or cleared title presses no key. #}
-                {# THE QUERY COMES BACK WITH THE PAGE. Adding a title answers with
-                   the whole page, so a box that redrew empty would lose the search
-                   somebody is part-way through adding from. #}
-                <input type="search" id="searchBox" name="q" placeholder="Search for a title…"
-                       autocomplete="off" value="{{ search.query }}"
-                       hx-get="/rankings/fragments/search?board={{ board.uid | urlencode }}"
-                       hx-trigger="input changed delay:350ms"
-                       hx-include="#searchMedia" hx-target="#searchResults" hx-swap="innerHTML"
-                       hx-sync="#searchResults:replace">
-                {# `autocomplete="off"` now that the SERVER chooses which option is
-                   selected: without it a reload restores whatever this was last
-                   set to, over the choice the page was drawn with. #}
+            {%- set board_query = '?board=' ~ (board.uid | urlencode) %}
+            {% call title_search.box('#searchResults',
+                                     '/rankings/fragments/search-stored' ~ board_query,
+                                     '/rankings/fragments/search' ~ board_query,
+                                     'searchBox', 'Search for a title…', 'Search',
+                                     form_class='ranker-search-row', include='#searchMedia',
+                                     value=search.query, autofocus=false) %}
+                {#- INSIDE THE FORM, so Enter sends it with the query; named by the
+                    box's `include` for the typed read. Changing it lists the stored
+                    titles again under the other medium — its own request, so it
+                    does not wait for Enter, in the box's queue like everything else
+                    that asks for the results. `autocomplete="off"` because the
+                    SERVER chooses which option is selected: without it a reload
+                    restores whatever this was last set to, over the choice the page
+                    was drawn with. -#}
                 <select id="searchMedia" name="media" aria-label="What to search for"
                         autocomplete="off"
-                        hx-get="/rankings/fragments/search?board={{ board.uid | urlencode }}"
-                        hx-trigger="change"
-                        hx-include="#searchBox" hx-target="#searchResults" hx-swap="innerHTML"
-                        hx-sync="#searchResults:replace">
+                        hx-get="/rankings/fragments/search-stored{{ board_query }}"
+                        hx-trigger="change" hx-include="#searchBox" hx-target="#searchResults"
+                        hx-json-enc="false" {{ title_search.sync('#searchResults') }}>
                     {% if board.media_scope != 'movie' %}<option value="show"
                         {%- if search.media == 'show' %} selected{% endif %}>Shows</option>{% endif %}
                     {% if board.media_scope != 'show' %}<option value="movie"
                         {%- if search.media == 'movie' %} selected{% endif %}>Movies</option>{% endif %}
                 </select>
-            </div>
+            {% endcall %}
             {# EMPTY ON EVERY ARRIVAL BUT ONE, and the same partial the fragment
                sends: an add answers with the page, so the results it comes back
                with have to be the results a search would have drawn. #}
             <div class="ranker-results" id="searchResults">
-                {%- with query = search.query, results = search.results,
-                        held = search.held, message = "", board_uid = board.uid %}
+                {%- with query = search.query, media = search.media, rows = search.rows,
+                        typed = search.typed, too_short = false, no_catalogue = false,
+                        failed = search.failed, message = "", board_uid = board.uid %}
                 {%- include "_ranker_search_results.html" %}{%- endwith %}
             </div>
 

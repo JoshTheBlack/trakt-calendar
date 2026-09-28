@@ -247,18 +247,43 @@ class SearchIsMarkupTests(FragmentTestCase):
             with self.subTest(fragment=fragment):
                 self.assertNotIn(fragment, source)
 
-    def test_the_box_and_the_media_choice_ask_for_the_results_fragment(self):
+    def test_the_box_is_the_shared_search_and_every_control_queues(self):
+        """The board's box is _title_search.html's `box`: typing asks the stored
+        titles, the form (Enter) asks the services, and the media choice lists
+        the stored titles again — each in `queue last` on the results, the
+        ordering measured in both engines (the old `replace` lost Enter's
+        answer), and each a GET that says so to the json-enc ancestors."""
         self.board_with(pool=1)
         html = self.client.get("/rankings").text
-        for control in (r'<input type="search" id="searchBox"[^>]*>',
-                        r'<select id="searchMedia"[^>]*>'):
-            element = re.search(control, html, re.S).group(0)
-            with self.subTest(control=control):
-                # The BOARD is in the address, because a result has to be drawn
-                # knowing whether this board already holds it.
-                self.assertIn('hx-get="/rankings/fragments/search?board=b1"', element)
+        box = re.search(r'<input type="text" id="searchBox"[^>]*>', html, re.S).group(0)
+        form = re.search(r'<form class="ranker-search-row"[^>]*>', html, re.S).group(0)
+        media = re.search(r'<select id="searchMedia"[^>]*>', html, re.S).group(0)
+        # The BOARD is in every address, because a result has to be drawn
+        # knowing whether this board already holds it.
+        self.assertIn('hx-get="/rankings/fragments/search-stored?board=b1"', box)
+        self.assertIn('hx-trigger="input changed"', box)
+        self.assertIn('hx-include="#searchMedia"', box)
+        self.assertIn('hx-get="/rankings/fragments/search?board=b1"', form)
+        self.assertIn('hx-get="/rankings/fragments/search-stored?board=b1"', media)
+        self.assertIn('hx-include="#searchBox"', media)
+        for element in (box, form, media):
+            with self.subTest(element=element[:40]):
                 self.assertIn('hx-target="#searchResults"', element)
-                self.assertIn('hx-sync="#searchResults:replace"', element)
+                self.assertIn('hx-sync="#searchResults:queue last"', element)
+                self.assertIn('hx-json-enc="false"', element)
+                self.assertNotIn("replace", element)
+                self.assertNotIn("delay:", element)
+        # The select rides INSIDE the form, so Enter sends the medium too.
+        self.assertLess(html.index(form), html.index(media))
+        self.assertLess(html.index(media), html.index("</form>", html.index(form)))
+
+    def test_the_box_takes_no_focus_and_comes_back_holding_its_query(self):
+        """Every action on the board answers with the page; a box that pulled
+        focus would scroll the reader back up to it each time."""
+        self.board_with(pool=1)
+        box = re.search(r'<input type="text" id="searchBox"[^>]*>',
+                        self.client.get("/rankings").text, re.S).group(0)
+        self.assertNotIn("autofocus", box)
 
 
 def inside(html: str, opening: str) -> str:

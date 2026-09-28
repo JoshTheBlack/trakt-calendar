@@ -1,47 +1,83 @@
+{% import '_source_logo.html' as src with context %}
+{% import '_title_search.html' as title_search with context %}
 {# Titles a search found: the inside of #searchResults under the pool's search
-   box, fetched as the box is typed into (/rankings/fragments/search). The results
-   used to arrive as JSON and be built into this markup by a script.
+   box. The board's box is the app's one title search (_title_search.html's
+   `box`): TYPING lists the titles this instance already stores
+   (/rankings/fragments/search-stored), and ENTER asks the viewer's services
+   (/rankings/fragments/search). Both answer with this partial, and so does an
+   add, which redraws the search it came from with the page.
 
-   A RESULT CARRIES ITS KEY AND THE QUERY THAT FOUND IT, AND NOTHING ELSE ABOUT
-   THE TITLE. Adding one — by a click or by dragging it into a tier — sends those
-   two back, and the server reads the title out of this same search's stored
-   answer (ranker/sources.py's title_from_search). A result used to carry the
-   whole title serialized onto its element for the add to hand back, which let a
-   page decide what was stored.
+   EACH RESULT NAMES ITSELF BY REFERENCE AND CARRIES NOTHING ELSE ABOUT THE
+   TITLE: a stored title by the identity it is stored under (`t`), a service's
+   hit by the query that found it and its place in that answer (`q`, `i`). The
+   server reads the title back out of what a service said
+   (ranker/sources.py's named_hit), so a page can never decide what a board
+   stores.
 
-   WHETHER A RESULT IS ALREADY ON THE BOARD IS DECIDED HERE. It used to be
-   written on afterwards by a script, because the held set "changes without a
-   request" — which stopped being true once a removal began answering with the
-   whole page. Every way of changing it is a request now, and the one that does
-   not redraw this list is a result DRAGGED into a tier, which marks the one
-   result it dragged (ranker/dnd.js). Nothing sweeps the list against the page's
-   copy of the board any more, which is just as well: that copy is bumped rather
-   than refreshed, so it could mark a result against a board that had moved.
+   A RESULT IS TWO CONTROLS, SIDE BY SIDE AND NEVER NESTED. The row itself adds
+   the whole title — clicked, or dragged into a tier (ranker/dnd.js reads the
+   same reference off the wrapper's data attributes). Under a show's row, a
+   <details> asks for that show's season checklist the first time it is opened,
+   so a search costs no season lookups. They are siblings because htmx's
+   attribute inheritance is on (static/js/boost.js): a checklist form inside the
+   row would inherit the row's own request and values.
 
-   CLICKING A RESULT POSTS IT, and the answer is the page with this search still
-   on it — drawn again from the cache the search box's own request filled, so
-   adding a second title from one search costs no second search. A HELD result
-   cannot be clicked at all, because a drag can end in a click on the result it
-   just added: style.css gives `.ranker-result.is-held` no pointer events, so the
-   click never reaches it. That rule, not a filter on the trigger, because htmx
-   builds an event filter (`click[...]`) with the Function constructor, which the
-   app's Content-Security-Policy refuses (app/csp.py).
+   WHETHER THE WHOLE TITLE IS ALREADY ON THE BOARD IS DECIDED HERE, and a held
+   row cannot be clicked at all — a drag can end in a click on the result it
+   just added: style.css gives `.ranker-hit.is-held > .ranker-result` no pointer
+   events, so the click never reaches it. That rule, not a filter on the
+   trigger, because htmx builds an event filter (`click[...]`) with the Function
+   constructor, which the app's Content-Security-Policy refuses (app/csp.py). A
+   held show's seasons can still be opened and added.
 
-   Nothing at all for a query too short to search, which the stylesheet reads as
-   "hide the list". #}
+   EVERY CONTROL THAT ASKS FOR SOMETHING JOINS THE BOX'S QUEUE on the results
+   (`title_search.queue`), for the box's own reason: a typed answer still
+   waiting when a row is pressed would otherwise land after the row's answer.
+
+   Context: `rows` (routes._result_rows), `query`, `media`, `typed` (stored
+   titles listed while typing), `too_short`, `no_catalogue`, `failed`,
+   `message`, `board_uid`. Nothing at all for a query too short to list, which
+   the stylesheet reads as "hide the list". #}
+{%- set results = '#searchResults' %}
 {%- if message %}<span class="ranker-preview-hint">{{ message }}</span>
+{%- elif typed and too_short %}
+{%- elif no_catalogue %}<span class="ranker-preview-hint">No service is set up to search, so
+    there is nothing to ask. An operator adds a Trakt or Simkl client id in Settings.</span>
 {%- elif query %}
-{%- for hit in results %}
-<div class="ranker-result{% if hit.key in held %} is-held{% endif %}"
-     data-key="{{ hit.key }}" data-query="{{ query }}"
-     title="Drag into a tier, or click to add to the pool"
-     hx-post="/rankings/boards/{{ board_uid }}/items/add" hx-json-enc
-     hx-vals='{{ {"key": hit.key, "query": query, "media": hit.media} | tojson }}'
-     hx-trigger="click"
-     hx-target="body" hx-swap="innerHTML">
-    {%- if hit.tmdb %}<img loading="lazy" alt="" src="/api/rankings/poster?media={{ hit.media }}&amp;tmdb={{ hit.tmdb }}" data-if-missing="remove">{% endif %}
-    <span class="ranker-name"><span class="ranker-title">{{ hit.title or "Untitled" }}</span><span class="ranker-year">{{ [hit.year, hit.network, (hit.runtime ~ "m") if hit.runtime else ""] | select | map("string") | join(" · ") }}</span></span>
+{%- if typed %}
+{#- Where these came from, said once above them: what this app already knows,
+    and the way to reach the rest named where somebody is looking. -#}
+<span class="ranker-preview-hint ranker-typed-note">
+    {%- if rows %}Titles this app already knows. Press Enter to search the services too.
+    {%- else %}Nothing this app already knows matches. Press Enter to search the services.
+    {%- endif %}</span>
+{%- endif %}
+{%- if failed %}<span class="ranker-preview-hint search-failed">Couldn't reach {{ src.names(failed) }} —
+    showing what the rest found.</span>{% endif %}
+{%- if not rows and not typed %}<span class="ranker-preview-hint">Nothing found.</span>{% endif %}
+{%- for row in rows %}
+<div class="ranker-hit{% if row.held %} is-held{% endif %}"
+     {%- if row.key %} data-key="{{ row.key }}"{% endif %}
+     {%- for name, value in row.ref.items() %} data-{{ name }}="{{ value }}"{% endfor %}>
+{%- set action = {"hx-post": "/rankings/boards/" ~ board_uid ~ "/items/add", "hx-json-enc": "",
+                  "hx-vals": row.ref | tojson | forceescape, "hx-target": "body",
+                  "hx-swap": "innerHTML", "hx-sync": title_search.queue(results),
+                  "title": ("Drag into a tier, or click to add to the pool" if row.key
+                            else "Click to add to the pool")} %}
+{%- call title_search.row('div', action, row.title or "Untitled", row.year, row.poster,
+                          sources=row.sources, go='' if row.held else 'Add →',
+                          extra_class='ranker-result') %}
+    {%- if row.season is not none %}<span class="chip search-season">Season {{ row.season }}</span> {% endif %}
+    {{- [row.network, (row.runtime ~ "m") if row.runtime and row.media == 'movie' else ""] | select | join(" · ") -}}
+{%- endcall %}
+{%- if row.media == 'show' %}
+<details class="ranker-hit-seasons">
+    <summary hx-get="/rankings/fragments/search-seasons?{{ dict(row.ref, board=board_uid) | urlencode }}"
+             hx-trigger="click once" hx-target="next .ranker-hit-pick" hx-swap="innerHTML"
+             hx-json-enc="false" {{ title_search.sync(results) }}>Seasons…</summary>
+    <div class="ranker-hit-pick"></div>
+</details>
+{%- endif %}
 </div>
-{%- else %}<span class="ranker-preview-hint">Nothing found.</span>
 {%- endfor %}
 {%- endif %}

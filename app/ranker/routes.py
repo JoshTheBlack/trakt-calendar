@@ -31,7 +31,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from . import (core as ranker, exports as ranker_export, grid_builder,
-               imports as ranker_import, seasons as ranker_seasons,
+               imports as ranker_import, item_keys, seasons as ranker_seasons,
                sources as ranker_sources)
 from .sources import Media
 from .. import auth, authz, chrome, details_panel, route_params
@@ -44,7 +44,7 @@ from ..providers import detail_source
 # that one is this feature's own translation for the search and ratings seams,
 # while a details panel asks the shared detail ports directly (see
 # app/providers/detail_source.py) and they raise the app-wide one.
-from ..providers.base import SourceUnavailable
+from ..providers.base import SourceUnavailable, proxied_image
 from ..templating import templates
 
 logger = logging.getLogger(__name__)
@@ -436,7 +436,7 @@ async def _rankings_response(request: Request, user, wanted: str | None, *,
         "open_tier": open_tier,
         # An empty search draws an empty box and no results, which is the page as
         # it arrives by every other route.
-        "search": search or {"query": "", "media": "", "results": (), "held": frozenset()},
+        "search": search or _search_context(),
         "notice": notice,
         "notice_ok": notice_ok,
         "undo": undo,
@@ -1312,151 +1312,366 @@ async def list_sources(request: Request):
     return JSONResponse({"ok": True, "sources": await _sources(user.user_id)})
 
 
-@guard.get("/rankings/fragments/search", AuthLevel.RANKER_APPROVED)
-async def search_fragment(request: Request):
-    """Titles to add, drawn as the list under the pool's search box.
+def _search_context(*, query: str = "", media: Media | str = "", rows=(), typed: bool = False,
+                    too_short: bool = False, no_catalogue: bool = False, failed=(),
+                    message: str = "") -> dict[str, Any]:
+    """What _ranker_search_results.html draws, in one shape for the fragment and
+    for the page an add answers with — one builder, so the two cannot disagree
+    about what a search result carries."""
+    return {"query": query, "media": str(media), "rows": list(rows), "typed": typed,
+            "too_short": too_short, "no_catalogue": no_catalogue,
+            "failed": sorted(str(source) for source in failed), "message": message}
 
-    A VIEW, NOT AN API, like every fragment on this page: the box asks for this
-    as it is typed into (hx-get in _ranker_board_shell.html) and the answer is the
-    results themselves. They used to arrive as JSON that a script turned into
-    markup, and each one carried a serialized copy of its title for the add to
-    hand back.
 
-    Uses the INSTANCE credential, deliberately: this grant does not imply a linked
-    account, and what is asked for is public catalogue data either way.
+def _result_rows(hits, *, query: str, media: Media, held) -> list[dict[str, Any]]:
+    """Search hits as the result rows the board draws — THE ONE PLACE A HIT
+    BECOMES ONE, so the text a row shows and the reference it posts back are read
+    off the same dict.
 
-    WHICH RESULTS THE BOARD ALREADY HOLDS IS DRAWN HERE. It used to be written on
-    afterwards by a script reading the page's own copy of the board — a copy that
-    is only ever BUMPED, never refreshed, so a result could be marked against a
-    board that had moved. Everything that changes the held set is a request now
-    (an add answers with the result redrawn, and a removal answers with the whole
-    page), so there is nothing left for that sweep to catch that this does not
-    already know. `board_keys` is membership alone, not fetch_board.
+    `ref` IS HOW A ROW NAMES ITSELF, and the whole of what it sends: a stored
+    title by the identity it is stored under (`t`, with the query only so the
+    page an add answers with can list the same titles again), a service's hit by
+    the query and its place in the answer (`q`, `i`). `media` is the medium the
+    SEARCH was for, which is what reading that search back needs — not the hit's
+    own, which for a service that mixes films into a show search can differ.
 
-    EVERY REFUSAL IS DRAWN, at 200: a non-200 is not swapped, so a status would
+    `key` is the whole title's board key, None for a hit no id yet keys (a
+    service's season-title before its season lookup): such a row cannot be drawn
+    as held and cannot be dragged, because there is no row to name until the add
+    has looked it up. Its season checklist still works — opening it is that
+    lookup."""
+    rows = []
+    for index, hit in enumerate(hits):
+        key = ranker_sources.hit_key(hit)
+        ref = ({"t": hit.title_key, "q": query} if hit.title_key
+               else {"q": query, "i": index})
+        rows.append({
+            "ref": {**ref, "media": str(media)},
+            "key": key,
+            "held": key is not None and key in held,
+            "media": str(hit.media),
+            "title": hit.title,
+            "year": hit.year,
+            "network": hit.network,
+            "runtime": hit.runtime,
+            "season": hit.season,
+            "sources": [str(source) for source in hit.source_ids],
+            # Through the image proxy HERE, where a hit becomes something a
+            # browser draws: the Content-Security-Policy admits no other image
+            # host, and the hit carries the service's own address.
+            "poster": proxied_image(hit.poster) or "",
+        })
+    return rows
+
+
+def _search_results(request: Request, board_uid: str, context: dict[str, Any]):
+    return templates.TemplateResponse(request, "_ranker_search_results.html", {
+        "request": request, "board_uid": board_uid, **context})
+
+
+def _search_media(params: Mapping[str, Any]) -> Media:
+    """The medium a search, a checklist or an add names, shows when it names
+    none; ValueError for one that is not a medium."""
+    return ranker_sources.parse_media(params.get("media"), Media.SHOW)
+
+
+@guard.get("/rankings/fragments/search-stored", AuthLevel.RANKER_APPROVED)
+async def stored_search_fragment(request: Request):
+    """The titles this app already stores that match what is being TYPED into
+    the board's box — the list drawn as somebody types.
+
+    NO SERVICE IS ASKED AND NOTHING IS COUNTED. It is an index read over the
+    titles some calendar month on this instance has loaded
+    (ranker_sources.typed_search), UNFILTERED, because adding a title is not
+    asking where it is on anybody's calendar. It builds no per-viewer settings
+    either: building them can refresh a token, which is a request.
+
+    EVERY ANSWER IS DRAWN, at 200: a non-200 is not swapped, so a status would
     leave the previous results standing under a query they no longer answer.
-    Too short a query draws nothing, which is what the box shows before anything
-    has been typed.
     """
     user = await auth.current_user(request)
     query = str(request.query_params.get("q") or "").strip()
-    try:
-        media = ranker_sources.parse_media(request.query_params.get("media"), Media.SHOW)
-    except ValueError as exc:
-        return _search_results(request, message=str(exc))
-    if len(query) < MIN_SEARCH_LENGTH:
-        return _search_results(request)
-    if await _search_over_budget(user.user_id):
-        return _search_results(request, message="Too many searches just now — give it a moment.")
-    try:
-        refs = await ranker_sources.search_source().search(query, media)
-    except ranker_sources.SourceUnavailable as exc:
-        return _search_results(request, message=str(exc))
-    results = [
-        {**item, "key": ranker_sources.result_key(item)}
-        for item in ranker_sources.items_from_refs(refs)
-    ][:MAX_SEARCH_RESULTS]
     board_uid = request.query_params.get("board") or ""
-    return _search_results(request, query=query, results=results, board_uid=board_uid,
-                           held=await ranker.board_keys(user.user_id, board_uid))
+    try:
+        media = _search_media(request.query_params)
+    except ValueError as exc:
+        return _search_results(request, board_uid, _search_context(message=str(exc)))
+    if ranker_sources.too_short(query):
+        return _search_results(request, board_uid, _search_context(
+            query=query, media=media, typed=True, too_short=True))
+    hits = await ranker_sources.typed_search(query, media, MAX_SEARCH_RESULTS)
+    held = await ranker.board_keys(user.user_id, board_uid)
+    return _search_results(request, board_uid, _search_context(
+        query=query, media=media, typed=True,
+        rows=_result_rows(hits, query=query, media=media, held=held)))
 
 
-def _search_results(request: Request, *, query: str = "", results=(), message: str = "",
-                    board_uid: str = "", held=frozenset()):
-    return templates.TemplateResponse(request, "_ranker_search_results.html", {
-        "request": request, "query": query, "results": results, "message": message,
-        "board_uid": board_uid, "held": held,
-    })
+@guard.get("/rankings/fragments/search", AuthLevel.RANKER_APPROVED)
+async def search_fragment(request: Request):
+    """Enter's search: the titles the viewer's services find, drawn as the list
+    under the pool's search box.
 
+    WHO IS ASKED is the viewer's settings' answer (ranker_sources.search_settings,
+    providers.for_catalogue_search): Trakt for every account, with the instance's
+    client id, and Simkl only for a viewer who has linked it, with their own
+    token. Each hit is marked with the services that found it.
 
-async def _add_searched_title(user, board_uid: str, data: dict):
-    """The add itself, for the two ways of asking. Answers (added, refusal), where
-    a refusal is the response to send back and `added` is how many titles the
-    board gained — nought when it already held it.
+    THIS IS WHAT THE SEARCH BUDGET COUNTS (`_search_over_budget`), and only this:
+    it is the one read here that spends a service's rate limit. The list drawn
+    while typing reads storage and is never counted.
 
-    ONE ADD, TWO ANSWERS, and that is the split rather than two adds. A result
-    CLICKED is answered with the page, because the page is where the title now is
-    and the search has to still be on screen to add a second one. A result DRAGGED
-    into a tier cannot be: the row has to land where the pointer dropped it, which
-    is a position among siblings no swap can name, so that path takes the count
-    back as JSON and puts the row there itself (static/js/ranker/dnd.js).
+    WHICH RESULTS THE BOARD ALREADY HOLDS IS DRAWN HERE, from `board_keys` —
+    membership alone, not the whole board.
+
+    EVERY REFUSAL IS DRAWN, at 200, for the typed list's reason.
     """
-    query = str(data.get("query") or "").strip()
+    user = await auth.current_user(request)
+    query = str(request.query_params.get("q") or "").strip()
+    board_uid = request.query_params.get("board") or ""
     try:
-        wanted = ranker.parse_key(data.get("key"))
-        media = ranker_sources.parse_media(wanted.media)
-    except (ranker.RankerError, ValueError) as exc:
-        return 0, authz.error(str(exc))
-    item = await ranker_sources.title_from_search(query, media, str(wanted))
+        media = _search_media(request.query_params)
+    except ValueError as exc:
+        return _search_results(request, board_uid, _search_context(message=str(exc)))
+    if len(query) < MIN_SEARCH_LENGTH:
+        return _search_results(request, board_uid, _search_context())
+    if await _search_over_budget(user.user_id):
+        return _search_results(request, board_uid, _search_context(
+            message="Too many searches just now — give it a moment."))
+    settings = await ranker_sources.search_settings(user.user_id)
+    if not ranker_sources.searchable(settings):
+        return _search_results(request, board_uid, _search_context(
+            query=query, media=media, no_catalogue=True))
+    result = await ranker_sources.catalogue_search(settings, query, media)
+    held = await ranker.board_keys(user.user_id, board_uid)
+    return _search_results(request, board_uid, _search_context(
+        query=query, media=media, failed=result.failed,
+        rows=_result_rows(result.hits[:MAX_SEARCH_RESULTS], query=query, media=media,
+                          held=held)))
+
+
+@guard.get("/rankings/fragments/search-seasons", AuthLevel.RANKER_APPROVED)
+async def search_seasons_fragment(request: Request):
+    """One search result's season checklist — asked for the first time its
+    "Seasons…" is opened, never with the search.
+
+    THE RESULT IS NAMED EXACTLY AS ITS ADD NAMES IT (`t`, or `q` and `i`) and
+    read back from what a service said (ranker_sources.named_hit). Its seasons
+    come from the shared picker lookup (ranker_sources.season_pick) — the same
+    one the tracker's add opens — which also fills in the ids of a hit the search
+    left keyless and names the season of a result that is one season.
+
+    WHAT IS OFFERED, GREYED AND SUGGESTED is app/ranker/seasons.py's, fed with
+    what this board already holds of the show (`held_seasons`) and the season the
+    viewer last finished, as a row's own season control is. The whole show is
+    not among them: the result's own row is what adds that.
+
+    EVERY OUTCOME IS DRAWN, at 200, as a sentence where the list would be.
+    """
+    user = await auth.current_user(request)
+    params = request.query_params
+    board_uid = params.get("board") or ""
+    ref = {name: params[name] for name in ("t", "q", "i", "media") if params.get(name)}
+
+    def _answer(options=(), note: str = "", ticked: int | None = None):
+        return templates.TemplateResponse(request, "_ranker_search_seasons.html", {
+            "request": request, "board_uid": board_uid, "ref": ref,
+            "options": list(options), "note": note, "ticked": ticked})
+
+    try:
+        media = _search_media(params)
+    except ValueError as exc:
+        return _answer(note=str(exc))
+    settings = await ranker_sources.search_settings(user.user_id)
+    hit = await ranker_sources.named_hit(settings, media, params)
+    if hit is None:
+        return _answer(note=ranker_sources.gone_sentence(params))
+    if hit.media != Media.SHOW:
+        return _answer(note="This is a film, so there are no seasons to pick — "
+                            "click it to add it.")
+    try:
+        pick = await ranker_sources.season_pick(settings, hit)
+    except SourceUnavailable:
+        logger.warning("Season list failed for a board search result", exc_info=True)
+        return _answer(note="Couldn't list this show's seasons just now.")
+    if pick is None:
+        return _answer(note="No service here can list this show's seasons.")
+    whole = ranker_sources.hit_key(hit, pick.ids)
+    if whole is None:
+        return _answer(note="This title has no id a board can hold it by.")
+    title = ranker.parse_key(whole).title
+    try:
+        held = await ranker.held_seasons(user.user_id, board_uid, str(title))
+    except ranker.RankerError:
+        held = set()
+    options = ranker_seasons.season_options(
+        pick.seasons, held=held, current=None,
+        finished=await ranker_import.latest_finished_season(user.user_id, title),
+        now=datetime.now(timezone.utc))[1:]
+    if pick.named_season is not None:
+        # The result IS this season, so asking which would be a question it has
+        # already answered.
+        options = ([option for option in options if option.season == pick.named_season]
+                   or [ranker_seasons.SeasonOption(pick.named_season,
+                                                   held=pick.named_season in held)])
+        return _answer(options, ticked=pick.named_season)
+    return _answer(options, note="" if options else "No seasons are listed for this show yet.")
+
+
+# The prefix a season checklist names each ticked season with, ONE FIELD PER
+# SEASON for the bulk Move's reason (PICK_PREFIX): json-enc makes a repeated name
+# a list only when there is more than one of it.
+SEASON_PREFIX = "season:"
+
+
+def _ticked_seasons(data: Mapping[str, Any]) -> list[str]:
+    """The seasons a checklist ticked, as the strings it posted — the data layer
+    validates each (item_keys.valid_season), so a bad one refuses the add."""
+    return [name[len(SEASON_PREFIX):] for name, value in data.items()
+            if name.startswith(SEASON_PREFIX) and value]
+
+
+@dataclass(frozen=True)
+class _Added:
+    """What adding a named result did: the arrivals, the key of the whole title
+    (which a drag inserts its row under), and the first row the add made —
+    what the page hoists to the head of the pool."""
+    arrived: ranker.Arrivals
+    key: str
+    first: str
+
+
+async def _add_named(user, board_uid: str, data: Mapping[str, Any]) -> _Added:
+    """Add the result a request names — the whole title, or the seasons its
+    checklist ticked — through the board's arrival rule. Raises RankerError with
+    the sentence to show when it cannot.
+
+    ONE ADD, THREE WAYS OF ASKING: a result clicked, a checklist submitted, and
+    a result dragged into a tier. Each names the result by reference and the
+    title is read back from what a service said (ranker_sources.named_hit and
+    board_item) — never from the page, and never by asking a service again, so
+    an add is not a search the budget does not see. N ticked seasons are N
+    arrivals, refused whole if they would pass the board's cap.
+    """
+    try:
+        media = _search_media(data)
+    except ValueError as exc:
+        raise ranker.ValidationError(str(exc)) from None
+    settings = await ranker_sources.search_settings(user.user_id)
+    hit = await ranker_sources.named_hit(settings, media, data)
+    if hit is None:
+        raise ranker.ValidationError(ranker_sources.gone_sentence(data))
+    item = await ranker_sources.board_item(settings, hit)
     if item is None:
-        return 0, authz.error("That search result is out of date — search for it again.")
-    try:
-        # A whole-show row the result turned into its season changed the board
-        # as much as a new row did, so the drag bumps its version for either.
-        arrived = await ranker.add_titles(user.user_id, board_uid, [item],
-                                          added_from="manual")
-        return arrived.added + arrived.converted, None
-    except ranker.RankerError as exc:
-        return 0, _refusal(exc)
+        raise ranker.ValidationError("This title has no id a board can hold it by.")
+    whole = item_keys.board_key(item["media"], item["match_source"], item["match_id"])
+    items = [item]
+    if data.get("want") == "seasons":
+        seasons = _ticked_seasons(data)
+        if not seasons:
+            raise ranker.ValidationError("Tick at least one season to add.")
+        items = [{**item, "season": season} for season in seasons]
+    arrived = await ranker.add_titles(user.user_id, board_uid, items, added_from="manual")
+    # Every season was validated by the add itself, so reading the first back
+    # cannot fail here.
+    first = item_keys.board_key(item["media"], item["match_source"], item["match_id"],
+                                item_keys.valid_season(items[0].get("season"), item["media"]))
+    return _Added(arrived, whole, first)
+
+
+def _added_notice(added: _Added, seasons: bool) -> str:
+    """What an add says it did, in words that fit whether it made rows, took a
+    whole-show row over, or found everything already there."""
+    count, converted = added.arrived
+    if count:
+        what = f"{count} season{'s' if count != 1 else ''}" if seasons else "the title"
+        return f"Added {what} to the pool{_converted(converted)}."
+    if converted:
+        return (f"Made {converted} whole-show row{'s' if converted != 1 else ''} "
+                "into the season, where it was.")
+    return ("Those seasons are already on this board." if seasons
+            else "That title is already on this board.")
 
 
 @guard.post("/rankings/boards/{board_uid}/items/add", AuthLevel.RANKER_APPROVED)
 async def add_searched_title(board_uid: str, request: Request):
-    """Add the title a result names, and answer with the page — the search still
-    on it, the result now drawn as held, and the board carrying its new version.
+    """Add what a result names — the whole title when its row is clicked, the
+    ticked seasons when its checklist is submitted — and answer with the page:
+    the search still on it, the result drawn as held, and the board carrying its
+    new version.
 
-    THE SEARCH IS REDRAWN FROM THE CACHE its own request filled, which is what
-    makes answering with the whole page affordable here: nothing is asked
-    upstream and the search budget never sees it. Without that the box would come
-    back empty and adding a second title from one search would mean typing it
-    again.
+    THE SEARCH IS REDRAWN FROM WHAT ITS OWN REQUEST STORED — the stored titles
+    again for a typed result, the services' stored answer for one Enter found —
+    so nothing is asked upstream and the search budget never sees it. Without it
+    the box would come back empty and adding a second title from one search
+    would mean searching again.
+
+    ALWAYS 200 WITH THE OUTCOME SAID ON THE PAGE, a refusal included: this
+    answer replaces the page, and a status would leave the viewer on a page that
+    did nothing and said nothing.
     """
     user = await auth.current_user(request)
     data = await authz.json_body(request)
-    query = str(data.get("query") or "").strip()
-    media_name = str(data.get("media") or "")
-    _, refusal = await _add_searched_title(user, board_uid, data)
-    if refusal is not None:
-        return refusal
-    results = ()
+    seasons = data.get("want") == "seasons"
+    notice, ok, first = "", True, ""
     try:
-        media = ranker_sources.parse_media(media_name, Media.SHOW)
-        refs = await ranker_sources.search_source().search(query, media, cached_only=True)
-        results = [
-            {**item, "key": ranker_sources.result_key(item)}
-            for item in ranker_sources.items_from_refs(refs)
-        ][:MAX_SEARCH_RESULTS]
-    except (ValueError, ranker_sources.SourceUnavailable):
-        # The search cannot be redrawn, which is not a reason to refuse the add
-        # that already happened: the page comes back without it.
-        query = ""
+        added = await _add_named(user, board_uid, data)
+        notice, first = _added_notice(added, seasons), added.first
+    except ranker.RankerError as exc:
+        notice, ok = str(exc), False
     return await _rankings_response(
-        request, user, board_uid, notice="Added to the pool.",
-        pool_first=str(ranker.parse_key(data.get("key"))),
-        search={"query": query, "media": media_name, "results": results,
-                "held": await ranker.board_keys(user.user_id, board_uid)})
+        request, user, board_uid, notice=notice, notice_ok=ok, pool_first=first,
+        search=await _redrawn_search(user, board_uid, data))
+
+
+async def _redrawn_search(user, board_uid: str, data: Mapping[str, Any]) -> dict[str, Any]:
+    """The search an add came from, drawn again from what it stored: the typed
+    list for a result named by its stored identity, the services' stored answer
+    for one named by its place. A search that can no longer be redrawn comes
+    back empty rather than refusing an add that has already happened."""
+    query = str(data.get("q") or "").strip()
+    try:
+        media = _search_media(data)
+    except ValueError:
+        return _search_context()
+    held = await ranker.board_keys(user.user_id, board_uid)
+    if data.get("t"):
+        if ranker_sources.too_short(query):
+            return _search_context(media=media)
+        hits = await ranker_sources.typed_search(query, media, MAX_SEARCH_RESULTS)
+        return _search_context(query=query, media=media, typed=True,
+                               rows=_result_rows(hits, query=query, media=media, held=held))
+    if not query:
+        return _search_context(media=media)
+    settings = await ranker_sources.search_settings(user.user_id)
+    result = await ranker_sources.catalogue_search(settings, query, media, cached_only=True)
+    return _search_context(
+        query=query, media=media, failed=result.failed,
+        rows=_result_rows(result.hits[:MAX_SEARCH_RESULTS], query=query, media=media,
+                          held=held))
 
 
 @guard.post("/api/rankings/boards/{board_uid}/items", AuthLevel.RANKER_APPROVED)
 async def add_board_items(board_uid: str, request: Request):
-    """Add a title to the board's pool for the DRAG, which needs the count back
-    rather than a page. Idempotent: a title the board already holds — pooled or
-    tiered — is left exactly as it is.
+    """Add the whole title a result names for the DRAG, which needs the row's
+    key back rather than a page: the row has to land where the pointer dropped
+    it, a position among siblings no swap can name, so static/js/ranker/dnd.js
+    puts it there itself. Idempotent: a title the board already holds — pooled
+    or tiered — is left exactly as it is.
 
-    THE PAGE NAMES A RESULT; IT DOES NOT HAND OVER A TITLE. It sends the query it
-    searched for and the key of the result picked, and the title is read back out
-    of that search's own stored answer (`ranker_sources.title_from_search`). What
-    is stored is what the service said, not fields a page sent — a page that sends
-    a title or an id map alongside has them ignored — and the add costs no second
-    lookup. A result no longer stored is refused with a sentence rather than
-    looked up afresh, so this cannot become a search the budget does not count.
+    THE PAGE NAMES A RESULT; IT DOES NOT HAND OVER A TITLE — the same reference
+    a click sends, resolved the same way (`_add_named`). A page that sends a
+    title or an id map alongside has them ignored.
     """
     user = await auth.current_user(request)
     data = await authz.json_body(request)
-    added, refusal = await _add_searched_title(user, board_uid, data)
-    if refusal is not None:
-        return refusal
-    return JSONResponse({"ok": True, "added": added})
+    try:
+        added = await _add_named(user, board_uid, {**data, "want": ""})
+    except ranker.RankerError as exc:
+        return _refusal(exc)
+    # A whole-show row the result turned into its season changed the board as
+    # much as a new row did, so the drag bumps its version for either.
+    return JSONResponse({"ok": True, "added": added.arrived.added + added.arrived.converted,
+                         "key": added.key})
 
 
 @guard.post("/rankings/boards/{board_uid}/removals/restore", AuthLevel.RANKER_APPROVED)

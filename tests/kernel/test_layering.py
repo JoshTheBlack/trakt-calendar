@@ -213,11 +213,12 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "the same request would be a second set of those to keep correct"),
     (RANKER, PROVIDERS): Edge(
         "ratings are imported from the viewer's source account, and a board "
-        "title's details panel asks detail_source which service can describe it. "
-        "THAT MODULE LIVES IN providers/ RATHER THAN IN THE CALENDAR so this edge "
-        "is the whole of the dependency: the board is meant to need nothing from "
-        "the calendar, and a panel every feature opens reads the registry, not "
-        "any one feature"),
+        "title's details panel asks detail_source which service can describe it — "
+        "in providers/ rather than in the calendar because a panel every feature "
+        "opens reads the registry, not any one feature. The board's search asks "
+        "the services through providers/title_search.py, the one fan-out, merge "
+        "and read-back every searching feature shares, and a result's season "
+        "checklist is that module's picker lookup"),
     (KERNEL, PROVIDERS): Edge(
         "config.py asks the registry which sources are configured when it "
         "validates settings. Function-local because providers/ reads config, "
@@ -234,7 +235,11 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
     (DISTRAKT, AUTH): Edge(
         "a tracker month belongs to one signed-in person, and every read of their "
         "viewing authenticates as them through auth/viewer.py's settings_for_user"),
-    (RANKER, AUTH): Edge("a board belongs to one signed-in person"),
+    (RANKER, AUTH): Edge(
+        "a board belongs to one signed-in person, and the board's search asks the "
+        "services with that person's settings through auth/viewer.py — the one "
+        "builder of that object, which is what decides that Simkl is asked only "
+        "for a viewer who linked it"),
     (SETTINGS, AUTH): Edge("the Settings screen is admin-only and links the app's own account"),
     (KERNEL, AUTH): Edge(
         "config.py reaches encryption_flow to refuse writing a secret while the "
@@ -309,6 +314,14 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "calendar already stores (entries.titles_matching), and a pick from it "
         "is read back out of those stored rows by identity (entries.stored_title) "
         "— the calendar owns those rows, so it owns the verbs that read them"),
+    (RANKER, CALENDAR): Edge(
+        "the board's search lists, as somebody types, the titles this instance "
+        "already stores (entries.titles_matching), and a result picked from that "
+        "list is read back out of those stored rows by identity "
+        "(entries.stored_title) — the calendar owns those rows, so it owns the "
+        "verbs that read them, and the board reads them through the same two the "
+        "tracker's add does rather than a query of its own. Only "
+        "ranker/sources.py reaches it"),
     (RANKER, DISTRAKT): Edge(
         "one adapter module imports the tracker's public surface so a board can "
         "be seeded from what the viewer finished. THE ONLY ranker module allowed "

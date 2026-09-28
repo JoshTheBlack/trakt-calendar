@@ -543,12 +543,34 @@ async def resolve_pick(settings, media: Media, query: str, index, *,
     earlier, and a result the store no longer holds is one to search for again
     rather than one to guess at.
     """
+    hit = await resolve_hit(settings, media, query, index)
+    if hit is None:
+        return None
+    return await pick_from_hit(settings, hit, cached_only=cached_only)
+
+
+async def resolve_hit(settings, media: Media, query: str, index) -> MergedSearchHit | None:
+    """The merged hit at `index` of the stored search for `query`, or None when
+    nothing stored answers to that name — the first half of `resolve_pick`, for a
+    caller that needs the hit itself rather than its season list.
+
+    CACHE ONLY, ALWAYS: the search is re-read from where the caller's own
+    earlier request stored it, merged again by the same pure rules, so the same
+    query lands on the same row and nothing is asked. `settings` must be the
+    ones that search was made with — `providers.for_catalogue_search` decides
+    from them who was asked, and a different answer would re-read a different
+    merge.
+    """
     asked = providers.for_catalogue_search(settings)
     if not asked:
         return None
     result = await search_catalogue(asked, settings, media, query, cached_only=True)
     try:
-        hit = result.hits[int(index)]
-    except (TypeError, ValueError, IndexError):
+        position = int(index)
+    except (TypeError, ValueError):
         return None
-    return await pick_from_hit(settings, hit, cached_only=cached_only)
+    # A negative index would read from the end of the list rather than name a
+    # row, so it is not a place in the answer.
+    if not 0 <= position < len(result.hits):
+        return None
+    return result.hits[position]
