@@ -16,6 +16,11 @@ patching the same names inside a test wins over this.
 AND A HAND ADD WRITES NO PREMIERE INTO THE CALENDAR unless a test says so:
 arrival.write_missing_premieres asks the service through the calendar search's
 fill_one_gap, which answers "" (nothing written) here by default.
+
+AND NO SERVICE HAS A PICTURE FOR A TITLE NOTHING HAS RECORDED ONE FOR: a month
+gives each such row its one poster lookup before it draws, and that lookup's
+Trakt search answers nothing here — so the title is recorded as having none, the
+path a real empty answer takes.
 """
 from __future__ import annotations
 
@@ -31,6 +36,7 @@ _NOTHING_MORE = {
     "app.providers.trakt.detail.fetch_title_facts": AsyncMock(return_value=TitleFacts("", "")),
     "app.providers.simkl.detail.fetch_title_facts": AsyncMock(return_value=TitleFacts("", "")),
     "app.calendar.search.fill_one_gap": AsyncMock(return_value=""),
+    "app.media.posters._fresh_provider_lookup": AsyncMock(return_value=None),
 }
 
 

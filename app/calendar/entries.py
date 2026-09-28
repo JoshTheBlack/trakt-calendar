@@ -806,6 +806,29 @@ def _stored_hit(title_key: str, rows, media: Media) -> title_search.MergedSearch
     return title_search.fold_one_title(hits, _item_key_of(title_key), title_key=title_key)
 
 
+async def posters_for(title_keys, media: Media) -> dict[str, dict[str, str]]:
+    """{title_key: {source: poster address}} for every stored title among
+    `title_keys` that some service's record gives a picture — the ORIGIN address
+    the calendar's own cards draw, never proxied here.
+
+    THE CALENDAR OWNS THESE ROWS, SO IT OWNS THE VERB THAT READS THEM: the
+    tracker draws a picture on each of its rows, and a title a calendar month has
+    loaded already carries one, which costs a single read for a whole page and
+    no request at all. One query however many keys, through the same
+    (media, title_key) filter the search's rows are read by."""
+    keys = sorted({str(key) for key in title_keys if key})
+    if not keys:
+        return {}
+    rows = await db.fetch_all(
+        f"SELECT title_key, source, poster FROM calendar_titles "
+        f"WHERE media = ? AND title_key IN ({', '.join('?' * len(keys))}) AND poster != ''",
+        (str(media), *keys))
+    out: dict[str, dict[str, str]] = {}
+    for row in rows:
+        out.setdefault(str(row["title_key"]), {}).setdefault(str(row["source"]), str(row["poster"]))
+    return out
+
+
 def _item_key_of(title_key: str) -> ItemKey | None:
     """The shared identity a stored title was grouped under, or None when the
     waterfall could not key it and it was stored under a per-source identity

@@ -2345,6 +2345,15 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
     justify-content: center; font-size: 0.72rem; color: var(--text-faint); overflow: hidden;
 }
 .distrakt-badge .distrakt-logo { max-width: 26px; max-height: 26px; border-radius: 5px; object-fit: contain; }
+/* The title's poster, beside the network badge rather than instead of it: the
+   badge is the network, the picture is the show. Small enough on a wide list that
+   a row grows by a few pixels, not a thumbnail's height; a phone draws it larger
+   across the row's two lines (below). The empty slot keeps the columns in line
+   for a title whose picture is not known yet. */
+.distrakt-poster {
+    flex: 0 0 auto; width: 24px; height: 36px; border-radius: 3px; object-fit: cover;
+}
+img.distrakt-poster { background: rgba(255,255,255,0.04); }
 /* A TITLE TOO WIDE FOR ITS CELL SCROLLS WHILE THE POINTER IS ON IT, AND NOTHING
    MEASURES IT. Whether a title overflows depends on the font, the viewport and
    the reader's own text size, so it used to be a script: read `scrollWidth`
@@ -2476,22 +2485,25 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 @container distrakt-rows (max-width: 760px) {
     .distrakt-show-row {
         display: grid; column-gap: 8px; row-gap: 1px;
-        grid-template-columns: auto auto auto minmax(0, 1fr) auto auto auto;
+        grid-template-columns: auto auto auto auto minmax(0, 1fr) auto auto auto;
         grid-template-rows: auto auto;
     }
     .distrakt-freshness { grid-column: 1; grid-row: 1 / 3; }
-    .distrakt-badge { grid-column: 2; grid-row: 1 / 3; }
-    .distrakt-title { grid-column: 3 / 7; grid-row: 1; }
-    .distrakt-row-actions { grid-column: 7; grid-row: 1; }
+    /* Two lines tall here, so the picture can be too: 34x51, the search
+       results' size, measured to grow a phone row by 3px. */
+    .distrakt-poster { grid-column: 2; grid-row: 1 / 3; width: 34px; height: 51px; }
+    .distrakt-badge { grid-column: 3; grid-row: 1 / 3; }
+    .distrakt-title { grid-column: 4 / 8; grid-row: 1; }
+    .distrakt-row-actions { grid-column: 8; grid-row: 1; }
     .distrakt-season, .distrakt-network, .distrakt-counts, .distrakt-dates {
         grid-row: 2; width: auto; text-align: left; font-size: 0.78rem;
     }
-    .distrakt-season { grid-column: 3; }
-    .distrakt-network { grid-column: 4; min-width: 0; }
-    .distrakt-counts { grid-column: 5; }
+    .distrakt-season { grid-column: 4; }
+    .distrakt-network { grid-column: 5; min-width: 0; }
+    .distrakt-counts { grid-column: 6; }
     /* The dates reach under the buttons, which sit on the first line only: at a
        360px window a premiere-to-finale span did not fit beside the rest. */
-    .distrakt-dates { grid-column: 6 / 8; }
+    .distrakt-dates { grid-column: 7 / 9; }
 }
 /* A watched film: same row shape as a show so the columns line up, but nothing
    to open and nothing to act on — it is a play that happened on a day. */

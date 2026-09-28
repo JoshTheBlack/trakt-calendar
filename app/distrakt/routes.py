@@ -39,7 +39,7 @@ from ..auth import AuthLevel, viewer
 from ..calendar import entries as calendar_entries, share_links
 from ..config import load_settings
 from ..endpoints import endpoint_choices
-from ..media import logos
+from ..media import artwork, logos, posters
 from ..perftrace import span
 # The catalogue search every feature shares — the fan-out, the merge and reading
 # a chosen result back out of it. What a result DOES once chosen is this file's.
@@ -53,6 +53,7 @@ from ..providers.trakt import TraktError
 # app.providers.trakt.detail would leave this file calling the real one — a live
 # network call in a test that then passes for the wrong reason.
 from ..providers.trakt import detail as trakt_detail, sync as trakt_sync
+from ..sources import prefs as source_prefs
 from ..templating import templates
 
 logger = logging.getLogger(__name__)
@@ -1079,6 +1080,14 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
             await logos.ensure_logos(settings, [
                 (s.get("network"), (s.get("ids") or {}).get("tmdb")) for s in shows
             ])
+        # And every row's picture, the same way: a title nothing has recorded a
+        # picture for gets its one lookup here, ahead of the render, and the
+        # answer — or the fact that there is none — is recorded for every later
+        # load. A title already known costs one read for the whole page.
+        with span("payload.ensure_posters"):
+            _, unknown = await _row_pictures(user_id, shows)
+            if unknown:
+                await posters.ensure_addresses(settings, unknown, await _poster_order(user_id))
 
     with span("payload.render"):
         # The first notice takes the PREMIERE records alone. It announces what
@@ -1367,7 +1376,8 @@ def _modal_context(settings, year: int, month: int) -> dict:
 
 def _month_context(request: Request, payload: dict, year: int, month: int,
                    emojis: dict, default_emoji: str, settings, *,
-                   message: str = "", ok: bool = True) -> dict:
+                   message: str = "", ok: bool = True,
+                   pictures: dict | None = None) -> dict:
     """The month fragment's whole context, out of the payload and nothing else.
 
     ONE READER OF THE PAYLOAD. Every mutating route answers through this, so what
@@ -1405,8 +1415,62 @@ def _month_context(request: Request, payload: dict, year: int, month: int,
         "emoji_for": lambda network: emojis.get(network or "", default_emoji),
         "logo_for": lambda network: (
             f"/api/network-logo?name={quote(network or '')}" if network in with_logos else ""),
+        # A row's picture, resolved for the whole page before it is drawn
+        # (_row_pictures) — "" where nothing is known yet.
+        "poster_for": lambda show: (pictures or {}).get((str(show.get("key")),
+                                                         show.get("season")), ""),
         **_modal_context(settings, year, month),
     }
+
+
+async def _poster_order(user_id: int) -> tuple[str, ...]:
+    """Whose artwork this viewer's rows draw: their own metadata preference, the
+    question the calendar asks of the same title (posters.order_for)."""
+    return posters.order_for((await source_prefs.load(user_id)).source_order(list(Source)))
+
+
+def _row_tmdb(show: dict) -> int | None:
+    try:
+        return int((show.get("ids") or {}).get("tmdb") or 0) or None
+    except (TypeError, ValueError):
+        return None
+
+
+async def _row_pictures(user_id: int, shows: list[dict]
+                        ) -> tuple[dict[tuple[str, int], str], list[tuple[str, int]]]:
+    """Each row's picture as a browser draws it — {(key, season): proxied
+    address, or ""} — and the (media, tmdb) of the titles nothing has any
+    picture recorded for, which are the ones worth a lookup.
+
+    FROM WHAT IS STORED, AND NOTHING ELSE. The season's own artwork where the
+    season registry has it (a row IS a season), else the show's: the picture the
+    calendar's own record of the title carries, and the poster registry's
+    sightings beside it — every source in the VIEWER's order, the one question
+    artwork.pick answers for every surface. Three reads for the whole page, and
+    never a request, so this is safe to call while drawing it.
+
+    THE ADDRESS, NEVER THE IMAGE: nothing here puts a picture on disk. The row
+    draws the address through the image proxy.
+    """
+    shows = [show for show in shows if show.get("key")]
+    order = await _poster_order(user_id)
+    stored = await calendar_entries.posters_for([show["key"] for show in shows], Media.SHOW)
+    refs = [(str(Media.SHOW), tmdb, show.get("season")) for show in shows
+            if (tmdb := _row_tmdb(show))]
+    known = await artwork.known(refs)
+    pictures: dict[tuple[str, int], str] = {}
+    unknown: set[tuple[str, int]] = set()
+    for show in shows:
+        tmdb = _row_tmdb(show)
+        pair = (str(Media.SHOW), tmdb)
+        season = show.get("season")
+        own = known.seasons.get((*pair, season), {}) if tmdb and season is not None else {}
+        address = artwork.pick({**known.shows.get(pair, {}), **stored.get(show["key"], {})},
+                               own, order)
+        pictures[(str(show["key"]), season)] = proxied_image(address) or ""
+        if not address and tmdb and pair not in known.missed:
+            unknown.add(pair)
+    return pictures, sorted(unknown)
 
 
 async def _month_answer(request: Request, user_id: int, year: int, month: int,
@@ -1434,10 +1498,11 @@ async def _month_answer(request: Request, user_id: int, year: int, month: int,
         # all. There is nothing to draw, so it is said and the list is left alone.
         return _month_refusal(request, payload.get("error") or "Not configured")
     emojis, default_emoji = await distrakt_store.get_emoji_prefs(user_id)
+    pictures, _ = await _row_pictures(user_id, payload.get("shows") or [])
     return templates.TemplateResponse(
         request, "_distrakt_month.html",
         _month_context(request, payload, year, month, emojis, default_emoji, settings,
-                       message=message, ok=ok))
+                       message=message, ok=ok, pictures=pictures))
 
 
 def _rewatch_answer(request: Request, ask: dict, resubmit_url: str,

@@ -23,8 +23,9 @@
 
    Context every macro here needs: `month_query` (the year and month the page is
    showing, as a query string), `closed` (this month is read-only), `emoji_for`
-   (network -> the viewer's fallback emoji) and `logo_for` (network -> a tile
-   URL, or "" when this instance has none). #}
+   (network -> the viewer's fallback emoji), `logo_for` (network -> a tile
+   URL, or "" when this instance has none) and `poster_for` (row -> its picture
+   through the image proxy, or ""). #}
 
 {# THE SHARED HALF OF EVERY MUTATION'S ADDRESS. The target is the show list and
    the swap is its whole contents, because every one of these routes answers
@@ -66,6 +67,17 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
    already warms every network on the page before it renders
    (routes._live_month_payload's ensure_logos), so by the time a row is drawn the
    tile either exists or never will, and the server can simply say which. #}
+{# The row's picture: the address the page resolved for it before drawing
+   (routes._row_pictures — the season's own artwork, else the show's, in the
+   viewer's order), drawn through the image proxy; nothing is fetched or kept
+   here. A row whose title has no picture known yet keeps the slot, empty, so
+   the titles below one another stay in line. #}
+{% macro picture(show) -%}
+{%- set src = poster_for(show) -%}
+{%- if src %}<img class="distrakt-poster" src="{{ src }}" alt="" loading="lazy" width="24" height="36">
+{%- else %}<span class="distrakt-poster is-empty" aria-hidden="true"></span>{% endif -%}
+{%- endmacro %}
+
 {% macro badge(network) -%}
 {%- set logo = logo_for(network) -%}
 <span class="distrakt-badge">
@@ -147,6 +159,7 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
     <span class="distrakt-freshness {{ show.counts_freshness or 'current' }}"
           role="img" title="{{ show.counts_note }}" aria-label="{{ show.counts_note }}"></span>
     {%- endif %}
+    {{ picture(show) }}
     {{ badge(show.network) }}
     <span class="distrakt-title"><span class="tt">{{ show.title }}</span>{{ return_mark(show) }}{{ missing_mark(show) }}</span>
     <span class="distrakt-season">S{{ '%02d' % show.season }}</span>
