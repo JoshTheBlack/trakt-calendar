@@ -49,7 +49,13 @@ header.hero {
     padding: 8px 3vw; border-bottom: 1px solid var(--card-border);
     background: rgba(10,12,16,0.92); backdrop-filter: blur(8px);
 }
-.hero-lead { display: flex; align-items: center; gap: 12px; }
+/* `flex-wrap` and `min-width: 0` because nothing inside can shrink: the wordmark
+   is `flex-shrink: 0`, the month title is `nowrap`, and so are the arrows. On
+   the calendar that row is ~400px (wordmark, "September 2026", two arrows), so a
+   phone scrolled sideways and the next-month arrow sat past the edge — measured
+   406px in Chromium and 414 in Firefox at a 390px viewport. Wrapping drops the
+   month nav under the wordmark only when the two do not fit side by side. */
+.hero-lead { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; min-width: 0; }
 .hero-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .hero-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .hero-meta { color: var(--text-faint); font-size: 0.76rem; white-space: nowrap; }
