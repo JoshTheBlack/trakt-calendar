@@ -42,7 +42,7 @@ import re
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import item_keys
 from .. import db
@@ -653,18 +653,28 @@ async def fetch_pool_after(user_id: int, board_uid: str, after: Any,
 # items
 # ---------------------------------------------------------------------------
 
+class Arrivals(NamedTuple):
+    """What an add did: rows it created, and whole-show rows it turned into the
+    season that arrived (`_plan_arrivals`). A title or season the board already
+    held is in neither count."""
+    added: int
+    converted: int
+
+
 async def add_titles(
     user_id: int,
     board_uid: str,
     refs: list[Mapping[str, Any]],
     *,
     added_from: str = "manual",
-) -> int:
-    """Add titles to a board's pool, returning how many were actually new.
+) -> Arrivals:
+    """Add titles to a board's pool, saying how many rows were created and how
+    many whole-show rows became the season that arrived.
 
-    Idempotent by way of the board's unique index: re-adding a title that
-    is already on the board — in the pool OR already tiered — does nothing,
-    rather than duplicating it or dragging it back out of the tier it is in.
+    EVERY ROW GOES THROUGH THE ARRIVAL RULE (`_plan_arrivals`): a title or season
+    the board already holds — in the pool OR already tiered — adds nothing and is
+    not dragged out of the tier it is in, and a season of a show the board holds
+    whole takes that row over in place.
 
     `refs` are mappings carrying the item fields; the provider adapters that
     produce them convert their own value type into this shape, so nothing in
@@ -675,24 +685,131 @@ async def add_titles(
     rows = [_normalize_ref(ref) for ref in refs]
     ts = db.now()
 
-    def _work(conn: db.Connection) -> int:
+    def _work(conn: db.Connection) -> Arrivals:
         board = _resolve_board(conn, user_id, board_uid)
         board_id = int(board["id"])
-        existing = int(conn.execute(
-            "SELECT COUNT(*) FROM tier_items WHERE board_id = ?", (board_id,)
-        ).fetchone()[0])
-        # Counted against the cap before inserting rather than after, so a
-        # request that would overflow is refused whole rather than half applied.
-        wanted = {item_keys.row_key(r) for r in rows}
-        known = set(_item_ids(conn, board_id))
-        if existing + len(wanted - known) > MAX_ITEMS_PER_BOARD:
-            raise ValidationError(f"A board holds at most {MAX_ITEMS_PER_BOARD} titles.")
-        added = sum(_insert_item(conn, board_id, row, added_from, ts) for row in rows)
-        if added:
+        plan = _plan_arrivals(rows, _item_ids(conn, board_id))
+        # Counted against the cap before anything is written, so a request that
+        # would overflow is refused whole rather than half applied.
+        _check_room(conn, board_id, sum(1 for step in plan if step.item_id is None))
+        added = converted = 0
+        for step in plan:
+            if step.item_id is None:
+                added += _insert_item(conn, board_id, step.row, added_from, ts)
+            else:
+                _redefine_row(conn, board_id, step.item_id, step.row["season"], step.row)
+                converted += 1
+        if added or converted:
             _touch(conn, board_id, user_id, ts)
-        return added
+        return Arrivals(added, converted)
 
     return await db.transaction(_work)
+
+
+class _Arrival(NamedTuple):
+    """One row an arrival will write: `item_id` None inserts it, an id is the
+    whole-show row it converts."""
+    row: dict[str, Any]
+    item_id: int | None
+
+
+def _plan_arrivals(rows: list[dict[str, Any]], held: Mapping[str, int]) -> list[_Arrival]:
+    """THE ARRIVAL RULE, which every way a title reaches a board runs — a search,
+    the import of what somebody finished, a ratings seed — so they cannot come to
+    disagree about what "the board already has this" means. Pure: `held` is the
+    board's key -> row id, and the answer says what to write.
+
+      - A TITLE OR SEASON THE BOARD ALREADY HOLDS ADDS NOTHING, nor does a second
+        copy of one in the same batch.
+      - A SEASON OF A SHOW THE BOARD HOLDS AS ITS WHOLE-SHOW ROW TAKES THAT ROW
+        OVER IN PLACE — the same id, tier and rank — rather than arriving beside
+        it. A whole-show row is what a board held before it could hold seasons,
+        and what somebody meant by it is the season they watched; a second row
+        would leave them to find and delete the first. Only one season can take
+        a row over, so when several arrive together it is the LATEST of them,
+        the one the row most likely meant (the season control suggests the
+        latest finished season for the same reason); the rest arrive as rows of
+        their own. And none does when the same batch names the whole show too —
+        a ratings list scoring both the show and one of its seasons wants both
+        rows, so the season arrives beside it.
+      - Conversions create no row, so the board's cap counts inserts alone.
+    """
+    held = dict(held)
+    wanted_whole = {item_keys.row_key(row) for row in rows if row["season"] is None}
+    # For each show whose whole-show row is held, the season in this batch that
+    # takes it over.
+    takes_over: dict[str, int] = {}
+    for row in rows:
+        if row["season"] is None:
+            continue
+        whole = item_keys.board_key(row["media"], row["match_source"], row["match_id"])
+        if (whole in held and whole not in wanted_whole
+                and item_keys.row_key(row) not in held):
+            takes_over[whole] = max(takes_over.get(whole, row["season"]), row["season"])
+
+    plan: list[_Arrival] = []
+    for row in rows:
+        key = item_keys.row_key(row)
+        if key in held:
+            continue
+        whole = item_keys.board_key(row["media"], row["match_source"], row["match_id"])
+        if row["season"] is not None and takes_over.get(whole) == row["season"]:
+            plan.append(_Arrival(row, held.pop(whole)))
+            del takes_over[whole]
+        else:
+            plan.append(_Arrival(row, None))
+        # Held from here on, so a repeat later in the batch adds nothing.
+        held[key] = -1
+    return plan
+
+
+def _check_room(conn: db.Connection, board_id: int, new_rows: int) -> None:
+    """Refuse, whole, an arrival that would take the board past
+    MAX_ITEMS_PER_BOARD, saying how many would still fit — "at most 2000" alone
+    leaves somebody importing a year of viewing to guess how much to leave out."""
+    if new_rows <= 0:
+        return
+    held = int(conn.execute(
+        "SELECT COUNT(*) FROM tier_items WHERE board_id = ?", (board_id,)
+    ).fetchone()[0])
+    if held + new_rows > MAX_ITEMS_PER_BOARD:
+        room = max(0, MAX_ITEMS_PER_BOARD - held)
+        raise ValidationError(
+            f"A board holds at most {MAX_ITEMS_PER_BOARD} titles. This would add "
+            f"{new_rows}, and {'none' if not room else room} more will fit.")
+
+
+def _redefine_row(conn: db.Connection, board_id: int, item_id: int, season: int | None,
+                  facts: Mapping[str, Any] | None = None) -> None:
+    """Make one row a different season of its show — or the whole show — IN
+    PLACE: the same id, tier and rank, so what a row is can change without the
+    board reshuffling around it. THE ONE WRITE OF tier_items.season on an existing
+    row, shared by the row's own season control (`set_item_season`) and by a
+    season arriving over its whole show (`_plan_arrivals`).
+
+    `facts` is the arriving row, when there is one: what it knows about the
+    season (its counts, its rating) replaces what the row said about the
+    whole show, and anything it does not know leaves the row's own value alone.
+    The season control passes none, because choosing a season teaches nothing
+    about it.
+    """
+    if facts is None:
+        conn.execute("UPDATE tier_items SET season = ? WHERE id = ? AND board_id = ?",
+                     (season, item_id, board_id))
+        return
+    known = {column: facts[column] for column in _ARRIVING_FACTS
+             if facts.get(column) not in (None, "")}
+    assignments = "".join(f", {column} = ?" for column in known)
+    conn.execute(
+        f"UPDATE tier_items SET season = ?{assignments} WHERE id = ? AND board_id = ?",
+        (season, *known.values(), item_id, board_id))
+
+
+# What a season arriving over its whole-show row may say about itself. Not the
+# identity (it is the same title), not where the row sits and not who added it
+# first. Constants, never input, which is what makes naming them in SQL safe.
+_ARRIVING_FACTS = ("tmdb", "title", "year", "network", "season_count", "episode_count",
+                   "runtime", "user_rating")
 
 
 def _insert_item(conn: db.Connection, board_id: int, row: Mapping[str, Any],
@@ -852,10 +969,7 @@ async def set_item_season(user_id: int, board_uid: str, key: Any, season: Any) -
             raise ValidationError(
                 "This board already holds the whole show." if wanted is None else
                 "This board already holds that season.")
-        conn.execute(
-            "UPDATE tier_items SET season = ? WHERE id = ? AND board_id = ?",
-            (wanted, known[str(parsed)], board_id),
-        )
+        _redefine_row(conn, board_id, known[str(parsed)], wanted)
         _touch(conn, board_id, user_id, ts)
         return str(target)
 
@@ -1087,6 +1201,13 @@ async def restore_removal(user_id: int, board_uid: str, key: Any) -> bool:
     that somehow disagreed must not put a different title on the board than the
     one the viewer asked for. The season is one of them, so a removed season
     comes back as that season and never as its whole show.
+
+    A RESTORE IS NOT AN ARRIVAL, so a season put back beside its whole-show row
+    does not take that row over the way a season arriving by search or import
+    does (`_plan_arrivals`). Putting a row back means that row, where it sat;
+    converting the whole-show row instead would move the season to the whole
+    show's place and lose a row nobody asked to lose. The two rows coexist, as
+    they may.
     """
     parsed = parse_key(key)
     ts = db.now()
@@ -1106,11 +1227,7 @@ async def restore_removal(user_id: int, board_uid: str, key: Any) -> bool:
         if str(parsed) in _item_ids(conn, board_id):
             _forget_removal(conn, board_id, parsed)
             return False
-        held = int(conn.execute(
-            "SELECT COUNT(*) FROM tier_items WHERE board_id = ?", (board_id,)
-        ).fetchone()[0])
-        if held >= MAX_ITEMS_PER_BOARD:
-            raise ValidationError(f"A board holds at most {MAX_ITEMS_PER_BOARD} titles.")
+        _check_room(conn, board_id, 1)
 
         record = _json_object(found["item_json"])
         row = _normalize_ref({**record, "media": found["media"],
@@ -1726,6 +1843,11 @@ async def seed_ratings(
         user to do by hand the exact work they asked for.
       - Nothing here runs on a schedule or repeats itself. Seeding a board twice
         does nothing the second time beyond whatever was rated in between.
+      - A RATED SEASON IS A SEASON ROW, and it arrives through the same rule as
+        every other add (`_plan_arrivals`): over the show's whole-show row it
+        takes that row over in place, carrying its score, and is then treated
+        as a row the board already held — placed if it was in the pool, left
+        where it is if it was already in a tier.
 
     Titles outside the board's media scope are skipped rather than refused: a
     movies board seeded from a mixed ratings list should get the movies, not an
@@ -1748,42 +1870,51 @@ async def seed_ratings(
         # Highest score first so the tiers fill in the order somebody would have
         # dragged them, and so a truncated run keeps the titles that matter most.
         ordered = sorted(in_scope, key=lambda pair: (-pair[1], pair[0]["title"]))
+        # The same title twice in one payload — a show rated under two ids, say —
+        # keeps only its first (highest) score, and counting the second would
+        # report an insert the UNIQUE will drop.
+        scores: dict[str, int] = {}
+        for row, score in ordered:
+            scores.setdefault(item_keys.row_key(row), score)
 
         new_items: list[tuple[dict[str, Any], int, str]] = []   # row, score, tier uid
         moves: list[tuple[int, str]] = []                       # item id, tier uid
+        # Whole-show rows a rated season takes over (the arrival rule every add
+        # runs, `_plan_arrivals`): the row becomes the season in place, carrying
+        # its rating, and is then placed like any row already on the board.
+        conversions: list[_Arrival] = []
         already_placed = 0
-        seen: set[str] = set()
-        for row, score in ordered:
-            key = item_keys.row_key(row)
-            if key in seen:
-                # The same title twice in one payload — a show rated under two
-                # ids, say. The first (highest) score has already claimed it, and
-                # counting the second would report an insert the UNIQUE will drop.
-                continue
-            seen.add(key)
+        held = {key: item_id for key, (item_id, _) in placements.items()}
+        plan = {item_keys.row_key(step.row): step
+                for step in _plan_arrivals([row for row, _ in ordered], held)}
+        for key, score in scores.items():
             tier_uid = tier_for_rating(score)
-            existing = placements.get(key)
-            if existing is None:
-                new_items.append((row, score, tier_uid))
-            elif existing[1] is not None:
+            step = plan.get(key)
+            if step is not None and step.item_id is None:
+                new_items.append((step.row, score, tier_uid))
+                continue
+            if step is not None:
+                conversions.append(step)
+                item_id = step.item_id
+                category_id = next(cat for iid, cat in placements.values() if iid == item_id)
+            else:
+                item_id, category_id = placements[key]
+            if category_id is not None:
                 already_placed += 1
             else:
-                moves.append((existing[0], tier_uid))
+                moves.append((item_id, tier_uid))
 
         wanted_tiers = {uid for _, _, uid in new_items} | {uid for _, uid in moves}
         missing = [uid for entry in TIER_TEMPLATE
                    if (uid := entry["uid"]) in wanted_tiers and uid not in categories]
         if len(categories) + len(missing) > MAX_CATEGORIES_PER_BOARD:
             raise ValidationError(f"A board holds at most {MAX_CATEGORIES_PER_BOARD} tiers.")
-        held = int(conn.execute(
-            "SELECT COUNT(*) FROM tier_items WHERE board_id = ?", (board_id,)
-        ).fetchone()[0])
-        if held + len(new_items) > MAX_ITEMS_PER_BOARD:
-            raise ValidationError(f"A board holds at most {MAX_ITEMS_PER_BOARD} titles.")
+        _check_room(conn, board_id, len(new_items))
 
         summary = {
             "tiers_created": len(missing),
             "titles_added": len(new_items),
+            "titles_converted": len(conversions),
             "titles_placed": len(new_items) + len(moves),
             "already_placed": already_placed,
             "out_of_scope": len(rated) - len(in_scope),
@@ -1807,6 +1938,8 @@ async def seed_ratings(
             )
             categories[uid] = int(cur.lastrowid)
 
+        for step in conversions:
+            _redefine_row(conn, board_id, step.item_id, step.row["season"], step.row)
         # Appended AFTER whatever each tier already holds, so a seed onto a board
         # somebody has started arranging never reshuffles their existing order.
         ranks = _next_ranks(conn, board_id, categories.values())

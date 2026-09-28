@@ -380,14 +380,14 @@ class BoardTests(RankerTestCase):
         for uid in ("b1", "b2"):
             asyncio.run(ranker.create_board(self.user_id, uid=uid))
             added = asyncio.run(ranker.add_titles(self.user_id, uid, [show_ref("550")]))
-            self.assertEqual(added, 1)
+            self.assertEqual(added, ranker.Arrivals(added=1, converted=0))
         self.assertEqual(self.value("SELECT COUNT(*) FROM tier_items"), 2)
 
     def test_the_same_title_twice_in_one_board_is_a_no_op(self):
         asyncio.run(ranker.create_board(self.user_id, uid="b1"))
         asyncio.run(ranker.add_titles(self.user_id, "b1", [show_ref("550")]))
         again = asyncio.run(ranker.add_titles(self.user_id, "b1", [show_ref("550", "Renamed")]))
-        self.assertEqual(again, 0)
+        self.assertEqual(again, ranker.Arrivals(added=0, converted=0))
         self.assertEqual(self.value("SELECT COUNT(*) FROM tier_items"), 1)
 
     def test_a_movie_and_a_show_with_the_same_id_are_different_titles(self):

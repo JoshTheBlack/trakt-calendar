@@ -1391,8 +1391,11 @@ async def _add_searched_title(user, board_uid: str, data: dict):
     if item is None:
         return 0, authz.error("That search result is out of date — search for it again.")
     try:
-        return await ranker.add_titles(user.user_id, board_uid, [item],
-                                       added_from="manual"), None
+        # A whole-show row the result turned into its season changed the board
+        # as much as a new row did, so the drag bumps its version for either.
+        arrived = await ranker.add_titles(user.user_id, board_uid, [item],
+                                          added_from="manual")
+        return arrived.added + arrived.converted, None
     except ranker.RankerError as exc:
         return 0, _refusal(exc)
 
@@ -1560,11 +1563,11 @@ async def import_finished_titles(board_uid: str, request: Request):
     source = ranker_import.finished_titles_source()
     refs = await source.finished_titles(user.user_id, media=media, year=year)
     try:
-        added = await ranker.add_titles(
+        arrived = await ranker.add_titles(
             user.user_id, board_uid, ranker_sources.items_from_refs(refs),
             added_from="tracker",
         )
-        notice, ok = f"Found {len(refs)}, added {added}.", True
+        notice, ok = f"Found {len(refs)}, added {arrived.added}{_converted(arrived.converted)}.", True
     except ranker.RankerError as exc:
         notice, ok = str(exc), False
     return await _rankings_response(request, user, board_uid, notice=notice, notice_ok=ok)
@@ -1617,10 +1620,20 @@ async def seed_from_ratings(board_uid: str, request: Request):
                    f"{summary['tiers_created']} new tier(s).")
     return _seed_answer(
         request, board_uid,
-        confirm=f"This would add {summary['titles_added']} title(s), place "
+        confirm=f"This would add {summary['titles_added']} title(s)"
+                f"{_converted(summary['titles_converted'])}, place "
                 f"{summary['titles_placed']} and create {summary['tiers_created']} "
                 f"tier(s). {summary['already_placed']} are already in a tier and "
                 "will not be moved.")
+
+
+def _converted(count: int) -> str:
+    """The clause an add's sentence gains for whole-show rows that became the
+    season arriving over them (ranker.add_titles), or nothing when there were
+    none — a count nobody's board has any of is noise in every other answer."""
+    if not count:
+        return ""
+    return f", and made {count} whole-show row{'s' if count != 1 else ''} into the season"
 
 
 def _seed_answer(request: Request, board_uid: str, *, confirm: str = "",

@@ -64,8 +64,12 @@ class TheyAreSeparateRowsTests(_SeasonsTestCase):
 
     def test_adding_one_again_adds_nothing(self):
         self.build_with_seasons()
-        self.assertEqual(self.add(show_ref(SHOW), show_ref(SHOW, season=2)), 0)
-        self.assertEqual(self.add(show_ref(SHOW, season=3)), 1)
+        self.assertEqual(self.add(show_ref(SHOW), show_ref(SHOW, season=2)),
+                         ranker.Arrivals(added=0, converted=0))
+        self.assertEqual(self.add(show_ref("8", season=3)),
+                         ranker.Arrivals(added=0, converted=1))
+        self.assertEqual(self.add(show_ref("9", season=3)),
+                         ranker.Arrivals(added=1, converted=0))
 
     def test_an_unsuffixed_key_names_the_whole_show(self):
         self.build_with_seasons()
@@ -90,8 +94,9 @@ class TheyAreSeparateRowsTests(_SeasonsTestCase):
         self.build_with_seasons()
         with mock_cap(4):
             with self.assertRaises(ranker.ValidationError):
-                self.add(show_ref(SHOW, season=3))
-            self.assertEqual(self.add(show_ref(SHOW, season=2)), 0)
+                self.add(show_ref("9", season=3))
+            self.assertEqual(self.add(show_ref(SHOW, season=2)),
+                             ranker.Arrivals(added=0, converted=0))
 
 
 class SavingAndMovingTests(_SeasonsTestCase):
