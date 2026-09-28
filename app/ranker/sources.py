@@ -69,6 +69,10 @@ class TitleRef:
     season_count: int | None = None
     episode_count: int | None = None
     runtime: int | None = None
+    # Which season of the show this is, None for the whole show. Part of what the
+    # board row IS (its key), so it travels into as_item's mapping beside the
+    # identity rather than among the descriptive fields.
+    season: int | None = None
 
     def identity(self) -> tuple[str, str] | None:
         """(match_source, match_id) by the waterfall, or None when this title
@@ -91,6 +95,7 @@ class TitleRef:
             "media": str(self.media),
             "match_source": match_source,
             "match_id": match_id,
+            "season": self.season,
             # The artwork key specifically, which is tmdb or nothing: TMDB is
             # what serves the image, so a title matched on tvdb still has no
             # poster to fetch and falls back to the placeholder.

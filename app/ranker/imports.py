@@ -157,53 +157,46 @@ def finished_titles_source() -> TrackerFinishedTitles:
 # ---------------------------------------------------------------------------
 
 async def _finished_shows(user_id: int, year: int | None) -> list[TitleRef]:
-    """One TitleRef per show with at least one finished season.
+    """One TitleRef per FINISHED SEASON — the unit somebody finishes, and the unit
+    a board row can now be.
 
-    SEASON AND EPISODE COUNTS MEAN "HOW MUCH OF THIS YOU FINISHED", not how long
-    the show ran: seasons is how many of them were completed, episodes is the
-    total across exactly those seasons. A reader who assumes otherwise will
-    wonder why a long-running show imports as two seasons.
+    A show finished across three seasons arrives as three season rows, each
+    carrying THAT season's own episode total, rather than one row for the show
+    with the seasons and episodes summed: what was finished is a season, and a
+    board ranks what was watched. Arriving through the board's arrival rule
+    (ranker.add_titles), a season of a show the board already holds as its
+    whole-show row takes that row over in place instead of landing beside it.
 
-    Identity comes from the most recent record, because a title's name, network
-    and ids are all things the other feature refreshes as it goes — the newest
-    row is the one that saw them last.
+    Keyed by (title, season), so the same season finished across two months (a
+    split cour, or a correction) is one row rather than two. Months are read in
+    order, so a later month's record overwrites an earlier one's — a title's
+    name, network and ids are things the other feature refreshes as it goes,
+    and the newest record is the one that saw them last.
     """
     months = await distrakt.list_months(user_id)
     wanted = [month for month in months
               if year is None or str(month).startswith(f"{year:04d}")]
 
-    # item key -> {identity fields, the completed seasons and their totals}
-    finished: dict[str, dict[str, Any]] = {}
-    # Months in order, so a later month's record overwrites an earlier one's —
-    # which is what makes the identity fields come from the most recent row.
+    finished: dict[tuple[str, int], TitleRef] = {}
     for month in wanted:
         for record in await _completed_in(user_id, month):
-            entry = finished.setdefault(str(distrakt.record_key(record)), {"seasons": {}})
-            entry.update({
-                "title": record.get("title") or "",
-                "network": record.get("network") or "",
-                # The whole map the roster row carries, which is already the shape
-                # a TitleRef wants — the tracker resolved these ids once and there
-                # is nothing here to translate.
-                "ids": dict(record.get("ids") or {}),
-            })
-            # Keyed by season so the same season finished across two months (a
-            # split cour, or a correction) counts once rather than doubling the
-            # episode total.
-            entry["seasons"][int(record["season"])] = int(record.get("total") or 0)
+            season = int(record["season"])
+            finished[(str(distrakt.record_key(record)), season)] = TitleRef(
+                media=Media.SHOW,
+                # The record's own title for its season: a service that files
+                # each season as a title of its own names it that way.
+                title=record.get("title") or "",
+                # The whole map the roster row carries, which is already the
+                # shape a TitleRef wants — the tracker resolved these ids once
+                # and there is nothing here to translate.
+                ids=dict(record.get("ids") or {}),
+                network=record.get("network") or "",
+                episode_count=int(record.get("total") or 0),
+                season=season,
+            )
 
-    refs = [
-        TitleRef(
-            media=Media.SHOW,
-            title=entry["title"],
-            ids=entry["ids"],
-            network=entry["network"],
-            season_count=len(entry["seasons"]),
-            episode_count=sum(entry["seasons"].values()),
-        )
-        for entry in finished.values()
-    ]
-    logger.info("tracker import: %d finished show(s) for user %s (year=%s)",
+    refs = list(finished.values())
+    logger.info("tracker import: %d finished season(s) for user %s (year=%s)",
                 len(refs), user_id, year)
     return refs
 

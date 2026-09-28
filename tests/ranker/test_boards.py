@@ -1211,13 +1211,27 @@ class TrackerImportTests(RankerTestCase):
                      _explode("a month was recomputed")):
             self.assertEqual(len(self.finished()), 1)
 
-    def test_counts_describe_how_much_was_finished(self):
+    def test_each_finished_season_is_its_own_title_with_its_own_total(self):
+        """What somebody finishes is a season, and a board row can be one — so
+        the import stopped folding a show's seasons into one row with the
+        seasons counted and the episodes summed."""
         self.month("2026-01", closed=True)
         self.show("2026-01", 10, 1, watched=0, total=10, kind="completed")
         self.show("2026-01", 10, 2, watched=0, total=12, kind="completed")
         self.show("2026-01", 10, 3, watched=0, total=6, kind="abandoned")
+        refs = self.finished()
+        self.assertEqual([(r.season, r.episode_count, r.season_count) for r in refs],
+                         [(1, 10, None), (2, 12, None)])
+        self.assertEqual([r.as_item()["season"] for r in refs], [1, 2])
+
+    def test_a_season_finished_in_two_months_is_one_title(self):
+        """A split cour, or a correction: the later month's record wins."""
+        self.month("2026-01", closed=True)
+        self.month("2026-02", closed=True)
+        self.show("2026-01", 10, 2, watched=0, total=6, kind="completed", title="Old Name")
+        self.show("2026-02", 10, 2, watched=0, total=12, kind="completed", title="New Name")
         ref, = self.finished()
-        self.assertEqual((ref.season_count, ref.episode_count), (2, 22))
+        self.assertEqual((ref.title, ref.season, ref.episode_count), ("New Name", 2, 12))
 
     def test_the_year_filter_is_when_it_was_watched(self):
         self.month("2025-06", closed=True)
@@ -1270,6 +1284,33 @@ class TrackerImportTests(RankerTestCase):
         self.assertIn("Found 1, added 1.", resp.text)
         self.assertEqual(self.value("SELECT added_from FROM tier_items"), "tracker")
         self.assertIsNone(self.value("SELECT category_id FROM tier_items"))
+        self.assertEqual(self.value("SELECT season FROM tier_items"), 1)
+
+    def test_the_import_lands_seasons_and_converts_a_whole_show_row_in_place(self):
+        """A show already on the board whole, tiered, is taken over by the
+        latest season that arrives — same row, same tier, same place — and the
+        other finished seasons land in the pool beside it."""
+        asyncio.run(ranker.add_titles(self.user_id, "b1", [
+            {"media": "show", "match_source": "tmdb", "match_id": "100", "title": "A Show"}]))
+        asyncio.run(ranker.save_layout(self.user_id, "b1", {
+            "version": self.value("SELECT version FROM tier_boards WHERE uid = 'b1'"),
+            "categories": [{"uid": "s", "label": "S", "rank_priority": 10,
+                            "items": ["show:tmdb:100"]}],
+            "pool": []}))
+        whole_id = self.value("SELECT id FROM tier_items")
+        self.month("2026-01", closed=True)
+        self.show("2026-01", 10, 1, watched=0, total=10, kind="completed")
+        self.show("2026-01", 10, 2, watched=0, total=8, kind="completed")
+        resp = self.client.post("/rankings/boards/b1/import", json={"media": "show"})
+        self.assertIn("Found 2, added 1, and made 1 whole-show row into the season.",
+                      resp.text)
+        rows = asyncio.run(db.fetch_all(
+            "SELECT id, season, category_id, episode_count FROM tier_items ORDER BY season"))
+        self.assertEqual([(r["season"], r["episode_count"]) for r in rows], [(1, 10), (2, 8)])
+        converted = rows[1]
+        self.assertEqual(converted["id"], whole_id)
+        self.assertIsNotNone(converted["category_id"])
+        self.assertIsNone(rows[0]["category_id"])
 
     def test_the_year_list_is_a_fragment_of_its_own(self):
         """Not two lists drawn and one chosen by CSS: a `display: none` <select>
