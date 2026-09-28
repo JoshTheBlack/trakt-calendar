@@ -343,15 +343,20 @@ both browsers before believing either answer.
 
 THE SAME GOES FOR htmx's REQUEST ORDERING, and a search box is where it bites.
 Two measured facts about the vendored htmx decide how a box that lists as you
-type and asks the services on Enter must be wired (`_distrakt_add_show.html`
-carries the measurements): a DEBOUNCED trigger's timer cannot be cancelled by
-anything else, so a debounced typed request fires after an immediate Enter and
-lands over its answer; and `hx-sync`'s `replace` loses track of the request that
-did the replacing once the aborted one settles, so the NEXT request aborts
-nothing and stale answers arrive late. What held in both engines is no debounce
-and `queue last` on the results target, shared by the box, the form and every
-result row. The calendar's own box (index.html) still debounces and replaces,
-and was measured cancelling its services' request on a quick Enter in both.
+type and asks the services on Enter must be wired: a DEBOUNCED trigger's timer
+cannot be cancelled by anything else, so a debounced typed request fires after
+an immediate Enter and lands over its answer; and `hx-sync`'s `replace` loses
+track of the request that did the replacing once the aborted one settles, so the
+NEXT request aborts nothing and stale answers arrive late — and on the calendar
+it aborted the services' request outright, 64 of 64 type-then-Enter trials in
+each engine. What held in both is no debounce and `queue last` on the results
+target, shared by the box, the form and every control inside the results that
+asks for them again. THAT RULE HAS ONE HOME, `templates/_title_search.html`:
+its `box` macro is every title search's box (the calendar's and the tracker's
+two), its `row` macro every result row, with the surface filling the ACTION
+SLOT (the element and what pressing it does), and its `queue`/`sync` are the one
+spelling of the policy for anything else that re-asks. A new search box is a
+call to that macro, not a copy of its attributes.
 
 ## Conventions for code you add or change
 
