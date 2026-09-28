@@ -262,11 +262,80 @@ class BackupTests(_SeasonsTestCase):
 
 class ExportTests(_SeasonsTestCase):
 
+    LABELS = ["Title 7", "Title 7 — Night Country", "Title 7 — Season 3"]
+
+    def build_show_and_two_seasons(self):
+        """One tier: the whole show, its season 2 (which has a name of its own)
+        and its season 3 — three rows of one show, ranked like any three titles."""
+        asyncio.run(ranker.create_board(self.user_id, uid=BOARD, name="Top"))
+        self.add(show_ref(SHOW, season_count=3, episode_count=24),
+                 show_ref(SHOW, season=2, season_name="Night Country", episode_count=6),
+                 show_ref(SHOW, season=3, episode_count=8))
+        asyncio.run(ranker.save_layout(self.user_id, BOARD, {
+            "version": self.version(),
+            "categories": [{"uid": "s", "label": "S", "rank_priority": 10,
+                            "items": [key(SHOW), season_key(SHOW, 2), season_key(SHOW, 3)]}],
+            "pool": [],
+        }))
+
     def test_a_season_is_its_own_entry_under_its_own_key(self):
         self.build_with_seasons()
         ranked = ranker_export.consolidate(self.board())
         self.assertEqual([entry.key for entry in ranked],
                          [key(SHOW), season_key(SHOW, 2), key("8")])
+
+    def test_a_show_and_two_of_its_seasons_are_three_entries_named_as_their_rows(self):
+        self.build_show_and_two_seasons()
+        board = self.board()
+        ranked = ranker_export.consolidate(board)
+        self.assertEqual([(entry.rank, entry.label) for entry in ranked],
+                         list(enumerate(self.LABELS, start=1)))
+        # The row on the page and the entry in the export are one name.
+        rows = board["categories"][0]["items"]
+        self.assertEqual([row["label"] for row in rows], self.LABELS)
+        # And a season row counts only itself: its own episodes, never the
+        # show's season count.
+        self.assertEqual([(row["season_count"], row["episode_count"]) for row in rows],
+                         [(3, 24), (None, 6), (None, 8)])
+
+    def test_the_text_export_uses_the_same_names(self):
+        self.build_show_and_two_seasons()
+        text = ranker_export.to_markdown(ranker_export.consolidate(self.board()))
+        self.assertEqual([line for line in text.splitlines() if line],
+                         [f"{n}. **{label}**" for n, label in enumerate(self.LABELS, start=1)])
+
+    def test_the_image_export_captions_each_entry_with_its_name(self):
+        from app.ranker import routes as ranker_routes
+        from tests.ranker.test_boards import no_artwork, patched
+        no_artwork(self)
+        self.build_show_and_two_seasons()
+        drawn = []
+
+        async def _render(entries, options, **_kwargs):
+            drawn.extend(entries)
+            return b"image"
+
+        with patched(ranker_routes, "_render", _render):
+            resp = self.client.post(f"/api/rankings/boards/{BOARD}/export",
+                                    json={"top_x": 3, "columns": 3, "fmt": "jpeg",
+                                          "show_titles": True})
+        self.assertEqual(resp.status_code, 200, resp.text[:300])
+        self.assertEqual([(entry.rank, entry.title) for entry in drawn],
+                         list(enumerate(self.LABELS, start=1)))
+
+    def test_a_seasons_name_is_part_of_what_a_cached_render_is_of(self):
+        self.build_show_and_two_seasons()
+        ranked = ranker_export.consolidate(self.board())
+
+        def render_key(entries):
+            return ranker_export.render_key(
+                entries, renderer_version=1, columns=3, scale=1.0, fmt="jpeg",
+                show_titles=True, podium=False, title="", username="", header_image=None)
+
+        import dataclasses
+        renamed = [dataclasses.replace(entry, season_name="Something Else")
+                   if entry.season == 2 else entry for entry in ranked]
+        self.assertNotEqual(render_key(ranked), render_key(renamed))
 
 
 class RoutesTests(_SeasonsTestCase):

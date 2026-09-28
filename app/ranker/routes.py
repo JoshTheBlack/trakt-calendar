@@ -2171,7 +2171,7 @@ def _grid_entries(ranked: list[ranker_export.RankedTitle],
     return [
         grid_builder.GridEntry(
             rank=entry.rank,
-            title=entry.title,
+            title=entry.label,
             poster=(posters.cached_poster(entry.media, entry.tmdb, order, entry.season)
                     if entry.tmdb else None),
             colour=entry.colour,

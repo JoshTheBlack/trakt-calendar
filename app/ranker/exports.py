@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import item_keys
+from . import item_keys, seasons
 from ..media import user_images
 
 logger = logging.getLogger(__name__)
@@ -82,6 +82,16 @@ class RankedTitle:
     # Which season of the show this entry is, None for the whole show — a
     # season and its show are two entries, ranked like any two titles.
     season: int | None = None
+    # The season's own name where it has one (tier_items.season_name), which is
+    # what an anthology's season is called in place of its number.
+    season_name: str = ""
+
+    @property
+    def label(self) -> str:
+        """What this entry is called in every export: the board row's own name
+        for it (seasons.row_label), so the image, the text and the row on the
+        page cannot come to call one title two things."""
+        return seasons.row_label(self.title, self.season, self.season_name)
 
     @property
     def key(self) -> str:
@@ -143,6 +153,7 @@ def consolidate(
             match_source=str(item.get("match_source") or ""),
             match_id=str(item.get("match_id") or ""),
             season=item.get("season"),
+            season_name=str(item.get("season_name") or ""),
             tmdb=item.get("tmdb"),
             title=str(item.get("title") or ""),
             year=item.get("year"),
@@ -229,7 +240,7 @@ def _markdown_line(entry: RankedTitle, emojis: Mapping[str, str] | None,
         if prefix:
             prefix += " "
     year = f" ({entry.year})" if entry.year else ""
-    return f"{prefix}**{entry.title or 'Untitled'}**{year}"
+    return f"{prefix}**{entry.label}**{year}"
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +273,7 @@ def render_key(
         "renderer": renderer_version,
         "titles": [
             [entry.rank, entry.media, entry.match_id, entry.season, entry.tmdb,
-             entry.colour, entry.title]
+             entry.colour, entry.label]
             for entry in ranked
         ],
         "columns": columns,
