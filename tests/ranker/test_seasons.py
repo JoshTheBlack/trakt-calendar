@@ -225,31 +225,114 @@ class DeletingAndRestoringATierTests(_SeasonsTestCase):
         self.assertEqual(self.pool_keys(), [season_key(SHOW, 2)])
 
 
+def _title_before_seasons(match_id: str, tier: str | None, rank: int) -> dict:
+    """One title exactly as a backup written before a board could hold a season
+    spelled it: no `season`, no `season_name`."""
+    return {"media": "show", "match_source": "tmdb", "match_id": match_id,
+            "tmdb": int(match_id), "ids_json": json.dumps({"tmdb": int(match_id)}),
+            "title": f"Title {match_id}", "year": 2024, "network": "HBO",
+            "season_count": 3, "episode_count": 24, "runtime": 55, "user_rating": None,
+            "added_from": "manual", "rank_in_category": rank, "created_at": 1700000000,
+            "category_uid": tier}
+
+
+# A version-1 document as the build before seasons wrote it: two boards' worth
+# of shape is not needed to show the point, one board with a tier and a pool is.
+SCHEMA_1_DOCUMENT = {
+    "schema": 1,
+    "exported_at": 1700000500,
+    "boards": [{
+        "uid": BOARD, "name": "Top", "year": 2024, "media_scope": "show",
+        "sort_order": 0, "created_at": 1700000000, "updated_at": 1700000400,
+        "categories": [{"uid": "s", "label": "S", "rank_priority": 10,
+                        "is_isolated": False, "sort_order": 0, "colour": None,
+                        "created_at": 1700000000}],
+        "items": [_title_before_seasons(SHOW, "s", 0), _title_before_seasons("8", "s", 1),
+                  _title_before_seasons("9", None, 0)],
+    }],
+}
+
+
 class BackupTests(_SeasonsTestCase):
+
+    def test_a_backup_is_version_2_and_every_title_says_its_season(self):
+        self.build_with_seasons()
+        doc = asyncio.run(ranker.export_user_data(self.user_id))
+        self.assertEqual(doc["schema"], 2)
+        for item in doc["boards"][0]["items"]:
+            with self.subTest(item=item["match_id"]):
+                self.assertIn("season", item)
+                self.assertIn("season_name", item)
 
     def test_a_season_row_round_trips(self):
         self.build_with_seasons()
+        asyncio.run(db.execute("UPDATE tier_items SET season_name = 'Night Country' "
+                               "WHERE season = 2"))
         before = self.board()
         doc = asyncio.run(ranker.export_user_data(self.user_id))
-        seasons = {(item["match_id"], item["season"]) for item in doc["boards"][0]["items"]}
-        self.assertEqual(seasons, {(SHOW, None), (SHOW, 1), (SHOW, 2), ("8", None)})
+        seasons = {(item["match_id"], item["season"], item["season_name"])
+                   for item in doc["boards"][0]["items"]}
+        self.assertEqual(seasons, {(SHOW, None, None), (SHOW, 1, None),
+                                   (SHOW, 2, "Night Country"), ("8", None, None)})
         asyncio.run(ranker.restore_user_data(self.user_id, json.loads(json.dumps(doc))))
         after = self.board()
         self.assertEqual(self.keys_in("s"), [key(SHOW), season_key(SHOW, 2), key("8")])
         self.assertEqual(self.pool_keys(), [season_key(SHOW, 1)])
         self.assertEqual(len(after["pool"]), len(before["pool"]))
+        self.assertEqual([item["label"] for item in after["categories"][0]["items"]],
+                         ["Title 7", "Title 7 — Night Country", "Title 8"])
 
-    def test_a_document_with_no_seasons_restores_every_title_whole(self):
-        """What every backup written before a board could hold a season looks
-        like: no `season` on any title."""
-        self.build_with_seasons()
-        doc = asyncio.run(ranker.export_user_data(self.user_id))
-        items = [item for item in doc["boards"][0]["items"] if item["season"] is None]
-        for item in items:
-            del item["season"]
-        doc["boards"][0]["items"] = items
-        asyncio.run(ranker.restore_user_data(self.user_id, doc))
+    def test_a_version_1_backup_restores_exactly_as_it_always_did(self):
+        """Every title the whole show, in its tier and place, with its counts."""
+        asyncio.run(ranker.restore_user_data(self.user_id,
+                                             json.loads(json.dumps(SCHEMA_1_DOCUMENT))))
         self.assertEqual(self.keys_in("s"), [key(SHOW), key("8")])
+        self.assertEqual(self.pool_keys(), [key("9")])
+        rows = asyncio.run(db.fetch_all(
+            "SELECT match_id, season, season_name, season_count, episode_count, title "
+            "FROM tier_items ORDER BY match_id"))
+        self.assertEqual([tuple(row) for row in rows],
+                         [(match_id, None, None, 3, 24, f"Title {match_id}")
+                          for match_id in (SHOW, "8", "9")])
+
+    def test_a_version_1_backup_that_carries_a_season_has_it_honoured(self):
+        """The shape the build just before the version bump wrote: version 1,
+        with `season` on its titles. What the file says a row was is what it
+        restores as, so a show and its season stay two rows."""
+        doc = json.loads(json.dumps(SCHEMA_1_DOCUMENT))
+        items = doc["boards"][0]["items"]
+        items.append({**_title_before_seasons(SHOW, "s", 2), "season": 2})
+        asyncio.run(ranker.restore_user_data(self.user_id, doc))
+        self.assertEqual(self.keys_in("s"), [key(SHOW), key("8"), season_key(SHOW, 2)])
+
+    def test_a_version_2_title_that_does_not_say_its_season_is_refused(self):
+        self.build_with_seasons()
+        for field in ("season", "season_name"):
+            with self.subTest(field=field):
+                doc = asyncio.run(ranker.export_user_data(self.user_id))
+                del doc["boards"][0]["items"][0][field]
+                with self.assertRaises(ranker.ValidationError) as caught:
+                    asyncio.run(ranker.restore_user_data(self.user_id, doc))
+                self.assertIn(field.replace("_", " "), str(caught.exception))
+        # Refused before anything was deleted: the board is still here.
+        self.assertEqual(len(self.keys_in("s")), 3)
+
+    def test_a_version_2_title_with_an_impossible_season_is_refused(self):
+        self.build_with_seasons()
+        for season in (-1, 1000, "two", 1.5):
+            with self.subTest(season=season):
+                doc = asyncio.run(ranker.export_user_data(self.user_id))
+                doc["boards"][0]["items"][0]["season"] = season
+                with self.assertRaises(ranker.ValidationError):
+                    asyncio.run(ranker.restore_user_data(self.user_id, doc))
+
+    def test_a_film_with_a_season_is_refused(self):
+        asyncio.run(ranker.create_board(self.user_id, uid=BOARD))
+        self.add({"media": "movie", "match_source": "tmdb", "match_id": "550", "tmdb": 550})
+        doc = asyncio.run(ranker.export_user_data(self.user_id))
+        doc["boards"][0]["items"][0]["season"] = 1
+        with self.assertRaises(ranker.ValidationError):
+            asyncio.run(ranker.restore_user_data(self.user_id, doc))
 
     def test_one_season_twice_on_a_board_is_refused(self):
         self.build_with_seasons()
@@ -258,6 +341,11 @@ class BackupTests(_SeasonsTestCase):
         items.append(dict(next(item for item in items if item["season"] == 2)))
         with self.assertRaises(ranker.ValidationError):
             asyncio.run(ranker.restore_user_data(self.user_id, doc))
+
+    def test_a_version_this_build_does_not_know_is_refused(self):
+        with self.assertRaises(ranker.ValidationError):
+            asyncio.run(ranker.restore_user_data(self.user_id, {**SCHEMA_1_DOCUMENT,
+                                                                "schema": 3}))
 
 
 class ExportTests(_SeasonsTestCase):

@@ -2044,8 +2044,23 @@ def _next_ranks(conn: db.Connection, board_id: int, category_ids) -> dict[int, i
 
 # Bump only on an incompatible change to the shape below. A restore refuses a
 # version it does not understand rather than guessing at the layout.
-EXPORT_SCHEMA = 1
-SUPPORTED_EXPORT_SCHEMAS = (1,)
+#
+# 2: a board may hold a show AND seasons of it, so every title states which it
+# is — `season` (null for the whole show) and `season_name` — rather than leaving
+# an absent field to mean "whole show". A version-2 title that leaves either out
+# is refused (`_validate_backup_item`): in a document that can hold seasons,
+# silence about the season is a file that has lost part of a title's identity,
+# and guessing "the whole show" would fold a season into its show. That is also
+# why the number moved: a build that reads only version 1 refuses this document
+# outright, where before it would have read a season and its show as one title
+# twice and refused the board with a message about duplicates.
+# 1: written before a board could hold a season, so its titles carry no `season`
+# and each restores as the whole show, exactly as it always did. A version-1
+# document that DOES carry a season — the shape the build before the bump wrote,
+# while a board could already hold seasons — has it honoured, since that is what
+# the file says the row was.
+EXPORT_SCHEMA = 2
+SUPPORTED_EXPORT_SCHEMAS = (1, 2)
 
 # The board columns a backup carries. `version` is not among them: it counts
 # saves against THIS database's copy of the board, so carrying it across would
@@ -2055,13 +2070,9 @@ _BACKUP_BOARD_FIELDS = ("uid", "name", "year", "media_scope", "sort_order",
 _BACKUP_CATEGORY_FIELDS = ("uid", "label", "rank_priority", "is_isolated",
                            "sort_order", "colour", "created_at")
 # `season` is part of a title's identity on a board (NULL is the whole show), so
-# it travels with the triple. A document written before a board could hold a
-# season has no `season` on any title, which reads back as the whole show — what
-# every row was then — so this reader takes both. What the field does NOT make
-# safe is the other direction: a build that predates it ignores the field, reads
-# a season and its show as one title twice, and refuses the board whole (the
-# "appears twice" check below) rather than restoring it smaller.
-# `season_name` rides beside it the same way: absent reads as no name of its own.
+# it travels with the triple, and `season_name` beside it (NULL: no name of its
+# own). What each schema version says about their absence is written at
+# EXPORT_SCHEMA above.
 _BACKUP_ITEM_FIELDS = ("media", "match_source", "match_id", "season", "season_name",
                        "tmdb", "ids_json",
                        "title", "year", "network", "season_count", "episode_count",
@@ -2192,7 +2203,7 @@ def _validate_backup(doc: Any) -> list[dict[str, Any]]:
     if len(raw_boards) > MAX_BOARDS_PER_USER:
         raise ValidationError(f"A backup can hold at most {MAX_BOARDS_PER_USER} boards.")
 
-    boards = [_validate_backup_board(entry) for entry in raw_boards]
+    boards = [_validate_backup_board(entry, schema) for entry in raw_boards]
     if len({board["uid"] for board in boards}) != len(boards):
         raise ValidationError("Two boards in this backup share an id.")
     per_year: dict[int, int] = {}
@@ -2207,7 +2218,7 @@ def _validate_backup(doc: Any) -> list[dict[str, Any]]:
     return boards
 
 
-def _validate_backup_board(entry: Any) -> dict[str, Any]:
+def _validate_backup_board(entry: Any, schema: int) -> dict[str, Any]:
     if not isinstance(entry, Mapping):
         raise ValidationError("Each board must be an object.")
     raw_categories = entry.get("categories") or []
@@ -2224,7 +2235,7 @@ def _validate_backup_board(entry: Any) -> dict[str, Any]:
     if len(uids) != len(categories):
         raise ValidationError("Two tiers on one board share an id.")
 
-    items = [_validate_backup_item(row, uids) for row in raw_items]
+    items = [_validate_backup_item(row, uids, schema) for row in raw_items]
     keys = {item_keys.row_key(item["row"]) for item in items}
     if len(keys) != len(items):
         # The UNIQUE would drop the second copy silently, which would restore a
@@ -2272,9 +2283,19 @@ def _validate_tier_record(entry: Any) -> dict[str, Any]:
     }
 
 
-def _validate_backup_item(entry: Any, category_uids: set[str]) -> dict[str, Any]:
+# The fields a title must state from a given backup version on (EXPORT_SCHEMA
+# says why each version asks what it does).
+_REQUIRED_ITEM_FIELDS = {1: (), 2: ("season", "season_name")}
+
+
+def _validate_backup_item(entry: Any, category_uids: set[str], schema: int) -> dict[str, Any]:
     if not isinstance(entry, Mapping):
         raise ValidationError("Each title must be an object.")
+    for field in _REQUIRED_ITEM_FIELDS[schema]:
+        if field not in entry:
+            raise ValidationError(
+                f"A title in this backup does not say its {field.replace('_', ' ')} "
+                f"(null for the whole show), which a version {schema} backup must.")
     # _normalize_ref reads `ids`, while the export writes the stored `ids_json`
     # verbatim so a round trip is an identity. Parse it back into the map that
     # function expects rather than teaching it a second input shape.
