@@ -1080,12 +1080,14 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
             await logos.ensure_logos(settings, [
                 (s.get("network"), (s.get("ids") or {}).get("tmdb")) for s in shows
             ])
-        # And every row's picture, the same way: a title nothing has recorded a
-        # picture for gets its one lookup here, ahead of the render, and the
-        # answer — or the fact that there is none — is recorded for every later
-        # load. A title already known costs one read for the whole page.
+    if ports and (shows or movies):
+        # And every row's picture, the same way — the watched films' as well as
+        # the shows': a title nothing has recorded a picture for gets its one
+        # lookup here, ahead of the render, and the answer — or the fact that
+        # there is none — is recorded for every later load. A title already
+        # known costs one read for the whole page.
         with span("payload.ensure_posters"):
-            _, unknown = await _row_pictures(user_id, shows)
+            _, unknown = await _row_pictures(user_id, shows, movies)
             if unknown:
                 await posters.ensure_addresses(settings, unknown, await _poster_order(user_id))
 
@@ -1429,45 +1431,67 @@ async def _poster_order(user_id: int) -> tuple[str, ...]:
     return posters.order_for((await source_prefs.load(user_id)).source_order(list(Source)))
 
 
-def _row_tmdb(show: dict) -> int | None:
+def _row_tmdb(row: dict) -> int | None:
+    """The tmdb id a row's picture is found by: the row's own ids' where they
+    name one, else its KEY's where the key is a tmdb one.
+
+    THE KEY IS THE FALLBACK BECAUSE OF FILMS. A watched film's ids are what the
+    service whose history reported the play said, and that is usually only its
+    own id — measured on the owner's data, 20 of 21 frozen film rows carried no
+    tmdb id among their ids while every one of their keys was `movie:tmdb:N`,
+    the identity the watch was filed under. A row keyed by another service's id
+    and naming no tmdb one has nothing a lookup could be made by; the calendar's
+    own record of it can still give it a picture."""
     try:
-        return int((show.get("ids") or {}).get("tmdb") or 0) or None
+        tmdb = int((row.get("ids") or {}).get("tmdb") or 0)
     except (TypeError, ValueError):
+        tmdb = 0
+    if tmdb > 0:
+        return tmdb
+    try:
+        key = parse_item_key(str(row.get("key") or ""))
+        return int(key.match_id) if key.match_source == "tmdb" and int(key.match_id) > 0 else None
+    except ValueError:
         return None
 
 
-async def _row_pictures(user_id: int, shows: list[dict]
-                        ) -> tuple[dict[tuple[str, int], str], list[tuple[str, int]]]:
+async def _row_pictures(user_id: int, shows: list[dict], films: list[dict] | None = None,
+                        ) -> tuple[dict[tuple[str, int | None], str], list[tuple[str, int]]]:
     """Each row's picture as a browser draws it — {(key, season): proxied
-    address, or ""} — and the (media, tmdb) of the titles nothing has any
-    picture recorded for, which are the ones worth a lookup.
+    address, or ""}, a film's season being None — and the (media, tmdb) of the
+    titles nothing has any picture recorded for, which are the ones worth a
+    lookup.
 
     FROM WHAT IS STORED, AND NOTHING ELSE. The season's own artwork where the
-    season registry has it (a row IS a season), else the show's: the picture the
-    calendar's own record of the title carries, and the poster registry's
+    season registry has it (a row IS a season), else the title's: the picture
+    the calendar's own record of the title carries, and the poster registry's
     sightings beside it — every source in the VIEWER's order, the one question
-    artwork.pick answers for every surface. Three reads for the whole page, and
-    never a request, so this is safe to call while drawing it.
+    artwork.pick answers for every surface. A film is the same question with no
+    season. A handful of reads for the whole page, and never a request, so this
+    is safe to call while drawing it.
 
     THE ADDRESS, NEVER THE IMAGE: nothing here puts a picture on disk. The row
     draws the address through the image proxy.
     """
-    shows = [show for show in shows if show.get("key")]
+    rows = ([(Media.SHOW, show) for show in shows if show.get("key")]
+            + [(Media.MOVIE, film) for film in films or [] if film.get("key")])
     order = await _poster_order(user_id)
-    stored = await calendar_entries.posters_for([show["key"] for show in shows], Media.SHOW)
-    refs = [(str(Media.SHOW), tmdb, show.get("season")) for show in shows
-            if (tmdb := _row_tmdb(show))]
+    stored = {media: await calendar_entries.posters_for(
+                  [row["key"] for kind, row in rows if kind == media], media)
+              for media in (Media.SHOW, Media.MOVIE)}
+    refs = [(str(media), tmdb, row.get("season")) for media, row in rows
+            if (tmdb := _row_tmdb(row))]
     known = await artwork.known(refs)
-    pictures: dict[tuple[str, int], str] = {}
+    pictures: dict[tuple[str, int | None], str] = {}
     unknown: set[tuple[str, int]] = set()
-    for show in shows:
-        tmdb = _row_tmdb(show)
-        pair = (str(Media.SHOW), tmdb)
-        season = show.get("season")
+    for media, row in rows:
+        tmdb = _row_tmdb(row)
+        pair = (str(media), tmdb)
+        season = row.get("season")
         own = known.seasons.get((*pair, season), {}) if tmdb and season is not None else {}
-        address = artwork.pick({**known.shows.get(pair, {}), **stored.get(show["key"], {})},
+        address = artwork.pick({**known.shows.get(pair, {}), **stored[media].get(row["key"], {})},
                                own, order)
-        pictures[(str(show["key"]), season)] = proxied_image(address) or ""
+        pictures[(str(row["key"]), season)] = proxied_image(address) or ""
         if not address and tmdb and pair not in known.missed:
             unknown.add(pair)
     return pictures, sorted(unknown)
@@ -1498,7 +1522,8 @@ async def _month_answer(request: Request, user_id: int, year: int, month: int,
         # all. There is nothing to draw, so it is said and the list is left alone.
         return _month_refusal(request, payload.get("error") or "Not configured")
     emojis, default_emoji = await distrakt_store.get_emoji_prefs(user_id)
-    pictures, _ = await _row_pictures(user_id, payload.get("shows") or [])
+    pictures, _ = await _row_pictures(user_id, payload.get("shows") or [],
+                                      payload.get("movies") or [])
     return templates.TemplateResponse(
         request, "_distrakt_month.html",
         _month_context(request, payload, year, month, emojis, default_emoji, settings,

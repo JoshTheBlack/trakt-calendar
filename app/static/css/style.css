@@ -2346,7 +2346,7 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
 }
 .distrakt-badge .distrakt-logo { max-width: 26px; max-height: 26px; border-radius: 5px; object-fit: contain; }
 /* The title's poster, beside the network badge rather than instead of it: the
-   badge is the network, the picture is the show. Small enough on a wide list that
+   badge is the network (a film's is 🎬), the picture is the title. Small enough on a wide list that
    a row grows by a few pixels, not a thumbnail's height; a phone draws it larger
    across the row's two lines (below). The empty slot keeps the columns in line
    for a title whose picture is not known yet. */

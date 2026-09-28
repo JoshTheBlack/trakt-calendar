@@ -67,10 +67,10 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
    already warms every network on the page before it renders
    (routes._live_month_payload's ensure_logos), so by the time a row is drawn the
    tile either exists or never will, and the server can simply say which. #}
-{# The row's picture: the address the page resolved for it before drawing
-   (routes._row_pictures — the season's own artwork, else the show's, in the
-   viewer's order), drawn through the image proxy; nothing is fetched or kept
-   here. A row whose title has no picture known yet keeps the slot, empty, so
+{# The row's picture — a show's or a watched film's: the address the page
+   resolved for it before drawing (routes._row_pictures — the season's own
+   artwork, else the title's, in the viewer's order), drawn through the image
+   proxy; nothing is fetched or kept here. A row whose title has no picture known yet keeps the slot, empty, so
    the titles below one another stay in line. #}
 {% macro picture(show) -%}
 {%- set src = poster_for(show) -%}
@@ -209,6 +209,7 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
    what was watched and there is no roster row to correct it through. #}
 {% macro film_row(film) %}
 <div class="distrakt-show-row distrakt-film-row">
+    {{ picture(film) }}
     <span class="distrakt-badge">🎬</span>
     <span class="distrakt-title"><span class="tt">{{ film.title or 'Untitled' }}</span></span>
     <span class="distrakt-season"></span>
