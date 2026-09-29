@@ -36,6 +36,14 @@ class _Port:
         return self.listing
 
 
+async def once_listed(user_id: int, *ids: int, source: str = "simkl") -> None:
+    """An earlier listing of this service named these ids — what a title has to
+    have been, before its absence from a listing can mean it was removed."""
+    from app import cache
+    await cache.set(removals._listed_key(user_id, source), sorted(ids),
+                    retain_seconds=removals._LISTED_SECONDS)
+
+
 class MarkingWhatAServiceNoLongerListsTests(DistraktTestCase):
     def setUp(self):
         self.month = month_back(0)
@@ -60,6 +68,7 @@ class MarkingWhatAServiceNoLongerListsTests(DistraktTestCase):
         await distrakt.add_user_record(self.user_id, a_record(
             tmdb=901, season=1, kind=distrakt.RecordKind.KEEPUP,
             ids={"tmdb": 901, "simkl": 999}))
+        await once_listed(self.user_id, 222, 999)
 
         self.assertEqual(await removals.check(SETTINGS, self.user_id, Source.SIMKL, port), 1)
         record = await self._record()
@@ -163,6 +172,7 @@ class MarkingWhatAServiceNoLongerListsTests(DistraktTestCase):
         await distrakt.add_user_record(self.user_id, a_record(
             tmdb=901, season=1, kind=distrakt.RecordKind.KEEPUP,
             ids={"tmdb": 901, "simkl": 999}))
+        await once_listed(self.user_id, 222, 999)
 
         await removals.check(SETTINGS, self.user_id, Source.SIMKL,
                              _Port({999: "other"}))
@@ -192,6 +202,7 @@ class MarkingWhatAServiceNoLongerListsTests(DistraktTestCase):
         await distrakt.add_user_record(self.user_id, a_record(
             tmdb=901, season=1, kind=distrakt.RecordKind.KEEPUP,
             ids={"tmdb": 901, "simkl": 999}))
+        await once_listed(self.user_id, 222, 999)
 
         await removals.check(SETTINGS, self.user_id, Source.SIMKL, _Port({999: "x"}))
         marked = [r for r in await store.user_records(self.user_id)
@@ -207,9 +218,47 @@ class MarkingWhatAServiceNoLongerListsTests(DistraktTestCase):
             tmdb=901, season=1, kind=distrakt.RecordKind.KEEPUP,
             ids={"tmdb": 901, "simkl": 999}))
         port = _Port({999: "x"})
+        await once_listed(self.user_id, 222, 999)
 
         self.assertEqual(await removals.check(SETTINGS, self.user_id, Source.SIMKL, port), 1)
         self.assertEqual(await removals.check(SETTINGS, self.user_id, Source.SIMKL, port), 0)
+
+    async def test_a_title_no_listing_ever_named_is_never_marked(self):
+        """THE BUG, MEASURED ON THE OWNER'S ACCOUNT. A row carries a service's id
+        whenever anything supplied one — the calendar does, for titles the viewer
+        never put in that library — so Line of Fire and TRINITY, both held at
+        Simkl as nothing at all, were marked "dropped", and the mark's tooltip
+        says to remove the row. Absent from a listing means removed only for a
+        title a listing once named."""
+        await self._listed(simkl=222)                 # a Simkl id from the calendar
+        await distrakt.add_user_record(self.user_id, a_record(
+            tmdb=901, season=1, kind=distrakt.RecordKind.KEEPUP,
+            ids={"tmdb": 901, "simkl": 999}))
+        await removals.check(SETTINGS, self.user_id, Source.SIMKL, _Port({999: "x"}))
+        self.assertEqual((await self._record())["missing_sources"], [])
+
+    async def test_a_mark_on_a_title_no_listing_ever_named_is_cleared(self):
+        """The wrong marks already made are taken back by the next check."""
+        await self._listed(simkl=222)
+        await store.set_missing_sources(self.user_id, self.key, ["simkl"])
+        await distrakt.add_user_record(self.user_id, a_record(
+            tmdb=901, season=1, kind=distrakt.RecordKind.KEEPUP,
+            ids={"tmdb": 901, "simkl": 999}))
+        await removals.check(SETTINGS, self.user_id, Source.SIMKL, _Port({999: "x"}))
+        self.assertEqual((await self._record())["missing_sources"], [])
+
+    async def test_a_title_listed_once_and_then_gone_stays_marked(self):
+        """The record of what was listed only grows, so the mark a real removal
+        made survives the passes after it rather than being cleared by the next
+        listing that also lacks the title."""
+        await self._listed(simkl=222)
+        await distrakt.add_user_record(self.user_id, a_record(
+            tmdb=901, season=1, kind=distrakt.RecordKind.KEEPUP,
+            ids={"tmdb": 901, "simkl": 999}))
+        await removals.check(SETTINGS, self.user_id, Source.SIMKL, _Port({222: "a", 999: "x"}))
+        for _pass in range(2):
+            await removals.check(SETTINGS, self.user_id, Source.SIMKL, _Port({999: "x"}))
+            self.assertEqual((await self._record())["missing_sources"], ["simkl"])
 
 
 class APassThatMarksMostOfATrackerSaysSoTests(DistraktTestCase):
@@ -232,6 +281,7 @@ class APassThatMarksMostOfATrackerSaysSoTests(DistraktTestCase):
 
     async def test_marking_most_of_them_is_warned_about_and_still_done(self):
         await self._rows(4)
+        await once_listed(self.user_id, 500, 501, 502, 503)
         # One of the four is still listed, so the answer is believable.
         port = _Port({500: "still-here"})
         with self.assertLogs("app.distrakt.removals", level="WARNING") as caught:
@@ -245,6 +295,7 @@ class APassThatMarksMostOfATrackerSaysSoTests(DistraktTestCase):
         """The warning has to be rare or it is noise. Three of four still listed
         is an ordinary removal and gets no line."""
         await self._rows(4)
+        await once_listed(self.user_id, 500, 501, 502, 503)
         port = _Port({500: "a", 501: "b", 502: "c"})
         with self.assertNoLogs("app.distrakt.removals", level="WARNING"):
             self.assertEqual(

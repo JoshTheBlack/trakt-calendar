@@ -24,10 +24,39 @@ from __future__ import annotations
 
 import logging
 
+from .. import cache
 from ..providers.base import ItemKey
 from . import store
 
 logger = logging.getLogger(__name__)
+
+# EVERY ID A SERVICE'S LISTING HAS EVER NAMED, per account — what makes "no longer
+# lists" a claim about something that WAS listed. A row carries a service's id
+# whenever anything supplied one, and the calendar supplies them for titles the
+# viewer never put in that library at all: MEASURED on the owner's account, Line
+# of Fire and TRINITY (added from the calendar, Simkl ids from its listings, Simkl
+# holding nothing for either) were both marked "dropped", and the mark's own
+# tooltip says to remove the row — which is what happened to TRINITY. So a title
+# is marked only once its id has been seen in a listing and has since gone.
+# THE SET ONLY GROWS: a title removed stays remembered as once held, which is
+# what keeps its mark; one put back is cleared by clear_named. Kept in the cache
+# (app/cache.py), so losing it costs marks and never history — the next listing
+# starts it again. The version is in the key for the reason watch_history gives
+# for its kept library read.
+_LISTED_VERSION = 1
+_LISTED_SECONDS = 400 * 24 * 60 * 60
+
+
+def _listed_key(user_id: int, name: str) -> str:
+    return f"distrakt_listed:v{_LISTED_VERSION}:{int(user_id)}:{name}"
+
+
+async def _ever_listed(user_id: int, name: str) -> set[int]:
+    stored = await cache.get(_listed_key(user_id, name), _LISTED_SECONDS)
+    try:
+        return {int(value) for value in stored} if isinstance(stored, list) else set()
+    except (TypeError, ValueError):
+        return set()
 
 
 def _held_by_us(records: list[dict], source: str) -> dict[int, list[ItemKey]]:
@@ -141,6 +170,14 @@ async def check(settings, user_id: int, source, port) -> int:
             name, len(ours))
         return 0
 
+    # WHAT THIS LISTING ADDS TO EVERYTHING EARLIER ONES NAMED, kept before any
+    # row is judged. A title is gone only if an earlier listing named it and this
+    # one does not; a title no listing ever named was never held there, and a mark
+    # on it is cleared (see _LISTED_VERSION).
+    listed_before = await _ever_listed(user_id, name)
+    await cache.set(_listed_key(user_id, name), sorted(listed_before | set(held)),
+                    retain_seconds=_LISTED_SECONDS)
+
     # WHAT EACH IDENTITY CURRENTLY SAYS, so a service being added to or removed
     # from the list leaves the OTHER service's answer untouched. A row marked
     # missing at Simkl and still held at Trakt has to keep saying both.
@@ -159,7 +196,8 @@ async def check(settings, user_id: int, source, port) -> int:
     # nobody asked about is not rare at all, and left the operator with a page of
     # wrong marks and nothing to read. That is exactly how `plantowatch` went
     # unnoticed — see simkl/sync.py's LIBRARY_STATUSES.
-    missing_now = sum(len(keys) for ident, keys in ours.items() if ident not in held)
+    missing_now = sum(len(keys) for ident, keys in ours.items()
+                      if ident not in held and ident in listed_before)
     total = sum(len(keys) for keys in ours.values())
     if total and missing_now * 2 > total:
         logger.warning(
@@ -171,7 +209,7 @@ async def check(settings, user_id: int, source, port) -> int:
 
     changed = 0
     for service_id, keys in ours.items():
-        gone = service_id not in held
+        gone = service_id not in held and service_id in listed_before
         for key in keys:
             was = current.get(str(key), set())
             now = (was | {name}) if gone else (was - {name})
@@ -182,5 +220,6 @@ async def check(settings, user_id: int, source, port) -> int:
     if changed:
         logger.info("distrakt removals: %s no longer lists %d of %d title(s) this "
                     "viewer holds there; %d row(s) updated",
-                    name, sum(1 for i in ours if i not in held), len(ours), changed)
+                    name, sum(1 for i in ours if i not in held and i in listed_before),
+                    len(ours), changed)
     return changed
