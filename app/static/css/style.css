@@ -2586,16 +2586,22 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     outline: none; border-color: var(--gold); background: var(--bg-panel);
     color: var(--text); opacity: 1; width: auto; min-width: 100%; z-index: 6;
 }
+/* NO WIDER THAN THE ROOM A PHONE LEAVES IT. It hangs from the code's left edge,
+   which on a phone's facts line is about a third of the way across, and a long
+   network's full name beside ⬇ and ↻ ran past the window — MEASURED at 320,
+   "Paramount+ with Showtime" put both buttons off the right edge. So the name
+   wraps and the buttons keep their width. */
 .distrakt-emoji-tools {
     display: none; position: absolute; left: 0; top: 100%; margin-top: 3px; z-index: 5;
-    gap: 2px; padding: 3px; white-space: nowrap;
+    gap: 2px; padding: 3px; width: max-content; max-width: min(22em, 55vw);
     background: var(--bg-panel); border: 1px solid var(--card-border); border-radius: 7px;
     box-shadow: 0 10px 24px rgba(0,0,0,0.5);
 }
 .distrakt-emoji:focus-within .distrakt-emoji-tools { display: flex; align-items: center; }
 /* Which network this code belongs to, in full: the row's own cell truncates a
    long name, and a phone's row does not draw it at all. */
-.distrakt-emoji-net { padding: 0 6px 0 4px; font-family: inherit; font-size: 0.74rem; color: var(--text-dim); }
+.distrakt-emoji-net { flex: 1 1 auto; min-width: 0; padding: 0 6px 0 4px; font-family: inherit; font-size: 0.74rem; color: var(--text-dim); }
+.distrakt-emoji-tools > .btn-ghost { flex: 0 0 auto; }
 /* The default emoji's own small panel, a popover under its pill in the header
    (_distrakt_emoji_default.html). */
 .emoji-default-panel { width: 240px; padding: 10px; gap: 6px; white-space: normal; }
