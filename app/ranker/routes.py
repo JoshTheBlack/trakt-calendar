@@ -57,6 +57,14 @@ guard = authz.Guard(router)
 # `private`: this response requires a session, so a shared cache in front of
 # the app has no business holding a copy.
 _POSTER_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
+# "No picture" is the one answer that CHANGES: adding a result files the picture
+# its row was drawn with, a calendar sighting files one later, and a lookup that
+# failed (rather than finding nothing) is retried by the next asker. Cached for a
+# day like a redirect, it outlived all three — a title removed and added again
+# drew its empty frame from the browser's copy although the add had just filed
+# Simkl's poster. Asking again costs a registry read, never a lookup a recorded
+# miss has already settled.
+_POSTER_MISS_HEADERS = {"Cache-Control": "private, no-cache"}
 
 # A restore is the one request that legitimately carries whole boards rather than
 # a list of keys, so the largest it may be is DERIVED FROM THE CAPS it has to
@@ -1383,7 +1391,7 @@ async def rankings_poster(request: Request):
         return Response(status_code=404)
     address = await _row_address(user.user_id, item, look_up=True)
     if not address:
-        return Response(status_code=404, headers=_POSTER_CACHE_HEADERS)
+        return Response(status_code=404, headers=_POSTER_MISS_HEADERS)
     return RedirectResponse(proxied_image(address), status_code=302,
                             headers=_POSTER_CACHE_HEADERS)
 

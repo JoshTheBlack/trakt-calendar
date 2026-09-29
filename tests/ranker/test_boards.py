@@ -958,6 +958,26 @@ class WarmRouteTests(RankerTestCase):
         self.assertEqual(searched, ["search/tmdb/1"])
         self.assertEqual(self.value("SELECT url FROM show_posters WHERE tmdb = 1"), "")
 
+    def test_no_picture_is_an_answer_the_browser_asks_again(self):
+        """A 404 cached for a day like a redirect outlived the picture an add filed
+        next: a title removed and added again drew its empty frame from the
+        browser's copy. A picture found is a day; no picture is asked again."""
+        from app.providers.trakt import transport as trakt_transport
+
+        async def _nothing(*args, **kwargs):
+            return []
+
+        with patched(trakt_transport, "cached_get", _nothing):
+            miss = self.poster()
+        self.assertEqual(miss.status_code, 404)
+        self.assertIn("no-cache", miss.headers["cache-control"])
+        self.assertNotIn("max-age", miss.headers["cache-control"])
+        from app.media import artwork
+        asyncio.run(artwork.record_poster_url("show", 1, "simkl", "https://simkl.in/p.jpg"))
+        found = self.poster()
+        self.assertEqual(found.status_code, 302)
+        self.assertIn("max-age=86400", found.headers["cache-control"])
+
     def test_a_lookup_that_fails_is_not_remembered_as_a_miss(self):
         from app.providers.trakt import transport as trakt_transport
 
