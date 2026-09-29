@@ -390,3 +390,70 @@ class TheMatchIsMadeAtReadTests(unittest.IsolatedAsyncioTestCase):
                 "shows", calendar_cache.window_start(day))
         self.assertEqual(len(window.groups), 1)
         self.assertEqual(sorted(window.groups[0]["by_source"]), ["simkl", "trakt"])
+
+
+# Dexter: Original Sin's premiere as the two services stored it on the owner's
+# instance: Simkl's per-title lookup gives the day (Sunday 15 December, pinned at
+# UTC midnight), Trakt the instant (10pm Eastern that Sunday, which is Monday
+# 03:00 UTC) — and the windows start on Mondays.
+DEC15_SIMKL_DAY = 1734220800.0
+DEC16_TRAKT_0300Z = 1734318000.0
+
+
+class AnAiringAWindowEdgeCutInTwoTests(unittest.TestCase):
+    """One premiere, two services, two adjacent windows — and so, before this,
+    two cards on one day, because each window is matched on its own."""
+
+    def windows(self, *records):
+        """The span as a month read assembles it: each record grouped in its own
+        UTC window, the windows in order, then joined."""
+        by_window = {}
+        for record in records:
+            start = calendar_cache.window_start(calendar_cache.record_utc_date(record))
+            by_window.setdefault(start, []).append(record)
+        groups = [group for start in sorted(by_window)
+                  for group in calendar_cache.group_records(by_window[start])]
+        return calendar_cache.dedupe_groups(groups)
+
+    def original_sin(self, *, simkl_ts=DEC15_SIMKL_DAY, trakt_ts=DEC16_TRAKT_0300Z):
+        return (Record(source=Source.SIMKL, media="show", id="2091057",
+                       ids={"simkl": "2091057", "tmdb": "219937"}, detail_url="",
+                       title="Dexter: Original Sin", air_ts=simkl_ts, date_only=True,
+                       season=1, episode_number=1, enriched=False),
+                trakt("Dexter: Original Sin", {"trakt": 202335, "tmdb": 219937},
+                      air_ts=trakt_ts, season=1, episode=1))
+
+    def test_the_premiere_is_one_card_with_both_services(self):
+        simkl_record, trakt_record = self.original_sin()
+        self.assertNotEqual(
+            calendar_cache.window_start(calendar_cache.record_utc_date(simkl_record)),
+            calendar_cache.window_start(calendar_cache.record_utc_date(trakt_record)))
+        groups = self.windows(simkl_record, trakt_record)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(sorted(groups[0]["by_source"]), ["simkl", "trakt"])
+        self.assertEqual(groups[0]["ids"]["simkl"], "2091057")
+        self.assertEqual(groups[0]["ids"]["trakt"], 202335)
+
+    def test_a_week_apart_is_two_airings(self):
+        """A service listing the same episode a week later is a rerun or a
+        second market, not the same airing split by an edge."""
+        simkl_record, trakt_record = self.original_sin(simkl_ts=DEC15_SIMKL_DAY - 6 * 86400)
+        self.assertEqual(len(self.windows(simkl_record, trakt_record)), 2)
+
+    def test_one_service_either_side_of_the_edge_stays_two(self):
+        """Its own two listings: joining would collapse a service's listing
+        rather than reconcile two services."""
+        first = trakt("Show", {"trakt": 1, "tmdb": 5}, air_ts=DEC15_SIMKL_DAY + 3600,
+                      season=1, episode=1)
+        second = trakt("Show", {"trakt": 1, "tmdb": 5}, air_ts=DEC16_TRAKT_0300Z,
+                       season=1, episode=1)
+        self.assertEqual(len(self.windows(first, second)), 2)
+
+    def test_the_windows_own_copies_are_left_alone(self):
+        """The join builds a new group: a window's groups can be held and served
+        again, and must not grow another service's record behind its back."""
+        simkl_record, trakt_record = self.original_sin()
+        first = calendar_cache.group_records([simkl_record])
+        second = calendar_cache.group_records([trakt_record])
+        calendar_cache.dedupe_groups(first + second)
+        self.assertEqual(list(first[0]["by_source"]), ["simkl"])

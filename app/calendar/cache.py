@@ -980,9 +980,19 @@ def dedupe_groups(groups: list[dict]) -> list[dict]:
     identity the per-source dedupe uses one layer down: two adjacent windows both
     handed the same airing are one card, while a title genuinely listed twice at
     different times stays two, exactly as it has always rendered.
+
+    AND ONE AIRING TWO SERVICES PUT EITHER SIDE OF A WINDOW'S EDGE IS JOINED
+    HERE, because this is the only place both halves are in one list. The match
+    runs per window (`match_keys`), and a window starts on a Monday in UTC — which
+    is exactly where a Sunday-evening American premiere falls apart: one service
+    states the day (Sunday) and the other the instant (Monday, 01:00-04:00 UTC).
+    Measured: Dexter, Dexter: New Blood and Dexter: Original Sin each drew as two
+    cards on one day, the same key in two adjacent windows. See
+    `_one_airing_split` for what counts.
     """
     seen: set[tuple] = set()
     out: list[dict] = []
+    first_with_key: dict[str, int] = {}
     for group in groups:
         order = calendar_resolve.source_order(group)
         primary = (group.get("by_source") or {}).get(order[0], {}) if order else {}
@@ -990,8 +1000,58 @@ def dedupe_groups(groups: list[dict]) -> list[dict]:
         if identity in seen:
             continue
         seen.add(identity)
+        key = str(group.get("key") or "")
+        earlier = first_with_key.get(key)
+        if earlier is not None and _one_airing_split(out[earlier], group):
+            out[earlier] = _joined(out[earlier], group)
+            continue
+        first_with_key.setdefault(key, len(out))
         out.append(group)
     return out
+
+
+# How far apart two services' dates for one airing may be and still be joined
+# across a window's edge: a stated day against an instant is a day at most
+# anywhere on earth, and more than that is a different airing.
+_SPLIT_AIRING_DAYS = 1
+
+
+def _one_airing_split(first: dict, second: dict) -> bool:
+    """Whether two groups sharing a key are ONE airing that a window's edge cut
+    in two, rather than two airings.
+
+    THE SAME RULE A WINDOW ALREADY APPLIES, NARROWED. Inside one window a shared
+    key from two different services is one group whatever days they give; across
+    the edge only a day apart is admitted, so a show a service lists again weeks
+    later stays its own card. Every other condition refuses:
+
+      - a key with a repeat marker (`#2`) is one service listing an airing twice,
+        which the calendar has always drawn twice;
+      - a service in BOTH groups means they are that service's two listings, and
+        joining would collapse them rather than reconcile two services.
+    """
+    key = str(first.get("key") or "")
+    if not key or "#" in key:
+        return False
+    a, b = first.get("by_source") or {}, second.get("by_source") or {}
+    if not a or not b or set(a) & set(b):
+        return False
+    days = [epoch_moment(float(r.get("air_ts") or 0)).date()
+            for r in (*a.values(), *b.values())]
+    return (max(days) - min(days)).days <= _SPLIT_AIRING_DAYS
+
+
+def _joined(first: dict, second: dict) -> dict:
+    """The two halves as the one group `group_records` would have built had they
+    been in one window: every service's record under its own name, and ids first
+    writer wins. A new dict, because a window's groups may be held elsewhere."""
+    ids = dict(first.get("ids") or {})
+    for namespace, value in (second.get("ids") or {}).items():
+        if value not in (None, ""):
+            ids.setdefault(namespace, value)
+    return {**first, "ids": ids,
+            "by_source": {**(first.get("by_source") or {}),
+                          **(second.get("by_source") or {})}}
 
 
 async def visible_records(groups, endpoint, *, genres="", countries="",
