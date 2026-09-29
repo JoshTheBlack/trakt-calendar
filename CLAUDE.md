@@ -347,12 +347,13 @@ because attribute inheritance would hand the row's request to the form.
 Moving a title between tiers is one button per destination ON THE ROW, posting to the
 same route a bulk move already used — a menu shared by the whole board is what
 made "which row opened it" a question the browser had to answer. Setting which
-season a show row is lives in that same menu: a `<details>` whose `<summary>`
-asks for the season list `click once`, and one button per season posting
-itself, a season the board already holds being `disabled` rather than refused
-afterwards. The request is on the summary and never the `<details>`, because
-htmx's attribute inheritance is on (static/js/boost.js) and a trigger on an
-ancestor becomes the trigger of the form inside it.
+season a show row is has the same shape beside it: a button ON THE ROW saying
+what the row is ("All", "S3"), with its own empty popover that the button asks
+the season list into `click once`, and one button per season posting itself, a
+season the board already holds being `disabled` rather than refused afterwards.
+The request is on the button and never on an ancestor of the list's form,
+because htmx's attribute inheritance is on (static/js/boost.js) and a trigger on
+an ancestor becomes the trigger of the form inside it.
 A saved view preference is `hx-post` plus `hx-json-enc` on the control
 itself, answered with the page's own `#pageMeta` out of band — which is how a
 class reaches <body>, the one element a swap can never replace. And a title

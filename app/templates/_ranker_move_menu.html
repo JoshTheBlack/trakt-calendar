@@ -1,7 +1,7 @@
 {#- dedent -#}
-{# What one title can be done with from its ⇄: where it can be moved to, and — on
-   a show — which season of the show the row is. Drawn the first time its ⇄ is
-   pressed and swapped into that row's empty popover (_ranker_row.html).
+{# Where one title can be moved to. Drawn the first time its ⇄ is pressed and
+   swapped into that row's empty popover (_ranker_row.html). Which season a show
+   row is has its own button on the row now, beside ⓘ.
 
    ASKED FOR RATHER THAN DRAWN WITH THE ROW. Every row on a board has one of
    these, and a board draws up to a thousand rows and redraws all of them on
@@ -15,18 +15,7 @@
    pressed. `move_items` takes any title on the board and reads an empty tier as
    "back to the pool", so leaving a tier and changing tier are one request, the
    same one the bulk Move sends. The key's field has no `form=`, so it belongs to
-   this form and never to the board's selection form.
-
-   THE SEASON CHOICE IS A <details> WHOSE LIST IS ASKED FOR WHEN IT IS OPENED,
-   and not when this menu is: listing a show's seasons is a lookup at a service,
-   and this menu is opened far more often to move a title than to change what it
-   is. The request sits on the <summary> — `click once`, which a keyboard press
-   on a summary fires too, the shape a closed tier's header uses — and NOT on the
-   <details>: this app turns htmx's attribute inheritance on (static/js/boost.js),
-   so a trigger on the <details> would become the trigger of the season list's
-   own form inside it, and that form would stop posting. The summary is the
-   list's sibling, never its ancestor. It is OUTSIDE the move form too, so the two
-   forms are never nested. #}
+   this form and never to the board's selection form. #}
 <form hx-boost="false" hx-post="/rankings/boards/{{ board_uid }}/items/move" hx-json-enc
       hx-target="body" hx-swap="innerHTML">
     <input type="hidden" name="pick:{{ key }}" value="1">
@@ -34,10 +23,3 @@
     <button name="tier" value="{{ tier.uid }}">{{ tier.label }}</button>
     {%- endfor %}
 </form>
-{%- if seasons_url %}
-<details class="ranker-season">
-    <summary hx-get="{{ seasons_url }}" hx-trigger="click once"
-             hx-target="next .ranker-season-list" hx-swap="innerHTML">Whole show or season…</summary>
-    <div class="ranker-season-list"><span class="ranker-season-wait">Listing seasons…</span></div>
-</details>
-{%- endif %}

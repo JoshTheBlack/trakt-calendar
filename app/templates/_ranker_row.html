@@ -101,6 +101,22 @@
         <button type="button" class="ranker-act" title="Details" aria-label="Details"
                 data-details-open="/rankings/fragments/details?{{ {'board': board_uid, 'key': item.key} | urlencode }}"
                 data-details-heading="{{ item.label }}">ⓘ</button>
+        {# WHICH SEASON A SHOW ROW IS, set from the row itself: a button saying what
+           the row is now ("All" for the whole show, "S3" for a season) and a
+           popover of its own, EMPTY until the button is first pressed — the ⇄
+           menu's own shape just below, and placed by the same stylesheet rule.
+           It lived inside the ⇄ menu as a <details>, which took three presses to
+           reach and read as a move. The list is still asked for only when opened
+           (`click once`): it is a lookup at a service, and a board draws up to a
+           thousand rows. A film has no seasons and so no button. #}
+        {% if item.media == 'show' %}
+        <button type="button" class="ranker-act ranker-season-act" title="Whole show or season"
+                aria-label="Whole show or season"
+                popovertarget="season-{{ item.key }}"
+                hx-get="/rankings/fragments/seasons?{{ {'board': board_uid, 'key': item.key} | urlencode }}"
+                hx-trigger="click once" hx-target="next .ranker-menu" hx-swap="innerHTML">{{ 'S' ~ item.season if item.season is not none else 'All' }}</button>
+        <div class="ranker-menu ranker-season-list" id="season-{{ item.key }}" popover></div>
+        {% endif %}
         <button type="button" class="ranker-act" title="Move up" aria-label="Move up"
                 data-nudge="-1">▲</button>
         <button type="button" class="ranker-act" title="Move down" aria-label="Move down"

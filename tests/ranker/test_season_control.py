@@ -11,8 +11,8 @@ Four promises, each held here:
     premiere dates. Never a season still to air, and never the specials — but
     both are listed and can be chosen.
   - WHEN IT IS ASKED. The season list is a lookup at a service, so it is made
-    when the control is OPENED — never when the board, a row or its ⇄ menu is
-    drawn. A board draws up to a thousand rows.
+    when the row's season button is first PRESSED — never when the board, a row
+    or its ⇄ menu is drawn. A board draws up to a thousand rows.
   - WHAT CHOOSING DOES. The row becomes that season (or the whole show) IN PLACE:
     the same id, the same tier, the same rank. A film has no such control.
 """
@@ -166,6 +166,14 @@ class _ControlTestCase(_SeasonsTestCase):
     def menu(self, row_key: str) -> str:
         return self.client.get(f"/rankings/fragments/move-menu?board={BOARD}&key={row_key}").text
 
+    def drawn_row(self, row_key: str) -> str:
+        return self.client.get(f"/rankings/fragments/row?board={BOARD}&key={row_key}").text
+
+    def season_button(self, row_key: str) -> str | None:
+        found = re.search(r'<button[^>]*class="ranker-act ranker-season-act"[^>]*>[^<]*</button>',
+                          self.drawn_row(row_key), re.S)
+        return found.group(0) if found else None
+
     def season_list(self, row_key: str, listed=LISTED) -> tuple[str, list]:
         calls, fake = stub_seasons(listed)
         with mock.patch.object(detail_source, "seasons", fake):
@@ -187,15 +195,28 @@ class _ControlTestCase(_SeasonsTestCase):
 
 class WhenItIsAskedTests(_ControlTestCase):
 
-    def test_drawing_the_board_and_the_menu_asks_nobody(self):
+    def test_drawing_the_board_the_row_and_the_menu_asks_nobody(self):
+        """The control is a button ON THE ROW with a popover of its own, asking
+        for the list on its first press — no longer a <details> three presses
+        deep in the ⇄ menu, which now only moves. MEASURED in Chromium and
+        Firefox at 1280 and 390: no seasons request on board load, one on the
+        first press, none on a second."""
         self.build_with_seasons()
         with mock.patch.object(detail_source, "seasons", exploding):
             self.assertEqual(self.client.get(f"/rankings?board={BOARD}").status_code, 200)
+            button = self.season_button(key(SHOW))
             menu = self.menu(key(SHOW))
-        self.assertIn('class="ranker-season"', menu)
-        self.assertIn('hx-trigger="click once"', menu)
+        self.assertIn('hx-trigger="click once"', button)
         self.assertIn(f'hx-get="/rankings/fragments/seasons?board={BOARD}&amp;key=show%3Atmdb%3A7"',
-                      menu)
+                      button)
+        self.assertIn('popovertarget="season-show:tmdb:7"', button)
+        self.assertIn(">All</button>", button)
+        self.assertIn('id="season-show:tmdb:7" popover></div>', self.drawn_row(key(SHOW)))
+        self.assertNotIn("season", menu)
+
+    def test_the_button_says_what_the_row_is(self):
+        self.build_with_seasons()
+        self.assertIn(">S2</button>", self.season_button(season_key(SHOW, 2)))
 
     def test_opening_the_control_asks_the_service_that_describes_the_title(self):
         self.build_with_seasons()
@@ -205,7 +226,8 @@ class WhenItIsAskedTests(_ControlTestCase):
     def test_a_film_row_has_no_season_control(self):
         asyncio.run(ranker.create_board(self.user_id, uid=BOARD))
         self.add({"media": "movie", "match_source": "tmdb", "match_id": "550", "title": "F"})
-        self.assertNotIn("ranker-season", self.menu("movie:tmdb:550"))
+        self.assertIsNone(self.season_button("movie:tmdb:550"))
+        self.assertNotIn("season", self.menu("movie:tmdb:550"))
         body, calls = self.season_list("movie:tmdb:550")
         self.assertEqual((body, calls), ("", []))
 

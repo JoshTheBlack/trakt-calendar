@@ -604,25 +604,17 @@ async def move_menu_fragment(request: Request):
     return templates.TemplateResponse(request, "_ranker_move_menu.html", {
         "request": request, "board_uid": board_uid, "key": item["key"],
         "tiers": _move_choices(board),
-        # A show row's menu also sets which season the row is; a film has none.
-        "seasons_url": (_seasons_url(board_uid, item["key"])
-                        if item["media"] == Media.SHOW else ""),
     })
-
-
-def _seasons_url(board_uid: str, key: str) -> str:
-    return f"/rankings/fragments/seasons?{urlencode({'board': board_uid, 'key': key})}"
 
 
 @guard.get("/rankings/fragments/seasons", AuthLevel.RANKER_APPROVED)
 async def seasons_fragment(request: Request):
     """What one show row can be set to: the whole show, or any of its seasons.
 
-    ASKED FOR WHEN THE ROW'S "Season" CHOICE IS OPENED, never with the row or its
-    menu: listing a show's seasons is a lookup at a service, a board draws up to a
-    thousand rows, and the ⇄ menu is opened far more often to move a title than
-    to change what it is. The first opening pays for it; the answer is cached
-    upstream like every other per-title read.
+    ASKED FOR WHEN THE ROW'S SEASON BUTTON IS FIRST PRESSED (_ranker_row.html),
+    never with the row: listing a show's seasons is a lookup at a service and a
+    board draws up to a thousand rows. The first press pays for it; the answer is
+    cached upstream like every other per-title read.
 
     WHICH SERVICE LISTS THE SEASONS IS THE ONE THAT DESCRIBES THE TITLE
     (detail_source.choose, as the details panel asks), with the instance's

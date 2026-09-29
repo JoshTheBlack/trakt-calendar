@@ -3063,16 +3063,14 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     padding: 6px 10px; border-radius: 6px; font-family: inherit; font-size: 0.8rem;
 }
 .ranker-menu button:hover { background: rgba(255,255,255,0.08); }
-/* A show row's "whole show or season" choice, below the destinations
-   (_ranker_move_menu.html). Its list arrives when it is opened, and a long-running
-   show lists dozens of seasons, so the list scrolls inside the menu rather than
-   pushing it off the screen. */
-.ranker-season { border-top: 1px solid var(--card-border); margin-top: 3px; padding-top: 3px; }
-.ranker-season > summary {
-    cursor: pointer; padding: 6px 10px; border-radius: 6px; font-size: 0.8rem; color: var(--text-dim);
-}
-.ranker-season > summary:hover { background: rgba(255,255,255,0.08); color: var(--text); }
-.ranker-season-list { display: flex; flex-direction: column; gap: 2px; max-height: min(50vh, 320px); overflow-y: auto; }
+/* A show row's "whole show or season" list, in the popover of the row's own
+   season button (_ranker_row.html) — a `.ranker-menu` like the ⇄ one, so it is
+   placed by the rule above. A long-running show lists dozens of seasons, so the
+   list scrolls inside the popover rather than running off the screen. */
+.ranker-season-list { max-height: min(50vh, 320px); overflow-y: auto; }
+/* The button says what the row is ("All", "S3") in the row's quiet control
+   colour, a touch bolder than the glyphs beside it so it reads as a word. */
+.ranker-act.ranker-season-act { font-size: 0.72rem; font-weight: 700; min-width: 2.2em; }
 .ranker-season-list > form { display: contents; }
 .ranker-menu .ranker-season-choice { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .ranker-season-choice.is-suggested .ranker-season-label { color: var(--gold-soft); font-weight: 600; }
