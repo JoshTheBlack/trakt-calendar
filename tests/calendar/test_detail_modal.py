@@ -571,3 +571,64 @@ class OpeningAOneServiceCardAsksTheOtherTests(AppTestCase):
         self.assertIn('hx-swap-oob="outerHTML:.card[data-airing=', resp.text)
         self.assertIn("simkl=4242", resp.text, "the redrawn card does not carry Simkl's id")
         self.assertEqual(again.text, "", "a card two services draw was asked about again")
+
+    def _complete(self, body):
+        from types import SimpleNamespace
+        from app.providers.base import Record, Source
+
+        async def _find(settings, media, ids):
+            return {"simkl": "4242", "tmdb": 777}
+
+        async def _seasons(settings, source_id, media):
+            return SimpleNamespace(seasons=[{"season": 1, "first_aired": "2026-07-08"}])
+
+        async def _records(settings, source_id, media, moments):
+            return [Record(source=Source.SIMKL, media=media, id=str(source_id),
+                           ids={"simkl": str(source_id), "tmdb": 777}, detail_url="",
+                           title="The Elusive Samurai",
+                           air_ts=datetime(2026, 7, 8, tzinfo=timezone.utc).timestamp(),
+                           date_only=True, season=season, episode_number=1,
+                           episode_label="S01E01", enriched=True)
+                    for season, _when in moments]
+
+        port = SimpleNamespace(fetch_seasons=_seasons, records_for=_records,
+                               fetch_details=AsyncMock(return_value={}))
+        with patch("app.providers.for_catalogue_search", return_value=[
+                    (Source.SIMKL, SimpleNamespace(find_by_shared_id=_find))]), \
+             patch("app.providers.get", return_value=SimpleNamespace(detail_port=port)):
+            return self.client.post(
+                "/api/calendar/complete-card?endpoint=shows%2Fpremieres&year=2026&month=7",
+                json={"key": self.KEY, "season": 1, **body}).text
+
+    def test_the_redraw_replaces_the_card_as_the_page_drew_it(self):
+        """The joining service can bring the time, and the time is part of a
+        card's airing digest — MEASURED on a live copy, Dexter: Original Sin's
+        card was redrawn under a new airing, the answer addressed a card the page
+        did not have, and the page kept the one-service card until a reload. The
+        panel names the airing the card was drawn under and the answer replaces
+        that."""
+        drawn = "0123456789abcdef"
+        self.assertIn(f"hx-swap-oob=\"outerHTML:.card[data-airing='{drawn}']\"",
+                      self._complete({"airing": drawn}))
+
+    def test_an_airing_reference_is_only_ever_a_digest(self):
+        """It goes into a selector, so anything but the digest's own shape is
+        dropped and the card is addressed by its own airing."""
+        answer = self._complete({"airing": "x'] , .card[data-id"})
+        self.assertNotIn("x']", answer)
+        self.assertIn('hx-swap-oob="outerHTML:.card[data-airing=', answer)
+
+    def test_the_panel_passes_the_cards_airing_on(self):
+        html = self._get(self.PANEL.format(endpoint="shows/premieres") + "&airing=0123456789abcdef",
+                         trakt={"shows/203330": TRAKT_SHOW,
+                                "shows/203330/people": TRAKT_PEOPLE,
+                                "shows/203330/seasons/1": TRAKT_EPISODES}).text
+        self.assertIn('"airing": "0123456789abcdef"', html)
+        # And the card itself carries it on its details address, as drawn.
+        import re
+        with patch("app.calendar.cache.fetch_window_records",
+                   AsyncMock(return_value=([], ["trakt", "simkl"], []))):
+            page = self.client.get("/calendar?endpoint=shows%2Fpremieres&year=2026&month=7").text
+        card = re.search(r'<div class="card[^"]*" data-id="show:tmdb:777" data-airing="([0-9a-f]{16})"'
+                         r'[^>]*data-details-open="([^"]+)"', page)
+        self.assertIn(f"airing={card.group(1)}", card.group(2))

@@ -46,7 +46,11 @@
    one title apart (Item.airing_key); it is a digest precisely so that a title's
    own slug can never put a space or a quote into an attribute htmx parses as a
    selector. Passed only by the route that answers a mark; the page draws its
-   cards inline.
+   cards inline. `replaces` ({new airing: old}) is for the one answer where a
+   card's own airing can have MOVED under it: a second service joining it (the
+   details panel's follow-up) can bring the time, and the time is part of the
+   digest — so that card is addressed by the airing the page drew it under,
+   which its details address carries (`airing`) for exactly this.
 
    WHEN TWO SERVICES DESCRIBED THE SAME AIRING, this card is the one place that
    shows. `item.alternatives` is {field: {service: value}} for the fields they
@@ -145,7 +149,7 @@
    the one card (calendar/routes.py's `anchor`) and `sameas` is what tells two
    airings of one show apart without a second way of naming them. #}
 {%- set is_anchor = anchor is defined and anchor is not none and item is sameas anchor -%}
-<div class="card{% if item.mark_key in not_watching %} not-watching{% endif %}{% if item.mark_key in new_ids %} is-new{% endif %}{% if item.episode_number == 1 and item.season == 1 %} is-series-premiere{% endif %}{% if is_anchor %} jump-target{% endif %}"{% if is_anchor %} id="jump-target"{% endif %} data-id="{{ item.mark_key }}" data-airing="{{ item.airing_key }}"{% if oob %} hx-swap-oob="outerHTML:.card[data-airing='{{ item.airing_key }}']"{% endif %} data-media="{{ item.media }}" data-details-open="{{ details_url('/calendar/fragments/details', item.media, item.ids, item.season, item.mark_key) }}&amp;{{ {'title': won_by('title'), 'poster': won_by('poster'), 'overview': won_by('overview')} | urlencode }}{% if library %}&amp;{{ {'tvdb': item.ids.get('tvdb') or '', 'tmdb': item.ids.get('tmdb') or ''} | urlencode }}{% endif %}{% if endpoint %}&amp;{{ {'endpoint': endpoint.key, 'year': year, 'month': month} | urlencode }}{% endif %}" data-details-heading="{{ item.title }}">
+<div class="card{% if item.mark_key in not_watching %} not-watching{% endif %}{% if item.mark_key in new_ids %} is-new{% endif %}{% if item.episode_number == 1 and item.season == 1 %} is-series-premiere{% endif %}{% if is_anchor %} jump-target{% endif %}"{% if is_anchor %} id="jump-target"{% endif %} data-id="{{ item.mark_key }}" data-airing="{{ item.airing_key }}"{% if oob %} hx-swap-oob="outerHTML:.card[data-airing='{{ (replaces or {}).get(item.airing_key, item.airing_key) }}']"{% endif %} data-media="{{ item.media }}" data-details-open="{{ details_url('/calendar/fragments/details', item.media, item.ids, item.season, item.mark_key) }}&amp;{{ {'title': won_by('title'), 'poster': won_by('poster'), 'overview': won_by('overview')} | urlencode }}{% if library %}&amp;{{ {'tvdb': item.ids.get('tvdb') or '', 'tmdb': item.ids.get('tmdb') or ''} | urlencode }}{% endif %}{% if endpoint %}&amp;{{ {'endpoint': endpoint.key, 'year': year, 'month': month, 'airing': item.airing_key} | urlencode }}{% endif %}" data-details-heading="{{ item.title }}">
     <div class="poster-wrap">
         <div class="ribbon-wrap"><div class="ribbon-text">NOT WATCHING</div></div>
         <div class="new-badge">✨ NEW</div>

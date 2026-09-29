@@ -1788,7 +1788,18 @@ async def _completion_follow_up(settings, params, season: int | None) -> str:
         "year": route_params.valid_year(params.get("year"), today.year),
         "month": route_params.valid_month(params.get("month"), today.month)})
     return Markup(templates.get_template("_details_follow_up.html").render(
-        query=query, key=key, season=season))
+        query=query, key=key, season=season, airing=_airing_ref(params.get("airing"))))
+
+
+# What Item.airing_key looks like (a blake2s digest, 8 bytes as hex). It is only
+# ever a reference the page was drawn with, and it goes into a selector, so
+# nothing else is let through.
+_AIRING_REF = re.compile(r"[0-9a-f]{16}")
+
+
+def _airing_ref(value) -> str:
+    text = str(value or "")
+    return text if _AIRING_REF.fullmatch(text) else ""
 
 
 async def _library_actions(request: Request, settings, media: str, params) -> str:
@@ -1889,7 +1900,8 @@ _CARD_KEY = re.compile(r"[A-Za-z0-9._-]+(?::[A-Za-z0-9._-]+){1,2}")
 
 
 async def _marked_answer(request: Request, user, endpoint, year: int, month: int,
-                         item_id: str) -> Response:
+                         item_id: str, *, drawn_as: str = "",
+                         season: int | None = None) -> Response:
     """What a mark looks like on screen, drawn by the side that decided it.
 
     EVERY CARD FOR THIS TITLE ON THIS MONTH, plus the two counts a mark moves,
@@ -1907,6 +1919,12 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
 
     IT IS ALSO complete_card's ANSWER: a card's missing service answering is a
     write about the title, not a mark, and the cards it changes are the same ones.
+    That answer passes `drawn_as` — the airing the page drew the card under, and
+    its `season` — because the service that joined can bring the time, which is
+    part of an airing's digest: MEASURED, Dexter: Original Sin's card was drawn as
+    one airing and redrawn as another, so the answer addressed a card the page did
+    not have and the page kept the Trakt-only card until a reload. The one card
+    of that season is sent to replace the card as it was drawn.
 
     A TITLE THAT IS NOT ON THIS MONTH ANSWERS WITH THE COUNTS ALONE. That is not
     an error: the mark is a statement about the show and it has been stored
@@ -1972,8 +1990,11 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
                        prefs["hide_not_watching"])
              for group in grouped if group["date"] in days]
     logo_networks = await _logo_networks(settings, items)
+    completed = [item for item in items if season is None or item.season == season]
+    replaces = ({completed[0].airing_key: drawn_as}
+                if drawn_as and len(completed) == 1 else {})
     return templates.TemplateResponse(request, "_marked_cards.html", {
-        "chips": chips, "gone": gone,
+        "chips": chips, "gone": gone, "replaces": replaces,
         "request": request, "items": items,
         "not_watching": marked, "new_ids": meta.get("new_ids") or set(),
         "can_filter": True, "badge_modes": vocab.BadgeModes(prefs),
@@ -2033,7 +2054,8 @@ async def complete_card(request: Request):
         season=season, tz=_resolve_viewer_tz(user, settings), now=db.now())
     if not stored:
         return Response(status_code=200)
-    return await _marked_answer(request, user, endpoint, year, month, key)
+    return await _marked_answer(request, user, endpoint, year, month, key,
+                                drawn_as=_airing_ref(payload.get("airing")), season=season)
 
 
 @guard.post("/api/state", AuthLevel.CALENDAR_APPROVED)
