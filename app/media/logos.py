@@ -259,6 +259,41 @@ async def ensure_logo(settings, network: str, tmdb_id) -> Path | None:
     return tile
 
 
+async def regenerate(settings, network: str, tmdb_id) -> Path | None:
+    """Make `network`'s tile again from TMDB, and return it — or None, with the
+    tile it had left exactly where it was.
+
+    THE OLD TILE IS SET ASIDE, NOT DELETED, until a new one exists. `ensure_logo`
+    cannot tell TMDB being unreachable from TMDB having no logo: both reach it as
+    no answer, and both end in a negative marker. So dropping the tile first and
+    re-resolving — which is what this was — turned a regenerate pressed while
+    TMDB was down into a network with NO logo, marked as having none until the
+    marker aged out. A regenerate that makes nothing now changes nothing.
+    """
+    tile = _tile_path(network)
+    previous = tile.with_suffix(".previous")
+    had = tile.exists()
+    if had:
+        tile.replace(previous)
+    _none_path(network).unlink(missing_ok=True)
+
+    def put_back() -> None:
+        _none_path(network).unlink(missing_ok=True)
+        if had:
+            previous.replace(tile)
+
+    try:
+        made = await ensure_logo(settings, network, tmdb_id)
+    except BaseException:
+        put_back()
+        raise
+    if made is None:
+        put_back()
+        return None
+    previous.unlink(missing_ok=True)
+    return made
+
+
 async def ensure_logos(settings, roster) -> int:
     """Best-effort pre-generation of the network tiles a roster needs. Returns how
     many were newly generated.

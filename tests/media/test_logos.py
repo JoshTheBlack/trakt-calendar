@@ -95,6 +95,65 @@ class EnsureLogosTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(generated, 1)  # Netflix survived
 
 
+class RegenerateTests(unittest.IsolatedAsyncioTestCase):
+    """A regenerate that makes nothing changes nothing: TMDB unreachable and
+    TMDB with no logo reach `ensure_logo` alike, as a miss."""
+
+    CFG = SimpleNamespace(tmdb_configured=True)
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.dir = Path(tempfile.mkdtemp())
+        patcher = patch("app.media.logos.LOGO_DIR", self.dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.tile = logos._tile_path("HBO")
+        self.tile.write_bytes(b"old tile")
+
+    async def test_a_new_tile_replaces_the_old_one(self):
+        async def made(settings, network, tmdb):
+            logos._tile_path(network).write_bytes(b"new tile")
+            return logos._tile_path(network)
+
+        with patch("app.media.logos.ensure_logo", side_effect=made):
+            self.assertEqual(await logos.regenerate(self.CFG, "HBO", 1), self.tile)
+        self.assertEqual(self.tile.read_bytes(), b"new tile")
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["hbo.png"])
+
+    async def test_nothing_made_keeps_the_old_tile_and_marks_nothing_missing(self):
+        async def missed(settings, network, tmdb):
+            logos._none_path(network).write_text("")
+            return None
+
+        with patch("app.media.logos.ensure_logo", side_effect=missed):
+            self.assertIsNone(await logos.regenerate(self.CFG, "HBO", 1))
+        self.assertEqual(self.tile.read_bytes(), b"old tile")
+        self.assertFalse(logos.is_negative("HBO"))
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["hbo.png"])
+
+    async def test_a_failure_puts_the_old_tile_back(self):
+        with patch("app.media.logos.ensure_logo", side_effect=RuntimeError("down")):
+            with self.assertRaises(RuntimeError):
+                await logos.regenerate(self.CFG, "HBO", 1)
+        self.assertEqual(self.tile.read_bytes(), b"old tile")
+
+    async def test_the_version_a_page_draws_moves_with_a_new_tile(self):
+        before = logos.versions(["HBO", "AMC"])
+        self.assertEqual(set(before), {"HBO"})
+
+        async def made(settings, network, tmdb):
+            path = logos._tile_path(network)
+            path.write_bytes(b"new tile")
+            import os
+            os.utime(path, ns=(before["HBO"] + 10**9, before["HBO"] + 10**9))
+            return path
+
+        with patch("app.media.logos.ensure_logo", side_effect=made):
+            await logos.regenerate(self.CFG, "HBO", 1)
+        self.assertNotEqual(logos.versions(["HBO"])["HBO"], before["HBO"])
+
+
 class FetchWatchedProgressTests(unittest.IsolatedAsyncioTestCase):
     async def test_aggregates_distinct_episodes_from_history(self):
         events = [

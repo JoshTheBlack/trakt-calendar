@@ -2737,12 +2737,12 @@ async def api_network_logo(request: Request):
 
 @guard.post("/api/network-logo/regenerate", AuthLevel.ADMIN)
 async def api_network_logo_regenerate(request: Request):
-    """Drop a single network's cached logo and re-resolve it from TMDB."""
+    """Re-resolve a single network's logo from TMDB, keeping the old tile when no
+    new one can be made (logos.regenerate)."""
     data = await authz.json_body(request)
     name = (data.get("name") or "").strip()
     tmdb = data.get("tmdb")
     if not name:
         return JSONResponse({"ok": False, "error": "Missing network name"}, status_code=400)
-    logos.delete(name)
-    path = await logos.ensure_logo(load_settings(), name, tmdb)
+    path = await logos.regenerate(load_settings(), name, tmdb)
     return JSONResponse({"ok": True, "network": name, "generated": bool(path and path.exists())})
