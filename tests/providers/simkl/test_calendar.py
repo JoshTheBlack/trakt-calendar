@@ -391,6 +391,24 @@ class TwoShowsCanShareOneSlugTests(unittest.TestCase):
             with self.subTest(zone=zone):
                 self.assertEqual(render(record, ZoneInfo(zone)).air_date, "2021-11-07")
 
+    def test_a_per_title_ids_block_keeps_simkls_own_id(self):
+        """The per-title lookup spells Simkl's id `simkl`, where a calendar file
+        spells it `simkl_id`. A record built from it without that id could be
+        neither described nor enriched: its panel said nothing could describe
+        it."""
+        from app.providers import detail_source
+        record = simkl_calendar.to_show_record(
+            {"date": "2021-11-07", "title": "Dexter: New Blood",
+             "ids": {"simkl": "1775229", "slug": "dexter-new-blood",
+                     "tmdb": "131927", "imdb": "tt14164730"},
+             "episode": {"season": 1, "episode": 1}})
+        self.assertEqual(str(record.ids.get("simkl")), "1775229")
+        self.assertEqual(record.id, "1775229")
+        from app.config import Settings
+        answerer = detail_source.choose(Settings(), record.ids)
+        self.assertIsNotNone(answerer)
+        self.assertEqual((answerer.source, answerer.source_id), (Source.SIMKL, "1775229"))
+
     def test_an_entry_with_a_time_is_still_an_instant(self):
         record = simkl_calendar.to_show_record(
             self._entry(2415129, "brothers", "250203", "2026-09-23T20:00:00-04:00"))

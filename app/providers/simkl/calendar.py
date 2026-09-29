@@ -430,8 +430,15 @@ def _simkl_ids(raw: dict) -> dict:
     # nothing else can be asked; that would mean verifying each one against Trakt
     # before storing it, which is a lookup rather than a free read. Whoever wants
     # that should add it as a verified lookup, not by widening this map.
+    # BOTH SPELLINGS OF SIMKL'S OWN ID, as `_record_id` below reads them. A
+    # calendar file writes `simkl_id`; the per-title lookup a search builds its
+    # record from writes `simkl`. Reading only the first stored every searched
+    # card with no Simkl id — measured, nine rows on one instance — and a card
+    # without one cannot be described (detail_source.choose asks a service by
+    # its own id) or enriched (the drain keys on it), so it opened on "Nothing
+    # here can describe this item" and stayed bare.
     return _ids.normalize({
-        "simkl": raw.get("simkl_id"),
+        "simkl": raw.get("simkl_id") or raw.get("simkl"),
         "slug": raw.get("slug"),
         "tmdb": raw.get("tmdb"),
         "imdb": raw.get("imdb"),
