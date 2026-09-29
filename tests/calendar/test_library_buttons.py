@@ -17,13 +17,13 @@ import asyncio
 import re
 import time
 from urllib.parse import quote
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app import assets, db
 from app.calendar import vocab
 from app.config import Settings, load_settings, save_settings
 from app.integrations import routes as integrations_routes
+from app.providers import detail_source
 from app.providers.base import Source
 
 from tests.calendar.test_routes import CalendarRouteTestCase, _entry
@@ -279,7 +279,7 @@ class ThePanelHeaderCarriesTheSameButtonsTests(_LibraryTestCase):
                "&key=show%3Atvdb%3A777&tvdb=777")
 
     def _panel(self) -> str:
-        chosen = SimpleNamespace(source=Source.TRAKT, source_id="1")
+        chosen = detail_source.Answerer(Source.TRAKT, "1", stored_only=False)
         with patch("app.providers.detail_source.choose", return_value=chosen), \
              patch("app.providers.detail_source.describe",
                    AsyncMock(return_value={"title": "Held Show", "overview": "A show."})):

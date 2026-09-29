@@ -26,7 +26,7 @@ from datetime import date
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.providers import season as season_rules
+from app.providers import detail_source, season as season_rules
 from app.providers.base import Media, Source, SourceUnavailable
 
 from tests.calendar.test_routes import CalendarRouteTestCase, _entry
@@ -118,7 +118,7 @@ class TheLineIsDrawnForWhicheverSourceCanAnswerTests(CalendarRouteTestCase):
         port = SimpleNamespace(fetch_season_summary=_summary,
                                catalogue_configured=lambda settings: True)
         with patch("app.providers.detail_source.choose",
-                   return_value=SimpleNamespace(source=source, source_id="4242")), \
+                   return_value=detail_source.Answerer(source, "4242", stored_only=False)), \
              patch("app.providers.get",
                    return_value=SimpleNamespace(detail_port=port)), \
              patch("app.clock.today", return_value=date(2026, 9, 3)):

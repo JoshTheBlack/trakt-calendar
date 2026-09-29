@@ -162,6 +162,36 @@ class TheWordsTests(DistraktTestCase):
         self.assertEqual(arrived.record["network"], "Asked Net")
         asked.assert_awaited_once()
 
+    async def test_a_season_only_the_second_service_holds_is_named_by_it(self):
+        """MEASURED: Simkl files its anthology "Monster" under the ids of Trakt's
+        "DAHMER – Monster: The Jeffrey Dahmer Story", which has one season. Trakt,
+        asked first, holds nothing of season 4, so Simkl — which holds all eight
+        episodes — answers the season AND names the row."""
+        empty = {"season": 4, "total": 0, "cadence": None, "premiere": None, "finale": None,
+                 "started_airing": False, "finished_airing": False, "air_dates": []}
+        held = {**SEASON, "season": 4, "total": 8, "air_dates": []}
+        with patch("app.providers.trakt.detail.fetch_season_detail", AsyncMock(return_value=empty)), \
+                patch("app.providers.simkl.detail.fetch_season_detail",
+                      AsyncMock(return_value=held)), \
+                _facts("DAHMER - Monster", "Netflix"), \
+                patch("app.providers.simkl.detail.fetch_title_facts",
+                      AsyncMock(return_value=TitleFacts("Monster", "Netflix"))):
+            arrived, = await arrival.describe(SETTINGS, [a_filing(
+                ids={"tmdb": 900, "trakt": 111, "simkl": 222}, season=4)])
+        self.assertEqual(arrived.record["title"], "Monster")
+        self.assertEqual(arrived.record["total"], 8)
+        self.assertEqual(arrived.detail["described_by"], "simkl")
+
+    async def test_a_season_the_describing_service_holds_is_named_by_it_as_before(self):
+        with patch("app.providers.trakt.detail.fetch_season_detail",
+                   AsyncMock(return_value={**SEASON, "air_dates": []})), \
+                _facts("Trakt Title", "HBO"), \
+                patch("app.providers.simkl.detail.fetch_season_detail") as simkl_season:
+            arrived, = await arrival.describe(SETTINGS, [a_filing(
+                ids={"tmdb": 900, "trakt": 111, "simkl": 222})])
+        self.assertEqual(arrived.record["title"], "Trakt Title")
+        simkl_season.assert_not_called()
+
     async def test_a_blank_answer_keeps_the_paths_words(self):
         with _season(), _facts("", ""):
             arrived, = await arrival.describe(SETTINGS, [a_filing(network="AMC")])

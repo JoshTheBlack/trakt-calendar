@@ -45,7 +45,7 @@ from typing import NamedTuple
 # test double installed on app.providers is the one these functions call (see
 # CLAUDE.md's rule about names bound at import time).
 from .. import providers
-from .base import Media, SeasonsAnswer, Source
+from .base import Media, SeasonsAnswer, Source, SourceUnavailable
 
 
 def ports():
@@ -179,6 +179,65 @@ def choose(settings, ids) -> Answerer | None:
     for source, value in known:
         return Answerer(source, value, stored_only=True)
     return None
+
+
+async def for_season(settings, ids, chosen: Answerer, ask, holds):
+    """(who answered, their answer) for ONE SEASON of a title: `chosen`'s answer,
+    unless it holds nothing of that season and a later service the title names
+    does.
+
+    `ask(answerer)` asks one service; `holds(answer)` says whether the answer has
+    anything of the season in it (episodes, a total).
+
+    WHY A SEASON CAN OUTRANK THE DECLARED ORDER. `choose` picks by id, and the ids
+    on a title are one service's claim that two catalogues' entries are the same
+    show — which is true of the show and not always of its seasons. MEASURED:
+    Simkl files its anthology "Monster" (1446614) as one show with four seasons
+    and states the tmdb, imdb, tvdb ids and Trakt slug of "DAHMER – Monster: The
+    Jeffrey Dahmer Story", which Trakt and TMDB list as a show with ONE season;
+    each later season is a show of its own there. So Trakt, asked first, answered
+    Monster's season 4 with no episodes, and the row drew TBA and a panel with no
+    episode list while Simkl held all eight, dated.
+
+    DECIDED AFTER THE FIRST ANSWER, NOT BEFORE IT: the chosen service is asked
+    exactly as it always was, and only an answer with nothing of the season in it
+    costs a second question. A FAILURE IS NOT "NOTHING": it raises, as it did,
+    because a service that could not be asked has said nothing about the season.
+    A later service that fails is skipped, and with nobody holding the season the
+    first answer stands. A stored-only answerer is never followed — nobody here
+    can be asked, which is what stored-only means.
+    """
+    first = await ask(chosen)
+    if holds(first) or chosen.stored_only:
+        return chosen, first
+    known = [(source, value) for source, _port in ports()
+             if (value := str((ids or {}).get(str(source)) or "").strip())]
+    for source, value in known:
+        if (source == chosen.source
+                or not providers.get(source).detail_port.catalogue_configured(settings)):
+            continue
+        other = Answerer(source, value, stored_only=False)
+        try:
+            answer = await ask(other)
+        except SourceUnavailable:
+            continue
+        if holds(answer):
+            return other, answer
+    return chosen, first
+
+
+async def describe_season(settings, chosen: Answerer, ids, media, season: int | None, *,
+                          cache_only: bool = False) -> tuple[Answerer, dict | None]:
+    """`describe`, with the season rule `for_season` states: (who answered, the
+    answer). A panel draws the answering service's name and links, so it has to
+    be told which one that was. With no season there is nothing to hold, and it
+    is `describe` exactly."""
+    if season is None:
+        return chosen, await describe(settings, chosen, media, season, cache_only=cache_only)
+    return await for_season(
+        settings, ids, chosen,
+        lambda answerer: describe(settings, answerer, media, season, cache_only=cache_only),
+        lambda details: bool(details and details.get("episodes")))
 
 
 async def describe(settings, chosen: Answerer, media, season: int | None, *,

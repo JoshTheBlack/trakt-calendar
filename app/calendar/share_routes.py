@@ -1370,7 +1370,11 @@ async def _describe_shared_title(request: Request, share_row, settings) -> _Desc
     chosen = detail_source.choose(settings, bound)
     if chosen is None:
         return None
-    details = await detail_source.describe(settings, chosen, media, season)
+    # A season the chosen service has no episodes of is answered by the next
+    # service that does — among the BOUND ids only, so the promise above holds
+    # for the second question as for the first (detail_source.for_season).
+    chosen, details = await detail_source.describe_season(settings, chosen, bound,
+                                                          media, season)
     if details is None:
         return None
     # THE BOUND IDS AND WHAT THE ANSWER ADDED, never the raw request: an outbound

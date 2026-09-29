@@ -314,21 +314,38 @@ async def season_detail(settings, rec: dict, *, fresh: bool = False, client=None
     `detail_source` would be a second place for "who can answer for this record"
     to drift, so there is one and both the live pass and the add routes call it.
     """
+    from ..providers import detail_source as catalogue_answerer
     from ..providers import season as season_rules
     from ..providers.simkl import detail as simkl_detail
     from ..providers.trakt.detail import fetch_season_detail
     ids = rec.get("ids") or {}
-    source = detail_source(rec, settings)
-    if source == "simkl":
-        return await simkl_detail.fetch_season_detail(
-            settings, ids.get("simkl"), rec["season"], rec.get("media") or "show")
-    if source is None:
-        return season_rules.empty_season(int(rec["season"]))
-    return await fetch_season_detail(settings, ids.get("trakt"), rec["season"],
-                                     fresh=fresh, client=client)
+    season = int(rec["season"])
+    if detail_source(rec, settings) is None:
+        return season_rules.empty_season(season)
+
+    async def ask(answerer) -> dict:
+        # By the row's own id for that service, as stored, rather than the
+        # answerer's text copy of it.
+        source_id = ids.get(str(answerer.source))
+        if str(answerer.source) == "simkl":
+            return await simkl_detail.fetch_season_detail(
+                settings, source_id, season, rec.get("media") or "show")
+        return await fetch_season_detail(settings, source_id, season,
+                                         fresh=fresh, client=client)
+
+    # A SEASON THE CHOSEN SERVICE HAS NO EPISODES OF IS THE NEXT ONE'S TO ANSWER,
+    # by the rule every details panel follows (detail_source.for_season, which
+    # says why): the ids on a title can join two catalogues' shows whose seasons
+    # do not line up. `described_by` says who answered, so the row credits the
+    # total to that service (`_apply_counts`) and a title filed from this answer
+    # takes its name from it (arrival.describe).
+    answered, detail = await catalogue_answerer.for_season(
+        settings, ids, catalogue_answerer.choose(settings, ids), ask,
+        lambda summary: int((summary or {}).get("total") or 0) > 0)
+    return {**detail, "described_by": str(answered.source)}
 
 
-async def title_facts(settings, rec: dict) -> TitleFacts:
+async def title_facts(settings, rec: dict, *, service: str | None = None) -> TitleFacts:
     """What the service that DESCRIBES this record calls the title, and who it
     says carried it — empty strings when no service can be asked.
 
@@ -375,8 +392,12 @@ async def title_facts(settings, rec: dict) -> TitleFacts:
     its own that the record already carries, in the same declared order, so this
     fills a silence and never overrides an answer. One that cannot be reached
     leaves the network blank, as the describing service did.
+
+    `service` NAMES THE SERVICE TO ASK INSTEAD of the describing one: the one that answered the
+    record's season when the describing service had none of it (see
+    `season_detail`), whose name for the title is the right one for that season.
     """
-    source = detail_source(rec, settings)
+    source = service or detail_source(rec, settings)
     ids = rec.get("ids") or {}
     source_id = ids.get(source) if source else None
     if not source_id:
@@ -447,7 +468,8 @@ def _merge_available(rec: dict, detail: dict, watched: dict[str, int], settings,
     show = {**rec, "key": str(record_key(rec)), "unavailable": False,
             "unavailable_source": "", "unavailable_reason": ""}
     show.update({field: detail[field] for field in _LIVE_FIELDS})
-    _apply_counts(show, rec, watched, settings, asked, dates, retired)
+    _apply_counts(show, rec, watched, settings, asked, dates, retired,
+                  described_by=detail.get("described_by"))
     # AFTER the counts, not before: the note names the services the numbers came
     # from and those are what `_apply_counts` has just decided.
     #
@@ -602,7 +624,8 @@ def source_labels() -> dict[str, str]:
 
 
 def _apply_counts(show: dict, rec: dict, watched: dict[str, int], settings,
-                  asked=(), dates=None, retired=frozenset()) -> None:
+                  asked=(), dates=None, retired=frozenset(),
+                  described_by: str | None = None) -> None:
     """Put the watched counts on a live show, in all three forms it is read in.
 
     `watched` is the primary source's number and is what every existing reader
@@ -661,8 +684,10 @@ def _apply_counts(show: dict, rec: dict, watched: dict[str, int], settings,
     # which service's episode count it was measured against. One entry: a
     # season's total comes from one source (see detail_source). A record no
     # source could be asked about names none here — the total on it is its own
-    # last-known number and no service is answering for it this pass.
-    detail_from = detail_source(rec, settings)
+    # last-known number and no service is answering for it this pass. The
+    # service that ANSWERED where the season lookup says (`described_by`): a
+    # season the chosen service has none of is answered by the next.
+    detail_from = described_by or detail_source(rec, settings)
     show["total_by_source"] = {detail_from: total} if detail_from else {}
     show["counts"] = counts.counts_label(counting or (watched if not retired else {}),
                                          total, source_labels(), order, asked)

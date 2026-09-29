@@ -200,7 +200,13 @@ context's keys once — for the calendar, the tracker, the share page and the
 rankings board; no surface builds that markup in script, and `_details_modal.html`
 is the one shell around it. Which service describes a title is one question on
 all four, answered by `app/providers/detail_source.py` (in the providers package,
-not the calendar, because four features ask it). Because one renderer draws every
+not the calendar, because four features ask it). ONE SEASON of a title has one
+refinement, and it lives there too (`for_season`): a service whose answer holds
+nothing of that season hands it to the next service the title names that does —
+ids join two catalogues' SHOWS, and their seasons need not line up (Simkl's
+anthology "Monster" carries the ids of Trakt's one-season "DAHMER – Monster").
+It is decided after the first answer, so the common case costs nothing, and a
+failure is never read as an empty season. Because one renderer draws every
 answer, `DetailPort`'s answer has ONE KEY SET whoever gives it, and
 `tests/providers/test_protocol_conformance.py`'s
 `EveryDetailPortAnswersTheSameKeysTests` asserts it — a Protocol checks methods,

@@ -1985,8 +1985,11 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     try:
         # See the calendar's own modal: with nobody reachable, what this
         # instance already holds beats a blank card, and None is the case where
-        # it holds nothing either.
-        details = await detail_source.describe(settings, chosen, Media.SHOW, season)
+        # it holds nothing either. A season the chosen service has no episodes
+        # of is answered by the next service that does (detail_source.for_season).
+        chosen, details = await detail_source.describe_season(
+            settings, chosen, ids, Media.SHOW, season)
+        source = chosen.source
         if details is None:
             return details_panel.gap(request, "Nothing here can describe this item.")
     except Exception:

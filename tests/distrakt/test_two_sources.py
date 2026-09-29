@@ -384,6 +384,29 @@ class TheRowTests(TwoSourceTestCase):
         self.assertEqual(row["counts"], "3/8")
         self.assertEqual(row["watched"], 3)
 
+    async def test_a_season_only_the_second_service_holds_is_its_to_count(self):
+        """The ids join two catalogues' shows whose seasons need not line up (Simkl's
+        anthology "Monster" under Trakt's "DAHMER – Monster", which has one season):
+        a season Trakt holds nothing of is counted from Simkl, dated, and the
+        total is credited to Simkl."""
+        async def _trakt(settings, trakt_id, season, fresh=False, client=None):
+            return {"season": season, "total": 0, "cadence": None, "premiere": None,
+                    "finale": None, "started_airing": False, "finished_airing": False,
+                    "air_dates": []}
+
+        async def _simkl(settings, simkl_id, season, media="show", today=None):
+            return {"season": season, "total": 8, "cadence": "b", "premiere": "9/17",
+                    "finale": "9/17", "started_airing": True, "finished_airing": True,
+                    "air_dates": ["2026-09-17"] * 8}
+
+        with patch("app.providers.trakt.detail.fetch_season_detail", _trakt), \
+                patch("app.providers.simkl.detail.fetch_season_detail", _simkl):
+            row, = await live.compute_live_shows(
+                self.user_id, [_record(101, season=4)], BOTH,
+                watched_lookup={}, sources_read=ORDER)
+        self.assertEqual((row["total"], row["premiere"], row["cadence"]), (8, "9/17", "b"))
+        self.assertEqual(row["total_by_source"], {"simkl": 8})
+
     async def test_the_episode_total_is_recorded_against_the_service_asked(self):
         """A season's total comes from ONE service — it is catalogue data and
         paying a second call to learn the two count episodes slightly differently
