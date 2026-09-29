@@ -106,6 +106,7 @@ All notable changes to this project are documented here. Format loosely follows 
 - ✏️ **A field redrawn after saving shows what was saved.** Saving your display name could leave the box empty even though the name was stored — and anywhere else in the app a saved field is redrawn could do the same.
 
 ### 🥚
+- Reading a whole Simkl library is one request instead of twelve, and takes about half as long — the same answer, measured item for item. Reads of only what changed are unaffected.
 - A title added by hand no longer puts its first-ever air date on the calendar in place of a season premiere a service could not date; it writes that season's premiere or nothing.
 - The key sequence no longer throws you out of the page it opens. Once both had been visited in one session, pressing it on the second went back to the first; there is one listener now and it reads which page it is on.
 - What a row opens is the same panel the rest of the app opens, drawn by the same thing, so a score it never had room to show is simply there, and a picture with it.

@@ -426,6 +426,62 @@ async def _all_items(settings: Settings, media: str, status: str,
     return data if isinstance(data, dict) else {}
 
 
+async def _whole_library(settings: Settings) -> dict | None:
+    """Every list of the library in ONE call, or None when it could not be read.
+
+    `/sync/all-items/` with neither a catalogue nor a status answers every
+    catalogue and every list at once. MEASURED against the owner's account on
+    2026-09-29: the same 1,591 items the twelve per-list calls return, every
+    body byte-identical to its per-list copy, anime included (the anime mapping
+    rides on every item, so `full_anime_seasons` is asked of the whole call — it
+    is a superset of `full`), in 0.40s against 1.66s. It also carries the
+    `plantowatch` list, which a watch record leaves out (`_split` below).
+
+    A credential failure re-raises and any other failure is None, as a single
+    list's does in `_all_items`.
+    """
+    params = dict(LIBRARY_PARAMS, extended=ANIME_EXTENDED)
+    try:
+        data = await transport.cached_get(
+            transport.sync_client(), settings, "sync/all-items/", params,
+            pool=transport.SYNC_POOL, private=True, raise_errors=True,
+            app=transport.APP_NAME_TRACKER)
+    except transport.SimklError as exc:
+        if transport.is_credential_failure(exc):
+            raise
+        logger.warning("simkl all-items could not be read: %s", exc)
+        return None
+    return data if isinstance(data, dict) else {}
+
+
+def _split(whole: dict, media: str, status: str) -> dict:
+    """One list's document out of a whole-library answer, shaped as the per-list
+    call answers it. An item's own `status` names its list — measured identical
+    to the list it is filed under in the per-list calls, all 1,591 items."""
+    return {media: [item for item in (whole.get(media) or [])
+                    if isinstance(item, dict) and item.get("status") == status]}
+
+
+async def _documents(settings: Settings, wanted) -> list[tuple[str, str, dict | None]]:
+    """(catalogue, list, document) for every list `wanted` names, None where it
+    could not be read.
+
+    ONE CALL WHEN EVERY LIST IS WANTED WHOLE, twelve otherwise. A first read and
+    a baseline want every list with no `date_from`, and one call answers that
+    exactly (`_whole_library`). A bounded read asks each moved list only for what
+    moved SINCE ITS OWN STAMP, which one call cannot express, so it stays per
+    list — which is also what Simkl's sync guide asks of an incremental client.
+    """
+    everything = {(media, status) for media in LIBRARY_TYPES for status in WATCHED_STATUSES}
+    if ({(media, status) for media, status, date_from in wanted if date_from is None}
+            == everything and len(wanted) == len(everything)):
+        whole = await _whole_library(settings)
+        return [(media, status, None if whole is None else _split(whole, media, status))
+                for media, status, _ in wanted]
+    return [(media, status, await _all_items(settings, media, status, date_from))
+            for media, status, date_from in wanted]
+
+
 def _refuse_a_read_that_read_nothing(wanted: int, failed: int, what: str) -> None:
     """Raise when every bucket a read meant to fetch failed.
 
@@ -741,8 +797,7 @@ async def fetch_library(settings: Settings, *, start_at: str | None = None,
     events: list[dict] = []
     failed = 0
     with span("simkl.library", buckets=len(wanted)) as sp:
-        for media, status, date_from in wanted:
-            document = await _all_items(settings, media, status, date_from)
+        for media, status, document in await _documents(settings, wanted):
             if document is None:
                 failed += 1
                 complete = False

@@ -48,6 +48,39 @@ def _cached_get(*answers):
     return AsyncMock(side_effect=_answer)
 
 
+BUCKETS = [(media, status) for media in sync.LIBRARY_TYPES for status in sync.WATCHED_STATUSES]
+
+
+def _library_get(*answers):
+    """`_cached_get`, for a stand-in whose answers are written PER LIST, in the
+    order the per-list reads ask for them — which a whole-library read now asks
+    for in one call (`sync/all-items/`). That call takes the next twelve answers
+    at once and is served them folded into one document, each item carrying its
+    list's `status` as Simkl's own whole answer does (measured: every item's
+    status names the list it is filed under). A failure among them fails the one
+    call. A per-list call is served one answer, as before."""
+    served = list(answers)
+
+    async def _answer(_client, _settings, path, *_args, raise_errors=False, **_kwargs):
+        if path != "sync/all-items/":
+            value = served.pop(0)
+        else:
+            parts, served[:len(BUCKETS)] = served[:len(BUCKETS)], []
+            failure = next((part for part in parts if isinstance(part, Exception)), None)
+            value = failure if failure is not None else {}
+            if failure is None:
+                for (media, status), part in zip(BUCKETS, parts):
+                    for item in (part or {}).get(media) or []:
+                        value.setdefault(media, []).append({"status": status, **item})
+        if isinstance(value, Exception):
+            if raise_errors:
+                raise value
+            return None
+        return value
+
+    return AsyncMock(side_effect=_answer)
+
+
 class PrivacyTests(unittest.IsolatedAsyncioTestCase):
     """Every read here is one person's. None of it may be cached, and none of it
     may travel on the pool that allows parallel requests."""
@@ -251,7 +284,7 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
         return {"lists": lists}
 
     async def _read(self, answers, **kwargs):
-        spy = _cached_get(*answers)
+        spy = _library_get(*answers)
         with patch("app.providers.simkl.transport.cached_get", new=spy):
             return await sync.fetch_library(SETTINGS, **kwargs), spy
 
@@ -359,7 +392,7 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
         expensive call this module makes."""
         read, spy = await self._read([{"shows": [self._item()]}] + [{}] * 11)
         self.assertEqual([e["episode"]["number"] for e in read.events], [1, 2])
-        self.assertEqual(spy.await_count, 12)
+        self.assertEqual(spy.await_count, 1)
 
     async def test_the_window_bounds_the_plays_and_never_the_library(self):
         """A baseline needs every title the person holds; only the EVENTS are
@@ -411,7 +444,7 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
         correctness, so an unstated list is unknown rather than unchanged."""
         read, spy = await self._read([{}] * 12, activities={"lists": {}},
                                      since={"lists": {}})
-        self.assertEqual(spy.await_count, 12)
+        self.assertEqual([call.args[2] for call in spy.await_args_list], ["sync/all-items/"])
         self.assertTrue(read.complete)
 
     async def test_a_bucket_that_moved_is_asked_only_for_what_moved(self):
@@ -452,10 +485,40 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
         the FIRST read would read as a title Simkl does not have, which is the
         answer that gets recorded permanently."""
         read, spy = await self._read([{}] * 12, activities=self._activities())
-        self.assertEqual(spy.await_count, 12)
+        self.assertEqual(spy.await_count, 1)
         for call in spy.await_args_list:
             self.assertNotIn("date_from", call.args[3])
         self.assertTrue(read.complete)
+
+    async def test_a_whole_read_is_one_call_and_a_bounded_one_is_per_list(self):
+        """Every list wanted whole is what `/sync/all-items/` with no catalogue
+        and no status answers — MEASURED on a live account: the same 1,591 items
+        the twelve calls return, byte-identical, in a quarter of the time. A
+        bounded read asks each moved list for what moved since ITS OWN stamp, which
+        one call cannot express, so it stays per list."""
+        _read, whole = await self._read([{}] * 12)
+        self.assertEqual([call.args[2] for call in whole.await_args_list], ["sync/all-items/"])
+        before = self._activities(shows_watching="2026-08-01T00:00:00Z",
+                                  movies_completed="2026-08-01T00:00:00Z")
+        now = self._activities(shows_watching="2026-08-20T00:00:00Z",
+                               movies_completed="2026-08-20T00:00:00Z")
+        _read, bounded = await self._read([{}, {}], activities=now, since=before)
+        self.assertEqual([call.args[2] for call in bounded.await_args_list],
+                         ["sync/all-items/shows/watching", "sync/all-items/movies/completed"])
+
+    async def test_the_whole_read_leaves_the_plan_to_watch_list_out(self):
+        """It answers every list at once, `plantowatch` included, and a watch
+        record reads only the lists a watch can be in (WATCHED_STATUSES) — a
+        title only planned must not become an entry that has seen nothing."""
+        planned = {"status": "plantowatch",
+                   "show": {"title": "Later", "ids": {"simkl_id": 9, "tmdb": "901"}}}
+
+        async def _whole(*_args, **_kwargs):
+            return {"shows": [{"status": "watching", **self._item()}, planned]}
+
+        with patch("app.providers.simkl.transport.cached_get", new=AsyncMock(side_effect=_whole)):
+            read = await sync.fetch_library(SETTINGS)
+        self.assertEqual(list(read.entries), ["show:tmdb:900"])
 
     async def test_a_bucket_with_no_earlier_stamp_of_its_own_is_unbounded(self):
         """A list this app has never recorded has no point in time to ask for
@@ -475,14 +538,24 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
         """`complete` MEANS "EVERY BUCKET I MEANT TO READ, I READ", never "I
         finished looping". The caller retires a title absent from a complete read,
         so a read that downgraded a refusal to an absence would have it delete
-        watch history it merely failed to fetch."""
-        answers = [{"shows": [self._item()]},
-                   transport.SimklError("that list 500ed", 500)] + [{}] * 10
-        read, spy = await self._read(answers)
-        self.assertEqual(spy.await_count, 12)
+        watch history it merely failed to fetch. A per-list read — every moved
+        list, each bounded — is the one that can lose a single list."""
+        before = self._activities(shows_watching="2026-08-01T00:00:00Z",
+                                  shows_completed="2026-08-01T00:00:00Z")
+        now = self._activities(shows_watching="2026-08-20T00:00:00Z",
+                               shows_completed="2026-08-20T00:00:00Z")
+        answers = [{"shows": [self._item()]}, transport.SimklError("that list 500ed", 500)]
+        read, spy = await self._read(answers, activities=now, since=before)
+        self.assertEqual(spy.await_count, 2)
         self.assertFalse(read.complete)
         # And what it DID read is still there — a lost bucket costs that bucket.
         self.assertEqual(list(read.entries), ["show:tmdb:900"])
+
+    async def test_a_whole_read_that_was_refused_is_no_read_at_all(self):
+        """One call answers every list, so it cannot lose one: refused, nothing
+        was read, and that raises rather than answering an empty library."""
+        with self.assertRaises(transport.SimklError):
+            await self._read([transport.SimklError("gone", 500)] + [{}] * 11)
 
     async def test_a_read_in_which_no_bucket_could_be_read_raises(self):
         """THE REGRESSION, at the level it starts. Twelve refused buckets used to
@@ -570,7 +643,13 @@ class AnimeSeasonTitleTests(unittest.IsolatedAsyncioTestCase):
         async def _get(client, settings, path, param=None, **kwargs):
             paths.append(path)
             params.append(dict(param or {}))
-            return next(buckets)
+            if path != "sync/all-items/":
+                return next(buckets)
+            whole = {}
+            for (media, status), part in zip(BUCKETS, buckets):
+                for item in (part or {}).get(media) or []:
+                    whole.setdefault(media, []).append({"status": status, **item})
+            return whole
 
         with patch("app.providers.simkl.transport.cached_get",
                    new=AsyncMock(side_effect=_get)):
@@ -616,14 +695,27 @@ class AnimeSeasonTitleTests(unittest.IsolatedAsyncioTestCase):
         read, _paths, _params = await self._read(shows_items=[plain])
         self.assertEqual(read.entries["show:tmdb:900"].seasons, {3: {4: "2026-07-01"}})
 
-    async def test_only_the_anime_buckets_ask_for_the_mapping(self):
-        """`full_anime_seasons` is a superset of `full` and costs a larger
-        payload; television gains nothing from it, so it is asked for where it
-        answers something."""
+    async def test_the_mapping_is_asked_for_wherever_anime_can_be(self):
+        """`full_anime_seasons` is a superset of `full`. A whole read answers the
+        anime lists too, so it asks for it; a per-list read asks it of the anime
+        lists alone, since television gains nothing from it."""
         _read, paths, params = await self._read()
-        asked = dict(zip(paths, params))
-        self.assertEqual(asked["sync/all-items/anime/watching"]["extended"],
+        self.assertEqual(dict(zip(paths, params))["sync/all-items/"]["extended"],
                          sync.ANIME_EXTENDED)
+        asked = {}
+
+        async def _get(client, settings, path, param=None, **kwargs):
+            asked[path] = dict(param or {})
+            return {}
+
+        stamps = {media: {status: "S" for status in sync.WATCHED_STATUSES}
+                  for media in sync.LIBRARY_TYPES}
+        moved = {media: dict(block, watching="T") for media, block in stamps.items()}
+        with patch("app.providers.simkl.transport.cached_get",
+                   new=AsyncMock(side_effect=_get)):
+            await sync.fetch_library(SETTINGS, activities={"lists": moved},
+                                     since={"lists": stamps})
+        self.assertEqual(asked["sync/all-items/anime/watching"]["extended"], sync.ANIME_EXTENDED)
         self.assertEqual(asked["sync/all-items/shows/watching"]["extended"], "full")
 
     async def test_every_bucket_asks_for_the_episodes_of_a_finished_title(self):
