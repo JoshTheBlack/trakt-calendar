@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import re
 from html import unescape
+from unittest.mock import AsyncMock, patch
 
 from app import distrakt as distrakt_store
 from app.distrakt import post_memo, prefs
@@ -78,6 +79,18 @@ class TheMapKeepsOnlyWhatWasChosenTests(MonthFragmentTestCase):
         emojis = self.prefs_now()[0]
         self.assertEqual(emojis["HBO"], "📺")
         self.assertEqual(len(emojis["AMC"]), prefs.MAX_CODE_LENGTH)
+
+    def test_a_new_default_takes_the_entries_that_restated_the_old_one_with_it(self):
+        """Drawn as "no code of its own", so they move with the default rather
+        than keeping the old one the moment it changes."""
+        asyncio.run(distrakt_store.set_emoji_prefs(
+            self.user_id, {"AMC": ":tv:", "FX": ":fx:", "HBO": ":film:"}, ":tv:"))
+        asyncio.run(prefs.set_default_emoji(self.user_id, ":film:"))
+        self.assertEqual(self.prefs_now(), ({"FX": ":fx:"}, ":film:"))
+
+    def test_an_empty_default_is_the_apps_own(self):
+        asyncio.run(prefs.set_default_emoji(self.user_id, "  "))
+        self.assertEqual(self.prefs_now()[1], distrakt_store.DEFAULT_EMOJI)
 
     def test_drawing_and_adding_register_no_network(self):
         """Nothing is filed for the viewer: the rows name every network the month
@@ -205,6 +218,21 @@ class SavingACodeTests(MonthFragmentTestCase):
                 self.assertIn("toast err", resp.text)
         self.assertEqual(asyncio.run(distrakt_store.get_emoji_prefs(self.user_id))[0], {})
 
+    def test_the_default_is_saved_by_its_own_field_and_the_month_follows(self):
+        year, month = self.current
+        resp = self.client.post(f"/api/distrakt/emoji-default?year={year}&month={month}",
+                                json={"code": ":film:"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("month-changed", resp.headers.get("HX-Trigger", ""))
+        self.assertIn('id="emojiDefaultPill"', resp.text)
+        self.assertIn("🙂 :film:", resp.text)
+        self.assertRegex(resp.text, r'<input type="text" id="emojiDefault" name="code" value=":film:"')
+        self.assertEqual(asyncio.run(distrakt_store.get_emoji_prefs(self.user_id)), ({}, ":film:"))
+        # Empty means the app's own default.
+        self.client.post(f"/api/distrakt/emoji-default?year={year}&month={month}", json={"code": ""})
+        self.assertEqual(asyncio.run(distrakt_store.get_emoji_prefs(self.user_id))[1],
+                         distrakt_store.DEFAULT_EMOJI)
+
     def test_one_accounts_save_is_not_anothers(self):
         """The map renders into ONE account's posts, and what the answer re-renders
         from is kept per account: a neighbour saving the same network changes
@@ -219,3 +247,70 @@ class SavingACodeTests(MonthFragmentTestCase):
         self.assertEqual(asyncio.run(distrakt_store.get_emoji_prefs(self.user_id))[0], {})
         self.assertEqual(asyncio.run(distrakt_store.get_emoji_prefs(neighbour))[0],
                          {"HBO": ":theirs:"})
+
+
+class TheLogoToolsTests(MonthFragmentTestCase):
+    """Under a code while it is edited: the network's name, its tile to download
+    where there is one, and — for an administrator — making the tile again."""
+
+    def setUp(self):
+        super().setUp()
+        self.list_one()
+        year, month = self.current
+        self.address = f"/api/distrakt/network-logo?year={year}&month={month}"
+
+    def tools(self, html: str) -> str:
+        found = re.search(r'<span class="distrakt-emoji-tools">(.*?)</span>\s*</span>', html, re.S)
+        return found.group(1) if found else ""
+
+    def test_download_is_offered_only_where_there_is_a_tile(self):
+        with patch("app.media.logos.versions", return_value={}):
+            self.assertNotIn("download", self.tools(self.month(*self.current).html))
+        with patch("app.media.logos.versions", return_value={"HBO": 7}):
+            tools = unescape(self.tools(self.month(*self.current).html))
+        self.assertIn('href="/api/network-logo?name=HBO&v=7&download=1"', tools)
+        self.assertIn('hx-boost="false"', tools)
+
+    def test_only_an_administrator_is_offered_the_regenerate(self):
+        self.assertNotIn("/api/distrakt/network-logo", self.month(*self.current).html)
+        self.assertEqual(self.client.post(self.address, json={"network": "HBO"}).status_code, 403)
+
+    def as_admin(self):
+        admin = self.make_user("admin", is_admin=True, distrakt_approved=True,
+                               calendar_approved=True)
+        self.link_identity(admin, "trakt", 902, "tok3")
+        asyncio.run(distrakt_store.add_user_record(admin, {
+            "media": Media.SHOW, "ids": {"trakt": 500, "tmdb": 500}, "season": 1,
+            "title": "Listed Show", "network": "HBO",
+            "kind": distrakt_store.RecordKind.KEEPUP}))
+        self.sign_in_as(admin)
+
+    def test_an_administrator_regenerates_by_the_months_own_tmdb_id(self):
+        self.as_admin()
+        self.assertIn("/api/distrakt/network-logo", self.month(*self.current).html)
+        made = AsyncMock(return_value="tile")
+        with patch("app.media.logos.regenerate", made), \
+                patch("app.media.logos.versions", return_value={"HBO": 9}):
+            resp = self.client.post(self.address, json={"network": "HBO"})
+        self.assertEqual(made.await_args.args[1:], ("HBO", 500))
+        # Every badge and every code cell for HBO, with the new tile's version.
+        self.assertIn(f"hx-swap-oob=\"outerHTML:.distrakt-badge[data-net='{_ref('HBO')}']\"", resp.text)
+        self.assertIn(f"hx-swap-oob=\"outerHTML:.distrakt-emoji[data-net='{_ref('HBO')}']\"", resp.text)
+        self.assertIn("name=HBO&amp;v=9", resp.text)
+        self.assertIn("toast ok", resp.text)
+
+    def test_a_regenerate_that_made_nothing_says_the_old_tile_is_kept(self):
+        self.as_admin()
+        self.month(*self.current)
+        with patch("app.media.logos.regenerate", AsyncMock(return_value=None)), \
+                patch("app.media.logos.versions", return_value={"HBO": 9}):
+            resp = self.client.post(self.address, json={"network": "HBO"})
+        self.assertIn("the old one is kept", resp.text)
+        self.assertIn("toast err", resp.text)
+
+    def test_a_network_the_month_names_no_tmdb_id_for_is_refused(self):
+        self.as_admin()
+        with patch("app.media.logos.regenerate", AsyncMock()) as made:
+            resp = self.client.post(self.address, json={"network": "Nowhere TV"})
+        made.assert_not_awaited()
+        self.assertIn("toast err", resp.text)

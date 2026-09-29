@@ -131,11 +131,25 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
            hx-post="/api/distrakt/emoji{{ month_query }}" hx-json-enc
            hx-trigger="change" hx-swap="none"
            hx-vals='{{ {"network": network} | tojson }}'>
+    {#- THE NETWORK'S LOGO TOOLS, shown while the code is being edited: its full
+        name (a row's own cell truncates it, and a phone's row does not draw it),
+        the tile to download — to upload to Discord as the emoji this code names —
+        and, for an administrator, making the tile again. -#}
     <span class="distrakt-emoji-tools">
         <span class="distrakt-emoji-net">{{ network }}</span>
-        <a class="btn-ghost small" href="/api/network-logo?name={{ network | urlencode }}&amp;download=1"
+        {%- set logo = logo_for(network) %}
+        {%- if logo %}
+        {#- Not boosted: htmx boosts every link under a boosted <body> and ignores
+            `download`, so this would fetch the PNG and swap it into the page
+            instead of saving a file. -#}
+        <a class="btn-ghost small" href="{{ logo }}&amp;download=1"
            download hx-boost="false" title="Download {{ network }}'s logo">⬇</a>
-        <button type="button" class="btn-ghost small" title="Regenerate {{ network }}'s logo (admin)">↻</button>
+        {%- endif %}
+        {%- if is_admin %}
+        <button type="button" class="btn-ghost small" title="Make {{ network }}'s logo again"
+                hx-post="/api/distrakt/network-logo{{ month_query }}" hx-json-enc hx-swap="none"
+                hx-vals='{{ {"network": network} | tojson }}'>↻</button>
+        {%- endif %}
     </span>
 </span>
 {%- else %}<span class="distrakt-emoji"></span>{% endif -%}

@@ -59,6 +59,7 @@ DISTRAKT_POSTS = (
     "/api/distrakt/refresh",
     "/api/distrakt/import",
     "/api/distrakt/emoji",
+    "/api/distrakt/emoji-default",
     "/api/distrakt/remove",
     "/api/distrakt/add",
     "/api/distrakt/abandon",

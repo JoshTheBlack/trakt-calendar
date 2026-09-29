@@ -2219,6 +2219,83 @@ async def api_distrakt_emoji(request: Request):
     return response if kept else _and_the_month(response)
 
 
+@guard.post("/api/distrakt/emoji-default", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_emoji_default(request: Request):
+    """Save the code a network with none of its own posts as, from the header
+    pill's field. Empty means the app's own default (prefs.set_default_emoji).
+
+    THE PILL AND ITS FIELD COME BACK OUT OF BAND, and the month is asked to fetch
+    itself: every network without a code of its own, on every row and in both
+    posts, changes with the default, which is the whole month's markup — and a
+    default changes rarely enough that the refetch is the right cost.
+    """
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+    _emojis, default_emoji = await prefs.set_default_emoji(user.user_id, data.get("code"))
+    year, month = _viewed_month(request)
+    return _and_the_month(templates.TemplateResponse(request, "_distrakt_emoji_default_answer.html", {
+        "request": request, "default_network_emoji": default_emoji,
+        "month_query": f"?year={year}&month={month}",
+    }))
+
+
+async def _network_tmdb(user_id: int, month_key: str, network: str) -> int | None:
+    """A TMDB id for some title on `network` that this viewer's month shows — the
+    lookup a network's logo is found by (TMDB lists a show's networks, not a
+    network's logo by name). From what is stored, the month's records and the
+    viewer's own list, the two things the page's rows are drawn from."""
+    doc = await distrakt_store.load_month(user_id, month_key) or {}
+    for rec in [*(doc.get("shows") or []), *await distrakt_store.user_records(user_id)]:
+        if (rec.get("network") or "") == network:
+            try:
+                tmdb = int((rec.get("ids") or {}).get("tmdb") or 0)
+            except (TypeError, ValueError):
+                continue
+            if tmdb > 0:
+                return tmdb
+    return None
+
+
+@guard.post("/api/distrakt/network-logo", AuthLevel.ADMIN)
+async def api_distrakt_network_logo(request: Request):
+    """Make a network's logo tile again, from the ↻ under a row's emoji code.
+
+    ADMIN, as the calendar's regenerate is: a tile is the instance's, shared by
+    every viewer and every calendar card, and making one spends the instance's
+    TMDB key.
+
+    THE ANSWER IS EVERY ROW'S BADGE AND CODE CELL FOR THAT NETWORK, OUT OF BAND,
+    with the new tile's version in the address both draw (_emoji_context), plus
+    a line saying what happened. A regenerate that could make nothing keeps the tile it had
+    (logos.regenerate), and says so.
+    """
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+    network = str(data.get("network") or "").strip()
+    if not network or len(network) > prefs.MAX_NETWORK_LENGTH:
+        return _month_refusal(request, "That isn't a network this page shows.")
+    year, month = _viewed_month(request)
+    tmdb = await _network_tmdb(user.user_id, distrakt_store.month_key(year, month), network)
+    if tmdb is None:
+        return _month_refusal(request, f"Nothing on this month names a TMDB id for {network}, "
+                                       "so its logo can't be looked up.")
+    had = bool(logos.versions([network]))
+    made = await logos.regenerate(load_settings(), network, tmdb)
+    if made is not None:
+        message, ok = f"Made {network}'s logo again.", True
+    elif had:
+        message, ok = f"No new logo for {network} could be made, so the old one is kept.", False
+    else:
+        message, ok = f"TMDB has no usable logo for {network}.", False
+    emojis, default_emoji = await distrakt_store.get_emoji_prefs(user.user_id)
+    return templates.TemplateResponse(request, "_distrakt_logo_answer.html", {
+        "request": request, "network": network,
+        "month_query": f"?year={year}&month={month}",
+        "message": message, "message_ok": ok,
+        **_emoji_context(emojis, default_emoji, [network], user.is_admin),
+    })
+
+
 @guard.post("/api/distrakt/emojis", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_set_emojis(request: Request):
     """Replace this user's network->emoji map.

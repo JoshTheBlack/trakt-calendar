@@ -344,6 +344,8 @@ class EveryConvertedRouteRefusesTests(MonthFragmentTestCase):
         ("/api/distrakt/add-movie", {"q": "x", "i": 0, "watched_on": "2026-01-01"}),
         ("/api/distrakt/emojis", {"network-0": "HBO", "emoji-0": ":hbo:"}),
         ("/api/distrakt/emoji", {"network": "HBO", "code": ":hbo:"}),
+        ("/api/distrakt/emoji-default", {"code": ":tv:"}),
+        ("/api/distrakt/network-logo", {"network": "HBO"}),
         ("/api/distrakt/backfill/survey", {"start": "2026-01", "end": "2026-02"}),
         ("/api/distrakt/backfill/apply", {}),
         ("/api/distrakt/share-link", {"kind": ""}),

@@ -207,6 +207,7 @@ class UnauthenticatedTests(GatingTestCase):
                 self.assertEqual(self.client.get(path).status_code, 401)
         for path in ("/api/distrakt/refresh", "/api/distrakt/import",
                      "/api/distrakt/remove", "/api/distrakt/emoji",
+                     "/api/distrakt/emoji-default",
                      "/api/distrakt/add", "/api/distrakt/abandon",
                      "/api/distrakt/acknowledge-return",
                      "/api/distrakt/unknown-add", "/api/distrakt/unknown-resume",
@@ -226,7 +227,7 @@ class UnauthenticatedTests(GatingTestCase):
                      "/admin/encryption/enable", "/admin/encryption/verify",
                      "/admin/encryption/encrypt", "/admin/encryption/opt-out",
                      "/calendar/library/add", "/calendar/library/add-month",
-                     "/api/network-logo/regenerate"):
+                     "/api/network-logo/regenerate", "/api/distrakt/network-logo"):
             with self.subTest(path=path):
                 self.assertEqual(self.client.post(path, json={}).status_code, 401)
 

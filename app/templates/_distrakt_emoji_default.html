@@ -1,0 +1,26 @@
+{# THE DEFAULT EMOJI: the code a network with none of its own posts as. A pill in
+   the header opening a popover with the field (distrakt.html) — light dismiss
+   and Escape come with the popover, and nothing here is script.
+
+   THE FIELD SAVES ITSELF ON `change`, the way a row's code does
+   (_distrakt_rows.html's `emoji`): Enter, or focus leaving after an edit, and
+   nothing for a click in and out. It sits in no form. An empty field means the
+   app's own default.
+
+   `oob` IS THE ANSWER'S SPELLING (routes.api_distrakt_emoji_default): the pill
+   and the field by id, not the popover around them, so a popover the field was
+   saved from by Enter stays open with the value as stored. The rows and the
+   posts come with the month the answer asks the page to fetch. #}
+{% macro pill(default_emoji, oob=false) -%}
+<button type="button" id="emojiDefaultPill" class="pill-btn nav-menu-btn" popovertarget="emojiDefaultMenu"
+        title="The emoji a network with none of its own posts as"
+        {%- if oob %} hx-swap-oob="outerHTML"{% endif %}>🙂 {{ default_emoji }}</button>
+{%- endmacro %}
+
+{% macro field(default_emoji, month_query, oob=false) -%}
+<input type="text" id="emojiDefault" name="code" value="{{ default_emoji }}"
+       spellcheck="false" autocomplete="off"
+       hx-post="/api/distrakt/emoji-default{{ month_query }}" hx-json-enc
+       hx-trigger="change" hx-swap="none"
+       {%- if oob %} hx-swap-oob="outerHTML"{% endif %}>
+{%- endmacro %}

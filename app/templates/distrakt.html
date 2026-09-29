@@ -1,6 +1,7 @@
 {% extends '_base.html' %}
 {% import '_distrakt_modals.html' as modals %}
 {% import '_distrakt_import.html' as imports %}
+{% import '_distrakt_emoji_default.html' as default_emoji %}
 {% set site_suffix = false %}
 {% set progress_bar = true %}
 {% set body_class = 'distrakt-page' %}
@@ -35,16 +36,13 @@
         {{ imports.button(month_query) }}
         <button type="button" class="pill-btn" command="show-modal" commandfor="addShowModal">➕ Add show</button>
         <button type="button" class="pill-btn" command="show-modal" commandfor="addMovieModal">🎬 Add film</button>
-        {#- MOCKUP: the default emoji, out of the retired Emoji map tab. A popover
-            the pill opens (light dismiss and Escape come with it); NOT WIRED —
-            the build saves the field on change, as a row's code saves. -#}
+        {#- The default emoji — see _distrakt_emoji_default.html. A network's own
+            code is edited on its rows. -#}
         <div class="nav-menu emoji-default-menu">
-            <button type="button" class="pill-btn nav-menu-btn" popovertarget="emojiDefaultMenu"
-                    title="The emoji a network with none of its own posts as">🙂 {{ default_network_emoji }}</button>
+            {{ default_emoji.pill(default_network_emoji) }}
             <div class="nav-menu-items emoji-default-panel" id="emojiDefaultMenu" popover>
                 <label for="emojiDefault">Default emoji</label>
-                <input type="text" id="emojiDefault" name="default_network_emoji"
-                       value="{{ default_network_emoji }}" spellcheck="false" autocomplete="off">
+                {{ default_emoji.field(default_network_emoji, month_query) }}
                 <p class="distrakt-note">What your Discord posts use for a network with
                     no code of its own. A row's code is edited on the row itself.</p>
             </div>
