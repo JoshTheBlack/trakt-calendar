@@ -748,14 +748,27 @@ class PerUserEmojiMapTests(RegressionTestCase):
         self.assertEqual(emojis, {})
         self.assertEqual(default_emoji, store.DEFAULT_EMOJI)
 
-    def test_registering_networks_writes_only_the_acting_users_map(self):
+    def test_saving_a_code_writes_only_the_acting_users_map(self):
+        """Through the route a row's field posts to, so it is the session that
+        decides whose map is written — the body names a network and nothing
+        else."""
         from app import distrakt as store
         mine, theirs = self.tracker("mine"), self.tracker("theirs")
-        asyncio.run(store.register_networks(mine, ["HBO", "AMC", ""]))
-        self.assertEqual(
-            set(asyncio.run(store.get_emoji_prefs(mine))[0]), {"HBO", "AMC"})
+        asyncio.run(store.set_emoji_prefs(theirs, {"AMC": ":theirs:"}, ":tv:"))
+        self.login("mine")
+        resp = self.client.post("/api/distrakt/emoji", json={"network": "HBO", "code": ":hbo:"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(asyncio.run(store.get_emoji_prefs(mine))[0], {"HBO": ":hbo:"})
         # The other account is untouched — the actual reported bug.
-        self.assertEqual(asyncio.run(store.get_emoji_prefs(theirs))[0], {})
+        self.assertEqual(asyncio.run(store.get_emoji_prefs(theirs))[0], {"AMC": ":theirs:"})
+
+    def test_no_path_onto_the_tracker_files_networks_into_anybodys_map(self):
+        """Networks used to be registered into the acting user's map as the default
+        by every path that filed a record; that is the path the app-wide map leaked
+        through. Nothing registers any more — the rows name every network."""
+        from app.distrakt import arrival, prefs
+        self.assertFalse(hasattr(arrival, "register"))
+        self.assertFalse(hasattr(prefs, "register_networks"))
 
     def test_settings_no_longer_carries_the_map_at_all(self):
         """Removed rather than left unused: a lingering app-wide field is

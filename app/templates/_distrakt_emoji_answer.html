@@ -1,0 +1,15 @@
+{% import '_distrakt_rows.html' as row with context %}
+{% import '_distrakt_posts.html' as posts %}
+{# A SAVED EMOJI CODE, answered out of band to everything it changes and nothing
+   else: every row's cell for that network (the row template's own `emoji`
+   macro, addressed by `data-net`), and — where the month's post inputs are kept —
+   both copy blocks rendered again with the new map (routes.api_distrakt_emoji).
+   Where they are not kept, the route asks the page to fetch its month instead,
+   and the month's answer brings the posts.
+
+   Context: `network`, `post1`/`post2` (or none), plus what _distrakt_rows.html's
+   `emoji` macro needs. #}
+{{ row.emoji(network, oob=true) }}
+{%- if post1 is not none %}
+{{ posts.oob(post1, post2) }}
+{%- endif %}

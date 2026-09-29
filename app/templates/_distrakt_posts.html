@@ -1,0 +1,10 @@
+{# THE TWO COPY BLOCKS, as an answer redraws them out of band. One spelling for
+   the two answers that carry them: the month, which is what the posts describe,
+   and a saved emoji code, which changes a line of them and nothing else — so a
+   post somebody copies after editing a code already carries that code. #}
+{% macro oob(post1, post2) -%}
+<textarea id="post1Text" class="distrakt-copy-textarea" readonly spellcheck="false"
+          hx-swap-oob="outerHTML">{{ post1 }}</textarea>
+<textarea id="post2Text" class="distrakt-copy-textarea" readonly spellcheck="false"
+          hx-swap-oob="outerHTML">{{ post2 }}</textarea>
+{%- endmacro %}

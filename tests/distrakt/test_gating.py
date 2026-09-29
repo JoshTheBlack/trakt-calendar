@@ -58,7 +58,7 @@ DISTRAKT_GETS = (
 DISTRAKT_POSTS = (
     "/api/distrakt/refresh",
     "/api/distrakt/import",
-    "/api/distrakt/backfill-networks",
+    "/api/distrakt/emoji",
     "/api/distrakt/remove",
     "/api/distrakt/add",
     "/api/distrakt/abandon",

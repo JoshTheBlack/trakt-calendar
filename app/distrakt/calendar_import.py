@@ -302,7 +302,6 @@ async def import_premieres(user_id: int, month_key: str, settings,
         }))
         filed.append(rec)
         present.add(key)
-    await arrival.register(user_id, filed)
     if filed:
         await save_month(user_id, doc)
     return len(filed)

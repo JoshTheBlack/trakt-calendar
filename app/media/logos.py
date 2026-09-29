@@ -72,6 +72,27 @@ def tiled(networks) -> set[str]:
     return {name for name in {n for n in networks if n} if cached_tile(name)}
 
 
+def versions(networks) -> dict[str, int]:
+    """Which of `networks` have a tile on disk, each with WHEN it was written.
+
+    `tiled` with a version beside each answer, for a page that puts the version
+    into the tile's address. The tile route answers with a day's private cache
+    lifetime, so an address that stayed the same across a regenerate would go on
+    showing the browser's copy of the old picture; with the version in it, a new
+    tile is a new address and the old copy is never asked for again.
+    """
+    found = {}
+    for name in {n for n in networks if n}:
+        path = cached_tile(name)
+        if path is None:
+            continue
+        try:
+            found[name] = path.stat().st_mtime_ns
+        except OSError:
+            continue  # swept between the check and the stat: no tile after all
+    return found
+
+
 def is_negative(network: str) -> bool:
     return bool(network) and _none_path(network).exists()
 

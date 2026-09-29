@@ -548,3 +548,28 @@ def render_post2(shows: list[dict], emoji_map: dict | None = None, default_emoji
         movs = sorted(movies, key=lambda m: _sort_title(m.get("title")))
         sections.append(_section("**Movies**", [_movie_line(m) for m in movs]))
     return "\n\n".join(sections)
+
+
+class PostInputs(NamedTuple):
+    """Everything the two posts are rendered from EXCEPT the viewer's emoji map.
+
+    Held apart from the map because the map is the one input that changes on its
+    own: a code edited on a row changes every line for that network and nothing
+    else, so the posts can be rendered again from these with the new map rather
+    than by working the month out again (routes.api_distrakt_emoji).
+    """
+    series_premieres: list[dict]
+    season_premieres: list[dict]
+    shows: list[dict]
+    movies: list[dict] | None
+    standing: MonthStanding
+    link_url: str | None
+
+
+def render_posts(inputs: PostInputs, emoji_map: dict | None,
+                 default_emoji: str) -> tuple[str, str]:
+    """(POST 1, POST 2) for one month, from what it holds and the viewer's map."""
+    return (render_post1(inputs.series_premieres, inputs.season_premieres,
+                         emoji_map, default_emoji, link_url=inputs.link_url),
+            render_post2(inputs.shows, emoji_map, default_emoji,
+                         movies=inputs.movies, standing=inputs.standing))

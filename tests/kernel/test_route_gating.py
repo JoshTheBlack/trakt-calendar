@@ -206,7 +206,7 @@ class UnauthenticatedTests(GatingTestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.client.get(path).status_code, 401)
         for path in ("/api/distrakt/refresh", "/api/distrakt/import",
-                     "/api/distrakt/backfill-networks", "/api/distrakt/remove",
+                     "/api/distrakt/remove", "/api/distrakt/emoji",
                      "/api/distrakt/add", "/api/distrakt/abandon",
                      "/api/distrakt/acknowledge-return",
                      "/api/distrakt/unknown-add", "/api/distrakt/unknown-resume",
@@ -344,29 +344,15 @@ class DistraktTemplateTests(GatingTestCase):
             conn, user_id=user_id, provider="trakt", provider_user_id=provider_user_id)))
         return user_id
 
-    def test_the_emoji_map_is_rendered_in_rather_than_fetched(self):
-        """The editor's rows come with the page rather than being asked for.
-
-        It used to be BOTH — rendered into a global AND fetched again by the
-        page's own init before the month was even asked for — because the rows
-        were built in the browser from that global. They are drawn now, by the
-        one function every emoji answer uses (routes._emoji_row_contexts), so
-        the first draw and every redraw are the same markup."""
-        user_id = self._tracker(is_admin=False)
-        asyncio.run(distrakt.set_emoji_prefs(user_id, {"HBO": ":hbo:"}, ":tv:"))
-        self.sign_in_as(user_id)
-        body = self.client.get(self.PAGE).text
-        self.assertIn('name="network-0" value="HBO"', body)
-        self.assertIn('name="emoji-0" value=":hbo:"', body)
-
-    def test_the_emoji_map_is_this_users_own(self):
+    def test_the_default_emoji_is_this_users_own(self):
         """It renders into ONE account's Discord posts, so it is that account's.
-        It used to be app-wide, which meant any user's roster import registered
-        networks into the operator's map."""
+        The map used to be app-wide, which meant any user's roster import
+        registered networks into the operator's map. The page draws the default
+        in its header pill; a network's own code is drawn on its rows."""
         mine = self._tracker(is_admin=False)
         theirs = self._tracker(is_admin=True)
-        asyncio.run(distrakt.set_emoji_prefs(mine, {"HBO": ":mine:"}, ":tv:"))
-        asyncio.run(distrakt.set_emoji_prefs(theirs, {"HBO": ":theirs:"}, ":tv:"))
+        asyncio.run(distrakt.set_emoji_prefs(mine, {}, ":mine:"))
+        asyncio.run(distrakt.set_emoji_prefs(theirs, {}, ":theirs:"))
         self.sign_in_as(mine)
         self.assertIn(":mine:", self.client.get(self.PAGE).text)
         self.sign_out()
@@ -375,19 +361,10 @@ class DistraktTemplateTests(GatingTestCase):
         self.assertIn(":theirs:", body)
         self.assertNotIn(":mine:", body)
 
-    def test_a_new_account_starts_with_an_empty_map(self):
-        """Nothing seeds it — not settings.json, not another account. It fills in
-        from this user's own roster and travels with their Backup export. One
-        blank row is always drawn, which is what "+ Add network" means."""
+    def test_a_new_account_starts_on_the_apps_default(self):
+        """Nothing seeds it — not settings.json, not another account."""
         self.sign_in_as(self._tracker(is_admin=False))
-        body = self.client.get(self.PAGE).text
-        self.assertIn('name="network-0" value=""', body)
-        self.assertNotIn('name="network-1"', body)
-
-    def test_every_tracker_user_can_edit_their_own_map(self):
-        """No longer admin-only: the map decides how THIS account's posts render."""
-        self.sign_in_as(self._tracker(is_admin=False))
-        self.assertIn('hx-post="/api/distrakt/emojis"', self.client.get(self.PAGE).text)
+        self.assertIn(f"🙂 {distrakt.DEFAULT_EMOJI}", self.client.get(self.PAGE).text)
 
 
 class SettingsRedactionTests(GatingTestCase):

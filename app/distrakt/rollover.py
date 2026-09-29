@@ -375,5 +375,4 @@ async def _initialize_month(user_id: int, month_key: str, settings,
         seeded = await history_records(user_id, settings, present, nw_ids)
         for rec in seeded:
             await store.add_user_record(user_id, rec)
-        await arrival.register(user_id, seeded)
     return doc

@@ -43,7 +43,7 @@ from ..calendar import entries as calendar_entries
 from ..calendar import search as calendar_search
 from ..providers.base import (MATCH_SOURCES, Media, Source, SourceUnavailable,
                               TitleFacts, collect_ids)
-from . import live, prefs, store
+from . import live, store
 from .lifecycle import CATALOGUE_FIELDS
 from .store import record_key
 
@@ -248,13 +248,6 @@ async def write_missing_premieres(settings, record: dict) -> int:
                         name, key, record["season"])
             written += 1
     return written
-
-
-async def register(user_id: int, records: list[dict]) -> None:
-    """Put every network these records carry into the viewer's emoji map, so a
-    network any path filed appears in their editor ready to customize — one call
-    for every path, where it used to be made by some paths and not others."""
-    await prefs.register_networks(user_id, [rec.get("network") for rec in records])
 
 
 def calendar_teaches(held: dict, by_source: dict) -> dict:

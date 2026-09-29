@@ -22,10 +22,12 @@
    stopPropagation to do it.
 
    Context every macro here needs: `month_query` (the year and month the page is
-   showing, as a query string), `closed` (this month is read-only), `emoji_for`
-   (network -> the viewer's fallback emoji), `logo_for` (network -> a tile
-   URL, or "" when this instance has none) and `poster_for` (row -> its picture
-   through the image proxy, or ""). #}
+   showing, as a query string), `closed` (this month is read-only), `poster_for`
+   (row -> its picture through the image proxy, or ""), and what
+   routes._emoji_context builds: `emoji_for` (network -> the code it posts as),
+   `emoji_own` (whether that is its own rather than the default), `logo_for`
+   (network -> a tile URL, or "" when this instance has none), `net_ref`
+   (network -> what an answer addresses its cells by) and `is_admin`. #}
 
 {# THE SHARED HALF OF EVERY MUTATION'S ADDRESS. The target is the show list and
    the swap is its whole contents, because every one of these routes answers
@@ -58,15 +60,6 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
     hx-swap="innerHTML swapEmpty:false show:top showTarget:.row-marked"
 {%- endmacro %}
 
-{# The network badge: the tile this instance has already generated, or the
-   viewer's own emoji for that network.
-
-   ASKED OF THE DISK RATHER THAN OF THE BROWSER. This used to be an <img> at the
-   logo route with an `onerror` that swapped in the emoji, so every network with
-   no tile cost a 404 per row and the fallback was a script. The month payload
-   already warms every network on the page before it renders
-   (routes._live_month_payload's ensure_logos), so by the time a row is drawn the
-   tile either exists or never will, and the server can simply say which. #}
 {# The row's picture — a show's or a watched film's: the address the page
    resolved for it before drawing (routes._row_pictures — the season's own
    artwork, else the title's, in the viewer's order), drawn through the image
@@ -78,28 +71,66 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
 {%- else %}<span class="distrakt-poster is-empty" aria-hidden="true"></span>{% endif -%}
 {%- endmacro %}
 
-{# MOCKUP: the badge is the logo alone now; the emoji code has its own cell. #}
-{% macro badge(network) -%}
+{# The network badge: the LOGO alone, where this instance holds a tile, and an
+   empty slot where it does not — the emoji code has a cell of its own, so the
+   badge does not fall back to it. `data-net` is what an answer that
+   regenerated the logo addresses every copy by.
+
+   ASKED OF THE DISK RATHER THAN OF THE BROWSER. This used to be an <img> at the
+   logo route with an `onerror` swapping in a fallback, so every network with no
+   tile cost a 404 per row and the fallback was a script. The month payload
+   already warms every network on the page before it renders
+   (routes._live_month_payload's ensure_logos), so by the time a row is drawn the
+   tile either exists or never will, and the server can simply say which. #}
+{% macro badge(network, oob=false) -%}
 {%- set logo = logo_for(network) -%}
-<span class="distrakt-badge">
+<span class="distrakt-badge"{% if network %} data-net="{{ net_ref(network) }}"{% endif %}
+      {%- if oob %} hx-swap-oob="outerHTML:.distrakt-badge[data-net='{{ net_ref(network) }}']"{% endif %}>
     {%- if logo %}<img class="distrakt-logo" src="{{ logo }}" alt="">{% endif -%}
 </span>
 {%- endmacro %}
 
-{# MOCKUP of the network's emoji code, editable where it is drawn. The code is a
-   text field styled as plain text; focusing it (a click) makes it look like a
-   field and brings the network's logo tools beside it. NOT WIRED: the build adds
-   the save (hx-post + hx-json-enc on change) and the out-of-band redraw of every
-   row showing the same network. A code equal to the default is drawn dimmer. #}
-{% macro emoji(network) -%}
+{# THE NETWORK'S DISCORD EMOJI CODE, EDITED WHERE IT IS DRAWN.
+
+   A TEXT FIELD DRESSED AS TEXT, not text swapped for a field on a click: a
+   field is already what takes a click, a caret and typing, so there is nothing
+   to swap and no script. Focused, it looks like a field and the network's logo
+   tools hang under it (`:focus-within`).
+
+   IT SAVES ITSELF ON `change`. htmx sends its own named value with the network
+   beside it, as application/json (hx-json-enc), when the value was changed and
+   then committed: Enter, or focus leaving. A click in and out with nothing
+   changed is no `change`, so it sends nothing; Enter followed by a click away is
+   ONE request, because the value committed by Enter has not changed since. It
+   sits in no form, so Enter submits nothing of its own. Escape does not undo:
+   that would be script, and the field is only saved once it is committed.
+
+   THE ANSWER REDRAWS EVERY COPY, out of band, by `data-net` — every row on that
+   network shows the one code, and the answer (_distrakt_emoji_answer.html) is
+   this macro again. `hx-swap="none"` because the field itself is one of those
+   copies. The shape is _library_button.html's: htmx splits an oob value at its
+   first colon and only when it holds no space, which the digest guarantees.
+
+   A NETWORK WITH NO CODE OF ITS OWN SHOWS THE DEFAULT, dimmer; emptying the
+   field puts a network back on the default (prefs.set_network_emoji).
+
+   Clicking it opens no details panel: an input acts for itself inside a row
+   that opens one (static/js/ui.js's ACTS_FOR_ITSELF). #}
+{% macro emoji(network, oob=false) -%}
 {%- if network %}
-<span class="distrakt-emoji{{ '' if emoji_own(network) else ' is-default' }}">
+{%- set ref = net_ref(network) -%}
+{%- set code = emoji_for(network) -%}
+<span class="distrakt-emoji{{ '' if emoji_own(network) else ' is-default' }}" data-net="{{ ref }}"
+      {%- if oob %} hx-swap-oob="outerHTML:.distrakt-emoji[data-net='{{ ref }}']"{% endif %}>
     {#- `size` is the code's own length, so a phone's row gives it exactly the
         room it needs without the stylesheet having to measure anything. -#}
-    <input type="text" class="distrakt-emoji-code" value="{{ emoji_for(network) }}"
-           size="{{ [emoji_for(network) | length, 4] | max }}"
+    <input type="text" class="distrakt-emoji-code" name="code" value="{{ code }}"
+           size="{{ [code | length, 4] | max }}"
            aria-label="Discord emoji for {{ network }}" title="Discord emoji for {{ network }} — click to edit"
-           spellcheck="false" autocomplete="off">
+           spellcheck="false" autocomplete="off"
+           hx-post="/api/distrakt/emoji{{ month_query }}" hx-json-enc
+           hx-trigger="change" hx-swap="none"
+           hx-vals='{{ {"network": network} | tojson }}'>
     <span class="distrakt-emoji-tools">
         <span class="distrakt-emoji-net">{{ network }}</span>
         <a class="btn-ghost small" href="/api/network-logo?name={{ network | urlencode }}&amp;download=1"
