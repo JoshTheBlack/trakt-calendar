@@ -190,6 +190,15 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
 {%- endif %}
 {%- endmacro %}
 
+{# ROOM FOR AN ABANDON BUTTON A ROW DOES NOT HAVE (a completed row, a closed
+   month, a film), so its ✕ and every column before it line up with the rows
+   that do. Invisible, unreachable and the same markup as the real one, so it is
+   exactly as wide in any font. #}
+{% macro abandon_room() -%}
+<span class="btn-ghost small distrakt-abandon is-placeholder" aria-hidden="true">
+            <span>Abandon</span><span class="alt">Un-abandon</span></span>
+{%- endmacro %}
+
 {% macro show_row(show, marked=false) %}
 {%- set is_premiere = show.bucket in ('new', 'returning') -%}
 {#- The x/y comes from the server already written out, from the rule a closed
@@ -234,21 +243,21 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
     {%- endif %}
     {{ picture(show) }}
     <span class="distrakt-title"><span class="tt">{{ show.title }}</span>{{ return_mark(show) }}{{ missing_mark(show) }}</span>
-    {#- MOCKUP: the row's facts in one wrapper — `display: contents` on a wide
-        list, one flexible line under the title on a phone. -#}
+    {#- The row's facts in one wrapper — `display: contents` on a wide list, so
+        they stay the row's own columns, and one flexible line under the title
+        on a phone. -#}
     <span class="distrakt-facts">
-    {#- MOCKUP: THE DATES COME FIRST, just after the title, so a section without
-        any (Cleanup, Completed) has its empty slot where a short title's own
-        space already is, and every column from the season on sits in the same
-        place on every row. A phone puts them back at the end of the line. -#}
+    {#- THE DATES COME FIRST, just after the title, so a section without any
+        (Cleanup, Completed) has its empty slot where a short title's own space
+        already is, and every column from the season on sits in the same place
+        on every row. A phone puts them back at the end of the line. -#}
     <span class="distrakt-dates">{{ dates }}</span>
     <span class="distrakt-season">S{{ '%02d' % show.season }}</span>
     {#- The badge sits beside the network it stands for, between the season and
         the network's name, rather than ahead of the title. -#}
     {{ badge(show.network) }}
-    {#- Spelled out in every bucket, not just as a tooltip: this is the string the
-        emoji map is keyed on, so seeing it is what makes the map editable
-        without guessing. -#}
+    {#- Spelled out in every bucket, not just as a tooltip: it is what the code
+        beside it belongs to, and the code is edited right there. -#}
     <span class="distrakt-network">{{ show.network or '—' }}</span>
     {{ emoji(show.network) }}
     <span class="distrakt-counts{{ ' is-split' if split }}"
@@ -267,21 +276,16 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
             too: what a past month RECORDS can still be corrected, but its
             verdicts were settled when it froze. -#}
         {%- if not closed and show.bucket != 'completed' %}
-        {#- MOCKUP: both labels are in the button, the other one invisible, so it
-            is as wide as its wider label either way and an abandoned row lines
-            up with the rest. -#}
+        {#- Both labels are in the button, the other one invisible, so it is as
+            wide as its wider label either way and an abandoned row lines up with
+            the rest. -#}
         <button type="button" class="btn-ghost small distrakt-abandon"
                 {{ month_post('/api/distrakt/abandon',
                               {'key': show.key, 'season': show.season,
                                'abandoned': not show.abandoned}) }}>
             <span>{{ 'Un-abandon' if show.abandoned else 'Abandon' }}</span><span class="alt" aria-hidden="true">{{ 'Abandon' if show.abandoned else 'Un-abandon' }}</span></button>
         {%- else %}
-        {#- MOCKUP: ROOM FOR A BUTTON THIS ROW DOES NOT HAVE, so its ✕ and every
-            column before it line up with the rows that do. Invisible, unreachable
-            and the same markup as the real one, so it is exactly as wide in any
-            font. -#}
-        <span class="btn-ghost small distrakt-abandon is-placeholder" aria-hidden="true">
-            <span>Abandon</span><span class="alt">Un-abandon</span></span>
+        {{ abandon_room() }}
         {%- endif %}
         {%- call confirm.ask(slot='remove-' ~ show.key ~ '-' ~ show.season,
                              question=('Take this off what this month records?'
@@ -314,12 +318,7 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
     <span class="distrakt-counts">{{ film.year or '' }}</span>
     </span>
     <span class="distrakt-row-actions">
-        {#- MOCKUP: ROOM FOR A BUTTON THIS ROW DOES NOT HAVE, so its ✕ and every
-            column before it line up with the rows that do. Invisible, unreachable
-            and the same markup as the real one, so it is exactly as wide in any
-            font. -#}
-        <span class="btn-ghost small distrakt-abandon is-placeholder" aria-hidden="true">
-            <span>Abandon</span><span class="alt">Un-abandon</span></span>
+        {{ abandon_room() }}
         {%- if film.key %}
         {%- call confirm.ask(slot='film-' ~ film.key,
                              question='Forget watching ' ~ (film.title or 'this film')

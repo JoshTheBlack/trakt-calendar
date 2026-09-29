@@ -342,7 +342,6 @@ class EveryConvertedRouteRefusesTests(MonthFragmentTestCase):
         ("/api/distrakt/add", {"q": "x", "i": 0, "season": 1}),
         ("/api/distrakt/add-completed", {"q": "x", "i": 0, "season": 1}),
         ("/api/distrakt/add-movie", {"q": "x", "i": 0, "watched_on": "2026-01-01"}),
-        ("/api/distrakt/emojis", {"network-0": "HBO", "emoji-0": ":hbo:"}),
         ("/api/distrakt/emoji", {"network": "HBO", "code": ":hbo:"}),
         ("/api/distrakt/emoji-default", {"code": ":tv:"}),
         ("/api/distrakt/network-logo", {"network": "HBO"}),
@@ -350,7 +349,6 @@ class EveryConvertedRouteRefusesTests(MonthFragmentTestCase):
         ("/api/distrakt/backfill/apply", {}),
         ("/api/distrakt/share-link", {"kind": ""}),
         ("/api/distrakt/restore", {"payload": "{}", "ack": "REPLACE MY DATA"}),
-        ("/distrakt/fragments/emoji-rows", {}),
     )
 
     def test_a_form_encoded_body_is_refused_before_routing(self):

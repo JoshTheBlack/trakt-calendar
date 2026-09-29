@@ -422,7 +422,7 @@ async def distrakt(request: Request):
             **chrome.page_context(user),
         })
     month = route_params.valid_month(request.query_params.get("month"), today.month)
-    network_emojis, default_network_emoji = await distrakt_store.get_emoji_prefs(user.user_id)
+    _network_emojis, default_network_emoji = await distrakt_store.get_emoji_prefs(user.user_id)
     backfill_start, backfill_end = backfill.default_range(today)
     settings = await viewer.settings_for_user(user.user_id)
     context = {
@@ -439,14 +439,10 @@ async def distrakt(request: Request):
         # open on" selector; the same list the calendar's endpoint picker uses.
         "endpoints": endpoint_choices(),
         **chrome.page_context(user),
-        # This user's OWN map — it renders into their Discord posts and nobody
-        # else's. Drawn with the page rather than fetched: it used to be BOTH,
-        # rendered into a global AND fetched again by the page's own init before
-        # the month was even asked for.
+        # This user's OWN default emoji, for the header pill — it renders into
+        # their Discord posts and nobody else's. A network's own code is drawn
+        # on its rows, with the month.
         "default_network_emoji": default_network_emoji,
-        # The editor's rows come from the one function every emoji answer uses,
-        # so the first draw and every redraw are the same markup.
-        "emoji_rows": _emoji_row_contexts(network_emojis),
         # The range the backfill dialog opens on. Rendered rather than fetched:
         # the server decides it and used to answer a request whose only job was
         # to fill in two inputs.
@@ -1661,8 +1657,8 @@ def _and_the_month(response: Response) -> Response:
     """`response`, plus a nudge that makes the month list fetch itself again.
 
     FOR AN ANSWER THAT CHANGES WHAT THE LIST LOOKS LIKE WITHOUT BEING ABOUT IT:
-    saving the emoji map changes every roster badge, and restoring a backup
-    replaces the month outright. Recomputing a month inside those answers would
+    a new default emoji changes every row and post line without a code of its
+    own, and restoring a backup replaces the month outright. Recomputing a month inside those answers would
     spend a season lookup per listed title in a response nobody asked a month of,
     and it would put a second month-drawing path beside the one the page already
     has. THE LIST ALREADY KNOWS HOW TO FETCH ITSELF (distrakt.html's hidden
@@ -1834,26 +1830,6 @@ async def import_fragment(request: Request):
             context["undescribed"] = sorted(offer.undescribed, key=str.casefold)
     return templates.TemplateResponse(request, "_distrakt_import_list.html", context)
 
-
-@guard.post("/distrakt/fragments/emoji-rows", AuthLevel.DISTRAKT_APPROVED)
-async def distrakt_emoji_rows_fragment(request: Request):
-    """The editor's rows with one more or one fewer, and nothing written.
-
-    A POST THAT STORES NOTHING, and the verb is right rather than a compromise.
-    What this needs in order to answer is the form as it stands — every field
-    somebody has typed and not saved — and this app's rule is that an address
-    carries a reference and never data. The server cannot look up an unsaved
-    edit, so the form is the body.
-
-    `remove` NAMES A ROW BY ITS FIELD SUFFIX. Leaving it out is the other action:
-    the answer drops the blanks, sorts what is left and draws a fresh blank row
-    at the end, which is exactly what "+ Add network" means once the row being
-    typed into is committed.
-    """
-    user = await auth.current_user(request)
-    data = await authz.json_body(request)
-    rows = _emoji_rows_from_form(data, drop=str(data.get("remove", "")))
-    return _emoji_answer(request, rows, user.is_admin)
 
 
 @guard.get("/distrakt/fragments/day-label", AuthLevel.DISTRAKT_APPROVED)
@@ -2079,60 +2055,6 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
                                        "year": str(year), "month": str(month)})
 
 
-# The emoji editor's rows travel as one flat field per value, named by the row's
-# POSITION: `network-0`, `emoji-0`, `network-1`… That is the shape the calendar's
-# filter chips already use and it is chosen for the same two reasons. json-enc
-# serializes a form as flat name/value pairs with no dependable array convention,
-# so a list has to be spelled out; and the row's own network name cannot be the
-# field name, because it is free text somebody is in the middle of editing.
-#
-# THE INDEX MEANS NOTHING BUT "these two belong together". Rows are re-sorted and
-# renumbered on the way back out, so a gap left by a removal is not a hole
-# anybody has to keep track of.
-_EMOJI_ROW_FIELDS = ("network", "emoji")
-
-
-def _emoji_rows_from_form(data: dict, *, drop: str = "") -> list[tuple[str, str]]:
-    """The editor's rows as (network, emoji) pairs, in the order they were drawn,
-    minus the one `drop` names.
-
-    PAIRED BY THE SUFFIX AND ORDERED BY THE FORM, not by counting up from zero. A
-    removal leaves a gap in the numbering of what is still on screen, and walking
-    0, 1, 2… would stop at the hole and silently discard every row after it. The
-    body preserves the order the fields were serialized in, which is the order
-    they are drawn in, so iterating it IS the page's order.
-
-    A ROW WITH NO NETWORK IS DROPPED rather than refused: the editor always draws
-    a blank row for somebody to type into, and one left untouched is not an error
-    to report. Values are stripped, because a network name with a trailing space
-    keys nothing.
-    """
-    return [(str(value or "").strip(),
-             str(data.get(f"emoji-{key[len('network-'):]}") or "").strip())
-            for key, value in data.items()
-            if key.startswith("network-") and key[len("network-"):] != drop]
-
-
-def _emoji_row_contexts(pairs) -> list[tuple[str, str, str]]:
-    """(network, emoji, tile URL or "") per row, alphabetically, blanks dropped.
-
-    ONE BUILDER FOR THE FIRST DRAW AND EVERY REDRAW, so the rows the page ships
-    with and the rows an answer swaps in cannot differ. Alphabetical by network
-    is the order the editor has always shown, and it is the server's now:
-    sorting in the browser meant the rows had to be held in an array there, which
-    is why an unsaved edit had to be read back out of the DOM before anything
-    could redraw them (`_syncEmojiEntriesFromDom`). A form holds its own edits, so
-    that whole problem goes away with the array.
-    """
-    named = sorted(((network, emoji) for network, emoji in
-                    (pairs.items() if isinstance(pairs, dict) else pairs) if network),
-                   key=lambda pair: pair[0].lower())
-    with_logos = logos.tiled(network for network, _emoji in named)
-    return [(network, emoji,
-             f"/api/network-logo?name={quote(network)}" if network in with_logos else "")
-            for network, emoji in named]
-
-
 async def _post_link_choices(user_id: int) -> dict:
     """What the announcement post's two selectors offer and which entries are
     currently chosen.
@@ -2155,29 +2077,6 @@ async def _post_link_choices(user_id: int) -> dict:
         "preferred_label": share_links.KIND_LABELS.get(payload["preferred_kind"],
                                                 payload["preferred_kind"]),
     }
-
-
-def _emoji_answer(request: Request, pairs, is_admin: bool, *,
-                  message: str = "", ok: bool = True) -> Response:
-    """The editor's rows, redrawn — the one answer every emoji-map route gives.
-
-    ALPHABETICAL BY NETWORK, which is the order the editor has always shown and
-    is now the server's to state. Sorting in the browser meant the rows had to be
-    held in an array there, which is why an unsaved edit had to be read back out
-    of the DOM before anything could redraw them (`_syncEmojiEntriesFromDom`) —
-    a form holds its own edits, so that whole problem goes away with the array.
-
-    A ROW WITH NO NETWORK NAME IS DROPPED HERE and a fresh blank one is drawn by
-    the template, so the editor always has somewhere to type and never
-    accumulates the ones nobody filled in.
-    """
-    return templates.TemplateResponse(request, "_distrakt_emoji_rows.html", {
-        "request": request,
-        "rows": _emoji_row_contexts(pairs),
-        "is_admin": is_admin,
-        "message": message,
-        "message_ok": ok,
-    })
 
 
 @guard.post("/api/distrakt/emoji", AuthLevel.DISTRAKT_APPROVED)
@@ -2294,33 +2193,6 @@ async def api_distrakt_network_logo(request: Request):
         "message": message, "message_ok": ok,
         **_emoji_context(emojis, default_emoji, [network], user.is_admin),
     })
-
-
-@guard.post("/api/distrakt/emojis", AuthLevel.DISTRAKT_APPROVED)
-async def api_distrakt_set_emojis(request: Request):
-    """Replace this user's network->emoji map.
-
-    DISTRAKT_APPROVED rather than ADMIN: the map is this account's own now, and
-    it decides how this account's Discord posts render. It used to be saved
-    through the admin-only settings endpoint, which is why only an administrator
-    could edit what every user's posts looked like.
-    """
-    user = await auth.current_user(request)
-    data = await authz.json_body(request)
-    rows = _emoji_rows_from_form(data)
-    default_emoji = str(data.get("default_network_emoji") or "").strip() or distrakt_store.DEFAULT_EMOJI
-    clean = {network: emoji for network, emoji in rows if network}
-    await distrakt_store.set_emoji_prefs(user.user_id, clean, default_emoji)
-    # THE ROWS COME BACK SORTED AND RENUMBERED, which is the save's visible
-    # effect: a blank row typed in at the bottom takes its place in the list, and
-    # a row emptied out is gone.
-    #
-    # AND THE MONTH IS ASKED TO REDRAW ITSELF, because every roster badge falls
-    # back to this map, so saving it changes what the list looks like. One header
-    # rather than a second month recompute inside this answer: the list already
-    # knows how to fetch itself, and this says when.
-    return _and_the_month(_emoji_answer(request, clean.items(), user.is_admin,
-                                        message="Emoji map saved"))
 
 
 @guard.post("/api/distrakt/remove", AuthLevel.DISTRAKT_APPROVED)

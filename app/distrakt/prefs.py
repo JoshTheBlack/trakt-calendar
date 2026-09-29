@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 
 from .. import db
 
@@ -70,7 +69,7 @@ def _without_defaults(emojis: dict, *defaults: str) -> dict:
             if str(code) not in defaults}
 
 
-def _write(conn: sqlite3.Connection, user_id: int, emojis: dict, default_emoji: str) -> None:
+def _write(conn: db.Connection, user_id: int, emojis: dict, default_emoji: str) -> None:
     conn.execute(_UPSERT, (user_id, json.dumps(emojis), default_emoji, db.now()))
 
 
@@ -107,7 +106,7 @@ async def set_network_emoji(user_id: int, network: str, code: str) -> tuple[dict
     """
     network, code = network.strip(), clean_code(code)
 
-    def _work(conn: sqlite3.Connection) -> tuple[dict, str]:
+    def _work(conn: db.Connection) -> tuple[dict, str]:
         emojis, default_emoji = _decode(conn.execute(_SELECT, (user_id,)).fetchone())
         emojis = {**emojis, network: code}
         emojis = _without_defaults(emojis, "", default_emoji)
@@ -129,7 +128,7 @@ async def set_default_emoji(user_id: int, code: str) -> tuple[dict, str]:
     """
     code = clean_code(code) or DEFAULT_EMOJI
 
-    def _work(conn: sqlite3.Connection) -> tuple[dict, str]:
+    def _work(conn: db.Connection) -> tuple[dict, str]:
         emojis, was = _decode(conn.execute(_SELECT, (user_id,)).fetchone())
         emojis = _without_defaults(emojis, "", was, code)
         _write(conn, user_id, emojis, code)
