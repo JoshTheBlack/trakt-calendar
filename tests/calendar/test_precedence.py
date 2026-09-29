@@ -286,15 +286,30 @@ class TheFieldsThatAreNotAContestTests(unittest.TestCase):
 
     def test_the_air_time_and_its_flag_come_from_one_source_together(self):
         """A timestamp read under the other source's `date_only` renders a film a
-        day early for half the world, so the two travel as one answer."""
+        day early for half the world, so the two travel as one answer — and
+        between two of the same precision, the viewer's order decides."""
         group = _group(
             _record(Source.TRAKT, media="movie", air_ts=1000.0, date_only=True),
-            _record(Source.SIMKL, media="movie", air_ts=2000.0, date_only=False),
+            _record(Source.SIMKL, media="movie", air_ts=2000.0, date_only=True),
         )
         first = calendar_resolve.resolve(group)
         self.assertEqual((first.air_ts, first.date_only), (1000.0, True))
         second = calendar_resolve.resolve(group, _prefs("simkl"))
-        self.assertEqual((second.air_ts, second.date_only), (2000.0, False))
+        self.assertEqual((second.air_ts, second.date_only), (2000.0, True))
+
+    def test_a_service_that_knows_the_time_beats_one_that_knows_the_day(self):
+        """Dexter: Original Sin, as stored: Trakt's instant (10pm Eastern on the
+        15th) and Simkl's per-title date. Preferring Simkl made the merged card
+        lose its 22:00; the day is the same airing said less precisely, so the
+        instant wins whoever is preferred, and brings its own flag with it."""
+        group = _group(
+            _record(Source.TRAKT, air_ts=1734318000.0, date_only=False),
+            _record(Source.SIMKL, air_ts=1734220800.0, date_only=True),
+        )
+        for order in ((), ("simkl",)):
+            with self.subTest(order=order):
+                record = calendar_resolve.resolve(group, _prefs(*order))
+                self.assertEqual((record.air_ts, record.date_only), (1734318000.0, False))
 
 
 class WhatTheCardIsToldAboutProvenanceTests(unittest.TestCase):

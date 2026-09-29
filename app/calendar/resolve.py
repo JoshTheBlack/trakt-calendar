@@ -279,6 +279,25 @@ def _winner(records: list[Record], order: list[str], field_name: str,
     return None
 
 
+def _resolve_airing(records: list[Record], order: list[str]) -> Record | None:
+    """The source whose date and time the card shows: ONE THAT KNOWS THE TIME
+    before one that knows only the day, the viewer's preference breaking ties.
+
+    `_resolve_coordinate`'s reasoning, for the same kind of field. A date-only
+    record of an airing another service states as an instant is not a competing
+    claim — it is the same airing said less precisely, pinned at UTC midnight so
+    it lands on its day. Let it win and a merged card loses the time the other
+    service knew: MEASURED, Dexter: Original Sin's card showed Trakt's 22:00
+    until Simkl's per-title lookup (a bare "2024-12-15") joined it, and then
+    showed no time at all for a viewer whose order puts Simkl first. Two records
+    of the same precision are an ordinary contest, decided by preference — which
+    is every film, since a release is a date from both services.
+    """
+    stated = [r for r in records if _present(r.air_ts)]
+    timed = [r for r in stated if not r.date_only]
+    return _winner(timed or stated, order, AIRING_FIELD, lambda _r: True)
+
+
 def _coordinate_rank(record: Record) -> int:
     """How completely `record` states the episode coordinate: 2 both, 1 one, 0
     neither."""
@@ -395,8 +414,7 @@ def resolve_records(group, records: list[Record], prefs=None) -> Record | None:
                 getattr(coordinate, field_name) if coordinate is not None
                 else getattr(primary, field_name))
 
-    airing = _winner(records, _order(prefs, AIRING_FIELD, names), AIRING_FIELD,
-                     lambda r: _present(r.air_ts))
+    airing = _resolve_airing(records, _order(prefs, AIRING_FIELD, names))
     for field_name in AIRING_FIELDS:
         setattr(resolved, field_name, getattr(airing or primary, field_name))
 
