@@ -548,7 +548,8 @@ async def tier_strips_fragment(request: Request):
         return HTMLResponse("")
     return templates.TemplateResponse(
         request, "_ranker_tier_strips.html",
-        {"request": request, "categories": _tiers_by_priority(board["categories"])},
+        {"request": request, "categories": _tiers_by_priority(board["categories"]),
+         "board_uid": board["uid"]},
     )
 
 

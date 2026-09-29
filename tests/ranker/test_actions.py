@@ -509,7 +509,23 @@ class TierStripTests(_ActionTestCase):
         asyncio.run(ranker.move_items(self.user_id, BOARD, keys, "tier-a"))
         strip = re.search(r"data-tier=\"tier-a\".*?</span>", self.strips(), re.S).group(0)
         self.assertEqual(strip.count("<img"), 14)
-        self.assertEqual(re.findall(r"tmdb=(\d+)", strip), [str(n) for n in range(10, 24)])
+        self.assertEqual(re.findall(r"key=show%3Atmdb%3A(\d+)", strip),
+                         [str(n) for n in range(10, 24)])
+
+    def test_each_picture_is_asked_for_the_way_its_row_asks(self):
+        """By board and key — the only way the poster route answers. Asked by
+        media and tmdb it was a 404 every time, so every picture removed itself
+        and no tier header showed any artwork."""
+        from html import unescape
+
+        from app.media import artwork
+        asyncio.run(artwork.record_poster_urls([("show", 1, "trakt", "https://media.trakt.tv/one.jpg")]))
+        strip = re.search(r"data-tier=\"tier-s\".*?</span>", self.strips(), re.S).group(0)
+        first = unescape(re.search(r'src="([^"]+)"', strip).group(1))
+        self.assertIn(f"board={BOARD}", first)
+        answer = self.client.get(first, follow_redirects=False)
+        self.assertEqual(answer.status_code, 302)
+        self.assertIn("one.jpg", unescape(answer.headers["location"]).replace("%2F", "/"))
 
     def test_the_inline_strip_and_the_fragment_are_one_renderer(self):
         """A second copy of this markup is how the header and the tier would come

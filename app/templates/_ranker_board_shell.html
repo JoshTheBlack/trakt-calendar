@@ -164,7 +164,7 @@
                             isolated</span>
                         {% endif %}
                     </span>
-                    {{ tier_strip.strip(category) }}
+                    {{ tier_strip.strip(category, board.uid) }}
                 </summary>
                 {# Height reserved from the count the server already knows, so
                    opening a tier does not lurch the page while its rows arrive. #}
