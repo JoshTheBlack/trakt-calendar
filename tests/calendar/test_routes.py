@@ -1420,6 +1420,20 @@ class RouteSplitTests(CalendarRouteTestCase):
         # And the endpoint switcher submits to it, not to the picker.
         self.assertIn('action="/calendar"', page.text)
 
+    def test_the_numbers_card_is_a_popover_a_phone_opens_with_a_pill(self):
+        """On a phone the card covered most of a card's width; it is a popover
+        there, opened by a pill holding the month's total (style.css hides it at
+        700px and below and draws it as an ordinary card above). The pill sits
+        right before the card, which is what turns its arrow while it is open.
+        MEASURED in Chromium and Firefox at 1280 (card where it always was, no
+        pill) and 390 (hidden; the pill, a tap outside, Escape and the pill again
+        open and close it)."""
+        with patch("app.calendar.cache.fetch_window_records", window_fetch([])):
+            html = self.client.get("/calendar?year=2026&month=7").text
+        pill = re.search(r'<button[^>]*class="stats-pill"[^>]*>', html).group(0)
+        self.assertIn('popovertarget="statsBar"', pill)
+        self.assertRegex(html, r'(?s)class="stats-pill".*?</button>\s*<div id="statsBar" class="stats-bar" popover>')
+
 
 class CalendarShellTests(CalendarRouteTestCase):
     """The page ships the first few days and asks for the rest itself."""

@@ -22,7 +22,18 @@
    page was sent. The two a mark moves are drawn by _watch_counts.html, which is
    also what a mark's answer sends back — so nothing here is ever moved by the
    page itself. #}
-<div id="statsBar" class="stats-bar">
+{# ON A PHONE THE CARD IS A POPOVER BEHIND A PILL. Floating over the bottom right
+   at full size it covered most of a card's width on a 390px screen. The card is
+   `popover` everywhere, and the stylesheet draws it as an ordinary fixed card on a
+   wide screen (an author `display` wins over the browser's hiding of a closed
+   popover) and hides it on a narrow one until the pill opens it — which is where
+   light dismiss, Escape and the pill closing it again come from, with no script.
+   The pill carries the month's total so the one number most asked for needs no
+   tap; it sits right before the card so the stylesheet can turn its arrow while
+   the card is open. #}
+<button type="button" class="stats-pill" popovertarget="statsBar"
+        aria-label="This month's numbers">📊 <strong>{{ stats.total }}</strong> <span class="stats-pill-arrow" aria-hidden="true">▴</span></button>
+<div id="statsBar" class="stats-bar" popover>
     <div class="stats-head">
         <div class="stats-row"><span>📺 Total:</span><strong id="statTotal">{{ stats.total }}</strong></div>
         <span id="deltaMsg" class="delta-msg {{ delta.kind }}">{{ delta.text }}</span>

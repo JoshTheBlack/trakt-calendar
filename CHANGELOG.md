@@ -5,6 +5,7 @@ All notable changes to this project are documented here. Format loosely follows 
 ## 🏷️ [1.2.5] - UNRELEASED
 
 ### Changed
+- 📊 **On a phone, the calendar's numbers wait behind a button.** The card with the month's total, what you are watching and the recent history floated over the bottom of the screen and covered most of a card's width. On a narrow screen it is now a small 📊 button showing the total; tap it for the rest, and tap anywhere else to put it away. Wider screens are unchanged.
 - 🖼️ **An exported image names a season on a line of its own.** With titles switched on, a season's caption was "Show — Season 3" on one line, and on most posters the season — the part that tells two of a show's entries apart — was what got cut off. The show's name now has the caption and the season sits under it, a little smaller. A board with no seasons on it exports exactly as before.
 - ✕ **Every title search has a clear button.** A small ✕ at the end of the box — on the calendar, the rankings board and both of the tracker's add dialogs — empties it and takes the list of results away with it, instead of deleting what you typed a letter at a time. It appears only while there is something to clear.
 - 🏷️ **A search result names which service found it, always.** Every row in the tracker's add flow now shows a small logo per service that returned it, whether one catalogue is linked or several — it used to appear only once a second catalogue was searchable. It is attribution as much as it is useful for telling one service's own data quirks apart from the merge's.

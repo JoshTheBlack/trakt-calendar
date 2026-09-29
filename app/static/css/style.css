@@ -331,7 +331,28 @@ body:not(.hide-not-watching) .hide-toggle .hide-on { display: none; }
 /* ---- Sync + stats panels ---- */
 
 .stats-head { width: 100%; }
-.stats-bar { position: fixed; bottom: 20px; right: 20px; z-index: 9990; padding: 12px 16px; background: rgba(18,21,28,0.92); border: 1px solid var(--card-border); border-radius: 12px; min-width: 200px; font-size: 0.78rem; backdrop-filter: blur(6px); }
+.stats-bar { position: fixed; inset: auto 20px 20px auto; margin: 0; z-index: 9990; padding: 12px 16px; background: rgba(18,21,28,0.92); color: inherit; border: 1px solid var(--card-border); border-radius: 12px; min-width: 200px; font-size: 0.78rem; backdrop-filter: blur(6px);
+    /* A `popover` (see _calendar_body.html), shown as an ordinary card here:
+       the browser hides a closed popover with `display: none`, and this wins. */
+    display: block; overflow: visible; }
+.stats-pill { display: none; }
+/* A PHONE GETS THE PILL AND THE CARD WAITS BEHIND IT — the card covered most of
+   a card's width at 390px. The same breakpoint the calendar's cards change
+   shape at. Opened, the card stands just above the pill. */
+@media (max-width: 700px) {
+    .stats-bar:not(:popover-open) { display: none; }
+    .stats-bar { inset: auto 12px 66px auto; max-width: calc(100vw - 24px); }
+    .stats-pill {
+        position: fixed; bottom: 16px; right: 12px; z-index: 9991;
+        display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px;
+        border-radius: 999px; border: 1px solid var(--card-border);
+        background: rgba(18,21,28,0.92); color: var(--text); backdrop-filter: blur(6px);
+        font: inherit; font-size: 0.82rem; font-weight: 600; cursor: pointer;
+    }
+    .stats-pill strong { color: var(--gold-soft); }
+    .stats-pill-arrow { display: inline-block; transition: rotate 0.15s; }
+    .stats-pill:has(+ .stats-bar:popover-open) .stats-pill-arrow { rotate: 180deg; }
+}
 .stats-row { display: flex; justify-content: space-between; width: 100%; margin-bottom: 4px; }
 .stats-row strong { color: var(--gold-soft); font-size: 0.92rem; }
 @keyframes statPop {
