@@ -127,10 +127,10 @@ from typing import NamedTuple
 
 from . import arrival, counts, film_snapshots, naming, removals, store
 from .store import ID_COLUMNS, IDENTITY_COLUMNS, record_key
-from .. import clock, db, providers
-from ..providers.base import (ItemKey, LibraryPort, Media, PlayCountPort,
-                              SourceUnavailable, UnlistedSeasons, collect_ids,
-                              item_key, resolve_key)
+from .. import cache, clock, db, providers
+from ..providers.base import (ItemKey, LibraryEntry, LibraryPort, LibraryRead, Media,
+                              PlayCountPort, SourceUnavailable, UnlistedSeasons,
+                              collect_ids, item_key, resolve_key)
 from ..sources import prefs as source_prefs
 
 logger = logging.getLogger(__name__)
@@ -191,6 +191,75 @@ _UNREADABLE = "unreadable"
 # cannot answer "does this service hold this title", which is the only question
 # the baseline asks it.
 _LIBRARY = "library"
+
+# THE LAST COMPLETE LIBRARY READ, KEPT BETWEEN REQUESTS beside the activity blob
+# it was read under — the one piece of a library that IS worth keeping past the
+# pass that read it, because of what asks for it. A title entering the roster
+# (an add, a rollover) needs to know whether each service holds it, and only a
+# COMPLETE read can say "not there"; the incremental sync reads only what moved,
+# so every add used to pull the whole library. MEASURED on the owner's instance:
+# three adds within thirty seconds, each a full read of every list.
+#
+# IT IS GOOD FOR EXACTLY AS LONG AS THE SERVICE SAYS NOTHING HAS MOVED. The
+# service's own activity blob is the test: equal to the one stored beside the
+# read, and nothing in the library has changed since, so the read still answers
+# for it; different in any stamp at all, and it is thrown away and read again.
+# That check is one small call, where the read it stands in for is the service's
+# most expensive one.
+#
+# A REBASELINE NEVER READS IT. Asking for one (`force`) is asking for the library
+# as the service holds it now, and a removal beacon moving says the stored one is
+# wrong — both pull in full, and what they read replaces what is kept here.
+# THE VERSION IS IN THE KEY, so a change to how a read is parsed or shaped is a
+# new key rather than an old read decoded into a new meaning.
+_STORED_LIBRARY_VERSION = 1
+# How long an unchanged library may be served from here. Long, because the
+# activity check is what keeps it honest; a limit at all so a library nobody's
+# service has touched in months is still read afresh now and then.
+_STORED_LIBRARY_SECONDS = 14 * 24 * 60 * 60
+
+
+def _stored_library_key(user_id: int, name: str) -> str:
+    # PER ACCOUNT, because it is one person's library read with their own token;
+    # the cache it lives in is shared, and a key without the account in it would
+    # hand one viewer's watch history to another.
+    return f"distrakt_library:v{_STORED_LIBRARY_VERSION}:{int(user_id)}:{name}"
+
+
+async def _remember_library(user_id: int, name: str, activities, read: LibraryRead) -> None:
+    """Keep a COMPLETE read, under the activity blob it was read under. A
+    partial read, or one with no blob to test it against, is never kept."""
+    if not read.complete or not activities:
+        return
+    entries = {key: [dict(entry.ids),
+                     {str(season): {str(number): when for number, when in episodes.items()}
+                      for season, episodes in entry.seasons.items()},
+                     str(entry.unlisted_seasons)]
+               for key, entry in read.entries.items()}
+    await cache.set(_stored_library_key(user_id, name),
+                    {"activities": activities, "entries": entries},
+                    retain_seconds=_STORED_LIBRARY_SECONDS)
+
+
+async def _stored_library(user_id: int, name: str, activities) -> LibraryRead | None:
+    """The kept read, when the service's activity blob is exactly the one it was
+    read under — else None, and the caller reads the library again. It carries no
+    plays: they belong to the window of the pass that read them, and a baseline
+    asks only what each title holds."""
+    stored = await cache.get(_stored_library_key(user_id, name), _STORED_LIBRARY_SECONDS)
+    if not isinstance(stored, dict) or not activities or stored.get("activities") != activities:
+        return None
+    try:
+        entries = {key: LibraryEntry(
+                       ids=dict(ids),
+                       seasons={int(season): {int(number): when
+                                              for number, when in episodes.items()}
+                                for season, episodes in seasons.items()},
+                       unlisted_seasons=UnlistedSeasons(unlisted))
+                   for key, (ids, seasons, unlisted) in stored["entries"].items()}
+    except (KeyError, TypeError, ValueError):
+        return None
+    return LibraryRead(entries=entries, events=[], complete=True)
 
 # The sources whose removal beacon moved on THIS pass, so the caller can ask each
 # of them what it still holds. IN MEMORY ONLY, like the three around it.
@@ -1640,7 +1709,7 @@ async def baseline_show(settings, user_id: int, record: dict) -> None:
             touched = True
         elif isinstance(port, LibraryPort):
             touched = await _baseline_from_library(
-                settings, state, str(source), port,
+                settings, user_id, state, str(source), port,
                 {str(record_key(record)): record}, span) or touched
     if touched:
         await _save(user_id, state)
@@ -1717,6 +1786,13 @@ async def sync(settings, user_id: int, force: bool = False, today: date | None =
 
     state[_PLAYS] = plays
     state[_UNREADABLE] = unreadable
+    # EVERY COMPLETE READ THIS PASS MADE IS KEPT for the passes after it, under
+    # the activity blob this pass read it under — kept HERE because this is where
+    # the account is known, and a complete read (a first sync, a rebaseline) is
+    # exactly the one an add is later going to want. Only complete reads that
+    # cleared the floor are ever in _LIBRARY (see _sync_from_library).
+    for name, read in (state.get(_LIBRARY) or {}).items():
+        await _remember_library(user_id, name, (state.get("beacons") or {}).get(name), read)
     # WHEN NOTHING ANSWERED, THE FAILURE IS THE TRACKER'S, and it is raised the
     # way it always was — the route's own handler renders last-known totals plus
     # a notice at HTTP 200. That is what keeps an account with one linked service
@@ -2197,7 +2273,7 @@ async def _sync_from_library(settings, state: dict, name: str, library, span, *,
     return read.events
 
 
-async def _baseline_from_library(settings, state: dict, name: str, library,
+async def _baseline_from_library(settings, user_id: int, state: dict, name: str, library,
                                  missing: dict[str, dict], span) -> bool:
     """Baseline every title in `missing` for one source, out of ONE library read.
 
@@ -2209,13 +2285,24 @@ async def _baseline_from_library(settings, state: dict, name: str, library,
 
     The sync that ran a moment ago may already have made a complete read; taking
     it from there rather than repeating it is the difference between one pass over
-    a library and two in the same request.
+    a library and two in the same request. Failing that, the complete read an
+    EARLIER pass kept is taken, if the service's activity blob says nothing has
+    moved since it was read (see _STORED_LIBRARY_VERSION) — which is what makes
+    adding a title one small call rather than a whole library.
     """
     read = (state.get(_LIBRARY) or {}).get(name)
     if read is None:
         try:
-            with span("wh.baseline_library", n=len(missing), source=name):
-                read = await library.fetch_library(settings)
+            with span("wh.baseline_library", n=len(missing), source=name) as sp:
+                # BEFORE the read, so the blob kept with it can only be older than
+                # what the read saw: a change landing between the two makes the
+                # next check disagree and read again, never the other way round.
+                activities = await library.fetch_last_activities(settings)
+                read = await _stored_library(user_id, name, activities)
+                sp.set(stored=read is not None)
+                if read is None:
+                    read = await library.fetch_library(settings)
+                    await _remember_library(user_id, name, activities, read)
         except SourceUnavailable as exc:
             # The same per-source degradation the sync takes: a title left
             # un-baselined for one service still gets the other's count, and the
@@ -2360,8 +2447,8 @@ async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: b
         if not missing:
             continue
         if library is not None:
-            saved |= await _baseline_from_library(settings, state, str(source), library,
-                                                  missing, span)
+            saved |= await _baseline_from_library(settings, user_id, state, str(source),
+                                                  library, missing, span)
             continue
         try:
             with span("wh.baseline_missing", n=len(missing), source=str(source)):

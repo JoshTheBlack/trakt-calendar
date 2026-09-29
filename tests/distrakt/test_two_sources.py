@@ -843,6 +843,106 @@ class AskingWithoutAnIdTests(TwoSourceTestCase):
         self.assertEqual(wh.unreadable_sources(state), ["simkl"])
 
 
+class TheLastCompleteReadIsKeptTests(TwoSourceTestCase):
+    """A title entering the roster needs a COMPLETE library read to learn whether a
+    service holds it, and every add used to pull the whole library for that —
+    measured, three adds in thirty seconds, each a full read. The last complete
+    read is kept, beside the activity blob it was read under, and serves until the
+    service says anything has moved. A rebaseline always reads in full."""
+
+    def _record(self, tid) -> dict:
+        """Named to both services — a title added from a search carries each
+        service's own id — since the add path asks a service only about a title
+        it can name to it."""
+        return {"media": "show", "match_source": "tmdb", "match_id": str(tid),
+                "season": 1, "title": f"Show {tid}",
+                "ids": {"trakt": tid, "simkl": tid, "tmdb": tid}}
+
+    async def _run(self, call, *, simkl, beacon=BEACON, user_id=None):
+        library = AsyncMock(return_value=_library_read(simkl))
+        activities = AsyncMock(return_value=beacon)
+        patches = [*_patch("trakt"),
+                   patch("app.providers.simkl.sync.fetch_last_activities", new=activities),
+                   patch("app.providers.simkl.sync.fetch_history", new=AsyncMock(return_value=[])),
+                   patch("app.providers.simkl.sync.fetch_progress_details",
+                         new=AsyncMock(return_value={})),
+                   patch("app.providers.simkl.sync.fetch_library", new=library),
+                   # The removal check a first sync or a rebaseline owes; None is
+                   # "cannot say", which checks nothing — not what these are about.
+                   patch("app.providers.simkl.sync.fetch_library_ids",
+                         new=AsyncMock(return_value=None))]
+        for p in patches:
+            p.start()
+        try:
+            result = await call(user_id or self.user_id)
+        finally:
+            for p in patches:
+                p.stop()
+        return result, library, activities
+
+    async def _first_pass(self, user_id=None):
+        """A first sync: an unbounded, complete read, which is the one kept."""
+        return await self._run(
+            lambda uid: wh.sync_and_baseline(BOTH, uid, [self._record(101)]),
+            simkl={101: {1: _episodes(1, 2)}, 202: {1: _episodes(1, 2, 3)}}, user_id=user_id)
+
+    async def _add(self, tid, *, beacon=BEACON, simkl=None, user_id=None):
+        """The add path: one title, baselined from every source."""
+        return await self._run(
+            lambda uid: wh.baseline_show(BOTH, uid, self._record(tid)),
+            simkl=simkl if simkl is not None else {101: {1: _episodes(1, 2)},
+                                                   202: {1: _episodes(1, 2, 3)}},
+            beacon=beacon, user_id=user_id)
+
+    async def test_an_add_while_nothing_has_moved_reads_the_kept_library(self):
+        _, first, _ = await self._first_pass()
+        first.assert_awaited_once()
+        _, library, activities = await self._add(202)
+        library.assert_not_awaited()
+        activities.assert_awaited_once()
+        state = await wh.load_state(self.user_id)
+        self.assertEqual(wh.watched_map(state)[(KEY(202), 1)].get("simkl"), 3)
+
+    async def test_a_title_the_kept_library_does_not_hold_is_answered_from_it_too(self):
+        """"Not there" is the answer a complete read exists to give, and the kept
+        one gives it without a new read."""
+        await self._first_pass()
+        _, library, _ = await self._add(303)
+        library.assert_not_awaited()
+        state = await wh.load_state(self.user_id)
+        self.assertNotIn("simkl", wh.watched_map(state).get((KEY(303), 1), {}))
+
+    async def test_anything_moving_at_the_service_reads_the_library_again(self):
+        await self._first_pass()
+        _, library, _ = await self._add(202, beacon=MOVED,
+                                        simkl={202: {1: _episodes(1, 2, 3, 4)}})
+        library.assert_awaited_once()
+        state = await wh.load_state(self.user_id)
+        self.assertEqual(wh.watched_map(state)[(KEY(202), 1)].get("simkl"), 4)
+        # And that read is what is kept now, under the blob it was read with.
+        _, again, _ = await self._add(404, beacon=MOVED)
+        again.assert_not_awaited()
+
+    async def test_a_rebaseline_always_reads_in_full(self):
+        """Asking for one is asking for the library as the service holds it now,
+        so the kept read is never offered to it — whatever the activity says."""
+        await self._first_pass()
+        _, library, _ = await self._run(
+            lambda uid: wh.sync_and_baseline(BOTH, uid, [self._record(101)], force=True),
+            simkl={101: {1: _episodes(1, 2, 3, 4, 5)}})
+        library.assert_awaited()
+        state = await wh.load_state(self.user_id)
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)].get("simkl"), 5)
+
+    async def test_the_kept_read_is_one_accounts_own(self):
+        """It is a person's watch history read with their own token, and the
+        cache it is kept in is shared by the whole instance."""
+        await self._first_pass()
+        other = await self._account("other")
+        _, library, _ = await self._add(202, user_id=other)
+        library.assert_awaited_once()
+
+
 class AgreementAtZeroTests(TwoSourceTestCase):
     """A season NEITHER service has any watches for, on a title BOTH of them hold.
 
