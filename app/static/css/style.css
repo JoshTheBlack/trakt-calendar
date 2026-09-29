@@ -2264,6 +2264,14 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
     color: var(--text-dim); padding: 9px 16px; cursor: pointer; font-size: 0.9rem; font-weight: 600;
 }
 .distrakt-tab:hover { color: var(--text); }
+/* On a narrow phone the four tabs were wider than the window (343px at 320),
+   which is what scrolled the whole page sideways. They wrap onto a second line
+   instead — a strip that scrolled within itself fitted too, but hid the last tab
+   where nothing said it was there (MEASURED: Emoji map started at 421px). */
+@media (max-width: 400px) {
+    .distrakt-tabs { flex-wrap: wrap; }
+    .distrakt-tab { padding: 8px 10px; font-size: 0.84rem; }
+}
 /* THE TAB STRIP IS A RADIOGROUP, which is what a tab strip already IS: one of a
    set, chosen, and arrow-key navigable for free. The radios are hidden rather
    than removed so they keep the keyboard and can show their own focus, and each
@@ -2588,6 +2596,16 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     /* The dates reach under the buttons, which sit on the first line only: at a
        360px window a premiere-to-finale span did not fit beside the rest. */
     .distrakt-dates { grid-column: 7 / 9; }
+}
+/* THE NARROWEST PHONES, where the two-line row still did not fit: at a 320px
+   window a Cleanup row's first line (picture, title, Abandon and ✕) needed
+   about 297px of a 283px row, and the buttons — which cannot shrink — hung
+   6-14px past its edge (MEASURED in Chromium). Tighter gaps and slimmer row
+   buttons give it back without touching anything wider. */
+@container distrakt-rows (max-width: 340px) {
+    .distrakt-show-row { column-gap: 5px; }
+    .distrakt-row-actions { gap: 2px; }
+    .distrakt-row-actions .btn-ghost.small { padding: 3px 6px; font-size: 0.72rem; }
 }
 /* A watched film: same row shape as a show so the columns line up, but nothing
    to open and nothing to act on — it is a play that happened on a day. */
