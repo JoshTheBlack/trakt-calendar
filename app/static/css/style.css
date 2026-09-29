@@ -2368,7 +2368,7 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
 
 /* Uniform single-line rows: picture | title (flex, hover-scrolls) | S## | badge | network | (x/y) | dates | actions */
 .distrakt-show-row {
-    display: flex; align-items: center; gap: 10px;
+    display: flex; align-items: center; gap: 8px;
     padding: 4px 10px; min-height: 34px; font-size: 0.85rem;
     border: 1px solid var(--card-border); border-radius: 8px; background: rgba(255,255,255,0.02);
 }
@@ -2554,10 +2554,57 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
    a tooltip. Truncates instead of wrapping — a long network name must not push
    the counts and dates out of their columns. */
 .distrakt-network {
-    flex: 0 0 auto; width: 9em; overflow: hidden; text-overflow: ellipsis;
+    flex: 0 0 auto; width: 8em; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; color: var(--text-faint); font-size: 0.82em;
 }
-.distrakt-counts { flex: 0 0 auto; width: 6em; text-align: right; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+/* MOCKUP: THE NETWORK'S DISCORD EMOJI CODE, EDITED WHERE IT IS DRAWN. A text
+   field dressed as plain text until it has focus, so a click is all it takes and
+   nothing has to swap it in; the network's logo tools hang under it while it is
+   being edited. Dimmer when the network has no code of its own. */
+/* MOCKUP: a row's facts are one wrapper that draws nothing on a wide list, so
+   its cells stay the row's own flex items (a phone makes it their line). */
+.distrakt-facts { display: contents; }
+/* SIX CHARACTERS OF THE CODE ON THE ROW, a longer one ending in an
+   ellipsis. The cell is set in the field's own monospace so `6ch` means six of
+   ITS characters; focused, the field lifts out of the cell to its full length
+   (its `size`), over the counts, without moving anything else on the row. */
+.distrakt-emoji {
+    flex: 0 0 auto; position: relative; width: calc(6ch + 12px); height: 1.7em;
+    font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 0.76em;
+}
+.distrakt-emoji-code {
+    position: absolute; left: 0; top: 50%; translate: 0 -50%;
+    width: 100%; margin: 0; padding: 1px 5px;
+    font: inherit; color: var(--text-dim); background: transparent;
+    border: 1px solid transparent; border-radius: 5px;
+    text-overflow: ellipsis; cursor: text;
+}
+.distrakt-emoji.is-default .distrakt-emoji-code { color: var(--text-faint); opacity: 0.55; }
+.distrakt-emoji-code:hover { border-color: var(--card-border); }
+.distrakt-emoji-code:focus {
+    outline: none; border-color: var(--gold); background: var(--bg-panel);
+    color: var(--text); opacity: 1; width: auto; min-width: 100%; z-index: 6;
+}
+.distrakt-emoji-tools {
+    display: none; position: absolute; left: 0; top: 100%; margin-top: 3px; z-index: 5;
+    gap: 2px; padding: 3px; white-space: nowrap;
+    background: var(--bg-panel); border: 1px solid var(--card-border); border-radius: 7px;
+    box-shadow: 0 10px 24px rgba(0,0,0,0.5);
+}
+.distrakt-emoji:focus-within .distrakt-emoji-tools { display: flex; align-items: center; }
+/* Which network this code belongs to, in full: the row's own cell truncates a
+   long name, and a phone's row does not draw it at all. */
+.distrakt-emoji-net { padding: 0 6px 0 4px; font-family: inherit; font-size: 0.74rem; color: var(--text-dim); }
+/* MOCKUP: the default emoji's own small panel, under its pill in the header. */
+.emoji-default-panel { width: 240px; padding: 10px; gap: 6px; white-space: normal; }
+.emoji-default-panel label { font-size: 0.78rem; font-weight: 600; color: var(--text-dim); }
+.emoji-default-panel input { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; }
+.emoji-default-panel .distrakt-note { margin: 0; font-size: 0.74rem; }
+/* MOCKUP: the counts start where the code ends rather than right-aligned in a
+   6em box, and a row with no dates (Cleanup, Completed) spends no width on them —
+   so the facts sit close together instead of spread across fixed boxes. */
+.distrakt-counts { flex: 0 0 auto; min-width: 4.5em; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.distrakt-dates:empty { display: none; }
 .distrakt-dates { flex: 0 0 auto; width: 8.5em; text-align: right; white-space: nowrap; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 .distrakt-row-actions { flex: 0 0 auto; display: flex; gap: 4px; }
 /* A NARROW LIST PUTS A ROW'S FACTS UNDER ITS TITLE. The one-line row gives
@@ -2574,28 +2621,43 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 @container distrakt-rows (max-width: 760px) {
     .distrakt-show-row {
         display: grid; column-gap: 8px; row-gap: 1px;
-        grid-template-columns: auto auto auto auto minmax(0, 1fr) auto auto auto;
+        grid-template-columns: auto auto minmax(0, 1fr) auto;
         grid-template-rows: auto auto;
     }
     .distrakt-freshness { grid-column: 1; grid-row: 1 / 3; }
     /* Two lines tall here, so the picture can be too: 34x51, the search
        results' size, measured to grow a phone row by 3px. */
     .distrakt-poster { grid-column: 2; grid-row: 1 / 3; width: 34px; height: 51px; }
+    .distrakt-title { grid-column: 3; grid-row: 1; }
+    .distrakt-row-actions { grid-column: 4; grid-row: 1; }
+    /* MOCKUP: THE FACTS ARE ONE FLEXIBLE LINE UNDER THE TITLE, reaching under the
+       buttons. As grid cells they shared columns with the buttons above them,
+       so the button column's width (119px with Abandon) was taken out of the
+       second line too, and a code there was cut to ":s_am…" beside empty space. */
+    .distrakt-facts {
+        grid-column: 3 / 5; grid-row: 2; min-width: 0;
+        display: flex; flex-wrap: wrap; align-items: center; column-gap: 8px; row-gap: 0;
+    }
+    /* WRAPS RATHER THAN OVERFLOWS: a season two services count differently says
+       "(2/2 (Trakt) · 3/2 (Simkl))", 149px on its own, and at a 320px window that
+       line needed 15px more than it had (MEASURED, Halloween Baking Championship).
+       Only such a row takes a third line. */
+    .distrakt-season, .distrakt-emoji, .distrakt-counts, .distrakt-dates {
+        width: auto; text-align: left; font-size: 0.78rem;
+    }
     /* On the facts line, so a line of text's height: the badge is sized down
        to it rather than making the second line taller than the first. */
-    .distrakt-badge { grid-column: 4; grid-row: 2; width: 18px; height: 18px; }
+    .distrakt-badge { width: 18px; height: 18px; }
     .distrakt-badge .distrakt-logo { max-width: 18px; max-height: 18px; }
-    .distrakt-title { grid-column: 3 / 8; grid-row: 1; }
-    .distrakt-row-actions { grid-column: 8; grid-row: 1; }
-    .distrakt-season, .distrakt-network, .distrakt-counts, .distrakt-dates {
-        grid-row: 2; width: auto; text-align: left; font-size: 0.78rem;
-    }
-    .distrakt-season { grid-column: 3; }
-    .distrakt-network { grid-column: 5; min-width: 0; }
-    .distrakt-counts { grid-column: 6; }
-    /* The dates reach under the buttons, which sit on the first line only: at a
-       360px window a premiere-to-finale span did not fit beside the rest. */
-    .distrakt-dates { grid-column: 7 / 9; }
+    /* MOCKUP: ON A PHONE THE CODE TAKES THE NETWORK NAME'S PLACE. There is no
+       width for both (a 390px row overflowed by 31px with the two side by side);
+       the logo beside it already says which network it is, and editing the code
+       names the network in full. */
+    .distrakt-network { display: none; }
+    /* Six characters here too, in a slightly smaller face; after the shared
+       `width: auto` above, which would otherwise collapse the cell. */
+    .distrakt-emoji { flex: 0 0 auto; width: calc(6ch + 12px); font-size: 0.72rem; }
+    .distrakt-dates { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 }
 /* THE NARROWEST PHONES, where the two-line row still did not fit: at a 320px
    window a Cleanup row's first line (picture, title, Abandon and ✕) needed

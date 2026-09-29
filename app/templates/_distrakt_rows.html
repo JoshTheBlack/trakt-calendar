@@ -78,12 +78,36 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
 {%- else %}<span class="distrakt-poster is-empty" aria-hidden="true"></span>{% endif -%}
 {%- endmacro %}
 
+{# MOCKUP: the badge is the logo alone now; the emoji code has its own cell. #}
 {% macro badge(network) -%}
 {%- set logo = logo_for(network) -%}
 <span class="distrakt-badge">
-    {%- if logo %}<img class="distrakt-logo" src="{{ logo }}" alt="">
-    {%- else %}{{ emoji_for(network) }}{% endif -%}
+    {%- if logo %}<img class="distrakt-logo" src="{{ logo }}" alt="">{% endif -%}
 </span>
+{%- endmacro %}
+
+{# MOCKUP of the network's emoji code, editable where it is drawn. The code is a
+   text field styled as plain text; focusing it (a click) makes it look like a
+   field and brings the network's logo tools beside it. NOT WIRED: the build adds
+   the save (hx-post + hx-json-enc on change) and the out-of-band redraw of every
+   row showing the same network. A code equal to the default is drawn dimmer. #}
+{% macro emoji(network) -%}
+{%- if network %}
+<span class="distrakt-emoji{{ '' if emoji_own(network) else ' is-default' }}">
+    {#- `size` is the code's own length, so a phone's row gives it exactly the
+        room it needs without the stylesheet having to measure anything. -#}
+    <input type="text" class="distrakt-emoji-code" value="{{ emoji_for(network) }}"
+           size="{{ [emoji_for(network) | length, 4] | max }}"
+           aria-label="Discord emoji for {{ network }}" title="Discord emoji for {{ network }} — click to edit"
+           spellcheck="false" autocomplete="off">
+    <span class="distrakt-emoji-tools">
+        <span class="distrakt-emoji-net">{{ network }}</span>
+        <a class="btn-ghost small" href="/api/network-logo?name={{ network | urlencode }}&amp;download=1"
+           download hx-boost="false" title="Download {{ network }}'s logo">⬇</a>
+        <button type="button" class="btn-ghost small" title="Regenerate {{ network }}'s logo (admin)">↻</button>
+    </span>
+</span>
+{%- else %}<span class="distrakt-emoji"></span>{% endif -%}
 {%- endmacro %}
 
 {# A season that was finished and is on the pile again — the episode count moved,
@@ -161,6 +185,9 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
     {%- endif %}
     {{ picture(show) }}
     <span class="distrakt-title"><span class="tt">{{ show.title }}</span>{{ return_mark(show) }}{{ missing_mark(show) }}</span>
+    {#- MOCKUP: the row's facts in one wrapper — `display: contents` on a wide
+        list, one flexible line under the title on a phone. -#}
+    <span class="distrakt-facts">
     <span class="distrakt-season">S{{ '%02d' % show.season }}</span>
     {#- The badge sits beside the network it stands for, between the season and
         the network's name, rather than ahead of the title. -#}
@@ -169,11 +196,13 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
         emoji map is keyed on, so seeing it is what makes the map editable
         without guessing. -#}
     <span class="distrakt-network">{{ show.network or '—' }}</span>
+    {{ emoji(show.network) }}
     <span class="distrakt-counts"
           {%- if counts and show.counts_detail %} title="{{ show.counts_detail }}"{% endif %}>
         {{- '(' ~ counts ~ ')' if counts else '' -}}
     </span>
     <span class="distrakt-dates">{{ dates }}</span>
+    </span>
     <span class="distrakt-row-actions">
         {#- A COMPLETED ROW OFFERS NO ABANDON, and that is not a tidying-up. You
             cannot give up on something you have finished, so the control was
@@ -213,11 +242,14 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
 <div class="distrakt-show-row distrakt-film-row">
     {{ picture(film) }}
     <span class="distrakt-title"><span class="tt">{{ film.title or 'Untitled' }}</span></span>
+    <span class="distrakt-facts">
     <span class="distrakt-season"></span>
     <span class="distrakt-badge">🎬</span>
     <span class="distrakt-network">Film</span>
+    <span class="distrakt-emoji"></span>
     <span class="distrakt-counts">{{ film.year or '' }}</span>
     <span class="distrakt-dates">{{ (film.watched_at or '')[:10] }}</span>
+    </span>
     <span class="distrakt-row-actions">
         {%- if film.key %}
         {%- call confirm.ask(slot='film-' ~ film.key,

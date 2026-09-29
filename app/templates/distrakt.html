@@ -35,6 +35,20 @@
         {{ imports.button(month_query) }}
         <button type="button" class="pill-btn" command="show-modal" commandfor="addShowModal">➕ Add show</button>
         <button type="button" class="pill-btn" command="show-modal" commandfor="addMovieModal">🎬 Add film</button>
+        {#- MOCKUP: the default emoji, out of the retired Emoji map tab. A popover
+            the pill opens (light dismiss and Escape come with it); NOT WIRED —
+            the build saves the field on change, as a row's code saves. -#}
+        <div class="nav-menu emoji-default-menu">
+            <button type="button" class="pill-btn nav-menu-btn" popovertarget="emojiDefaultMenu"
+                    title="The emoji a network with none of its own posts as">🙂 {{ default_network_emoji }}</button>
+            <div class="nav-menu-items emoji-default-panel" id="emojiDefaultMenu" popover>
+                <label for="emojiDefault">Default emoji</label>
+                <input type="text" id="emojiDefault" name="default_network_emoji"
+                       value="{{ default_network_emoji }}" spellcheck="false" autocomplete="off">
+                <p class="distrakt-note">What your Discord posts use for a network with
+                    no code of its own. A row's code is edited on the row itself.</p>
+            </div>
+        </div>
 {% endcall %}
 
 <main class="distrakt-main">
@@ -57,14 +71,10 @@
         <input type="radio" name="distrakt-tab" id="tab-shows" class="distrakt-tab-radio" checked autocomplete="off">
         <input type="radio" name="distrakt-tab" id="tab-copy" class="distrakt-tab-radio" autocomplete="off">
         <input type="radio" name="distrakt-tab" id="tab-data" class="distrakt-tab-radio" autocomplete="off">
-        <input type="radio" name="distrakt-tab" id="tab-emoji" class="distrakt-tab-radio" autocomplete="off">
         <nav class="distrakt-tabs">
             <label class="distrakt-tab" for="tab-shows">This month's shows</label>
             <label class="distrakt-tab" for="tab-copy">Copy blocks</label>
             <label class="distrakt-tab" for="tab-data">Backup</label>
-            {# Everyone with the tracker gets this: the map is their own and
-               decides how their own Discord posts render. #}
-            <label class="distrakt-tab" for="tab-emoji">Emoji map</label>
         </nav>
 
         <section class="distrakt-panel" data-panel="shows">
@@ -241,44 +251,6 @@
             </div>
         </section>
 
-        <section class="distrakt-panel distrakt-section" data-panel="emoji">
-            <h2>Network → emoji map</h2>
-            <p class="distrakt-note">Your own map — it decides how the networks in
-                <strong>your</strong> Discord posts render, and nobody else's. New networks
-                are added here automatically as your roster picks them up. It travels with
-                the Backup export.</p>
-            {# THE EDITOR IS A FORM AND ITS ROWS ARE THE SERVER'S. Every control
-               here posts the form and is answered with the rows, so an edit
-               nobody has saved rides along with the request instead of having to
-               be read back out of the DOM before a redraw could clobber it.
-
-               NOTHING IN THIS FORM CARRIES `hx-get` — see the month loader above
-               for why an inherited GET would become every button's verb. #}
-            <form id="emojiForm" hx-boost="false"
-                  hx-post="/api/distrakt/emojis" hx-json-enc
-                  hx-target="#emojiRows" hx-swap="outerHTML">
-                {#- The same rows every emoji answer swaps in, drawn from the
-                    same builder (routes._emoji_row_contexts). -#}
-                {% with rows = emoji_rows, message = '' %}{% include '_distrakt_emoji_rows.html' %}{% endwith %}
-                <div class="emoji-map-actions">
-                    <button type="button" class="btn-ghost small"
-                            hx-post="/distrakt/fragments/emoji-rows" hx-json-enc
-                            hx-include="#emojiForm"
-                            hx-target="#emojiRows" hx-swap="outerHTML">+ Add network</button>
-                    <button type="button" class="btn-ghost small"
-                            title="Add every network used by this month's shows"
-                            hx-post="/api/distrakt/backfill-networks{{ month_query }}" hx-json-enc
-                            hx-include="#emojiForm"
-                            hx-target="#emojiRows" hx-swap="outerHTML">⤓ Backfill from shows</button>
-                </div>
-                <div class="field distrakt-default-emoji">
-                    <label for="e_default">Default emoji (fallback)</label>
-                    <input type="text" id="e_default" name="default_network_emoji"
-                           value="{{ default_network_emoji }}" spellcheck="false">
-                </div>
-                <button type="submit" class="btn-primary">Save emoji map</button>
-            </form>
-        </section>
     </div>
 </main>
 

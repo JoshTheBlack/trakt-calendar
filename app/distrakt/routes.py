@@ -1429,6 +1429,9 @@ def _month_context(request: Request, payload: dict, year: int, month: int,
         "closed": closed,
         "month_query": f"?year={year}&month={month}",
         "emoji_for": lambda network: emojis.get(network or "", default_emoji),
+        # MOCKUP: whether the network has a code of its own, or is showing the
+        # default (every network the roster registers is stored AS the default).
+        "emoji_own": lambda network: emojis.get(network or "", default_emoji) != default_emoji,
         "logo_for": lambda network: (
             f"/api/network-logo?name={quote(network or '')}" if network in with_logos else ""),
         # A row's picture, resolved for the whole page before it is drawn
