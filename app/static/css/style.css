@@ -2600,13 +2600,31 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .emoji-default-panel label { font-size: 0.78rem; font-weight: 600; color: var(--text-dim); }
 .emoji-default-panel input { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; }
 .emoji-default-panel .distrakt-note { margin: 0; font-size: 0.74rem; }
-/* MOCKUP: the counts start where the code ends rather than right-aligned in a
-   6em box, and a row with no dates (Cleanup, Completed) spends no width on them —
-   so the facts sit close together instead of spread across fixed boxes. */
-.distrakt-counts { flex: 0 0 auto; min-width: 4.5em; color: var(--text-dim); font-variant-numeric: tabular-nums; }
-.distrakt-dates:empty { display: none; }
-.distrakt-dates { flex: 0 0 auto; width: 8.5em; text-align: right; white-space: nowrap; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+/* MOCKUP: EVERY ROW GIVES THE SAME WIDTHS TO WHAT FOLLOWS ITS TITLE, whatever
+   section it is in, so the columns line up down the whole list: the dates box
+   (first, after the title, empty on a Cleanup or Completed row), the counts, and
+   the buttons (a row with only ✕ keeps Abandon's room). Letting any of them
+   collapse is what made the list shift sideways from one section to the next. */
+.distrakt-counts {
+    flex: 0 0 auto; width: 5.5em; white-space: nowrap; overflow: hidden;
+    color: var(--text-dim); font-variant-numeric: tabular-nums;
+}
+/* The services disagree about this season (or only one of two has it): one
+   number on the row, the primary service's, marked; hovering says who holds
+   what, which is the tooltip the row already had. */
+.distrakt-counts.is-split {
+    color: var(--danger, #e0736b); cursor: help;
+    text-decoration: underline dotted; text-underline-offset: 3px;
+}
+.distrakt-dates { flex: 0 0 auto; width: 7.5em; text-align: right; white-space: nowrap; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 .distrakt-row-actions { flex: 0 0 auto; display: flex; gap: 4px; }
+/* MOCKUP: the Abandon button is as wide as its wider label, both labels stacked
+   in one grid cell with the other one hidden; a row without the button holds an
+   invisible copy of it (see _distrakt_rows.html). */
+.distrakt-abandon { display: inline-grid; }
+.distrakt-abandon > span { grid-area: 1 / 1; text-align: center; }
+.distrakt-abandon > .alt { visibility: hidden; }
+.distrakt-abandon.is-placeholder { visibility: hidden; }
 /* A NARROW LIST PUTS A ROW'S FACTS UNDER ITS TITLE. The one-line row gives
    fixed widths to the season, network, counts and dates (about 26em between
    them) plus the logo and the buttons, which at a 400px phone left the title no
@@ -2630,6 +2648,9 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     .distrakt-poster { grid-column: 2; grid-row: 1 / 3; width: 34px; height: 51px; }
     .distrakt-title { grid-column: 3; grid-row: 1; }
     .distrakt-row-actions { grid-column: 4; grid-row: 1; }
+    /* A phone's rows do not share columns across the list, so the room held for
+       a missing button would only take width from the title. */
+    .distrakt-abandon.is-placeholder { display: none; }
     /* MOCKUP: THE FACTS ARE ONE FLEXIBLE LINE UNDER THE TITLE, reaching under the
        buttons. As grid cells they shared columns with the buttons above them,
        so the button column's width (119px with Abandon) was taken out of the
@@ -2657,7 +2678,7 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     /* Six characters here too, in a slightly smaller face; after the shared
        `width: auto` above, which would otherwise collapse the cell. */
     .distrakt-emoji { flex: 0 0 auto; width: calc(6ch + 12px); font-size: 0.72rem; }
-    .distrakt-dates { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .distrakt-dates { order: 1; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 }
 /* THE NARROWEST PHONES, where the two-line row still did not fit: at a 320px
    window a Cleanup row's first line (picture, title, Abandon and ✕) needed

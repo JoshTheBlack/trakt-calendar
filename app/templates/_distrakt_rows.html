@@ -153,7 +153,14 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
     (app/distrakt/counts.py). EVERY BUCKET DRAWS ITS COUNT, COMPLETED INCLUDED: a
     blank cell would read as both services agreeing the season is done, which is a
     claim neither of them made. -#}
-{%- set xy = show.counts or (show.watched ~ '/' ~ show.total) -%}
+{#- MOCKUP: A SPLIT COUNT IS ONE NUMBER ON THE ROW. When the services disagree
+    (or only one of two has the season) the label reads "2/2 (Trakt) · 3/2
+    (Simkl)", which is too wide for a column every row shares. The row shows the
+    primary service's x/y, marked, and the per-service story stays in the
+    tooltip it already has (show.counts_detail). The build takes this from
+    counts.py (one home), not from a "(" in the string as this mockup does. -#}
+{%- set split = show.counts and '(' in show.counts -%}
+{%- set xy = (show.watched ~ '/' ~ show.total) if split or not show.counts else show.counts -%}
 {%- set counts = (xy ~ (', ' ~ show.cadence if show.cadence else '')) if is_premiere else xy -%}
 {#- New/Returning: premiere (– finale for weekly). Keepup: finale (end date).
     A date nobody has announced reads TBA, as the details panel's episode list
@@ -188,6 +195,11 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
     {#- MOCKUP: the row's facts in one wrapper — `display: contents` on a wide
         list, one flexible line under the title on a phone. -#}
     <span class="distrakt-facts">
+    {#- MOCKUP: THE DATES COME FIRST, just after the title, so a section without
+        any (Cleanup, Completed) has its empty slot where a short title's own
+        space already is, and every column from the season on sits in the same
+        place on every row. A phone puts them back at the end of the line. -#}
+    <span class="distrakt-dates">{{ dates }}</span>
     <span class="distrakt-season">S{{ '%02d' % show.season }}</span>
     {#- The badge sits beside the network it stands for, between the season and
         the network's name, rather than ahead of the title. -#}
@@ -197,11 +209,10 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
         without guessing. -#}
     <span class="distrakt-network">{{ show.network or '—' }}</span>
     {{ emoji(show.network) }}
-    <span class="distrakt-counts"
+    <span class="distrakt-counts{{ ' is-split' if split }}"
           {%- if counts and show.counts_detail %} title="{{ show.counts_detail }}"{% endif %}>
         {{- '(' ~ counts ~ ')' if counts else '' -}}
     </span>
-    <span class="distrakt-dates">{{ dates }}</span>
     </span>
     <span class="distrakt-row-actions">
         {#- A COMPLETED ROW OFFERS NO ABANDON, and that is not a tidying-up. You
@@ -214,11 +225,21 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
             too: what a past month RECORDS can still be corrected, but its
             verdicts were settled when it froze. -#}
         {%- if not closed and show.bucket != 'completed' %}
-        <button type="button" class="btn-ghost small"
+        {#- MOCKUP: both labels are in the button, the other one invisible, so it
+            is as wide as its wider label either way and an abandoned row lines
+            up with the rest. -#}
+        <button type="button" class="btn-ghost small distrakt-abandon"
                 {{ month_post('/api/distrakt/abandon',
                               {'key': show.key, 'season': show.season,
                                'abandoned': not show.abandoned}) }}>
-            {{ 'Un-abandon' if show.abandoned else 'Abandon' }}</button>
+            <span>{{ 'Un-abandon' if show.abandoned else 'Abandon' }}</span><span class="alt" aria-hidden="true">{{ 'Abandon' if show.abandoned else 'Un-abandon' }}</span></button>
+        {%- else %}
+        {#- MOCKUP: ROOM FOR A BUTTON THIS ROW DOES NOT HAVE, so its ✕ and every
+            column before it line up with the rows that do. Invisible, unreachable
+            and the same markup as the real one, so it is exactly as wide in any
+            font. -#}
+        <span class="btn-ghost small distrakt-abandon is-placeholder" aria-hidden="true">
+            <span>Abandon</span><span class="alt">Un-abandon</span></span>
         {%- endif %}
         {%- call confirm.ask(slot='remove-' ~ show.key ~ '-' ~ show.season,
                              question=('Take this off what this month records?'
@@ -243,14 +264,20 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
     {{ picture(film) }}
     <span class="distrakt-title"><span class="tt">{{ film.title or 'Untitled' }}</span></span>
     <span class="distrakt-facts">
+    <span class="distrakt-dates">{{ (film.watched_at or '')[:10] }}</span>
     <span class="distrakt-season"></span>
     <span class="distrakt-badge">🎬</span>
     <span class="distrakt-network">Film</span>
     <span class="distrakt-emoji"></span>
     <span class="distrakt-counts">{{ film.year or '' }}</span>
-    <span class="distrakt-dates">{{ (film.watched_at or '')[:10] }}</span>
     </span>
     <span class="distrakt-row-actions">
+        {#- MOCKUP: ROOM FOR A BUTTON THIS ROW DOES NOT HAVE, so its ✕ and every
+            column before it line up with the rows that do. Invisible, unreachable
+            and the same markup as the real one, so it is exactly as wide in any
+            font. -#}
+        <span class="btn-ghost small distrakt-abandon is-placeholder" aria-hidden="true">
+            <span>Abandon</span><span class="alt">Un-abandon</span></span>
         {%- if film.key %}
         {%- call confirm.ask(slot='film-' ~ film.key,
                              question='Forget watching ' ~ (film.title or 'this film')
