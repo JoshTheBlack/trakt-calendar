@@ -1696,6 +1696,16 @@ async def _add_named(user, board_uid: str, data: Mapping[str, Any]) -> _Added:
         listed = await ranker_sources.stored_seasons(settings, hit)
         items = [_season_item(item, season, listed) for season in seasons]
     arrived = await ranker.add_titles(user.user_id, board_uid, items, added_from="manual")
+    # THE PICTURE THE RESULT WAS DRAWN WITH IS FILED, under the service that
+    # published it, as the calendar files every poster it sees. The row asks for
+    # its picture by board and key afterwards (rankings_poster), and a title
+    # nothing had filed got one lookup — which asks TMDB and Trakt by tmdb id, so
+    # a title only Simkl lists came back a recorded miss and drew the empty frame
+    # although its search row had just shown Simkl's poster. A sighting, not a
+    # lookup: no request, and a later sighting from any service updates it.
+    if item.get("tmdb") and hit.poster and hit.poster_source:
+        await artwork.record_poster_urls(
+            [(item["media"], item["tmdb"], hit.poster_source, hit.poster)])
     # Every season was validated by the add itself, so reading the first back
     # cannot fail here.
     first = item_keys.board_key(item["media"], item["match_source"], item["match_id"],

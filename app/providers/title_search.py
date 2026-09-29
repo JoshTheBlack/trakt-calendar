@@ -96,7 +96,11 @@ class MergedSearchHit(NamedTuple):
 
     `poster` FOLLOWS THE SAME LEADER-THEN-GAPS RULE as the fields above, and is
     the service's own address — see `SearchHit.poster` for why it is proxied only
-    where it is drawn.
+    where it is drawn. `poster_source` is WHICH service's, because a picture
+    this app keeps is filed under the service that published it
+    (app/media/artwork.py's registry, read in each viewer's own order) — and a
+    title only one service lists has no other way into that registry: the one
+    lookup a missing picture gets asks TMDB and Trakt, by tmdb id.
     """
     key: ItemKey | None
     season: int | None
@@ -110,6 +114,7 @@ class MergedSearchHit(NamedTuple):
     media: Media
     title_key: str | None = None
     poster: str = ""
+    poster_source: str = ""
 
 
 class SearchMergeResult(NamedTuple):
@@ -161,13 +166,15 @@ class _Merging:
     ids: dict[str, Any]
     media: Media
     poster: str = ""
+    poster_source: str = ""
     source_ids: dict[Source, str] = field(default_factory=dict)
 
     @classmethod
     def start(cls, hit: SearchHit, key: ItemKey | None) -> "_Merging":
         slot = cls(key=key, season=hit.season, title=hit.title, year=hit.year,
                    network=hit.network, runtime=hit.runtime, overview=hit.overview,
-                   ids=dict(hit.ids), media=hit.media, poster=hit.poster)
+                   ids=dict(hit.ids), media=hit.media, poster=hit.poster,
+                   poster_source=str(hit.source) if hit.poster else "")
         slot.source_ids[hit.source] = hit.source_id
         return slot
 
@@ -198,8 +205,8 @@ class _Merging:
             self.network = hit.network
         if _blank(self.overview):
             self.overview = hit.overview
-        if _blank(self.poster):
-            self.poster = hit.poster
+        if _blank(self.poster) and not _blank(hit.poster):
+            self.poster, self.poster_source = hit.poster, str(hit.source)
         if self.year is None:
             self.year = hit.year
         if self.runtime is None:
@@ -210,7 +217,8 @@ class _Merging:
                                source_ids=dict(self.source_ids), ids=dict(self.ids),
                                title=self.title, year=self.year, network=self.network,
                                runtime=self.runtime, overview=self.overview, media=self.media,
-                               title_key=title_key, poster=self.poster)
+                               title_key=title_key, poster=self.poster,
+                               poster_source=self.poster_source)
 
 
 def fold_one_title(hits: Sequence[SearchHit], key: ItemKey | None, *,

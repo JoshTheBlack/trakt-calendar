@@ -270,6 +270,28 @@ class AddTests(_SearchTestCase):
         # The pick and the redraw both read the search back; nothing asked again.
         self.assertEqual([c["cached_only"] for c in self.catalogue.calls], [False, True, True])
 
+    def test_a_simkl_only_pick_files_the_poster_its_row_was_drawn_with(self):
+        """The row's picture is asked for by key afterwards, and a title nothing
+        had filed got one lookup — TMDB and Trakt, by tmdb id — so a title only
+        Simkl lists was recorded as having no picture and drew the empty frame,
+        although its search row had just shown Simkl's poster. The add files
+        that address under Simkl, and the row's picture route redirects to it."""
+        poster = "https://simkl.in/posters/31/313599abc_m.jpg"
+        self.catalogue.hits = [a_hit(313599, ids={"tmdb": 313599, "simkl": 99},
+                                     source_ids={Source.SIMKL: "99"}, poster=poster,
+                                     poster_source="simkl")]
+        self.enter("title")
+        self.assertEqual(self.add({"q": "title", "i": 0, "media": "show"}).status_code, 200)
+        self.assertEqual([dict(row) for row in self.rows(
+            "SELECT source, url FROM show_posters WHERE tmdb = 313599")],
+            [{"source": "simkl", "url": poster}])
+        with mock.patch("app.media.posters._look_up_address",
+                        side_effect=AssertionError("a filed picture was looked up again")):
+            picture = self.client.get("/api/rankings/poster?board=b1&key=show:tmdb:313599",
+                                      follow_redirects=False)
+        self.assertEqual(picture.status_code, 302)
+        self.assertEqual(picture.headers["location"], proxied_image(poster))
+
     def test_the_search_is_still_on_the_page_with_the_result_held(self):
         self.enter("title")
         html = self.add({"q": "title", "i": 0, "media": "show"}).text
