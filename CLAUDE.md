@@ -356,7 +356,12 @@ because htmx's attribute inheritance is on (static/js/boost.js) and a trigger on
 an ancestor becomes the trigger of the form inside it.
 A saved view preference is `hx-post` plus `hx-json-enc` on the control
 itself, answered with the page's own `#pageMeta` out of band — which is how a
-class reaches <body>, the one element a swap can never replace. And a title
+class reaches <body>, the one element a swap can never replace. A value edited
+where it is drawn — a tracker row's emoji code — is a FIELD DRESSED AS TEXT,
+saved on `change` and answered out of band to EVERY copy of it by a digest
+selector: nothing swaps text for a field, and `change` alone is what makes
+Enter save once, a click away save once, and a click in and out send nothing
+(measured in both engines; templates/_distrakt_rows.html's `emoji`). And a title
 scrolling because it is too wide for its cell is CONTAINER QUERY UNITS: `100cqw`
 is the cell's own width and `100%` in a transform is the title's, so the
 difference IS the overflow and nothing has to measure it — which is what emptied
