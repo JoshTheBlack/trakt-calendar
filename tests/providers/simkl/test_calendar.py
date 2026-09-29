@@ -376,6 +376,26 @@ class TwoShowsCanShareOneSlugTests(unittest.TestCase):
         self.assertEqual(record.ids.get("slug"), "brothers")
         self.assertEqual(record.ids.get("simkl"), 2415129)
 
+    def test_a_bare_date_is_that_day_for_every_viewer(self):
+        """What a search jump builds from a per-title lookup: a season premiere
+        known only as a day. Read as an instant it was midnight UTC — the evening
+        before, west of UTC — and Dexter: New Blood drew a day ahead of Trakt's
+        card for the same premiere."""
+        from zoneinfo import ZoneInfo
+
+        from app.calendar.search import render
+        record = simkl_calendar.to_show_record(
+            self._entry(1775229, "dexter-new-blood", "131927", "2021-11-07"))
+        self.assertTrue(record.date_only)
+        for zone in ("America/Los_Angeles", "America/New_York", "UTC", "Pacific/Auckland"):
+            with self.subTest(zone=zone):
+                self.assertEqual(render(record, ZoneInfo(zone)).air_date, "2021-11-07")
+
+    def test_an_entry_with_a_time_is_still_an_instant(self):
+        record = simkl_calendar.to_show_record(
+            self._entry(2415129, "brothers", "250203", "2026-09-23T20:00:00-04:00"))
+        self.assertFalse(record.date_only)
+
     def test_an_entry_with_no_id_still_falls_back_to_its_slug(self):
         """Better a slug than nothing: an entry this app cannot key at all is an
         entry it cannot store."""

@@ -479,8 +479,18 @@ def to_show_record(entry: dict) -> Record | None:
     date_raw = entry.get("date")
     if not date_raw:
         return None
+    # A BARE DATE IS A DATE, NOT MIDNIGHT UTC. Every tv.json entry states a time
+    # and an offset, but a season premiere built from a per-title lookup
+    # (records_for, for a search jump) carries only the day — detail.py keeps the
+    # day because Simkl's times sit in one fixed offset per file and only the day
+    # is reliable. Read as an instant, "2021-11-07" was midnight UTC, which is the
+    # evening of the 6th anywhere west of UTC: measured, Dexter: New Blood drew a
+    # day before Trakt's card for the same premiere. Pinned the way
+    # to_movie_record pins a release date, so it lands on that day for everyone.
+    text = str(date_raw)
+    date_only = len(text) == 10
     try:
-        dt = datetime.fromisoformat(str(date_raw))
+        dt = datetime.fromisoformat(f"{text}T00:00:00+00:00" if date_only else text)
     except ValueError:
         return None
 
@@ -499,6 +509,7 @@ def to_show_record(entry: dict) -> Record | None:
         detail_url=_detail_url(Media.SHOW, entry.get("url"), ids_raw),
         title=entry.get("title") or "Untitled",
         air_ts=epoch_seconds(dt),
+        date_only=date_only,
         poster=poster_url(entry.get("poster")),
         episode_label=ep_label,
         episode_title="",
