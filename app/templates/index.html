@@ -82,7 +82,7 @@
                and that view is unreachable until you pick a third one first. #}
             <select id="endpointSelect" name="endpoint" autocomplete="off" data-url-state>
                 {% for ep in endpoints %}
-                <option value="{{ ep.key }}"{% if ep.key == endpoint.key %} selected{% endif %}>{{ ep.label }}</option>
+                <option value="{{ ep.key }}" title="{{ ep.label }}"{% if ep.key == endpoint.key %} selected{% endif %}>{{ ep.short or ep.label }}</option>
                 {% endfor %}
             </select>
         </form>

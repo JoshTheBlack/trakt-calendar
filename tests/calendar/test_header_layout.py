@@ -45,6 +45,21 @@ class APhoneHeaderKeepsItsIconsTests(unittest.TestCase):
                       '<span class="month-abbr" aria-hidden="true">{{ month_label[:3] }}</span>',
                       page)
 
+    def test_the_calendar_picker_says_one_word_and_keeps_the_full_name(self):
+        """Two rows on a phone needs the picker to say one word, and option text
+        cannot follow the screen width, so it says the short name everywhere —
+        with the full name as each option's title, and everywhere else a calendar
+        is named."""
+        from app.endpoints import ENDPOINTS
+        from tests.support import APP_DIR
+        page = (APP_DIR / "templates" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('title="{{ ep.label }}"', page)
+        self.assertIn(">{{ ep.short or ep.label }}</option>", page)
+        for endpoint in ENDPOINTS.values():
+            with self.subTest(endpoint=endpoint.key):
+                self.assertTrue(endpoint.short)
+                self.assertNotIn(" ", endpoint.short)
+
     def test_a_button_that_loses_its_word_keeps_its_name(self):
         import re
 

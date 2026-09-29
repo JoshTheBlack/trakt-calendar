@@ -104,27 +104,36 @@ html.has-distrakt #distraktNav { display: flex; }
 }
 .month-title-link { display: inline-block; position: relative; transition: transform .18s ease; }
 .month-abbr { display: none; }
-/* A PHONE'S HEADER, TWO OR THREE ROWS WHERE IT WAS FIVE. A button keeps its
-   emoji or icon and drops its word (`.pill-text`, with the word still its
-   `aria-label`/`title`), the month shortens to three letters so it fits on the
-   logo's line with a slightly smaller wordmark, and the numbers readout goes —
-   the 📊 pill at the foot of the page carries the total on a phone
-   (_calendar_body.html). The breakpoint is where the full labels stop fitting
-   two rows; every page's ☰ Menu takes the same rule, so the button is the same
-   everywhere at a given width. */
+/* A PHONE'S HEADER, TWO ROWS WHERE IT WAS FIVE: the logo and the month, then
+   every control. A button keeps its emoji or icon and drops its word
+   (`.pill-text`, with the word still its `aria-label`/`title`), the month
+   shortens to three letters beside a smaller wordmark and switcher, the
+   calendar picker loses its 📡 and says one word (Endpoint.short — the picker
+   says it at every width, since option text cannot follow the screen), and the
+   numbers readout goes: the 📊 pill at the foot of the page carries the total
+   (_calendar_body.html). MEASURED in Chromium and Firefox: 71px of header at 390
+   and 360, no sideways scroll. The actions stop hugging the right edge so they
+   can share the picker's row. Every page's ☰ Menu takes the same rule, so the
+   button is the same everywhere at a given width. */
 @media (max-width: 560px) {
-    header.hero { gap: 6px 8px; }
+    header.hero { gap: 6px; padding: 6px 10px; }
     header.hero .pill-text { display: none; }
-    header.hero .pill-btn, header.hero .nav-menu-btn { padding: 6px 9px; gap: 0; }
+    header.hero .pill-btn, header.hero .nav-menu-btn { padding: 5px 7px; gap: 0; }
     header.hero .pill-icon { margin-right: 0; }
     .hero-lead { gap: 6px 10px; }
-    .hero-lead img.brand-wordmark { height: 28px; }
+    .hero-lead img.brand-wordmark { height: 24px; }
     .month-nav { gap: 6px; }
-    .month-nav-btn { width: 28px; height: 28px; }
+    .month-nav-btn { width: 24px; height: 24px; }
+    .month-nav-btn img { width: 11px; height: 11px; }
+    .hero-lead .month-title-link h1 { font-size: 1.15rem; }
     .month-full { display: none; }
     .month-abbr { display: inline; }
     .hero-meta { display: none; }
-    .hero-controls .control select { max-width: 132px; }
+    .hero-controls, .hero-actions { gap: 4px; }
+    .hero-actions { margin-left: 0; }
+    .hero-controls .control { padding: 3px 6px; gap: 0; }
+    .hero-controls .control label { display: none; }
+    .hero-controls .control select { font-size: 0.72rem; }
 }
 .month-title-link:hover { transform: translateY(-1px); }
 

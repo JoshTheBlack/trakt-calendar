@@ -26,6 +26,12 @@ class Endpoint:
     media: Media        # which object each item wraps
     has_episode: bool   # whether items include an "episode" object (SxxEyy)
     description: str
+    # THE ONE WORD THE CALENDAR'S OWN PICKER SHOWS, and only the picker. The page
+    # header has to fit a phone in two rows, and a <select> cannot change its
+    # option text by screen width, so the picker says this at every width — the
+    # full `label` stays everywhere else a calendar is named (search results,
+    # titles, the picker's own tooltip). Empty falls back to the label.
+    short: str = ""
 
 
 # Order here is the order shown in the UI dropdown.
@@ -36,6 +42,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         media=Media.SHOW,
         has_episode=True,
         description="Brand-new shows premiering their very first episode.",
+        short="Series",
     ),
     "shows/premieres": Endpoint(
         key="shows/premieres",
@@ -43,6 +50,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         media=Media.SHOW,
         has_episode=True,
         description="Season premieres (episode 1 of any season).",
+        short="Seasons",
     ),
     "shows/finales": Endpoint(
         key="shows/finales",
@@ -50,6 +58,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         media=Media.SHOW,
         has_episode=True,
         description="Season/series finales airing this month.",
+        short="Finales",
     ),
     "shows": Endpoint(
         key="shows",
@@ -57,6 +66,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         media=Media.SHOW,
         has_episode=True,
         description="Every episode of every show airing this month.",
+        short="Episodes",
     ),
     "movies": Endpoint(
         key="movies",
@@ -64,6 +74,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         media=Media.MOVIE,
         has_episode=False,
         description="Theatrical / streaming movie premieres this month.",
+        short="Movies",
     ),
 }
 
