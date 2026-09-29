@@ -466,15 +466,16 @@ async def _documents(settings: Settings, wanted) -> list[tuple[str, str, dict | 
     """(catalogue, list, document) for every list `wanted` names, None where it
     could not be read.
 
-    ONE CALL WHEN EVERY LIST IS WANTED WHOLE, twelve otherwise. A first read and
-    a baseline want every list with no `date_from`, and one call answers that
-    exactly (`_whole_library`). A bounded read asks each moved list only for what
-    moved SINCE ITS OWN STAMP, which one call cannot express, so it stays per
-    list — which is also what Simkl's sync guide asks of an incremental client.
+    ONE CALL WHEN EVERY WANTED LIST IS WANTED WHOLE, one per list otherwise. A
+    first read, a rebaseline and a baseline ask each list they want with no
+    `date_from`, and one call answers all of them (`_whole_library`) — including
+    when a list the service marks as never used is left out of `wanted`, since
+    that list is empty in the whole answer too. MEASURED on a rebaseline: eight
+    such lists were eight calls. A bounded read asks each moved list only for
+    what moved SINCE ITS OWN STAMP, which one call cannot express, so it stays
+    per list — which is also what Simkl's sync guide asks of an incremental client.
     """
-    everything = {(media, status) for media in LIBRARY_TYPES for status in WATCHED_STATUSES}
-    if ({(media, status) for media, status, date_from in wanted if date_from is None}
-            == everything and len(wanted) == len(everything)):
+    if len(wanted) > 1 and all(date_from is None for _, _, date_from in wanted):
         whole = await _whole_library(settings)
         return [(media, status, None if whole is None else _split(whole, media, status))
                 for media, status, _ in wanted]
@@ -897,38 +898,39 @@ async def fetch_library_ids(settings: Settings) -> dict[int, str] | None:
     form produces `carniv%25C3%25A0le`, a link to a title that does not exist,
     from a value that looks right in the database. Decoding here means the stored
     name is the NAME and every consumer can encode it exactly once.
+
+    ONE CALL FOR EVERY LIST. `/sync/all-items/` with neither a catalogue nor a
+    status lists every catalogue and every list a library keeps. MEASURED on the
+    owner's account, 2026-09-29: the same 1,638 ids the fifteen per-list calls
+    (LIBRARY_TYPES x LIBRARY_STATUSES) return, none missing and none extra, in
+    0.10s against 3.40s. Its items carry no `status` under `simkl_ids_only`, and
+    none is needed: the question is what is held, in whichever list.
     """
     ids: dict[int, str] = {}
     with span("simkl.library_ids") as sp:
-        for media in LIBRARY_TYPES:
-            for status in LIBRARY_STATUSES:
-                params = {"extended": "simkl_ids_only"}
-                try:
-                    document = await transport.cached_get(
-                        transport.sync_client(), settings,
-                        f"sync/all-items/{media}/{status}", params,
-                        pool=transport.SYNC_POOL, private=True, raise_errors=True,
-                        app=transport.APP_NAME_TRACKER)
-                except transport.SimklError as exc:
-                    if transport.is_credential_failure(exc):
-                        raise
-                    logger.warning(
-                        "simkl library ids: %s/%s could not be read (%s) — no "
-                        "removal check this pass", media, status, exc)
-                    return None
-                if not isinstance(document, dict):
+        try:
+            document = await transport.cached_get(
+                transport.sync_client(), settings, "sync/all-items/",
+                {"extended": "simkl_ids_only"},
+                pool=transport.SYNC_POOL, private=True, raise_errors=True,
+                app=transport.APP_NAME_TRACKER)
+        except transport.SimklError as exc:
+            if transport.is_credential_failure(exc):
+                raise
+            logger.warning("simkl library ids could not be read (%s) — no removal "
+                           "check this pass", exc)
+            return None
+        # A catalogue with nothing in it is omitted entirely rather than sent as an
+        # empty list, so every key is read by name and a missing one is an
+        # ordinary empty answer.
+        for key in LIBRARY_TYPES:
+            for item in (document.get(key) if isinstance(document, dict) else None) or []:
+                entry = _entry_ids((item.get("show") or item.get("movie")
+                                    or item) if isinstance(item, dict) else {})
+                simkl_id = entry.get("simkl")
+                if simkl_id is None:
                     continue
-                # A bucket with nothing in it is omitted entirely rather than sent
-                # as an empty list, so every key is read by name and a missing one
-                # is an ordinary empty answer.
-                for key in (media, "shows", "movies", "anime"):
-                    for item in document.get(key) or []:
-                        entry = _entry_ids((item.get("show") or item.get("movie")
-                                            or item) if isinstance(item, dict) else {})
-                        simkl_id = entry.get("simkl")
-                        if simkl_id is None:
-                            continue
-                        ids[int(simkl_id)] = unquote(str(entry.get("simkl_slug") or ""))
+                ids[int(simkl_id)] = unquote(str(entry.get("simkl_slug") or ""))
         sp.set(titles=len(ids))
     return ids
 

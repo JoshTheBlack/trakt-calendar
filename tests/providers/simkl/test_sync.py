@@ -412,9 +412,20 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
         leaves the read complete."""
         activities = self._activities(shows_hold=None, shows_dropped=None,
                                       anime_hold=None, anime_dropped=None)
-        read, spy = await self._read([{}] * 8, activities=activities)
-        self.assertEqual(spy.await_count, 8)
+        read, spy = await self._read([{}] * 12, activities=activities)
+        # Every list it does want is wanted whole, so the whole library is still
+        # one call — a never-used list simply holds nothing in that answer.
+        # MEASURED: a rebaseline wanting eight lists was eight calls before this.
+        self.assertEqual([call.args[2] for call in spy.await_args_list], ["sync/all-items/"])
         self.assertTrue(read.complete)
+        # And asked per list — a bounded read — it is never fetched at all.
+        before = self._activities(shows_watching="2026-08-01T00:00:00Z",
+                                  shows_hold=None, shows_dropped=None)
+        now = self._activities(shows_watching="2026-08-20T00:00:00Z",
+                               shows_hold=None, shows_dropped=None)
+        _read, bounded = await self._read([{}], activities=now, since=before)
+        self.assertEqual([call.args[2] for call in bounded.await_args_list],
+                         ["sync/all-items/shows/watching"])
 
     async def test_a_bucket_whose_stamp_has_not_moved_is_not_fetched(self):
         """The private endpoints support no conditional request of any kind — no
@@ -820,29 +831,22 @@ class LibraryIdsTests(unittest.IsolatedAsyncioTestCase):
 
     Its answer is used to conclude that a title the viewer HOLDS is gone, so the
     interesting cases are all about when it must refuse to answer at all.
+
+    ONE CALL, EVERY LIST: `/sync/all-items/` unfiltered, measured to list exactly
+    the ids the fifteen per-list calls did (see fetch_library_ids).
     """
 
-    # ONE READ PER (catalogue, bucket), COMPUTED RATHER THAN WRITTEN OUT. These
-    # tests padded with a literal count, which meant adding a bucket made them
-    # fail for arithmetic rather than for the thing they assert.
-    CALLS = len(sync.LIBRARY_TYPES) * len(sync.LIBRARY_STATUSES)
-    MOVIES_AT = (len(sync.LIBRARY_TYPES) - 1) * len(sync.LIBRARY_STATUSES)
-
-    async def _ids(self, answers):
-        """`answers` in call order, padded with empty buckets to the full sweep."""
-        padded = list(answers) + [{}] * (self.CALLS - len(answers))
-        spy = _cached_get(*padded)
+    async def _ids(self, answer):
+        spy = _cached_get(answer)
         with patch("app.providers.simkl.transport.cached_get", new=spy):
             return await sync.fetch_library_ids(SETTINGS), spy
 
     async def test_it_reads_both_the_show_and_the_movie_shapes(self):
-        """Measured live: a show bucket sends `{"show": {"ids": ...}}` and a movie
-        bucket `{"movie": {...}}`, under a key named for the catalogue."""
-        answers = [{}] * self.CALLS
-        answers[0] = {"shows": [{"show": {"ids": {"simkl": 2519, "slug": "chuck"}}}]}
-        answers[self.MOVIES_AT] = {
-            "movies": [{"movie": {"ids": {"simkl": 53084, "slug": "ab"}}}]}
-        ids, _ = await self._ids(answers)
+        """Measured live: a show sends `{"show": {"ids": ...}}` and a movie
+        `{"movie": {...}}`, under a key named for the catalogue."""
+        ids, _ = await self._ids({
+            "shows": [{"show": {"ids": {"simkl": 2519, "slug": "chuck"}}}],
+            "movies": [{"movie": {"ids": {"simkl": 53084, "slug": "ab"}}}]})
         self.assertEqual(ids, {2519: "chuck", 53084: "ab"})
 
     async def test_a_percent_encoded_slug_is_decoded_once_here(self):
@@ -850,63 +854,54 @@ class LibraryIdsTests(unittest.IsolatedAsyncioTestCase):
         a URL by encoding what it is given, so handing over the encoded form makes
         `carniv%25C3%25A0le` — a dead link built from a value that looks right in
         the database."""
-        answers = [{"shows": [{"show": {"ids": {"simkl": 514,
-                                                "slug": "carniv%C3%A0le"}}}]}]
-        ids, _ = await self._ids(answers)
+        ids, _ = await self._ids({"shows": [{"show": {"ids": {"simkl": 514,
+                                                              "slug": "carniv%C3%A0le"}}}]})
         self.assertEqual(ids, {514: "carnivàle"})
 
-    async def test_one_unreadable_bucket_refuses_the_whole_answer(self):
-        """THE ASYMMETRY WITH fetch_library, AND THE REASON FOR IT. There, a bucket
+    async def test_a_listing_that_cannot_be_read_refuses_the_whole_answer(self):
+        """THE ASYMMETRY WITH fetch_library, AND THE REASON FOR IT. There, a list
         that failed costs freshness and the caller folds in what it got. Here it
-        costs every title in that bucket: they are simply ABSENT, and absence is
-        the entire signal. There is no partial version of this answer that is safe
-        to diff, so a failure means no check rather than a check on less."""
-        answers = [{"shows": [{"show": {"ids": {"simkl": 1, "slug": "a"}}}]},
-                   transport.SimklError("500 while reading the list")]
-        ids, _ = await self._ids(answers)
+        costs every title in it: they are simply ABSENT, and absence is the entire
+        signal. There is no partial version of this answer that is safe to diff,
+        so a failure means no check rather than a check on less."""
+        ids, _ = await self._ids(transport.SimklError("500 while reading the list"))
         self.assertIsNone(ids)
 
     async def test_a_credential_failure_is_raised_rather_than_reported_as_empty(self):
         """It is not a statement about this list, it is a statement about every
-        request this token will ever make. Swallowing it once per bucket would
-        swallow it twelve times and call the result a library."""
+        request this token will ever make."""
         boom = transport.SimklError("Simkl rejected the credentials (401).")
         with patch.object(transport, "is_credential_failure", return_value=True):
             with self.assertRaises(transport.SimklError):
-                await self._ids([boom])
+                await self._ids(boom)
 
     async def test_an_empty_library_is_an_answer_rather_than_a_refusal(self):
-        """Every bucket read, every one of them empty. That is a viewer who holds
+        """Every list read, every one of them empty. That is a viewer who holds
         nothing, and it is a real state the caller is entitled to act on — told
         apart from an unreadable one by being {} rather than None."""
-        ids, spy = await self._ids([])
+        ids, spy = await self._ids({})
         self.assertEqual(ids, {})
-        self.assertEqual(spy.await_count, self.CALLS)
+        self.assertEqual(spy.await_count, 1)
 
-    async def test_it_asks_for_every_bucket_a_library_keeps(self):
-        """THE BUG THIS EXISTS FOR, AND IT SHIPPED. This read asked only the
-        buckets a WATCH can be found in, which leaves out `plantowatch` — and a
+    async def test_it_asks_for_every_list_a_library_keeps(self):
+        """THE BUG THIS EXISTS FOR, AND IT SHIPPED. This read once asked only the
+        lists a WATCH can be found in, which leaves out `plantowatch` — and a
         title absent from this answer is reported to the caller as removed from
-        the library. On a live account 39 titles sat in that bucket, and 29 of the
-        33 rows the removal diff called missing were among them: nothing had been
-        removed, the listing had never been asked.
+        the library. On a live account 39 titles sat in that list, and 29 of the
+        33 rows the removal diff called missing were among them.
 
-        Asserted on the ADDRESSES requested rather than on a count, because a
-        count is what the tests here already checked and it passed throughout."""
-        _, spy = await self._ids([])
-        asked = {call.args[2] for call in spy.await_args_list}
-        for media in sync.LIBRARY_TYPES:
-            for status in sync.LIBRARY_STATUSES:
-                with self.subTest(bucket=f"{media}/{status}"):
-                    self.assertIn(f"sync/all-items/{media}/{status}", asked)
+        One call naming no catalogue and no status asks for every list at once;
+        asserted on the address, because a narrower one is how the bug came in."""
+        _, spy = await self._ids({})
+        self.assertEqual([call.args[2] for call in spy.await_args_list], ["sync/all-items/"])
+        self.assertEqual(spy.await_args.args[3], {"extended": "simkl_ids_only"})
 
     async def test_a_title_only_in_plan_to_watch_is_still_in_the_library(self):
         """The whole claim in one case: the viewer holds it, has watched none of
-        it, and it must not read as gone."""
-        answers = [{}] * self.CALLS
-        answers[sync.LIBRARY_STATUSES.index("plantowatch")] = {
-            "shows": [{"show": {"ids": {"simkl": 4242, "slug": "the-abandons"}}}]}
-        ids, _ = await self._ids(answers)
+        it, and it must not read as gone. The listing carries no status here, and
+        nothing filters on one."""
+        ids, _ = await self._ids({"shows": [
+            {"show": {"ids": {"simkl": 4242, "slug": "the-abandons"}}}]})
         self.assertEqual(ids, {4242: "the-abandons"})
 
     def test_a_listing_bucket_is_not_a_watched_bucket(self):
