@@ -2340,8 +2340,18 @@ async def add_header_image(board_uid: str, request: Request):
     )
 
 
-def _preview_url(query: str) -> str:
-    return f"/rankings/preview.webp?{query}" if query else "/rankings/preview.webp"
+def _preview_url(query: str, revision: Any) -> str:
+    """The preview's address: the options being composed, and the board's version.
+
+    THE VERSION IS IN THE ADDRESS BECAUSE THE BROWSER KEEPS PICTURES BY ADDRESS.
+    The image is sent `no-store`, and that did not stop a stale one: an <img>
+    drawn again at an address the page has already loaded is taken from the
+    document's own image cache without asking, so a board edited after one
+    preview showed that first preview every time the dialog reopened — measured,
+    and a reload was the only way out. The version moves with every change to the
+    board (core._touch), so the address names this board as it now stands.
+    """
+    return f"/rankings/preview.webp?{query}&rev={revision}"
 
 
 @guard.get("/rankings/fragments/export", AuthLevel.RANKER_APPROVED)
@@ -2389,6 +2399,7 @@ async def export_readout_fragment(request: Request):
     emojis, default_emoji = await ranker_import.network_emojis(user.user_id)
     return _export_readout(
         request, message=message, over=over, count=len(ranked), query=query,
+        revision=board.get("version"),
         header=_header_thumb(options.header_image),
         markdown=ranker_export.to_markdown(ranked, title=options.title, emojis=emojis,
                                            default_emoji=default_emoji),
@@ -2396,14 +2407,15 @@ async def export_readout_fragment(request: Request):
 
 
 def _export_readout(request: Request, *, message: str, over: bool = True, count: int = 0,
-                    query: str = "", header: str = "", markdown: str = "") -> Response:
+                    query: str = "", revision: Any = None, header: str = "",
+                    markdown: str = "") -> Response:
     """The dialog's live half: the size line, the preview, the Markdown the copy
     button takes, and — out of band, because they sit elsewhere in the dialog —
     the Download button in the state this size leaves it in and the thumbnail of
     the picture now chosen."""
     return templates.TemplateResponse(request, "_ranker_export_readout.html", {
         "request": request, "message": message, "over": over, "count": count,
-        "preview_url": _preview_url(query) if count and not over else "",
+        "preview_url": _preview_url(query, revision) if count and not over else "",
         "header_thumb": header, "markdown": markdown,
     })
 

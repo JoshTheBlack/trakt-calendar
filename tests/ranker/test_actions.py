@@ -619,6 +619,25 @@ class ExportOptionsAreMarkupTests(_ActionTestCase):
         self.assertNotIn("change", events)
         self.assertIn('hx-sync="this:queue last"', form)
 
+    def test_the_preview_address_moves_when_the_board_changes(self):
+        """The browser keeps a picture by its address, `no-store` or not, so an
+        address that stayed put after an edit reopened the dialog on the old
+        picture until the page was reloaded."""
+        def preview():
+            return re.search(r'<img alt="Preview of the poster grid" src="([^"]+)"',
+                             self.readout()).group(1)
+        first = preview()
+        self.assertEqual(preview(), first, "nothing changed, so neither may the address")
+        asyncio.run(ranker.remove_items(self.user_id, BOARD, [key("3")]))
+        after_removal = preview()
+        self.assertNotEqual(after_removal, first)
+        asyncio.run(ranker.save_layout(self.user_id, BOARD, {
+            "version": self.version(),
+            "categories": [{"uid": "tier-s", "label": "S", "rank_priority": 60,
+                            "items": [key("2"), key("1")]}],
+            "pool": []}))
+        self.assertNotEqual(preview(), after_removal)
+
     def test_the_preview_address_carries_the_options_it_was_drawn_from(self):
         html = self.readout(title="Top Shows")
         src = re.search(r'<img alt="Preview of the poster grid" src="([^"]+)"', html).group(1)
