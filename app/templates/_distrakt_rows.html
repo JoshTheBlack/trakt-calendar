@@ -160,9 +160,11 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
           role="img" title="{{ show.counts_note }}" aria-label="{{ show.counts_note }}"></span>
     {%- endif %}
     {{ picture(show) }}
-    {{ badge(show.network) }}
     <span class="distrakt-title"><span class="tt">{{ show.title }}</span>{{ return_mark(show) }}{{ missing_mark(show) }}</span>
     <span class="distrakt-season">S{{ '%02d' % show.season }}</span>
+    {#- The badge sits beside the network it stands for, between the season and
+        the network's name, rather than ahead of the title. -#}
+    {{ badge(show.network) }}
     {#- Spelled out in every bucket, not just as a tooltip: this is the string the
         emoji map is keyed on, so seeing it is what makes the map editable
         without guessing. -#}
@@ -210,9 +212,9 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
 {% macro film_row(film) %}
 <div class="distrakt-show-row distrakt-film-row">
     {{ picture(film) }}
-    <span class="distrakt-badge">🎬</span>
     <span class="distrakt-title"><span class="tt">{{ film.title or 'Untitled' }}</span></span>
     <span class="distrakt-season"></span>
+    <span class="distrakt-badge">🎬</span>
     <span class="distrakt-network">Film</span>
     <span class="distrakt-counts">{{ film.year or '' }}</span>
     <span class="distrakt-dates">{{ (film.watched_at or '')[:10] }}</span>

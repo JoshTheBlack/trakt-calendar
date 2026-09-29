@@ -2278,7 +2278,7 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
 .distrakt-bucket-head:first-child { margin-top: 0; }
 .distrakt-weekday-head { color: var(--text-dim); font-style: italic; font-size: 0.82rem; margin: 5px 0 2px 2px; }
 
-/* Uniform single-line rows: badge | title (flex, hover-scrolls) | S## | (x/y) | dates | actions */
+/* Uniform single-line rows: picture | title (flex, hover-scrolls) | S## | badge | network | (x/y) | dates | actions */
 .distrakt-show-row {
     display: flex; align-items: center; gap: 10px;
     padding: 4px 10px; min-height: 34px; font-size: 0.85rem;
@@ -2476,9 +2476,10 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
    fixed widths to the season, network, counts and dates (about 26em between
    them) plus the logo and the buttons, which at a 400px phone left the title no
    width at all. MEASURED: in Firefox's responsive mode titles appeared only from
-   a 550px window. Below this width a row becomes two lines beside its logo: the
-   title and the buttons on the first, the facts sized to what they say on the
-   second. A container query and not a viewport one, because what
+   a 550px window. Below this width a row becomes two lines beside its picture:
+   the title and the buttons on the first, the facts sized to what they say on
+   the second — the network badge among them, between the season and the
+   network's name, as on the one-line row. A container query and not a viewport one, because what
    squeezes the title is the list's own width, the same reason the rankings
    board's tier rows use one. Every cell is placed by column, so a row without
    the freshness dot (a closed month's) lays out the same. */
@@ -2492,13 +2493,16 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     /* Two lines tall here, so the picture can be too: 34x51, the search
        results' size, measured to grow a phone row by 3px. */
     .distrakt-poster { grid-column: 2; grid-row: 1 / 3; width: 34px; height: 51px; }
-    .distrakt-badge { grid-column: 3; grid-row: 1 / 3; }
-    .distrakt-title { grid-column: 4 / 8; grid-row: 1; }
+    /* On the facts line, so a line of text's height: the badge is sized down
+       to it rather than making the second line taller than the first. */
+    .distrakt-badge { grid-column: 4; grid-row: 2; width: 18px; height: 18px; }
+    .distrakt-badge .distrakt-logo { max-width: 18px; max-height: 18px; }
+    .distrakt-title { grid-column: 3 / 8; grid-row: 1; }
     .distrakt-row-actions { grid-column: 8; grid-row: 1; }
     .distrakt-season, .distrakt-network, .distrakt-counts, .distrakt-dates {
         grid-row: 2; width: auto; text-align: left; font-size: 0.78rem;
     }
-    .distrakt-season { grid-column: 4; }
+    .distrakt-season { grid-column: 3; }
     .distrakt-network { grid-column: 5; min-width: 0; }
     .distrakt-counts { grid-column: 6; }
     /* The dates reach under the buttons, which sit on the first line only: at a

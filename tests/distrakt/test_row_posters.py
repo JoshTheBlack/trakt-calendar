@@ -148,6 +148,17 @@ class RowPosterTests(MonthFragmentTestCase):
         self.assertIn('class="distrakt-badge"', row)
         self.assertLess(row.index("distrakt-poster"), row.index("distrakt-badge"))
 
+    def test_the_badge_sits_between_the_season_and_the_network(self):
+        """Beside the network it stands for, not ahead of the title."""
+        self.list_one()
+        outer, season, calendar = self.offline()
+        with outer, season, calendar:
+            html = self.client.get("/distrakt/fragments/month?year=%d&month=%d" % self.current).text
+        row = re.search(r'<div class="distrakt-show-row.*?</div>', html, re.S).group(0)
+        order = [row.index(f'class="{cell}') for cell in
+                 ("distrakt-title", "distrakt-season", "distrakt-badge", "distrakt-network")]
+        self.assertEqual(order, sorted(order))
+
 
 class FilmRowPosterTests(MonthFragmentTestCase):
     """A watched film's row draws a picture by the same rules as a show's.
