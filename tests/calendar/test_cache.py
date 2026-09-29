@@ -1087,6 +1087,27 @@ class ReadPathTests(CacheTestCase):
         fetch.assert_awaited()
         self.assertEqual(window.groups[0]["by_source"]["trakt"]["id"], "both")
 
+    async def test_a_first_fill_serves_what_a_search_already_wrote_there(self):
+        """A month opened for the first time is drawn by the read that fills it.
+        That read served the records it had just FETCHED, and a window's rows
+        also hold what a search wrote into it before anyone opened the month —
+        so a jump to a search-written premiere opened on a month without its
+        card, and found it only on the next visit."""
+        from app.calendar import entries
+        loose = base.Record(
+            source=base.Source.SIMKL, media=base.Media.SHOW, id="9197",
+            ids={"simkl": 9197, "tmdb": "1405"}, detail_url="", title="Dexter",
+            air_ts=datetime(2026, 7, 7, tzinfo=timezone.utc).timestamp(), date_only=True,
+            season=1, episode_number=1)
+        await entries.store_loose_airings(SHOWS.key, [loose], now=1000, stale_after=10 ** 9)
+        fetch = window_fetch([_entry("fetched", "2026-07-06T12:00:00Z")])
+        with patch("app.calendar.cache.fetch_window_records", fetch):
+            window, _ = await calendar_cache.load_window(
+                SHOWS, self.settings, date(2026, 7, 6), now=1000)
+        titles = sorted(record["title"] for group in window.groups
+                        for record in group["by_source"].values())
+        self.assertEqual(titles, ["Dexter", "fetched"])
+
     async def test_public_read_never_fetches_and_serves_what_is_cached(self):
         # Nothing cached, fetch disabled -> empty, and no source is ever asked.
         fetch = AsyncMock(side_effect=AssertionError("must not fetch"))
@@ -1272,11 +1293,15 @@ class AssembleRangeTests(CacheTestCase):
         self.assertEqual(await read(["apple tv"]), [])
         self.assertEqual(sorted(await read(None)), ["apple", "flix", "hbo"])
 
-    async def test_overlapping_windows_dedupe_keeping_the_earlier_windows_copy(self):
-        """gather loads the windows concurrently, but the results are stitched
-        back in window order, so an airing two adjacent windows both return is
-        kept from the EARLIER window — the same copy the old sequential read
-        kept. Proves ordering survives the concurrent fetch."""
+    async def test_an_airing_two_windows_both_fetch_is_one_card(self):
+        """Two adjacent windows' fetches both returning one airing draw it once.
+
+        WHICH COPY'S FIELDS SURVIVE IS NO LONGER THIS TEST'S QUESTION, and it
+        was: it asked that the EARLIER window's copy be kept, which held while a
+        filling read served the records it had fetched. A fill now serves its
+        window read back from the rows, where a title's name is one row that the
+        later write owns and each window holds only its own dates — so there is
+        no second copy left to choose between."""
         w1 = calendar_cache.window_start(date(2026, 7, 6))
         w2 = w1 + timedelta(days=7)
         from_w1 = _entry("dup", "2026-07-15T20:00:00Z", season=3, number=3)
@@ -1297,7 +1322,6 @@ class AssembleRangeTests(CacheTestCase):
                 start_date=date(2026, 7, 1), end_date=date(2026, 7, 31))
         items = [i for g in grouped for i in g["items"]]
         self.assertEqual(len(items), 1)
-        self.assertEqual(items[0].title, "from the earlier window")
 
     async def test_a_single_failed_window_renders_the_rest_and_flags_partial(self):
         """RESILIENT BUT LOUD: one window's fetch failing (nothing cached to fall

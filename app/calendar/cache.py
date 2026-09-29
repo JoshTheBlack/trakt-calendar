@@ -694,9 +694,18 @@ async def stored_window_signature() -> str:
 
 async def store_window(endpoint_key: str, start: date, records: list[Record],
                        ttl_seconds: int, now: int, *, sources=(), asked=None,
-                       unchanged=()) -> list[dict]:
-    """Store one window's records as rows, and hand back the groups a caller
-    about to serve the same window would otherwise build a second time.
+                       unchanged=()) -> None:
+    """Store one window's records as rows.
+
+    NOTHING IS HANDED BACK, and it used to be: the groups of the records just
+    stored, so that the read that filled could serve them without building them
+    twice. Those are not the window. A window's rows also hold whatever a search
+    or a card's panel wrote into it (`entries.store_loose_airings`), and the
+    stored rows of a source that answered "unchanged" — and a month opened for
+    the first time was drawn without either. Measured: a search jump to Dexter's
+    1 October 2006 premiere, which only Simkl's search-written row put on
+    30 September, opened a month with no such card and nothing to land on; the
+    next visit, reading rows, found it. `load_window` reads the window back.
 
     THE GROUPING IS NO LONGER WHAT IS STORED. It used to be: the window blob held
     the finished groups, so the match ran once at fill and every read served its
@@ -725,7 +734,6 @@ async def store_window(endpoint_key: str, start: date, records: list[Record],
     # served from before the refill for the length of its TTL. Named, because
     # this window belongs to one endpoint and the others are untouched.
     _forget_spans(endpoint_key)
-    return group_records(records)
 
 
 # HOW STALE A SPAN MAY BE BEFORE A READ REFILLS IT, by how far its own dates are
@@ -901,18 +909,17 @@ async def load_window(endpoint: Endpoint, settings, start: date, *,
         if cached is not None:  # serve the stale copy rather than nothing
             return cached
         raise
-    groups = await store_window(endpoint.key, start, records, ttl, ts,
-                                sources=answered, asked=in_play, unchanged=unchanged)
-    if unchanged and not answered:
-        # EVERY SOURCE SAID "UNCHANGED", SO THIS FETCH BROUGHT NO RECORDS — and
-        # `groups` is therefore empty while the stored rows are perfectly good.
-        # Serving what was just built would blank the month on the very read that
-        # confirmed it was current, which is the worst possible outcome of a
-        # successful conditional GET. The store above still ran: it advanced the
-        # coverage clock without touching an airing.
-        refreshed = await read_cached_window(endpoint.key, start)
-        if refreshed is not None:
-            return refreshed
+    await store_window(endpoint.key, start, records, ttl, ts,
+                       sources=answered, asked=in_play, unchanged=unchanged)
+    # SERVED FROM THE ROWS JUST WRITTEN, NOT FROM WHAT WAS FETCHED — see
+    # store_window for what the fetch alone leaves out. The sharpest case: EVERY
+    # SOURCE SAID "UNCHANGED", so this fetch brought no records at all while the
+    # stored rows are perfectly good, and serving what was fetched would blank
+    # the month on the very read that confirmed it was current. The store above
+    # still ran: it advanced the coverage clock without touching an airing.
+    stored = await read_cached_window(endpoint.key, start)
+    if unchanged and not answered and stored is not None:
+        return stored
     # A FILL, NOT A READ — this line only runs when the branch above actually
     # fetched and stored, never on a cache-hit return further up. That is
     # what lets it ask for enrichment sooner than the next heartbeat tick
@@ -926,6 +933,9 @@ async def load_window(endpoint: Endpoint, settings, start: date, *,
     # than a per-view cost added to the hot render path.
     sightings = (s for s in (_poster_sighting(r) for r in records) if s is not None)
     await artwork.record_poster_urls(sightings)
+    # The GROUPS from the rows; who was asked and who answered from this fill,
+    # which knows them in the sources' declared order.
+    groups = stored[0].groups if stored is not None else group_records(records)
     return CachedWindow(groups, tuple(answered), tuple(in_play)), ts
 
 
