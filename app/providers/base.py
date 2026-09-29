@@ -714,7 +714,11 @@ def render(record: Record, tz: ZoneInfo) -> Item:
         genre_slugs=slugs,
         air_date=moment.strftime("%Y-%m-%d"),
         air_display=moment.strftime("%d %b %Y"),
-        air_time=moment.strftime("%H:%M"),
+        # NO TIME FOR A DATE. A date-only record is pinned at UTC midnight so it
+        # lands on its day for everyone, and that midnight is bookkeeping, not an
+        # hour anybody named: printed, every film card and every day-only premiere
+        # claimed to air at 00:00.
+        air_time="" if record.date_only else moment.strftime("%H:%M"),
         day_of_week=moment.strftime("%A"),
     )
 

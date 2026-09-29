@@ -129,6 +129,17 @@ class TestNormalizeProducesARecord:
         assert record.air_ts == 1784145600.0
         assert not hasattr(record, "air_date")
 
+    def test_a_date_renders_with_no_time(self):
+        """A date-only record is pinned at UTC midnight so it lands on its day
+        everywhere; printing that midnight made every film and day-only
+        premiere claim to air at 00:00. An instant keeps its local time."""
+        from app.providers.base import render
+        record = trakt_calendar.to_record(ENTRY, SHOWS.media)
+        dated = dataclasses.replace(record, date_only=True, air_ts=1784073600.0)  # 2026-07-15
+        assert render(dated, ZoneInfo("America/New_York")).air_time == ""
+        assert render(dated, ZoneInfo("America/New_York")).air_date == "2026-07-15"
+        assert render(record, ZoneInfo("UTC")).air_time == "20:00"
+
     def test_an_item_missing_a_required_field_raises_at_construction(self):
         """THE REASON THIS IS A DATACLASS. A provider that forgets to say when
         something airs fails here, in its own tests, rather than rendering a
