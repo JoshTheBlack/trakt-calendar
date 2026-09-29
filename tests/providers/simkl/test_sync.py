@@ -88,7 +88,7 @@ class PrivacyTests(unittest.IsolatedAsyncioTestCase):
     async def test_every_get_is_private_and_on_the_sync_pool(self):
         answers = [
             {"tv_shows": {"all": "T"}},                       # the beacon
-            *[{} for _ in range(12)],                         # every history bucket
+            *[{} for _ in range(len(BUCKETS))],               # every history bucket
         ]
         spy = _cached_get(*answers)
         with patch("app.providers.simkl.transport.cached_get", new=spy):
@@ -105,7 +105,8 @@ class PrivacyTests(unittest.IsolatedAsyncioTestCase):
         is POST /sync/history, and no call in this module may name it."""
         send = AsyncMock()
         with patch("app.providers.simkl.transport.send", new=send), \
-             patch("app.providers.simkl.transport.cached_get", new=_cached_get(*[{}] * 13)):
+             patch("app.providers.simkl.transport.cached_get",
+                   new=_cached_get(*[{}] * (len(BUCKETS) + 1))):
             await sync.fetch_history(SETTINGS)
         for call in send.await_args_list:
             self.assertNotIn("sync/history", call.args[2])
@@ -252,7 +253,7 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
         about the connection, the service or the token, and it is not this
         module's to turn into a result."""
         with patch("app.providers.simkl.transport.cached_get",
-                   new=_cached_get(*[transport.SimklError("gone", 500)] * 12)):
+                   new=_cached_get(*[transport.SimklError("gone", 500)] * len(BUCKETS))):
             with self.assertRaises(transport.SimklError):
                 await sync.fetch_history(SETTINGS)
 
@@ -538,7 +539,7 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
         never re-read because its stamp stops moving."""
         before = {"lists": {"shows": {"watching": "2026-08-01T00:00:00Z"}}}
         now = self._activities(shows_watching="2026-08-20T00:00:00Z")
-        _read, spy = await self._read([{}] * 12, activities=now, since=before)
+        _read, spy = await self._read([{}] * len(BUCKETS), activities=now, since=before)
         sent = {call.args[2]: call.args[3].get("date_from")
                 for call in spy.await_args_list}
         self.assertEqual(sent["sync/all-items/shows/watching"],
@@ -605,6 +606,50 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(call.kwargs["raise_errors"], True)
 
 
+class PlanToWatchTests(unittest.IsolatedAsyncioTestCase):
+    """A title on the viewer's Simkl watchlist can carry watched episodes.
+    MEASURED on the owner's account: 42 of 47 plan-to-watch titles did — a bulk
+    move had put them there — and a read that skipped the list reported Simkl
+    holding nothing for them, so two seasons finished that month read as
+    verdicts no service backed."""
+
+    WATCHED = {"status": "plantowatch", "watched_episodes_count": 10,
+               "last_watched_at": "2026-09-24T23:48:36Z",
+               "show": {"title": "Strange New Worlds",
+                        "ids": {"simkl_id": 1347534, "tmdb": "103516"}},
+               "seasons": [{"number": 4, "episodes": [
+                   {"number": n, "watched_at": "2026-09-2%dT00:00:00Z" % min(n, 9)}
+                   for n in range(1, 11)]}]}
+    LISTED_ONLY = {"status": "plantowatch", "watched_episodes_count": 0,
+                   "show": {"title": "Later", "ids": {"simkl_id": 9, "tmdb": "901"}}}
+
+    async def _read(self, *items):
+        async def _whole(*_args, **_kwargs):
+            return {"shows": list(items)}
+
+        with patch("app.providers.simkl.transport.cached_get", new=AsyncMock(side_effect=_whole)):
+            return await sync.fetch_library(SETTINGS)
+
+    async def test_a_watched_title_on_the_watchlist_is_read_as_watched(self):
+        read = await self._read(self.WATCHED)
+        entry = read.entries["show:tmdb:103516"]
+        self.assertEqual(sorted(entry.seasons[4]), list(range(1, 11)))
+        self.assertEqual(len([e for e in read.events if e["episode"]["season"] == 4]), 10)
+
+    async def test_a_title_only_on_the_watchlist_says_nothing(self):
+        """Simkl stays silent about it, as before — not "seen none of it", which
+        would draw a disagreement for every title only watchlisted there."""
+        read = await self._read(self.LISTED_ONLY)
+        self.assertEqual(read.entries, {})
+
+    async def test_its_stamp_is_one_the_reads_follow(self):
+        """So a title moving into the list moves a stamp a bounded read notices."""
+        payload = {"tv_shows": {"all": "T", "watching": "T1", "plantowatch": "T2"}}
+        with patch("app.providers.simkl.transport.cached_get", new=_cached_get(payload)):
+            beacon = await sync.fetch_last_activities(SETTINGS)
+        self.assertEqual(beacon["lists"]["shows"]["plantowatch"], "T2")
+
+
 class AnimeSeasonTitleTests(unittest.IsolatedAsyncioTestCase):
     """Simkl's anime season-titles, and the parameter that resolves them.
 
@@ -646,9 +691,10 @@ class AnimeSeasonTitleTests(unittest.IsolatedAsyncioTestCase):
         """A library read whose only non-empty buckets are `shows/watching`,
         `anime/watching` and `anime/completed`. Returns the read, the paths asked
         for and the parameters each was asked with."""
-        buckets = iter([{"shows": list(shows_items)}] + [{}] * 3
-                       + [{"anime": list(anime_items)},
-                          {"anime": list(finished)}] + [{}] * 6)
+        per_type = len(sync.WATCHED_STATUSES)
+        buckets = iter([{"shows": list(shows_items)}] + [{}] * (per_type - 1)
+                       + [{"anime": list(anime_items)}, {"anime": list(finished)}]
+                       + [{}] * (per_type - 2) + [{}] * per_type)
         paths, params = [], []
 
         async def _get(client, settings, path, param=None, **kwargs):
@@ -904,15 +950,11 @@ class LibraryIdsTests(unittest.IsolatedAsyncioTestCase):
             {"show": {"ids": {"simkl": 4242, "slug": "the-abandons"}}}]})
         self.assertEqual(ids, {4242: "the-abandons"})
 
-    def test_a_listing_bucket_is_not_a_watched_bucket(self):
-        """LIBRARY_STATUSES IS NOT WATCHED_STATUSES, and the difference is the
-        point. `plantowatch` belongs in a listing of what is HELD and must stay
-        out of the reads that ask what has been WATCHED — feeding them a bucket
-        with no watches in it is how a baseline learns that a viewer has seen
-        nothing of a title they own."""
-        self.assertNotIn("plantowatch", sync.WATCHED_STATUSES)
-        self.assertEqual(set(sync.LIBRARY_STATUSES) - set(sync.WATCHED_STATUSES),
-                         {"plantowatch"})
+    def test_the_listing_covers_every_list_a_watch_can_be_in(self):
+        """`plantowatch` is held AND can hold watches (see WATCHED_STATUSES), so
+        the listing and the watch reads cover the same lists."""
+        self.assertIn("plantowatch", sync.LIBRARY_STATUSES)
+        self.assertEqual(set(sync.LIBRARY_STATUSES), set(sync.WATCHED_STATUSES))
 
     def test_an_unrecognised_bucket_is_never_asked_for(self):
         """Simkl answers a status it does not know with the WHOLE library rather

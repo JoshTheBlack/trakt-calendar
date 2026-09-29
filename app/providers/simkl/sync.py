@@ -61,15 +61,25 @@ logger = logging.getLogger(__name__)
 # exactly one, and a season somebody is part-way through sits in `watching`
 # while a finished one sits in `completed` — so asking only about `completed`
 # would lose every season in progress, which is most of what the tracker counts.
-# `plantowatch` is excluded because nothing in it has been watched.
-WATCHED_STATUSES = ("watching", "completed", "hold", "dropped")
+#
+# `plantowatch` IS ONE OF THEM, which it was once assumed not to be. MEASURED on
+# the owner's account, 2026-09-29: 42 of the 47 titles in that list carry watched
+# episodes — a bulk move on one July evening put them there, Strange New Worlds
+# with all forty episodes seen and Halloween Baking Championship still being
+# watched. Left unread, a complete read reported Simkl holding nothing for them,
+# and two seasons finished that month read as verdicts no service backed any
+# more. An item there with NOTHING watched is still left out
+# (`_holds_no_watches`), so Simkl stays silent about a title that is only on its
+# watchlist rather than claiming it was seen none of.
+PLAN_TO_WATCH = "plantowatch"
+WATCHED_STATUSES = ("watching", "completed", "hold", "dropped", PLAN_TO_WATCH)
 
-# THE BUCKETS A LIBRARY LISTING MUST COVER, WHICH IS NOT THE SAME QUESTION.
-# WATCHED_STATUSES above is about where a WATCH can be found, and `plantowatch`
-# is rightly missing from it: nothing in there has been watched. fetch_library_ids
-# asks something else — WHAT IS STILL IN THIS LIBRARY — and reads a title's
-# absence as the service having dropped it. A bucket it never asks about is
-# therefore every title in that bucket reported as removed.
+# THE BUCKETS A LIBRARY LISTING MUST COVER. fetch_library_ids asks WHAT IS STILL
+# IN THIS LIBRARY and reads a title's absence as the service having dropped it,
+# so a bucket it never asks about is every title in that bucket reported as
+# removed. It is every list a watch can be in (WATCHED_STATUSES), plan-to-watch
+# included; it was a separate, wider list while plan-to-watch was not read for
+# watches, and it stays its own name because the two questions are different.
 #
 # MEASURED ON A LIVE ACCOUNT, which is how this was found: 39 of that library's
 # titles sit in `plantowatch`, and 29 of the 33 rows the removal diff called
@@ -80,7 +90,7 @@ WATCHED_STATUSES = ("watching", "completed", "hold", "dropped")
 # unrecognised status with the whole library rather than an error — measured:
 # `shows/notinteresting` returned 1,045 distinct ids against a real library of
 # 1,045 — so reading it would make every diff believe nothing is ever missing.
-LIBRARY_STATUSES = (*WATCHED_STATUSES, "plantowatch")
+LIBRARY_STATUSES = WATCHED_STATUSES
 
 # The one bucket whose items are NOT itemized, measured against a live account:
 # every title in `watching` carries a `seasons[]` block with an entry per episode
@@ -696,6 +706,21 @@ def _merged_claim(first: UnlistedSeasons, second: UnlistedSeasons) -> UnlistedSe
     return first if first == second else UnlistedSeasons.SILENT
 
 
+def _holds_no_watches(item: dict, status: str) -> bool:
+    """A plan-to-watch item nobody has watched any of: a title on the viewer's
+    Simkl watchlist and nothing more. Left out of a watch read, so a title only
+    watchlisted there reads as Simkl saying nothing about it — which is what it
+    has always read as — rather than as Simkl reporting it seen none of."""
+    if status != PLAN_TO_WATCH:
+        return False
+    if any(season.get("episodes") for season in item.get("seasons") or []):
+        return False
+    try:
+        return int(item.get("watched_episodes_count") or 0) == 0 and not item.get("last_watched_at")
+    except (TypeError, ValueError):
+        return True
+
+
 def _fold_library_item(entries: dict[str, LibraryEntry], item: dict,
                        status: str) -> None:
     """One library item filed under the SHARED identity of its title.
@@ -811,6 +836,8 @@ async def fetch_library(settings: Settings, *, start_at: str | None = None,
                 continue
             items = document.get(media) or document.get("shows") or []
             for item in items:
+                if _holds_no_watches(item, status):
+                    continue
                 events.extend(_episode_events(item, start_at))
                 _fold_library_item(entries, item, status)
         sp.set(unread=failed, complete=complete)
@@ -873,12 +900,10 @@ async def fetch_library_ids(settings: Settings) -> dict[int, str] | None:
     filtered out for not having moved is exactly the title a diff would then
     report as removed. This is the one read in this module that must stay whole.
 
-    EVERY BUCKET, NOT THE WATCHED ONES (LIBRARY_STATUSES, not WATCHED_STATUSES).
-    "Where can a watch be found" and "what is still in this library" are different
-    questions, and this is the second: a title in `plantowatch` has been watched
-    nowhere and is still very much in the library, so leaving that bucket unasked
-    reported every title in it as removed. See LIBRARY_STATUSES for the numbers
-    that found it.
+    EVERY BUCKET (LIBRARY_STATUSES), `plantowatch` included: a title there may
+    have been watched nowhere and is still very much in the library, so leaving
+    that bucket unasked reported every title in it as removed. See
+    LIBRARY_STATUSES for the numbers that found it.
 
     NONE RATHER THAN A SHORT LIST WHEN ANY BUCKET FAILS, and the asymmetry with
     fetch_library is deliberate. There, a bucket that could not be read makes the
