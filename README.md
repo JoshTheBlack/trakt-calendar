@@ -85,6 +85,16 @@ docker run -p 8000:8000 -v trakt-data:/data ghcr.io/<owner>/trakt-new-shows:late
 You can also seed credentials without touching the UI by setting `TRAKT_CLIENT_ID` and
 `TRAKT_ACCESS_TOKEN` environment variables on first run.
 
+### Keeping a log file
+
+The app logs to the console only, unless you set `LOG_FILE`. With `LOG_FILE=1` it also
+writes `logs/app.log` in the data directory (`/data/logs/app.log` in the container, so it
+lands on your volume); any other value is taken as the file's path. The file rolls over at
+10 MB and the five most recent old ones are kept (`app.log.1` … `app.log.5`), so it never
+passes about 60 MB. It is meant for catching what happened around a problem — a slow
+page, an error — so the lines can be passed on afterwards. `LOG_LEVEL` (default `INFO`)
+decides how much is written, to the console and the file alike.
+
 ## Serving over HTTPS
 
 Three settings decide whether the app behaves correctly behind a reverse proxy. All three

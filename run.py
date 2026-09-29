@@ -4,6 +4,10 @@ Usage:
     python run.py               # http://localhost:8000 with auto-reload
 Environment:
     HOST (default 0.0.0.0), PORT (default 8000), RELOAD (default 1)
+    LOG_FILE (default off) — also write the log to a file: `1` for
+        data/logs/app.log, or a path. Rolled over at 10 MB, five old files
+        kept. For handing over the lines around a problem afterwards; see
+        app/logging_setup.py.
     LOG_LEVEL (default INFO) — set to DEBUG to see every outbound Trakt API
         call (the "app.perf" logger's netGET/netPOST/cacheHIT lines from
         app/providers/trakt/, app/calendar/cache.py, and app/auth/trakt.py), plus
@@ -16,7 +20,6 @@ Environment:
         slow instance means lowering these, not raising LOG_LEVEL, which turns
         on full per-Trakt-call tracing as well. See app/perftrace.py.
 """
-import logging
 import os
 
 # Loads a gitignored .env file in the project root, if present, before anything
@@ -32,13 +35,12 @@ import hypercorn.asyncio
 from hypercorn.config import Config
 
 # Quiet third-party libs (WARNING) but surface our own app.* diagnostics at
-# LOG_LEVEL (default INFO; set DEBUG for per-Trakt-call tracing — see the
-# module docstring). Fires before `from app.main import app` below, which
-# reruns the identical setup (see app/main.py) — a no-op here since
-# basicConfig() only attaches a handler once, so this call is the one that
-# actually wins for the dev runner.
-logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-logging.getLogger("app").setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+# LOG_LEVEL, to the console and — with LOG_FILE — a rolling file (see the module
+# docstring and app/logging_setup.py). Fires before `from app.main import app`
+# below, so the app's own import-time lines are caught too; app/main.py calls the
+# same setup again, which is a no-op.
+from app import logging_setup
+logging_setup.configure()
 # Nothing here quiets hypercorn's per-request access log, and nothing can: it
 # overwrites that logger's level from its own config after this runs (see the note
 # in app/main.py). What actually decides it is config.accesslog below.

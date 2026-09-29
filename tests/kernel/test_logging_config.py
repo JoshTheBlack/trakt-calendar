@@ -61,5 +61,80 @@ class LoggingConfigTests(unittest.TestCase):
         self.assertEqual(logging.getLogger("app.perf").level, logging.NOTSET)
 
 
+class LogFileTests(unittest.TestCase):
+    """LOG_FILE: a rolling file beside the console, only when asked for."""
+
+    def setUp(self):
+        import tempfile
+        self.dir = Path(tempfile.mkdtemp())
+        self.root = logging.getLogger()
+        self.before = list(self.root.handlers)
+
+    def tearDown(self):
+        import shutil
+        for handler in self.root.handlers[:]:
+            if handler not in self.before:
+                self.root.removeHandler(handler)
+                handler.close()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def configure(self, value, **patches):
+        from unittest import mock
+        from app import logging_setup
+        with mock.patch.dict(os.environ, {"LOG_FILE": value}), \
+                mock.patch.multiple(logging_setup, **patches) if patches else _nothing():
+            return logging_setup.configure()
+
+    def file_handlers(self):
+        return [h for h in self.root.handlers
+                if isinstance(h, logging.FileHandler) and h not in self.before]
+
+    def test_off_unless_asked(self):
+        from app import logging_setup
+        for value in ("", "0", "false", "Off", " no "):
+            with self.subTest(value=value):
+                self.assertIsNone(logging_setup.log_file_path(value))
+                self.assertIsNone(self.configure(value))
+                self.assertEqual(self.file_handlers(), [])
+
+    def test_a_yes_means_the_data_directory_and_anything_else_is_a_path(self):
+        from app import config, logging_setup
+        self.assertEqual(logging_setup.log_file_path("1"),
+                         Path(config.DATA_DIR) / "logs" / "app.log")
+        self.assertEqual(logging_setup.log_file_path("TRUE"),
+                         Path(config.DATA_DIR) / "logs" / "app.log")
+        self.assertEqual(logging_setup.log_file_path(str(self.dir / "x.log")), self.dir / "x.log")
+
+    def test_ten_megabytes_five_kept_and_one_handler_however_often_it_is_called(self):
+        """Both entry points call configure(); a second handler would write every
+        line twice and fight the first over the rollover."""
+        path = self.dir / "logs" / "app.log"
+        self.assertEqual(self.configure(str(path)), path)
+        self.configure(str(path))
+        handler, = self.file_handlers()
+        self.assertEqual((handler.maxBytes, handler.backupCount), (10 * 1024 * 1024, 5))
+        logging.getLogger("app.somewhere").warning("a line worth handing over")
+        handler.flush()
+        self.assertIn("WARNING app.somewhere: a line worth handing over",
+                      path.read_text(encoding="utf-8"))
+
+    def test_it_rolls_over_and_keeps_five(self):
+        path = self.dir / "app.log"
+        self.configure(str(path), LOG_FILE_MAX_BYTES=300)
+        log = logging.getLogger("app.rollover")
+        for n in range(200):
+            log.warning("line %03d of a log that outgrows its file", n)
+        for handler in self.file_handlers():
+            handler.close()
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()),
+                         ["app.log", "app.log.1", "app.log.2", "app.log.3", "app.log.4",
+                          "app.log.5"])
+
+
+def _nothing():
+    import contextlib
+    return contextlib.nullcontext()
+
+
 if __name__ == "__main__":
     unittest.main()

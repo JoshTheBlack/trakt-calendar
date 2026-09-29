@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -34,6 +33,7 @@ from . import csp
 from . import chrome
 from . import db
 from . import http_pool
+from . import logging_setup
 from . import perftrace
 from . import secrets_box
 from . import settings_routes
@@ -66,17 +66,10 @@ logger = logging.getLogger(__name__)
 
 # Configured here (not only in run.py) so `hypercorn app.main:app` — what the
 # Docker image's CMD runs directly, bypassing run.py entirely — gets the same
-# app.* diagnostics and Trakt-call tracing as the dev runner, instead of
-# Python's silent WARNING-only default. LOG_LEVEL controls the app's own
-# loggers (including "app.perf", which every outbound Trakt call logs a line
-# to at DEBUG — see app/providers/trakt/, app/calendar/cache.py, app/auth/trakt.py);
-# third-party libraries stay at WARNING regardless, since their own DEBUG
-# output is rarely what anyone actually wants. basicConfig() only attaches a
-# handler if the root logger doesn't already have one, so when run.py has
-# already called it (the dev path) this is a no-op and run.py's config wins;
-# in Docker, where nothing else calls it, this is the only config that fires.
-logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-logging.getLogger("app").setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+# app.* diagnostics, Trakt-call tracing and optional log file (LOG_FILE) as the
+# dev runner, instead of Python's silent WARNING-only default. app/logging_setup.py
+# is the one setup; calling it again after run.py has is a no-op.
+logging_setup.configure()
 # HYPERCORN'S ACCESS LOG CANNOT BE TURNED OFF FROM HERE, and trying is the
 # obvious wrong answer. Hypercorn builds its Logger AFTER importing this module
 # and calls setLevel on "hypercorn.access" itself, from config.loglevel (default
