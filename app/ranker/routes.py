@@ -2171,7 +2171,7 @@ def _layout(ranked: list[ranker_export.RankedTitle],
     return grid_builder.compute_layout(
         len(ranked), columns=options.columns, scale=options.scale,
         show_titles=options.show_titles, podium=options.podium,
-        subtitles=any(entry.subtitle for entry in ranked))
+        subtitles=[bool(entry.subtitle) for entry in ranked])
 
 
 def _grid_entries(ranked: list[ranker_export.RankedTitle],

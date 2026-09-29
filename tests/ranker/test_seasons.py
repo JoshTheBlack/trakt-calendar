@@ -419,19 +419,38 @@ class ExportTests(_SeasonsTestCase):
         self.assertEqual([entry.subtitle for entry in drawn][0], "")
         self.assertTrue(all(entry.subtitle for entry in drawn[1:]))
 
-    def test_the_season_line_is_added_only_to_a_grid_holding_a_season(self):
-        """A board of whole shows renders exactly as it did; one holding a season
-        pays a second, smaller caption strip per row, and the pre-render size the
-        readout reports is that same geometry."""
+    def test_the_season_line_is_added_only_to_a_row_holding_a_season(self):
+        """A board of whole shows renders exactly as it did; a row holding a
+        season pays a second, smaller caption strip, and a row of films or whole
+        shows beside it does not — the owner asked for the space back on a board
+        mixing the two. The pre-render size the readout reports is this same
+        geometry."""
         from app.ranker import grid_builder
         plain = grid_builder.compute_layout(6, columns=3, show_titles=True)
-        seasons = grid_builder.compute_layout(6, columns=3, show_titles=True, subtitles=True)
-        untitled = grid_builder.compute_layout(6, columns=3, subtitles=True)
+        both = grid_builder.compute_layout(6, columns=3, show_titles=True, subtitles=[True] * 6)
+        first_row = grid_builder.compute_layout(
+            6, columns=3, show_titles=True, subtitles=[False, True, False, False, False, False])
+        untitled = grid_builder.compute_layout(6, columns=3, subtitles=[True] * 6)
         self.assertEqual(plain.subcaption_h, 0)
         self.assertIsNone(plain.cells[0].subcaption)
-        self.assertEqual(seasons.height - plain.height, 2 * grid_builder.SUBCAPTION_H)
-        self.assertEqual(seasons.cells[0].subcaption[1], seasons.cells[0].caption[3])
+        self.assertEqual(both.height - plain.height, 2 * grid_builder.SUBCAPTION_H)
+        self.assertEqual(both.cells[0].subcaption[1], both.cells[0].caption[3])
+        # Only the first row paid it: its three cells have the strip, the next
+        # row's have none and start straight under the first row's season line.
+        self.assertEqual(first_row.height - plain.height, grid_builder.SUBCAPTION_H)
+        self.assertTrue(all(cell.subcaption for cell in first_row.cells[:3]))
+        self.assertTrue(all(cell.subcaption is None for cell in first_row.cells[3:]))
+        self.assertEqual(first_row.cells[3].tile[1], first_row.cells[0].subcaption[3])
         self.assertEqual(untitled.height, grid_builder.compute_layout(6, columns=3).height)
+
+    def test_the_podium_pays_for_the_line_only_when_it_holds_a_season(self):
+        from app.ranker import grid_builder
+        plain = grid_builder.compute_layout(6, columns=3, show_titles=True, podium=True)
+        below = grid_builder.compute_layout(6, columns=3, show_titles=True, podium=True,
+                                            subtitles=[False] * 3 + [True] + [False] * 2)
+        self.assertIsNone(below.cells[0].subcaption)
+        self.assertIsNotNone(below.cells[3].subcaption)
+        self.assertEqual(below.height - plain.height, grid_builder.SUBCAPTION_H)
 
     def test_a_season_line_renders(self):
         """Pixels, not geometry: the second strip is drawn into, and a grid of
@@ -446,7 +465,7 @@ class ExportTests(_SeasonsTestCase):
         image = Image.open(BytesIO(grid_builder.build_grid(
             entries, columns=2, show_titles=True, fmt="png", scale=0.5)))
         layout = grid_builder.compute_layout(2, columns=2, show_titles=True, scale=0.5,
-                                             subtitles=True)
+                                             subtitles=[False, True])
         self.assertEqual(image.size, (layout.width, layout.height))
         strip = image.crop(layout.cells[1].subcaption)
         self.assertGreater(len(set(strip.getdata())), 1, "the season line drew nothing")

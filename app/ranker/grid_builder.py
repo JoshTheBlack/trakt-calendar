@@ -27,6 +27,7 @@ bound how many run at once — a 100-item canvas is tens of megapixels.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from io import BytesIO
@@ -66,10 +67,11 @@ CAPTION_H = 62
 # A SECOND, SMALLER CAPTION LINE FOR A SEASON, under the show's name. One line
 # held "Show — Season 3" and most did not fit a 500px tile at the caption's size,
 # so the season — the half that tells two rows of one show apart — was the half
-# cut off. Added only to a grid that holds a season at all, so a board of whole
-# shows renders exactly as it did; and smaller than the name, because it is the
-# name's qualifier. Each row pays it once, which a WebP ceiling can feel — see
-# LABEL_H — and a grid over it is refused before rendering as before.
+# cut off. Added only to a ROW that holds a season, so a row of films or whole
+# shows keeps its old height — on a board of nothing but, the image is exactly
+# what it was; and smaller than the name, because it is the name's qualifier.
+# Each such row pays it once, which a WebP ceiling can feel — see LABEL_H — and a
+# grid over it is refused before rendering as before.
 SUBCAPTION_H = 46
 
 # Flush by default: the look this feature was designed around has no spacing at
@@ -109,7 +111,7 @@ FORMATS = frozenset(MAX_DIMENSION)
 # Bumped whenever anything above changes where a pixel lands. A render cache
 # keyed on the inputs alone would keep serving the old layout after the code
 # that produced it was replaced.
-RENDERER_VERSION = 4
+RENDERER_VERSION = 5
 
 # Two parents, not one: this module sits in app/ranker/ and the bundled image
 # lives under app/static/, so the walk is up out of the package and then down.
@@ -218,13 +220,14 @@ def compute_layout(
     scale: float = 1.0,
     show_titles: bool = False,
     podium: bool = False,
-    subtitles: bool = False,
+    subtitles: Sequence[bool] = (),
 ) -> Layout:
     """Where everything goes, for `count` entries in `columns` columns.
 
-    `subtitles` says whether any entry has a season line to draw — asked of the
-    entries by `build_grid` and of the ranking by the export routes, which size
-    and refuse a canvas before there are entries to ask.
+    `subtitles` says, entry by entry in order, which have a season line to
+    draw — asked of the entries by `build_grid` and of the ranking by the export
+    routes, which size and refuse a canvas before there are entries to ask. A row
+    gets the line's strip only when one of its own entries has one.
 
     Constants are scaled HERE, at layout time, rather than by shrinking a
     finished canvas — downscaling afterwards spends exactly the memory the
@@ -246,7 +249,11 @@ def compute_layout(
     header_h = _scaled(HEADER_H, scale)
     label_h = _scaled(LABEL_H, scale)
     caption_h = _scaled(CAPTION_H, scale) if show_titles else 0
-    subcaption_h = _scaled(SUBCAPTION_H, scale) if show_titles and subtitles else 0
+    subcaption_h = _scaled(SUBCAPTION_H, scale) if show_titles and any(subtitles) else 0
+    flagged = list(subtitles)
+
+    def row_subcaption(first: int, in_row: int) -> int:
+        return subcaption_h if any(flagged[first:first + in_row]) else 0
     gutter = round(GUTTER * scale)
     margin = round(MARGIN * scale)
 
@@ -265,16 +272,16 @@ def compute_layout(
         # what is left is split between its ends rather than hanging off one.
         podium_w = (content_w - (podium_count - 1) * gutter) // podium_count
         podium_h = round(podium_w * tile_h / tile_w)
-        y = _place_row(cells, index, podium_count, podium_w, podium_h,
-                       label_h, caption_h, subcaption_h, gutter, margin, content_w, y)
+        y = _place_row(cells, index, podium_count, podium_w, podium_h, label_h, caption_h,
+                       row_subcaption(index, podium_count), gutter, margin, content_w, y)
         index += podium_count
 
     remaining = count - index
     rows = math.ceil(remaining / columns) if remaining else 0
     for row in range(rows):
         in_row = min(columns, remaining - row * columns)
-        y = _place_row(cells, index, in_row, tile_w, tile_h,
-                       label_h, caption_h, subcaption_h, gutter, margin, content_w, y)
+        y = _place_row(cells, index, in_row, tile_w, tile_h, label_h, caption_h,
+                       row_subcaption(index, in_row), gutter, margin, content_w, y)
         index += in_row
 
     # `y` has a trailing gutter on it from the last row placed; the canvas ends
@@ -356,7 +363,7 @@ def build_grid(
     layout = compute_layout(
         len(entries), columns=columns, scale=scale,
         show_titles=show_titles, podium=podium,
-        subtitles=any(entry.subtitle for entry in entries),
+        subtitles=[bool(entry.subtitle) for entry in entries],
     )
     ensure_fits(layout, fmt)
 
