@@ -666,6 +666,12 @@ def _apply_counts(show: dict, rec: dict, watched: dict[str, int], settings,
     show["total_by_source"] = {detail_from: total} if detail_from else {}
     show["counts"] = counts.counts_label(counting or (watched if not retired else {}),
                                          total, source_labels(), order, asked)
+    # AND THE ONE NUMBER THE ROW DRAWS, from the same inputs: the label above is
+    # every service's number spelled out, which is right for a post and too wide
+    # for a column every row shares, so the row shows the primary's, marked when
+    # the services do not all say it (counts.row_count).
+    row = counts.row_count(counting or (watched if not retired else {}), total, order, asked)
+    show["count_label"], show["count_split"] = row.label, row.split
     # THE SAME NUMBERS, SAID IN FULL, for the row's tooltip. One line has room
     # for the counts and nothing else, so a service nobody asked and a service
     # that agrees look identical in it — see counts.counts_detail, which is where

@@ -100,6 +100,40 @@ class MonthFragmentTestCase(AppTestCase):
             "kind": distrakt_store.RecordKind.KEEPUP,
         }))
 
+    def _drawn(self, payload: dict) -> str:
+        """The month fragment drawn straight off a payload, with no route and no
+        read: for what a payload the harness cannot produce looks like."""
+        from app.distrakt import routes as distrakt_routes
+        emojis, default_emoji = asyncio.run(distrakt_store.get_emoji_prefs(self.user_id))
+        context = distrakt_routes._month_context(
+            None, {"ok": True, "shows": [], **payload}, *self.current,
+            emojis, default_emoji, Settings())
+        from app.templating import templates
+        return templates.get_template("_distrakt_month.html").render(**context)
+
+
+# A row the services disagree about, as the payload carries it.
+SPLIT_ROW = {"key": str(KEY), "season": 1, "title": "Split Show", "bucket": "cleanup",
+             "network": "HBO", "watched": 2, "total": 2,
+             "count_label": "2/2", "count_split": True,
+             "counts": "2/2 (Trakt) · 3/2 (Simkl)",
+             "counts_detail": "Trakt: 2 of 2\nSimkl: 3 of 2"}
+
+
+class TheRowsCountTests(MonthFragmentTestCase):
+    """What a row's count cell draws."""
+
+    def test_a_split_count_is_one_marked_number_with_the_story_in_its_tooltip(self):
+        html = self._drawn({"shows": [SPLIT_ROW]})
+        self.assertIn('class="distrakt-counts is-split" title="Trakt: 2 of 2\nSimkl: 3 of 2">(2/2)<',
+                      html)
+        self.assertNotIn("(Trakt)", html.split('id="post1Text"')[0])
+
+    def test_an_agreed_count_is_unmarked(self):
+        html = self._drawn({"shows": [{**SPLIT_ROW, "count_split": False, "counts": "2/2"}]})
+        self.assertIn('class="distrakt-counts" title=', html)
+        self.assertIn(">(2/2)<", html)
+
 
 class WhatEachStandingDrawsTests(MonthFragmentTestCase):
     """The three months a viewer can be looking at."""
@@ -199,15 +233,6 @@ class TheQuestionsAboveTheListTests(MonthFragmentTestCase):
     and both its answers are pinned here, off the payload the fragment draws
     from.
     """
-
-    def _drawn(self, payload: dict) -> str:
-        from app.distrakt import routes as distrakt_routes
-        emojis, default_emoji = asyncio.run(distrakt_store.get_emoji_prefs(self.user_id))
-        context = distrakt_routes._month_context(
-            None, {"ok": True, "shows": [], **payload}, *self.current,
-            emojis, default_emoji, Settings())
-        from app.templating import templates
-        return templates.get_template("_distrakt_month.html").render(**context)
 
     def test_a_play_nothing_could_place_names_the_episode_and_asks(self):
         html = self._drawn({"unknown_episodes": [

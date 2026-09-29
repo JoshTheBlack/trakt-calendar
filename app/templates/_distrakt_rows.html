@@ -147,20 +147,17 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
 
 {% macro show_row(show, marked=false) %}
 {%- set is_premiere = show.bucket in ('new', 'returning') -%}
-{#- The x/y comes from the server already written out, because when two accounts
-    report different numbers for a season the row shows BOTH, each labelled — and
-    that rule is the same one a closed month is written with, so it has one home
-    (app/distrakt/counts.py). EVERY BUCKET DRAWS ITS COUNT, COMPLETED INCLUDED: a
-    blank cell would read as both services agreeing the season is done, which is a
-    claim neither of them made. -#}
-{#- MOCKUP: A SPLIT COUNT IS ONE NUMBER ON THE ROW. When the services disagree
-    (or only one of two has the season) the label reads "2/2 (Trakt) · 3/2
-    (Simkl)", which is too wide for a column every row shares. The row shows the
-    primary service's x/y, marked, and the per-service story stays in the
-    tooltip it already has (show.counts_detail). The build takes this from
-    counts.py (one home), not from a "(" in the string as this mockup does. -#}
-{%- set split = show.counts and '(' in show.counts -%}
-{%- set xy = (show.watched ~ '/' ~ show.total) if split or not show.counts else show.counts -%}
+{#- The x/y comes from the server already written out, from the rule a closed
+    month is written with (app/distrakt/counts.py's row_count). A SPLIT COUNT IS
+    ONE NUMBER: when the services disagree, or only one of two holds the season,
+    each service's number written out ("2/2 (Trakt) · 3/2 (Simkl)") is too wide
+    for a column every row shares, so the row shows the primary service's, marked,
+    and the per-service story is the tooltip it already had (show.counts_detail).
+    EVERY BUCKET DRAWS ITS COUNT, COMPLETED INCLUDED: a blank cell would read as
+    both services agreeing the season is done, which is a claim neither of them
+    made. -#}
+{%- set split = show.count_split -%}
+{%- set xy = show.count_label -%}
 {%- set counts = (xy ~ (', ' ~ show.cadence if show.cadence else '')) if is_premiere else xy -%}
 {#- New/Returning: premiere (– finale for weekly). Keepup: finale (end date).
     A date nobody has announced reads TBA, as the details panel's episode list

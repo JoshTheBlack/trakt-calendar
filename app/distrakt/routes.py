@@ -552,10 +552,17 @@ def _rows_for(shape: lifecycle.MonthShape,
         # the browser because a frozen month keeps what each service said and has
         # to be able to render that disagreement years later, from the same rule
         # that wrote it (app/distrakt/counts.py).
+        per_source = show.get("watched_by_source") or show.get("watched")
+        if "count_label" not in show:
+            # The row's one number, which a live show already carries
+            # (live._apply_counts) and a stored one is given here from the same
+            # rule.
+            row_count = counts.row_count(per_source, show.get("total"), live.source_order())
+            show = {**show, "count_label": row_count.label, "count_split": row_count.split}
         rows.append({**show, "returned": bool(show.get("came_back")),
                      "counts": show.get("counts") or counts.counts_label(
-                         show.get("watched_by_source") or show.get("watched"),
-                         show.get("total"), live.source_labels(), live.source_order()),
+                         per_source, show.get("total"), live.source_labels(),
+                         live.source_order()),
                      # THE SAME BREAKDOWN IN FULL, for the row's tooltip — a peek
                      # at what this month actually recorded, which is the most
                      # useful thing a frozen row can offer.
@@ -566,8 +573,8 @@ def _rows_for(shape: lifecycle.MonthShape,
                      # watch state, which a frozen month deliberately does not
                      # consult — it renders what it froze.
                      "counts_detail": show.get("counts_detail") or counts.counts_detail(
-                         show.get("watched_by_source") or show.get("watched"),
-                         show.get("total"), live.source_labels(), live.source_order())})
+                         per_source, show.get("total"), live.source_labels(),
+                         live.source_order())})
     return rows
 
 

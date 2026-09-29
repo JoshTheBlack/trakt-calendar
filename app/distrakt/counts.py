@@ -36,6 +36,7 @@ carries, so the rule can be tested without a database, a request or a provider.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import NamedTuple
 
 # What the row shows between two services' numbers. A middle dot rather than a
 # slash or a comma, because a slash already means "x of y" one character to the
@@ -301,6 +302,60 @@ def counts_detail(per_source: Mapping[str, int] | int | None, total,
     return "\n".join(lines)
 
 
+def split(per_source: Mapping[str, int] | int | None, total, asked=()) -> bool:
+    """Whether the services tell this season's count differently: they disagree,
+    or only some of the services `asked` hold it at all.
+
+    ONE TEST FOR THE TWO PLACES THAT ASK IT — `counts_label`, which then writes
+    each service's number out, and `row_count`, which marks the one number it
+    shows. Two copies of "is this a disagreement" is how a row would come to be
+    drawn marked beside a post that reads as agreement.
+
+    `asked` IS WHICH SERVICES WERE READ FOR THIS ACCOUNT, and it is what tells a
+    season only ONE of two services knows about from a season both of them agree
+    on. Both arrive as a single number, and they mean different things: the first
+    is one service's claim that the other never made. With one service read —
+    which is what almost every account has — nothing is ever split.
+    """
+    if not isinstance(per_source, Mapping) or not per_source:
+        return False
+    complete = len(asked) <= 1 or {str(source) for source in asked} <= set(per_source)
+    # Resolved against the total, so a service that said "all of it" agrees with
+    # one that counted every episode rather than reading as a zero beside it.
+    return not (agreed(resolve(per_source, total)) and complete)
+
+
+class RowCount(NamedTuple):
+    """The one "x/y" a tracker row has room for, and whether it stands for more.
+
+    `watched` is the PRIMARY service's number (`primary_count`), which is the
+    number a frozen month keeps and the announcement post prints, so the row and
+    the post cannot show two different counts for one season. `split` says the
+    services do not all say that — the row marks the number, and the whole story
+    is the row's tooltip (`counts_detail`).
+    """
+    watched: int
+    total: int
+    split: bool
+
+    @property
+    def label(self) -> str:
+        return f"{self.watched}/{self.total}"
+
+
+def row_count(per_source: Mapping[str, int] | int | None, total, order=(),
+              asked=()) -> RowCount:
+    """The row's single count: the primary service's "x/y", marked when split.
+
+    NOT `counts_label`, which writes every service's number out and is what the
+    posts and the withdrawn-verdict sentences keep using, where there is a whole
+    line for it. A row is a column every row on the page shares, and two labelled
+    numbers ("2/2 (Trakt) · 3/2 (Simkl)") are too wide for it.
+    """
+    y = int(total or 0)
+    return RowCount(primary_count(per_source, order, y), y, split(per_source, y, asked))
+
+
 def counts_label(per_source: Mapping[str, int] | int | None, total,
                  labels: Mapping[str, str] | None = None, order=(), asked=()) -> str:
     """The "x/y" a row shows, which is two of them when the services disagree.
@@ -309,13 +364,9 @@ def counts_label(per_source: Mapping[str, int] | int | None, total,
     `label`); a source with no entry is shown under its own name rather than
     dropped, because an unlabelled number is still better than a missing one.
 
-    `asked` IS WHICH SERVICES WERE READ FOR THIS ACCOUNT, and it is what tells a
-    season only ONE of two services knows about from a season both of them agree
-    on. Both arrive here as a single number, and they mean different things: the
-    first is one service's claim that the other never made, and it carries that
-    service's badge. With one service read — which is what almost every account
-    has — there is nothing to distinguish, and every row is a bare number exactly
-    as it always was.
+    `asked` is which services were read for this account — see `split`, which is
+    where a season only one of two services knows about is told apart from one
+    they agree on. A split season carries each service's badge.
     """
     y = int(total or 0)
     if not isinstance(per_source, Mapping) or not per_source:
@@ -325,8 +376,7 @@ def counts_label(per_source: Mapping[str, int] | int | None, total,
     # so a claim that reached a row through some path nobody updated still renders
     # as the number the service meant rather than as a negative one.
     per_source = resolve(per_source, y)
-    complete = len(asked) <= 1 or {str(source) for source in asked} <= set(per_source)
-    if agreed(per_source) and complete:
+    if not split(per_source, y, asked):
         return f"{primary_count(per_source, order)}/{y}"
     names = [str(s) for s in order if str(s) in per_source]
     names += [s for s in sorted(per_source) if s not in names]

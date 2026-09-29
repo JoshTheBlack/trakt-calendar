@@ -257,6 +257,34 @@ class AgreementTests(TwoSourceTestCase):
         self.assertEqual(counts.counts_label(per_source, 8, LABELS, ORDER, ORDER),
                          "2/8 (Simkl)")
 
+    async def test_a_row_shows_one_number_the_primarys_marked_when_split(self):
+        """A row is a column every row shares, so a disagreement is the primary
+        service's number, marked — while the label the posts use still writes
+        each service's out."""
+        split_row = counts.row_count({"trakt": 2, "simkl": 3}, 2, ORDER, ORDER)
+        self.assertEqual((split_row.label, split_row.split), ("2/2", True))
+        self.assertEqual(counts.counts_label({"trakt": 2, "simkl": 3}, 2, LABELS, ORDER, ORDER),
+                         "2/2 (Trakt) · 3/2 (Simkl)")
+        agreed = counts.row_count({"trakt": 3, "simkl": 3}, 8, ORDER, ORDER)
+        self.assertEqual((agreed.label, agreed.split), ("3/8", False))
+
+    async def test_a_season_only_one_of_two_holds_is_split_on_the_row(self):
+        only = counts.row_count({"simkl": 2}, 8, ORDER, ORDER)
+        self.assertEqual((only.label, only.split), ("2/8", True))
+        # With one service read there is nothing for it to be split from.
+        self.assertFalse(counts.row_count({"trakt": 2}, 8, ORDER, ("trakt",)).split)
+
+    async def test_all_of_it_agrees_with_every_episode_counted(self):
+        """A service that said "all of it" without itemizing agrees with one that
+        counted every episode; resolving the claim against no total would have
+        read it as a zero and split the row."""
+        row = counts.row_count({"trakt": 8, "simkl": counts.ALL_EPISODES}, 8, ORDER, ORDER)
+        self.assertEqual((row.label, row.split), ("8/8", False))
+
+    async def test_a_bare_number_from_an_old_frozen_month_is_never_split(self):
+        row = counts.row_count(5, 8)
+        self.assertEqual((row.label, row.split), ("5/8", False))
+
     async def test_the_one_number_a_month_keeps_is_the_primary_services(self):
         """Not the highest and not the union: those would each be a different
         number depending on which services happened to answer, and a frozen month
@@ -342,6 +370,8 @@ class TheRowTests(TwoSourceTestCase):
         row, = await self._rows({(KEY(101), 1): {"trakt": 3, "simkl": 4}}, ORDER)
         self.assertEqual(row["counts"], "3/8 (Trakt) · 4/8 (Simkl)")
         self.assertEqual(row["watched_by_source"], {"trakt": 3, "simkl": 4})
+        # What the row itself draws: the primary's number, marked.
+        self.assertEqual((row["count_label"], row["count_split"]), ("3/8", True))
         # The single number every existing reader asks for is the primary's.
         self.assertEqual(row["watched"], 3)
 
@@ -1696,10 +1726,11 @@ class TheRowTheCountsCellDrawsTests(unittest.TestCase):
         self.assertNotIn("bucket", self.counts_expression())
 
     def test_the_cell_is_drawn_from_the_string_the_server_wrote(self):
-        """`show.counts` is the server's, and the fallback is only for a row from
-        before it was carried. Neither may be re-derived while rendering: the
+        """`show.count_label` and `show.count_split` are the server's
+        (counts.row_count), and neither may be re-derived while rendering: the
         rule is the one a month is frozen with (app/distrakt/counts.py)."""
-        self.assertIn("set xy = show.counts or", self.source)
+        self.assertIn("set xy = show.count_label", self.source)
+        self.assertIn("set split = show.count_split", self.source)
         self.assertIn("xy", self.counts_expression())
 
 
