@@ -1683,7 +1683,12 @@ async def _add_named(user, board_uid: str, data: Mapping[str, Any]) -> _Added:
     hit = await ranker_sources.named_hit(settings, media, data)
     if hit is None:
         raise ranker.ValidationError(ranker_sources.gone_sentence(data))
-    item = await ranker_sources.board_item(settings, hit)
+    try:
+        item = await ranker_sources.board_item(settings, hit)
+    except SourceUnavailable:
+        # A keyless result's lookup could not be made — the service, not the title.
+        raise ranker.ValidationError(
+            "Couldn't look this title up just now — try again in a moment.") from None
     if item is None:
         raise ranker.ValidationError("This title has no id a board can hold it by.")
     whole = item_keys.board_key(item["media"], item["match_source"], item["match_id"])

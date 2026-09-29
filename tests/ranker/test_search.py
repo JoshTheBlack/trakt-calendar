@@ -292,6 +292,65 @@ class AddTests(_SearchTestCase):
         self.assertEqual(picture.status_code, 302)
         self.assertEqual(picture.headers["location"], proxied_image(poster))
 
+    def _keyless(self):
+        """A result the search left keyless: Simkl's own id and nothing any other
+        service shares, as nine results across five live searches were."""
+        self.catalogue.hits = [a_hit(1850009, ids={"simkl": 1850009},
+                                     source_ids={Source.SIMKL: "1850009"},
+                                     title="Attack on Titan / Shingeki No Die")]
+        self.enter("title")
+
+    def _pick(self, ids):
+        return title_search.Pick(title="Attack on Titan / Shingeki No Die", network="",
+                                 year=None, ids=ids, seasons=[], named_season=None,
+                                 media=Media.SHOW)
+
+    def test_a_keyless_result_is_looked_up_and_added(self):
+        """MEASURED: every keyless result across five live searches got a tvdb or
+        mal id from its own per-title lookup — the one "Seasons…" makes. The add
+        makes it when nothing had stored it, where it used to refuse."""
+        self._keyless()
+        calls = []
+
+        async def _pick_from_hit(settings, hit, *, cached_only):
+            # With nothing stored the store-only pick STILL answers, carrying the
+            # hit's own ids — measured live, and what kept the lookup from being
+            # made when this test answered None instead.
+            calls.append(cached_only)
+            return self._pick({"simkl": 1850009} if cached_only
+                              else {"simkl": 1850009, "tvdb": 416458})
+
+        with mock.patch.object(title_search, "pick_from_hit", new=_pick_from_hit):
+            page = self.add({"q": "title", "i": 0, "media": "show"})
+        self.assertIn("Added the title to the pool.", page.text)
+        self.assertIn("show:tvdb:416458", self.keys())
+        self.assertIn(False, calls, "the add never made the lookup")
+
+    def test_a_keyless_result_whose_lookup_finds_no_id_is_still_refused(self):
+        self._keyless()
+
+        async def _pick_from_hit(settings, hit, *, cached_only):
+            return None if cached_only else self._pick({"simkl": 1850009})
+
+        with mock.patch.object(title_search, "pick_from_hit", new=_pick_from_hit):
+            page = self.add({"q": "title", "i": 0, "media": "show"})
+        self.assertIn("This title has no id a board can hold it by.", page.text)
+        self.assertEqual(self.keys(), [])
+
+    def test_a_lookup_that_could_not_be_made_says_so(self):
+        """The service, not the title — so not the no-id sentence."""
+        from app.providers.base import SourceUnavailable
+        self._keyless()
+
+        async def _pick_from_hit(settings, hit, *, cached_only):
+            if cached_only:
+                return self._pick({"simkl": 1850009})
+            raise SourceUnavailable("Simkl is down")
+
+        with mock.patch.object(title_search, "pick_from_hit", new=_pick_from_hit):
+            page = self.add({"q": "title", "i": 0, "media": "show"})
+        self.assertIn("look this title up just now", page.text)
+
     def test_the_search_is_still_on_the_page_with_the_result_held(self):
         self.enter("title")
         html = self.add({"q": "title", "i": 0, "media": "show"}).text

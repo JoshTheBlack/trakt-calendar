@@ -399,16 +399,28 @@ async def board_item(settings: Settings,
     """The whole title a hit names, as the board data layer stores it, or None
     for one with no id a board can key it on.
 
-    A HIT THE SEARCH LEFT KEYLESS IS READ AGAIN THROUGH ITS SEASON LOOKUP, cache
-    only: a service that files each season as a title of its own often answers a
-    search with no shared id, and opening the result's season list is what
-    fetched the ids that key it. Never a request here — an add that could look
-    something up would be a search nobody counted.
+    A HIT THE SEARCH LEFT KEYLESS IS READ AGAIN THROUGH ITS SEASON LOOKUP: a
+    service that files each season as a title of its own often answers a search
+    with no shared id, and the per-title lookup is what finds the ids that key it.
+    From the store when its "Seasons…" list was opened already, and otherwise
+    MADE HERE — the one request an add may make, and only for such a hit. It was
+    cache-only, and the add then refused a title it could have held: MEASURED
+    live across five searches, all nine keyless results got a tvdb or mal id from
+    this lookup, both titles the owner was refused among them. It is the lookup
+    opening "Seasons…" makes, which is not a search and is not counted as one;
+    raises SourceUnavailable when the service cannot be asked.
+
+    "NOTHING STORED" IS NOT ONLY None: with no lookup stored, the store-only pick
+    still answers, carrying the hit's own ids and so keying nothing — measured,
+    that is what made the add refuse all four keyless "attack on titan" results.
+    So the lookup is made whenever the stored answer cannot key the title.
     """
     ids = dict(hit.ids)
     network = hit.network
     if resolve_identity(ids) is None and hit.media is Media.SHOW:
         pick = await title_search.pick_from_hit(settings, hit, cached_only=True)
+        if pick is None or resolve_identity({**pick.ids, **ids}) is None:
+            pick = await title_search.pick_from_hit(settings, hit, cached_only=False) or pick
         if pick is not None:
             ids = {**pick.ids, **ids}
             network = network or pick.network

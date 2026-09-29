@@ -467,8 +467,10 @@ async def pick_from_hit(settings, hit: MergedSearchHit, *, cached_only: bool) ->
 
     `cached_only` IS THE CALLER'S BECAUSE THE TWO KINDS OF CALLER DIFFER. A
     picker may make the per-title lookup, because that lookup is what the click
-    is FOR; an add may not make anything, because an add that can search is an
-    add that spends a budget nobody is counting.
+    is FOR; an add may not SEARCH, because an add that can search is an add that
+    spends a budget nobody is counting. The one lookup an add may make is this
+    one, for a result the search left with no id to key it on — the rankings
+    board's add does, see app/ranker/sources.py's board_item for the measurement.
 
     THE FIRST SOURCE IN THE HIT'S OWN ORDER THAT THIS INSTANCE CAN DESCRIBE WITH
     IS WHO IS ASKED, and that order is the registry's — whoever found a title is
