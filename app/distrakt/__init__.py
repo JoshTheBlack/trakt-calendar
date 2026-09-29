@@ -51,7 +51,7 @@ from .backup import (
 from .calendar_import import (candidate_ref, import_candidates, import_premieres,
                               matches_not_watching)
 from .live import compute_live_shows, live_key
-from .prefs import DEFAULT_EMOJI, get_emoji_prefs, register_networks, set_emoji_prefs
+from .prefs import DEFAULT_EMOJI, get_emoji_prefs, set_emoji_prefs
 from .rollover import (
     TOTALS_STALE_HOURS,
     WATCHED_RECENCY_DAYS,
@@ -152,7 +152,7 @@ __all__ = [
     "migrate_to_month", "migrate_to_user", "month_committed",
     "month_first_day", "month_key", "month_records", "month_standing",
     "month_is_tracked", "months_with_shows", "new_month_doc", "normalize_show", "parse_month_key",
-    "premiere_kind", "record_key", "register_networks", "remove_month_record",
+    "premiere_kind", "record_key", "remove_month_record",
     "remove_season_everywhere", "remove_season_from_month",
     "remove_user_record", "restore_user_data",
     "row_to_record", "save_month", "set_came_back", "set_emoji_prefs",

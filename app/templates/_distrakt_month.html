@@ -2,6 +2,7 @@
 {% import '_toast.html' as toast %}
 {% import '_distrakt_modals.html' as modals %}
 {% import '_distrakt_import.html' as imports %}
+{% import '_distrakt_posts.html' as posts %}
 {# THE TRACKER'S MONTH, drawn from the payload `_distrakt_month_payload` has
    always built — the questions, the buckets with their weekday heads, the films,
    the notice, the read-only banner and the two copy blocks.
@@ -77,10 +78,7 @@
     {%- if banner %}<div class="distrakt-frozen-note">{{ banner }}</div>{% endif -%}
 </div>
 
-<textarea id="post1Text" class="distrakt-copy-textarea" readonly spellcheck="false"
-          hx-swap-oob="outerHTML">{{ post1 }}</textarea>
-<textarea id="post2Text" class="distrakt-copy-textarea" readonly spellcheck="false"
-          hx-swap-oob="outerHTML">{{ post2 }}</textarea>
+{{ posts.oob(post1, post2) }}
 
 {#- The add flow's overlays, closed and empty. Unconditional rather than
     per-route: an answer only ever exists because somebody pressed something, and

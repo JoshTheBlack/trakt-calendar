@@ -414,7 +414,6 @@ async def apply(user_id: int, settings, plan: dict | None = None) -> dict:
             continue
         for record in rows:
             await distrakt.add_month_record(user_id, month_key, record)
-        await arrival.register(user_id, rows)
         await _record_films(user_id, month_key, state, tz)
         # Closed LAST and through its own verb, because closing is two columns on
         # the month row: handing save_month a doc to close the month with would

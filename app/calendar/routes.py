@@ -1602,13 +1602,20 @@ async def season_line_fragment(request: Request):
     settings = load_settings()
     params = request.query_params
     season = route_params.season(params.get("season"))
-    chosen = detail_source.choose(settings, detail_source.ids_from_query(params))
+    asked = detail_source.ids_from_query(params)
+    chosen = detail_source.choose(settings, asked)
     provider = providers.get(chosen.source) if chosen is not None else None
     line = None
     if season is not None and provider is not None and provider.detail_port is not None:
         try:
-            detail = await provider.detail_port.fetch_season_summary(
-                settings, chosen.source_id, season, Media(params.get("media", "show")))
+            media = Media(params.get("media", "show"))
+            # The same season rule the panel follows (detail_source.for_season):
+            # a service with no episodes of this season hands it to the next.
+            _answered, detail = await detail_source.for_season(
+                settings, asked, chosen,
+                lambda answerer: providers.get(answerer.source).detail_port.fetch_season_summary(
+                    settings, answerer.source_id, season, media),
+                lambda summary: int((summary or {}).get("total") or 0) > 0)
         except SourceUnavailable as exc:
             logger.info("No season line from %s: %s", chosen.source, exc)
         except ValueError:
@@ -1697,8 +1704,11 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
         # NO SOURCE REACHABLE MEANS DRAW WHAT IS ALREADY HELD, which `describe`
         # decides: reading the store back needs no credential and makes no
         # request, and refusing instead threw away a description this instance
-        # had already fetched once. None is the genuinely empty case.
-        details = await detail_source.describe(settings, chosen, media, season)
+        # had already fetched once. None is the genuinely empty case. A season
+        # the chosen service has no episodes of is answered by the next service
+        # that does (detail_source.for_season).
+        chosen, details = await detail_source.describe_season(
+            settings, chosen, asked, media, season)
     except SourceUnavailable:
         # The shared degradation contract rather than one service's error type:
         # this route can be answered by either of two sources and catching only
@@ -2737,12 +2747,12 @@ async def api_network_logo(request: Request):
 
 @guard.post("/api/network-logo/regenerate", AuthLevel.ADMIN)
 async def api_network_logo_regenerate(request: Request):
-    """Drop a single network's cached logo and re-resolve it from TMDB."""
+    """Re-resolve a single network's logo from TMDB, keeping the old tile when no
+    new one can be made (logos.regenerate)."""
     data = await authz.json_body(request)
     name = (data.get("name") or "").strip()
     tmdb = data.get("tmdb")
     if not name:
         return JSONResponse({"ok": False, "error": "Missing network name"}, status_code=400)
-    logos.delete(name)
-    path = await logos.ensure_logo(load_settings(), name, tmdb)
+    path = await logos.regenerate(load_settings(), name, tmdb)
     return JSONResponse({"ok": True, "network": name, "generated": bool(path and path.exists())})

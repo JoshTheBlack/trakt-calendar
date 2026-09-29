@@ -43,7 +43,7 @@ from ..calendar import entries as calendar_entries
 from ..calendar import search as calendar_search
 from ..providers.base import (MATCH_SOURCES, Media, Source, SourceUnavailable,
                               TitleFacts, collect_ids)
-from . import live, prefs, store
+from . import live, store
 from .lifecycle import CATALOGUE_FIELDS
 from .store import record_key
 
@@ -105,16 +105,6 @@ async def describe(settings, records: list[dict], *, strict: bool = False) -> li
         for rec in recs:
             rec["ids"] = canonical_ids(held[key])
 
-    facts = await _title_facts(settings, groups, known)
-    for key, recs in groups.items():
-        title, network = facts.get(key) or TitleFacts("", "")
-        for rec in recs:
-            # A BLANK ANSWER KEEPS THE PATH'S VALUE: the service could not be
-            # asked or has nothing to say, and a row with the path's words is
-            # better than a row with none.
-            rec["title"] = title or str(rec.get("title") or "")
-            rec["network"] = network or str(rec.get("network") or "")
-
     keyed = [rec for recs in groups.values() for rec in recs]
     details = await live.fetch_season_details(
         settings, [{**rec, "media": rec.get("media") or Media.SHOW} for rec in keyed],
@@ -128,6 +118,29 @@ async def describe(settings, records: list[dict], *, strict: bool = False) -> li
             continue
         rec.update({field: detail.get(field) for field in CATALOGUE_FIELDS})
         found[id(rec)] = dict(detail)
+
+    # THE SEASON IS LOOKED UP BEFORE THE NAME IS ASKED FOR, because the service
+    # that answered a record's season is the one that names it. Usually that is
+    # the describing service either way; where it is not, the chosen service
+    # had no episodes of the season (detail_source.for_season) and its name is
+    # another show's — Trakt's "DAHMER – Monster: The Jeffrey Dahmer Story" on
+    # Simkl's "Monster" season 4, which only Simkl holds. So the names are
+    # asked per title AND per answering service; a record with no season
+    # answer is named by the describing service, as before.
+    named: dict[tuple[str, str | None], list[dict]] = {}
+    for key, recs in groups.items():
+        for rec in recs:
+            answered = (found.get(id(rec)) or {}).get("described_by")
+            named.setdefault((key, answered), []).append(rec)
+    facts = await _title_facts(settings, named, known)
+    for group, recs in named.items():
+        title, network = facts.get(group) or TitleFacts("", "")
+        for rec in recs:
+            # A BLANK ANSWER KEEPS THE PATH'S VALUE: the service could not be
+            # asked or has nothing to say, and a row with the path's words is
+            # better than a row with none.
+            rec["title"] = title or str(rec.get("title") or "")
+            rec["network"] = network or str(rec.get("network") or "")
     logger.info("tracker arrival: described %d record(s) of %d title(s)",
                 len(keyed), len(groups))
     return [Arrival(rec, found.get(id(rec), {})) for rec in out]
@@ -248,13 +261,6 @@ async def write_missing_premieres(settings, record: dict) -> int:
                         name, key, record["season"])
             written += 1
     return written
-
-
-async def register(user_id: int, records: list[dict]) -> None:
-    """Put every network these records carry into the viewer's emoji map, so a
-    network any path filed appears in their editor ready to customize — one call
-    for every path, where it used to be made by some paths and not others."""
-    await prefs.register_networks(user_id, [rec.get("network") for rec in records])
 
 
 def calendar_teaches(held: dict, by_source: dict) -> dict:
@@ -447,13 +453,16 @@ async def ask_for_missing_ids(user_id: int, settings, *,
     return changed
 
 
-def stored_facts(settings, rec: dict, by_source: dict) -> TitleFacts | None:
+def stored_facts(settings, rec: dict, by_source: dict, *,
+                 service: str | None = None) -> TitleFacts | None:
     """The describing service's title and network for `rec` from the stored
     calendar (`by_source` is calendar.entries.known_about's answer for its
     title), or None when disk does not hold exactly what a lookup would answer —
     see `_title_facts`. Also how naming.py repairs a row stored without a network,
-    so a repaired row and a newly arrived one carry the same words."""
-    service = live.detail_source(rec, settings)
+    so a repaired row and a newly arrived one carry the same words. `service`
+    names the service to read instead, where one answered the season (see
+    `describe`)."""
+    service = service or live.detail_source(rec, settings)
     if not service:
         return None
     own = (rec.get("ids") or {}).get(service)
@@ -464,8 +473,10 @@ def stored_facts(settings, rec: dict, by_source: dict) -> TitleFacts | None:
     return TitleFacts(row.title, row.network)
 
 
-async def _title_facts(settings, groups: dict, known: dict) -> dict[str, TitleFacts]:
-    """{title key: the describing service's title and network}.
+async def _title_facts(settings, groups: dict, known: dict) -> dict[tuple, TitleFacts]:
+    """{(title key, service): that service's title and network}, for `groups`
+    keyed the same way — the service being the one that answered those records'
+    season, or None for the describing service (see `describe`).
 
     FROM DISK ONLY WHEN DISK HOLDS EXACTLY THE ANSWER A LOOKUP WOULD GIVE: the
     describing service's own stored record, for the very id the row carries, and
@@ -475,22 +486,23 @@ async def _title_facts(settings, groups: dict, known: dict) -> dict[str, TitleFa
     things. MEASURED on a live instance, the stored calendar answered most of the
     titles a history backfill had filed blank.
     """
-    out: dict[str, TitleFacts] = {}
-    lookups: list[str] = []
-    for key, recs in groups.items():
-        stored = stored_facts(settings, recs[0], known.get(key) or {})
+    out: dict[tuple, TitleFacts] = {}
+    lookups: list[tuple] = []
+    for group, recs in groups.items():
+        key, service = group
+        stored = stored_facts(settings, recs[0], known.get(key) or {}, service=service)
         if stored is not None:
-            out[key] = stored
+            out[group] = stored
         else:
-            lookups.append(key)
+            lookups.append(group)
     answers = await asyncio.gather(
-        *(live.title_facts(settings, groups[key][0]) for key in lookups),
+        *(live.title_facts(settings, groups[group][0], service=group[1]) for group in lookups),
         return_exceptions=True)
-    for key, got in zip(lookups, answers):
+    for group, got in zip(lookups, answers):
         if isinstance(got, BaseException):
-            logger.info("tracker arrival: no title facts for %s (%r)", key, got)
+            logger.info("tracker arrival: no title facts for %s (%r)", group[0], got)
             continue
-        out[key] = got
+        out[group] = got
     logger.info("tracker arrival: title facts for %d title(s), %d from the stored "
                 "calendar, %d asked for", len(groups), len(groups) - len(lookups), len(lookups))
     return out

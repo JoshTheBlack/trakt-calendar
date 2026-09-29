@@ -225,7 +225,7 @@ class RolloverOverHttpTestCase(AppTestCase):
             """
             self.baseline_calls.append(str((record.get("ids") or {}).get("tmdb") or ""))
 
-        async def title_facts(settings, rec):
+        async def title_facts(settings, rec, *, service=None):
             """The show-level lookup every add makes to describe what it files —
             the prompt row carries no network of its own. Recorded rather than
             merely stubbed: it is a per-click outbound call, so a test that starts

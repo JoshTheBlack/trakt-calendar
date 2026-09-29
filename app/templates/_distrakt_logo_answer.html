@@ -1,0 +1,11 @@
+{% import '_distrakt_rows.html' as row with context %}
+{% import '_toast.html' as toast %}
+{# A NETWORK'S LOGO MADE AGAIN (routes.api_distrakt_network_logo): every row's
+   badge for that network, out of band by `data-net`, drawn with the new tile's
+   version in its address so the browser asks for the new picture; every row's
+   code cell too, whose download link carries the same address (and appears once
+   there is a tile to download); and a line saying what happened, which includes
+   "nothing new could be made". #}
+{{ row.badge(network, oob=true) }}
+{{ row.emoji(network, oob=true) }}
+{{ toast.flash(message, message_ok) }}

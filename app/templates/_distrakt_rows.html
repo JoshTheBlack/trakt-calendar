@@ -22,10 +22,12 @@
    stopPropagation to do it.
 
    Context every macro here needs: `month_query` (the year and month the page is
-   showing, as a query string), `closed` (this month is read-only), `emoji_for`
-   (network -> the viewer's fallback emoji), `logo_for` (network -> a tile
-   URL, or "" when this instance has none) and `poster_for` (row -> its picture
-   through the image proxy, or ""). #}
+   showing, as a query string), `closed` (this month is read-only), `poster_for`
+   (row -> its picture through the image proxy, or ""), and what
+   routes._emoji_context builds: `emoji_for` (network -> the code it posts as),
+   `emoji_own` (whether that is its own rather than the default), `logo_for`
+   (network -> a tile URL, or "" when this instance has none), `net_ref`
+   (network -> what an answer addresses its cells by) and `is_admin`. #}
 
 {# THE SHARED HALF OF EVERY MUTATION'S ADDRESS. The target is the show list and
    the swap is its whole contents, because every one of these routes answers
@@ -58,15 +60,6 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
     hx-swap="innerHTML swapEmpty:false show:top showTarget:.row-marked"
 {%- endmacro %}
 
-{# The network badge: the tile this instance has already generated, or the
-   viewer's own emoji for that network.
-
-   ASKED OF THE DISK RATHER THAN OF THE BROWSER. This used to be an <img> at the
-   logo route with an `onerror` that swapped in the emoji, so every network with
-   no tile cost a 404 per row and the fallback was a script. The month payload
-   already warms every network on the page before it renders
-   (routes._live_month_payload's ensure_logos), so by the time a row is drawn the
-   tile either exists or never will, and the server can simply say which. #}
 {# The row's picture — a show's or a watched film's: the address the page
    resolved for it before drawing (routes._row_pictures — the season's own
    artwork, else the title's, in the viewer's order), drawn through the image
@@ -78,12 +71,88 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
 {%- else %}<span class="distrakt-poster is-empty" aria-hidden="true"></span>{% endif -%}
 {%- endmacro %}
 
-{% macro badge(network) -%}
+{# The network badge: the LOGO alone, where this instance holds a tile, and an
+   empty slot where it does not — the emoji code has a cell of its own, so the
+   badge does not fall back to it. `data-net` is what an answer that
+   regenerated the logo addresses every copy by.
+
+   ASKED OF THE DISK RATHER THAN OF THE BROWSER. This used to be an <img> at the
+   logo route with an `onerror` swapping in a fallback, so every network with no
+   tile cost a 404 per row and the fallback was a script. The month payload
+   already warms every network on the page before it renders
+   (routes._live_month_payload's ensure_logos), so by the time a row is drawn the
+   tile either exists or never will, and the server can simply say which. #}
+{% macro badge(network, oob=false) -%}
 {%- set logo = logo_for(network) -%}
-<span class="distrakt-badge">
-    {%- if logo %}<img class="distrakt-logo" src="{{ logo }}" alt="">
-    {%- else %}{{ emoji_for(network) }}{% endif -%}
+<span class="distrakt-badge"{% if network %} data-net="{{ net_ref(network) }}"{% endif %}
+      {%- if oob %} hx-swap-oob="outerHTML:.distrakt-badge[data-net='{{ net_ref(network) }}']"{% endif %}>
+    {%- if logo %}<img class="distrakt-logo" src="{{ logo }}" alt="">{% endif -%}
 </span>
+{%- endmacro %}
+
+{# THE NETWORK'S DISCORD EMOJI CODE, EDITED WHERE IT IS DRAWN.
+
+   A TEXT FIELD DRESSED AS TEXT, not text swapped for a field on a click: a
+   field is already what takes a click, a caret and typing, so there is nothing
+   to swap and no script. Focused, it looks like a field and the network's logo
+   tools hang under it (`:focus-within`).
+
+   IT SAVES ITSELF ON `change`. htmx sends its own named value with the network
+   beside it, as application/json (hx-json-enc), when the value was changed and
+   then committed: Enter, or focus leaving. A click in and out with nothing
+   changed is no `change`, so it sends nothing; Enter followed by a click away is
+   ONE request, because the value committed by Enter has not changed since. It
+   sits in no form, so Enter submits nothing of its own. Escape does not undo:
+   that would be script, and the field is only saved once it is committed.
+
+   THE ANSWER REDRAWS EVERY COPY, out of band, by `data-net` — every row on that
+   network shows the one code, and the answer (_distrakt_emoji_answer.html) is
+   this macro again. `hx-swap="none"` because the field itself is one of those
+   copies. The shape is _library_button.html's: htmx splits an oob value at its
+   first colon and only when it holds no space, which the digest guarantees.
+
+   A NETWORK WITH NO CODE OF ITS OWN SHOWS THE DEFAULT, dimmer; emptying the
+   field puts a network back on the default (prefs.set_network_emoji).
+
+   Clicking it opens no details panel: an input acts for itself inside a row
+   that opens one (static/js/ui.js's ACTS_FOR_ITSELF). #}
+{% macro emoji(network, oob=false) -%}
+{%- if network %}
+{%- set ref = net_ref(network) -%}
+{%- set code = emoji_for(network) -%}
+<span class="distrakt-emoji{{ '' if emoji_own(network) else ' is-default' }}" data-net="{{ ref }}"
+      {%- if oob %} hx-swap-oob="outerHTML:.distrakt-emoji[data-net='{{ ref }}']"{% endif %}>
+    {#- `size` is the code's own length, so a phone's row gives it exactly the
+        room it needs without the stylesheet having to measure anything. -#}
+    <input type="text" class="distrakt-emoji-code" name="code" value="{{ code }}"
+           size="{{ [code | length, 4] | max }}"
+           aria-label="Discord emoji for {{ network }}" title="Discord emoji for {{ network }} — click to edit"
+           spellcheck="false" autocomplete="off"
+           hx-post="/api/distrakt/emoji{{ month_query }}" hx-json-enc
+           hx-trigger="change" hx-swap="none"
+           hx-vals='{{ {"network": network} | tojson }}'>
+    {#- THE NETWORK'S LOGO TOOLS, shown while the code is being edited: its full
+        name (a row's own cell truncates it, and a phone's row does not draw it),
+        the tile to download — to upload to Discord as the emoji this code names —
+        and, for an administrator, making the tile again. -#}
+    <span class="distrakt-emoji-tools">
+        <span class="distrakt-emoji-net">{{ network }}</span>
+        {%- set logo = logo_for(network) %}
+        {%- if logo %}
+        {#- Not boosted: htmx boosts every link under a boosted <body> and ignores
+            `download`, so this would fetch the PNG and swap it into the page
+            instead of saving a file. -#}
+        <a class="btn-ghost small" href="{{ logo }}&amp;download=1"
+           download hx-boost="false" title="Download {{ network }}'s logo">⬇</a>
+        {%- endif %}
+        {%- if is_admin %}
+        <button type="button" class="btn-ghost small" title="Make {{ network }}'s logo again"
+                hx-post="/api/distrakt/network-logo{{ month_query }}" hx-json-enc hx-swap="none"
+                hx-vals='{{ {"network": network} | tojson }}'>↻</button>
+        {%- endif %}
+    </span>
+</span>
+{%- else %}<span class="distrakt-emoji"></span>{% endif -%}
 {%- endmacro %}
 
 {# A season that was finished and is on the pile again — the episode count moved,
@@ -121,15 +190,28 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
 {%- endif %}
 {%- endmacro %}
 
+{# ROOM FOR AN ABANDON BUTTON A ROW DOES NOT HAVE (a completed row, a closed
+   month, a film), so its ✕ and every column before it line up with the rows
+   that do. Invisible, unreachable and the same markup as the real one, so it is
+   exactly as wide in any font. #}
+{% macro abandon_room() -%}
+<span class="btn-ghost small distrakt-abandon is-placeholder" aria-hidden="true">
+            <span>Abandon</span><span class="alt">Un-abandon</span></span>
+{%- endmacro %}
+
 {% macro show_row(show, marked=false) %}
 {%- set is_premiere = show.bucket in ('new', 'returning') -%}
-{#- The x/y comes from the server already written out, because when two accounts
-    report different numbers for a season the row shows BOTH, each labelled — and
-    that rule is the same one a closed month is written with, so it has one home
-    (app/distrakt/counts.py). EVERY BUCKET DRAWS ITS COUNT, COMPLETED INCLUDED: a
-    blank cell would read as both services agreeing the season is done, which is a
-    claim neither of them made. -#}
-{%- set xy = show.counts or (show.watched ~ '/' ~ show.total) -%}
+{#- The x/y comes from the server already written out, from the rule a closed
+    month is written with (app/distrakt/counts.py's row_count). A SPLIT COUNT IS
+    ONE NUMBER: when the services disagree, or only one of two holds the season,
+    each service's number written out ("2/2 (Trakt) · 3/2 (Simkl)") is too wide
+    for a column every row shares, so the row shows the primary service's, marked,
+    and the per-service story is the tooltip it already had (show.counts_detail).
+    EVERY BUCKET DRAWS ITS COUNT, COMPLETED INCLUDED: a blank cell would read as
+    both services agreeing the season is done, which is a claim neither of them
+    made. -#}
+{%- set split = show.count_split -%}
+{%- set xy = show.count_label -%}
 {%- set counts = (xy ~ (', ' ~ show.cadence if show.cadence else '')) if is_premiere else xy -%}
 {#- New/Returning: premiere (– finale for weekly). Keepup: finale (end date).
     A date nobody has announced reads TBA, as the details panel's episode list
@@ -161,19 +243,28 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
     {%- endif %}
     {{ picture(show) }}
     <span class="distrakt-title"><span class="tt">{{ show.title }}</span>{{ return_mark(show) }}{{ missing_mark(show) }}</span>
+    {#- The row's facts in one wrapper — `display: contents` on a wide list, so
+        they stay the row's own columns, and one flexible line under the title
+        on a phone. -#}
+    <span class="distrakt-facts">
+    {#- THE DATES COME FIRST, just after the title, so a section without any
+        (Cleanup, Completed) has its empty slot where a short title's own space
+        already is, and every column from the season on sits in the same place
+        on every row. A phone puts them back at the end of the line. -#}
+    <span class="distrakt-dates">{{ dates }}</span>
     <span class="distrakt-season">S{{ '%02d' % show.season }}</span>
     {#- The badge sits beside the network it stands for, between the season and
         the network's name, rather than ahead of the title. -#}
     {{ badge(show.network) }}
-    {#- Spelled out in every bucket, not just as a tooltip: this is the string the
-        emoji map is keyed on, so seeing it is what makes the map editable
-        without guessing. -#}
+    {#- Spelled out in every bucket, not just as a tooltip: it is what the code
+        beside it belongs to, and the code is edited right there. -#}
     <span class="distrakt-network">{{ show.network or '—' }}</span>
-    <span class="distrakt-counts"
+    {{ emoji(show.network) }}
+    <span class="distrakt-counts{{ ' is-split' if split }}"
           {%- if counts and show.counts_detail %} title="{{ show.counts_detail }}"{% endif %}>
         {{- '(' ~ counts ~ ')' if counts else '' -}}
     </span>
-    <span class="distrakt-dates">{{ dates }}</span>
+    </span>
     <span class="distrakt-row-actions">
         {#- A COMPLETED ROW OFFERS NO ABANDON, and that is not a tidying-up. You
             cannot give up on something you have finished, so the control was
@@ -185,11 +276,16 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
             too: what a past month RECORDS can still be corrected, but its
             verdicts were settled when it froze. -#}
         {%- if not closed and show.bucket != 'completed' %}
-        <button type="button" class="btn-ghost small"
+        {#- Both labels are in the button, the other one invisible, so it is as
+            wide as its wider label either way and an abandoned row lines up with
+            the rest. -#}
+        <button type="button" class="btn-ghost small distrakt-abandon"
                 {{ month_post('/api/distrakt/abandon',
                               {'key': show.key, 'season': show.season,
                                'abandoned': not show.abandoned}) }}>
-            {{ 'Un-abandon' if show.abandoned else 'Abandon' }}</button>
+            <span>{{ 'Un-abandon' if show.abandoned else 'Abandon' }}</span><span class="alt" aria-hidden="true">{{ 'Abandon' if show.abandoned else 'Un-abandon' }}</span></button>
+        {%- else %}
+        {{ abandon_room() }}
         {%- endif %}
         {%- call confirm.ask(slot='remove-' ~ show.key ~ '-' ~ show.season,
                              question=('Take this off what this month records?'
@@ -213,12 +309,16 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
 <div class="distrakt-show-row distrakt-film-row">
     {{ picture(film) }}
     <span class="distrakt-title"><span class="tt">{{ film.title or 'Untitled' }}</span></span>
+    <span class="distrakt-facts">
+    <span class="distrakt-dates">{{ (film.watched_at or '')[:10] }}</span>
     <span class="distrakt-season"></span>
     <span class="distrakt-badge">🎬</span>
     <span class="distrakt-network">Film</span>
+    <span class="distrakt-emoji"></span>
     <span class="distrakt-counts">{{ film.year or '' }}</span>
-    <span class="distrakt-dates">{{ (film.watched_at or '')[:10] }}</span>
+    </span>
     <span class="distrakt-row-actions">
+        {{ abandon_room() }}
         {%- if film.key %}
         {%- call confirm.ask(slot='film-' ~ film.key,
                              question='Forget watching ' ~ (film.title or 'this film')

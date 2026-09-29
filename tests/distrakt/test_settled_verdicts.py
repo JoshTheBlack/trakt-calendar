@@ -730,9 +730,13 @@ class TheControlsACompletedRowOffersTests(unittest.TestCase):
         """✕ is the one thing every row keeps, in every bucket and every month:
         what a month RECORDS can always be corrected — so its confirm sits
         OUTSIDE the branch that takes Abandon away."""
-        after_branch = self.source.split("Un-abandon")[1].split("{% endmacro %}")[0]
+        # From the branch's own opening, not from a label inside it: the button
+        # spells both of its labels (so it is as wide as the wider one), and a
+        # row without it holds an invisible copy spelling them again.
+        row = self.source.split("{% macro show_row")[1].split("{% endmacro %}")[0]
+        after_branch = row.split("{%- if not closed and show.bucket")[1]
         self.assertIn("{%- endif %}", after_branch.split("confirm.ask")[0])
-        self.assertIn("/api/distrakt/remove", after_branch)
+        self.assertIn("/api/distrakt/remove", after_branch.split("confirm.ask")[1])
 
 
 class TheRouteStillRefusesADirectAbandonTests(AppTestCase):

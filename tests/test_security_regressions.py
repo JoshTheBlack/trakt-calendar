@@ -748,14 +748,27 @@ class PerUserEmojiMapTests(RegressionTestCase):
         self.assertEqual(emojis, {})
         self.assertEqual(default_emoji, store.DEFAULT_EMOJI)
 
-    def test_registering_networks_writes_only_the_acting_users_map(self):
+    def test_saving_a_code_writes_only_the_acting_users_map(self):
+        """Through the route a row's field posts to, so it is the session that
+        decides whose map is written — the body names a network and nothing
+        else."""
         from app import distrakt as store
         mine, theirs = self.tracker("mine"), self.tracker("theirs")
-        asyncio.run(store.register_networks(mine, ["HBO", "AMC", ""]))
-        self.assertEqual(
-            set(asyncio.run(store.get_emoji_prefs(mine))[0]), {"HBO", "AMC"})
+        asyncio.run(store.set_emoji_prefs(theirs, {"AMC": ":theirs:"}, ":tv:"))
+        self.login("mine")
+        resp = self.client.post("/api/distrakt/emoji", json={"network": "HBO", "code": ":hbo:"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(asyncio.run(store.get_emoji_prefs(mine))[0], {"HBO": ":hbo:"})
         # The other account is untouched — the actual reported bug.
-        self.assertEqual(asyncio.run(store.get_emoji_prefs(theirs))[0], {})
+        self.assertEqual(asyncio.run(store.get_emoji_prefs(theirs))[0], {"AMC": ":theirs:"})
+
+    def test_no_path_onto_the_tracker_files_networks_into_anybodys_map(self):
+        """Networks used to be registered into the acting user's map as the default
+        by every path that filed a record; that is the path the app-wide map leaked
+        through. Nothing registers any more — the rows name every network."""
+        from app.distrakt import arrival, prefs
+        self.assertFalse(hasattr(arrival, "register"))
+        self.assertFalse(hasattr(prefs, "register_networks"))
 
     def test_settings_no_longer_carries_the_map_at_all(self):
         """Removed rather than left unused: a lingering app-wide field is
@@ -786,34 +799,36 @@ class PerUserEmojiMapTests(RegressionTestCase):
         self.assertEqual(asyncio.run(store.get_emoji_prefs(user_id)),
                          ({"HBO": ":hbo:"}, ":film:"))
 
-    def test_the_editor_is_reachable_without_being_an_admin(self):
-        """The editor is a FORM now: its rows travel as one flat field per value,
-        named by position, and the answer is the rows the server made of them.
-        There is no GET beside it any more — the rows come with the page."""
+    def test_codes_and_the_default_are_saved_without_being_an_admin(self):
+        """The map decides how THIS account's posts render, so every tracker user
+        edits their own: a code on a row, and the default in the header."""
         user_id = self.tracker("plain")
         self.login("plain")
-        resp = self.client.post("/api/distrakt/emojis", json={
-            "network-0": "HBO", "emoji-0": ":hbo:", "default_network_emoji": ":film:",
-        })
-        self.assertEqual(resp.status_code, 200)
-        self.assertIn('name="network-0" value="HBO"', resp.text)
+        for path, body in (("/api/distrakt/emoji", {"network": "HBO", "code": ":hbo:"}),
+                           ("/api/distrakt/emoji-default", {"code": ":film:"})):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.post(path, json=body).status_code, 200)
         from app import distrakt as store
         self.assertEqual(asyncio.run(store.get_emoji_prefs(user_id)),
                          ({"HBO": ":hbo:"}, ":film:"))
 
-    def test_a_row_nobody_filled_in_is_dropped_rather_than_stored(self):
-        """The editor always draws a blank row to type into, and one left
-        untouched is not an error to report — it is a row nobody filled in. A
-        map cannot be malformed any more: it arrives as flat fields, so there is
-        no shape for a caller to get wrong."""
+    def test_a_save_that_names_no_network_stores_nothing(self):
+        """A network is the key, and a blank one keys nothing."""
         user_id = self.tracker("plain")
         self.login("plain")
-        self.client.post("/api/distrakt/emojis", json={
-            "network-0": "HBO", "emoji-0": ":hbo:",
-            "network-1": "  ", "emoji-1": ":nobody:",
-        })
+        self.client.post("/api/distrakt/emoji", json={"network": "  ", "code": ":nobody:"})
         from app import distrakt as store
-        self.assertEqual(asyncio.run(store.get_emoji_prefs(user_id))[0], {"HBO": ":hbo:"})
+        self.assertEqual(asyncio.run(store.get_emoji_prefs(user_id))[0], {})
+
+    def test_the_old_whole_map_editor_is_gone(self):
+        """It replaced the whole map from whatever one tab held, so a second tab's
+        save undid the first's. Nothing answers it now."""
+        self.tracker("plain")
+        self.login("plain")
+        for path in ("/api/distrakt/emojis", "/distrakt/fragments/emoji-rows",
+                     "/api/distrakt/backfill-networks"):
+            with self.subTest(path=path):
+                self.assertIn(self.client.post(path, json={}).status_code, (404, 405))
 
 
 class DistraktDetailsTests(RegressionTestCase):

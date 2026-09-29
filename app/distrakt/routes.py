@@ -28,7 +28,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from . import (arrival, backfill, counts, discord_fmt, episode_progress, lifecycle, live,
-               rollover, slug_repair, unsettled, watch_history)
+               post_memo, prefs, rollover, slug_repair, unsettled, watch_history)
 # The data layer is reached through this package's own public surface, the same
 # names an outside caller uses, rather than through the six modules those names
 # are defined in: a route handler has no business knowing which half of the
@@ -346,7 +346,6 @@ async def _add_to_past_month(request: Request, user_id, month_key: str, show: di
     # save_month round trip to set them would delete the month's records and
     # re-insert only the ones the doc handed over.
     await distrakt_store.set_month_closed(user_id, month_key)
-    await arrival.register(user_id, [show])
     await arrival.write_missing_premieres(settings, show)
     return await _month_answer(
         request, user_id, year, month, settings, message=message,
@@ -423,7 +422,7 @@ async def distrakt(request: Request):
             **chrome.page_context(user),
         })
     month = route_params.valid_month(request.query_params.get("month"), today.month)
-    network_emojis, default_network_emoji = await distrakt_store.get_emoji_prefs(user.user_id)
+    _network_emojis, default_network_emoji = await distrakt_store.get_emoji_prefs(user.user_id)
     backfill_start, backfill_end = backfill.default_range(today)
     settings = await viewer.settings_for_user(user.user_id)
     context = {
@@ -440,14 +439,10 @@ async def distrakt(request: Request):
         # open on" selector; the same list the calendar's endpoint picker uses.
         "endpoints": endpoint_choices(),
         **chrome.page_context(user),
-        # This user's OWN map — it renders into their Discord posts and nobody
-        # else's. Drawn with the page rather than fetched: it used to be BOTH,
-        # rendered into a global AND fetched again by the page's own init before
-        # the month was even asked for.
+        # This user's OWN default emoji, for the header pill — it renders into
+        # their Discord posts and nobody else's. A network's own code is drawn
+        # on its rows, with the month.
         "default_network_emoji": default_network_emoji,
-        # The editor's rows come from the one function every emoji answer uses,
-        # so the first draw and every redraw are the same markup.
-        "emoji_rows": _emoji_row_contexts(network_emojis),
         # The range the backfill dialog opens on. Rendered rather than fetched:
         # the server decides it and used to answer a request whose only job was
         # to fill in two inputs.
@@ -481,10 +476,22 @@ def _empty_month_payload(month_key: str, emojis: dict, default_emoji: str,
         "ok": True, "month": month_key, "closed": False, "readonly": readonly, "shows": [],
         "movies": [],
         "empty_note": empty_note,
-        "post1": discord_fmt.render_post1([], [], emojis, default_emoji, link_url=link_url),
-        "post2": discord_fmt.render_post2([], emojis, default_emoji, standing=standing),
+        **_posts(discord_fmt.PostInputs([], [], [], None, standing, link_url),
+                 emojis, default_emoji),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _posts(inputs: discord_fmt.PostInputs, emojis: dict, default_emoji: str) -> dict:
+    """A payload's two posts, and what they were rendered from.
+
+    THE INPUTS TRAVEL WITH THE PAYLOAD so `_month_answer` can keep them for the
+    month (post_memo) whichever of the four shapes built it: an emoji code
+    saved on a row renders both posts again from them with the new map, rather
+    than working the whole month out again to change one line's emoji.
+    """
+    post1, post2 = discord_fmt.render_posts(inputs, emojis, default_emoji)
+    return {"post1": post1, "post2": post2, "post_inputs": inputs}
 
 
 def _rows_for(shape: lifecycle.MonthShape,
@@ -552,10 +559,17 @@ def _rows_for(shape: lifecycle.MonthShape,
         # the browser because a frozen month keeps what each service said and has
         # to be able to render that disagreement years later, from the same rule
         # that wrote it (app/distrakt/counts.py).
+        per_source = show.get("watched_by_source") or show.get("watched")
+        if "count_label" not in show:
+            # The row's one number, which a live show already carries
+            # (live._apply_counts) and a stored one is given here from the same
+            # rule.
+            row_count = counts.row_count(per_source, show.get("total"), live.source_order())
+            show = {**show, "count_label": row_count.label, "count_split": row_count.split}
         rows.append({**show, "returned": bool(show.get("came_back")),
                      "counts": show.get("counts") or counts.counts_label(
-                         show.get("watched_by_source") or show.get("watched"),
-                         show.get("total"), live.source_labels(), live.source_order()),
+                         per_source, show.get("total"), live.source_labels(),
+                         live.source_order()),
                      # THE SAME BREAKDOWN IN FULL, for the row's tooltip — a peek
                      # at what this month actually recorded, which is the most
                      # useful thing a frozen row can offer.
@@ -566,8 +580,8 @@ def _rows_for(shape: lifecycle.MonthShape,
                      # watch state, which a frozen month deliberately does not
                      # consult — it renders what it froze.
                      "counts_detail": show.get("counts_detail") or counts.counts_detail(
-                         show.get("watched_by_source") or show.get("watched"),
-                         show.get("total"), live.source_labels(), live.source_order())})
+                         per_source, show.get("total"), live.source_labels(),
+                         live.source_order())})
     return rows
 
 
@@ -643,10 +657,9 @@ async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, defau
         # The first notice gets the month's PREMIERE records and nothing else: it
         # announces what began in the month, which is true of a month in any
         # standing and whatever each of those titles has since become.
-        "post1": discord_fmt.render_post1(shape.series_premieres, shape.season_premieres,
-                                          emojis, default_emoji, link_url=link_url),
-        "post2": discord_fmt.render_post2(shows, emojis, default_emoji,
-                                          movies=movies, standing=standing),
+        **_posts(discord_fmt.PostInputs(shape.series_premieres, shape.season_premieres,
+                                        shows, movies, standing, link_url),
+                 emojis, default_emoji),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         # Reports the ACTUAL cause: True only when Trakt rate-limited us, False when
         # it was simply unreachable. The client shows the banner off `notice`
@@ -670,10 +683,9 @@ def _closed_month_payload(doc: dict, month_key: str, emojis: dict, default_emoji
         "movies": doc.get("movies") or [],
         # A closed month's announcement is still every premiere it had, whatever
         # each one has since become.
-        "post1": discord_fmt.render_post1(shape.series_premieres, shape.season_premieres,
-                                          emojis, default_emoji, link_url=link_url),
-        "post2": discord_fmt.render_post2(shows, emojis, default_emoji,
-                                          movies=doc.get("movies"), standing=standing),
+        **_posts(discord_fmt.PostInputs(shape.series_premieres, shape.season_premieres,
+                                        shows, doc.get("movies"), standing, link_url),
+                 emojis, default_emoji),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1109,10 +1121,9 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
         # The first notice takes the PREMIERE records alone. It announces what
         # began in the month and nothing else, in every standing, which is a
         # different question from the one the page and the second notice ask.
-        post1 = discord_fmt.render_post1(shape.series_premieres, shape.season_premieres,
-                                         emojis, default_emoji, link_url=link_url)
-        post2 = discord_fmt.render_post2(shows, emojis, default_emoji, movies=movies,
-                                         standing=standing)
+        posts = _posts(discord_fmt.PostInputs(shape.series_premieres, shape.season_premieres,
+                                              shows, movies, standing, link_url),
+                       emojis, default_emoji)
     return {
         "ok": True,
         "month": month_key,
@@ -1146,8 +1157,7 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
         # own tooltip is written from (app/distrakt/live.py), and a second copy
         # in JavaScript could not be tested against it.
         "source_notices": live.unavailable_notices(computed, unreadable=unreadable),
-        "post1": post1,
-        "post2": post2,
+        **posts,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }, 200
 
@@ -1390,10 +1400,35 @@ def _modal_context(settings, year: int, month: int) -> dict:
     }
 
 
+def _emoji_context(emojis: dict, default_emoji: str, networks, is_admin: bool) -> dict:
+    """What a row's network badge and emoji code are drawn from.
+
+    ONE BUILDER FOR THE MONTH AND FOR AN ANSWER THAT REDRAWS ONE NETWORK'S CELLS,
+    because an answer's cell replaces the month's copies out of band and has to
+    be the same markup, drawn from the same rule, to do that invisibly.
+
+    `emoji_for` is the code the network posts as — its own, or the default — and
+    `emoji_own` whether it has one (prefs.own_code: an entry equal to the default
+    is none). `logo_for` is the tile's address with the tile's own version in
+    it, so a regenerated logo is a new address the browser has not cached
+    (media/logos.versions). `net_ref` is what an answer addresses the cells by.
+    """
+    versions = logos.versions(networks)
+    return {
+        "emoji_for": lambda network: prefs.own_code(emojis, default_emoji, network) or default_emoji,
+        "emoji_own": lambda network: bool(prefs.own_code(emojis, default_emoji, network)),
+        "net_ref": prefs.network_ref,
+        "logo_for": lambda network: (
+            f"/api/network-logo?name={quote(network or '')}&v={versions[network]}"
+            if network in versions else ""),
+        "is_admin": is_admin,
+    }
+
+
 def _month_context(request: Request, payload: dict, year: int, month: int,
                    emojis: dict, default_emoji: str, settings, *,
                    message: str = "", ok: bool = True,
-                   pictures: dict | None = None) -> dict:
+                   pictures: dict | None = None, is_admin: bool = False) -> dict:
     """The month fragment's whole context, out of the payload and nothing else.
 
     ONE READER OF THE PAYLOAD. Every mutating route answers through this, so what
@@ -1403,9 +1438,6 @@ def _month_context(request: Request, payload: dict, year: int, month: int,
     shows = payload.get("shows") or []
     highlight = payload.get("highlight") or {}
     closed = bool(payload.get("closed") or payload.get("readonly"))
-    # Which networks this instance actually holds a tile for, asked once for the
-    # whole response rather than once per row, and never of the browser.
-    with_logos = logos.tiled(show.get("network") for show in shows)
     return {
         "request": request,
         "sections": discord_fmt.page_sections(shows),
@@ -1428,9 +1460,10 @@ def _month_context(request: Request, payload: dict, year: int, month: int,
         "message_ok": ok,
         "closed": closed,
         "month_query": f"?year={year}&month={month}",
-        "emoji_for": lambda network: emojis.get(network or "", default_emoji),
-        "logo_for": lambda network: (
-            f"/api/network-logo?name={quote(network or '')}" if network in with_logos else ""),
+        # Which networks this instance holds a tile for is asked once for the
+        # whole response rather than once per row, and never of the browser.
+        **_emoji_context(emojis, default_emoji,
+                         (show.get("network") for show in shows), is_admin),
         # A row's picture, resolved for the whole page before it is drawn
         # (_row_pictures) — "" where nothing is known yet.
         "poster_for": lambda show: (pictures or {}).get((str(show.get("key")),
@@ -1535,13 +1568,17 @@ async def _month_answer(request: Request, user_id: int, year: int, month: int,
         # The one payload shape that is not a month: no source can be asked at
         # all. There is nothing to draw, so it is said and the list is left alone.
         return _month_refusal(request, payload.get("error") or "Not configured")
+    # What the posts this answer carries were rendered from, kept for the next
+    # emoji code saved on this month (api_distrakt_emoji).
+    post_memo.remember(user_id, payload["month"], payload["post_inputs"])
     emojis, default_emoji = await distrakt_store.get_emoji_prefs(user_id)
     pictures, _ = await _row_pictures(user_id, payload.get("shows") or [],
                                       payload.get("movies") or [])
+    user = await auth.current_user(request)
     return templates.TemplateResponse(
         request, "_distrakt_month.html",
         _month_context(request, payload, year, month, emojis, default_emoji, settings,
-                       message=message, ok=ok, pictures=pictures))
+                       message=message, ok=ok, pictures=pictures, is_admin=user.is_admin))
 
 
 def _rewatch_answer(request: Request, ask: dict, resubmit_url: str,
@@ -1620,8 +1657,8 @@ def _and_the_month(response: Response) -> Response:
     """`response`, plus a nudge that makes the month list fetch itself again.
 
     FOR AN ANSWER THAT CHANGES WHAT THE LIST LOOKS LIKE WITHOUT BEING ABOUT IT:
-    saving the emoji map changes every roster badge, and restoring a backup
-    replaces the month outright. Recomputing a month inside those answers would
+    a new default emoji changes every row and post line without a code of its
+    own, and restoring a backup replaces the month outright. Recomputing a month inside those answers would
     spend a season lookup per listed title in a response nobody asked a month of,
     and it would put a second month-drawing path beside the one the page already
     has. THE LIST ALREADY KNOWS HOW TO FETCH ITSELF (distrakt.html's hidden
@@ -1742,7 +1779,6 @@ async def api_distrakt_import(request: Request):
     if not chosen:
         return _month_refusal(request, "Tick at least one title to import.")
     # The instance's settings, for the reason the gate above gives.
-    # The networks it files are registered where it files them (arrival.register).
     added = await distrakt_store.import_premieres(user_id, month_key, load_settings(), chosen)
     return await _month_answer(
         request, user_id, year, month, settings,
@@ -1794,53 +1830,6 @@ async def import_fragment(request: Request):
             context["undescribed"] = sorted(offer.undescribed, key=str.casefold)
     return templates.TemplateResponse(request, "_distrakt_import_list.html", context)
 
-
-@guard.post("/api/distrakt/backfill-networks", AuthLevel.DISTRAKT_APPROVED)
-async def api_distrakt_backfill_networks(request: Request):
-    """Register every network used by this month's roster into the emoji map
-    (with the default emoji) so they all show up in the editor. Returns the map."""
-    user_id = await _distrakt_user_id(request)
-    data = await authz.json_body(request)
-    year, month = _viewed_month(request)
-    doc = await distrakt_store.load_month(user_id, distrakt_store.month_key(year, month))
-    stored = await _register_networks(
-        user_id, [show.get("network") for show in (doc or {}).get("shows", [])],
-    )
-    # WHAT IS ON SCREEN WINS, WHICH IS WHY THE FORM POSTS ITSELF. The rows the
-    # editor is holding may carry edits nobody has saved, and answering with the
-    # stored map alone would throw them away — so the form sends what it has and
-    # the merge happens here, adding only networks it does not already name. It
-    # was `_syncEmojiEntriesFromDom` reading the rows back out of the DOM before
-    # a redraw could clobber them; a form that posts its own fields needs no such
-    # rescue.
-    on_screen = dict(_emoji_rows_from_form(data))
-    on_screen.pop("", None)
-    merged = {**{network: emoji for network, emoji in stored.items()
-                 if network not in on_screen}, **on_screen}
-    user = await auth.current_user(request)
-    return _emoji_answer(request, merged.items(), user.is_admin,
-                         message="Backfilled networks from shows")
-
-
-@guard.post("/distrakt/fragments/emoji-rows", AuthLevel.DISTRAKT_APPROVED)
-async def distrakt_emoji_rows_fragment(request: Request):
-    """The editor's rows with one more or one fewer, and nothing written.
-
-    A POST THAT STORES NOTHING, and the verb is right rather than a compromise.
-    What this needs in order to answer is the form as it stands — every field
-    somebody has typed and not saved — and this app's rule is that an address
-    carries a reference and never data. The server cannot look up an unsaved
-    edit, so the form is the body.
-
-    `remove` NAMES A ROW BY ITS FIELD SUFFIX. Leaving it out is the other action:
-    the answer drops the blanks, sorts what is left and draws a fresh blank row
-    at the end, which is exactly what "+ Add network" means once the row being
-    typed into is committed.
-    """
-    user = await auth.current_user(request)
-    data = await authz.json_body(request)
-    rows = _emoji_rows_from_form(data, drop=str(data.get("remove", "")))
-    return _emoji_answer(request, rows, user.is_admin)
 
 
 @guard.get("/distrakt/fragments/day-label", AuthLevel.DISTRAKT_APPROVED)
@@ -1996,8 +1985,11 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     try:
         # See the calendar's own modal: with nobody reachable, what this
         # instance already holds beats a blank card, and None is the case where
-        # it holds nothing either.
-        details = await detail_source.describe(settings, chosen, Media.SHOW, season)
+        # it holds nothing either. A season the chosen service has no episodes
+        # of is answered by the next service that does (detail_source.for_season).
+        chosen, details = await detail_source.describe_season(
+            settings, chosen, ids, Media.SHOW, season)
+        source = chosen.source
         if details is None:
             return details_panel.gap(request, "Nothing here can describe this item.")
     except Exception:
@@ -2066,60 +2058,6 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
                                        "year": str(year), "month": str(month)})
 
 
-# The emoji editor's rows travel as one flat field per value, named by the row's
-# POSITION: `network-0`, `emoji-0`, `network-1`… That is the shape the calendar's
-# filter chips already use and it is chosen for the same two reasons. json-enc
-# serializes a form as flat name/value pairs with no dependable array convention,
-# so a list has to be spelled out; and the row's own network name cannot be the
-# field name, because it is free text somebody is in the middle of editing.
-#
-# THE INDEX MEANS NOTHING BUT "these two belong together". Rows are re-sorted and
-# renumbered on the way back out, so a gap left by a removal is not a hole
-# anybody has to keep track of.
-_EMOJI_ROW_FIELDS = ("network", "emoji")
-
-
-def _emoji_rows_from_form(data: dict, *, drop: str = "") -> list[tuple[str, str]]:
-    """The editor's rows as (network, emoji) pairs, in the order they were drawn,
-    minus the one `drop` names.
-
-    PAIRED BY THE SUFFIX AND ORDERED BY THE FORM, not by counting up from zero. A
-    removal leaves a gap in the numbering of what is still on screen, and walking
-    0, 1, 2… would stop at the hole and silently discard every row after it. The
-    body preserves the order the fields were serialized in, which is the order
-    they are drawn in, so iterating it IS the page's order.
-
-    A ROW WITH NO NETWORK IS DROPPED rather than refused: the editor always draws
-    a blank row for somebody to type into, and one left untouched is not an error
-    to report. Values are stripped, because a network name with a trailing space
-    keys nothing.
-    """
-    return [(str(value or "").strip(),
-             str(data.get(f"emoji-{key[len('network-'):]}") or "").strip())
-            for key, value in data.items()
-            if key.startswith("network-") and key[len("network-"):] != drop]
-
-
-def _emoji_row_contexts(pairs) -> list[tuple[str, str, str]]:
-    """(network, emoji, tile URL or "") per row, alphabetically, blanks dropped.
-
-    ONE BUILDER FOR THE FIRST DRAW AND EVERY REDRAW, so the rows the page ships
-    with and the rows an answer swaps in cannot differ. Alphabetical by network
-    is the order the editor has always shown, and it is the server's now:
-    sorting in the browser meant the rows had to be held in an array there, which
-    is why an unsaved edit had to be read back out of the DOM before anything
-    could redraw them (`_syncEmojiEntriesFromDom`). A form holds its own edits, so
-    that whole problem goes away with the array.
-    """
-    named = sorted(((network, emoji) for network, emoji in
-                    (pairs.items() if isinstance(pairs, dict) else pairs) if network),
-                   key=lambda pair: pair[0].lower())
-    with_logos = logos.tiled(network for network, _emoji in named)
-    return [(network, emoji,
-             f"/api/network-logo?name={quote(network)}" if network in with_logos else "")
-            for network, emoji in named]
-
-
 async def _post_link_choices(user_id: int) -> dict:
     """What the announcement post's two selectors offer and which entries are
     currently chosen.
@@ -2144,54 +2082,120 @@ async def _post_link_choices(user_id: int) -> dict:
     }
 
 
-def _emoji_answer(request: Request, pairs, is_admin: bool, *,
-                  message: str = "", ok: bool = True) -> Response:
-    """The editor's rows, redrawn — the one answer every emoji-map route gives.
+@guard.post("/api/distrakt/emoji", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_emoji(request: Request):
+    """Save ONE network's Discord emoji code, from the field on a row.
 
-    ALPHABETICAL BY NETWORK, which is the order the editor has always shown and
-    is now the server's to state. Sorting in the browser meant the rows had to be
-    held in an array there, which is why an unsaved edit had to be read back out
-    of the DOM before anything could redraw them (`_syncEmojiEntriesFromDom`) —
-    a form holds its own edits, so that whole problem goes away with the array.
+    DISTRAKT_APPROVED rather than ADMIN: the map is this account's own and
+    decides how this account's Discord posts render (distrakt/prefs.py).
 
-    A ROW WITH NO NETWORK NAME IS DROPPED HERE and a fresh blank one is drawn by
-    the template, so the editor always has somewhere to type and never
-    accumulates the ones nobody filled in.
-    """
-    return templates.TemplateResponse(request, "_distrakt_emoji_rows.html", {
-        "request": request,
-        "rows": _emoji_row_contexts(pairs),
-        "is_admin": is_admin,
-        "message": message,
-        "message_ok": ok,
-    })
+    ONE KEY, IN A TRANSACTION (prefs.set_network_emoji), so two tabs editing two
+    networks keep both. An empty code puts the network back on the default.
 
-
-@guard.post("/api/distrakt/emojis", AuthLevel.DISTRAKT_APPROVED)
-async def api_distrakt_set_emojis(request: Request):
-    """Replace this user's network->emoji map.
-
-    DISTRAKT_APPROVED rather than ADMIN: the map is this account's own now, and
-    it decides how this account's Discord posts render. It used to be saved
-    through the admin-only settings endpoint, which is why only an administrator
-    could edit what every user's posts looked like.
+    THE ANSWER IS SMALL AND OUT OF BAND: every row's cell for that network, and
+    both posts rendered again from the month's kept inputs with the new map
+    (post_memo) — a code is edited in order to be posted, so a post copied after
+    the edit has to carry it. Nothing else on the page depends on the code, so
+    the month is not worked out again for it. Where nothing is kept for this
+    month (a restart since it was drawn), the page is asked to fetch its month
+    instead, which is the one answer that still brings the posts.
     """
     user = await auth.current_user(request)
     data = await authz.json_body(request)
-    rows = _emoji_rows_from_form(data)
-    default_emoji = str(data.get("default_network_emoji") or "").strip() or distrakt_store.DEFAULT_EMOJI
-    clean = {network: emoji for network, emoji in rows if network}
-    await distrakt_store.set_emoji_prefs(user.user_id, clean, default_emoji)
-    # THE ROWS COME BACK SORTED AND RENUMBERED, which is the save's visible
-    # effect: a blank row typed in at the bottom takes its place in the list, and
-    # a row emptied out is gone.
-    #
-    # AND THE MONTH IS ASKED TO REDRAW ITSELF, because every roster badge falls
-    # back to this map, so saving it changes what the list looks like. One header
-    # rather than a second month recompute inside this answer: the list already
-    # knows how to fetch itself, and this says when.
-    return _and_the_month(_emoji_answer(request, clean.items(), user.is_admin,
-                                        message="Emoji map saved"))
+    network = str(data.get("network") or "").strip()
+    if not network or len(network) > prefs.MAX_NETWORK_LENGTH:
+        return _month_refusal(request, "That isn't a network this page shows.")
+    emojis, default_emoji = await prefs.set_network_emoji(user.user_id, network,
+                                                          data.get("code"))
+    year, month = _viewed_month(request)
+    kept = post_memo.recall(user.user_id, distrakt_store.month_key(year, month))
+    post1, post2 = (discord_fmt.render_posts(kept, emojis, default_emoji)
+                    if kept else (None, None))
+    response = templates.TemplateResponse(request, "_distrakt_emoji_answer.html", {
+        "request": request,
+        "network": network,
+        "month_query": f"?year={year}&month={month}",
+        "post1": post1, "post2": post2,
+        **_emoji_context(emojis, default_emoji, [network], user.is_admin),
+    })
+    return response if kept else _and_the_month(response)
+
+
+@guard.post("/api/distrakt/emoji-default", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_emoji_default(request: Request):
+    """Save the code a network with none of its own posts as, from the header
+    pill's field. Empty means the app's own default (prefs.set_default_emoji).
+
+    THE PILL AND ITS FIELD COME BACK OUT OF BAND, and the month is asked to fetch
+    itself: every network without a code of its own, on every row and in both
+    posts, changes with the default, which is the whole month's markup — and a
+    default changes rarely enough that the refetch is the right cost.
+    """
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+    _emojis, default_emoji = await prefs.set_default_emoji(user.user_id, data.get("code"))
+    year, month = _viewed_month(request)
+    return _and_the_month(templates.TemplateResponse(request, "_distrakt_emoji_default_answer.html", {
+        "request": request, "default_network_emoji": default_emoji,
+        "month_query": f"?year={year}&month={month}",
+    }))
+
+
+async def _network_tmdb(user_id: int, month_key: str, network: str) -> int | None:
+    """A TMDB id for some title on `network` that this viewer's month shows — the
+    lookup a network's logo is found by (TMDB lists a show's networks, not a
+    network's logo by name). From what is stored, the month's records and the
+    viewer's own list, the two things the page's rows are drawn from."""
+    doc = await distrakt_store.load_month(user_id, month_key) or {}
+    for rec in [*(doc.get("shows") or []), *await distrakt_store.user_records(user_id)]:
+        if (rec.get("network") or "") == network:
+            try:
+                tmdb = int((rec.get("ids") or {}).get("tmdb") or 0)
+            except (TypeError, ValueError):
+                continue
+            if tmdb > 0:
+                return tmdb
+    return None
+
+
+@guard.post("/api/distrakt/network-logo", AuthLevel.ADMIN)
+async def api_distrakt_network_logo(request: Request):
+    """Make a network's logo tile again, from the ↻ under a row's emoji code.
+
+    ADMIN, as the calendar's regenerate is: a tile is the instance's, shared by
+    every viewer and every calendar card, and making one spends the instance's
+    TMDB key.
+
+    THE ANSWER IS EVERY ROW'S BADGE AND CODE CELL FOR THAT NETWORK, OUT OF BAND,
+    with the new tile's version in the address both draw (_emoji_context), plus
+    a line saying what happened. A regenerate that could make nothing keeps the tile it had
+    (logos.regenerate), and says so.
+    """
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+    network = str(data.get("network") or "").strip()
+    if not network or len(network) > prefs.MAX_NETWORK_LENGTH:
+        return _month_refusal(request, "That isn't a network this page shows.")
+    year, month = _viewed_month(request)
+    tmdb = await _network_tmdb(user.user_id, distrakt_store.month_key(year, month), network)
+    if tmdb is None:
+        return _month_refusal(request, f"Nothing on this month names a TMDB id for {network}, "
+                                       "so its logo can't be looked up.")
+    had = bool(logos.versions([network]))
+    made = await logos.regenerate(load_settings(), network, tmdb)
+    if made is not None:
+        message, ok = f"Made {network}'s logo again.", True
+    elif had:
+        message, ok = f"No new logo for {network} could be made, so the old one is kept.", False
+    else:
+        message, ok = f"TMDB has no usable logo for {network}.", False
+    emojis, default_emoji = await distrakt_store.get_emoji_prefs(user.user_id)
+    return templates.TemplateResponse(request, "_distrakt_logo_answer.html", {
+        "request": request, "network": network,
+        "month_query": f"?year={year}&month={month}",
+        "message": message, "message_ok": ok,
+        **_emoji_context(emojis, default_emoji, [network], user.is_admin),
+    })
 
 
 @guard.post("/api/distrakt/remove", AuthLevel.DISTRAKT_APPROVED)
@@ -2725,21 +2729,9 @@ async def _outstanding_play(user_id: int, key: ItemKey, season: int) -> dict | N
                 None)
 
 
-async def _register_networks(user_id: int, networks) -> dict:
-    """Auto-populate THIS user's network->emoji map: any network not yet mapped
-    gets the default emoji as a placeholder so it appears in their editor, ready
-    to customize. No-op for blank / already-mapped networks.
-
-    Per-user because it used to write settings.json, so importing a roster on any
-    tracker account registered its networks into the operator's map.
-    """
-    return await distrakt_store.register_networks(user_id, networks)
-
-
 @guard.post("/api/distrakt/add", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_add(request: Request):
-    """Add a show+season by hand, baseline the viewer's watch history for it, and
-    register its network in the emoji map.
+    """Add a show+season by hand and baseline the viewer's watch history for it.
 
     WHICH RECORD IT BECOMES FOLLOWS FROM WHETHER IT HAS AIRED, and the season
     lookup that answers that is made here rather than guessed at. A season that
@@ -2892,7 +2884,6 @@ async def api_distrakt_add(request: Request):
         })
     else:
         await lifecycle.follow(user_id, {**show, **detail, "season": show["season"]})
-    await arrival.register(user_id, [show])
     await arrival.write_missing_premieres(settings, show)
     # THE DECISION, AS A FLOOR, WRITTEN BEFORE THE MONTH IS RECOMPUTED. A
     # `history_from` in the body says "this pass starts here": the plays before
@@ -3373,9 +3364,6 @@ async def api_distrakt_unknown_add(request: Request):
         floor = _valid_day(data.get("history_from"))
         if floor:
             await distrakt_store.set_history_from(user_id, key, season, floor)
-    # The viewer's own emoji map is keyed by network name, so a network nothing
-    # registered draws nothing — the same call every way onto the tracker makes.
-    await arrival.register(user_id, [record])
     await arrival.write_missing_premieres(settings, {**record, "season": season})
     # ANSWERED, so it stops being asked. Closing it here rather than leaving
     # standing_questions to notice the season is now listed keeps the answer and

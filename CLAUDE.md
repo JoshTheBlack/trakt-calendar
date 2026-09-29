@@ -200,7 +200,13 @@ context's keys once — for the calendar, the tracker, the share page and the
 rankings board; no surface builds that markup in script, and `_details_modal.html`
 is the one shell around it. Which service describes a title is one question on
 all four, answered by `app/providers/detail_source.py` (in the providers package,
-not the calendar, because four features ask it). Because one renderer draws every
+not the calendar, because four features ask it). ONE SEASON of a title has one
+refinement, and it lives there too (`for_season`): a service whose answer holds
+nothing of that season hands it to the next service the title names that does —
+ids join two catalogues' SHOWS, and their seasons need not line up (Simkl's
+anthology "Monster" carries the ids of Trakt's one-season "DAHMER – Monster").
+It is decided after the first answer, so the common case costs nothing, and a
+failure is never read as an empty season. Because one renderer draws every
 answer, `DetailPort`'s answer has ONE KEY SET whoever gives it, and
 `tests/providers/test_protocol_conformance.py`'s
 `EveryDetailPortAnswersTheSameKeysTests` asserts it — a Protocol checks methods,
@@ -356,7 +362,12 @@ because htmx's attribute inheritance is on (static/js/boost.js) and a trigger on
 an ancestor becomes the trigger of the form inside it.
 A saved view preference is `hx-post` plus `hx-json-enc` on the control
 itself, answered with the page's own `#pageMeta` out of band — which is how a
-class reaches <body>, the one element a swap can never replace. And a title
+class reaches <body>, the one element a swap can never replace. A value edited
+where it is drawn — a tracker row's emoji code — is a FIELD DRESSED AS TEXT,
+saved on `change` and answered out of band to EVERY copy of it by a digest
+selector: nothing swaps text for a field, and `change` alone is what makes
+Enter save once, a click away save once, and a click in and out send nothing
+(measured in both engines; templates/_distrakt_rows.html's `emoji`). And a title
 scrolling because it is too wide for its cell is CONTAINER QUERY UNITS: `100cqw`
 is the cell's own width and `100%` in a transform is the title's, so the
 difference IS the overflow and nothing has to measure it — which is what emptied

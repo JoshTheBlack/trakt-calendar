@@ -72,6 +72,27 @@ def tiled(networks) -> set[str]:
     return {name for name in {n for n in networks if n} if cached_tile(name)}
 
 
+def versions(networks) -> dict[str, int]:
+    """Which of `networks` have a tile on disk, each with WHEN it was written.
+
+    `tiled` with a version beside each answer, for a page that puts the version
+    into the tile's address. The tile route answers with a day's private cache
+    lifetime, so an address that stayed the same across a regenerate would go on
+    showing the browser's copy of the old picture; with the version in it, a new
+    tile is a new address and the old copy is never asked for again.
+    """
+    found = {}
+    for name in {n for n in networks if n}:
+        path = cached_tile(name)
+        if path is None:
+            continue
+        try:
+            found[name] = path.stat().st_mtime_ns
+        except OSError:
+            continue  # swept between the check and the stat: no tile after all
+    return found
+
+
 def is_negative(network: str) -> bool:
     return bool(network) and _none_path(network).exists()
 
@@ -236,6 +257,41 @@ async def ensure_logo(settings, network: str, tmdb_id) -> Path | None:
         img.save(tile)
         logger.info("logo[%s]: GENERATED -> %s", network, tile.name)
     return tile
+
+
+async def regenerate(settings, network: str, tmdb_id) -> Path | None:
+    """Make `network`'s tile again from TMDB, and return it — or None, with the
+    tile it had left exactly where it was.
+
+    THE OLD TILE IS SET ASIDE, NOT DELETED, until a new one exists. `ensure_logo`
+    cannot tell TMDB being unreachable from TMDB having no logo: both reach it as
+    no answer, and both end in a negative marker. So dropping the tile first and
+    re-resolving — which is what this was — turned a regenerate pressed while
+    TMDB was down into a network with NO logo, marked as having none until the
+    marker aged out. A regenerate that makes nothing now changes nothing.
+    """
+    tile = _tile_path(network)
+    previous = tile.with_suffix(".previous")
+    had = tile.exists()
+    if had:
+        tile.replace(previous)
+    _none_path(network).unlink(missing_ok=True)
+
+    def put_back() -> None:
+        _none_path(network).unlink(missing_ok=True)
+        if had:
+            previous.replace(tile)
+
+    try:
+        made = await ensure_logo(settings, network, tmdb_id)
+    except BaseException:
+        put_back()
+        raise
+    if made is None:
+        put_back()
+        return None
+    previous.unlink(missing_ok=True)
+    return made
 
 
 async def ensure_logos(settings, roster) -> int:
