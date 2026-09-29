@@ -43,7 +43,10 @@
             {# The picker at the app's root, so stepping back out of a month lands
                on the address somebody would type or bookmark. #}
             <a class="month-title-link" href="/?year={{ year }}&amp;endpoint={{ endpoint.key }}" title="Pick a month / year">
-                <h1>{{ month_label }} {{ year }}</h1>
+                {# BOTH SPELLINGS OF THE MONTH, and the stylesheet shows one: the
+                   full name, or its first three letters on a phone, where the
+                   month has to fit on the logo's line (style.css, `.pill-text`). #}
+                <h1><span class="month-full">{{ month_label }}</span><span class="month-abbr" aria-hidden="true">{{ month_label[:3] }}</span> {{ year }}</h1>
             </a>
             <a class="month-nav-btn next" href="?month={{ nav.next_month }}&amp;year={{ nav.next_year }}&amp;endpoint={{ endpoint.key }}" title="Next month" aria-label="Next month">
                 <img src="/static/images/arrow-right.png" alt="Next month">
@@ -122,8 +125,8 @@
            tzSelect by id, for the one press that fills it from the device. #}
         <div class="nav-menu view-menu">
             <button type="button" class="nav-menu-btn"
-                    popovertarget="viewMenuItems"
-                    title="How this calendar is drawn">👁️ View</button>
+                    popovertarget="viewMenuItems" aria-label="View"
+                    title="How this calendar is drawn">🎛️<span class="pill-text"> View</span></button>
             <div class="nav-menu-items view-menu-items" id="viewMenuItems" popover>
                 {% if source_choices %}
                 <form class="view-row" action="/calendar" method="get" title="Which services fill this view — this page only, nothing saved"
@@ -227,7 +230,7 @@
            opening. #}
         <button type="button" id="searchBtn" class="pill-btn"
                 command="show-modal" commandfor="searchModal"
-                title="Find a title on your calendar">🔍 Search</button>
+                title="Find a title on your calendar" aria-label="Search">🔍<span class="pill-text"> Search</span></button>
         {{ marks.button() }}
         {# A CHECKBOX WEARING A BUTTON'S CLOTHES, which is what took three
            statements of one fact down to one. It used to be a button, a script
@@ -250,8 +253,8 @@
                 <input type="checkbox" id="hideToggle" name="hide_not_watching" value="1"
                        autocomplete="off"
                        {%- if view.hide_not_watching %} checked{% endif %}>
-                <span class="hide-on">🚫 Hiding</span>
-                <span class="hide-off">👁️ Showing all</span>
+                <span class="hide-on">🚫<span class="pill-text"> Hiding</span></span>
+                <span class="hide-off">👁️<span class="pill-text"> Showing all</span></span>
             </label>
         </form>
         {# Library writes land in the operator's own Sonarr/Radarr and Seerr
@@ -264,7 +267,8 @@
         {% with query = '?' ~ request.url.query if request.url.query else '', confirm = '', message = '', marks = [] %}{% include '_add_all.html' %}{% endwith %}
         {% endif %}
         <button type="button" class="pill-btn" hx-get="/calendar/fragments/share"
-                hx-target="#shareSlot" hx-swap="innerHTML">🔗 Share</button>
+                hx-target="#shareSlot" hx-swap="innerHTML"
+                title="Share this calendar" aria-label="Share">🔗<span class="pill-text"> Share</span></button>
 {% endcall %}
 
 {% include "_calendar_body.html" %}

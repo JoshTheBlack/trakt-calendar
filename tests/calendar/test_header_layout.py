@@ -30,5 +30,31 @@ class TheHeaderLeadFitsAPhoneTests(unittest.TestCase):
         self.assertEqual(value(declarations(".hero-lead"), "min-width"), "0")
 
 
+class APhoneHeaderKeepsItsIconsTests(unittest.TestCase):
+    """On a phone the header's buttons drop their words (`.pill-text`, hidden by
+    style.css below 560px) and the month shortens to three letters, so it fits on
+    the logo's line. MEASURED in Chromium and Firefox: 241px of header at 390 and
+    320 before, 117 after, no sideways scroll. What a template must keep for that
+    is here: both spellings of the month, and every button that loses its word
+    still named by it."""
+
+    def test_the_month_is_drawn_both_ways(self):
+        from tests.support import APP_DIR
+        page = (APP_DIR / "templates" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('<span class="month-full">{{ month_label }}</span>'
+                      '<span class="month-abbr" aria-hidden="true">{{ month_label[:3] }}</span>',
+                      page)
+
+    def test_a_button_that_loses_its_word_keeps_its_name(self):
+        import re
+
+        from tests.support import APP_DIR
+        for name in ("index.html", "_nav.html"):
+            page = (APP_DIR / "templates" / name).read_text(encoding="utf-8")
+            for button in re.findall(r"<button[^>]*>[^<]*<span class=\"pill-text\">", page):
+                with self.subTest(template=name, button=button[:60]):
+                    self.assertIn("aria-label=", button)
+
+
 if __name__ == "__main__":
     unittest.main()

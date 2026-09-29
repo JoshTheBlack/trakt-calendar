@@ -103,6 +103,29 @@ html.has-distrakt #distraktNav { display: flex; }
     background: linear-gradient(90deg, var(--gold-soft), var(--gold) 40%, var(--crimson)); -webkit-background-clip: text; background-clip: text; color: transparent;
 }
 .month-title-link { display: inline-block; position: relative; transition: transform .18s ease; }
+.month-abbr { display: none; }
+/* A PHONE'S HEADER, TWO OR THREE ROWS WHERE IT WAS FIVE. A button keeps its
+   emoji or icon and drops its word (`.pill-text`, with the word still its
+   `aria-label`/`title`), the month shortens to three letters so it fits on the
+   logo's line with a slightly smaller wordmark, and the numbers readout goes —
+   the 📊 pill at the foot of the page carries the total on a phone
+   (_calendar_body.html). The breakpoint is where the full labels stop fitting
+   two rows; every page's ☰ Menu takes the same rule, so the button is the same
+   everywhere at a given width. */
+@media (max-width: 560px) {
+    header.hero { gap: 6px 8px; }
+    header.hero .pill-text { display: none; }
+    header.hero .pill-btn, header.hero .nav-menu-btn { padding: 6px 9px; gap: 0; }
+    header.hero .pill-icon { margin-right: 0; }
+    .hero-lead { gap: 6px 10px; }
+    .hero-lead img.brand-wordmark { height: 28px; }
+    .month-nav { gap: 6px; }
+    .month-nav-btn { width: 28px; height: 28px; }
+    .month-full { display: none; }
+    .month-abbr { display: inline; }
+    .hero-meta { display: none; }
+    .hero-controls .control select { max-width: 132px; }
+}
 .month-title-link:hover { transform: translateY(-1px); }
 
 .control { display: flex; align-items: center; gap: 6px; background: var(--bg-panel); border: 1px solid var(--card-border); padding: 4px 10px; border-radius: 999px; font-size: 0.78rem; }

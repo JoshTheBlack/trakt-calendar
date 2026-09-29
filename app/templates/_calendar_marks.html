@@ -44,6 +44,6 @@
         hx-get="/calendar/fragments/filters{{ calendar_query }}"
         hx-target="#filtersSlot" hx-swap="innerHTML"
         title="{% if paused %}Your filters are switched off — this calendar is showing everything{% elif view.filters_active %}Filtering this calendar by {{ view.filters_summary }}{% else %}Filter this calendar by genre, country, or network{% endif %}">
-    🎚️ {% if paused %}Filters off{% elif view.filters_active %}Filtered{% else %}Filters{% endif %}
+    🎚️<span class="pill-text"> {% if paused %}Filters off{% elif view.filters_active %}Filtered{% else %}Filters{% endif %}</span>
 </button>
 {% endmacro %}

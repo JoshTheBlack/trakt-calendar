@@ -971,7 +971,7 @@ class SourceSelectorTests(CalendarRouteTestCase):
         self.assertLess(row.index("data-device-timezone"), row.index('id="tzSelect"'))
 
     def test_the_endpoint_picker_stays_out_of_the_view_panel(self):
-        """THE GROUPING RULE, PINNED. The four controls behind 👁️ View answer
+        """THE GROUPING RULE, PINNED. The four controls behind 🎛️ View answer
         "how should this be drawn"; the endpoint picker answers "which calendar
         am I reading", which is navigation and stays in the bar. Asserted because
         the cheapest future tidy-up of that row is to sweep the picker in too,

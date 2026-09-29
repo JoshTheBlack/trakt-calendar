@@ -34,7 +34,7 @@
         title="Add every watching item this month to {{ service }}"
         hx-post="/calendar/library/add-month{{ query }}" hx-json-enc
         hx-target="this" hx-swap="outerHTML">
-    <img class="pill-icon" src="/static/icons/{{ icon }}.png" alt=""> Add all
+    <img class="pill-icon" src="/static/icons/{{ icon }}.png" alt="Add all"><span class="pill-text"> Add all</span>
 </button>
 {% endif %}
 {%- include '_library_answer.html' -%}
