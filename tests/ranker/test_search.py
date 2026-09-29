@@ -273,7 +273,9 @@ class AddTests(_SearchTestCase):
     def test_the_search_is_still_on_the_page_with_the_result_held(self):
         self.enter("title")
         html = self.add({"q": "title", "i": 0, "media": "show"}).text
-        self.assertIn('value="title"', html)
+        # The BOX keeps its text by surviving the swap (`hx-preserve`, measured
+        # in both engines), so what the answer must carry is the search's rows.
+        self.assertIn('id="searchBox-b1"', html)
         rows = result_rows(html)
         self.assertEqual(len(rows), ranker_routes.MAX_SEARCH_RESULTS)
         self.assertEqual([r["held"] for r in rows[:2]], [True, False])

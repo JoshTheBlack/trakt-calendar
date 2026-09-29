@@ -255,7 +255,7 @@ class SearchIsMarkupTests(FragmentTestCase):
         answer), and each a GET that says so to the json-enc ancestors."""
         self.board_with(pool=1)
         html = self.client.get("/rankings").text
-        box = re.search(r'<input type="text" id="searchBox"[^>]*>', html, re.S).group(0)
+        box = re.search(r'<input type="text" id="searchBox-b1"[^>]*>', html, re.S).group(0)
         form = re.search(r'<form class="ranker-search-row"[^>]*>', html, re.S).group(0)
         media = re.search(r'<select id="searchMedia"[^>]*>', html, re.S).group(0)
         # The BOARD is in every address, because a result has to be drawn
@@ -265,7 +265,7 @@ class SearchIsMarkupTests(FragmentTestCase):
         self.assertIn('hx-include="#searchMedia"', box)
         self.assertIn('hx-get="/rankings/fragments/search?board=b1"', form)
         self.assertIn('hx-get="/rankings/fragments/search-stored?board=b1"', media)
-        self.assertIn('hx-include="#searchBox"', media)
+        self.assertIn('hx-include="#searchBox-b1"', media)
         for element in (box, form, media):
             with self.subTest(element=element[:40]):
                 self.assertIn('hx-target="#searchResults"', element)
@@ -273,17 +273,31 @@ class SearchIsMarkupTests(FragmentTestCase):
                 self.assertIn('hx-json-enc="false"', element)
                 self.assertNotIn("replace", element)
                 self.assertNotIn("delay:", element)
+        # The shared box's clear button, right after it: a reset asking the
+        # typed list empty, under the same medium, in the same queue.
+        clear = re.search(r'id="searchBox-b1"[^>]*>\s*(<button[^>]*>)', html, re.S).group(1)
+        self.assertIn('type="reset"', clear)
+        self.assertIn('hx-get="/rankings/fragments/search-stored?board=b1"', clear)
+        self.assertIn('hx-include="#searchMedia"', clear)
+        self.assertIn('hx-sync="#searchResults:queue last"', clear)
         # The select rides INSIDE the form, so Enter sends the medium too.
         self.assertLess(html.index(form), html.index(media))
         self.assertLess(html.index(media), html.index("</form>", html.index(form)))
 
     def test_the_box_takes_no_focus_and_comes_back_holding_its_query(self):
         """Every action on the board answers with the page; a box that pulled
-        focus would scroll the reader back up to it each time."""
+        focus would scroll the reader back up to it each time. It keeps its text
+        by SURVIVING the page (`hx-preserve`, matched by an id naming the
+        board), not by being redrawn with the query as its value — a drawn value
+        is also the value a reset restores, so the clear button would put the
+        query straight back. MEASURED in both engines: the box still held its
+        text after an add's page answer, and the clear emptied it."""
         self.board_with(pool=1)
-        box = re.search(r'<input type="text" id="searchBox"[^>]*>',
+        box = re.search(r'<input type="text" id="searchBox-b1"[^>]*>',
                         self.client.get("/rankings").text, re.S).group(0)
         self.assertNotIn("autofocus", box)
+        self.assertIn("hx-preserve", box)
+        self.assertNotIn("value=", box)
 
 
 def inside(html: str, opening: str) -> str:

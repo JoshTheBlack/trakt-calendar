@@ -1475,6 +1475,24 @@ class CalendarShellTests(CalendarRouteTestCase):
             with self.subTest(element=element[:40]):
                 self.assertIn('hx-sync="#searchResults:queue last"', element)
 
+    def test_the_search_box_has_a_clear_button_right_after_it(self):
+        """A RESET button, which empties the box with no script, asking the typed
+        route with an empty query, which answers with the resting hint — in the
+        box's queue. It is the box's next sibling because the stylesheet hides it
+        while the box is empty with `input:placeholder-shown + .search-clear`.
+        MEASURED in both engines at 1280 and 390: one request (`q=`), box and
+        list emptied, no console errors."""
+        html = self.client.get("/calendar?year=2026&month=7").text
+        clear = re.search(r'id="searchInput"[^>]*>\s*(<button[^>]*>)', html, re.S).group(1)
+        self.assertIn('type="reset"', clear)
+        self.assertIn('class="search-clear"', clear)
+        self.assertIn('hx-get="/calendar/search"', clear)
+        self.assertIn('''hx-vals='{"q": ""}\'''', clear)
+        self.assertIn('hx-include="#searchEndpoint"', clear)
+        self.assertIn('hx-sync="#searchResults:queue last"', clear)
+        self.assertIn("Type a title to find it",
+                      self.client.get("/calendar/search?q=&endpoint=shows").text)
+
     def test_the_shell_still_states_the_whole_months_numbers(self):
         """The tiles, the chip strip and the is-new answer are claims about the
         month, so they must not shrink to the days that happen to be rendered."""

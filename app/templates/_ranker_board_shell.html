@@ -25,18 +25,21 @@
            button, asks the viewer's services. THE BOARD IS NAMED IN BOTH ADDRESSES
            because a result has to be drawn knowing whether this board already
            holds it, and has to carry the request that adds it here.
-           THE QUERY COMES BACK WITH THE PAGE (`value`), and nothing takes focus
-           when it does (`autofocus=false`): adding a title answers with the whole
-           page, and a box that redrew empty — or pulled the reader back up to it —
-           would lose the search somebody is part-way through adding from. #}
+           THE BOX SURVIVES THE PAGE (`preserve`), and nothing takes focus when it
+           does (`autofocus=false`): adding a title answers with the whole page,
+           and a box that redrew empty — or pulled the reader back up to it —
+           would lose the search somebody is part-way through adding from. ITS ID
+           NAMES THE BOARD because a preserved element is matched by id: another
+           board's page draws its own, empty box rather than inheriting this one. #}
         <div class="ranker-add">
             {%- set board_query = '?board=' ~ (board.uid | urlencode) %}
+            {%- set box_id = 'searchBox-' ~ board.uid %}
             {% call title_search.box('#searchResults',
                                      '/rankings/fragments/search-stored' ~ board_query,
                                      '/rankings/fragments/search' ~ board_query,
-                                     'searchBox', 'Search for a title…', 'Search',
+                                     box_id, 'Search for a title…', 'Search',
                                      form_class='ranker-search-row', include='#searchMedia',
-                                     value=search.query, autofocus=false) %}
+                                     preserve=true, autofocus=false) %}
                 {#- INSIDE THE FORM, so Enter sends it with the query; named by the
                     box's `include` for the typed read. Changing it lists the stored
                     titles again under the other medium — its own request, so it
@@ -48,7 +51,7 @@
                 <select id="searchMedia" name="media" aria-label="What to search for"
                         autocomplete="off"
                         hx-get="/rankings/fragments/search-stored{{ board_query }}"
-                        hx-trigger="change" hx-include="#searchBox" hx-target="#searchResults"
+                        hx-trigger="change" hx-include="#{{ box_id }}" hx-target="#searchResults"
                         hx-json-enc="false" {{ title_search.sync('#searchResults') }}>
                     {% if board.media_scope != 'movie' %}<option value="show"
                         {%- if search.media == 'show' %} selected{% endif %}>Shows</option>{% endif %}

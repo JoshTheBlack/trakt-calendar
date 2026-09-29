@@ -62,14 +62,28 @@
     tests/kernel/test_settings_panel.py asks of every read inside a form that
     names the encoder.
 
-    `value` is the query to draw the box holding, for a surface whose answer to
-    a press is the whole page (the rankings board): a box that came back empty
-    would lose the search somebody is part-way through adding from. `autofocus`
-    is off for that surface for the same reason — every whole-page answer would
-    otherwise pull the reader's focus, and the page, back up to the box. -#}
+    `preserve` is for a surface whose answer to a press is the whole page (the
+    rankings board): a box that came back empty would lose the search somebody
+    is part-way through adding from, so the box is `hx-preserve`d — the element
+    itself survives the swap, holding whatever is in it, including anything
+    typed after the press. It used to be redrawn with the query as its `value`,
+    which is also its RESET value, and so a clear button restored the query it
+    was meant to clear. `input_id` must name the board for it (a preserved
+    element is matched by id, and another board's page must not inherit the
+    box). `autofocus` is off for that surface for the same reason — every
+    whole-page answer would otherwise pull the reader's focus, and the page,
+    back up to the box.
+
+    THE CLEAR BUTTON IS A RESET BUTTON, which is how the box is emptied with no
+    script: the form's own reset puts every control back to what it was drawn
+    with, and the box is drawn empty. The same press asks the typed route with
+    an empty query, which every surface answers with its resting state, so the
+    list goes with the text — in the box's queue like everything else that asks
+    for the results. Hidden while the box is empty (style.css), since there is
+    nothing to clear. -#}
 {% macro box(results, typed_url, live_url, input_id, placeholder, button,
              form_class='search-bar', label='', required=false, include='',
-             busy_id='', button_class='btn-ghost small', value='', autofocus=true) -%}
+             busy_id='', button_class='btn-ghost small', preserve=false, autofocus=true) -%}
 <form class="{{ form_class }}" hx-boost="false" hx-json-enc="false"
       hx-get="{{ live_url }}" hx-target="{{ results }}"
       {%- if busy_id %} hx-indicator="#{{ busy_id }}"{% endif %}
@@ -77,13 +91,19 @@
     {%- if label %}
     <label for="{{ input_id }}">{{ label }}</label>
     {%- endif %}
+    <span class="search-field">
     <input type="text" id="{{ input_id }}" name="q" placeholder="{{ placeholder }}"
            autocomplete="off" spellcheck="false"
-           {%- if value %} value="{{ value }}"{% endif %}
+           {%- if preserve %} hx-preserve{% endif %}
            {%- if autofocus %} autofocus{% endif %}{% if required %} required{% endif %}
            hx-get="{{ typed_url }}" hx-json-enc="false" hx-trigger="input changed" hx-target="{{ results }}"
            {%- if include %} hx-include="{{ include }}"{% endif %}
            {{ sync(results) }}>
+    <button type="reset" class="search-clear" aria-label="Clear the search" title="Clear"
+            hx-get="{{ typed_url }}" hx-vals='{"q": ""}' hx-json-enc="false" hx-target="{{ results }}"
+            {%- if include %} hx-include="{{ include }}"{% endif %}
+            {{ sync(results) }}>✕</button>
+    </span>
     {%- if caller %}{{ caller() }}{% endif %}
     <button type="submit" class="{{ button_class }}">{{ button }}</button>
     {%- if busy_id %}

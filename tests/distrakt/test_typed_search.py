@@ -192,6 +192,14 @@ class TypingTests(AddFlowTestCase):
                 form = re.search(rf'<form[^>]*hx-get="{re.escape(live_route)}[^>]*>',
                                  page, re.S).group(0)
                 self.assertIn(':queue last"', form)
+                # The shared box's clear button, right after it (see
+                # _title_search.html): a reset that asks the typed list empty.
+                clear = re.search(rf'id="{box}"[^>]*>\s*(<button[^>]*>)', page, re.S).group(1)
+                self.assertIn('type="reset"', clear)
+                self.assertIn(f'hx-get="{stored_route}', clear)
+                self.assertIn(':queue last"', clear)
+        # And an empty query is the resting state: nothing listed, nothing said.
+        self.assertEqual(rows(self.typed("")), [])
 
 
 class TypedPickTests(AddFlowTestCase):

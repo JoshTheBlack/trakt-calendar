@@ -426,7 +426,11 @@ its `box` macro is every title search's box (the calendar's, the tracker's two
 and the rankings board's), its `row` macro every result row, with the surface filling the ACTION
 SLOT (the element and what pressing it does), and its `queue`/`sync` are the one
 spelling of the policy for anything else that re-asks. A new search box is a
-call to that macro, not a copy of its attributes.
+call to that macro, not a copy of its attributes. The box brings its CLEAR
+BUTTON with it — a `type="reset"`, which empties the box with no script, asking
+the typed route for an empty query in the same queue — and that is why a box
+that must survive a whole-page answer (the rankings board's) is `hx-preserve`d
+rather than redrawn with a `value`: a drawn value is also what a reset restores.
 
 ## Conventions for code you add or change
 
