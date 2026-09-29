@@ -518,6 +518,25 @@ class AnsweringTheQuestionTests(AppTestCase):
         self.assertEqual(listed["kind"], distrakt_store.RecordKind.CATCHUP)
         self.assertTrue(listed["came_back"])
 
+    def test_re_add_finds_the_verdict_of_a_season_premiered_the_same_month(self):
+        """A season premiered and finished in one month holds BOTH records there,
+        and the lookup the route used answered with the premiere — so the verdict
+        it was asked about was refused as "not recorded as finished". MEASURED on
+        the owner's account with Halloween Baking Championship S12."""
+        asyncio.run(distrakt_store.add_month_record(
+            self.user_id, self.month,
+            {**_verdict({"trakt": 10, "simkl": 10}),
+             "kind": distrakt_store.RecordKind.SEASON_PREMIERE}))
+        with patch.object(transport, "shared_client", return_value=_CatalogueClient()):
+            resp = self.client.post("/api/distrakt/verdict-readd",
+                                    json={"key": KEY, "season": SEASON},
+                                    headers={"Origin": ORIGIN})
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("isn&#39;t recorded as finished", resp.text)
+        self.assertEqual([r["kind"] for r in self._settled()], [])
+        listed, = self._listed()
+        self.assertTrue(listed["came_back"])
+
     def test_re_add_takes_its_numbers_from_the_lookup_rather_than_the_verdict(self):
         """"Re-derives from what the services say now" is the whole promise: the
         withdrawn record's episode total must not be carried across as though it

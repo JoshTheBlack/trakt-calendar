@@ -3488,10 +3488,17 @@ async def api_distrakt_verdict_readd(request: Request):
     except RequestError as exc:
         return _month_refusal(request, str(exc))
     month_key = _this_month()
-    placed = await lifecycle.find_shown_season(user_id, key, season, month=month_key)
-    if (placed is None or placed.month != month_key
-            or placed.record["kind"] != distrakt_store.RecordKind.COMPLETED):
+    # THE MONTH'S COMPLETED RECORD ITSELF, not wherever the season is shown. A
+    # season that premiered and was finished in one month holds BOTH records
+    # there, and find_shown_season answers with the premiere — so this refused
+    # the very verdict it was asked about. MEASURED on the owner's account:
+    # Halloween Baking Championship S12, premiered and completed in September,
+    # answered "isn't recorded as finished this month".
+    record = await distrakt_store.find_month_record(
+        user_id, month_key, distrakt_store.RecordKind.COMPLETED, key, season)
+    if record is None:
         return _month_refusal(request, "That season isn't recorded as finished this month.")
+    placed = lifecycle.Placement(record, month_key)
     settings = await viewer.settings_for_user(user_id)
     await watch_history.baseline_show(settings, user_id, placed.record)
     await lifecycle.reopen(user_id, placed, look_up=_season_lookup(settings))
