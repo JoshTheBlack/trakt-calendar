@@ -393,6 +393,10 @@ class ExportTests(_SeasonsTestCase):
                          [f"{n}. **{label}**" for n, label in enumerate(self.LABELS, start=1)])
 
     def test_the_image_export_captions_each_entry_with_its_name(self):
+        """The show's name on the caption and the season on a line of its own
+        under it: on one line, most "Show — Season N" labels did not fit a tile
+        and the season was the half cut off. Together they are still the row's
+        name — the season half is exactly what `row_label` puts after its dash."""
         from app.ranker import routes as ranker_routes
         from tests.ranker.test_boards import no_artwork, patched
         no_artwork(self)
@@ -408,8 +412,46 @@ class ExportTests(_SeasonsTestCase):
                                     json={"top_x": 3, "columns": 3, "fmt": "jpeg",
                                           "show_titles": True})
         self.assertEqual(resp.status_code, 200, resp.text[:300])
-        self.assertEqual([(entry.rank, entry.title) for entry in drawn],
-                         list(enumerate(self.LABELS, start=1)))
+        self.assertEqual(
+            [(entry.rank, f"{entry.title} — {entry.subtitle}" if entry.subtitle else entry.title)
+             for entry in drawn],
+            list(enumerate(self.LABELS, start=1)))
+        self.assertEqual([entry.subtitle for entry in drawn][0], "")
+        self.assertTrue(all(entry.subtitle for entry in drawn[1:]))
+
+    def test_the_season_line_is_added_only_to_a_grid_holding_a_season(self):
+        """A board of whole shows renders exactly as it did; one holding a season
+        pays a second, smaller caption strip per row, and the pre-render size the
+        readout reports is that same geometry."""
+        from app.ranker import grid_builder
+        plain = grid_builder.compute_layout(6, columns=3, show_titles=True)
+        seasons = grid_builder.compute_layout(6, columns=3, show_titles=True, subtitles=True)
+        untitled = grid_builder.compute_layout(6, columns=3, subtitles=True)
+        self.assertEqual(plain.subcaption_h, 0)
+        self.assertIsNone(plain.cells[0].subcaption)
+        self.assertEqual(seasons.height - plain.height, 2 * grid_builder.SUBCAPTION_H)
+        self.assertEqual(seasons.cells[0].subcaption[1], seasons.cells[0].caption[3])
+        self.assertEqual(untitled.height, grid_builder.compute_layout(6, columns=3).height)
+
+    def test_a_season_line_renders(self):
+        """Pixels, not geometry: the second strip is drawn into, and a grid of
+        whole shows is byte-for-byte what it was without the new argument."""
+        from io import BytesIO
+
+        from PIL import Image
+
+        from app.ranker import grid_builder
+        entries = [grid_builder.GridEntry(rank=1, title="Title 7"),
+                   grid_builder.GridEntry(rank=2, title="Title 7", subtitle="Night Country")]
+        image = Image.open(BytesIO(grid_builder.build_grid(
+            entries, columns=2, show_titles=True, fmt="png", scale=0.5)))
+        layout = grid_builder.compute_layout(2, columns=2, show_titles=True, scale=0.5,
+                                             subtitles=True)
+        self.assertEqual(image.size, (layout.width, layout.height))
+        strip = image.crop(layout.cells[1].subcaption)
+        self.assertGreater(len(set(strip.getdata())), 1, "the season line drew nothing")
+        blank = image.crop(layout.cells[0].subcaption)
+        self.assertEqual(len(set(blank.getdata())), 1, "a whole show drew a season line")
 
     def test_a_seasons_name_is_part_of_what_a_cached_render_is_of(self):
         self.build_show_and_two_seasons()

@@ -2159,6 +2159,18 @@ def _header_bytes(user_id: int, spec: Any) -> bytes | None:
         return None
 
 
+def _layout(ranked: list[ranker_export.RankedTitle],
+            options: _ExportOptions) -> grid_builder.Layout:
+    """The geometry an export of `ranked` will render at, for the two routes that
+    size or refuse it before any tile is resolved — the renderer's own question
+    (`compute_layout`), with the season line in it exactly when `build_grid` will
+    find one among the entries `_grid_entries` makes."""
+    return grid_builder.compute_layout(
+        len(ranked), columns=options.columns, scale=options.scale,
+        show_titles=options.show_titles, podium=options.podium,
+        subtitles=any(entry.subtitle for entry in ranked))
+
+
 def _grid_entries(ranked: list[ranker_export.RankedTitle],
                   order: tuple[str, ...]) -> list[grid_builder.GridEntry]:
     """The ranking as the renderer wants it, with each poster resolved from the
@@ -2171,7 +2183,8 @@ def _grid_entries(ranked: list[ranker_export.RankedTitle],
     return [
         grid_builder.GridEntry(
             rank=entry.rank,
-            title=entry.label,
+            title=entry.title or "Untitled",
+            subtitle=entry.subtitle,
             poster=(posters.cached_poster(entry.media, entry.tmdb, order, entry.season)
                     if entry.tmdb else None),
             colour=entry.colour,
@@ -2382,10 +2395,7 @@ async def export_readout_fragment(request: Request):
     except ranker_export.ExportError as exc:
         return _export_readout(request, message=str(exc))
 
-    layout = grid_builder.compute_layout(
-        len(ranked), columns=options.columns, scale=options.scale,
-        show_titles=options.show_titles, podium=options.podium,
-    )
+    layout = _layout(ranked, options)
     # A board with nothing tiered never reaches here: `consolidate` refuses it,
     # and its sentence is the one drawn above.
     over = not layout.fits(options.fmt)
@@ -2499,10 +2509,7 @@ async def export_grid(board_uid: str, request: Request):
     except ranker_export.ExportError as exc:
         return authz.error(str(exc))
 
-    layout = grid_builder.compute_layout(
-        len(ranked), columns=options.columns, scale=options.scale,
-        show_titles=options.show_titles, podium=options.podium,
-    )
+    layout = _layout(ranked, options)
     if not layout.fits(options.fmt):
         return authz.error(
             str(grid_builder.CanvasTooLarge(

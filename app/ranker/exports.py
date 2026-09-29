@@ -94,6 +94,13 @@ class RankedTitle:
         return seasons.row_label(self.title, self.season, self.season_name)
 
     @property
+    def subtitle(self) -> str:
+        """The season half of `label` on its own — "" for a whole show — for the
+        image, which draws it as a second caption line under the show's name
+        (grid_builder.SUBCAPTION_H), where one line cut most seasons off."""
+        return seasons.season_part(self.season, self.season_name)
+
+    @property
     def key(self) -> str:
         """This entry's board key.
 

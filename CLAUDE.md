@@ -252,8 +252,9 @@ scripts on the board treat a key as an opaque string and must go on doing so.
 WHAT A ROW IS CALLED AND COUNTS follows what it is. `app/ranker/seasons.py`'s
 `row_label` is the one spelling of its name ("Show — Season 3", or the season's
 own name, `tier_items.season_name`) for the row, its details heading, the
-removal history and both exports (`exports.RankedTitle.label`, which the image
-caption, the text and the render cache's key all read); and a row's counts
+removal history and both exports (`exports.RankedTitle.label`, which the text
+and the render cache's key read, and whose two halves the image captions on two
+lines — the show's name, then `RankedTitle.subtitle`); and a row's counts
 describe the row — a season
 has no season count and its own episode total. `core._redefine_row` REWRITES
 those (`_DEFINING_FACTS`) whenever a row's season changes, from the season list

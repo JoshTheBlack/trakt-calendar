@@ -63,6 +63,15 @@ LABEL_H = 62
 # without them is not paying for the space.
 CAPTION_H = 62
 
+# A SECOND, SMALLER CAPTION LINE FOR A SEASON, under the show's name. One line
+# held "Show — Season 3" and most did not fit a 500px tile at the caption's size,
+# so the season — the half that tells two rows of one show apart — was the half
+# cut off. Added only to a grid that holds a season at all, so a board of whole
+# shows renders exactly as it did; and smaller than the name, because it is the
+# name's qualifier. Each row pays it once, which a WebP ceiling can feel — see
+# LABEL_H — and a grid over it is refused before rendering as before.
+SUBCAPTION_H = 46
+
 # Flush by default: the look this feature was designed around has no spacing at
 # all. They are real constants rather than inlined zeros so that putting a gutter
 # or a border back is a one-line change instead of a rewrite of the arithmetic.
@@ -87,6 +96,9 @@ PLACEHOLDER_BACKGROUND = (28, 31, 34)
 _HEADER_TYPE = 0.60
 _RANK_TYPE = 0.78
 _CAPTION_TYPE = 0.58
+_SUBCAPTION_TYPE = 0.62
+# The season line is the name's qualifier, so it is drawn a step quieter.
+SUBCAPTION_COLOUR = (170, 176, 184)
 
 # Per-format hard ceilings, measured rather than assumed. WebP's is the one that
 # bites: a tall grid passes every other check and then throws from the encoder
@@ -97,7 +109,7 @@ FORMATS = frozenset(MAX_DIMENSION)
 # Bumped whenever anything above changes where a pixel lands. A render cache
 # keyed on the inputs alone would keep serving the old layout after the code
 # that produced it was replaced.
-RENDERER_VERSION = 3
+RENDERER_VERSION = 4
 
 # Two parents, not one: this module sits in app/ranker/ and the bundled image
 # lives under app/static/, so the walk is up out of the package and then down.
@@ -147,6 +159,9 @@ class GridEntry:
     rank: int
     title: str = ""
     poster: Path | None = None
+    # The season, drawn on its own line under `title` ("Season 3", or the
+    # season's own name); empty for a whole show.
+    subtitle: str = ""
     # The tier this title came from, tinting its rank number. It is the one place
     # tier identity survives into the image.
     colour: str | None = None
@@ -160,6 +175,7 @@ class Cell:
     tile: tuple[int, int, int, int]
     label: tuple[int, int, int, int]
     caption: tuple[int, int, int, int] | None
+    subcaption: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -177,6 +193,7 @@ class Layout:
     header_h: int
     label_h: int
     caption_h: int
+    subcaption_h: int
     gutter: int
     margin: int
     rows: int
@@ -201,8 +218,13 @@ def compute_layout(
     scale: float = 1.0,
     show_titles: bool = False,
     podium: bool = False,
+    subtitles: bool = False,
 ) -> Layout:
     """Where everything goes, for `count` entries in `columns` columns.
+
+    `subtitles` says whether any entry has a season line to draw — asked of the
+    entries by `build_grid` and of the ranking by the export routes, which size
+    and refuse a canvas before there are entries to ask.
 
     Constants are scaled HERE, at layout time, rather than by shrinking a
     finished canvas — downscaling afterwards spends exactly the memory the
@@ -224,6 +246,7 @@ def compute_layout(
     header_h = _scaled(HEADER_H, scale)
     label_h = _scaled(LABEL_H, scale)
     caption_h = _scaled(CAPTION_H, scale) if show_titles else 0
+    subcaption_h = _scaled(SUBCAPTION_H, scale) if show_titles and subtitles else 0
     gutter = round(GUTTER * scale)
     margin = round(MARGIN * scale)
 
@@ -243,7 +266,7 @@ def compute_layout(
         podium_w = (content_w - (podium_count - 1) * gutter) // podium_count
         podium_h = round(podium_w * tile_h / tile_w)
         y = _place_row(cells, index, podium_count, podium_w, podium_h,
-                       label_h, caption_h, gutter, margin, content_w, y)
+                       label_h, caption_h, subcaption_h, gutter, margin, content_w, y)
         index += podium_count
 
     remaining = count - index
@@ -251,7 +274,7 @@ def compute_layout(
     for row in range(rows):
         in_row = min(columns, remaining - row * columns)
         y = _place_row(cells, index, in_row, tile_w, tile_h,
-                       label_h, caption_h, gutter, margin, content_w, y)
+                       label_h, caption_h, subcaption_h, gutter, margin, content_w, y)
         index += in_row
 
     # `y` has a trailing gutter on it from the last row placed; the canvas ends
@@ -260,14 +283,14 @@ def compute_layout(
     return Layout(
         count=count, columns=columns, scale=scale, width=width, height=height,
         tile_w=tile_w, tile_h=tile_h, header_h=header_h, label_h=label_h,
-        caption_h=caption_h, gutter=gutter, margin=margin, rows=rows,
+        caption_h=caption_h, subcaption_h=subcaption_h, gutter=gutter, margin=margin, rows=rows,
         podium=podium_count, cells=tuple(cells),
     )
 
 
 def _place_row(cells: list[Cell], first_index: int, in_row: int, tile_w: int,
-               tile_h: int, label_h: int, caption_h: int, gutter: int,
-               margin: int, content_w: int, y: int) -> int:
+               tile_h: int, label_h: int, caption_h: int, subcaption_h: int,
+               gutter: int, margin: int, content_w: int, y: int) -> int:
     """Append one row of cells and return the y the next row starts at."""
     row_w = in_row * tile_w + (in_row - 1) * gutter
     x = margin + (content_w - row_w) // 2
@@ -275,14 +298,17 @@ def _place_row(cells: list[Cell], first_index: int, in_row: int, tile_w: int,
         left = x + column * (tile_w + gutter)
         tile_bottom = y + tile_h
         label_bottom = tile_bottom + label_h
+        caption_bottom = label_bottom + caption_h
         cells.append(Cell(
             index=first_index + column,
             tile=(left, y, left + tile_w, tile_bottom),
             label=(left, tile_bottom, left + tile_w, label_bottom),
-            caption=(left, label_bottom, left + tile_w, label_bottom + caption_h)
+            caption=(left, label_bottom, left + tile_w, caption_bottom)
             if caption_h else None,
+            subcaption=(left, caption_bottom, left + tile_w, caption_bottom + subcaption_h)
+            if subcaption_h else None,
         ))
-    return y + tile_h + label_h + caption_h + gutter
+    return y + tile_h + label_h + caption_h + subcaption_h + gutter
 
 
 def ensure_fits(layout: Layout, fmt: str) -> None:
@@ -330,6 +356,7 @@ def build_grid(
     layout = compute_layout(
         len(entries), columns=columns, scale=scale,
         show_titles=show_titles, podium=podium,
+        subtitles=any(entry.subtitle for entry in entries),
     )
     ensure_fits(layout, fmt)
 
@@ -347,6 +374,8 @@ def build_grid(
         rank_font = imaging.font(round(layout.label_h * _RANK_TYPE))
         caption_font = imaging.font(round(layout.caption_h * _CAPTION_TYPE)) \
             if layout.caption_h else None
+        subcaption_font = imaging.font(round(layout.subcaption_h * _SUBCAPTION_TYPE)) \
+            if layout.subcaption_h else None
 
         for cell in layout.cells:
             entry = entries[cell.index]
@@ -358,6 +387,9 @@ def build_grid(
             if cell.caption is not None and caption_font is not None:
                 imaging.draw_text(draw, cell.caption, entry.title, caption_font,
                                   imaging.TEXT_COLOUR)
+            if cell.subcaption is not None and subcaption_font is not None and entry.subtitle:
+                imaging.draw_text(draw, cell.subcaption, entry.subtitle, subcaption_font,
+                                  SUBCAPTION_COLOUR)
         return _encode(canvas, fmt)
     finally:
         canvas.close()
