@@ -284,7 +284,7 @@ back carrying entries two months past its end. Windows are trimmed before
 storage; without the trim a month read shows the same airing several times.
 
 **JavaScript is for what ONLY JavaScript can do, and the floor is MEASURED.**
-The whole first-party surface is **706 code lines across 15 .js files, 27 lines
+The whole first-party surface is **708 code lines across 15 .js files, 27 lines
 of inline `<script>` and NO inline `on*=` handlers** — the inline figure is
 every non-blank line inside the two blocks `csp.INLINE_BLOCKS` names
 (`_nav_head.html`'s 3, `error_lobby.html`'s 24), counted that way so the next
@@ -294,7 +294,10 @@ base template and the per-page script loader went, and 703 when the
 Content-Security-Policy moved the last ten handlers out of markup into listeners
 in the files that own them, and 706 when the rankings board moved onto the shared
 title search and a dragged result began inserting its row under the key the
-server answers with; from 4,024 lines when the audit began, and from
+server answers with, and 708 when a dialog the server opens stopped being opened
+again by every later swap once it had been closed (static/js/ui.js takes
+`data-open-modal` off as it acts on it) — counted as the non-blank, non-comment
+lines of those 15 files, the vendored `htmx-json-enc.js` not among them; from 4,024 lines when the audit began, and from
 1,213 / 26 / 30 at its last conversion. The WATCH TRACKER has no script of its
 own at all. Those three numbers are the point of this paragraph: they are what
 somebody adding a file is adding to, and a number that has drifted is a signal

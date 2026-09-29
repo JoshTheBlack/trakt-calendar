@@ -166,9 +166,17 @@ document.addEventListener('close', (event) => {
 // fragment that is redelivered while it is already up — the tracker's rewatch
 // question is answered with itself out of band — is not re-shown, which would
 // throw.
+//
+// SAID ONCE, SO IT IS TAKEN OFF AS IT IS ACTED ON. Left in place, a dialog the
+// reader had closed was opened again by the next swap ANYWHERE on the page —
+// measured: the tracker's rewatch question, closed with ×, reopened on every
+// keystroke typed into the add box beneath it, each keystroke being a swap. The
+// server re-arms it the only way it can, by delivering the dialog again.
 document.addEventListener('htmx:after:swap', () => {
-    document.querySelectorAll('dialog[data-open-modal]:not([open])')
-        .forEach(modal => modal.showModal());
+    document.querySelectorAll('dialog[data-open-modal]:not([open])').forEach(modal => {
+        modal.removeAttribute('data-open-modal');
+        modal.showModal();
+    });
 });
 
 // A BUTTON THAT WAITS FOR htmx (`data-awaits-htmx`), switched on once it can be
