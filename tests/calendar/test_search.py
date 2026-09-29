@@ -720,6 +720,10 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         self.assertIn("id=4242", url)
         self.assertNotIn("title=", url)
         self.assertNotIn("air", url)
+        # THE ANCHOR RIDES ON THE LINK ITSELF: following it is a boosted fetch,
+        # and a fetch's final URL drops the fragment the redirect carried, so a
+        # link without it landed at the top of the month over a marked card.
+        self.assertTrue(url.endswith("#jump-target"), url)
 
     async def test_a_title_with_no_date_is_not_offered_at_all(self):
         """The whole offer is "go to where this should be", and a title nobody

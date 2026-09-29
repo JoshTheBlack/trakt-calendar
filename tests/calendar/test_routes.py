@@ -1695,9 +1695,11 @@ class FollowingASearchResultWritesOneAiringTests(CalendarRouteTestCase):
         self.sign_in_as(self._make_user("jumper2"))
 
     def _go(self, url=None, mark="show:tmdb:1"):
+        from app.calendar.search import Landing
+
         async def _fill(settings, **kw):
             self.asked = kw
-            return mark
+            return Landing(mark, "2026-04-28") if mark else Landing()
 
         with patch("app.calendar.search.fill_one_gap", _fill):
             return self.client.get(url or self.JUMP, follow_redirects=False)
@@ -1710,6 +1712,15 @@ class FollowingASearchResultWritesOneAiringTests(CalendarRouteTestCase):
         self.assertIn("month=4", where)
         self.assertIn("highlight=", where)
         self.assertTrue(where.endswith("#jump-target"), where)
+
+    def test_it_names_the_day_so_a_card_past_the_first_days_is_found(self):
+        """The page draws only its first few days inline and fetches the rest as
+        the reader scrolls, so a mark alone could name a card that did not exist
+        yet: the jump landed at the top of the month. The day is what the page
+        uses to draw that day's cards with the page, as a stored result's link
+        does."""
+        where = self._go().headers["location"]
+        self.assertIn("&day=2026-04-28", where)
 
     def test_it_asks_the_service_for_exactly_what_the_link_named(self):
         self._go()

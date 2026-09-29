@@ -1329,12 +1329,17 @@ async def jump_to_a_searched_title(request: Request):
         media = Media.SHOW
     season = route_params.season(params.get("season"))
 
-    mark = await calendar_search.fill_one_gap(
+    landing = await calendar_search.fill_one_gap(
         settings, source=source, source_id=source_id, media=media,
         season=season, endpoint_key=endpoint.key,
         tz=_resolve_viewer_tz(user, settings), now=db.now())
-    if mark:
-        destination += f"&highlight={quote(mark, safe='')}#jump-target"
+    if landing:
+        # THE DAY RIDES WITH THE MARK, as it does on a stored result's link
+        # (calendar/search.py's Jump.url): a card past the days the page draws
+        # inline does not exist when the browser looks for #jump-target, so a
+        # mark alone landed at the top of the month.
+        destination += (f"&highlight={quote(landing.mark, safe='')}"
+                        f"&day={quote(landing.day, safe='')}#jump-target")
     # 303, so following this is a GET however the browser got here, and so a
     # reload of where it lands does not re-run the write.
     return RedirectResponse(destination, status_code=303)

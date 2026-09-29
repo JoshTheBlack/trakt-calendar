@@ -181,11 +181,16 @@ class Elsewhere:
         or nothing is worse than not offering to.
         """
         season = f"&season={self.item.season}" if self.item.season is not None else ""
+        # `#jump-target` ON THE LINK ITSELF, not only on the redirect: the page is
+        # boosted, so following this is a fetch, and a fetch's final URL drops
+        # the fragment the redirect's Location carried — measured in Chromium and
+        # Firefox, the card was drawn and marked and the page stayed at the top.
+        # htmx scrolls to the anchor of the address it was asked to follow.
         return (f"/calendar/jump?source={quote(str(self.source), safe='')}"
                 f"&id={quote(str(self.source_id), safe='')}"
                 f"&media={quote(str(self.media), safe='')}{season}"
                 f"&endpoint={quote(self.endpoint_key, safe='')}"
-                f"&year={self.year}&month={self.month}")
+                f"&year={self.year}&month={self.month}#jump-target")
 
 
 @dataclass(frozen=True)
@@ -433,10 +438,28 @@ async def _complete_known_seasons(rows: list[Elsewhere]) -> int:
     return stored
 
 
+@dataclass(frozen=True)
+class Landing:
+    """Where an airing `fill_one_gap` wrote is drawn: the card's mark key and the
+    viewer's day it falls on. Falsy when nothing was written.
+
+    THE DAY AS WELL AS THE MARK, because a month draws only its first few days
+    with the page and fetches the rest as the reader scrolls — so a card on a
+    later day does not exist when the browser looks for its anchor, and a jump
+    naming the mark alone landed at the top of the month. `Jump.url` already
+    carries both for a stored result; this is the same pair for a written one.
+    """
+    mark: str = ""
+    day: str = ""
+
+    def __bool__(self) -> bool:
+        return bool(self.mark)
+
+
 async def fill_one_gap(settings, *, source, source_id: str, media: Media,
                       season: int | None, endpoint_key: str, tz: ZoneInfo,
-                      now: int, exact_season: bool = False) -> str:
-    """Write ONE title's airing into the calendar and answer its mark key.
+                      now: int, exact_season: bool = False) -> Landing:
+    """Write ONE title's airing into the calendar and answer where it is drawn.
 
     WHAT THIS IS FOR. A service can be missing its own title: Trakt's show record
     dates Half Man's first season to 2026-04-28T20:00Z and Trakt's premieres
@@ -458,8 +481,8 @@ async def fill_one_gap(settings, *, source, source_id: str, media: Media,
     lookup and nothing more. Title, date, network, poster and the shared ids all
     come back from the service, so a hand-made URL cannot invent a calendar row.
 
-    Returns the mark key to highlight, or "" when nothing could be written —
-    which is not an error: the month is still worth opening.
+    Returns the card's `Landing`, falsy when nothing could be written — which is
+    not an error: the month is still worth opening.
 
     `exact_season` REFUSES THE FALLBACK. A search jump may land on a show's own
     first-air date when its season cannot be dated — the reader asked where the
@@ -471,7 +494,7 @@ async def fill_one_gap(settings, *, source, source_id: str, media: Media,
     """
     provider = providers.get(source)
     if provider is None or provider.detail_port is None:
-        return ""
+        return Landing()
 
     when = ""
     if season is not None and media is not Media.MOVIE:
@@ -482,22 +505,23 @@ async def fill_one_gap(settings, *, source, source_id: str, media: Media,
                 break
     if not when:
         if exact_season and season is not None and media is not Media.MOVIE:
-            return ""
+            return Landing()
         # The title's own first-air date: what a film always uses, and what a
         # show falls back to when the season could not be dated.
         when = await _first_aired_of(settings, provider, media, source_id)
         season = None
     if not when:
-        return ""
+        return Landing()
 
     records = await _records_for(provider, settings, source_id, media,
                                  [(season, when)])
     if not records:
-        return ""
+        return Landing()
     await entries.store_loose_airings(
         endpoint_key, records, now=now, stale_after=now + TITLE_STALE_SECONDS)
     calendar_cache.forget_endpoint_spans(endpoint_key)
-    return render(records[0], tz).mark_key
+    item = render(records[0], tz)
+    return Landing(item.mark_key, item.air_date)
 
 
 # THE CALENDARS WHERE A CARD IS A SEASON'S PREMIERE OR A FILM'S RELEASE — the one

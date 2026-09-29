@@ -48,6 +48,7 @@ All notable changes to this project are documented here. Format loosely follows 
 - ✅ **Your own watched episodes are marked on the calendar's panel too.** Opening a card shows which episodes of that season you have seen, and how many — the same marks, from the same record, as the page that has always shown them. It is read from what this app has already stored, so it costs nothing and asks nobody. A show you have watched nothing of still gets the marks, unfilled, because each one is also the link to that episode on the service that would record it.
 
 ### Fixed
+- 🎯 **Opening a search result the calendar did not have yet lands on its card.** It opened the right month but left you at the top of it, so a premiere late in the month meant scrolling to find what you had just asked for.
 - 📅 **A premiere found by searching lands on the right day.** Following a search result that only Simkl had put its premiere on the evening before, anywhere west of London — so Dexter: New Blood showed up a day ahead of its own card from Trakt.
 - 🖼️ **The export preview shows the board as it is now.** Changing a board and opening Export again showed the preview from before the change until the page was reloaded.
 - 🪟 **A window you close stays closed.** A question or panel the app opened for you on its own could pop back up the next time anything else on the page updated — typing in a search box beneath it was enough to reopen it on every keystroke.
