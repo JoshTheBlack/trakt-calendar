@@ -2339,6 +2339,21 @@ async def _named_pick(settings, media: Media, named, *,
                                            named.get("i"), cached_only=cached_only)
 
 
+def _pick_reference(named) -> dict:
+    """Exactly what named a search result — `t` for a row read from the stored
+    calendar, `q` and `i` for one a service answered — and nothing else, for a
+    request that has to name the same result again (the season buttons, the
+    re-watch question's two answers).
+
+    ONE SPELLING, because a second one went stale: the re-watch answers were
+    re-posting `q` and `i` alone after the typed list began naming its rows by
+    `t`, so answering the question about a title picked from that list named
+    nothing and was refused as an expired search."""
+    if named.get("t"):
+        return {"t": str(named["t"])}
+    return {"q": str(named.get("q") or ""), "i": named.get("i", "")}
+
+
 def _pick_gone(named) -> str:
     """What to say when `_named_pick` finds nothing — which of the two ways the
     result was named says what went away, and so what to do about it."""
@@ -2664,8 +2679,7 @@ async def distrakt_seasons_fragment(request: Request):
     params = request.query_params
     # THE REFERENCE IS PASSED ON, NOT REBUILT: what named the result here is
     # exactly what the season button will name it by, and nothing else rides.
-    named = ({"t": params["t"]} if params.get("t")
-             else {"q": params.get("q", ""), "i": params.get("i", "")})
+    named = _pick_reference(params)
     # A SERVICE THAT COULD NOT BE ASKED IS ITS OWN STATE, drawn rather than
     # answered with a status: a non-200 is never swapped, so the slot would stay
     # empty with nothing to explain it — and "search for it again" would send
@@ -2865,8 +2879,7 @@ async def api_distrakt_add(request: Request):
         data, title=show["title"])
     if ask:
         return _rewatch_answer(request, ask, f"/api/distrakt/add?year={year}&month={month}",
-                               {"q": data.get("q") or "", "i": data.get("i"),
-                                "season": season})
+                               {**_pick_reference(data), "season": season})
 
     await distrakt_store.clear_prompt_dismissal(user_id, key, int(show["season"]))
     if already_finished:

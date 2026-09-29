@@ -115,6 +115,7 @@ All notable changes to this project are documented here. Format loosely follows 
 - Looking for something to add no longer waits for you to finish typing: what this app already knows is listed as you type, without asking anyone, and Enter asks further, as before. Anything picked from that list is taken exactly as if it had been found the long way, and every line in it carries a picture now.
 - Every line carries a picture of what it is now, films as well as shows, beside the badge it already had — small on a wide screen, larger across both lines on a phone. Each one is found at most once and remembered, including the ones that turn out to have no picture at all.
 - When nothing it reads can be reached, this month's films stay on the page with everything else it last knew, instead of vanishing until a refresh that gets through.
+- Answering "have you watched this before?" now finishes the add for a title picked from the list that appears as you type. It named the title the old way, so the answer was turned away and the question sat there with nothing added.
 - Checking what filling in past months would add no longer claims a month it deliberately never read is empty. A month it leaves alone now says that it did, a row with nothing behind it has stopped offering to open, and where there is nothing to write it no longer offers to write it.
 
 ### Under the hood

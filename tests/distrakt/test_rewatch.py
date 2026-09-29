@@ -23,7 +23,10 @@ No network.
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import unittest
+from html import unescape
 from zoneinfo import ZoneInfo
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, patch
@@ -482,6 +485,39 @@ class TheAddAsksBeforeItWritesAnythingTests(_RosterAddCase):
             asyncio.run(store.month_records(self.user_id, "2026-09")), [])
 
     # -- answering it --
+
+    def test_a_title_from_the_typed_list_is_named_the_same_way_by_both_answers(self):
+        """A row the typed list offered names its stored identity (`t`), not a
+        query and a place in its answer. The question's two answers re-post the
+        pick, and they used to re-post `q` and `i` alone — so answering about a
+        typed pick named nothing, was refused as an expired search, and the
+        question stayed open over a season that never arrived."""
+        stored = "show:tmdb:1396"
+        pick = title_search.Pick(title="Breaking Bad", network="AMC", year=None,
+                                 ids=dict(self.IDS), seasons=[], named_season=None,
+                                 media=Media.SHOW)
+
+        async def _named(settings, media, named, *, cached_only):
+            return pick if named.get("t") == stored else None
+
+        def post(body):
+            with self._services(history=self.OLD_RUN), \
+                    patch.object(distrakt_routes, "_named_pick", _named):
+                return self.client.post("/api/distrakt/add?year=2026&month=9", json=body)
+
+        asked = post({"t": stored, "season": 1})
+        self.assertTrue(RewatchPrompt(asked.text).asked)
+        answers = [json.loads(unescape(vals)) for vals in
+                   re.findall(r"hx-vals='([^']*)'", asked.text)]
+        self.assertEqual(len(answers), 2, asked.text[:500])
+        for body in answers:
+            with self.subTest(body=body):
+                self.assertEqual((body.get("t"), "q" in body, body["season"]), (stored, False, 1))
+        resp = post(answers[0])
+        self.assertEqual(resp.status_code, 200, resp.text[:300])
+        self.assertNotIn("search has expired", resp.text)
+        self.assertNotIn("no longer stored", resp.text)
+        self.assertIsNotNone(self._completed(), "counting everything did not add it")
 
     def test_a_fresh_run_lands_at_zero_on_the_month_being_looked_at(self):
         """THE REPORTED SYMPTOM, INVERTED. This came out as 13/13 on the current
