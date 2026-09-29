@@ -1576,6 +1576,15 @@ button.search-row { width: 100%; background: none; font: inherit; text-align: le
    and the cold load stays clear of the sticky header. Both paths measured at
    each candidate before this number was chosen. */
 #jump-target { scroll-margin-block: 30vh 30vh; }
+/* THE DAYS ABOVE THE CARD ARE LAID OUT FOR REAL, because the scroll to it is
+   measured against them. `content-visibility: auto` (see .day-block) sizes a day
+   it has not rendered yet at its 900px estimate, and Firefox scrolls to the card
+   BEFORE rendering the days above it: MEASURED at 1920x1080 with posters, the
+   1st of October 2011 was 900px when the jump to the 2nd scrolled and 376px a
+   moment later, so the card ended 200px ABOVE the viewport — Chromium landed it
+   at 30vh. Only the days drawn with the shell can be above it (a later day is a
+   skeleton, already visible), so this renders a handful of days, once. */
+.day-block:has(~ .day-block #jump-target) { content-visibility: visible; }
 
 .source-toggles { display: flex; flex-wrap: wrap; gap: 8px; }
 .source-toggle {
