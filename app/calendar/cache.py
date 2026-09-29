@@ -223,24 +223,12 @@ def dedupe_records(records: list[Record]) -> list[Record]:
 # silently dropped on the way in, and the symptom would have been a matcher that
 # never matched.
 
-# ---------------------------------------------------------------------------
-# grouping â€” one entry per real title, each source's record kept whole
-# ---------------------------------------------------------------------------
-#
-# THERE IS NO PRUNING ANY MORE, and its disappearance is the point rather than a
-# side effect. Pruning existed to whitelist which of a raw payload's fields were
-# worth storing; a Record already IS that whitelist, per source, by construction.
-# The whitelist also carried a trap a second source would have walked straight
-# into: it named the id keys it kept, so any id namespace it had not been taught
-# about â€” a second service's own id, an anime title's `mal` â€” would have been
-# silently dropped on the way in, and the symptom would have been a matcher that
-# never matched.
 
 def group_base(record: Record) -> str:
     """The part of a group key that names the TITLE, with no airing in it.
 
     The cross-source waterfall (app/providers/base.py's resolve_key), never a
-    service's own id â€” keying on one of those would make the same title arriving
+    service's own id — keying on one of those would make the same title arriving
     from two services two rows for ever. It stringifies whatever id it lands on,
     which is the whole of this app's defence against the type mismatch that
     matters most here: Simkl reports a tmdb id as the string "285652" and Trakt
@@ -262,8 +250,8 @@ def episode_coords(record: Record) -> tuple[int, int] | None:
 
     A THIRD OF PREMIERE ENTRIES STATE NEITHER, measured over July and August:
     1230 of them carry no season or no episode number, overwhelmingly Simkl
-    anime, where a season is simply not part of how the entry is spelled â€” an
-    absolute episode number and nothing else â€” plus a scattering of Trakt records
+    anime, where a season is simply not part of how the entry is spelled — an
+    absolute episode number and nothing else — plus a scattering of Trakt records
     that give a season and no number. So "the coordinates" is not a field a
     matcher may assume it has, and None here is the ordinary case rather than a
     malformed one. What such a record can still say is handled by `match_keys`
@@ -284,7 +272,7 @@ def group_key(record: Record) -> str:
 
     THIS IS NOT THE FINAL KEY. A record stating no coordinates can still turn out
     to be the same airing as one that states them, and deciding that needs the
-    other records in the window â€” see `match_keys`, which is what `group_records`
+    other records in the window — see `match_keys`, which is what `group_records`
     actually keys on. This function stays because "what does this record say
     about itself" is a separate question worth asking on its own.
     """
@@ -294,7 +282,7 @@ def group_key(record: Record) -> str:
 
 
 def match_keys(records: list[Record]) -> list[str]:
-    """The final group key for each of `records`, in the same order â€” THE
+    """The final group key for each of `records`, in the same order — THE
     MATCHER.
 
     Everything above answers "what does one record call itself". This answers the
@@ -304,7 +292,7 @@ def match_keys(records: list[Record]) -> list[str]:
     because they describe the airing at DIFFERENT RESOLUTIONS. Measured on real
     stored windows: one service lists an anime premiere as episode 1 with no
     season at all and the other lists it as S01E01, same title, same tmdb id,
-    same day â€” and the coordinates being part of the key is what made those two
+    same day — and the coordinates being part of the key is what made those two
     cards instead of one.
 
     So a record that states no full coordinate is folded into a coordinated
@@ -316,7 +304,7 @@ def match_keys(records: list[Record]) -> list[str]:
       - and agreement on whichever half of the coordinate the record DID state.
         This is the condition that carries most of the weight: one live window
         holds eight uncoordinated records for a single title on one day, one per
-        episode, against that title's eight coordinated ones â€” day alone would
+        episode, against that title's eight coordinated ones — day alone would
         make all eight ambiguous and match none of them, while the stated episode
         number picks each one out exactly.
 
@@ -324,11 +312,11 @@ def match_keys(records: list[Record]) -> list[str]:
     WHOLE SAFETY ARGUMENT. Every coordinated airing of the title on that day is a
     candidate, whoever listed it; only if there is EXACTLY ONE is the record
     folded in, and only then is it asked whether that airing already carries a
-    record from this same source â€” in which case it is refused too, because
+    record from this same source — in which case it is refused too, because
     folding a service's uncoordinated listing into its own coordinated one would
     be collapsing that service's listing rather than reconciling two of them, and
     a service listing one airing twice is a repeat the calendar has always drawn
-    twice. Counting the other way round â€” narrowing by source and THEN counting â€”
+    twice. Counting the other way round — narrowing by source and THEN counting —
     is a real trap and not a theoretical one: on a day where one service lists
     season 4 and the other season 5 of the same show, it would leave exactly one
     survivor for an uncoordinated third record and merge it into the wrong
@@ -340,8 +328,8 @@ def match_keys(records: list[Record]) -> list[str]:
     with nothing on the page to say so.
 
     WHAT THIS DELIBERATELY DOES NOT DO is match on title and day. Two different
-    SEASONS of one show premiering on the same day is a real thing â€” three live
-    examples, all with both records fully coordinated â€” and any rule of the form
+    SEASONS of one show premiering on the same day is a real thing — three live
+    examples, all with both records fully coordinated — and any rule of the form
     "same title, same day, one card" destroys them. They are untouched here
     precisely because both sides state a full coordinate and neither is a
     candidate for folding.
@@ -351,7 +339,7 @@ def match_keys(records: list[Record]) -> list[str]:
     keys = [f"{b}|{c[0]}|{c[1]}" if c else b for b, c in zip(bases, coords)]
 
     # What each title's fully-coordinated airings are, and who listed them on
-    # which day â€” the only thing an uncoordinated record can be folded into.
+    # which day — the only thing an uncoordinated record can be folded into.
     coordinated: dict[str, dict[tuple[int, int], dict]] = {}
     for index, record in enumerate(records):
         if coords[index] is None:
@@ -388,7 +376,7 @@ def group_records(records: list[Record]) -> list[dict]:
     PROVENANCE IS RECORDED FOR EVERY FIELD, not only for the ones that disagree,
     because "both sources agreed" and "only one source had it" must be able to
     render differently and the second is not recoverable from a de-duplicated
-    blob. Storage cost is not a concern here and must not be optimized against â€”
+    blob. Storage cost is not a concern here and must not be optimized against —
     windows measure a few kilobytes compressed, and de-duplicating equal values
     would destroy the agreement signal to save nothing.
 
@@ -398,8 +386,8 @@ def group_records(records: list[Record]) -> list[dict]:
     in declared order means the earlier source's spelling of an id is the one
     kept.
 
-    A KEY COLLIDING WITH ITSELF FOR ONE SOURCE is a repeated airing â€” the same
-    episode listed twice at different times â€” and gets a distinct key rather than
+    A KEY COLLIDING WITH ITSELF FOR ONE SOURCE is a repeated airing — the same
+    episode listed twice at different times — and gets a distinct key rather than
     overwriting, because the calendar has always drawn both and this is not the
     place to decide it should stop. Two records from DIFFERENT sources under one
     key is the ordinary case and is exactly what the group is for.
@@ -434,11 +422,11 @@ class CachedWindow(NamedTuple):
 
     THE TWO LISTS ARE DIFFERENT FACTS AND CONFLATING THEM IS WHAT MADE THE
     "incomplete data" banner permanent. A source in `asked` but not in `sources`
-    was reached for and could not answer â€” that is the only thing "partial"
+    was reached for and could not answer — that is the only thing "partial"
     should ever mean. A source in neither was not in play when this window was
     filled: either it did not exist on the instance yet, or its declared reach
     does not cover this window at all. That is not a failure to report, it is a
-    window that predates the question â€” and the read path treats it as a MISS to
+    window that predates the question — and the read path treats it as a MISS to
     be refilled, exactly as a payload from an older shape version is a miss
     rather than an error.
 
@@ -455,7 +443,7 @@ class CachedWindow(NamedTuple):
 
 def _poster_sighting(record: Record):
     """(media, tmdb, source, url) for one record, or None when it lacks either
-    id â€” the tuple the ranker's poster registry is keyed on."""
+    id — the tuple the ranker's poster registry is keyed on."""
     tmdb_id = (record.ids or {}).get("tmdb")
     if not tmdb_id or not record.poster:
         return None
