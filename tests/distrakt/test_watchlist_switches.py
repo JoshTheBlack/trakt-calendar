@@ -125,6 +125,19 @@ class TheSwitchTests(SwitchTestCase):
         self.press(True, source="plex")
         self.assertEqual(asyncio.run(ww.switched_on(self.user_id)), [])
 
+    def test_a_departure_the_service_could_not_hear_warns_on_the_pill(self):
+        """A drop or an undo that failed files no row — it waits to be sent
+        again — so the pill has no count to show, and must still warn."""
+        self.add_listed(1)
+        self.press(True)
+        asyncio.run(ww._record(self.user_id, SIMKL, {
+            "show:tmdb:1": ww.WriteRow("1", "none", ww.WriteState.WRITTEN)}))
+        ww._trouble[(self.user_id, SIMKL)] = ww.Trouble(
+            "1 show(s) taken off the tracker could not be changed on the list.", time.monotonic())
+        html = self.page()
+        pill = text(html.split('id="watchlistPill"', 1)[1].split("</button>", 1)[0])
+        self.assertIn("⚠", pill)
+
     def test_a_refused_show_is_said_beside_its_switch(self):
         """A list at its limit refuses and is never retried, so without a line of
         its own the panel would read as if every show had been added."""

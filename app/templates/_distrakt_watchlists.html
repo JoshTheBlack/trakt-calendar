@@ -28,9 +28,15 @@
 {%- endmacro %}
 
 {% macro pill_label(switches, oob=false) -%}
+{#- A failed ARRIVAL is a row and has a count; a failed DEPARTURE (a drop or
+    an undo the service could not hear) waits in memory and files no row, so it
+    has only the switch's trouble. Either is a warning on the pill: it is the
+    one part of this a viewer sees without opening the panel. -#}
 {%- set failing = switches | selectattr('on') | sum(attribute='failed') -%}
+{%- set troubled = switches | selectattr('on') | selectattr('trouble') | list -%}
 <span id="watchlistPillLabel"{% if oob %} hx-swap-oob="outerHTML"{% endif %}>📋 Lists
-    {%- if failing %} <span class="watchlist-failing">⚠ {{ failing }}</span>{% endif %}</span>
+    {%- if failing %} <span class="watchlist-failing">⚠ {{ failing }}</span>
+    {%- elif troubled %} <span class="watchlist-failing">⚠</span>{% endif %}</span>
 {%- endmacro %}
 
 {% macro panel(switches, oob=false) -%}
