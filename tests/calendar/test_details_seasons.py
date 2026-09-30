@@ -385,7 +385,7 @@ class ThePanelDescribesTheSeasonItIsOpenOnTests(_CardPanelTestCase):
         """THE SHOW'S AND THE SEASON'S, not one instead of the other. They answer
         different questions — the premise, and what this particular run of it is
         about — and an anthology wants both: the show blurb sits with the chips,
-        the season's under the trailer."""
+        the season's under the videos."""
         panel = self._panel(season="2")
         self.assertIn("Spies.", panel.html)                    # the show's
         self.assertIn("What season 2 is about.", panel.html)   # this season's
@@ -413,26 +413,26 @@ class ThePanelDescribesTheSeasonItIsOpenOnTests(_CardPanelTestCase):
         self.assertIn("What season 1 is about.", rows)
         self.assertIn("S1 Actor", rows)
         self.assertIn("S1 Ep 1", rows)
-        # And NOT the show's blurb or its trailer, which do not move.
+        # And NOT the show's blurb or its videos, which do not move.
         self.assertNotIn("Spies.", rows)
-        self.assertNotIn("Trailer", rows)
+        self.assertNotIn("details-videos", rows)
 
     def test_what_does_not_vary_by_season_is_not_re_sent(self):
         """The chips, the show's description, the outbound buttons and the
-        trailer are facts about the TITLE, so a tab must not carry them —
+        videos are facts about the TITLE, so a tab must not carry them —
         swapping them in again would draw them twice."""
         rows = self._get("/calendar/fragments/details/season", season="1").text
         self.assertNotIn("details-hero", rows)
         self.assertNotIn("Paramount+", rows)
-        self.assertNotIn("trailer-embed", rows)
+        self.assertNotIn("video-player", rows)
 
-    def test_the_trailer_is_drawn_once_however_many_seasons_there_are(self):
-        """It is the TITLE's — neither service publishes one per season, measured
-        — so one copy sits between the strip and the panes. A copy per pane would
+    def test_the_player_is_drawn_once_however_many_seasons_there_are(self):
+        """The videos are the TITLE's — neither service lists any per season,
+        measured — so one player sits between the strip and the panes. A copy per pane would
         be an iframe per opened season, all but one hidden and still loading."""
-        self.assertEqual(self._panel().html.count("trailer-embed"), 1)
+        self.assertEqual(self._panel().html.count("<iframe"), 1)
 
-    def test_the_trailer_is_written_before_the_seasons_it_is_drawn_after(self):
+    def test_the_videos_are_written_before_the_seasons_it_is_drawn_after(self):
         """WHERE IT SITS IN THE DOCUMENT IS NOT WHERE IT IS DRAWN, and the
         document is what matters when the layout rules are not there. Flex
         `order` lifts it between the strip and the panes; a pane has to stay its
@@ -441,8 +441,8 @@ class ThePanelDescribesTheSeasonItIsOpenOnTests(_CardPanelTestCase):
         rules existed dropped it to the bottom of the panel, under the episode
         list. Emitted first, the worst case is that it sits above the tabs."""
         html = self._panel().html
-        self.assertLess(html.index("details-trailer"), html.index("ep-season-tab"))
-        self.assertLess(html.index("details-trailer"), html.index("ep-list"))
+        self.assertLess(html.index("details-videos"), html.index("ep-season-tab"))
+        self.assertLess(html.index("details-videos"), html.index("ep-list"))
 
     def test_the_seasons_own_name_is_shown_where_it_has_one(self):
         """Anthologies title their seasons properly — Murder House, Asylum,

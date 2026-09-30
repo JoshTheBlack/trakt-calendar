@@ -1800,8 +1800,29 @@ button.search-row { width: 100%; background: none; font: inherit; text-align: le
 .details-hero .d-chips { display: flex; flex-wrap: wrap; gap: 6px; font-size: 0.74rem; }
 .details-overview { color: var(--text-dim); font-size: 0.88rem; line-height: 1.55; }
 .details-section-title { font-family: 'Bebas Neue', sans-serif; letter-spacing: 1px; color: var(--gold-soft); font-size: 1.25rem; margin: 4px 0 2px; }
-.trailer-embed { position: relative; width: 100%; aspect-ratio: 16/9; border-radius: 10px; overflow: hidden; border: 1px solid var(--card-border); background: #000; }
-.trailer-embed iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.video-player { position: relative; width: 100%; aspect-ratio: 16/9; border-radius: 10px; overflow: hidden; border: 1px solid var(--card-border); background: #000; }
+.video-player iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+/* EVERY VIDEO BOTH SERVICES LIST, AS LINKS AIMED AT THE ONE PLAYER ABOVE
+   (_details.html's `videos`). A BOUNDED BOX THAT SCROLLS, because the list is
+   not capped: a film's often runs past ten, and it must not push the season's
+   own content a screen further down. About five rows show before it scrolls.
+   A row's title takes the room and WRAPS rather than overflowing, so a long
+   Trakt title cannot widen the panel at phone width. */
+.video-picker { list-style: none; margin: 8px 0 0; padding: 0; display: flex;
+                flex-direction: column; gap: 2px; max-height: 190px; overflow-y: auto; }
+.video-pick { display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+              border-radius: 8px; color: var(--text-dim); text-decoration: none;
+              font-size: 0.82rem; background: rgba(255,255,255,0.02); }
+.video-pick:hover { color: var(--text); background: rgba(255,255,255,0.07); }
+/* THE ONE JUST PRESSED. A link cannot know which video the frame holds, so
+   there is no "now playing" mark — but focus stays on the row that was
+   pressed, and that is the honest thing to draw. */
+.video-pick:focus { color: var(--text); outline: 2px solid var(--accent-blue); outline-offset: -2px; }
+.video-pick .v-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.video-pick .v-kind, .video-pick .v-first { color: var(--text-faint); font-size: 0.72rem; white-space: nowrap; }
+.video-pick .v-first { color: var(--accent-blue); }
+.video-pick .v-sources { display: inline-flex; gap: 4px; flex-shrink: 0; }
+.video-pick .v-sources .source-logo { height: 12px; }
 .cast-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 12px; }
 .cast-member { display: flex; flex-direction: column; gap: 6px; text-align: center; }
 .cast-member .headshot { width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 10px; background: var(--card); border: 1px solid var(--card-border); }
@@ -1838,29 +1859,30 @@ button.search-row { width: 100%; background: none; font: inherit; text-align: le
 }
 .ep-season-radio:focus-visible + .ep-season-tab { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
 /* THREE GROUPS IN ONE FLEX CONTAINER, ordered rather than nested: the labels
-   along the top, then the title's trailer, then the panes. The trailer is not
-   the season's — neither service publishes one per season — and it lives inside
-   this container purely so that ONE copy of it can sit between the strip and the
+   along the top, then the title's videos, then the panes. The videos are not
+   the season's — neither service lists any per season — and they live inside
+   this container purely so that ONE player can sit between the strip and the
    swapped content. Repeating it inside each pane would put an iframe per opened
    season on the page, all but one hidden and still loading. */
 /* SCOPED TO `.ep-seasons >`, AND THAT SCOPING IS THE RULE RATHER THAN A NICETY.
-   A title with ONE season draws no picker, so its trailer is a direct child of
+   A title with ONE season draws no picker, so its videos are a direct child of
    `.modal-body` instead — which is itself `display: flex; flex-direction:
    column`. An unscoped `order: 2` therefore applied THERE too, against siblings
-   all sitting at the default 0, and sent the trailer to the BOTTOM of the whole
-   panel, under the episode list. Read out of a browser console: parent
-   `modal-body`, order 2, laid out last of seven children. The ordering is only
-   ever meant for the picker's own container, and a one-season panel needs none
-   of it — its trailer is already written above the season's content.
-   The space below it is for the same reason the ordering exists: what follows is
+   all sitting at the default 0, and sent the trailer then drawn here to the
+   BOTTOM of the whole panel, under the episode list. Read out of a browser
+   console: parent `modal-body`, order 2, laid out last of seven children. The
+   ordering is only ever meant for the picker's own container, and a one-season
+   panel needs none of it — its videos are already written above the season's
+   content.
+   The space below is for the same reason the ordering exists: what follows is
    a new subject. The modal body's own 16px gap covers the no-picker case. */
-.ep-seasons > .details-trailer { order: 2; flex: 0 0 100%; margin-bottom: 16px; }
+.ep-seasons > .details-videos { order: 2; flex: 0 0 100%; margin-bottom: 16px; }
 /* Every pane is a full-width row below that, and only the checked one is drawn.
    A pane that has never been opened holds its loading line and nothing else, so
    an unopened season costs a request only when it is asked for. */
 .ep-season-pane { order: 3; flex: 0 0 100%; display: none; }
 .ep-season-radio:checked + .ep-season-tab + .ep-season-pane { display: block; }
-/* The season's own description, under the trailer and visibly a caption to the
+/* The season's own description, under the videos and visibly a caption to the
    season rather than a second copy of the show's blurb above the picker. */
 .details-overview.season { border-left: 2px solid var(--accent-blue);
                            padding-left: 10px; margin-bottom: 6px; }

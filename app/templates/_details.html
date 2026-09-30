@@ -20,14 +20,16 @@
      that knows the tracker exists.
 
    THIS FILE IS THE TITLE; _details_season.html IS THE SEASON. Everything here —
-   the picture, the chips, the outbound buttons, the trailer — is a fact about the
+   the picture, the chips, the outbound buttons, the videos — is a fact about the
    title and stays put when a season tab is pressed. The description, the cast and
    the episodes vary by season and live in that partial, which is included here
    for the season the panel opened on and fetched by a tab for any other.
 
    Context it reads: `d` (one source's detail answer, whose key set is the same
    whoever gave it — see DetailPort in app/providers/base.py — or, where no
-   source can describe the item, the few facts the surface itself holds), `media`,
+   source can describe the item, the few facts the surface itself holds; its
+   `videos` are every service's, pooled — app/providers/detail_source.py's
+   `describe_panel`), `media`,
    `season` (the season below it), `title` (the card's own, for the poster's alt
    text), `poster`, `progress`, `links`, `tabs` (the season picker, empty where
    there is nothing to pick between) and `note` (why the panel is short, where it
@@ -83,47 +85,84 @@
 </div>
 {% endif %}
 
-{#- THE TRAILER, AND IT IS THE TITLE'S RATHER THAN THE SEASON'S. Measured before
-    it was placed here: neither service publishes a per-season trailer. Trakt's
-    season objects carry no `trailer` key from `seasons`, from `seasons/{n}/info`
-    or under four speculative `extended` values, and Simkl's array is free-text
-    names with sparse coverage — half of them opening credits or clips, and Fargo
-    has none at all. So the heading says Trailer and not "this season's", and it
-    sits ABOVE the season's own description rather than inside the swapped pane,
-    which is also what keeps ONE iframe on the page however many seasons get
-    opened.
+{#- THE VIDEOS, AND THEY ARE THE TITLE'S RATHER THAN THE SEASON'S. Measured
+    before they were placed here: neither service lists a video per season —
+    Trakt's season video lists were empty for every show probed, and Simkl's
+    array hangs off the title. So they sit ABOVE the season's own description
+    rather than inside the swapped pane, which is also what keeps ONE player on
+    the page however many seasons get opened.
 
-    Embedded where it is a YouTube video and linked out where it is not — each
-    provider has already read which video a value names (app/youtube.py), so
-    the template plays `video_id` as it stands and asks nothing of its own. -#}
-{%- macro trailer() -%}
+    `d.videos` IS EVERY SERVICE'S LIST, POOLED AND ORDERED
+    (app/providers/videos.py), with what plays first at the front — so this
+    draws, and decides nothing.
+
+    ONE PLAYER, AND EVERY ROW IS A LINK AIMED AT IT. A row is an <a> whose
+    `target` names the iframe, so pressing it loads that video INTO THE SAME
+    FRAME: the previous video stops because its document is replaced, nothing
+    is left playing hidden, and there is no script and no request to this
+    server. MEASURED in Chromium and Firefox under the app's own frame-src: the
+    chosen video plays once `autoplay` is in the frame's `allow`, with no CSP
+    complaint. One lazy frame per video behind radio tabs was measured too and
+    rejected — a video switched away from is only hidden, and goes on playing.
+    Closing the panel removes the frame (static/js/ui.js), which is what stops
+    the sound.
+
+    NO "NOW PLAYING" MARK: a link cannot know which video the frame holds
+    without script. The first row is the default and says so; :focus shows the
+    one just pressed.
+
+    A VIDEO HOSTED ANYWHERE BUT YOUTUBE IS A LINK OUT, in a new tab. frame-src
+    admits YouTube's no-cookie host and nothing else (app/csp.py), and widening
+    it for a video in a few hundred is not a trade worth making.
+
+    THE HEADING NAMES THE ONE VIDEO WHEN THERE IS ONE — "Teaser" where that is
+    all there is, since calling it "Trailer" would misname it — and says
+    "Videos" when there is a list to pick from. The rows each say which service
+    lists them, with the same marks the card's flip control wears. -#}
+{%- macro videos() -%}
 {% set vids = d.videos or [] %}
 {% if vids %}
 {% set first = vids[0] %}
-<div class="details-trailer">
-<div class="details-section-title">▶️ {{ first.kind | capitalize }}</div>
-{% if first.embeddable %}<div class="trailer-embed"><iframe src="https://www.youtube-nocookie.com/embed/{{ first.video_id }}"
+<div class="details-videos">
+<div class="details-section-title">▶️ {{ 'Videos' if vids | length > 1 else first.kind | capitalize }}</div>
+{% if first.embeddable %}<div class="video-player"><iframe name="detailsPlayer"
+        src="https://www.youtube-nocookie.com/embed/{{ first.video_id }}"
         title="{{ first.title or first.kind | capitalize }}" loading="lazy" referrerpolicy="strict-origin-when-cross-origin"
-        allow="accelerometer; encrypted-media; gyroscope; picture-in-picture"
+        allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture"
         allowfullscreen></iframe></div>
-{%- else %}<a class="pill-btn" href="{{ first.url }}" target="_blank" rel="noopener">Watch ↗</a>{% endif %}
+{%- elif vids | length == 1 %}<a class="pill-btn" href="{{ first.url }}" target="_blank" rel="noopener">Watch ↗</a>{% endif %}
+{% if vids | length > 1 %}
+<ol class="video-picker">
+    {%- for v in vids %}
+    <li><a class="video-pick"
+        {%- if v.embeddable %} href="https://www.youtube-nocookie.com/embed/{{ v.video_id }}?autoplay=1" target="detailsPlayer"
+        {%- else %} href="{{ v.url }}" target="_blank" rel="noopener"{% endif %}>
+        <span class="v-title">{{ v.title or v.kind | capitalize }}</span>
+        {%- if v.title %}<span class="v-kind">{{ v.kind | capitalize }}</span>{% endif %}
+        {%- if loop.first and v.embeddable %}<span class="v-first">plays first</span>{% endif %}
+        <span class="v-sources">{% for source in v.sources %}{{ src.mark(source) }}{% endfor %}</span>
+        {%- if not v.embeddable %}<span class="v-out" aria-label="opens in a new tab">↗</span>{% endif %}
+    </a></li>
+    {%- endfor %}
+</ol>
+{% endif %}
 </div>
 {% endif %}
 {%- endmacro -%}
 
 {# THE SEASON PICKER, AND EVERYTHING BELOW IT IS THAT SEASON'S.
 
-   IT SITS BENEATH THE OUTBOUND BUTTONS AND ABOVE THE TRAILER. What is above it —
+   IT SITS BENEATH THE OUTBOUND BUTTONS AND ABOVE THE VIDEOS. What is above it —
    the picture, the chips, what the SHOW is, the buttons — are facts about the
    TITLE and do not move when a tab is pressed. What is below it is that season's
    own description, its own cast and its own episodes.
 
-   THE TRAILER SITS INSIDE THIS CONTAINER, BETWEEN THE STRIP AND THE PANES, and
-   that is a layout device rather than a claim that it belongs to the season: the
-   flex `order` in style.css puts labels first, the trailer second and the panes
-   third, which is the only way to get one shared element between the two without
-   repeating it in every pane. Repeating it would mean an iframe per opened
-   season, all but one of them hidden and still loading.
+   THE VIDEOS SIT INSIDE THIS CONTAINER, BETWEEN THE STRIP AND THE PANES, and
+   that is a layout device rather than a claim that they belong to the season:
+   the flex `order` in style.css puts labels first, the videos second and the
+   panes third, which is the only way to get one shared element between the two
+   without repeating it in every pane. Repeating it would mean a player per
+   opened season, all but one of them hidden and still loading.
 
    `season` is the one that was ANSWERED — app/details_panel.py reconciles what
    the click asked about with what the source came back with, so there is one
@@ -146,19 +185,19 @@
    without one, which is where their description and cast come from. #}
 {% if tabs | length > 1 %}
 <div class="ep-seasons">
-    {#- THE TRAILER IS EMITTED FIRST AND DRAWN SECOND, and the order of those two
-        sentences is the whole point. Visually it belongs between the strip and
+    {#- THE VIDEOS ARE EMITTED FIRST AND DRAWN SECOND, and the order of those two
+        sentences is the whole point. Visually they belong between the strip and
         the panes, which only flex `order` can do — a pane has to stay the
         ADJACENT SIBLING of its label for `:checked + label + pane` to switch it,
         so nothing can be written between them.
-        IT USED TO BE EMITTED LAST, and that was a latent bug: with the ordering
-        rules missing for any reason — a stylesheet the browser had cached from
-        before they existed — the trailer fell to the BOTTOM of the panel, under
-        the episode list, which is where the owner found it. Emitted first, the
-        worst case is that it sits above the tabs, which is where it lived one
-        iteration ago and is a sane place for it. It also fixes the reading order
-        for anything that follows the document rather than the layout. -#}
-    {{ trailer() }}
+        THE TRAILER THAT CAME BEFORE THEM USED TO BE EMITTED LAST, and that was a
+        latent bug: with the ordering rules missing for any reason — a stylesheet
+        the browser had cached from before they existed — it fell to the BOTTOM
+        of the panel, under the episode list, which is where the owner found it.
+        Emitted first, the worst case is that they sit above the tabs, which is a
+        sane place for them. It also fixes the reading order for anything that
+        follows the document rather than the layout. -#}
+    {{ videos() }}
     {%- for tab in tabs %}
     <input type="radio" name="detailsSeason" class="ep-season-radio"
            id="epSeason-{{ tab.number }}"{% if tab.current %} checked{% else %}
@@ -171,7 +210,7 @@
     </div>
     {%- endfor %}
 </div>
-{% else %}{{ trailer() }}{% include '_details_season.html' %}{% endif %}
+{% else %}{{ videos() }}{% include '_details_season.html' %}{% endif %}
 
 {#- WHY THE PANEL IS SHORT, where the surface knows. It sits where the episodes
     would have been, so an item nobody here can describe explains its missing

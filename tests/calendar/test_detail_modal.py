@@ -235,7 +235,7 @@ class DetailModalSourceTests(AppTestCase):
         trailer at all; a real id embeds."""
         html = self._simkl_only().text
         self.assertNotIn("youtube.com/watch", html)
-        self.assertNotIn("trailer-embed", html)
+        self.assertNotIn("<iframe", html)
         real = {**SIMKL_TITLE,
                 "trailers": [{"name": "Trailer", "youtube": "dQw4w9WgXcQ"}]}
         html = self._get("media=show&simkl=3204421&season=1",
@@ -271,6 +271,9 @@ class DetailModalSourceTests(AppTestCase):
         self.assertIn("Trakt&#39;s words.", html)
         self.assertIn("tv/2601798", simkl_asked)
         self.assertIn('src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"', html)
+        # And Simkl's teaser is one press away, in the same player.
+        self.assertIn('href="https://www.youtube-nocookie.com/embed/4PPodH3i_7k?autoplay=1" '
+                      'target="detailsPlayer"', html)
 
     def test_a_season_tab_asks_nobody_for_videos(self):
         """A tab draws that season's rows and no player, so it pools nothing."""
