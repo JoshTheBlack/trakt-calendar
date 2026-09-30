@@ -130,12 +130,20 @@ class Trouble(NamedTuple):
     at: float
 
 
-class _Pending(NamedTuple):
-    """One departure waiting for its answer at the services. `serial` tells this
-    request's departure from a later one for the same show, so a pass finishing
-    with the first never discards the second."""
+class Pending(NamedTuple):
+    """One departure waiting for its answer at the services.
+
+    `serial` tells this request's departure from a later one for the same show,
+    so a pass finishing with the first never discards the second.
+
+    `ready` is whether the request that said it has FINISHED. Until then a pass
+    neither acts on it nor forgets the show's row: a pass that started earlier
+    can read the tracker before this request's removal is written, find the show
+    still there, and would otherwise conclude it was not the last season."""
     departure: Departure
+    key: str
     serial: int
+    ready: bool = False
 
 
 # IN PROCESS, AND NONE OF IT IS WHAT IS OWED. The table says that. What lives
@@ -145,7 +153,7 @@ class _Pending(NamedTuple):
 _locks: dict[int, asyncio.Lock] = {}
 _running: dict[int, asyncio.Task] = {}
 _again: set[int] = set()
-_departures: dict[int, dict[str, _Pending]] = {}
+_departures: dict[int, dict[str, Pending]] = {}
 _serials = itertools.count(1)
 _trouble: dict[tuple[int, str], Trouble] = {}
 
@@ -271,7 +279,7 @@ def _departed_title(key: str, source: str, row: WriteRow | None) -> WatchlistTit
 
 # the pass
 
-def expect(user_id: int, key: ItemKey | str, departure: Departure) -> None:
+def expect(user_id: int, key: ItemKey | str, departure: Departure) -> Pending:
     """Say that a request is about to take a season of `key` off the tracker by
     the viewer's hand. Whether it was the show's LAST season is decided by the
     pass, from the tracker as it then stands.
@@ -280,9 +288,44 @@ def expect(user_id: int, key: ItemKey | str, departure: Departure) -> None:
     started by some other request may run between this request's write and its
     answer — and that pass, finding the show gone, would forget its row, and with
     it the only record that the app had written the show. A pending departure
-    keeps the row until it has been answered.
+    keeps the row until it has been answered, and is acted on only once its
+    request has finished (`after_request`).
     """
-    _departures.setdefault(user_id, {})[str(key)] = _Pending(departure, next(_serials))
+    pending = Pending(departure, str(key), next(_serials))
+    _departures.setdefault(user_id, {})[pending.key] = pending
+    return pending
+
+
+def withdraw(user_id: int, pending: Pending) -> None:
+    """Take back an `expect` whose request turned out to change nothing — the
+    season was not where the request said — so no pass answers a departure that
+    never happened. Only that request's own departure: one made since stands."""
+    waiting = _departures.get(user_id, {})
+    if _same(waiting.get(pending.key), pending):
+        del waiting[pending.key]
+
+
+def _same(found: Pending | None, pending: Pending) -> bool:
+    return found is not None and found.serial == pending.serial
+
+
+async def after_request(user_id: int, departed: Sequence[Pending] = ()) -> None:
+    """What the tracker's router runs once one of this viewer's answers has gone:
+    the departures THAT request said (`departed`, what its `expect` calls
+    returned) are now whole, and a pass is started if the viewer switched any
+    service on.
+
+    Only that request's own, because another request of the viewer's may still
+    be between its `expect` and its removal. Nothing switched on means no pass
+    will ever answer them, so they are let go here rather than kept for good."""
+    waiting = _departures.get(user_id, {})
+    for pending in departed:
+        if _same(waiting.get(pending.key), pending):
+            waiting[pending.key] = pending._replace(ready=True)
+    if await switched_on(user_id):
+        nudge(user_id)
+    else:
+        _settle_departures(user_id, {pending.key: pending for pending in departed})
 
 
 def nudge(user_id: int) -> None:
@@ -339,7 +382,8 @@ def _fail(user_id: int, source: str, message: str) -> None:
 
 async def _pass(user_id: int) -> None:
     sources = await switched_on(user_id)
-    taken = dict(_departures.get(user_id, {}))
+    taken = {key: pending for key, pending in _departures.get(user_id, {}).items()
+             if pending.ready}
     if not sources:
         _settle_departures(user_id, taken)
         return
@@ -381,13 +425,13 @@ async def _pass(user_id: int) -> None:
                                  if key not in unfinished})
 
 
-def _settle_departures(user_id: int, answered: Mapping[str, _Pending]) -> None:
+def _settle_departures(user_id: int, answered: Mapping[str, Pending]) -> None:
     """Take the departures this pass answered off the waiting list — each only if
     it is still the one the pass read, so a ✕ that arrived during the pass
     waits for the next."""
     waiting = _departures.get(user_id, {})
     for key, pending in answered.items():
-        if waiting.get(key) is pending:
+        if _same(waiting.get(key), pending):
             del waiting[key]
     if not waiting:
         _departures.pop(user_id, None)

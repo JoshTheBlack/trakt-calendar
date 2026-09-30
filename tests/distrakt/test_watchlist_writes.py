@@ -11,7 +11,7 @@ import asyncio
 from unittest.mock import AsyncMock, patch
 
 from app import db, distrakt
-from app.distrakt import watchlist_writes as ww
+from app.distrakt import lifecycle, watchlist_writes as ww
 from app.providers.base import Source
 from tests.distrakt.test_store import DistraktTestCase, a_record, month_back
 from tests.distrakt.watchlist_fake import FakeList
@@ -308,3 +308,166 @@ class OnePassAtATimeTests(WatchlistTestCase):
             await asyncio.sleep(0.01)
         self.assertEqual([keys for verb, keys in self.fake.calls if verb == "put"],
                          [["show:tmdb:1"], ["show:tmdb:2"]])
+
+
+class DepartureTests(WatchlistTestCase):
+    """Giving up and the ✕: the only two departures that have an answer at the
+    service, each only when it took the show's LAST season off the tracker."""
+
+    KEY = "show:tmdb:1"
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        await self.listed(1)
+        await self.switch_on()
+
+    async def depart(self, departure, season: int = 1):
+        """What a request does: say it, take the season off, finish, and the pass
+        that follows."""
+        pending = ww.expect(self.user_id, self.KEY, departure)
+        key = distrakt.record_key(a_record(1))
+        if departure is ww.Departure.ABANDON:
+            record = await distrakt.find_user_record(self.user_id, key, season)
+            await lifecycle.give_up(self.user_id, record, month=month_back(0))
+        else:
+            await distrakt.remove_user_record(self.user_id, key, season)
+        await self.finish([pending])
+
+    async def finish(self, departed):
+        with patch.object(ww, "nudge", lambda user_id: None):
+            await ww.after_request(self.user_id, departed)
+        await ww.run(self.user_id)
+
+    # abandon
+
+    async def test_giving_up_on_the_last_season_drops_the_show(self):
+        self.fake.held = {self.KEY: "watching"}
+        await ww.run(self.user_id)
+        await self.depart(ww.Departure.ABANDON)
+        self.assertEqual(self.fake.held, {self.KEY: "dropped"})
+        self.assertEqual(await self.states(), {self.KEY: ("dropped", "plantowatch")})
+        self.assertEqual(ww._departures, {})
+
+    async def test_giving_up_drops_it_whatever_the_viewer_had_it_as(self):
+        await ww.run(self.user_id)
+        self.fake.held[self.KEY] = "watching"     # a play moved it on since
+        await self.depart(ww.Departure.ABANDON)
+        self.assertEqual(self.fake.held, {self.KEY: "dropped"})
+
+    async def test_another_season_still_there_is_not_a_departure(self):
+        await self.listed(1, season=2)
+        await ww.run(self.user_id)
+        await self.depart(ww.Departure.ABANDON)
+        self.assertEqual(self.fake.sent("drop"), [])
+        self.assertEqual(self.fake.held, {self.KEY: "plantowatch"})
+        self.assertEqual(ww._departures, {})
+
+    async def test_a_show_the_service_never_held_is_not_added_to_drop_it(self):
+        self.fake.unknown = {self.KEY}
+        await ww.run(self.user_id)               # not found: nothing held there
+        self.fake.unknown = set()
+        await self.depart(ww.Departure.ABANDON)
+        self.assertEqual(self.fake.held, {})
+        self.assertEqual(await self.states(), {self.KEY: ("dropped", "none")})
+
+    async def test_taking_it_back_writes_it_again(self):
+        await ww.run(self.user_id)
+        await self.depart(ww.Departure.ABANDON)
+        await lifecycle.take_back(self.user_id, distrakt.record_key(a_record(1)), 1,
+                                  month=month_back(0))
+        await ww.run(self.user_id)
+        self.assertEqual(self.fake.held, {self.KEY: "plantowatch"})
+        self.assertEqual(await self.states(), {self.KEY: ("written", "dropped")})
+
+    # the ✕
+
+    async def test_the_x_puts_back_what_the_viewer_had(self):
+        self.fake.held = {self.KEY: "watching"}
+        await ww.run(self.user_id)
+        await self.depart(ww.Departure.REMOVE)
+        self.assertEqual(self.fake.held, {self.KEY: "watching"})
+        self.assertEqual(await self.states(), {self.KEY: ("undone", "plantowatch")})
+
+    async def test_the_x_leaves_a_show_the_viewer_listed_themselves(self):
+        self.fake.held = {self.KEY: "plantowatch"}
+        await ww.run(self.user_id)
+        await self.depart(ww.Departure.REMOVE)
+        self.assertEqual(self.fake.held, {self.KEY: "plantowatch"})
+        self.assertEqual(await self.states(), {self.KEY: ("undone", "plantowatch")})
+
+    async def test_the_x_takes_a_show_it_added_out_again_when_nothing_is_watched(self):
+        await ww.run(self.user_id)
+        await self.depart(ww.Departure.REMOVE)
+        self.assertEqual(self.fake.held, {})
+
+    async def test_the_x_keeps_a_show_it_added_once_something_is_watched(self):
+        await ww.run(self.user_id)
+        self.fake.watched = {self.KEY}
+        self.fake.held[self.KEY] = "watching"
+        await self.depart(ww.Departure.REMOVE)
+        self.assertEqual(self.fake.held, {self.KEY: "watching"})
+        self.assertEqual(await self.states(), {self.KEY: ("undone", "watching")})
+
+    async def test_the_x_undoes_nothing_the_app_did_not_write(self):
+        self.fake.unknown = {self.KEY}
+        await ww.run(self.user_id)
+        await self.depart(ww.Departure.REMOVE)
+        self.assertEqual(self.fake.sent("undo"), [])
+
+    async def test_the_x_on_one_of_two_seasons_changes_nothing(self):
+        await self.listed(1, season=2)
+        self.fake.held = {self.KEY: "watching"}
+        await ww.run(self.user_id)
+        await self.depart(ww.Departure.REMOVE, season=2)
+        self.assertEqual(self.fake.sent("undo"), [])
+        self.assertEqual(self.fake.held, {self.KEY: "plantowatch"})
+
+    async def test_an_x_and_its_return_write_it_again(self):
+        await ww.run(self.user_id)
+        await self.depart(ww.Departure.REMOVE)
+        await self.listed(1)
+        await ww.run(self.user_id)
+        self.assertEqual(self.fake.held, {self.KEY: "plantowatch"})
+
+    # failures and timing
+
+    async def test_a_failed_drop_changes_no_row_and_is_tried_again(self):
+        await ww.run(self.user_id)
+        self.fake.fail = True
+        await self.depart(ww.Departure.ABANDON)
+        self.assertEqual(await self.states(), {self.KEY: ("written", "none")})
+        self.assertIn(self.KEY, ww._departures[self.user_id])
+        self.fake.fail = False
+        with patch.object(ww, "QUIET_SECONDS", 0):
+            await ww.run(self.user_id)
+        self.assertEqual(self.fake.held, {self.KEY: "dropped"})
+        self.assertEqual(ww._departures, {})
+
+    async def test_a_pass_before_the_request_finishes_neither_acts_nor_forgets(self):
+        """A pass that read the tracker before this request's removal was written
+        would find the show still there. It must leave the departure waiting and
+        the row alone, and the pass after the request answers it."""
+        self.fake.held = {self.KEY: "watching"}
+        await ww.run(self.user_id)
+        pending = ww.expect(self.user_id, self.KEY, ww.Departure.REMOVE)
+        await ww.run(self.user_id)                         # show still there
+        await distrakt.remove_user_record(self.user_id, distrakt.record_key(a_record(1)), 1)
+        await ww.run(self.user_id)                         # gone, request unfinished
+        self.assertEqual(await self.states(), {self.KEY: ("written", "watching")})
+        self.assertEqual(self.fake.sent("undo"), [])
+        await self.finish([pending])
+        self.assertEqual(self.fake.held, {self.KEY: "watching"})
+        self.assertEqual(await self.states(), {self.KEY: ("undone", "plantowatch")})
+
+    async def test_a_withdrawn_departure_is_never_answered(self):
+        await ww.run(self.user_id)
+        pending = ww.expect(self.user_id, "show:tmdb:5", ww.Departure.ABANDON)
+        ww.withdraw(self.user_id, pending)
+        await self.finish([pending])
+        self.assertEqual(self.fake.sent("drop"), [])
+
+    async def test_with_nothing_switched_on_a_finished_departure_is_let_go(self):
+        await ww.switch(self.user_id, SIMKL, False)
+        pending = ww.expect(self.user_id, self.KEY, ww.Departure.ABANDON)
+        await self.finish([pending])
+        self.assertEqual(ww._departures, {})

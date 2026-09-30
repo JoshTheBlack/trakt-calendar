@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from fastapi.routing import APIRoute
 
+from app import clock
 from app.distrakt import routes as distrakt_routes, watchlist_writes as ww
 from app.providers.base import Source
 from tests.distrakt.test_rewatch import KEY, _RosterAddCase
@@ -80,3 +81,61 @@ class ARequestAsksForAPassTests(_RosterAddCase):
         answer = self.client.post("/api/distrakt/refresh", json={})
         self.assertNotEqual(answer.status_code, 200)
         self.assertEqual(self.nudged, [])
+
+
+class TheViewersOwnDeparturesTests(_RosterAddCase):
+    """The x and Abandon say, before changing anything, that they are taking a
+    season off; the hook marks that whole once the answer has gone."""
+
+    def setUp(self):
+        super().setUp()
+        started = patch.object(ww, "nudge", lambda user_id: None)
+        started.start()
+        self.addCleanup(started.stop)
+        self.addCleanup(ww._departures.clear)
+        asyncio.run(ww.switch(self.user_id, SIMKL, True))
+        today = clock.today()
+        self.here = f"year={today.year}&month={today.month}"
+        # Two months back, whatever the year: a month that is over.
+        back = today.year * 12 + today.month - 3
+        self.over = f"year={back // 12}&month={back % 12 + 1}"
+        self._search_add(year=today.year, month=today.month)
+
+    def waiting(self) -> dict:
+        return {key: (str(pending.departure), pending.ready)
+                for key, pending in ww._departures.get(self.user_id, {}).items()}
+
+    def test_the_x_says_so_and_is_whole_once_answered(self):
+        with self._services():
+            answer = self.client.post(f"/api/distrakt/remove?{self.here}",
+                                      json={"key": str(KEY), "season": 1})
+        self.assertEqual(answer.status_code, 200)
+        self.assertEqual(self.waiting(), {str(KEY): ("remove", True)})
+
+    def test_an_x_that_found_nothing_takes_it_back(self):
+        with self._services():
+            self.client.post(f"/api/distrakt/remove?{self.here}",
+                             json={"key": "show:tmdb:5", "season": 1})
+        self.assertEqual(self.waiting(), {})
+
+    def test_an_x_on_a_month_that_is_over_is_not_a_departure(self):
+        with self._services():
+            self.client.post(f"/api/distrakt/remove?{self.over}",
+                             json={"key": str(KEY), "season": 1})
+        self.assertEqual(self.waiting(), {})
+
+    def test_giving_up_says_so(self):
+        with self._services():
+            answer = self.client.post(f"/api/distrakt/abandon?{self.here}",
+                                      json={"key": str(KEY), "season": 1, "abandoned": True})
+        self.assertEqual(answer.status_code, 200)
+        self.assertEqual(self.waiting(), {str(KEY): ("abandon", True)})
+
+    def test_taking_it_back_is_no_departure(self):
+        with self._services():
+            self.client.post(f"/api/distrakt/abandon?{self.here}",
+                             json={"key": str(KEY), "season": 1, "abandoned": True})
+            ww._departures.clear()
+            self.client.post(f"/api/distrakt/abandon?{self.here}",
+                             json={"key": str(KEY), "season": 1, "abandoned": False})
+        self.assertEqual(self.waiting(), {})

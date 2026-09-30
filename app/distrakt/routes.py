@@ -61,11 +61,24 @@ logger = logging.getLogger(__name__)
 
 
 async def _write_watchlists_after(request: Request) -> None:
-    """Start the viewer's watchlist pass, once their answer has gone. See
-    `_owe_watchlist_pass`."""
+    """Start the viewer's watchlist pass, once their answer has gone, with the
+    departures this request said now whole. See `_owe_watchlist_pass`."""
     user = await auth.current_user(request)
-    if user is not None and await watchlist_writes.switched_on(user.user_id):
-        watchlist_writes.nudge(user.user_id)
+    if user is not None:
+        await watchlist_writes.after_request(
+            user.user_id, getattr(request.state, "watchlist_departures", ()))
+
+
+def _departing(request: Request, user_id: int, key: ItemKey,
+               departure: watchlist_writes.Departure) -> watchlist_writes.Pending:
+    """Say, before a request changes anything, that it is taking a season of
+    `key` off the tracker by the viewer's hand (watchlist_writes.expect), and
+    keep the answer on the request so the hook above can say when the request
+    is whole."""
+    pending = watchlist_writes.expect(user_id, key, departure)
+    request.state.watchlist_departures = [
+        *getattr(request.state, "watchlist_departures", ()), pending]
+    return pending
 
 
 async def _owe_watchlist_pass(request: Request, background: BackgroundTasks) -> None:
@@ -2268,12 +2281,20 @@ async def api_distrakt_remove(request: Request):
     except RequestError as exc:
         return _month_refusal(request, str(exc))
     month_key = distrakt_store.month_key(year, month)
+    # Said BEFORE anything is removed, for the reason watchlist_writes.expect
+    # gives, and taken back below if nothing was. The pass undoes the app's own
+    # write at a service only if this was the show's last season on the tracker.
+    # A month that is over holds history rather than anything on the tracker, so
+    # a ✕ there corrects a record and takes nothing off the tracker.
+    standing = distrakt_store.month_standing(month_key, clock.today())
+    departing = (None if standing is distrakt_store.MonthStanding.PAST
+                 else _departing(request, user_id, key, watchlist_writes.Departure.REMOVE))
     # The named month's records, whatever kind they are, and no other month's.
     # Asked of the MONTH rather than of whether it was frozen, for the reason
     # api_distrakt_add gives: a past month the rollover never reached is over just
     # the same, and a removal is not the place to discover that.
     gone = await distrakt_store.remove_season_from_month(user_id, month_key, key, season)
-    if distrakt_store.month_standing(month_key, clock.today()) is distrakt_store.MonthStanding.CURRENT:
+    if standing is distrakt_store.MonthStanding.CURRENT:
         # AND THE VIEWER'S LIST, because the month under way is the one page that
         # draws it. Not folded into the line above with `or`: the list has to be
         # asked either way, or a row that lives ONLY there — a season being kept up
@@ -2281,6 +2302,8 @@ async def api_distrakt_remove(request: Request):
         dropped = await distrakt_store.remove_user_record(user_id, key, season)
         gone = gone or dropped
     if not gone:
+        if departing is not None:
+            watchlist_writes.withdraw(user_id, departing)
         return _month_refusal(request, "Show/season not found in that month")
 
     settings = await viewer.settings_for_user(user_id)
@@ -3264,6 +3287,11 @@ async def api_distrakt_abandon(request: Request):
         placed = await lifecycle.find_season(user_id, key, season, month=viewed_month)
         if placed is None:
             return _month_refusal(request, "Show/season not found in that month")
+        # Said BEFORE the season moves, so a pass that runs meanwhile keeps the
+        # show's record at the service until this is answered; the pass then
+        # drops the show there only if this was its last season on the tracker.
+        # Taking it back needs nothing here: that is an arrival like any other.
+        _departing(request, user_id, key, watchlist_writes.Departure.ABANDON)
         show = await _live_form_source(settings, placed.record, season)
         rec = await lifecycle.give_up(
             user_id, show, month=acted_month,
