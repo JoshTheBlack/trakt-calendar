@@ -16,7 +16,7 @@ dot access, which reads identically either way.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import MISSING as MISSING_DEFAULT
 from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta, timezone
@@ -1462,6 +1462,161 @@ class SearchPort(Protocol):
         ...
 
 
+# ---------------------------------------------------------------------------
+# Writing to a person's own list at a service
+# ---------------------------------------------------------------------------
+
+# What a service holds for a title it holds nothing for, in every service's
+# vocabulary. One spelling, because "none" is the one status every service
+# shares and the one every undo rule turns on.
+NOT_HELD = "none"
+
+
+class WatchlistTitle(NamedTuple):
+    """One SHOW, as the tracker names it to a service's list.
+
+    A SHOW, NEVER A SEASON: a service's watchlist lists a title once, so the key
+    is the show's identity and every season of it is the same write.
+
+    `ids` is every id the tracker holds for the title, collect_ids()-filtered,
+    so an implementation sends whichever of them its service resolves best —
+    its own id where there is one, since a shared id can name more than one of
+    its titles (Simkl files each anime season as its own title, and several
+    share one TMDB id).
+    """
+    key: ItemKey
+    ids: dict
+
+
+class WatchlistHolding(NamedTuple):
+    """What a service holds for one title, read from the service.
+
+    `status` is THAT SERVICE'S OWN vocabulary — a service whose lists are
+    statuses answers one of them, a plain watchlist answers "listed" — and
+    NOT_HELD where it holds nothing. `watched` is whether anything of the title
+    is watched there, which is what decides whether taking it away could take
+    viewing history with it. `service_id` is the service's own id for the title
+    where the read found it, None where it did not.
+    """
+    status: str
+    watched: bool
+    service_id: str | None
+
+
+class WatchlistOutcome(StrEnum):
+    """What became of one title in one write. The same set for every operation,
+    so a caller maps it onto its own record of the write rather than learning a
+    vocabulary per verb.
+
+      WRITTEN    the write was made AND a read of the list afterwards shows it.
+      ALREADY    the list already said what the write would have; nothing sent.
+      KEPT       deliberately not touched: undoing it would have taken something
+                 the viewer did themselves with it (see WatchlistPort.undo).
+      NOT_FOUND  the service's answer named the title as unmatched.
+      REFUSED    the service refused the title for a reason retrying will not
+                 fix (a list at its size limit).
+      FAILED     anything else — including a write the service accepted whose
+                 effect the read-back does not show. A status code proves
+                 nothing on a service that answers success to paths that do
+                 nothing, so an unconfirmed write is a failure, and may be
+                 tried again.
+    """
+    WRITTEN = "written"
+    ALREADY = "already"
+    KEPT = "kept"
+    NOT_FOUND = "not_found"
+    REFUSED = "refused"
+    FAILED = "failed"
+
+
+class WatchlistResult(NamedTuple):
+    """One title's answer from a write: what became of it, what the service held
+    before (read at the moment of the write, which is what an undo later puts
+    back), what it holds after, and the service's own id for it where known."""
+    outcome: WatchlistOutcome
+    status_before: str
+    status_after: str
+    service_id: str | None
+
+
+class WatchlistUndo(NamedTuple):
+    """One earlier write to take back: the title, and what the service held
+    before the tracker wrote it — the only record of what to put back."""
+    title: WatchlistTitle
+    status_before: str
+
+
+@runtime_checkable  # see the note on SyncPort above
+class WatchlistPort(Protocol):
+    """Writing the tracker's shows to a person's OWN list at a service, and
+    taking those writes back.
+
+    THE ONLY PORT IN THIS FILE THAT WRITES, and every rule below follows from a
+    write reaching somebody's own list. A careless one moves a title the viewer
+    put somewhere on purpose, and a service may answer success to a request that
+    did nothing. So every implementation holds to three things:
+
+      - EVERY OUTCOME IS READ FROM THE ANSWER'S BODY, never from its status.
+      - EVERY WRITE IS CONFIRMED BY READING THE LIST BACK, once per batch, and a
+        title the read-back does not show as written is FAILED, not WRITTEN.
+      - WHAT THE SERVICE HELD BEFORE IS READ AT THE MOMENT OF THE WRITE and
+        returned, because it is the only record an undo can restore.
+
+    BATCHED: each verb takes every title at once and costs one write and two
+    reads (before, after) however many titles there are, because these services
+    rate-limit writes per second and hold a write lock per user.
+
+    RESULTS ARE KEYED BY str(title.key). A title the verb had nothing to do for
+    is still answered (ALREADY or KEPT), so a caller can rely on every title it
+    passed coming back. An empty batch answers {} and makes no call.
+
+    RAISES this source's SourceUnavailable subclass when the service could not
+    be asked at all — before a write, or with a write whose answer never came —
+    so a caller never records "could not ask" as a per-title outcome.
+    """
+
+    def list_url(self, account_id: str) -> str:
+        """The address of the list this port writes to, on the service's own
+        site, for the linked account `account_id` names (the identity row's
+        provider_user_id). Makes no call: it gates nothing, it is a link."""
+        ...
+
+    async def holdings(self, settings: Settings,
+                       titles: Sequence[WatchlistTitle]) -> dict[str, WatchlistHolding]:
+        """What the service holds for each title. Every title comes back, as
+        NOT_HELD where the service holds nothing. A read only — the one a later
+        full reconcile would compare the tracker against."""
+        ...
+
+    async def put(self, settings: Settings,
+                  titles: Sequence[WatchlistTitle]) -> dict[str, WatchlistResult]:
+        """Put each title on the list this port writes to, WHATEVER the service
+        held it as. A title already there is ALREADY and is not sent."""
+        ...
+
+    async def drop(self, settings: Settings,
+                   titles: Sequence[WatchlistTitle]) -> dict[str, WatchlistResult]:
+        """Take each title off that list because the viewer gave up on it. What
+        "off" means is the service's: a status service moves it to its own
+        given-up status, which keeps the viewer's history; a plain watchlist
+        removes it. A title the service holds nothing for is ALREADY — dropping
+        must never ADD a title to somebody's library."""
+        ...
+
+    async def undo(self, settings: Settings,
+                   rows: Sequence[WatchlistUndo]) -> dict[str, WatchlistResult]:
+        """Take back the tracker's own earlier writes, putting each title back
+        the way `status_before` says the service held it.
+
+        NOTHING THE VIEWER DID THEMSELVES IS TOUCHED. A title held before the
+        tracker wrote it goes back to that, not away. A title the service held
+        nothing for is removed only if nothing of it is watched NOW — read at the
+        moment of the undo, never trusted from earlier — because removing it
+        would take that viewing with it; otherwise it is KEPT.
+        """
+        ...
+
+
 @runtime_checkable  # see the note on SyncPort above
 class Provider(Protocol):
     """What the registry needs in order to offer a source at all: who it is,
@@ -1509,6 +1664,11 @@ class Provider(Protocol):
     # a search and never names one, so a source claiming search while carrying
     # no port would be lying in the one way the registry cannot catch.
     search_port: SearchPort | None
+    # How this source's own list is written, or None for a source the tracker
+    # does not write to. Declared here for the same reason as the ports above:
+    # the tracker asks the registry which services it may write to and never
+    # names one.
+    watchlist_port: WatchlistPort | None
 
     def is_configured(self, settings: Settings) -> bool:
         """Whether this source has the credentials it needs to be asked

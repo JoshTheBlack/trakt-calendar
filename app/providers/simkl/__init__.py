@@ -249,6 +249,7 @@ class _SimklProvider:
     # missing search port has (see this port's own module for the fan-out it
     # hides).
     search_port = _SimklSearchPort()
+    watchlist_port = None
 
     def is_configured(self, settings: Settings) -> bool:
         return settings.simkl_configured

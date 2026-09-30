@@ -274,6 +274,10 @@ class _TraktProvider:
     # which sources can be searched and never names Trakt, so a second
     # catalogue can be searched alongside it with no edit here.
     search_port = _TraktSearchPort()
+    # None until this package writes a watchlist: the registry then offers the
+    # tracker no Trakt switch, which is the honest answer for a write nothing
+    # here can make yet.
+    watchlist_port = None
 
     def is_configured(self, settings: Settings) -> bool:
         return settings.trakt_configured
