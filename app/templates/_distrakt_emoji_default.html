@@ -7,14 +7,22 @@
    nothing for a click in and out. It sits in no form. An empty field means the
    app's own default.
 
-   `oob` IS THE ANSWER'S SPELLING (routes.api_distrakt_emoji_default): the pill
-   and the field by id, not the popover around them, so a popover the field was
-   saved from by Enter stays open with the value as stored. The rows and the
-   posts come with the month the answer asks the page to fetch. #}
-{% macro pill(default_emoji, oob=false) -%}
+   `oob` IS THE ANSWER'S SPELLING (routes.api_distrakt_emoji_default): the
+   pill's LABEL and the field by id, not the popover around them, so a popover
+   the field was saved from by Enter stays open with the value as stored. The
+   label and never the button: the button is what the open popover is anchored
+   to, and replacing it dropped the anchor, so the panel jumped to the screen's
+   left edge (MEASURED in Chromium). The rows and the posts come with the month
+   the answer asks the page to fetch. #}
+{% macro pill(default_emoji) -%}
 <button type="button" id="emojiDefaultPill" class="pill-btn nav-menu-btn" popovertarget="emojiDefaultMenu"
-        title="The emoji a network with none of its own posts as"
-        {%- if oob %} hx-swap-oob="outerHTML"{% endif %}>🙂 {{ default_emoji }}</button>
+        title="The emoji a network with none of its own posts as">
+    {{- pill_label(default_emoji) -}}
+</button>
+{%- endmacro %}
+
+{% macro pill_label(default_emoji, oob=false) -%}
+<span id="emojiDefaultPillLabel"{% if oob %} hx-swap-oob="outerHTML"{% endif %}>🙂 {{ default_emoji }}</span>
 {%- endmacro %}
 
 {% macro field(default_emoji, month_query, oob=false) -%}

@@ -84,7 +84,9 @@ class TheSwitchTests(SwitchTestCase):
         self.assertEqual(asyncio.run(ww.switched_on(self.user_id)), [SIMKL])
         self.assertIn("Writing 2 shows to Simkl", text(answer.text))
         # Both halves out of band, and the panel asking for itself until done.
-        self.assertRegex(answer.text, r'id="watchlistPill"[^>]*hx-swap-oob="outerHTML"')
+        # The pill's LABEL, never the button the open panel is anchored to.
+        self.assertRegex(answer.text, r'id="watchlistPillLabel" hx-swap-oob="outerHTML"')
+        self.assertNotIn('id="watchlistPill"', answer.text)
         self.assertIn('id="watchlistPanel" class="watchlist-panel-body" hx-swap-oob="outerHTML"',
                       answer.text)
         self.assertIn('hx-get="/distrakt/fragments/watchlists" hx-trigger="load delay:2s"',

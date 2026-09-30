@@ -14,15 +14,23 @@
    all the server's (watchlist_writes.switches), so a service gaining a list
    port appears here with no change to this file.
 
-   `oob` IS THE ANSWER'S SPELLING (routes.api_distrakt_watchlist): the pill and
-   the panel by id, not the popover around them, so a popover a box was changed
-   in stays open showing what is now true. #}
-{% macro pill(switches, oob=false) -%}
-{%- set failing = switches | selectattr('on') | sum(attribute='failed') -%}
+   `oob` IS THE ANSWER'S SPELLING (routes.api_distrakt_watchlist): the pill's
+   LABEL and the panel by id, not the popover around them, so a popover a box
+   was changed in stays open showing what is now true. The label and never the
+   button: the button is what the open popover is anchored to, and replacing it
+   drops the anchor, so the panel jumped to the screen's left edge (MEASURED in
+   Chromium and Firefox). #}
+{% macro pill(switches) -%}
 <button type="button" id="watchlistPill" class="pill-btn nav-menu-btn" popovertarget="watchlistMenu"
-        title="Put the shows on this tracker on your own list at a service"
-        {%- if oob %} hx-swap-oob="outerHTML"{% endif %}>📋 Lists
-    {%- if failing %} <span class="watchlist-failing">⚠ {{ failing }}</span>{% endif %}</button>
+        title="Put the shows on this tracker on your own list at a service">
+    {{- pill_label(switches) -}}
+</button>
+{%- endmacro %}
+
+{% macro pill_label(switches, oob=false) -%}
+{%- set failing = switches | selectattr('on') | sum(attribute='failed') -%}
+<span id="watchlistPillLabel"{% if oob %} hx-swap-oob="outerHTML"{% endif %}>📋 Lists
+    {%- if failing %} <span class="watchlist-failing">⚠ {{ failing }}</span>{% endif %}</span>
 {%- endmacro %}
 
 {% macro panel(switches, oob=false) -%}

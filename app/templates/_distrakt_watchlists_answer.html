@@ -1,7 +1,7 @@
 {% import '_distrakt_watchlists.html' as lists %}
 {# A SWITCH CHANGED, OR THE PANEL ASKING FOR ITSELF WHILE A WRITE IS UNDER WAY:
-   the header pill out of band, and the panel — out of band too when the answer
+   the header pill's label out of band, and the panel — out of band too when the answer
    is to a switch, whose request swaps nothing itself
    (routes.api_distrakt_watchlist, routes.watchlists_fragment). #}
-{{ lists.pill(switches, oob=true) }}
+{{ lists.pill_label(switches, oob=true) }}
 {{ lists.panel(switches, oob=panel_oob) }}
