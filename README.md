@@ -20,27 +20,21 @@
 
 ---
 
-## Why this exists
-
-Trakt's V3 redesign removed the ability to simply browse "what new shows are premiering
-this month." This app brings that back: pick a month, and see every premiere grouped by
-day, with posters, ratings, languages, networks, air dates, and more — then click any
-title for cast, its videos from both services in one player, and the full episode list.
-
 ## Features
 
-- 📅 Browse premieres for any month/year, grouped by day
+- 📅 Browse premieres for any month, grouped by day
 - 📡 **Switchable endpoints** — new shows, season premieres, season finales, all episodes, or movies
-- 🔍 **Find a title and jump to it** — search the calendar you're on as you type, with no calls to anybody, and widen to your other calendars from the results; press Enter to also ask the services, which turns up titles your calendar hasn't loaded yet. Those come back a season at a time, and opening one writes it onto the day it belongs to — including premieres the services left off their own calendars.
-- 🔀 **Two sources, one calendar** — Trakt and, optionally, [Simkl](#simkl--an-optional-second-source). A month is built from both, a title both of them list is one card rather than two, which services show is a tick-box in the calendar's **🎚️ Filters** panel, and whose description you read when both list the same title is an order on your **Account** page. Simkl needs no credentials to fill a calendar
-- 🖼️ Rich poster tiles — rating, runtime, network, and episode (SxxEyy) badges, plus language, country, day-of-week, and a lazily-loaded current-season summary (episode count, latest / next air date)
-- 🔍 **Details modal** on click — full overview, every video both services list (trailers first) in one embedded player, cast (headshots + characters), and the season's episode list with air dates
-- ✅ Mark shows **watching / not watching** — saved server-side, so it follows you across devices — plus a one-click filter to hide the ones you're not watching
-- 📥 **Add to Sonarr / Radarr / Seerr** — one click to send a show to Sonarr, a movie to Radarr, or request either on Seerr (Overseerr/Jellyseerr); buttons show each app's logo, appear only when configured, and auto-disable if the instance is unreachable (background heartbeat). An "Add all" button bulk-adds a whole month.
-- 🎛️ **Layout options** — poster-on-top or poster-beside cards, days stacked or packed beside each other, and a poster-only wall with hover-to-expand details
-- 🖼️ **Share links preview as a picture of the month they point at** — pasted into Discord, Slack or iMessage, a share link unfurls into a generated card naming the month, how much is on it, and the titles leading it. It is drawn only from what the calendar cache already holds, so a link preview never spends the owner's Trakt budget on a stranger's behalf; finished cards are kept in `data/share_cards` and swept on the maintenance heartbeat (age first, then a byte budget)
+- 🔀 **Two sources, one calendar** — Trakt and, optionally, [Simkl](#simkl--an-optional-second-source). A title both list is one card; which services show is a tick-box in **🎚️ Filters**, and whose description wins is an order on your **Account** page. Simkl needs no credentials to fill a calendar
+- 🔍 **Find a title and jump to it** — search the calendar you're on as you type, or press Enter to also ask the services for titles your calendar hasn't loaded yet; opening one files it onto the day it airs
+- 🖼️ Rich poster tiles — rating, runtime, network and episode badges, plus language, country and a current-season summary
+- 🔍 **Details modal** — overview, every video both services list in one player, and each season's description, cast and episodes with your watched ones marked, plus a link out to each service
+- ✅ Mark shows **watching / not watching** — saved to your account, with a one-click filter to hide the ones you're not watching
+- 📥 **Add to Sonarr / Radarr / Seerr** — one click per title. Buttons appear only when configured, arrive already marked when the title is in that library, and grey out with a reason when they can't be used. "Add all" adds everything you're watching that month, after confirming
+- 🎛️ **Layout options** — poster-on-top or poster-beside cards, stacked or packed days, and a poster-only wall
+- 🔗 **Read-only share links** — a shared calendar opens each title's details and shows your watched marks (you can switch that off). Pasted into Discord, Slack or iMessage, a link unfurls into a picture of the month, drawn only from what's already cached so a stranger's link never spends your Trakt budget
+- 🏆 **Rankings boards** — tier-rank shows, films or single seasons by dragging, up to 2,000 titles a board. Add by search, from what you've finished, or from your Trakt ratings; move several at once, restore removals for 30 days, and export an image, Markdown or a backup
 - 📈 Tracks premiere counts over time and shows the change since your last visit
-- ⚙️ **Everything configured from the UI** — Trakt credentials, timezone, filters, and layout all live in an in-app Settings panel; no config files to edit
+- ⚙️ **Everything configured from the UI** — no config files to edit
 
 ## Quick start (local)
 
@@ -52,21 +46,13 @@ python run.py            # -> http://localhost:8000
 ```
 
 The first visit redirects to **/onboarding**, where you create the administrator account.
-Two things happen there automatically, so plain-HTTP development and HTTPS deployments
-both work with no configuration:
-
-- The **session cookie policy** is resolved from the browser that submitted the form —
-  plain HTTP gets a cookie that works, HTTPS gets a `Secure` one. See
-  [Serving over HTTPS](#serving-over-https) if you need to override it.
-- The account **adopts whatever is already in `data/settings.json`**, including an
-  existing Trakt token, so an instance upgraded from a pre-accounts version keeps its
-  data and its calendar looks exactly as it did.
+The session cookie is set up from that browser, so plain HTTP and HTTPS both work with no
+configuration, and an existing `data/settings.json` (Trakt token included) is adopted, so an
+upgraded instance keeps its data.
 
 Then click **⚙️ Settings** and paste your Trakt **Client ID** and **Access Token** (create
 a free API app at [trakt.tv/oauth/applications](https://trakt.tv/oauth/applications)).
-That's it — pick a month and browse.
-
-Simkl is optional and adds a second source for the calendar; see
+That's it — pick a month and browse. Simkl is optional; see
 [Simkl — an optional second source](#simkl--an-optional-second-source).
 
 > `run.py` starts the app under Hypercorn with auto-reload. Override `HOST`, `PORT`, or
@@ -74,7 +60,7 @@ Simkl is optional and adds a second source for the calendar; see
 
 ## Run with Docker
 
-A container image is built and pushed to GHCR automatically on every push to `main`
+A container image is built and pushed to GHCR on every push to `main`
 (see [`.github/workflows/docker-build.yml`](.github/workflows/docker-build.yml)). Mount a
 volume so your settings and watch-state persist:
 
@@ -82,18 +68,15 @@ volume so your settings and watch-state persist:
 docker run -p 8000:8000 -v trakt-data:/data ghcr.io/<owner>/trakt-new-shows:latest
 ```
 
-You can also seed credentials without touching the UI by setting `TRAKT_CLIENT_ID` and
-`TRAKT_ACCESS_TOKEN` environment variables on first run.
+You can also seed credentials by setting `TRAKT_CLIENT_ID` and `TRAKT_ACCESS_TOKEN` on
+first run.
 
 ### Keeping a log file
 
-The app logs to the console only, unless you set `LOG_FILE`. With `LOG_FILE=1` it also
-writes `logs/app.log` in the data directory (`/data/logs/app.log` in the container, so it
-lands on your volume); any other value is taken as the file's path. The file rolls over at
-10 MB and the five most recent old ones are kept (`app.log.1` … `app.log.5`), so it never
-passes about 60 MB. It is meant for catching what happened around a problem — a slow
-page, an error — so the lines can be passed on afterwards. `LOG_LEVEL` (default `INFO`)
-decides how much is written, to the console and the file alike.
+The app logs to the console only. Set `LOG_FILE=1` to also write `logs/app.log` in the data
+directory (`/data/logs/app.log` in the container), or any other value for a path of your own.
+It rolls over at 10 MB and keeps five old files, so it never passes about 60 MB. `LOG_LEVEL`
+(default `INFO`) sets how much is written to both.
 
 ## Serving over HTTPS
 
@@ -103,16 +86,8 @@ have safe production defaults, so a normal HTTPS deployment needs only `public_b
 ### `cookie_secure` — set for you at onboarding
 
 Whether the session cookie carries the `Secure` flag and the `__Host-` name prefix.
-**Onboarding resolves this from the browser that created the admin account**, so you
-normally never touch it.
-
-It is decided there rather than at startup because startup genuinely cannot tell: behind a
-TLS-terminating proxy this app is served over plain HTTP whether or not the browser is on
-HTTPS. The onboarding request can tell, because the browser's `Origin` header carries the
-scheme *it* used — and unlike `X-Forwarded-Proto`, that does not depend on
-`trusted_proxy_ips` already being correct.
-
-To override, edit `data/settings.json` and restart:
+**Onboarding sets it from the browser that created the admin account**, so you normally
+never touch it. To override, edit `data/settings.json` and restart:
 
 | Value | Use it when |
 |---|---|
@@ -120,37 +95,23 @@ To override, edit `data/settings.json` and restart:
 | `never` | You genuinely serve over plain HTTP: local development, or a LAN-only instance with no TLS. |
 | `auto` | You want live scheme detection. Requires `trusted_proxy_ips` to be correct, or it degrades to `never`. |
 
-It stays file-only, not a Settings field, because a wrong value logs you out of the screen
-that would fix it.
+It is file-only because a wrong value would log you out of the screen that fixes it.
 
-> **If this is ever wrong**, it fails in one specific way: sign-in returns success and the
-> very next request is anonymous, so the browser loops back to `/login`. Both `/login` and
-> the Settings panel detect the mismatch and say so, rather than leaving it looking like a
-> wrong password — but that is the symptom to recognize.
+> **If it is ever wrong**, sign-in succeeds and the very next request is anonymous, looping
+> back to `/login`. Both `/login` and Settings detect the mismatch and say so.
 
 ### `public_base_url` — required for provider login and share links
 
-The origin people reach this instance on, e.g. `https://shows.example.com` — origin only,
-no path and no trailing slash. **Every** absolute URL the app generates is built from it and
-never from the `Host` header, which makes the app immune to Host-header injection and
-removes any dependency on proxy configuration for URL correctness. Trakt also compares the
-`redirect_uri` byte for byte against what you registered, so a header-derived value would
-break sign-in. Required before "Log in with Trakt" and public share links can work.
+The origin people reach this instance on, e.g. `https://shows.example.com` — no path, no
+trailing slash. Every absolute URL the app generates is built from it, never from the `Host`
+header, and Trakt and Simkl compare the redirect URI byte for byte. Required for "Log in with
+Trakt" and public share links; setting it also narrows the same-origin check on mutating
+requests to that one origin.
 
-**If it has locked you out** — unset, so "Log in with Trakt" is not offered, or wrong, so
-the same-origin check refuses every mutating request including the password sign-in — set
-the `PUBLIC_BASE_URL` environment variable and restart. The only screen that can correct the
-setting is behind the sign-in it is blocking, so this is the supported way back in without
-editing files by hand.
-
-The variable **overrides** whatever is stored, because a wrong saved value is the lockout
-that actually happens. So it announces itself in both directions: at startup the log carries
-a warning naming the environment value and the saved one whenever they differ, and while the
-variable is set the Settings screen says so beside the base-URL field. Save the right value
-there, then remove the variable and restart — until you do, what you save has no effect.
-Nothing is ever written to the database on your behalf, so removing the variable is all it
-takes to undo it. An unusable value (a path, a trailing slash, no scheme) is logged and
-ignored rather than stopping the app, leaving the stored value in force.
+**Locked out** (unset, or wrong)? Set the `PUBLIC_BASE_URL` environment variable and restart.
+It overrides the saved value — the startup log and the Settings screen both say so while it
+does — so save the right value in Settings, then remove the variable and restart. An unusable
+value is logged and ignored.
 
 ```bash
 docker run -p 8000:8000 -v trakt-data:/data \
@@ -158,27 +119,14 @@ docker run -p 8000:8000 -v trakt-data:/data \
   ghcr.io/<owner>/trakt-new-shows:latest
 ```
 
-Setting it also tightens the same-origin check on mutating requests to exactly one origin.
-Until it is set, an instance accepts either scheme for its own `Host` — the host match is
-what refuses a hostile origin, and the scheme cannot be observed through a TLS-terminating
-proxy that hasn't been declared in `trusted_proxy_ips` yet. Set it once you're deployed.
-
 ### `trusted_proxy_ips` — required for correct rate limiting
 
-Comma-separated CIDRs whose `X-Forwarded-For` this app believes. Default `127.0.0.1/32`,
-which is **wrong behind Docker**: Traefik connects from a container address, so the header
-is ignored and every user collapses onto the proxy's IP. Per-IP login rate limiting then
-applies to the whole instance at once, and the admin session list shows one address for
-everybody.
-
-Set it to your proxy's address or subnet. The Settings screen shows the address the current
-request arrived from, and warns when forwarded headers are arriving but being ignored — so
-read the value off the screen rather than guessing your Docker subnet.
-
-It is configured in two places deliberately. Hypercorn reads `TRUSTED_PROXY_IPS` at process
-start for its own `--forwarded-allow-ips` and cannot be reconfigured from the running app;
-the app's own copy is the `trusted_proxy_ips` setting, seeded from that env var on first run
-and editable in Settings thereafter. Set the env var and the setting follows.
+Comma-separated CIDRs whose `X-Forwarded-For` this app believes. The default `127.0.0.1/32`
+is **wrong behind Docker**: every user collapses onto the proxy's IP, so login rate limiting
+applies to the whole instance at once. Set it to your proxy's address or subnet — the
+Settings screen shows the address each request arrives from and warns when forwarded headers
+are being ignored. Use the `TRUSTED_PROXY_IPS` environment variable: Hypercorn reads it at
+start, and it seeds the Settings value on first run.
 
 ```bash
 docker run -p 8000:8000 -v trakt-data:/data \
@@ -210,63 +158,55 @@ Then set `public_base_url` to `https://shows.example.com` in Settings and leave
 `cookie_secure` at `always`.
 </details>
 
+### Content-Security-Policy — the app sends its own
+
+Every response carries a strict `Content-Security-Policy` (only the app's own scripts and
+styles, pictures only through its image service, YouTube's no-cookie player as the one
+embed). **Don't add another one at your proxy**: a browser enforces every policy it
+receives, so a second one can block parts of the app. After deploying, check that a page
+arrives with exactly one `Content-Security-Policy` header.
+
 ### `TRAKT_FAKE_TODAY` — a development-only clock
 
-Set it to an ISO date (`2026-09-01`) and the app believes that is today. It exists so a
-month rollover can actually be watched happening: the tracker's behaviour at a month
-boundary depends entirely on the date, and short of waiting for the calendar there was no
-way to reach it.
-
-**Do not set this on a real instance.** A moved clock will freeze the month under way,
-reopen rollover decisions, or make a month that has not started behave as though it had —
-against your real data. It is read from the process environment only; nothing in the app
-can set it, there is no screen for it, and an instance running with it logs a warning
-naming the date every time it boots. Unset it and restart to go back to the real clock.
+Set it to an ISO date (`2026-09-01`) and the app believes that is today, so the ███████'s
+month rollover can be watched happening. **Never set it on a real instance** — it would
+freeze or reopen months against your real data. It is read from the environment only, and
+an instance running with it logs a warning naming the date on every boot.
 
 ## Configuration
 
-Configuration is done in the **⚙️ Settings** panel. Almost everything lives in the SQLite
-database (`data/app.db`) — credentials in an encryptable secrets store, everything else in
-a plain settings store — so `data/settings.json` (git-ignored) is no longer the source of
-truth for most of it. See [At-rest encryption](#at-rest-encryption-of-stored-secrets) below
-for why it's split that way and what's still in the file.
+Configuration is done in the **⚙️ Settings** panel and stored in `data/app.db` — credentials
+in an encryptable secrets store (see [At-rest encryption](#at-rest-encryption-of-stored-secrets)).
 
 | Setting | What it does |
 |---|---|
 | **Trakt Client ID / Access Token** | Your Trakt API credentials |
-| **Simkl Client ID / Secret** | Optional — see [Simkl](#simkl--an-optional-second-source) for which of the two each feature needs. No instance-wide access token any more: each person links their own |
-| **Include Simkl results on the calendar** | Instance-wide, on by default. Untick and Simkl leaves the calendar immediately, including months already cached; tick it again and they come back without clearing anything |
-| **Timezone** | Air times are converted to this zone (grouped IANA dropdown) |
+| **Simkl Client ID / Secret** | Optional — see [Simkl](#simkl--an-optional-second-source) for what each feature needs. Each person links their own account |
+| **Include Simkl results on the calendar** | Instance-wide, on by default. Untick it and Simkl leaves the calendar at once, cached months included |
+| **Timezone** | Air times are converted to this zone |
 | **Default endpoint** | Which calendar to show by default |
 | **Pagination limit** | Max items fetched per request |
 | **Detail cache (minutes)** | How long cast/episode/video lookups are cached (`0` disables) |
-| **Sonarr / Radarr** | Instance URL, API key, quality profile, and root folder for the add-to-library buttons (click "Load profiles & folders" to populate the dropdowns) |
-| **Seerr** | Instance URL + API key to enable the request button (works with the Overseerr/Jellyseerr lineage) |
+| **Sonarr / Radarr** | Instance URL, API key, quality profile and root folder ("Load profiles & folders" fills the dropdowns) |
+| **Seerr** | Instance URL + API key for the request button (Overseerr/Jellyseerr) |
 | **Public base URL** | The origin this instance is reached on — see [Serving over HTTPS](#serving-over-https) |
 | **Trusted proxy addresses** | Whose `X-Forwarded-For` to believe — see [Serving over HTTPS](#serving-over-https) |
 | **Genres / Countries / Certifications / Networks** (Calendar section) | The instance's **content floor** — see below. Not the same thing as your own 🎚️ Filters. |
 
-Two settings are deliberately file-only, because a wrong value in the UI could lock the
-operator out of the UI that would fix it. Edit `data/settings.json` and restart:
-`cookie_secure` (set for you at onboarding — see above) and `allow_open_registration`
-(default `false`; when `true`, anyone can register without an invite). Nothing else lives
-in that file — see [At-rest encryption](#at-rest-encryption-of-stored-secrets).
+Two settings are file-only, because a wrong value in the UI could lock the operator out of
+the UI that would fix it. Edit `data/settings.json` and restart: `cookie_secure` (see above)
+and `allow_open_registration` (default `false`; when `true`, anyone can register without an
+invite).
 
-The endpoint, layout, and hide-not-watching controls also live in the header for quick
-switching, and every choice persists. Marking something "not watching" is a decision about
-the **show**, not about the card you clicked: it applies on every calendar view, in every
-month, and on your public share page, until you turn it back on.
+The endpoint, layout and hide-not-watching controls also live in the header. Marking
+something "not watching" applies to the **show** — every view, every month, and your share
+page — until you turn it back on.
 
 **🎚️ Filters** in the header narrows your calendar by genre, country, certification and
-network. The button reads **🎚️ Filtered** while anything is being held back, and
-**🎚️ Filters off** while you have switched them off without clearing them. Filters belong
-to your account, not to the instance — two people read the same cached month and each see it
-filtered their own way. **New accounts start with nothing filtered.**
-
-The panel has two tabs, **📺 TV** and **🎬 Movies**, and opens on whichever kind of calendar
-you are looking at. They hold **separate answers**: excluding a genre from your shows leaves
-your films alone. The tab you are not on carries a count, so a narrowed film calendar says so
-while you are reading your show calendar.
+network. Filters belong to your account, so two people reading the same cached month each
+see it their own way; new accounts start unfiltered. The button reads **🎚️ Filtered** while
+anything is held back. The **📺 TV** and **🎬 Movies** tabs hold separate answers — excluding
+a genre from your shows leaves your films alone:
 
 | | 📺 TV | 🎬 Movies |
 |---|---|---|
@@ -277,114 +217,71 @@ while you are reading your show calendar.
 | Certifications | US TV Parental Guidelines | MPA film ratings |
 | Release markets and formats — where a film is being *shown* | — | ✅ |
 
-Each dimension is a row of chips: press one to keep **only** that value, again to **filter it
-out**, again to stop filtering on it — green and red, the same two answers a badge on a card
-offers. Anything the chips don't name (an unusual genre, any ISO country code, a network) is
-typed into the box under them and becomes a chip of its own. Networks are matched **exactly**
-as the service spells them, capitals included: `tvN` and `TVN` are two different broadcasters.
-Each field's **i** button explains what it does and what it does not.
+Press a chip once to keep **only** that value, again to **filter it out**, again to clear it.
+Anything the chips don't name can be typed in below them. Networks match **exactly** as the
+service spells them: `tvN` and `TVN` are two different broadcasters. At least one service has
+to stay on.
 
-**Services are asked once per medium.** One service has the deeper show coverage and the other
-the wider film listing, which is a preference no amount of narrowing can express — so the TV
-tab and the Movies tab each get their own answer. Each service is an independent switch, so a
-service added to this app later arrives switched on for anyone who had them all on. At least
-one has to stay on.
+**The switch at the top turns every filter off without clearing any of them** — for "show
+me everything for a bit". Your **share links keep filtering** while it is off.
 
-**The switch at the top turns every filter off without clearing any of them.** Your answers
-stay exactly where they are and come back the moment you switch it on again; it is meant for
-"show me everything for a bit". Your **share links keep filtering** while it is off — turning
-your own view wide open should not quietly publish a wider calendar to everyone holding a link.
+You can also filter from a card: press its genre, country, network or certification and
+choose *filter out* or *only this*.
 
-You can also filter straight from a card: press the genre, country, network or certification a
-card is already showing and choose *filter out* or *only this*. It writes to the tab that card
-belongs to, so a genre you exclude from a film card does not touch your show calendar. A change
-lands on the next page load, since filtering happens while the month is put together.
-
-> Trakt gates its own calendar filtering behind a [VIP subscription](https://trakt.tv/vip/filtering),
-> but this app filters the cached response itself rather than asking Trakt to, so the
-> Filters panel works on any account.
+> Trakt gates its own calendar filtering behind a [VIP subscription](https://trakt.tv/vip/filtering);
+> this app filters the cached response itself, so Filters work on any account.
 
 ### The content floor — Settings > Calendar > Genres / Countries / Certifications / Networks
 
-These fields look like the per-account 🎚️ Filters above, but they are not: they are
-instance-wide, and they filter **before** the shared calendar cache is ever populated, not
-at read time. A show excluded here never enters the cache at all — no per-account filter
-can bring it back, because there's nothing left to filter. Anything else in the app that
-reads calendar data reads it through this same shared cache, so a floor-excluded show can
-never surface anywhere, for anyone, regardless of what that reader's own Filters allow.
-
-**This removes content for every user of the instance**, on top of whatever each person
-sets in their own Filters. Legitimate uses: trimming genres/countries nobody on the
-instance will ever watch (a smaller, cheaper cache), or keeping certain content off a
-shared/family instance — Certifications is the one built specifically for that: two small,
-fixed vocabularies (US TV Parental Guidelines / MPA film ratings), set with the same
-click-to-cycle chip picker as the per-account Filters. Leave the fields blank — the default
-— to filter nothing at this layer. The Settings screen repeats this warning next to the
-fields; read it before setting them on an instance other people use.
-
-Changing the floor doesn't take effect instantly: a window already cached keeps serving
-until its TTL lapses (`calendar_cache_ttl_minutes`, 10 minutes by default) and gets
-refetched — not worth a dedicated invalidation sweep for a 10-minute window.
+These look like the per-account 🎚️ Filters, but they are **instance-wide** and are applied
+before the shared calendar cache is filled: a title excluded here reaches nobody, whatever
+their own Filters say. Use it to trim what nobody on the instance watches, or to keep
+content off a family instance (Certifications uses the US TV Parental Guidelines and MPA
+film ratings). Blank — the default — filters nothing. A change applies at once, months
+already cached included, and undoing it brings those titles straight back.
 
 ## Simkl — an optional second source
 
 Simkl fills the calendar alongside Trakt, can sign people in, and can read a linked
-account's own watch history. **None of it is required**, and an instance that never
-touches these fields behaves exactly as it did before Simkl existed.
-
-The unusual part, and the thing worth reading before you create anything: **Simkl's three
-capabilities are gated separately**, so how much you set up depends on how much you want.
+account's watch history. **None of it is required**, and each capability is gated
+separately:
 
 | What you want | What it needs |
 |---|---|
 | Simkl titles on the calendar | **Nothing.** The calendar comes from public CDN files that take no id and no token |
 | Details for a Simkl-only title (overview, episodes, videos) | **Client ID** — Simkl's per-title endpoints take it as a query parameter |
 | **Log in with Simkl** / linking a Simkl account | **Client ID + Secret + Public base URL** |
-| Reading a linked account's own Simkl history, searching Simkl's catalogue | Each person's **own** Simkl link — there is no instance-wide credential for these any more |
+| Reading a linked account's own Simkl history, searching Simkl's catalogue | Each person's **own** Simkl link |
 
-To create the application, go to [simkl.com/settings/developer](https://simkl.com/settings/developer)
-and add one, choosing **"Server apps & services"** as the application type — Simkl's OAuth v2
-needs its own registration; a v1 application's credentials will not work here. The **redirect
-URI must match byte for byte** — Simkl compares it exactly, and unlike Trakt there is no
-device-code flow to fall back on if it is wrong. It is:
+Create an application at [simkl.com/settings/developer](https://simkl.com/settings/developer),
+choosing **"Server apps & services"** — Simkl's OAuth v2 needs its own registration, and a v1
+application's credentials will not work. The **redirect URI must match byte for byte**:
 
 ```
 <your public base URL>/auth/simkl/callback
 ```
 
-Settings ▸ **Simkl** shows the exact string to paste once a public base URL is saved, so
-copy it from there rather than typing it. Then paste the client id and secret back into the
-same tab. There is no access token field to fill in here any more: each person authorizes
-their own by signing in with Simkl from their **Account** page, and that grant refreshes
-itself for as long as it is used — Simkl issues a real refresh token under this version of
-its API, unlike the version this app used before.
+Settings ▸ **Simkl** shows the exact string once a public base URL is saved; copy it from
+there, then paste the client id and secret back into the same tab. Each person then links
+their own account from their **Account** page, and the link refreshes itself.
 
 ### What Simkl's calendar does and does not cover
 
-- It reaches roughly **three years back and three months forward**. Ask for a month outside
-  that and the app says the source does not go there, rather than drawing an empty month
-  that reads as "nothing airs then".
-- It has **no season-finale listing** — nothing in Simkl's calendar flags a finale — so the
-  Season Finales calendar is Trakt's alone. The other four take both services.
-- Simkl records arrive without genres, countries, certifications or networks; the app looks
-  those up afterwards and the calendar says how many titles are still waiting. Until a
-  title has them it is shown rather than quietly filtered out, so a filter never hides
-  something for lack of information. The number falls to zero on its own.
-- Simkl lists anime films on its anime feed rather than its movie one; the app files them
-  onto the movies calendar where they belong.
+- It reaches roughly **three years back and three months forward**; outside that, the app
+  says the source does not go there rather than drawing an empty month.
+- It has **no season-finale listing**, so the Season Finales calendar is Trakt's alone.
+- Its records arrive without genres, countries, certifications or networks. The app looks
+  those up afterwards and shows how many titles are still waiting; until then a title is
+  shown rather than filtered out.
+- Simkl lists anime films on its anime feed; the app files them onto the movies calendar.
 
 ## At-rest encryption of stored secrets
 
 By default, credentials (Trakt tokens, Sonarr/Radarr/Seerr/TMDB API keys, and every linked
-account's Trakt token) are stored in the database as plaintext — the same trust boundary
-this app has always had. Turning on encryption seals them with a key that lives **only** in
-your environment, never in the database file, so a leaked `app.db` (a backup, a volume
-snapshot, a stray file read) does not hand over live credentials.
-
-**What it defends against:** the database file leaving the host. **What it does not defend
-against:** full host compromise — if an attacker can read the process environment, they get
-the key too. That's inherent to any single-host design that doesn't rely on an external
-KMS/Vault, which would be overkill here.
+account's Trakt token) are stored in the database as plaintext. Turning on encryption seals
+them with a key that lives **only** in your environment, so a leaked `app.db` (a backup, a
+volume snapshot) does not hand over live credentials. It does not defend against full host
+compromise — whoever can read the environment has the key too.
 
 ### Enabling it
 
@@ -394,54 +291,42 @@ From **⚙️ Settings**, the encryption panel walks through two stages:
    ```bash
    python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
    ```
-   **The key is shown once.** Copy it into your environment as `ENCRYPTION_KEY` — an `.env`
-   file, `docker run -e ENCRYPTION_KEY=...`, or a compose `environment:` block — and restart
-   the app. Nothing is encrypted yet at this point.
-2. **Verify and encrypt.** After the restart, come back to Settings and confirm the key
-   survived the reboot. Once verified, encrypting is one click: every stored secret and
-   every linked account's Trakt token is sealed in place.
+   **The key is shown once.** Put it in your environment as `ENCRYPTION_KEY` (an `.env`
+   file, `docker run -e`, or a compose `environment:` block) and restart.
+2. **Verify and encrypt.** After the restart, confirm in Settings that the key survived;
+   then one click seals every stored secret and linked token in place.
 
-You can opt out at either step, and turn encryption on later from the same panel — opting
-out doesn't lose anything, it just leaves things as plaintext until you change your mind.
+You can opt out at either step and turn it on later from the same panel.
 
-> **⚠️ Losing `ENCRYPTION_KEY` after enabling makes every sealed secret and linked token
-> unrecoverable.** The app fails open, not silently broken: it treats sealed values it can't
-> read as unset rather than crashing, so it stays usable, but the Trakt/Sonarr/Radarr/Seerr
-> credentials have to be re-entered and every user has to re-link Trakt. **Do not re-save
-> credentials or re-link while the key is missing** — that overwrites the still-recoverable
-> ciphertext with a fresh plaintext value sealed under nothing. If a *different* key ends up
-> in the environment (not merely missing), the app detects the mismatch at startup and
-> routes an administrator to a dedicated recovery screen instead of failing request by
-> request, with two options: restore the original key (nothing is touched), or run a typed,
-> confirmed reset that blanks only the unrecoverable values, keeps linked accounts so they
-> can simply re-link, and reseals under the new key. **Back up `ENCRYPTION_KEY` somewhere
-> durable outside the app the moment you save it** — a password manager or secrets vault,
-> not a note next to the database backup.
+> **⚠️ Losing `ENCRYPTION_KEY` after enabling makes every sealed secret unrecoverable.** The
+> app keeps running and treats them as unset, so credentials must be re-entered and every
+> user must re-link Trakt. **Don't re-save credentials while the key is missing** — that
+> overwrites ciphertext you could still recover. If a *different* key turns up, an
+> administrator is sent to a recovery screen: restore the original key, or run a confirmed
+> reset that blanks only the lost values. **Back the key up somewhere durable outside the
+> app** — a password manager, not a note beside the database backup.
 
-Non-interactive environments (CI, scripted deployments) can skip the UI entirely by setting
-both `ENCRYPTION_KEY` and `ENCRYPT_SECRETS=1`; the app seals everything in place at startup,
-the same conversion the Settings button runs.
+Non-interactive deployments can set both `ENCRYPTION_KEY` and `ENCRYPT_SECRETS=1`; the app
+then seals everything at startup.
 
 ### Setting `ENCRYPTION_KEY` for local (non-Docker) runs
 
-Docker deployments set it as a real environment variable (`-e`, compose `environment:`),
-which already survives restarts. Running via `python run.py` instead, a shell-profile
-export doesn't survive a reboot and an IDE's own env picker is IDE-specific — so `run.py`
-loads a `.env` file from the project root on startup (via `python-dotenv`) before anything
-reads the environment. Copy `.env.example` to `.env` and fill in the key:
+`python run.py` loads a `.env` file from the project root before anything reads the
+environment:
 
 ```bash
 cp .env.example .env
 # then edit .env and set ENCRYPTION_KEY=<your key>
 ```
 
-`.env` is gitignored. A real environment variable, if one is already set, always wins over
-the file. This only applies to `python run.py` — the Docker image's entrypoint runs
-Hypercorn directly and never reads `.env`.
+`.env` is gitignored, a real environment variable wins over it, and the Docker image never
+reads it.
 
 ## Requirements
 
-- Python 3.11+ (3.12 recommended)
+- Python 3.11+ (3.12 recommended), whose built-in `sqlite3` links SQLite **3.35 or newer** —
+  true of the Docker image and of any current Python build; only an old distribution's system
+  Python (Ubuntu 20.04 ships 3.31) falls short
 - A free [Trakt API](https://trakt.tv/oauth/applications) application (Client ID + Access Token)
 - Optionally, a [Simkl](https://simkl.com/settings/developer) application — see
   [Simkl](#simkl--an-optional-second-source) for which parts need one and which need nothing
@@ -472,6 +357,10 @@ app/
   changelog.py      CHANGELOG.md, parsed once, for the in-app modal
   perftrace.py      Where a request's time went
   timezones.py      Curated IANA timezone list
+  csp.py            The Content-Security-Policy, and the hashes of the two inline blocks
+  details_panel.py  The one details panel every surface draws
+  youtube.py        Which YouTube video a service's value names, if any
+  logging_setup.py  Console logging, plus the optional LOG_FILE
   ── at the root without being kernel ──
   authz.py          Route authorization: declare-or-denied, CSRF/origin rules,
                      the shared JSON body guard. Auth tier, not kernel
@@ -481,8 +370,7 @@ app/
                      lockout, prefs, users, levels, admin
     routes.py         Onboarding, register, sign in/out, account page
     admin_routes.py   Admin screen: accounts, invites, retired identifiers
-    provider_login.py The sign-in/register/link completion every provider shares,
-                       so the policy is stated once rather than once per service
+    provider_login.py The sign-in/register/link completion every provider shares
     provider_avatars.py  Seeding an account's picture from the service it signed in with
     trakt.py          The Trakt OAuth flows and refresh-token renewal
     trakt_routes.py   "Log in with Trakt" (OAuth redirect flow)
@@ -506,53 +394,50 @@ app/
     share_code.py     The compact ?p= code a share link is handed out as
     share_card.py     The 1200x630 picture a share link unfurls into
     share_card_cache.py  Rendered cards on disk (data/share_cards), keyed by content
-  distrakt/         The watch tracker: store, live counts, month rollover, backup,
+  ████████/         The █████ ███████: store, live counts, month rollover, backup,
                      per-user prefs, and the calendar premiere import
-    routes.py         The tracker page and its API
-    backfill.py       Filling in never-tracked months from watch history
-    watch_history.py  The incremental per-user watch cache the tracker reads
-    discord_fmt.py    Which bucket a show is in, and the two Discord posts
-    prune.py          A hand-run pass over stored months (python -m), never
-                       reached by the app itself
+    routes.py         The ███████ page and its API
+    backfill.py       Filling in never-███████ months from █████ ███████
+    █████_███████.py  The incremental per-user █████ cache the ███████ reads
+    ███████_fmt.py    Which bucket a show is in, and the two ███████ posts
+    prune.py          A hand-run pass over stored months (python -m)
   ranker/
     core.py           The board data layer: tiers, entries, ordering, and what a
                        board keeps of the titles and tiers taken off it
     routes.py         The rankings page and its board API
     item_keys.py      What a board row is called: a title, or one season of it
-    seasons.py        What a show row's season choice offers and suggests, and
-                       what a season row is called and counts
+    seasons.py        What a show row's season choice offers, and what a season
+                       row is called and counts
     sources.py        Where rankable titles come from
     imports.py        Seeding a board from what the viewer has finished
     exports.py        Turning a board into the thing a user takes away
     grid_builder.py   The exported poster grid: pixels, and nothing else
   media/
-    posters.py        Which picture a title has (an address a page draws through
-                       the image proxy), and the tiles on disk that the share
-                       card and a board export composite
+    posters.py        Which picture a title has, and the tiles on disk that the
+                       share card and a board export composite
     logos.py          Network logo tiles
     artwork.py        Poster URL bookkeeping (show_posters, season_posters, a
                        title known to have none); no downloads
     user_images.py    Per-user avatar and grid-header images
-    imaging.py        Font, text-in-a-box and circular-mask primitives, shared by
-                       every renderer that draws a string
+    imaging.py        Font, text-in-a-box and circular-mask primitives
     tmdb.py           The TMDB client posters and logos fetch through
   integrations/     The three services a user points at their OWN server
     routes.py         Sonarr / Radarr / Seerr: status, options, add-to-library
     arr.py            Sonarr / Radarr
     seer.py           Overseerr / Jellyseerr
-  sources/          Whose answer you see: the per-account source preferences.
-                     No routes of its own — which services show is set in the
-                     calendar's Filters, and whose description wins on /me
+  sources/          Per-account source preferences; no routes of its own
     prefs.py          The stored preference and the vocabulary it is written in
   providers/        The calendar-source seam: the Record, capabilities, the registry
     base.py           What a source produces and what every source must implement
     detail_source.py  Which service a details panel asks about a given title
-    trakt/            transport, calendar, detail, sync, releases
-    simkl/            transport, calendar, detail, sync, titles
+    title_search.py   The one title search the calendar, boards and add dialogs share
+    videos.py         Every service's videos for a title, pooled into one ordered list
+    trakt/            transport, calendar, detail, sync, releases, watchlist
+    simkl/            transport, calendar, detail, sync, titles, watchlist
   templates/        Jinja2 templates
   static/           CSS (one bundled stylesheet), JS (one directory per page), images
 run.py              Dev runner (Hypercorn)
-tests/              Mirrors app/ — kernel, providers, calendar, distrakt, ranker,
+tests/              Mirrors app/ — kernel, providers, calendar, ████████, ranker,
                      auth, media, integrations — plus encryption/, which is named
                      for a concern because the at-rest key path spans two packages
 ```
