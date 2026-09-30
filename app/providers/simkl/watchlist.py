@@ -23,6 +23,10 @@ set aside for it, and what each rule here rests on:
     `anime` array — so everything here is sent under `shows`.
   - A move leaves the title's `added_to_watchlist_at` alone, and a removal
     takes it out of every list.
+  - A move between plantowatch, hold, dropped and watching leaves the viewer's
+    episode history exactly as it was. A move to COMPLETED does not: it marks
+    every unwatched episode watched, dated now (see `_put_back_as`).
+  - One write of 100 titles was accepted whole, each way (see WRITE_CHUNK).
 
 WRITES ARE NEVER CACHED and every read of the library is `private=True`, which
 the transport's cached_get turns into "never read from or written to the shared
@@ -218,6 +222,18 @@ def _echoed(answer: dict | None, section: str) -> set[tuple]:
             if isinstance(item, dict)}
 
 
+# HOW MANY TITLES ONE WRITE CARRIES. Measured on the live service: one
+# add-to-list of 100 shows answered 201 in 6.0 s with all 100 added and read
+# back, and one history removal of the same 100 deleted all of them — no limit
+# showed. But the transport gives a request 30 s in all, and a write that
+# outgrew that would be answered to nobody, so a larger batch goes out in
+# chunks of the size that was proven. The per-second pacing of those chunks
+# is the transport's.
+WRITE_CHUNK = 100
+
+_REMOVE = "sync/history/remove"
+
+
 class _Batch:
     """One verb's work over a batch: what was read before, which titles were
     sent and by what ids, and each title's answer as it becomes known."""
@@ -229,6 +245,42 @@ class _Batch:
         self.ambiguous = {key for key, title in self.titles.items() if before.find(title)[1]}
         self.results: dict[str, WatchlistResult] = {}
         self.sent: dict[str, dict] = {}
+        # What the read-back must show for each title a body said was written.
+        self.expected: dict[str, frozenset[str]] = {}
+        # Whether any write has been answered yet — see `write`.
+        self.posted = False
+
+    async def write(self, settings: Settings, path: str,
+                    entries: Sequence[tuple[str, dict]], shows) -> None:
+        """Send `entries` — (title key, the item that names it) — in chunks of
+        WRITE_CHUNK, reading each answer's body, and note what the read-back
+        must then show (`shows(key)`).
+
+        A WRITE THAT FAILS BEFORE ANY HAS BEEN ANSWERED RAISES: nothing is known
+        to have happened, which is "could not ask". Once one has been answered,
+        a later one failing fails only its own titles, so the answer about what
+        DID happen is not lost.
+        """
+        for start in range(0, len(entries), WRITE_CHUNK):
+            chunk = entries[start:start + WRITE_CHUNK]
+            keys = [key for key, _item in chunk]
+            try:
+                answer = await _post(settings, path, {"shows": [item for _key, item in chunk]})
+            except transport.SimklError:
+                if not self.posted:
+                    raise
+                for key in keys:
+                    self.settle(key, WatchlistOutcome.FAILED)
+                continue
+            self.posted = True
+            # A removal's answer lists what it could not match and COUNTS what
+            # it deleted, so an item it does not name as unmatched is one the
+            # count covers — the read-back is what says whether it really went.
+            if path == _REMOVE and answer is not None:
+                answer = {"added": {"shows": [{"ids": self.sent[key]} for key in keys]},
+                          "not_found": answer.get("not_found")}
+            for key in self.read_answer(answer, keys):
+                self.expected[key] = shows(key)
 
     def settle(self, key: str, outcome: WatchlistOutcome) -> None:
         held = self.before[key]
@@ -278,10 +330,11 @@ class _Batch:
                 self.settle(key, WatchlistOutcome.FAILED)
         return written
 
-    async def confirm(self, settings: Settings, expected: dict[str, frozenset[str]]) -> None:
-        """Read the library back once and settle every title the body said was
-        written: WRITTEN only where the list now shows one of `expected[key]`.
+    async def confirm(self, settings: Settings) -> None:
+        """Read the library back once and settle every title a body said was
+        written: WRITTEN only where the list now shows what `write` expected.
         A read-back that cannot be made confirms nothing."""
+        expected = self.expected
         if not expected:
             return
         try:
@@ -307,23 +360,20 @@ class _Batch:
 async def _move(settings: Settings, titles: Sequence[WatchlistTitle], to: str,
                 skip) -> dict[str, WatchlistResult]:
     """Move every title to `to`, except those `skip(holding)` says need nothing
-    (ALREADY). One read, one write, one read."""
+    (ALREADY). One read, one write per WRITE_CHUNK titles, one read."""
     if not titles:
         return {}
     batch = _Batch(titles, await _read(settings))
-    items, keys = [], []
+    entries = []
     for key, held in batch.before.items():
         if skip(held):
             batch.settle(key, WatchlistOutcome.ALREADY)
         elif batch.unsendable(key):
             batch.settle(key, WatchlistOutcome.NOT_FOUND)
         else:
-            items.append({"to": to, "ids": batch.sent[key]})
-            keys.append(key)
-    if items:
-        answer = await _post(settings, "sync/add-to-list", {"shows": items})
-        written = batch.read_answer(answer, keys)
-        await batch.confirm(settings, {key: frozenset({to}) for key in written})
+            entries.append((key, {"to": to, "ids": batch.sent[key]}))
+    await batch.write(settings, "sync/add-to-list", entries, lambda _key: frozenset({to}))
+    await batch.confirm(settings)
     return batch.results
 
 
@@ -343,11 +393,27 @@ async def drop(settings: Settings,
                        skip=lambda held: held.status in (NOT_HELD, DROPPED))
 
 
-def _restores(status: str) -> frozenset[str]:
-    """What a read-back may show after putting a title back to `status`. Simkl
-    documents rewriting `completed` to `watching` for a show still airing, so
-    asking for one and finding the other is the move having happened."""
-    return frozenset({COMPLETED, WATCHING}) if status == COMPLETED else frozenset({status})
+def _put_back_as(status_before: str) -> str:
+    """The status an undo moves a title to, given what it was before.
+
+    NEVER `completed`. MEASURED on the live service: moving a show to completed
+    MARKS EVERY UNWATCHED EPISODE WATCHED, dated the moment of the move — a
+    three-episode history became thirty-six — and moving it on to watching
+    takes those back off again. A show the viewer had finished can have gained
+    episodes since (a new season is exactly what brings it back onto the
+    tracker), so putting it back to completed would invent viewing dated today,
+    which the tracker would then read as plays. It goes back to watching, which
+    keeps every real play and invents none; the viewer can mark it finished
+    themselves.
+    """
+    return WATCHING if status_before == COMPLETED else status_before
+
+
+def _restored(status_before: str) -> frozenset[str]:
+    """What the list may show once a title is back: the status it was put to,
+    or — for a finished show — the status it had, should Simkl itself file a
+    show with nothing left unwatched as completed again."""
+    return frozenset({_put_back_as(status_before), status_before})
 
 
 async def undo(settings: Settings, rows: Sequence[WatchlistUndo]) -> dict[str, WatchlistResult]:
@@ -357,13 +423,14 @@ async def undo(settings: Settings, rows: Sequence[WatchlistUndo]) -> dict[str, W
       held nothing before, holds it now, nothing watched  -> removed
       held nothing before, something watched now          -> KEPT
       held a status before, holds another now             -> moved back to it
+                                                             (completed: to
+                                                             watching, above)
       holds nothing now, having held something before     -> KEPT: the viewer
                                                              took it out themselves
       already as it was                                   -> ALREADY
 
-    TWO WRITES AT MOST, the moves in one and the removals in the other. Once one
-    has been answered, a failure of the other fails only its own titles, so the
-    answer about what DID happen is not lost.
+    The moves and the removals are separate writes (two endpoints), each
+    chunked as `_Batch.write` describes.
     """
     if not rows:
         return {}
@@ -372,41 +439,17 @@ async def undo(settings: Settings, rows: Sequence[WatchlistUndo]) -> dict[str, W
     moves, removals = [], []
     for key, before in wanted.items():
         now = batch.before[key]
-        if now.status == before:
+        if now.status in _restored(before) or (before == NOT_HELD and now.status == NOT_HELD):
             batch.settle(key, WatchlistOutcome.ALREADY)
         elif now.status == NOT_HELD or (before == NOT_HELD and now.watched):
             batch.settle(key, WatchlistOutcome.KEPT)
         elif batch.unsendable(key):
             batch.settle(key, WatchlistOutcome.NOT_FOUND)
         elif before == NOT_HELD:
-            removals.append(key)
+            removals.append((key, {"ids": batch.sent[key]}))
         else:
-            moves.append(key)
-    expected: dict[str, frozenset[str]] = {}
-    posted = False
-    for keys, path, body in (
-            (moves, "sync/add-to-list",
-             {"shows": [{"to": wanted[key], "ids": batch.sent.get(key)} for key in moves]}),
-            (removals, "sync/history/remove",
-             {"shows": [{"ids": batch.sent.get(key)} for key in removals]})):
-        if not keys:
-            continue
-        try:
-            answer = await _post(settings, path, body)
-        except transport.SimklError:
-            if not posted:
-                raise
-            for key in keys:
-                batch.settle(key, WatchlistOutcome.FAILED)
-            continue
-        posted = True
-        # A removal's answer lists what it could not match and COUNTS what it
-        # deleted, so an item it does not name as unmatched is one the count
-        # covers — the read-back is what says whether it really went.
-        if path == "sync/history/remove" and answer is not None:
-            answer = {"added": {"shows": [{"ids": batch.sent[key]} for key in keys]},
-                      "not_found": answer.get("not_found")}
-        for key in batch.read_answer(answer, keys):
-            expected[key] = _restores(wanted[key])
-    await batch.confirm(settings, expected)
+            moves.append((key, {"to": _put_back_as(before), "ids": batch.sent[key]}))
+    await batch.write(settings, "sync/add-to-list", moves, lambda key: _restored(wanted[key]))
+    await batch.write(settings, _REMOVE, removals, lambda _key: frozenset({NOT_HELD}))
+    await batch.confirm(settings)
     return batch.results

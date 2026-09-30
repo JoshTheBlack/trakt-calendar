@@ -262,6 +262,44 @@ class PutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((fake.read_calls, fake.posts), ([], []))
 
 
+class ChunkTests(unittest.IsolatedAsyncioTestCase):
+    """MEASURED: one write of 100 was accepted whole, in 6 s against the
+    transport's 30 s budget. Larger batches go out 100 at a time, and are still
+    read before once and back once."""
+
+    def _titles(self, n):
+        return [title(1000 + i, simkl=5000 + i) for i in range(n)]
+
+    async def test_a_large_batch_is_written_a_hundred_at_a_time(self):
+        titles = self._titles(150)
+        after = library(*(item(5000 + i, "plantowatch") for i in range(150)))
+        fake = _Simkl(reads=[library(), after],
+                      answers=[(201, added("plantowatch", *({"simkl": 5000 + i} for i in range(100)))),
+                               (201, added("plantowatch", *({"simkl": 5000 + i} for i in range(100, 150))))])
+        with fake:
+            result = await watchlist.put(SETTINGS, titles)
+        self.assertEqual([len(post["body"]["shows"]) for post in fake.posts], [100, 50])
+        self.assertEqual(len(fake.read_calls), 2, "one read before, one back, whatever the size")
+        self.assertEqual({r.outcome for r in result.values()}, {WatchlistOutcome.WRITTEN})
+
+    async def test_a_later_chunk_failing_fails_only_its_own_titles(self):
+        titles = self._titles(150)
+        after = library(*(item(5000 + i, "plantowatch") for i in range(100)))
+        fake = _Simkl(reads=[library(), after],
+                      answers=[(201, added("plantowatch", *({"simkl": 5000 + i} for i in range(100)))),
+                               transport.SimklError("write lock", 400)])
+        with fake:
+            result = await watchlist.put(SETTINGS, titles)
+        outcomes = [result[f"show:tmdb:{1000 + i}"].outcome for i in range(150)]
+        self.assertEqual(set(outcomes[:100]), {WatchlistOutcome.WRITTEN})
+        self.assertEqual(set(outcomes[100:]), {WatchlistOutcome.FAILED})
+
+    async def test_the_first_chunk_failing_raises(self):
+        fake = _Simkl(reads=[library()], answers=[transport.SimklError("down", 503)])
+        with fake, self.assertRaises(transport.SimklError):
+            await watchlist.put(SETTINGS, self._titles(150))
+
+
 class DropTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_held_title_moves_to_dropped_whatever_it_was(self):
         fake = _Simkl(reads=[library(item(3152, "watching", watched=2)),
@@ -336,16 +374,44 @@ class UndoTests(unittest.IsolatedAsyncioTestCase):
                          {"shows": [{"to": "hold", "ids": {"simkl": 3152}}]})
         self.assertEqual(result["show:tmdb:4238"].outcome, WatchlistOutcome.WRITTEN)
 
-    async def test_completed_read_back_as_watching_is_the_move_happening(self):
-        """Simkl documents rewriting `completed` to `watching` for a show still
-        airing."""
+    async def test_a_finished_show_goes_back_to_watching_never_to_completed(self):
+        """MEASURED: a move to completed marked every unwatched episode of a
+        three-episode history watched, dated now. A finished show can have gained
+        a season since, so completed would invent viewing; watching keeps every
+        real play and invents none."""
         fake = _Simkl(reads=[library(item(3152, "plantowatch", watched=5)),
                              library(item(3152, "watching", watched=5))],
-                      answers=[(201, added("completed", {"simkl": 3152}))])
+                      answers=[(201, added("watching", {"simkl": 3152}))])
         with fake:
             result = await watchlist.undo(SETTINGS, [WatchlistUndo(title(4238, simkl=3152),
                                                                    "completed")])
+        self.assertEqual(fake.posts[0]["body"],
+                         {"shows": [{"to": "watching", "ids": {"simkl": 3152}}]})
         self.assertEqual(result["show:tmdb:4238"].outcome, WatchlistOutcome.WRITTEN)
+        self.assertEqual(result["show:tmdb:4238"].status_before, "plantowatch")
+
+    async def test_a_finished_show_already_watching_or_completed_is_not_sent(self):
+        for now in ("watching", "completed"):
+            with self.subTest(now=now):
+                fake = _Simkl(reads=[library(item(3152, now, watched=5))])
+                with fake:
+                    result = await watchlist.undo(
+                        SETTINGS, [WatchlistUndo(title(4238, simkl=3152), "completed")])
+                self.assertEqual(result["show:tmdb:4238"].outcome, WatchlistOutcome.ALREADY)
+                self.assertEqual(fake.posts, [])
+
+    async def test_no_undo_ever_asks_for_completed(self):
+        """Whatever it was before, nothing an undo sends names completed."""
+        statuses = ("watching", "plantowatch", "hold", "completed", "dropped")
+        rows = [WatchlistUndo(title(100 + n, simkl=900 + n), status)
+                for n, status in enumerate(statuses)]
+        held = library(*(item(900 + n, "plantowatch", watched=1) for n in range(len(statuses))))
+        fake = _Simkl(reads=[held, held], answers=[(201, added("x"))])
+        with fake:
+            await watchlist.undo(SETTINGS, rows)
+        sent = [entry["to"] for post in fake.posts for entry in post["body"]["shows"]]
+        self.assertNotIn("completed", sent)
+        self.assertIn("watching", sent)
 
     async def test_a_title_the_viewer_took_out_themselves_is_left_out(self):
         fake = _Simkl(reads=[library()])

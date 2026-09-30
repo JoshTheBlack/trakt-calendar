@@ -1609,7 +1609,9 @@ class WatchlistPort(Protocol):
         the way `status_before` says the service held it.
 
         NOTHING THE VIEWER DID THEMSELVES IS TOUCHED. A title held before the
-        tracker wrote it goes back to that, not away. A title the service held
+        tracker wrote it goes back to that, not away — or to the nearest status
+        that invents nothing, where putting it back exactly would write viewing
+        the viewer never did (Simkl's `completed` does; see its implementation). A title the service held
         nothing for is removed only if nothing of it is watched NOW — read at the
         moment of the undo, never trusted from earlier — because removing it
         would take that viewing with it; otherwise it is KEPT.
