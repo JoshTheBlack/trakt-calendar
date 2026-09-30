@@ -466,6 +466,28 @@ class DepartureTests(WatchlistTestCase):
         await self.finish([pending])
         self.assertEqual(self.fake.sent("drop"), [])
 
+    async def test_ten_departures_in_a_row_go_out_in_few_batches(self):
+        """Ten shows given up on as fast as requests can land: the first starts a
+        pass, the other nine wait for it, and the ONE pass they fold into sends
+        all nine together — every show dropped, never one call per show."""
+        keys = [f"show:tmdb:{n}" for n in range(1, 11)]
+        for n in range(2, 11):
+            await self.listed(n)
+        await ww.run(self.user_id)
+        self.fake.delay = 0.2
+        for n in range(1, 11):
+            pending = ww.expect(self.user_id, keys[n - 1], ww.Departure.ABANDON)
+            record = await distrakt.find_user_record(
+                self.user_id, distrakt.record_key(a_record(n)), 1)
+            await lifecycle.give_up(self.user_id, record, month=month_back(0))
+            await ww.after_request(self.user_id, [pending])
+        while ww.busy(self.user_id):
+            await asyncio.sleep(0.05)
+        drops = [len(batch) for verb, batch in self.fake.calls if verb == "drop"]
+        self.assertEqual(sum(drops), 10)
+        self.assertLessEqual(len(drops), 3, drops)
+        self.assertEqual({self.fake.held[key] for key in keys}, {"dropped"})
+
     async def test_with_nothing_switched_on_a_finished_departure_is_let_go(self):
         await ww.switch(self.user_id, SIMKL, False)
         pending = ww.expect(self.user_id, self.KEY, ww.Departure.ABANDON)
