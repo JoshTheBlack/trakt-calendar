@@ -950,6 +950,25 @@ async def month_records(user_id: int, month: str,
     return [row_to_record(r) for r in rows]
 
 
+async def records_from(user_id: int, month: str,
+                       kinds: Iterable[RecordKind | str] | None = None) -> list[dict]:
+    """Every month record on `month` and every month after it, optionally
+    narrowed to some kinds, oldest month first.
+
+    One query rather than a month_records call per month, because the question
+    it answers — what does the month under way, and whatever has been built
+    ahead of it, still hold — spans a number of months nobody has to know first.
+    Relies on month_key's zero-padding, like every other comparison of keys.
+    """
+    clause, params = _kind_filter(kinds)
+    rows = await db.fetch_all(
+        "SELECT * FROM distrakt_month_records WHERE user_id = ? AND month >= ?"
+        + clause + " ORDER BY month, rowid",
+        (user_id, _validate_month(month), *params),
+    )
+    return [row_to_record(r) for r in rows]
+
+
 async def find_month_record(user_id: int, month: str, kind: RecordKind | str,
                             key: ItemKey, season: int) -> dict | None:
     """One month record, or None if that month holds no record of that kind for

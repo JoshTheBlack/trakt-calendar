@@ -22,9 +22,12 @@ the reason it changes:
   prefs.py            the per-user network -> emoji map
   backup.py           the JSON export and its inverse
   discord_fmt.py      the two Discord notices
+  watchlist_writes.py the tracker's shows written to the viewer's own list at
+                      each service they switched on, and taken back off it
   routes.py           the tracker page and the whole /api/distrakt/* API
 
-lifecycle.py and unsettled.py are deliberately NOT re-exported below, for the same
+lifecycle.py, unsettled.py and watchlist_writes.py are deliberately NOT
+re-exported below, for the same
 reason the router and the backfill job are not: what they hold are ACTS — a season
 being taken up, settled, given up on; a held month's rows being worked out — rather
 than facts to read, and a caller that wants one of those is asking for that module
