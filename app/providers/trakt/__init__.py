@@ -4,7 +4,8 @@ error contract.
 The rest of the client is reached through its own module — `transport` for the
 pooled client and the sender, `calendar` for the window fetch and the
 normalizer, `detail` for public per-title lookups, `sync` for the reads that
-belong to whoever's token asked. This file deliberately does NOT re-export
+belong to whoever's token asked, `watchlist` for the writes to that person's
+own list. This file deliberately does NOT re-export
 those: a second name for `detail.fetch_details` is a second thing to keep in
 step, and a caller that imports the module it actually needs says which half of
 Trakt it depends on.
@@ -22,7 +23,7 @@ from datetime import date
 from .. import register
 from ..base import (Capabilities, Media, Record, SearchHit, SeasonsAnswer, Source,
                     TitleFacts)
-from . import calendar, detail, sync
+from . import calendar, detail, sync, watchlist
 from .transport import TraktError, TraktRateLimitError
 
 __all__ = ["TraktError", "TraktRateLimitError"]
@@ -234,6 +235,29 @@ class _TraktSyncPort:
         return sync.movie_plays_from(events)
 
 
+class _TraktWatchlistPort:
+    """Trakt's answer to "write this person's list" (app/providers/base.py's
+    WatchlistPort). A thin delegator over watchlist.py, through the MODULE
+    object, as the ports above are over theirs — what a write to Trakt means,
+    and what was measured before any of it was written, is that module's to
+    say."""
+
+    def list_url(self, account_id: str) -> str:
+        return watchlist.list_url(account_id)
+
+    async def holdings(self, settings: Settings, titles):
+        return await watchlist.holdings(settings, titles)
+
+    async def put(self, settings: Settings, titles):
+        return await watchlist.put(settings, titles)
+
+    async def drop(self, settings: Settings, titles):
+        return await watchlist.drop(settings, titles)
+
+    async def undo(self, settings: Settings, rows):
+        return await watchlist.undo(settings, rows)
+
+
 class _TraktProvider:
     """Trakt as the registry sees it: an id, a label, what it can answer, and
     whether it is configured. Everything this package actually DOES is called
@@ -274,10 +298,11 @@ class _TraktProvider:
     # which sources can be searched and never names Trakt, so a second
     # catalogue can be searched alongside it with no edit here.
     search_port = _TraktSearchPort()
-    # None until this package writes a watchlist: the registry then offers the
-    # tracker no Trakt switch, which is the honest answer for a write nothing
-    # here can make yet.
-    watchlist_port = None
+    # WHERE THE TRACKER'S SHOWS GO: this person's watchlist. Offered only with
+    # the viewer's own token (providers.for_watchlist asks `is_configured`
+    # below, which is the token test), since a write to somebody's list is the
+    # one thing here the instance's client id alone can never do.
+    watchlist_port = _TraktWatchlistPort()
 
     def is_configured(self, settings: Settings) -> bool:
         return settings.trakt_configured

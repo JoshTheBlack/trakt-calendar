@@ -444,6 +444,17 @@ class EveryWatchlistPortWritesTheSameWayTests(DatabaseTestCase):
             with self.subTest(source=source):
                 self.assertTrue(port.list_url("12345").startswith("https://"))
 
+    def test_every_port_links_to_its_own_service(self):
+        """The link sits beside that service's switch; a copied port that kept
+        another service's address would send the viewer to the wrong site."""
+        from urllib.parse import urlparse
+        for source, port in self._ports():
+            with self.subTest(source=source):
+                host = urlparse(port.list_url("12345")).hostname or ""
+                self.assertTrue(host == f"{source}.com" or host.endswith(f".{source}.com")
+                                or host == f"{source}.tv" or host.endswith(f".{source}.tv"),
+                                f"{source} links to {host}")
+
     def test_the_registry_offers_a_write_only_with_the_viewers_token(self):
         """A write to a person's list is the most private thing a token does, so
         a source is offered only where `is_configured` — the private question —
