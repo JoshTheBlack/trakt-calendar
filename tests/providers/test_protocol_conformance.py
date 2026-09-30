@@ -417,6 +417,11 @@ class EveryWatchlistPortWritesTheSameWayTests(DatabaseTestCase):
                 for source, provider in providers.registered().items()
                 if provider.watchlist_port is not None]
 
+    def test_at_least_one_registered_source_writes_a_list(self):
+        """Or every other test in this class passes by iterating nothing."""
+        self.assertTrue(self._ports(), "no source can write a list; the checks below "
+                                       "prove nothing")
+
     def test_every_watchlist_port_present_satisfies_watchlistport(self):
         for source, port in self._ports():
             with self.subTest(source=source):
