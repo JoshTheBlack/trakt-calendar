@@ -24,11 +24,12 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from . import (arrival, backfill, counts, discord_fmt, episode_progress, lifecycle, live,
-               post_memo, prefs, rollover, slug_repair, unsettled, watch_history)
+               post_memo, prefs, rollover, slug_repair, unsettled, watch_history,
+               watchlist_writes)
 # The data layer is reached through this package's own public surface, the same
 # names an outside caller uses, rather than through the six modules those names
 # are defined in: a route handler has no business knowing which half of the
@@ -58,7 +59,42 @@ from ..templating import templates
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+
+async def _write_watchlists_after(request: Request) -> None:
+    """Start the viewer's watchlist pass, once their answer has gone. See
+    `_owe_watchlist_pass`."""
+    user = await auth.current_user(request)
+    if user is not None and await watchlist_writes.switched_on(user.user_id):
+        watchlist_writes.nudge(user.user_id)
+
+
+async def _owe_watchlist_pass(request: Request, background: BackgroundTasks) -> None:
+    """EVERY REQUEST TO THE TRACKER ENDS WITH A WATCHLIST PASS, and this is the one
+    place that says so — a dependency of the router itself, so no route is
+    written without it.
+
+    WHY EVERY REQUEST AND NOT A LIST OF THE ONES THAT ADD. The tracker's rows are
+    written by this router's handlers and by nothing else in the app, and not
+    only by the routes that look like adds: opening a month builds it and seeds
+    the viewer's list from their viewing, a refresh moves seasons between the
+    list and the months, a restore replaces the lot. A list of routes would be a
+    second statement of which requests change the tracker, and the next route
+    to change it would not be on it. The pass itself decides what is owed from
+    the tables (watchlist_writes), so a request that changed nothing costs one
+    query for whether the viewer switched anything on, and one more for what the
+    tracker holds when they have.
+
+    AFTER THE ANSWER, AND NOT EVEN THEN INSIDE IT. A background task runs once
+    the response has been sent, and all it does is start the pass as a task of
+    its own and return — so neither this response nor the next request on the
+    same connection waits for a service. A dependency that fails the request
+    (the access level refusing it) sends no answer that carries this, so a
+    refused request starts nothing.
+    """
+    background.add_task(_write_watchlists_after, request)
+
+
+router = APIRouter(dependencies=[Depends(_owe_watchlist_pass)])
 guard = authz.Guard(router)
 
 # Which ids arriving in a request body are read as integers. imdb ids are not
