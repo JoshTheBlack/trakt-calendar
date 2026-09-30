@@ -226,7 +226,7 @@ class DetailModalSourceTests(AppTestCase):
 
     def test_a_trailer_is_embedded_when_it_names_a_video_and_absent_when_not(self):
         """Trakt sends a finished URL and Simkl sends an id. Reconciling that in
-        the provider is what lets `trailer` mean one thing to the panel.
+        the provider is what lets a video mean one thing to the panel.
 
         THE FIXTURE'S VALUE IS NOT A VIDEO ID — eight characters, where YouTube
         issues eleven — and it used to be wrapped in a watch URL anyway and
@@ -235,13 +235,51 @@ class DetailModalSourceTests(AppTestCase):
         trailer at all; a real id embeds."""
         html = self._simkl_only().text
         self.assertNotIn("youtube.com/watch", html)
-        self.assertNotIn("trailer-embed", html)
+        self.assertNotIn("<iframe", html)
         real = {**SIMKL_TITLE,
                 "trailers": [{"name": "Trailer", "youtube": "dQw4w9WgXcQ"}]}
         html = self._get("media=show&simkl=3204421&season=1",
                          simkl={"tv/3204421": real,
                                 "tv/episodes/3204421": SIMKL_EPISODES}).text
         self.assertIn("https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ", html)
+
+    # -- videos, pooled from both ------------------------------------------
+
+    def _pooled(self, path="/calendar/fragments/details"):
+        """A title both services list, each with a video of its own: Trakt a
+        trailer and Simkl a teaser. Returns the page and every Simkl path asked."""
+        simkl = _simkl_answers({"tv/2601798": {**SIMKL_TITLE, "trailers": [
+            {"name": "Official Teaser", "youtube": "4PPodH3i_7k"}]},
+            "tv/episodes/2601798": SIMKL_EPISODES})
+        trakt_client = _TraktClient({
+            "shows/203330": TRAKT_SHOW, "shows/203330/people": TRAKT_PEOPLE,
+            "shows/203330/seasons/2": TRAKT_EPISODES,
+            "shows/203330/videos": [{"title": "Official Trailer", "site": "youtube",
+                                     "url": "https://youtube.com/watch?v=dQw4w9WgXcQ",
+                                     "type": "trailer", "official": True}]})
+        with patch.object(trakt_transport, "shared_client", return_value=trakt_client), \
+             patch.object(simkl_transport, "cached_get", new=simkl):
+            resp = self.client.get(f"{path}?media=show&trakt=203330&simkl=2601798&season=2")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return resp.text, [call.args[2] for call in simkl.call_args_list]
+
+    def test_a_panel_asks_the_other_service_for_its_videos(self):
+        """Trakt describes the title; Simkl is asked for its catalogue record,
+        which is where its video list lives, and Trakt's trailer still plays
+        first because a trailer outranks a teaser."""
+        html, simkl_asked = self._pooled()
+        self.assertIn("Trakt&#39;s words.", html)
+        self.assertIn("tv/2601798", simkl_asked)
+        self.assertIn('src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"', html)
+        # And Simkl's teaser is one press away, in the same player.
+        self.assertIn('href="https://www.youtube-nocookie.com/embed/4PPodH3i_7k" '
+                      'target="detailsPlayer"', html)
+
+    def test_a_season_tab_asks_nobody_for_videos(self):
+        """A tab draws that season's rows and no player, so it pools nothing."""
+        html, simkl_asked = self._pooled("/calendar/fragments/details/season")
+        self.assertIn("Longing for Sea Bream!", html)
+        self.assertEqual(simkl_asked, [])
 
     def test_the_episode_list_is_this_season_without_its_specials(self):
         html = self._simkl_only().text

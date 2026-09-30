@@ -1,13 +1,12 @@
 """Which YouTube video a string names, if any — the one reading of it.
 
-TWO PLACES ASK AND THEY ARE ONE QUESTION. A source's trailer field is read into
-a link by the provider that fetched it, and the details panel decides whether it
-can EMBED what it was handed; both are "which video is this". They used to be two
-answers — the panel's filter read a URL carefully while Simkl's provider wrapped
-whatever its field held in a watch URL — and the gap between them is where a
-trailer button that goes nowhere came from. Here rather than in either, because
-the provider is the wrong side of the layering to import a template filter and
-the kernel may not import a provider.
+EVERY PROVIDER'S VIDEO LIST IS READ THROUGH THIS, and the details panel embeds
+only the id it yields. That used to be two answers — the panel's own filter read
+a URL carefully while Simkl's provider wrapped whatever its field held in a watch
+URL — and the gap between them is where a trailer button that goes nowhere came
+from. The provider now reads each value once, here, into a `Video` whose id the
+panel plays as it stands. In the kernel because every provider package asks it
+and none of them owns it.
 
 WHAT A SOURCE ACTUALLY SENDS, measured on a live instance's cached Simkl
 payloads: a bare eleven-character id nearly always, and otherwise an id with

@@ -25,7 +25,7 @@
 Trakt's V3 redesign removed the ability to simply browse "what new shows are premiering
 this month." This app brings that back: pick a month, and see every premiere grouped by
 day, with posters, ratings, languages, networks, air dates, and more — then click any
-title for cast, an embedded trailer, and the full episode list.
+title for cast, its videos from both services in one player, and the full episode list.
 
 ## Features
 
@@ -34,7 +34,7 @@ title for cast, an embedded trailer, and the full episode list.
 - 🔍 **Find a title and jump to it** — search the calendar you're on as you type, with no calls to anybody, and widen to your other calendars from the results; press Enter to also ask the services, which turns up titles your calendar hasn't loaded yet. Those come back a season at a time, and opening one writes it onto the day it belongs to — including premieres the services left off their own calendars.
 - 🔀 **Two sources, one calendar** — Trakt and, optionally, [Simkl](#simkl--an-optional-second-source). A month is built from both, a title both of them list is one card rather than two, which services show is a tick-box in the calendar's **🎚️ Filters** panel, and whose description you read when both list the same title is an order on your **Account** page. Simkl needs no credentials to fill a calendar
 - 🖼️ Rich poster tiles — rating, runtime, network, and episode (SxxEyy) badges, plus language, country, day-of-week, and a lazily-loaded current-season summary (episode count, latest / next air date)
-- 🔍 **Details modal** on click — full overview, an embedded trailer, cast (headshots + characters), and the season's episode list with air dates
+- 🔍 **Details modal** on click — full overview, every video both services list (trailers first) in one embedded player, cast (headshots + characters), and the season's episode list with air dates
 - ✅ Mark shows **watching / not watching** — saved server-side, so it follows you across devices — plus a one-click filter to hide the ones you're not watching
 - 📥 **Add to Sonarr / Radarr / Seerr** — one click to send a show to Sonarr, a movie to Radarr, or request either on Seerr (Overseerr/Jellyseerr); buttons show each app's logo, appear only when configured, and auto-disable if the instance is unreachable (background heartbeat). An "Add all" button bulk-adds a whole month.
 - 🎛️ **Layout options** — poster-on-top or poster-beside cards, days stacked or packed beside each other, and a poster-only wall with hover-to-expand details
@@ -239,7 +239,7 @@ for why it's split that way and what's still in the file.
 | **Timezone** | Air times are converted to this zone (grouped IANA dropdown) |
 | **Default endpoint** | Which calendar to show by default |
 | **Pagination limit** | Max items fetched per request |
-| **Detail cache (minutes)** | How long cast/episode/trailer lookups are cached (`0` disables) |
+| **Detail cache (minutes)** | How long cast/episode/video lookups are cached (`0` disables) |
 | **Sonarr / Radarr** | Instance URL, API key, quality profile, and root folder for the add-to-library buttons (click "Load profiles & folders" to populate the dropdowns) |
 | **Seerr** | Instance URL + API key to enable the request button (works with the Overseerr/Jellyseerr lineage) |
 | **Public base URL** | The origin this instance is reached on — see [Serving over HTTPS](#serving-over-https) |
@@ -338,7 +338,7 @@ capabilities are gated separately**, so how much you set up depends on how much 
 | What you want | What it needs |
 |---|---|
 | Simkl titles on the calendar | **Nothing.** The calendar comes from public CDN files that take no id and no token |
-| Details for a Simkl-only title (overview, episodes, trailer) | **Client ID** — Simkl's per-title endpoints take it as a query parameter |
+| Details for a Simkl-only title (overview, episodes, videos) | **Client ID** — Simkl's per-title endpoints take it as a query parameter |
 | **Log in with Simkl** / linking a Simkl account | **Client ID + Secret + Public base URL** |
 | Reading a linked account's own Simkl history, searching Simkl's catalogue | Each person's **own** Simkl link — there is no instance-wide credential for these any more |
 

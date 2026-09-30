@@ -752,9 +752,11 @@ async def _item_details(request: Request, *, season_only: bool) -> Response:
                                              reachable=False)
     try:
         # A season the chosen service has no episodes of is answered by the next
-        # service that does (detail_source.for_season).
-        chosen, details = await detail_source.describe_season(
-            settings, chosen, item["ids"], media, season)
+        # service that does (detail_source.for_season). A whole panel also pools
+        # every service's videos; a season tab draws none, so it asks for none.
+        describe = (detail_source.describe_season if season_only
+                    else detail_source.describe_panel)
+        chosen, details = await describe(settings, chosen, item["ids"], media, season)
     except SourceUnavailable:
         # Drawn rather than answered with a status, like every fragment here, and
         # in the sentence every other surface's panel uses for a failed lookup:

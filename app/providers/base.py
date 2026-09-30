@@ -1181,6 +1181,74 @@ class TitleFacts(NamedTuple):
     network: str
 
 
+class VideoKind(StrEnum):
+    """What a video is, in ONE vocabulary whoever listed it.
+
+    Trakt states a type on every video and these are its values, measured across
+    the titles on a live calendar. Simkl states only a free-text name, so its
+    entries are read into this set by the Simkl package and land on VIDEO when the
+    name says neither "trailer" nor "teaser" — an honest "a video" rather than a
+    guess at which of the finer kinds it is.
+    """
+    TRAILER = "trailer"
+    TEASER = "teaser"
+    CLIP = "clip"
+    FEATURETTE = "featurette"
+    BEHIND_THE_SCENES = "behind the scenes"
+    OPENING_CREDITS = "opening credits"
+    VIDEO = "video"
+
+    @classmethod
+    def read(cls, value: Any) -> "VideoKind":
+        """`value` as a member, or VIDEO for anything this set does not name —
+        a type a service adds tomorrow is still a video today."""
+        try:
+            return cls(str(value or "").strip().lower())
+        except ValueError:
+            return cls.VIDEO
+
+
+class Video(NamedTuple):
+    """One video a service lists for a TITLE (never a season: neither service
+    lists any per season — Trakt's season video lists were empty for every show
+    probed — so the panel treats a title's videos the way it always treated its
+    trailer).
+
+    `site` is where it is hosted ("youtube", "vimeo"), lowercased. `video_id` is
+    the YouTube id app/youtube.py read out of what the service sent, and "" for
+    anything hosted elsewhere; a YouTube entry naming no readable video is not a
+    Video at all, because an offered video that goes nowhere is worse than none.
+    `url` is the video's own page — what a link out opens.
+
+    `official` and `published` are None where the service does not say (Simkl
+    says neither). `sources` names every service that listed this video, which
+    is one until app/providers/videos.py pools several services' lists.
+    """
+    site: str
+    video_id: str
+    url: str
+    title: str
+    kind: VideoKind
+    official: bool | None
+    published: str | None
+    sources: tuple[str, ...]
+
+    @property
+    def embeddable(self) -> bool:
+        """Whether the panel can PLAY this in its own frame. YouTube only, and
+        that is the Content-Security-Policy's decision rather than this type's:
+        frame-src admits YouTube's no-cookie host and nothing else (app/csp.py),
+        so anything hosted elsewhere is a link out."""
+        return self.site == "youtube" and bool(self.video_id)
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """What makes two services' entries the SAME video: the host and the
+        video on it. Titles are no use — one service lists a video twice under
+        two names, and the two services name one video differently."""
+        return self.site, self.video_id or self.url
+
+
 @runtime_checkable  # see the note on SyncPort above
 class DetailPort(Protocol):
     """A source that can describe ONE TITLE as fully as it knows how — what the
@@ -1235,6 +1303,23 @@ class DetailPort(Protocol):
         call, which is what the public share pages use so a visitor's click can
         never spend the owner's rate limit. Fields with nothing cached behind them
         come back empty and the modal renders around them.
+
+        `videos` is THIS SERVICE's own list, as `Video`s, [] when it has none.
+        What the panel plays is every service's lists pooled (see
+        `fetch_videos` below and app/providers/detail_source.py), which is why
+        the answer carries a list rather than one chosen trailer.
+        """
+        ...
+
+    async def fetch_videos(self, settings: Settings, media, source_id, *,
+                           cache_only: bool = False) -> list[Video]:
+        """Every video THIS SERVICE lists for one title, in its own id space —
+        the same list its `fetch_details` answer carries under `videos`.
+
+        ITS OWN VERB so the panel can ask the service that is NOT describing a
+        title for its list without paying for a whole description it would
+        throw away. `cache_only=True` makes no outbound call, as everywhere in
+        this protocol. A service with nothing to say answers [].
         """
         ...
 

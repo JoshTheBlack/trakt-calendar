@@ -63,6 +63,8 @@ class _CatalogueClient:
             return _Response(SHOW)
         if path == "shows/7/seasons":
             return _Response(SEASONS)
+        if path == "shows/7/videos":
+            return _Response([])
         if path.startswith("shows/7/seasons/") and path.endswith("/people"):
             season = path.split("/")[3]
             return _Response({"cast": [{"person": {"name": f"S{season} Actor"},

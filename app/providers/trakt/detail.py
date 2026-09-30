@@ -16,9 +16,11 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from ... import youtube
 from ...config import Settings
 from .. import season as season_rules
-from ..base import MATCH_SOURCES, Media, TitleFacts, proxied_image
+from ..base import (MATCH_SOURCES, Media, Source, TitleFacts, Video, VideoKind,
+                    proxied_image)
 from . import _ids, transport
 from .transport import TraktError
 
@@ -121,6 +123,64 @@ def _episodes_from(episodes_raw, tz: ZoneInfo) -> list[dict]:
     return episodes
 
 
+def videos_from(raw) -> list[Video]:
+    """Trakt's `/videos` answer as `Video`s, in the order Trakt lists them.
+
+    A YouTube entry is kept only when app/youtube.py can read which video its
+    `url` names, and its url is rebuilt from that id — the strict reading every
+    other trailer value in this app goes through, so a malformed address is
+    skipped rather than embedded as somebody else's video.
+
+    ANYTHING ELSE IS KEPT ONLY AS AN http(s) ADDRESS, because the panel renders
+    it into an `href` and a link out is all it can ever be (Vimeo, measured as
+    three of 881 videos): a value in any other scheme is not somewhere a viewer
+    should be sent.
+    """
+    out = []
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        site = str(entry.get("site") or "").strip().lower()
+        url = str(entry.get("url") or "").strip()
+        video_id = ""
+        if site == "youtube":
+            video_id = youtube.video_id(url) or ""
+            if not video_id:
+                continue
+            url = youtube.watch_url(video_id)
+        elif not url.startswith(("https://", "http://")):
+            continue
+        official = entry.get("official")
+        out.append(Video(
+            site=site, video_id=video_id, url=url,
+            title=" ".join(str(entry.get("title") or "").split()),
+            kind=VideoKind.read(entry.get("type")),
+            official=official if isinstance(official, bool) else None,
+            published=str(entry.get("published_at") or "") or None,
+            sources=(str(Source.TRAKT),)))
+    return out
+
+
+async def fetch_videos(settings: Settings, media: str, trakt_id, *,
+                       cache_only: bool = False) -> list[Video]:
+    """Every video Trakt lists for a show or a film.
+
+    ITS OWN CALL, measured: no `extended` value puts videos on the title record
+    (`full,videos` and `videos` both answer without them). Public data, so it
+    rides the shared response cache on the same TTL as the title record beside
+    it — never `private`, since the answer is the same whoever asks.
+
+    THE LIST, NOT THE TITLE'S `trailer` FIELD. That field, when Trakt sets it,
+    was one of the listed videos every time (145 of 145 measured), and it is
+    unset on titles whose only video is a teaser or a clip — before a premiere,
+    which is when somebody opening the panel most wants one.
+    """
+    base = "movies" if media == "movie" else "shows"
+    return videos_from(await transport.cached_get(
+        transport.shared_client(), settings, f"{base}/{trakt_id}/videos", {},
+        cache_only=cache_only))
+
+
 async def fetch_title_payload(settings: Settings, media: str, trakt_id: str,
                               *, cache_only: bool = False) -> dict | None:
     """One title's raw `extended=full` object, exactly as Trakt returns it.
@@ -167,7 +227,7 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
     show's.
 
     WHAT STAYS SHOW-LEVEL, and the split is deliberate: genres, network,
-    certification, status, trailer, country, language and the rating are facts
+    certification, status, videos, country, language and the rating are facts
     about the TITLE, and Trakt has no per-season answer for most of them. So the
     chip row describes the show and the season pane describes the season.
 
@@ -191,6 +251,7 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
             f"shows/{trakt_id}/seasons/{season}/people" if per_season
             else f"{base}/{trakt_id}/people",
             {"extended": "full"}, cache_only=cache_only),
+        "videos": fetch_videos(settings, media, trakt_id, cache_only=cache_only),
     }
     if per_season:
         tasks["episodes"] = transport.cached_get(
@@ -312,7 +373,9 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         "imdb_rating": None,
         "release_types_by_country": {},
         "certification": (info.get("certification") or "").upper(),
-        "trailer": info.get("trailer") or "",
+        # EVERY VIDEO TRAKT LISTS, from its own call — see `fetch_videos` for
+        # why the list rather than the title's single `trailer` field.
+        "videos": results.get("videos") or [],
         # WHEN THE TITLE ITSELF FIRST AIRED, which `extended=full` already
         # returns and which nothing used to keep. Its reader is the calendar
         # search: a catalogue hit carries no date on either source, so the month

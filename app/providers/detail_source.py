@@ -39,13 +39,18 @@ recoverable at all.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import NamedTuple
 
 # The registry through its MODULE OBJECT rather than as names bound off it, so a
 # test double installed on app.providers is the one these functions call (see
 # CLAUDE.md's rule about names bound at import time).
 from .. import providers
-from .base import Media, SeasonsAnswer, Source, SourceUnavailable
+from . import videos
+from .base import Media, SeasonsAnswer, Source, SourceUnavailable, Video
+
+logger = logging.getLogger(__name__)
 
 
 def ports():
@@ -171,8 +176,7 @@ def choose(settings, ids) -> Answerer | None:
     finds nothing behind it is the other empty case, and only it can tell —
     reading the store is the only way to find out.
     """
-    known = [(source, value) for source, port in ports()
-             if (value := str((ids or {}).get(str(source)) or "").strip())]
+    known = _known_ids(ids)
     for source, value in known:
         if providers.get(source).detail_port.catalogue_configured(settings):
             return Answerer(source, value, stored_only=False)
@@ -210,9 +214,7 @@ async def for_season(settings, ids, chosen: Answerer, ask, holds):
     first = await ask(chosen)
     if holds(first) or chosen.stored_only:
         return chosen, first
-    known = [(source, value) for source, _port in ports()
-             if (value := str((ids or {}).get(str(source)) or "").strip())]
-    for source, value in known:
+    for source, value in _known_ids(ids):
         if (source == chosen.source
                 or not providers.get(source).detail_port.catalogue_configured(settings)):
             continue
@@ -238,6 +240,72 @@ async def describe_season(settings, chosen: Answerer, ids, media, season: int | 
         settings, ids, chosen,
         lambda answerer: describe(settings, answerer, media, season, cache_only=cache_only),
         lambda details: bool(details and details.get("episodes")))
+
+
+async def describe_panel(settings, chosen: Answerer, ids, media, season: int | None, *,
+                         cache_only: bool = False) -> tuple[Answerer, dict | None]:
+    """`describe_season`, with `videos` replaced by EVERY service's videos
+    pooled (app/providers/videos.py says why that one field is pooled when
+    nothing else is). What every surface calls to draw a WHOLE panel; a season
+    tab calls `describe_season`, because the videos are the title's and a tab
+    does not draw them.
+
+    `ids` IS WHAT THE CALLER MAY ASK ABOUT, and it is the same map
+    `describe_season` is handed — which is what keeps the share page's promise:
+    it passes the ids its link's airings carry and nothing else, so a service
+    asked for its videos is a service asked about a title the link shows. Each
+    service is asked by its own id in that map, never by an id another service
+    stated, so every list is that service's own answer about this title.
+
+    ASKED BESIDE THE DESCRIPTION, not after it, so the panel waits for the
+    slower of the two rather than their sum. Only where the season rule hands
+    the description to a later service is the first service's list asked
+    afterwards — its description was already read, so that is normally cached.
+
+    A SERVICE THAT CANNOT BE REACHED IS READ FROM THE STORE, as `choose` reads
+    it; one that FAILS contributes nothing and never fails the panel — the
+    videos are an addition to a description, not a reason to lose one.
+    """
+    others = [(source, value) for source, value in _known_ids(ids)
+              if source != chosen.source]
+    described, *lists = await asyncio.gather(
+        describe_season(settings, chosen, ids, media, season, cache_only=cache_only),
+        *(_videos(settings, source, value, media, cache_only=cache_only)
+          for source, value in others))
+    answerer, details = described
+    if details is None:
+        return answerer, None
+    by_source = {source: listed for (source, _id), listed in zip(others, lists)}
+    by_source[answerer.source] = list(details.get("videos") or [])
+    if chosen.source not in by_source:
+        by_source[chosen.source] = await _videos(
+            settings, chosen.source, chosen.source_id, media, cache_only=cache_only)
+    order = [source for source, _port in ports()]
+    pooled = videos.pool([by_source[source] for source in order if source in by_source],
+                         str(answerer.source))
+    return answerer, {**details, "videos": pooled}
+
+
+def _known_ids(ids) -> list[tuple[Source, str]]:
+    """(source, that source's own id) for every registered detail source `ids`
+    names, in declared order."""
+    return [(source, value) for source, _port in ports()
+            if (value := str((ids or {}).get(str(source)) or "").strip())]
+
+
+async def _videos(settings, source: Source, source_id: str, media, *,
+                  cache_only: bool) -> list[Video]:
+    """One service's videos, [] where it could not answer. An unreachable
+    service is read from the store, for the reason `choose` gives."""
+    port = providers.get(source).detail_port
+    try:
+        return await port.fetch_videos(
+            settings, Media(media), source_id,
+            cache_only=cache_only or not port.catalogue_configured(settings))
+    except SourceUnavailable:
+        logger.warning("%s could not list videos for %s; the panel plays the others",
+                       source, source_id)
+        return []
 
 
 async def describe(settings, chosen: Answerer, media, season: int | None, *,

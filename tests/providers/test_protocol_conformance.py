@@ -339,8 +339,23 @@ class EveryDetailPortAnswersTheSameKeysTests(DatabaseTestCase):
         for source, keys in answers.items():
             with self.subTest(source=source):
                 self.assertLessEqual(
-                    {"title", "overview", "episodes", "genres", "ids", "imdb_rating"},
+                    {"title", "overview", "episodes", "genres", "ids", "imdb_rating",
+                     "videos"},
                     set(keys))
+                # ONE KEY FOR A TITLE'S VIDEOS, not a list beside a single
+                # trailer: two keys for one fact is two answers to keep in step.
+                self.assertNotIn("trailer", keys)
+
+    async def test_every_port_answers_its_own_video_list_as_videos(self):
+        """`fetch_videos` is how the panel asks the service that is NOT
+        describing a title, so every port must have it and answer the shape the
+        description carries — a list of `Video`, empty on a cold cache."""
+        settings = self._settings()
+        for source, port in self._ports():
+            for media in (Media.SHOW, Media.MOVIE):
+                with self.subTest(source=source, media=str(media)):
+                    self.assertEqual(await port.fetch_videos(
+                        settings, media, self.UNKNOWN_ID, cache_only=True), [])
 
     def test_the_comparison_would_actually_report_a_one_sided_key(self):
         """The check reacting, because "the sets were equal" is weak evidence on

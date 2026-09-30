@@ -181,23 +181,26 @@ class TheModalsFieldSetTests(unittest.IsolatedAsyncioTestCase):
         got, _calls = await self._details()
         self.assertEqual(got["cast"], [])
 
-    async def test_a_bare_youtube_id_becomes_a_url_here_and_not_in_the_renderer(self):
+    async def test_a_bare_youtube_id_becomes_a_video_here_and_not_in_the_renderer(self):
         got, _calls = await self._details()
-        self.assertEqual(got["trailer"], "https://www.youtube.com/watch?v=abc123DEF_-")
+        [video] = got["videos"]
+        self.assertEqual(video.video_id, "abc123DEF_-")
+        self.assertEqual(video.url, "https://www.youtube.com/watch?v=abc123DEF_-")
+        self.assertEqual(video.sources, ("simkl",))
 
     async def test_a_trailer_naming_no_video_is_not_offered(self):
         """A value that names no video used to become a watch URL anyway — a
-        trailer button that opened YouTube's error page. A later entry that does
-        name one is used instead."""
+        trailer button that opened YouTube's error page. It is skipped, and an
+        entry beside it that does name one is kept."""
         unreadable = {**self.TITLE, "trailers": [{"youtube": "https://youtu.be/EhV"},
                                                  {"youtube": "@RealTime"}]}
         with patch.dict(self.TITLE, unreadable):
             got, _calls = await self._details()
-        self.assertEqual(got["trailer"], "")
+        self.assertEqual(got["videos"], [])
         with patch.dict(self.TITLE, {"trailers": [{"youtube": "274574"},
                                                   {"youtube": "dQw4w9WgXcQ"}]}):
             got, _calls = await self._details()
-        self.assertEqual(got["trailer"], "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        self.assertEqual([v.video_id for v in got["videos"]], ["dQw4w9WgXcQ"])
 
     async def test_the_poster_is_addressed_through_the_shared_proxy(self):
         """Simkl's own address (simkl_calendar.poster_url) must never reach the
@@ -510,8 +513,28 @@ class SeriesGapFillTests(unittest.IsolatedAsyncioTestCase):
     async def test_an_undescribed_season_takes_the_series_description(self):
         got = await self._details(2831384, 3, {2831384: self.THIN, 1034467: self.SERIES})
         self.assertEqual(got["overview"], "Herbivores and carnivores.")
-        self.assertEqual(got["trailer"], "https://www.youtube.com/watch?v=abc123DEF_-")
+        self.assertEqual([v.video_id for v in got["videos"]], ["abc123DEF_-"])
         self.assertEqual(got["network"], "Fuji TV")
+
+    async def test_its_video_list_takes_the_series_list_too(self):
+        """`fetch_videos` answers what this title's own description carries, so
+        the panel asking the service that is not describing it gets the same
+        list — the series' where the season-title has none."""
+        async def _get(client, settings, path, params=None, **kwargs):
+            return self.RECORDS.get(path)
+
+        per_title = {2831384: self.THIN, 1034467: self.SERIES}
+
+        async def _title(settings, sid, media, **kwargs):
+            return per_title.get(int(sid), {})
+
+        with patch("app.providers.simkl.transport.cached_get", new=AsyncMock(side_effect=_get)), \
+             patch("app.providers.simkl.titles.fetch_title", new=AsyncMock(side_effect=_title)):
+            got = await detail.fetch_videos(SETTINGS, Media.SHOW, 2831384)
+            cached = await detail.fetch_videos(SETTINGS, Media.SHOW, 2831384, cache_only=True)
+        self.assertEqual([v.video_id for v in got], ["abc123DEF_-"])
+        # The walk to the series makes calls, so a cache-only read does not take it.
+        self.assertEqual(cached, [])
 
     async def test_the_seasons_own_facts_are_not_overwritten(self):
         """`year` and `status` belong to the season. Reading 2019 and "ended"

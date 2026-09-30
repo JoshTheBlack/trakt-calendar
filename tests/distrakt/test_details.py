@@ -26,7 +26,7 @@ import asyncio
 import json
 import re
 from urllib.parse import parse_qs, urlsplit
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app import db, distrakt as distrakt_store
 from app.clock import today
@@ -123,7 +123,11 @@ class _DetailsRouteTestCase(AppTestCase):
         if month:
             year, number = distrakt_store.parse_month_key(month)
             viewed = f"&year={year}&month={number}"
-        with patch.object(transport, "shared_client", return_value=client):
+        # SIMKL KNOWS NOTHING HERE, stubbed rather than left to reach out: a row
+        # carrying a Simkl id has Simkl asked for its videos on a whole panel.
+        with patch.object(transport, "shared_client", return_value=client), \
+             patch("app.providers.simkl.transport.cached_get",
+                   new=AsyncMock(return_value=None)):
             return self.client.get(
                 f"/distrakt/fragments/details?key={KEY}&season={season}{viewed}")
 

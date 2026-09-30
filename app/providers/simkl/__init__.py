@@ -18,7 +18,7 @@ from ...config import Settings
 from ...endpoints import Endpoint
 from .. import register
 from ..base import (Capabilities, Media, Record, SearchHit, SeasonsAnswer, Source,
-                    TitleFacts)
+                    TitleFacts, Video)
 from . import by_id, calendar, detail, search, sync, titles, watchlist
 from .transport import SimklBlockedError, SimklError, SimklRateLimitError
 
@@ -134,6 +134,11 @@ class _SimklDetailPort:
                             season: int | None, *, cache_only: bool = False) -> dict:
         return await detail.fetch_details(settings, media, source_id, season,
                                           cache_only=cache_only)
+
+    async def fetch_videos(self, settings: Settings, media, source_id, *,
+                           cache_only: bool = False) -> list[Video]:
+        return await detail.fetch_videos(settings, media, source_id,
+                                         cache_only=cache_only)
 
     async def records_for(self, settings: Settings, source_id, media: Media,
                           moments) -> list[Record]:

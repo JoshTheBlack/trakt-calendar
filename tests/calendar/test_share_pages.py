@@ -471,8 +471,10 @@ class _ShareDetailsTestCase(SharePageTestCase):
         asyncio.run(cache.set(f"{base}/shows/123?{ext}", {
             "title": "Test Show", "year": 2026, "overview": "Full overview.",
             "status": "returning_series", "network": "HBO", "runtime": 50,
-            "genres": ["drama"], "rating": 8.4,
-            "trailer": "https://youtu.be/dQw4w9WgXcQ"}))
+            "genres": ["drama"], "rating": 8.4}))
+        asyncio.run(cache.set(f"{base}/shows/123/videos?", [
+            {"title": "Official Trailer", "url": "https://youtube.com/watch?v=dQw4w9WgXcQ",
+             "site": "youtube", "type": "trailer", "official": True}]))
         asyncio.run(cache.set(f"{base}/shows/123/people?{ext}", {
             "cast": [{"person": {"name": "A Actor"}, "character": "Lead"}]}))
         asyncio.run(cache.set(f"{base}/shows/123/seasons/2?{ext}", [
@@ -668,6 +670,42 @@ class SharePageDetailsModalTests(_ShareDetailsTestCase):
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertIn("Fetched live.", resp.text)
         self.assertIn("shows/123", called)
+
+    def test_the_other_services_videos_are_asked_only_by_a_bound_id(self):
+        """Videos are pooled from every service the ids name, which is a second
+        and third question on top of the description. With the cache cold, a
+        request naming a real title for one service and a made-up id for the
+        other asks the first about its own title — its videos included — and
+        never reaches the second at all: the pool runs over the bound ids and
+        nothing a stranger spelled."""
+        save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                               simkl_client_id="scid"))
+        stub, called = self._recording({
+            "shows/123": {"title": "Test Show", "overview": "Fetched live."},
+            "shows/123/videos": [{"title": "Official Teaser", "site": "youtube",
+                                  "url": "https://youtube.com/watch?v=4PPodH3i_7k",
+                                  "type": "teaser", "official": True}],
+            "shows/123/seasons/2": [{"number": 5, "title": "The One"}],
+        })
+        with stub, patch("app.providers.simkl.transport.cached_get") as simkl_get:
+            resp = self._details("media=show&trakt=123&simkl=888&season=2")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        simkl_get.assert_not_called()
+        self.assertIn("shows/123/videos", called)
+        self.assertEqual({path.split("/")[1] for path in called}, {"123"})
+        self.assertIn("youtube-nocookie.com/embed/4PPodH3i_7k", resp.text)
+
+    def test_a_service_that_cannot_be_reached_is_the_same_refusal_and_not_an_error(self):
+        """A lookup the link may make can still fail — the service is down — and
+        that used to escape the route as a 500, which the page does not swap in,
+        so the panel sat on its loading line. It is drawn as the one refusal a
+        stranger always gets: a different sentence for an outage would say, for
+        any id tried while a service is down, whether the owner's calendar
+        shows it, since only a title the link shows is ever asked about."""
+        from app.providers.base import SourceUnavailable
+        with patch("app.providers.trakt.detail.fetch_details",
+                   side_effect=SourceUnavailable("down")):
+            self.assertRefused(self._details("media=show&trakt=123&season=2"))
 
     def test_details_reach_through_the_username_url_form_too(self):
         asyncio.run(share_links.set_enabled(self.user_id, "username", True))

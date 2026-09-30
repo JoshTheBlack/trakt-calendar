@@ -248,7 +248,19 @@ failure is never read as an empty season. Because one renderer draws every
 answer, `DetailPort`'s answer has ONE KEY SET whoever gives it, and
 `tests/providers/test_protocol_conformance.py`'s
 `EveryDetailPortAnswersTheSameKeysTests` asserts it — a Protocol checks methods,
-not return shapes. The browser's half is one delegated listener in
+not return shapes. VIDEOS ARE THE ONE FIELD POOLED ACROSS SERVICES, and the
+exception is deliberate: a missing or wrong default video is recoverable only
+when the alternatives are on screen and say who listed them, and one field from
+one service showed nothing for a title whose only video was a teaser. Each
+answer's `videos` is that service's own list; `detail_source.describe_panel` —
+what every surface calls for a whole panel, a season tab calling
+`describe_season` — asks every other service the ids name for its list
+(`DetailPort.fetch_videos`) beside the description, and
+`app/providers/videos.py`'s pure `pool` orders them. The share page passes it the
+BOUND ids, so a service asked for its list is asked about a title the link
+shows. The panel plays them in ONE iframe that every choice in its popover menu
+targets by name, so a pick replaces what was playing with no request; the one
+line of script closes the menu afterwards. The browser's half is one delegated listener in
 `static/js/ui.js`: an element carrying `data-details-open` is an opener, and a
 control INSIDE an opener acts for itself rather than also opening the panel.
 
@@ -329,7 +341,7 @@ back carrying entries two months past its end. Windows are trimmed before
 storage; without the trim a month read shows the same airing several times.
 
 **JavaScript is for what ONLY JavaScript can do, and the floor is MEASURED.**
-The whole first-party surface is **708 code lines across 15 .js files, 27 lines
+The whole first-party surface is **712 code lines across 15 .js files, 27 lines
 of inline `<script>` and NO inline `on*=` handlers** — the inline figure is
 every non-blank line inside the two blocks `csp.INLINE_BLOCKS` names
 (`_nav_head.html`'s 3, `error_lobby.html`'s 24), counted that way so the next
@@ -341,7 +353,8 @@ in the files that own them, and 706 when the rankings board moved onto the share
 title search and a dragged result began inserting its row under the key the
 server answers with, and 708 when a dialog the server opens stopped being opened
 again by every later swap once it had been closed (static/js/ui.js takes
-`data-open-modal` off as it acts on it) — counted as the non-blank, non-comment
+`data-open-modal` off as it acts on it), and 712 when choosing a video from the
+details panel's menu began closing the menu (static/js/ui.js) — counted as the non-blank, non-comment
 lines of those 15 files, the vendored `htmx-json-enc.js` not among them; from 4,024 lines when the audit began, and from
 1,213 / 26 / 30 at its last conversion. The WATCH TRACKER has no script of its
 own at all. Those three numbers are the point of this paragraph: they are what
@@ -425,6 +438,9 @@ rather than what was hoped for:
     nobody pressing anything — the `open` attribute makes a NON-modal one and
     there is no attribute for the other kind;
   - a window opened INSIDE a click and aimed afterwards (the Plex popup);
+  - closing a popover when a LINK inside it is followed — a link cannot close
+    one, and the button that can loads a frame only through a form, which
+    `form-action 'self'` refuses for YouTube (the details panel's video menu);
   - a POST whose answer is a file to save;
   - a payload that is not a form's fields — the board's nested ordered tree;
   - telling a page it has ARRIVED after a boosted navigation, which fires no
