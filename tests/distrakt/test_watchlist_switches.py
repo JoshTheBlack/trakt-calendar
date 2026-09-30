@@ -65,8 +65,8 @@ class TheSwitchTests(SwitchTestCase):
         self.assertIn('id="watchlistPill"', html)
         self.assertIn('popovertarget="watchlistMenu"', html)
         panel = text(html.split('id="watchlistPanel"', 1)[1].split("</form>", 1)[0])
-        self.assertIn("Put these shows on my Simkl list", panel)
-        self.assertIn("Off. Nothing is written to Simkl.", panel)
+        self.assertIn("Add these shows to Simkl", panel)
+        self.assertIn("Off.", panel)
 
     def test_it_links_out_to_the_list_it_writes(self):
         self.assertIn(f'href="https://simkl.com/{SIMKL_ACCOUNT}/tv/plantowatch/"', self.page())
@@ -74,7 +74,7 @@ class TheSwitchTests(SwitchTestCase):
     def test_a_viewer_with_no_list_to_write_is_told_so(self):
         asyncio.run(db.execute("DELETE FROM linked_identities WHERE user_id = ? AND provider = ?",
                                (self.user_id, "simkl")))
-        self.assertIn("keeps a list this tracker can write to", text(self.page()))
+        self.assertIn("No linked service has a list to add to.", text(self.page()))
 
     def test_switching_on_says_the_writing_has_begun_and_asks_for_a_pass(self):
         self.add_listed(1)
@@ -82,7 +82,7 @@ class TheSwitchTests(SwitchTestCase):
         answer = self.press(True)
         self.assertEqual(answer.status_code, 200)
         self.assertEqual(asyncio.run(ww.switched_on(self.user_id)), [SIMKL])
-        self.assertIn("Writing 2 shows to Simkl", text(answer.text))
+        self.assertIn("Adding 2…", text(answer.text))
         # Both halves out of band, and the panel asking for itself until done.
         # The pill's LABEL, never the button the open panel is anchored to.
         self.assertRegex(answer.text, r'id="watchlistPillLabel" hx-swap-oob="outerHTML"')
@@ -99,15 +99,14 @@ class TheSwitchTests(SwitchTestCase):
         asyncio.run(ww._record(self.user_id, SIMKL, {
             "show:tmdb:1": ww.WriteRow("1", "none", ww.WriteState.WRITTEN)}))
         answer = self.client.get("/distrakt/fragments/watchlists")
-        self.assertIn("On. 1 show on this tracker is on your Simkl list.", text(answer.text))
+        self.assertIn("On · 1 show added.", text(answer.text))
         self.assertNotIn("hx-trigger=\"load delay", answer.text)
 
     def test_switching_off_stops_and_says_nothing_changes_there(self):
         self.press(True)
         answer = self.press(False)
         self.assertEqual(asyncio.run(ww.switched_on(self.user_id)), [])
-        self.assertIn("Off. Nothing is written to Simkl.", text(answer.text))
-        self.assertIn("Switching off changes nothing at the service.", text(answer.text))
+        self.assertIn("Off.", text(answer.text))
 
     def test_a_failure_is_drawn_with_its_count_and_wording(self):
         self.add_listed(1)
@@ -117,7 +116,7 @@ class TheSwitchTests(SwitchTestCase):
         ww._trouble[(self.user_id, SIMKL)] = ww.Trouble("Simkl could not be reached.",
                                                         time.monotonic())
         html = self.page()
-        self.assertIn("1 show could not be written. Simkl could not be reached.", text(html))
+        self.assertIn("1 failed. Simkl could not be reached.", text(html))
         self.assertIn("⚠ 1", text(html.split('id="watchlistPill"', 1)[1].split("</button>", 1)[0]))
         # A failure is waited out, not watched: the panel does not poll.
         self.assertNotIn('hx-get="/distrakt/fragments/watchlists"', html)
@@ -130,7 +129,7 @@ class TheSwitchTests(SwitchTestCase):
         self.press(True)
         asyncio.run(db.execute("DELETE FROM linked_identities WHERE user_id = ? AND provider = ?",
                                (self.user_id, "simkl")))
-        self.assertIn("no longer linked", text(self.page()))
+        self.assertIn("Simkl isn't linked.", text(self.page()))
         self.press(True)
         self.assertEqual(asyncio.run(ww.switched_on(self.user_id)), [SIMKL])
         self.press(False)

@@ -2623,7 +2623,7 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .watchlist-panel .distrakt-warn { color: var(--danger, #e0736b); }
 /* Beats `.nav-menu-items a`, which draws every link in a menu as a full-width
    row: this one is a link in a sentence's place, not a menu entry. */
-.nav-menu-items a.watchlist-link { width: auto; padding: 2px 0; font-size: 0.76rem; color: var(--gold); }
+.nav-menu-items a.watchlist-link { display: inline; width: auto; margin-left: 6px; padding: 0; font-size: inherit; color: var(--gold); }
 .nav-menu-items a.watchlist-link:hover { background: none; text-decoration: underline; }
 .watchlist-failing { margin-left: 4px; color: var(--danger, #e0736b); }
 /* EVERY ROW GIVES THE SAME WIDTHS TO WHAT FOLLOWS ITS TITLE, whatever

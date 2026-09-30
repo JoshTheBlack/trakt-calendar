@@ -41,7 +41,6 @@
                            | rejectattr('quiet') | selectattr('waiting') | list -%}
 <div id="watchlistPanel" class="watchlist-panel-body"
      {%- if oob %} hx-swap-oob="outerHTML"{% endif %}>
-    <p class="watchlist-title">Your lists</p>
     {% for switch in switches %}
     <form class="watchlist-switch" hx-post="/api/distrakt/watchlist" hx-json-enc hx-boost="false"
           hx-trigger="change" hx-swap="none">
@@ -50,41 +49,33 @@
         <label class="watchlist-toggle">
             <input type="checkbox" name="on" value="on" autocomplete="off"
                    {%- if switch.on %} checked{% endif %}>
-            <span>Put these shows on my {{ switch.label }} list</span>
+            <span>Add these shows to {{ switch.label }}</span>
         </label>
-        {% if switch.list_url %}
-        <a class="watchlist-link" href="{{ switch.list_url }}" target="_blank"
-           rel="noopener noreferrer" hx-boost="false">Open it on {{ switch.label }} ↗</a>
-        {% endif %}
         <p class="distrakt-note watchlist-state">
             {%- if not switch.on -%}
-                Off. Nothing is written to {{ switch.label }}.
+                Off.
             {%- elif not switch.linked -%}
-                {{ switch.label }} is no longer linked to your account, so nothing is
-                written. What is owed is kept until it is linked again.
+                {{ switch.label }} isn't linked.
             {%- elif switch.failed or switch.trouble -%}
                 <strong class="distrakt-warn">
-                {%- if switch.failed %}{{ switch.failed }} show{{ '' if switch.failed == 1 else 's' }} could not be written.{% endif %}
+                {%- if switch.failed %}{{ switch.failed }} failed.{% endif %}
                 {%- if switch.trouble %} {{ switch.trouble }}{% endif %}</strong>
-                Tried again after a few minutes, on your next visit to this page. The tracker
-                itself is unaffected.
+                Retrying in a few minutes.
             {%- elif switch.waiting -%}
-                Writing {{ switch.waiting }} show{{ '' if switch.waiting == 1 else 's' }} to
-                {{ switch.label }}…
+                Adding {{ switch.waiting }}…
             {%- else -%}
-                On. {{ switch.written }} show{{ '' if switch.written == 1 else 's' }} on this
-                tracker {{ 'is' if switch.written == 1 else 'are' }} on your {{ switch.label }} list.
-                New ones are added as they arrive.
+                On · {{ switch.written }} show{{ '' if switch.written == 1 else 's' }} added.
             {%- endif -%}
+            {%- if switch.list_url %}
+            <a class="watchlist-link" href="{{ switch.list_url }}" target="_blank"
+               rel="noopener noreferrer" hx-boost="false">Open ↗</a>
+            {%- endif %}
         </p>
     </form>
     {% else %}
-    <p class="distrakt-note">None of the services linked to your account keeps a list
-        this tracker can write to.</p>
+    <p class="distrakt-note">No linked service has a list to add to.</p>
     {% endfor %}
-    <p class="distrakt-note">Each show is added once, when it arrives. Giving up on it
-        drops it there; ✕ takes back only what this tracker added. Switching off
-        changes nothing at the service.</p>
+    <p class="distrakt-note">Abandon drops a show there; ✕ undoes only what was added.</p>
     {% if writing %}
     <div hidden hx-get="/distrakt/fragments/watchlists" hx-trigger="load delay:2s"
          hx-target="#watchlistPanel" hx-swap="outerHTML"></div>
