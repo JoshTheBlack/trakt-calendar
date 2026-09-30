@@ -1706,9 +1706,11 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
         # request, and refusing instead threw away a description this instance
         # had already fetched once. None is the genuinely empty case. A season
         # the chosen service has no episodes of is answered by the next service
-        # that does (detail_source.for_season).
-        chosen, details = await detail_source.describe_season(
-            settings, chosen, asked, media, season)
+        # that does (detail_source.for_season). A whole panel also pools every
+        # service's videos; a season tab draws none, so it asks for none.
+        describe = (detail_source.describe_season if episodes_only
+                    else detail_source.describe_panel)
+        chosen, details = await describe(settings, chosen, asked, media, season)
     except SourceUnavailable:
         # The shared degradation contract rather than one service's error type:
         # this route can be answered by either of two sources and catching only

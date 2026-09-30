@@ -2039,8 +2039,11 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
         # instance already holds beats a blank card, and None is the case where
         # it holds nothing either. A season the chosen service has no episodes
         # of is answered by the next service that does (detail_source.for_season).
-        chosen, details = await detail_source.describe_season(
-            settings, chosen, ids, Media.SHOW, season)
+        # A whole panel also pools every service's videos; a season tab draws
+        # none, so it asks for none.
+        describe = (detail_source.describe_season if episodes_only
+                    else detail_source.describe_panel)
+        chosen, details = await describe(settings, chosen, ids, Media.SHOW, season)
         source = chosen.source
         if details is None:
             return details_panel.gap(request, "Nothing here can describe this item.")

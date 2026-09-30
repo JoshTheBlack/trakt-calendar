@@ -1372,9 +1372,12 @@ async def _describe_shared_title(request: Request, share_row, settings) -> _Desc
         return None
     # A season the chosen service has no episodes of is answered by the next
     # service that does — among the BOUND ids only, so the promise above holds
-    # for the second question as for the first (detail_source.for_season).
-    chosen, details = await detail_source.describe_season(settings, chosen, bound,
-                                                          media, season)
+    # for the second question as for the first (detail_source.for_season). THE
+    # SAME HOLDS FOR THE THIRD: every service's videos are pooled over `bound`
+    # and nothing else, so a service asked for its list is asked about a title
+    # this link shows, by the id the link's own airing carries.
+    chosen, details = await detail_source.describe_panel(settings, chosen, bound,
+                                                         media, season)
     if details is None:
         return None
     # THE BOUND IDS AND WHAT THE ANSWER ADDED, never the raw request: an outbound

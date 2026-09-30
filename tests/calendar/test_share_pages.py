@@ -671,6 +671,30 @@ class SharePageDetailsModalTests(_ShareDetailsTestCase):
         self.assertIn("Fetched live.", resp.text)
         self.assertIn("shows/123", called)
 
+    def test_the_other_services_videos_are_asked_only_by_a_bound_id(self):
+        """Videos are pooled from every service the ids name, which is a second
+        and third question on top of the description. With the cache cold, a
+        request naming a real title for one service and a made-up id for the
+        other asks the first about its own title — its videos included — and
+        never reaches the second at all: the pool runs over the bound ids and
+        nothing a stranger spelled."""
+        save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                               simkl_client_id="scid"))
+        stub, called = self._recording({
+            "shows/123": {"title": "Test Show", "overview": "Fetched live."},
+            "shows/123/videos": [{"title": "Official Teaser", "site": "youtube",
+                                  "url": "https://youtube.com/watch?v=4PPodH3i_7k",
+                                  "type": "teaser", "official": True}],
+            "shows/123/seasons/2": [{"number": 5, "title": "The One"}],
+        })
+        with stub, patch("app.providers.simkl.transport.cached_get") as simkl_get:
+            resp = self._details("media=show&trakt=123&simkl=888&season=2")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        simkl_get.assert_not_called()
+        self.assertIn("shows/123/videos", called)
+        self.assertEqual({path.split("/")[1] for path in called}, {"123"})
+        self.assertIn("youtube-nocookie.com/embed/4PPodH3i_7k", resp.text)
+
     def test_details_reach_through_the_username_url_form_too(self):
         asyncio.run(share_links.set_enabled(self.user_id, "username", True))
         self._seed_detail_cache()
