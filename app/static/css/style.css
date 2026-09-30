@@ -2625,7 +2625,7 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
    row: this one is a link in a sentence's place, not a menu entry. */
 .nav-menu-items a.watchlist-link { width: auto; padding: 2px 0; font-size: 0.76rem; color: var(--gold); }
 .nav-menu-items a.watchlist-link:hover { background: none; text-decoration: underline; }
-.watchlist-failing { color: var(--danger, #e0736b); }
+.watchlist-failing { margin-left: 4px; color: var(--danger, #e0736b); }
 /* EVERY ROW GIVES THE SAME WIDTHS TO WHAT FOLLOWS ITS TITLE, whatever
    section it is in, so the columns line up down the whole list: the dates box
    (first, after the title, empty on a Cleanup or Completed row), the counts, and
