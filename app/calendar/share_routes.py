@@ -52,8 +52,8 @@ from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, Endpoint, endpoint_choices,
 from ..media import artwork, logos, posters, user_images
 from ..perftrace import span
 from ..providers import detail_source
-from ..providers.base import (Item, Media, Source, parse_item_key,
-                              parse_media)
+from ..providers.base import (Item, Media, Source, SourceUnavailable,
+                              parse_item_key, parse_media)
 from ..sources import prefs as source_prefs
 from ..timezones import build_options as build_timezone_options
 from ..templating import templates
@@ -1452,7 +1452,17 @@ async def _details(request: Request, share_row) -> Response:
         return _too_many_requests()
     if share_row is None:
         return details_panel.gap(request, _NO_DESCRIPTION)
-    described = await _describe_shared_title(request, share_row, settings)
+    try:
+        described = await _describe_shared_title(request, share_row, settings)
+    except SourceUnavailable:
+        # A SERVICE THAT COULD NOT BE ASKED IS THE SAME REFUSAL, drawn at 200 like
+        # every fragment — a non-200 is not swapped, so an escaped failure left
+        # the panel on its loading line. Not "could not load", which every other
+        # surface says: only a title this link shows is ever asked about, so a
+        # sentence of its own would tell a stranger, for any id tried while a
+        # service is down, whether the owner's calendar holds it.
+        logger.warning("A shared calendar's details lookup failed", exc_info=True)
+        described = None
     if described is None:
         # ONE REFUSAL FOR BOTH CASES, deliberately. "No source can describe this"
         # and "this link does not show that title" are different facts, and a

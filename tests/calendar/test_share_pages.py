@@ -695,6 +695,18 @@ class SharePageDetailsModalTests(_ShareDetailsTestCase):
         self.assertEqual({path.split("/")[1] for path in called}, {"123"})
         self.assertIn("youtube-nocookie.com/embed/4PPodH3i_7k", resp.text)
 
+    def test_a_service_that_cannot_be_reached_is_the_same_refusal_and_not_an_error(self):
+        """A lookup the link may make can still fail — the service is down — and
+        that used to escape the route as a 500, which the page does not swap in,
+        so the panel sat on its loading line. It is drawn as the one refusal a
+        stranger always gets: a different sentence for an outage would say, for
+        any id tried while a service is down, whether the owner's calendar
+        shows it, since only a title the link shows is ever asked about."""
+        from app.providers.base import SourceUnavailable
+        with patch("app.providers.trakt.detail.fetch_details",
+                   side_effect=SourceUnavailable("down")):
+            self.assertRefused(self._details("media=show&trakt=123&season=2"))
+
     def test_details_reach_through_the_username_url_form_too(self):
         asyncio.run(share_links.set_enabled(self.user_id, "username", True))
         self._seed_detail_cache()
