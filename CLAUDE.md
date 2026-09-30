@@ -248,7 +248,18 @@ failure is never read as an empty season. Because one renderer draws every
 answer, `DetailPort`'s answer has ONE KEY SET whoever gives it, and
 `tests/providers/test_protocol_conformance.py`'s
 `EveryDetailPortAnswersTheSameKeysTests` asserts it — a Protocol checks methods,
-not return shapes. The browser's half is one delegated listener in
+not return shapes. VIDEOS ARE THE ONE FIELD POOLED ACROSS SERVICES, and the
+exception is deliberate: a missing or wrong default video is recoverable only
+when the alternatives are on screen and say who listed them, and one field from
+one service showed nothing for a title whose only video was a teaser. Each
+answer's `videos` is that service's own list; `detail_source.describe_panel` —
+what every surface calls for a whole panel, a season tab calling
+`describe_season` — asks every other service the ids name for its list
+(`DetailPort.fetch_videos`) beside the description, and
+`app/providers/videos.py`'s pure `pool` orders them. The share page passes it the
+BOUND ids, so a service asked for its list is asked about a title the link
+shows. The panel plays them in ONE iframe that every row targets by name, so a
+pick replaces what was playing with no script. The browser's half is one delegated listener in
 `static/js/ui.js`: an element carrying `data-details-open` is an opener, and a
 control INSIDE an opener acts for itself rather than also opening the panel.
 
