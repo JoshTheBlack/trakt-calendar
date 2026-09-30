@@ -471,8 +471,10 @@ class _ShareDetailsTestCase(SharePageTestCase):
         asyncio.run(cache.set(f"{base}/shows/123?{ext}", {
             "title": "Test Show", "year": 2026, "overview": "Full overview.",
             "status": "returning_series", "network": "HBO", "runtime": 50,
-            "genres": ["drama"], "rating": 8.4,
-            "trailer": "https://youtu.be/dQw4w9WgXcQ"}))
+            "genres": ["drama"], "rating": 8.4}))
+        asyncio.run(cache.set(f"{base}/shows/123/videos?", [
+            {"title": "Official Trailer", "url": "https://youtube.com/watch?v=dQw4w9WgXcQ",
+             "site": "youtube", "type": "trailer", "official": True}]))
         asyncio.run(cache.set(f"{base}/shows/123/people?{ext}", {
             "cast": [{"person": {"name": "A Actor"}, "character": "Lead"}]}))
         asyncio.run(cache.set(f"{base}/shows/123/seasons/2?{ext}", [

@@ -22,7 +22,7 @@ from datetime import date
 
 from .. import register
 from ..base import (Capabilities, Media, Record, SearchHit, SeasonsAnswer, Source,
-                    TitleFacts)
+                    TitleFacts, Video)
 from . import calendar, detail, sync, watchlist
 from .transport import TraktError, TraktRateLimitError
 
@@ -82,6 +82,11 @@ class _TraktDetailPort:
                             season: int | None, *, cache_only: bool = False) -> dict:
         return await detail.fetch_details(settings, str(media), source_id, season,
                                           cache_only=cache_only)
+
+    async def fetch_videos(self, settings: Settings, media, source_id, *,
+                           cache_only: bool = False) -> list[Video]:
+        return await detail.fetch_videos(settings, str(media), source_id,
+                                         cache_only=cache_only)
 
     async def records_for(self, settings: Settings, source_id, media: Media,
                           moments) -> list[Record]:

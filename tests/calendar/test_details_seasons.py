@@ -37,10 +37,11 @@ from tests.support import AppTestCase, DetailsPanel, ORIGIN
 
 SHOW = {"title": "The Agency", "year": 2026, "overview": "Spies.",
         "status": "returning series", "network": "Paramount+", "runtime": 50,
-        "genres": ["drama"], "rating": 8.0,
-        # The TITLE's trailer. Neither service publishes one per season, so this
-        # is the only one there is and the panel draws it once.
-        "trailer": "https://youtu.be/dQw4w9WgXcQ"}
+        "genres": ["drama"], "rating": 8.0}
+# The TITLE's videos. Neither service lists any per season, so these are the only
+# ones there are and the panel draws one player for them.
+VIDEOS = [{"title": "Official Trailer", "url": "https://youtube.com/watch?v=dQw4w9WgXcQ",
+           "site": "youtube", "type": "trailer", "official": True}]
 PEOPLE = {"cast": [{"person": {"name": "Michael"}, "character": "Martian"}]}
 
 
@@ -92,6 +93,8 @@ class _CatalogueClient:
             return _Response(SHOW)
         if path == "shows/7/people":
             return _Response(PEOPLE)
+        if path == "shows/7/videos":
+            return _Response(VIDEOS)
         if path == "shows/7/seasons":
             return _Response(self._seasons)
         if path.endswith("/people") and path.startswith("shows/7/seasons/"):

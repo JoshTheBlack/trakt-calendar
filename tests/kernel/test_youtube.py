@@ -66,9 +66,3 @@ class VideoIdTests(unittest.TestCase):
     def test_the_watch_url_is_youtubes_own_page_for_that_id(self):
         self.assertEqual(youtube.watch_url("CEhHdPcz0u0?si=DTY4z"),
                          "https://www.youtube.com/watch?v=CEhHdPcz0u0")
-
-    def test_the_panel_filter_is_the_same_reading(self):
-        """One implementation: the template filter IS this function, so the
-        provider's link and the panel's embed cannot disagree about a value."""
-        from app.templating import templates
-        self.assertIs(templates.env.filters["youtube_id"], youtube.video_id)

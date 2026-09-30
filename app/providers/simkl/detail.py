@@ -24,7 +24,8 @@ from datetime import date, datetime
 from ... import youtube
 from ...config import Settings
 from .. import season as season_rules
-from ..base import Media, SeasonsAnswer, TitleFacts, proxied_image
+from ..base import (Media, SeasonsAnswer, Source, TitleFacts, Video, VideoKind,
+                    proxied_image)
 from . import _ids, _naming, titles, transport
 
 logger = logging.getLogger(__name__)
@@ -274,33 +275,69 @@ async def fetch_title_facts(settings: Settings, simkl_id, media: Media) -> Title
     return TitleFacts(str(fields.get("title") or ""), str(fields.get("network") or ""))
 
 
-def _trailer_url(trailers) -> str:
-    """The first trailer Simkl lists that names a video, as a watchable URL, or "".
+def _kind_named(name: str) -> VideoKind:
+    """A Simkl entry's kind, read from its name — the only place Simkl says one.
+
+    Teaser is asked first because "Teaser Trailer" is a teaser. A name saying
+    neither is VIDEO rather than a guess: measured across 10,140 stored entries,
+    47% say "trailer", 8% "teaser" and 42% neither (opening credits, clips and
+    free text among them).
+    """
+    lowered = name.lower()
+    if "teaser" in lowered:
+        return VideoKind.TEASER
+    if "trailer" in lowered:
+        return VideoKind.TRAILER
+    return VideoKind.VIDEO
+
+
+def videos_from(trailers) -> list[Video]:
+    """Simkl's `trailers` as `Video`s, in the order Simkl lists them.
 
     Simkl gives `[{"name": ..., "youtube": "<id>", "size": ...}]` — documented as
-    a bare YouTube id rather than a link — so the URL is built here. Building it
-    in the provider rather than in the renderer is what lets the modal's
-    `trailer` key mean the same thing whoever filled it in: Trakt sends a finished
-    URL, and a renderer that had to know which source it was looking at would be
-    a second place the two shapes are reconciled.
+    a bare YouTube id rather than a link, with no type, no date and no official
+    flag, so those are None here and the kind comes from the name
+    (`_kind_named`).
 
     THE FIELD IS NOT ALWAYS AN ID, and wrapping whatever it held in a watch URL
     offered a trailer button that went to YouTube's error page — a truncated
     URL, a channel handle, a number, free text (measured on a live instance: 38
     of 6,259 titles offering one). app/youtube.py reads which video a value names,
-    and a value naming none is SKIPPED, because an offered trailer that goes
-    nowhere is worse than no trailer.
-
-    THE FIRST READABLE ONE, because there is no other basis for choosing: the
-    list is unordered as far as the payload says.
+    and a value naming none is SKIPPED, because an offered video that goes
+    nowhere is worse than none.
     """
+    out = []
     for entry in trailers or []:
         if not isinstance(entry, dict):
             continue
-        url = youtube.watch_url(entry.get("youtube"))
-        if url:
-            return url
-    return ""
+        video_id = youtube.video_id(entry.get("youtube"))
+        if not video_id:
+            continue
+        name = " ".join(str(entry.get("name") or "").split())
+        out.append(Video(site="youtube", video_id=video_id,
+                         url=youtube.watch_url(video_id), title=name,
+                         kind=_kind_named(name), official=None, published=None,
+                         sources=(str(Source.SIMKL),)))
+    return out
+
+
+async def fetch_videos(settings: Settings, media: Media | str, simkl_id, *,
+                       cache_only: bool = False) -> list[Video]:
+    """Every video Simkl lists for a title, from the catalogue record
+    `fetch_details` reads — already stored, so this usually costs nothing.
+
+    A SEASON-TITLE WITH NONE TAKES ITS SERIES' LIST, by the same rule and the
+    same helper `fetch_details` fills its other blanks with: Simkl writes
+    trailers per season-title and has not written them yet for the newest ones.
+    Asked only where the title's own list is empty and a call is allowed, so it
+    answers exactly what this title's own description would have carried.
+    """
+    media = Media(media)
+    fields = await titles.fetch_title(settings, simkl_id, media, cache_only=cache_only) or {}
+    if (media is not Media.MOVIE and not cache_only and fields
+            and not fields.get("trailers")):
+        fields = await _filled_from_series(settings, simkl_id, media, fields)
+    return videos_from(fields.get("trailers"))
 
 
 async def _filled_from_series(settings: Settings, simkl_id, media: Media,
@@ -511,7 +548,9 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         "imdb_rating": (round(float(fields["imdb_rating"]), 1)
                         if fields.get("imdb_rating") else None),
         "certification": str(fields.get("certification") or "").upper(),
-        "trailer": _trailer_url(fields.get("trailers")),
+        # EVERY VIDEO SIMKL LISTS, not the first one — the panel pools them
+        # with the other service's and picks what plays (see videos_from).
+        "videos": videos_from(fields.get("trailers")),
         # Kept by `_extract` already; passed through for the calendar search,
         # which needs a month to point a catalogue hit at — see the same key on
         # the Trakt package's own payload.

@@ -23,7 +23,6 @@ from jinja2.ext import Extension
 
 from . import assets
 from . import chrome
-from . import youtube
 from .providers.base import Source
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
@@ -74,17 +73,6 @@ templates.env.globals["assets"] = assets
 # by every one of its callers — which is the fifteen-literals problem again, one
 # level up.
 templates.env.globals["product"] = chrome.PRODUCT_NAME
-
-
-# The eleven-character video id a trailer names, or None when it names none.
-#
-# A FILTER ON THE ENVIRONMENT RATHER THAN A STEP IN A ROUTE. The details panel is
-# one template rendered by three routes, and "which video is this" is the panel's
-# own question — asking it in each route would put the reading back in three
-# places, which is where it was when three JavaScript renderers each carried a
-# copy of it. The reading itself is app/youtube.py's, because the provider that
-# builds the trailer URL asks the same question.
-templates.env.filters["youtube_id"] = youtube.video_id
 
 
 def details_url(base: str, media, ids, season, key: str = "") -> str:

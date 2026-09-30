@@ -93,20 +93,20 @@
     which is also what keeps ONE iframe on the page however many seasons get
     opened.
 
-    Embedded where it is a YouTube link and linked out where it is not —
-    `youtube_id` is a filter on the shared Jinja environment rather than a
-    per-route step, because "is this a YouTube URL and which video is it" is one
-    question and this is its one asker. -#}
+    Embedded where it is a YouTube video and linked out where it is not — each
+    provider has already read which video a value names (app/youtube.py), so
+    the template plays `video_id` as it stands and asks nothing of its own. -#}
 {%- macro trailer() -%}
-{% if d.trailer %}
-{% set yt = d.trailer | youtube_id %}
+{% set vids = d.videos or [] %}
+{% if vids %}
+{% set first = vids[0] %}
 <div class="details-trailer">
-<div class="details-section-title">▶️ Trailer</div>
-{% if yt %}<div class="trailer-embed"><iframe src="https://www.youtube-nocookie.com/embed/{{ yt }}"
-        title="Trailer" loading="lazy" referrerpolicy="strict-origin-when-cross-origin"
+<div class="details-section-title">▶️ {{ first.kind | capitalize }}</div>
+{% if first.embeddable %}<div class="trailer-embed"><iframe src="https://www.youtube-nocookie.com/embed/{{ first.video_id }}"
+        title="{{ first.title or first.kind | capitalize }}" loading="lazy" referrerpolicy="strict-origin-when-cross-origin"
         allow="accelerometer; encrypted-media; gyroscope; picture-in-picture"
         allowfullscreen></iframe></div>
-{%- else %}<a class="pill-btn" href="{{ d.trailer }}" target="_blank" rel="noopener">Watch trailer ↗</a>{% endif %}
+{%- else %}<a class="pill-btn" href="{{ first.url }}" target="_blank" rel="noopener">Watch ↗</a>{% endif %}
 </div>
 {% endif %}
 {%- endmacro -%}

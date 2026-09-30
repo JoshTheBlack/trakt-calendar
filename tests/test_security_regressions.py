@@ -844,7 +844,7 @@ class DistraktDetailsTests(RegressionTestCase):
     DETAILS = {
         "title": "Silo", "year": 2026, "overview": "o", "status": "Returning",
         "network": "Apple TV", "runtime": 50, "genres": ["Drama"], "rating": 8.2,
-        "trailer": "", "homepage": "", "season": 3, "cast": [],
+        "videos": [], "homepage": "", "season": 3, "cast": [],
         "episodes": [{"number": n, "title": f"Ep {n}", "rating": None, "air_display": "Jul 1"}
                      for n in range(1, 6)],
     }
