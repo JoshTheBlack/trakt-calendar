@@ -471,3 +471,42 @@ class DepartureTests(WatchlistTestCase):
         pending = ww.expect(self.user_id, self.KEY, ww.Departure.ABANDON)
         await self.finish([pending])
         self.assertEqual(ww._departures, {})
+
+
+class RestoreTests(WatchlistTestCase):
+    """A restore replaces the tracker and leaves what was written at the
+    services alone: neither table travels in a backup, and the next pass
+    compares them with the restored tracker like any other."""
+
+    async def test_a_backup_carries_neither_table(self):
+        await self.listed(1)
+        await self.switch_on()
+        await ww.run(self.user_id)
+        exported = await distrakt.export_user_data(self.user_id)
+        self.assertFalse({"watchlist_targets", "watchlist_writes",
+                          "distrakt_listed_ids"} & set(exported))
+
+    async def test_both_survive_a_restore_and_the_restored_tracker_is_written(self):
+        await self.listed(2)
+        backup = await distrakt.export_user_data(self.user_id)   # holds show 2 only
+        await distrakt.remove_user_record(self.user_id, distrakt.record_key(a_record(2)), 1)
+        await self.listed(1)
+        await self.switch_on()
+        await ww.run(self.user_id)
+        await db.execute("INSERT INTO distrakt_listed_ids (user_id, source, service_id) "
+                         "VALUES (?, ?, ?)", (self.user_id, SIMKL, 42))
+
+        await distrakt.restore_user_data(self.user_id, backup)
+
+        self.assertEqual(await ww.switched_on(self.user_id), [SIMKL])
+        self.assertEqual(await self.states(), {"show:tmdb:1": ("written", "none")})
+        listed = await db.fetch_all("SELECT service_id FROM distrakt_listed_ids "
+                                    "WHERE user_id = ?", (self.user_id,))
+        self.assertEqual([row["service_id"] for row in listed], [42])
+        await ww.run(self.user_id)
+        self.assertEqual(self.fake.sent("put"), ["show:tmdb:1", "show:tmdb:2"])
+        # Show 1 is not in the restored tracker: its row is let go, so it is
+        # written again should it come back. Nothing was taken off the list.
+        self.assertEqual(await self.states(), {"show:tmdb:2": ("written", "none")})
+        self.assertEqual(self.fake.held, {"show:tmdb:1": "plantowatch",
+                                          "show:tmdb:2": "plantowatch"})

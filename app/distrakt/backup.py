@@ -78,6 +78,22 @@ _EXPORT_TABLES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # cannot be recovered from anywhere else.
     ("distrakt_prefs", ("network_emojis_json", "default_network_emoji", "updated_at")),
 )
+# DELIBERATELY NOT HERE, AND SO NEITHER EXPORTED NOR REPLACED BY A RESTORE:
+#   watchlist_targets and watchlist_writes (app/distrakt/watchlist_writes.py) —
+#     what the viewer switched on, and what the tracker has written to their
+#     own lists at those services. Both are facts about the SERVICE, which a
+#     restore does not change: a show written stays written there whatever file
+#     is loaded here. Replacing them from a file would forget writes that were
+#     made (so an undo could no longer put back what the viewer had) or claim
+#     writes that never were (so a show would never be written). Kept, the next
+#     pass compares them with the restored tracker like any other: a restored
+#     show no row covers is written, and a row whose show the file does not hold
+#     is let go.
+#   distrakt_listed_ids (app/distrakt/removals.py) — every id a service's
+#     listing has ever named, a fact about that service's library and not about
+#     anything tracked here.
+# A table missing from this list is one a restore leaves alone, which is what
+# `restore_user_data` does with every table it is not handed.
 
 
 class RestoreError(ValueError):
