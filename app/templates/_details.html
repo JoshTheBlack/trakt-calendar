@@ -96,20 +96,29 @@
     (app/providers/videos.py), with what plays first at the front — so this
     draws, and decides nothing.
 
-    ONE PLAYER, AND EVERY ROW IS A LINK AIMED AT IT. A row is an <a> whose
-    `target` names the iframe, so pressing it loads that video INTO THE SAME
-    FRAME: the previous video stops because its document is replaced, nothing
-    is left playing hidden, and there is no script and no request to this
-    server. MEASURED in Chromium and Firefox under the app's own frame-src: the
-    chosen video plays once `autoplay` is in the frame's `allow`, with no CSP
-    complaint. One lazy frame per video behind radio tabs was measured too and
-    rejected — a video switched away from is only hidden, and goes on playing.
-    Closing the panel removes the frame (static/js/ui.js), which is what stops
-    the sound.
+    ONE PLAYER, AND EVERY CHOICE IS A LINK AIMED AT IT. A choice is an <a>
+    whose `target` names the iframe, so pressing it loads that video INTO THE
+    SAME FRAME: the previous video stops because its document is replaced,
+    nothing is left playing hidden, and there is no script and no request to
+    this server. MEASURED in Chromium and Firefox under the app's own frame-src.
+    One lazy frame per video behind radio tabs was measured too and rejected — a
+    video switched away from is only hidden, and goes on playing. Closing the
+    panel removes the frame (static/js/ui.js), which is what stops the sound.
+
+    A CHOSEN VIDEO LOADS PAUSED, exactly as the first one does, and waits for
+    its own play button. Asked to autoplay, it began on its own and could sit on
+    YouTube's loading wheel with no control to stop it.
+
+    THE CHOICES ARE A MENU, NOT A LIST. They open from one button UNDER the
+    player, in a popover — top layer, light dismiss and Escape from the browser,
+    placed by `anchor()` (style.css's `.video-menu`) — so a film with a hundred
+    videos costs the panel one line, and the menu falls over what is below the
+    player rather than over the video. A pick closes it — the one thing here a
+    link cannot do, so static/js/ui.js does it and says why.
 
     NO "NOW PLAYING" MARK: a link cannot know which video the frame holds
-    without script. The first row is the default and says so; :focus shows the
-    one just pressed.
+    without script. The first choice is the default and says so; :focus shows
+    the one just pressed.
 
     A VIDEO HOSTED ANYWHERE BUT YOUTUBE IS A LINK OUT, in a new tab. frame-src
     admits YouTube's no-cookie host and nothing else (app/csp.py), and widening
@@ -117,8 +126,8 @@
 
     THE HEADING NAMES THE ONE VIDEO WHEN THERE IS ONE — "Teaser" where that is
     all there is, since calling it "Trailer" would misname it — and says
-    "Videos" when there is a list to pick from. The rows each say which service
-    lists them, with the same marks the card's flip control wears. -#}
+    "Videos" when there is a menu to pick from. Each choice says which service
+    lists it, with the same marks the card's flip control wears. -#}
 {%- macro videos() -%}
 {% set vids = d.videos or [] %}
 {% if vids %}
@@ -128,14 +137,15 @@
 {% if first.embeddable %}<div class="video-player"><iframe name="detailsPlayer"
         src="https://www.youtube-nocookie.com/embed/{{ first.video_id }}"
         title="{{ first.title or first.kind | capitalize }}" loading="lazy" referrerpolicy="strict-origin-when-cross-origin"
-        allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture"
+        allow="accelerometer; encrypted-media; gyroscope; picture-in-picture"
         allowfullscreen></iframe></div>
 {%- elif vids | length == 1 %}<a class="pill-btn" href="{{ first.url }}" target="_blank" rel="noopener">Watch ↗</a>{% endif %}
 {% if vids | length > 1 %}
-<ol class="video-picker">
+<button type="button" class="pill-btn video-menu-btn" popovertarget="detailsVideoMenu">▾ All {{ vids | length }} videos</button>
+<ol class="video-menu" id="detailsVideoMenu" popover>
     {%- for v in vids %}
     <li><a class="video-pick"
-        {%- if v.embeddable %} href="https://www.youtube-nocookie.com/embed/{{ v.video_id }}?autoplay=1" target="detailsPlayer"
+        {%- if v.embeddable %} href="https://www.youtube-nocookie.com/embed/{{ v.video_id }}" target="detailsPlayer"
         {%- else %} href="{{ v.url }}" target="_blank" rel="noopener"{% endif %}>
         <span class="v-title">{{ v.title or v.kind | capitalize }}</span>
         {%- if v.title %}<span class="v-kind">{{ v.kind | capitalize }}</span>{% endif %}

@@ -1802,17 +1802,37 @@ button.search-row { width: 100%; background: none; font: inherit; text-align: le
 .details-section-title { font-family: 'Bebas Neue', sans-serif; letter-spacing: 1px; color: var(--gold-soft); font-size: 1.25rem; margin: 4px 0 2px; }
 .video-player { position: relative; width: 100%; aspect-ratio: 16/9; border-radius: 10px; overflow: hidden; border: 1px solid var(--card-border); background: #000; }
 .video-player iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
-/* EVERY VIDEO BOTH SERVICES LIST, AS LINKS AIMED AT THE ONE PLAYER ABOVE
-   (_details.html's `videos`). A BOUNDED BOX THAT SCROLLS, because the list is
-   not capped: a film's often runs past ten, and it must not push the season's
-   own content a screen further down. About five rows show before it scrolls.
-   A row's title takes the room and WRAPS rather than overflowing, so a long
-   Trakt title cannot widen the panel at phone width. */
-.video-picker { list-style: none; margin: 8px 0 0; padding: 0; display: flex;
-                flex-direction: column; gap: 2px; max-height: 190px; overflow-y: auto; }
+/* EVERY VIDEO BOTH SERVICES LIST, AS A MENU OF LINKS AIMED AT THE ONE PLAYER
+   (_details.html's `videos`). The button sits under the player; the menu is a
+   popover, so the browser gives it the top layer, light dismiss and Escape.
+   PLACED BY `anchor()` UNDER ITS BUTTON, for the reason `.ranker-menu` states:
+   `position-anchor: auto` has to be spelled out or the implicit anchor does not
+   resolve. Under rather than over, so it falls across the panel below the
+   player and not across the video; above only where there is no room below.
+   Each of those also has a SHOVED form, pinned 8px from the window's left
+   edge, for a window narrower than the space the menu needs right of its
+   button: without them a phone had no position that fitted and Chromium left
+   the menu hanging off the bottom of the window (measured at 390 wide).
+   IT SCROLLS INSIDE ITSELF, because the list is not capped — a film's runs past
+   a hundred. A choice's title WRAPS rather than overflowing, and the menu is
+   never wider than the window, so a long title cannot widen a phone's page. */
+.video-menu-btn { margin-top: 8px; }
+.video-menu {
+    position: fixed; position-anchor: auto; inset: auto;
+    top: anchor(bottom); left: anchor(left); margin: 4px 0 0 0;
+    position-try-fallbacks: --video-menu-shove, --video-menu-above, --video-menu-above-shove;
+    width: min(460px, calc(100vw - 16px)); max-height: min(50vh, 340px); overflow-y: auto;
+    list-style: none; padding: 5px;
+    background: var(--bg-panel); border: 1px solid var(--card-border);
+    border-radius: 10px; box-shadow: 0 18px 40px rgba(0,0,0,0.6); color: var(--text);
+}
+.video-menu:popover-open { display: flex; flex-direction: column; gap: 2px; }
+@position-try --video-menu-shove { left: 8px; top: anchor(bottom); margin: 4px 0 0 0; }
+@position-try --video-menu-above { bottom: anchor(top); top: auto; left: anchor(left); margin: 0 0 4px 0; }
+@position-try --video-menu-above-shove { bottom: anchor(top); top: auto; left: 8px; margin: 0 0 4px 0; }
 .video-pick { display: flex; align-items: center; gap: 8px; padding: 6px 10px;
-              border-radius: 8px; color: var(--text-dim); text-decoration: none;
-              font-size: 0.82rem; background: rgba(255,255,255,0.02); }
+              border-radius: 6px; color: var(--text-dim); text-decoration: none;
+              font-size: 0.82rem; }
 .video-pick:hover { color: var(--text); background: rgba(255,255,255,0.07); }
 /* THE ONE JUST PRESSED. A link cannot know which video the frame holds, so
    there is no "now playing" mark — but focus stays on the row that was

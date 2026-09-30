@@ -272,7 +272,7 @@ class DetailModalSourceTests(AppTestCase):
         self.assertIn("tv/2601798", simkl_asked)
         self.assertIn('src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"', html)
         # And Simkl's teaser is one press away, in the same player.
-        self.assertIn('href="https://www.youtube-nocookie.com/embed/4PPodH3i_7k?autoplay=1" '
+        self.assertIn('href="https://www.youtube-nocookie.com/embed/4PPodH3i_7k" '
                       'target="detailsPlayer"', html)
 
     def test_a_season_tab_asks_nobody_for_videos(self):

@@ -153,6 +153,22 @@ document.addEventListener('close', (event) => {
     if (modal.hasAttribute('data-modal-discard')) modal.remove();
 }, true);
 
+// A VIDEO CHOSEN FROM THE DETAILS PANEL'S MENU CLOSES THE MENU.
+//
+// THE LINK DOES THE CHOOSING, AND THIS ONLY CLOSES. Each choice is an <a> whose
+// `target` is the player frame (templates/_details.html's `videos`), so the
+// video loads with no script and no request here. What markup cannot say is
+// "and close the menu": a link cannot close a popover, and the one element that
+// can — a button's `popovertargetaction="hide"` — can load a frame only by
+// submitting a form, which the policy's `form-action 'self'` refuses for a
+// YouTube address. Left open, the menu sat over the video, and a press on the
+// video does not dismiss it: that press lands in YouTube's frame, not this page
+// (measured in Chromium and Firefox).
+document.addEventListener('click', (event) => {
+    const pick = event.target instanceof Element && event.target.closest('.video-pick');
+    if (pick) pick.closest('[popover]')?.hidePopover();
+});
+
 // AN OVERLAY THE SERVER DELIVERS ALREADY OPEN, PUT INTO THE TOP LAYER.
 //
 // THE ONE PART OF OPENING A DIALOG THAT MARKUP CANNOT STATE, and the reason is
