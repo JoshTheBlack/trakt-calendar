@@ -501,6 +501,9 @@ async def distrakt(request: Request):
         # Which share-link forms would actually resolve, so the selector offers
         # only the ones that produce a working link.
         "post_link": await _post_link_choices(user.user_id),
+        # The header's list switches, one per service this viewer could write
+        # the tracker's shows to (watchlist_writes.switches).
+        "watchlists": await watchlist_writes.switches(user.user_id, settings),
         **_modal_context(settings, year, month),
     }
     return templates.TemplateResponse(request, "distrakt.html", context)
@@ -2188,6 +2191,52 @@ async def api_distrakt_emoji_default(request: Request):
         "request": request, "default_network_emoji": default_emoji,
         "month_query": f"?year={year}&month={month}",
     }))
+
+
+async def _watchlists_answer(request: Request, user_id: int, settings, *,
+                             panel_oob: bool) -> Response:
+    """The list switches' pill and panel, drawn from what is stored now."""
+    return templates.TemplateResponse(request, "_distrakt_watchlists_answer.html", {
+        "request": request, "panel_oob": panel_oob,
+        "switches": await watchlist_writes.switches(user_id, settings),
+    })
+
+
+@guard.post("/api/distrakt/watchlist", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_watchlist(request: Request):
+    """Switch the tracker's writes to one service's list on or off, from its box
+    in the header's list panel.
+
+    ON WRITES EVERYTHING ALREADY ON THE TRACKER, and not here: the pass every
+    tracker request ends with (`_owe_watchlist_pass`) runs once this answer has
+    gone, finds every show owed, and writes them in one batch. The answer says
+    so, and the panel asks for itself again until the writing is done. OFF stops
+    future writes and changes nothing at the service.
+
+    ONLY A SERVICE THE PANEL OFFERS, and on only through a live link: a switch
+    left on after its link went can be turned off, never on.
+    """
+    user_id = await _distrakt_user_id(request)
+    data = await authz.json_body(request)
+    settings = await viewer.settings_for_user(user_id)
+    offered = {switch.source: switch
+               for switch in await watchlist_writes.switches(user_id, settings)}
+    chosen = offered.get(str(data.get("source") or ""))
+    on = route_params.ticked(data.get("on"))
+    if chosen is None or (on and not chosen.linked):
+        return _month_refusal(request, "That service's list can't be written from here.")
+    await watchlist_writes.switch(user_id, chosen.source, on)
+    return await _watchlists_answer(request, user_id, settings, panel_oob=True)
+
+
+@guard.get("/distrakt/fragments/watchlists", AuthLevel.DISTRAKT_APPROVED)
+async def watchlists_fragment(request: Request):
+    """The list panel again, asked for by itself while a write is under way —
+    see templates/_distrakt_watchlists.html. Reading it starts a pass like any
+    tracker request, which is harmless: a pass with nothing owed asks nobody."""
+    user_id = await _distrakt_user_id(request)
+    settings = await viewer.settings_for_user(user_id)
+    return await _watchlists_answer(request, user_id, settings, panel_oob=False)
 
 
 async def _network_tmdb(user_id: int, month_key: str, network: str) -> int | None:

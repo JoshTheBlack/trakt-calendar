@@ -53,6 +53,7 @@ DISTRAKT_GETS = (
     "/api/distrakt/export",
     "/distrakt/fragments/search-movie",
     "/distrakt/fragments/import",
+    "/distrakt/fragments/watchlists",
 )
 
 DISTRAKT_POSTS = (
@@ -77,6 +78,7 @@ DISTRAKT_POSTS = (
     "/api/distrakt/backfill/apply",
     "/api/distrakt/add-movie",
     "/api/distrakt/remove-movie",
+    "/api/distrakt/watchlist",
 )
 
 

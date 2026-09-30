@@ -2,6 +2,7 @@
 {% import '_distrakt_modals.html' as modals %}
 {% import '_distrakt_import.html' as imports %}
 {% import '_distrakt_emoji_default.html' as default_emoji %}
+{% import '_distrakt_watchlists.html' as lists %}
 {% set site_suffix = false %}
 {% set progress_bar = true %}
 {% set body_class = 'distrakt-page' %}
@@ -45,6 +46,13 @@
                 {{ default_emoji.field(default_network_emoji, month_query) }}
                 <p class="distrakt-note">What your Discord posts use for a network with
                     no code of its own. A row's code is edited on the row itself.</p>
+            </div>
+        </div>
+        {#- The list switches — see _distrakt_watchlists.html. -#}
+        <div class="nav-menu watchlist-menu">
+            {{ lists.pill(watchlists) }}
+            <div class="nav-menu-items watchlist-panel" id="watchlistMenu" popover>
+                {{ lists.panel(watchlists) }}
             </div>
         </div>
 {% endcall %}

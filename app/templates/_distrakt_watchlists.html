@@ -1,0 +1,85 @@
+{# THE LIST SWITCHES: whether the tracker puts its shows on the viewer's own list
+   at each service (app/distrakt/watchlist_writes.py). A pill in the header
+   opening a popover (distrakt.html), the shape the default emoji's is — light
+   dismiss and Escape come with the popover, and nothing here is script.
+
+   ONE FORM PER SERVICE, POSTING ITSELF ON `change`. The box has a hidden
+   companion of the same name before it, because an unticked box sends nothing
+   and "off" has to arrive as an answer (route_params.last_value reads the pair).
+   The request sits on the FORM and the only other request in the panel sits on
+   a hidden SIBLING of it, never on an ancestor: htmx's attribute inheritance is
+   on, and a request on an ancestor would become the box's own.
+
+   WHAT A SERVICE IS CALLED, WHETHER IT IS OFFERED AND WHERE ITS LIST LIVES are
+   all the server's (watchlist_writes.switches), so a service gaining a list
+   port appears here with no change to this file.
+
+   `oob` IS THE ANSWER'S SPELLING (routes.api_distrakt_watchlist): the pill and
+   the panel by id, not the popover around them, so a popover a box was changed
+   in stays open showing what is now true. #}
+{% macro pill(switches, oob=false) -%}
+{%- set failing = switches | selectattr('on') | sum(attribute='failed') -%}
+<button type="button" id="watchlistPill" class="pill-btn nav-menu-btn" popovertarget="watchlistMenu"
+        title="Put the shows on this tracker on your own list at a service"
+        {%- if oob %} hx-swap-oob="outerHTML"{% endif %}>📋 Lists
+    {%- if failing %} <span class="watchlist-failing">⚠ {{ failing }}</span>{% endif %}</button>
+{%- endmacro %}
+
+{% macro panel(switches, oob=false) -%}
+{#- Asks for itself again while a write is under way, and stops asking once the
+    answer says nothing is left to wait for. A write that failed is waited out
+    rather than watched, so a service that is down is not polled either. -#}
+{%- set writing = switches | selectattr('on') | selectattr('linked')
+                           | rejectattr('quiet') | selectattr('waiting') | list -%}
+<div id="watchlistPanel" class="watchlist-panel-body"
+     {%- if oob %} hx-swap-oob="outerHTML"{% endif %}>
+    <p class="watchlist-title">Your lists</p>
+    {% for switch in switches %}
+    <form class="watchlist-switch" hx-post="/api/distrakt/watchlist" hx-json-enc hx-boost="false"
+          hx-trigger="change" hx-swap="none">
+        <input type="hidden" name="source" value="{{ switch.source }}">
+        <input type="hidden" name="on" value="">
+        <label class="watchlist-toggle">
+            <input type="checkbox" name="on" value="on" autocomplete="off"
+                   {%- if switch.on %} checked{% endif %}>
+            <span>Put these shows on my {{ switch.label }} list</span>
+        </label>
+        {% if switch.list_url %}
+        <a class="watchlist-link" href="{{ switch.list_url }}" target="_blank"
+           rel="noopener noreferrer" hx-boost="false">Open it on {{ switch.label }} ↗</a>
+        {% endif %}
+        <p class="distrakt-note watchlist-state">
+            {%- if not switch.on -%}
+                Off. Nothing is written to {{ switch.label }}.
+            {%- elif not switch.linked -%}
+                {{ switch.label }} is no longer linked to your account, so nothing is
+                written. What is owed is kept until it is linked again.
+            {%- elif switch.failed or switch.trouble -%}
+                <strong class="distrakt-warn">
+                {%- if switch.failed %}{{ switch.failed }} show{{ '' if switch.failed == 1 else 's' }} could not be written.{% endif %}
+                {%- if switch.trouble %} {{ switch.trouble }}{% endif %}</strong>
+                Tried again after a few minutes, on your next visit to this page. The tracker
+                itself is unaffected.
+            {%- elif switch.waiting -%}
+                Writing {{ switch.waiting }} show{{ '' if switch.waiting == 1 else 's' }} to
+                {{ switch.label }}…
+            {%- else -%}
+                On. {{ switch.written }} show{{ '' if switch.written == 1 else 's' }} on this
+                tracker {{ 'is' if switch.written == 1 else 'are' }} on your {{ switch.label }} list.
+                New ones are added as they arrive.
+            {%- endif -%}
+        </p>
+    </form>
+    {% else %}
+    <p class="distrakt-note">None of the services linked to your account keeps a list
+        this tracker can write to.</p>
+    {% endfor %}
+    <p class="distrakt-note">Each show is added once, when it arrives. Giving up on it
+        drops it there; ✕ takes back only what this tracker added. Switching off
+        changes nothing at the service.</p>
+    {% if writing %}
+    <div hidden hx-get="/distrakt/fragments/watchlists" hx-trigger="load delay:2s"
+         hx-target="#watchlistPanel" hx-swap="outerHTML"></div>
+    {% endif %}
+</div>
+{%- endmacro %}

@@ -45,7 +45,7 @@ from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from typing import NamedTuple
 
-from .. import clock, db, providers
+from .. import auth, clock, db, providers
 from ..auth import viewer
 from ..providers.base import (NOT_HELD, ItemKey, Media, SourceUnavailable, WatchlistOutcome,
                               WatchlistResult, WatchlistTitle, WatchlistUndo, parse_item_key)
@@ -275,6 +275,61 @@ def _departed_title(key: str, source: str, row: WriteRow | None) -> WatchlistTit
     if row is not None and row.service_id:
         ids[source] = row.service_id
     return WatchlistTitle(title, ids)
+
+
+# the switches
+
+class Switch(NamedTuple):
+    """One service's switch as the tracker page draws it."""
+    source: str
+    label: str
+    on: bool
+    # Whether the viewer's link to the service can be written through now.
+    # False for a switch left on after the link went: it can still be turned
+    # off, and says why nothing is being written.
+    linked: bool
+    # The list on the service's own site, where the linked account is known.
+    list_url: str | None
+    written: int      # shows on the tracker the list has from this tracker
+    waiting: int      # shows on the tracker still owed a write
+    failed: int       # shows whose last write failed
+    trouble: str      # the last failure's wording, or ""
+    quiet: bool       # a failure is being waited out before asking again
+
+
+async def switches(user_id: int, settings) -> list[Switch]:
+    """Every service this viewer can switch writes on for, plus any switched on
+    whose link has since gone, in the registry's order.
+
+    WHO IS OFFERED IS providers.for_watchlist's to say — a service carrying a
+    list port that this viewer has linked — so a service gaining a port appears
+    here with no change to this function or to the page.
+    """
+    on = set(await switched_on(user_id))
+    linked = {str(source): port for source, port in providers.for_watchlist(settings)}
+    accounts = {row["provider"]: row["provider_user_id"]
+                for row in await auth.list_identities(user_id)}
+    tracked = await on_tracker(user_id) if on else {}
+    out = []
+    for source, provider in providers.registered().items():
+        name = str(source)
+        if name not in linked and name not in on:
+            continue
+        held = await rows(user_id, name) if name in on else {}
+        port = linked.get(name)
+        account = accounts.get(name)
+        found = trouble(user_id, name)
+        out.append(Switch(
+            source=name, label=provider.label, on=name in on, linked=port is not None,
+            list_url=port.list_url(str(account)) if port is not None and account else None,
+            written=sum(1 for key in tracked if key in held
+                        and held[key].state is WriteState.WRITTEN),
+            waiting=sum(1 for key in tracked if key not in held
+                        or held[key].state in OWED_STATES),
+            failed=sum(1 for row in held.values() if row.state is WriteState.FAILED),
+            trouble=found.message if found else "",
+            quiet=_quiet(user_id, name)))
+    return out
 
 
 # the pass
