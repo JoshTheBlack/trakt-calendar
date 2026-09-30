@@ -3323,6 +3323,133 @@ MIGRATION_45 = """
 ALTER TABLE tier_items ADD COLUMN season_name TEXT;
 """
 
+
+# ---------------------------------------------------------------------------
+# 46 — the tracker's writes to a service's own lists, the ids a listing ever
+#      named, and the old shared `slug` column retired
+# ---------------------------------------------------------------------------
+MIGRATION_46_TABLES = """
+-- WHICH OF A VIEWER'S SERVICES THE TRACKER WRITES ITS SHOWS TO. A row means
+-- switched on, and its absence means off: there is no third state to store, and
+-- a boolean beside the key would be a second way to say "off" that the writer
+-- would then have to agree with. `source` is an open set of service names, as
+-- everywhere else in this schema, so another service is a registration rather
+-- than a rebuild.
+CREATE TABLE watchlist_targets (
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    source     TEXT    NOT NULL,
+    enabled_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, source)
+);
+
+-- WHAT THE TRACKER WROTE TO A SERVICE, PER SHOW, AND WHAT THAT SERVICE HELD
+-- BEFORE IT DID. A write to somebody's own list moves a title that may have been
+-- where the viewer put it, so undoing the tracker's own write means putting back
+-- exactly what was there -- and the only record of that is taken at the moment
+-- of the write. Keyed on the show (not a season): a service lists a show once.
+--
+-- `status_before` is the service's own vocabulary as it was read: for a service
+-- whose lists are statuses, one of them or 'none'; for a plain watchlist,
+-- 'listed' or 'none'. `state` is where the show stands: written, dropped,
+-- undone, not_found, refused, failed. `service_id` is the id that was sent, so
+-- an undo addresses the same title the write did even if the row later learns a
+-- different one.
+CREATE TABLE watchlist_writes (
+    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    source        TEXT    NOT NULL,
+    match_source  TEXT    NOT NULL,
+    match_id      TEXT    NOT NULL,
+    service_id    TEXT,
+    status_before TEXT    NOT NULL,
+    state         TEXT    NOT NULL,
+    updated_at    INTEGER NOT NULL,
+    PRIMARY KEY (user_id, source, match_source, match_id)
+);
+
+-- EVERY ID A SERVICE'S LIBRARY LISTING HAS EVER NAMED, per account. What makes
+-- "no longer lists" a claim about something that WAS listed (see
+-- app/distrakt/removals.py). It lived in api_cache, where the size cap evicts
+-- the least recently stored row first -- and a set rewritten only when a removal
+-- is announced is exactly that row, so an eviction silently cost the next real
+-- removal its mark. A table is not evicted. It only grows, as the set always did.
+CREATE TABLE distrakt_listed_ids (
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    source     TEXT    NOT NULL,
+    service_id INTEGER NOT NULL,
+    PRIMARY KEY (user_id, source, service_id)
+) WITHOUT ROWID;
+"""
+
+# The cache address the listed sets were filed under: distrakt_listed:v1:<user>:
+# <source>. RESTATED HERE, NOT IMPORTED, for migration 28's reason -- this reads
+# the rows as they were written, and must go on reading them that way whatever
+# app/distrakt/removals.py does next.
+_LISTED_CACHE_PREFIX = "distrakt_listed:v1:"
+
+
+def _listed_cache_set(payload) -> set[int] | None:
+    """One cached listed set as ids, or None when the row cannot be read.
+
+    THE BLOB FORMAT IS RESTATED TOO: app/cache.py stores zlib-compressed JSON,
+    and that module imports this one, so it cannot be imported back. The set was
+    written as a sorted JSON list of integers."""
+    import zlib
+
+    try:
+        value = json.loads(zlib.decompress(payload).decode("utf-8"))
+        return {int(item) for item in value} if isinstance(value, list) else None
+    except (zlib.error, ValueError, TypeError):
+        return None
+
+
+def MIGRATION_46(conn: sqlite3.Connection) -> None:
+    """The watchlist tables, the listed-ids set moved out of the evictable cache,
+    and the old shared `slug` column dropped.
+
+    THE CACHED SETS ARE COPIED, THEN THEIR ROWS DELETED. Nothing reads them once
+    this has run, so leaving them would only hold bytes until the sweep. A set
+    whose account no longer exists is dropped rather than copied -- the foreign
+    key would refuse it, and there is nobody left to mark. A set that cannot be
+    decoded is dropped with a warning: losing it costs marks until the next
+    listing names those titles again, never history, which is the same bargain
+    the cache always offered.
+
+    `slug` GOES, WITH NO BACKFILL LEFT TO DO. It was one column holding whichever
+    service's name for a title was learned last; migration 31 split it into
+    `trakt_slug` and `simkl_slug` and kept it only because some rows had nothing
+    else. MEASURED before this was written, on the development database and on a
+    production copy at schema 39: 0 rows in any of the three tables still relied
+    on it, and 0 rows were owed a name at all. Nothing has written it since the
+    split, so no row can come to rely on it again. Nothing indexes it, so a plain
+    DROP COLUMN is enough.
+    """
+    _run_script(conn, MIGRATION_46_TABLES)
+
+    # `_` is LIKE's one-character wildcard, so the prefix is escaped: the rows
+    # this deletes must be exactly the ones it read.
+    pattern = _LISTED_CACHE_PREFIX.replace("_", r"\_") + "%"
+    rows = conn.execute(
+        r"SELECT cache_key, payload FROM api_cache WHERE cache_key LIKE ? ESCAPE '\'",
+        (pattern,)).fetchall()
+    for cache_key, payload in rows:
+        user_part, _, source = cache_key[len(_LISTED_CACHE_PREFIX):].partition(":")
+        ids = _listed_cache_set(payload)
+        if not user_part.isdigit() or not source or ids is None:
+            logger.warning("Migration 46: dropping an unreadable listed-ids cache row %r",
+                           cache_key)
+            continue
+        user_id = int(user_part)
+        if conn.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone() is None:
+            continue
+        conn.executemany(
+            "INSERT OR IGNORE INTO distrakt_listed_ids (user_id, source, service_id) "
+            "VALUES (?, ?, ?)", [(user_id, source, service_id) for service_id in sorted(ids)])
+    conn.execute(r"DELETE FROM api_cache WHERE cache_key LIKE ? ESCAPE '\'", (pattern,))
+
+    for table in ("distrakt_user_seasons", "distrakt_month_records", "distrakt_unsettled_rows"):
+        conn.execute(f"ALTER TABLE {table} DROP COLUMN slug")
+
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -3369,6 +3496,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (43, MIGRATION_43),
     (44, MIGRATION_44),
     (45, MIGRATION_45),
+    (46, MIGRATION_46),
 ]
 
 

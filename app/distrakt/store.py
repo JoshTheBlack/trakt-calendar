@@ -194,12 +194,11 @@ IDENTITY_COLUMNS = ("media", "match_source", "match_id")
 # uses, and a second table of the same fact would drift.
 ID_COLUMNS = {
     "trakt_id": "trakt", "simkl_id": "simkl", "tmdb": "tmdb",
-    "tvdb": "tvdb", "imdb": "imdb", "mal": "mal", "slug": "slug",
+    "tvdb": "tvdb", "imdb": "imdb", "mal": "mal",
     # A SLUG IS PER SERVICE, and these two are why. Both services call a title's
-    # readable name `slug` and disagree on it, so the single column above held
-    # whichever one wrote last — and a link built from it was wrong for the other
-    # service, in both directions. `slug` is kept because rows predate the split
-    # and it is still the only value they have; nothing writes it any more.
+    # readable name `slug` and disagree on it, so the single shared column that
+    # came before them held whichever one wrote last — and a link built from it
+    # was wrong for the other service, in both directions. That column is gone.
     "trakt_slug": "trakt_slug", "simkl_slug": "simkl_slug",
 }
 

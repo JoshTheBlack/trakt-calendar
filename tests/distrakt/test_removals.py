@@ -39,9 +39,7 @@ class _Port:
 async def once_listed(user_id: int, *ids: int, source: str = "simkl") -> None:
     """An earlier listing of this service named these ids — what a title has to
     have been, before its absence from a listing can mean it was removed."""
-    from app import cache
-    await cache.set(removals._listed_key(user_id, source), sorted(ids),
-                    retain_seconds=removals._LISTED_SECONDS)
+    await removals._remember_listed(user_id, source, set(ids))
 
 
 class MarkingWhatAServiceNoLongerListsTests(DistraktTestCase):
@@ -259,6 +257,47 @@ class MarkingWhatAServiceNoLongerListsTests(DistraktTestCase):
         for _pass in range(2):
             await removals.check(SETTINGS, self.user_id, Source.SIMKL, _Port({999: "x"}))
             self.assertEqual((await self._record())["missing_sources"], ["simkl"])
+
+
+class WhatEveryListingNamedIsKeptTests(DistraktTestCase):
+    """The set a removal is judged against lives in its own table, because the
+    response cache it used to live in evicts its oldest rows under the size cap —
+    and this set, written only when a removal is announced, is the row that goes
+    first."""
+
+    async def test_a_listing_adds_the_ids_it_names_to_what_earlier_ones_named(self):
+        await distrakt.add_user_record(self.user_id, a_record(
+            tmdb=901, season=1, kind=distrakt.RecordKind.KEEPUP,
+            ids={"tmdb": 901, "simkl": 999}))
+        await once_listed(self.user_id, 222)
+
+        await removals.check(SETTINGS, self.user_id, Source.SIMKL, _Port({999: "x", 333: "y"}))
+
+        self.assertEqual(await removals._ever_listed(self.user_id, "simkl"), {222, 333, 999})
+
+    async def test_the_set_is_per_service(self):
+        """Trakt's listing naming an id says nothing about Simkl's."""
+        await once_listed(self.user_id, 222, source="trakt")
+        self.assertEqual(await removals._ever_listed(self.user_id, "simkl"), set())
+        self.assertEqual(await removals._ever_listed(self.user_id, "trakt"), {222})
+
+    async def test_emptying_the_response_cache_forgets_nothing(self):
+        """THE EVICTION THE TABLE EXISTS FOR, forced: a title listed once and
+        since removed is still marked after the whole cache is gone."""
+        from app import db
+        await distrakt.add_user_record(self.user_id, a_record(
+            season=1, kind=distrakt.RecordKind.KEEPUP, ids={"tmdb": 900, "simkl": 222}))
+        await distrakt.add_user_record(self.user_id, a_record(
+            tmdb=901, season=1, kind=distrakt.RecordKind.KEEPUP,
+            ids={"tmdb": 901, "simkl": 999}))
+        await removals.check(SETTINGS, self.user_id, Source.SIMKL, _Port({222: "a", 999: "x"}))
+        await db.execute("DELETE FROM api_cache")
+
+        await removals.check(SETTINGS, self.user_id, Source.SIMKL, _Port({999: "x"}))
+
+        record = next(r for r in await store.user_records(self.user_id)
+                      if str(store.record_key(r)) == "show:tmdb:900")
+        self.assertEqual(record["missing_sources"], ["simkl"])
 
 
 class APassThatMarksMostOfATrackerSaysSoTests(DistraktTestCase):

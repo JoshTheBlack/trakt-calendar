@@ -36,12 +36,12 @@ async def _seed_dataset(user_id: int, *, tag: str) -> None:
     """A dataset touching every exported table, so a round trip has something to
     prove in each of them."""
     await distrakt.add_month_record(user_id, "2026-07", {
-        "ids": {"trakt": 101, "tmdb": 555, "slug": f"slug-{tag}"}, "season": 1,
+        "ids": {"trakt": 101, "tmdb": 555, "trakt_slug": f"slug-{tag}"}, "season": 1,
         "title": f"Show {tag}", "network": "Net", "media": "show",
         "kind": distrakt.RecordKind.SERIES_PREMIERE,
     })
     await distrakt.add_month_record(user_id, "2026-08", {
-        "ids": {"trakt": 202, "tmdb": 606, "slug": f"other-{tag}"}, "season": 2,
+        "ids": {"trakt": 202, "tmdb": 606, "trakt_slug": f"other-{tag}"}, "season": 2,
         "title": "Second", "kind": distrakt.RecordKind.SEASON_PREMIERE,
     })
     # The viewer's own list, which belongs to no month at all.
@@ -345,7 +345,9 @@ class LegacyBackupTests(ExportTestCase):
         # Re-keyed by running the waterfall over the ids the row already held —
         # the same resolution the migration does to a live database.
         self.assertEqual((row["match_source"], row["match_id"]), ("tmdb", "9001"))
-        self.assertEqual(row["ids"], {"trakt": 601, "tmdb": 9001, "slug": "old-show"})
+        # The document's shared `slug` is not carried: nothing stores that column
+        # any more, and it cannot be said whose name it was.
+        self.assertEqual(row["ids"], {"trakt": 601, "tmdb": 9001})
         # and everything a frozen month renders from came back untouched
         self.assertEqual((row["watched"], row["total"], row["bucket"]),
                          (3, 8, "abandoned"))

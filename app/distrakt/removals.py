@@ -24,11 +24,12 @@ from __future__ import annotations
 
 import logging
 
-from .. import cache
+from .. import db
 from ..providers.base import ItemKey
 from . import store
 
 logger = logging.getLogger(__name__)
+
 
 # EVERY ID A SERVICE'S LISTING HAS EVER NAMED, per account — what makes "no longer
 # lists" a claim about something that WAS listed. A row carries a service's id
@@ -38,25 +39,31 @@ logger = logging.getLogger(__name__)
 # holding nothing for either) were both marked "dropped", and the mark's own
 # tooltip says to remove the row — which is what happened to TRINITY. So a title
 # is marked only once its id has been seen in a listing and has since gone.
+#
 # THE SET ONLY GROWS: a title removed stays remembered as once held, which is
-# what keeps its mark; one put back is cleared by clear_named. Kept in the cache
-# (app/cache.py), so losing it costs marks and never history — the next listing
-# starts it again. The version is in the key for the reason watch_history gives
-# for its kept library read.
-_LISTED_VERSION = 1
-_LISTED_SECONDS = 400 * 24 * 60 * 60
-
-
-def _listed_key(user_id: int, name: str) -> str:
-    return f"distrakt_listed:v{_LISTED_VERSION}:{int(user_id)}:{name}"
-
-
+# what keeps its mark; one put back is cleared by clear_named.
+#
+# IT IS A TABLE, `distrakt_listed_ids`, AND NOT A CACHE ROW, which it once was.
+# The response cache evicts its least recently stored row first when it is over
+# its size cap, and this set is rewritten only when a removal is announced — so
+# it was exactly the row an eviction would take, and losing it silently cost the
+# next real removal its mark.
 async def _ever_listed(user_id: int, name: str) -> set[int]:
-    stored = await cache.get(_listed_key(user_id, name), _LISTED_SECONDS)
-    try:
-        return {int(value) for value in stored} if isinstance(stored, list) else set()
-    except (TypeError, ValueError):
-        return set()
+    rows = await db.fetch_all(
+        "SELECT service_id FROM distrakt_listed_ids WHERE user_id = ? AND source = ?",
+        (int(user_id), name))
+    return {int(row["service_id"]) for row in rows}
+
+
+async def _remember_listed(user_id: int, name: str, service_ids) -> None:
+    """Add ids a listing named to what every listing has named. Only the new ones
+    are written, so an unchanged library costs no writes."""
+    if not service_ids:
+        return
+    await db.executemany(
+        "INSERT OR IGNORE INTO distrakt_listed_ids (user_id, source, service_id) "
+        "VALUES (?, ?, ?)",
+        [(int(user_id), name, int(service_id)) for service_id in sorted(service_ids)])
 
 
 def _held_by_us(records: list[dict], source: str) -> dict[int, list[ItemKey]]:
@@ -173,10 +180,9 @@ async def check(settings, user_id: int, source, port) -> int:
     # WHAT THIS LISTING ADDS TO EVERYTHING EARLIER ONES NAMED, kept before any
     # row is judged. A title is gone only if an earlier listing named it and this
     # one does not; a title no listing ever named was never held there, and a mark
-    # on it is cleared (see _LISTED_VERSION).
+    # on it is cleared (see _ever_listed).
     listed_before = await _ever_listed(user_id, name)
-    await cache.set(_listed_key(user_id, name), sorted(listed_before | set(held)),
-                    retain_seconds=_LISTED_SECONDS)
+    await _remember_listed(user_id, name, set(held) - listed_before)
 
     # WHAT EACH IDENTITY CURRENTLY SAYS, so a service being added to or removed
     # from the list leaves the OTHER service's answer untouched. A row marked

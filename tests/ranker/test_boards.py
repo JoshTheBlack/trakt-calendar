@@ -1042,7 +1042,7 @@ class TrackerImportTests(RankerTestCase):
         attribute."""
         asyncio.run(db.execute(
             "INSERT INTO distrakt_month_records (user_id, month, kind, media, match_source, "
-            "match_id, trakt_id, tmdb, slug, title, season, "
+            "match_id, trakt_id, tmdb, trakt_slug, title, season, "
             "network, watched, total, started_airing, finished_airing, created_at) "
             "VALUES (?, ?, ?, 'show', 'tmdb', ?, ?, ?, 'a-show', ?, ?, 'HBO', ?, ?, 1, 1, 0)",
             (self.user_id, month, kind, str(tmdb), trakt_id, tmdb, title, season,

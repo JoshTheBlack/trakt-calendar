@@ -116,8 +116,7 @@ def _rekey_roster(doc: dict) -> list[dict]:
     for row in doc.get("distrakt_shows") or []:
         if not isinstance(row, dict):
             raise RestoreError("distrakt_shows rows must be objects")
-        ids = collect_ids({"trakt": row.get("trakt_id"), "tmdb": row.get("tmdb"),
-                           "slug": row.get("slug")})
+        ids = collect_ids({"trakt": row.get("trakt_id"), "tmdb": row.get("tmdb")})
         media = str(row.get("media") or Media.SHOW)
         key = resolve_key(media, ids)
         if key is None:
@@ -131,7 +130,6 @@ def _rekey_roster(doc: dict) -> list[dict]:
             "match_id": key.match_id,
             "trakt_id": ids.get("trakt"),
             "tmdb": ids.get("tmdb"),
-            "slug": ids.get("slug") or "",
             "added_by": row.get("source") or "",
         })
     if unkeyable:

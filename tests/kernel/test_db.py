@@ -312,7 +312,10 @@ class MigrationTests(DbTestCase):
                 "'the-rookie-2018', 'the-rookie', 134421, 555, 'The Rookie', ?)", (now,))
             conn.commit()
 
-            db.migrate_sync(conn)
+            # Up to 39 and no further: a later migration drops the shared column
+            # this reads, and what is under test is what 39 itself did.
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 39]):
+                db.migrate_sync(conn)
 
             self.assertEqual(
                 conn.execute("SELECT COUNT(*) c FROM distrakt_slug_repairs").fetchone()["c"],
@@ -335,6 +338,104 @@ class MigrationTests(DbTestCase):
                 "AND tbl_name='distrakt_slug_repairs'")}
             self.assertIn("ix_distrakt_slug_repairs_at", indexes,
                           "the log is always read by date")
+        finally:
+            conn.close()
+            path.unlink(missing_ok=True)
+
+    def _at_45_with_listed_sets(self, path):
+        """A database at schema 45 holding one account, a tracker row with the
+        shared slug beside both namespaced ones, and three cached listed sets:
+        one readable, one for an account that no longer exists, one that cannot
+        be decoded."""
+        import sqlite3
+
+        from unittest.mock import patch
+
+        from app import cache
+
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 45]):
+            db.migrate_sync(conn)
+        now = db.now()
+        conn.execute("INSERT INTO users (id, username, created_at, updated_at) "
+                     "VALUES (1, 'someone', ?, ?)", (now, now))
+        conn.execute(
+            "INSERT INTO distrakt_user_seasons "
+            "(user_id, kind, media, match_source, match_id, season, slug, trakt_slug, "
+            " simkl_slug, trakt_id, simkl_id, title, created_at) "
+            "VALUES (1, 'keepup', 'show', 'tmdb', '900', 1, 'shared', 'a-show-2019', "
+            "'a-show', 11, 22, 'A Show', ?)", (now,))
+        for key, blob in (("distrakt_listed:v1:1:simkl", cache._encode([22, 5, 7])),
+                          ("distrakt_listed:v1:99:simkl", cache._encode([1])),
+                          ("distrakt_listed:v1:1:trakt", b"not zlib")):
+            conn.execute("INSERT INTO api_cache (cache_key, payload, cached_at, "
+                         "ttl_seconds, byte_size) VALUES (?, ?, ?, ?, ?)",
+                         (key, blob, now, 400 * 86400, len(blob)))
+        # A key that only LOOKS like one under LIKE's wildcard, which must survive.
+        conn.execute("INSERT INTO api_cache (cache_key, payload, cached_at, "
+                     "ttl_seconds, byte_size) VALUES ('distraktXlisted:v1:1:simkl', "
+                     "?, ?, NULL, 1)", (cache._encode([3]), now))
+        conn.commit()
+        return conn
+
+    async def test_migration_46_moves_every_readable_listed_set_into_its_table(self):
+        """What a removal is judged against leaves the evictable cache for a
+        table, with every id carried across and the cache rows gone; a set for an
+        account that no longer exists, or one that cannot be read, is dropped."""
+        path = TMP / "migration-46-listed.db"
+        conn = self._at_45_with_listed_sets(path)
+        try:
+            db.migrate_sync(conn)
+            listed = conn.execute(
+                "SELECT user_id, source, service_id FROM distrakt_listed_ids "
+                "ORDER BY service_id").fetchall()
+            self.assertEqual([tuple(r) for r in listed],
+                             [(1, "simkl", 5), (1, "simkl", 7), (1, "simkl", 22)])
+            left = [r["cache_key"] for r in conn.execute("SELECT cache_key FROM api_cache")]
+            self.assertEqual(left, ["distraktXlisted:v1:1:simkl"])
+        finally:
+            conn.close()
+            path.unlink(missing_ok=True)
+
+    async def test_migration_46_drops_the_shared_slug_and_keeps_both_namespaced_ones(self):
+        path = TMP / "migration-46-slug.db"
+        conn = self._at_45_with_listed_sets(path)
+        try:
+            db.migrate_sync(conn)
+            for table in ("distrakt_user_seasons", "distrakt_month_records",
+                          "distrakt_unsettled_rows"):
+                columns = {c["name"] for c in conn.execute(f"PRAGMA table_info({table})")}
+                self.assertNotIn("slug", columns, table)
+                self.assertTrue({"trakt_slug", "simkl_slug"} <= columns, table)
+            row = conn.execute("SELECT * FROM distrakt_user_seasons").fetchone()
+            self.assertEqual((row["trakt_slug"], row["simkl_slug"], row["title"]),
+                             ("a-show-2019", "a-show", "A Show"))
+        finally:
+            conn.close()
+            path.unlink(missing_ok=True)
+
+    async def test_migration_46_adds_the_watchlist_tables_and_they_cascade(self):
+        path = TMP / "migration-46-watchlist.db"
+        conn = self._at_45_with_listed_sets(path)
+        try:
+            db.migrate_sync(conn)
+            conn.execute("PRAGMA foreign_keys = ON")
+            columns = {table: [c["name"] for c in conn.execute(f"PRAGMA table_info({table})")]
+                       for table in ("watchlist_targets", "watchlist_writes")}
+            self.assertEqual(columns["watchlist_targets"], ["user_id", "source", "enabled_at"])
+            self.assertEqual(columns["watchlist_writes"],
+                             ["user_id", "source", "match_source", "match_id", "service_id",
+                              "status_before", "state", "updated_at"])
+            now = db.now()
+            conn.execute("INSERT INTO watchlist_targets VALUES (1, 'simkl', ?)", (now,))
+            conn.execute("INSERT INTO watchlist_writes VALUES "
+                         "(1, 'simkl', 'tmdb', '900', '22', 'none', 'written', ?)", (now,))
+            conn.execute("DELETE FROM users WHERE id = 1")
+            for table in ("watchlist_targets", "watchlist_writes", "distrakt_listed_ids"):
+                self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0],
+                                 0, f"{table} must go with its account")
         finally:
             conn.close()
             path.unlink(missing_ok=True)

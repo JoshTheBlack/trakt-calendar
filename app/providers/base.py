@@ -180,10 +180,11 @@ class Source(StrEnum):
 # merged id map — whichever service wrote last won — and BOTH links built from it
 # were then wrong half the time, Trakt's as readily as Simkl's.
 #
-# `slug` IS STILL READ, never written. Rows predate the split and their value is
-# usually but not provably Trakt's, so it stays a legitimate fallback for a
-# reader that has no namespaced one yet (see store.ID_COLUMNS and the migration
-# that backfills only what it can prove).
+# THE BARE `slug` IS STILL A KEY HERE, BUT ONLY IN ONE SERVICE'S OWN PAYLOAD,
+# where it is unambiguous: a Trakt record's slug is Trakt's, and the Trakt
+# calendar addresses its records by it. Nothing stores it — the tracker's rows
+# keep the namespaced pair only — and an id map merged from two services must
+# not carry it (see distrakt/arrival.py's `canonical_ids`).
 ID_KEYS = ("trakt", "slug", "trakt_slug", "simkl", "simkl_slug",
            "tvdb", "tmdb", "imdb", "mal")
 
