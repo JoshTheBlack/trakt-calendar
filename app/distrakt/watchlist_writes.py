@@ -293,6 +293,10 @@ class Switch(NamedTuple):
     written: int      # shows on the tracker the list has from this tracker
     waiting: int      # shows on the tracker still owed a write
     failed: int       # shows whose last write failed
+    # Shows on the tracker the service refused — a list at its size limit.
+    # Settled, so never retried and never among `waiting`: without its own
+    # count the panel would say every show was added.
+    refused: int
     trouble: str      # the last failure's wording, or ""
     quiet: bool       # a failure is being waited out before asking again
 
@@ -327,6 +331,8 @@ async def switches(user_id: int, settings) -> list[Switch]:
             waiting=sum(1 for key in tracked if key not in held
                         or held[key].state in OWED_STATES),
             failed=sum(1 for row in held.values() if row.state is WriteState.FAILED),
+            refused=sum(1 for key in tracked if key in held
+                        and held[key].state is WriteState.REFUSED),
             trouble=found.message if found else "",
             quiet=_quiet(user_id, name)))
     return out

@@ -66,6 +66,10 @@
             {%- else -%}
                 On · {{ switch.written }} show{{ '' if switch.written == 1 else 's' }} added.
             {%- endif -%}
+            {%- if switch.on and switch.linked and switch.refused %}
+                <strong class="distrakt-warn">{{ switch.refused }} refused: the list on
+                {{ switch.label }} is full.</strong>
+            {%- endif -%}
             {%- if switch.list_url %}
             <a class="watchlist-link" href="{{ switch.list_url }}" target="_blank"
                rel="noopener noreferrer" hx-boost="false">Open ↗</a>

@@ -125,6 +125,19 @@ class TheSwitchTests(SwitchTestCase):
         self.press(True, source="plex")
         self.assertEqual(asyncio.run(ww.switched_on(self.user_id)), [])
 
+    def test_a_refused_show_is_said_beside_its_switch(self):
+        """A list at its limit refuses and is never retried, so without a line of
+        its own the panel would read as if every show had been added."""
+        self.add_listed(1)
+        self.add_listed(2)
+        self.press(True)
+        asyncio.run(ww._record(self.user_id, SIMKL, {
+            "show:tmdb:1": ww.WriteRow("1", "none", ww.WriteState.WRITTEN),
+            "show:tmdb:2": ww.WriteRow(None, "none", ww.WriteState.REFUSED)}))
+        panel = text(self.client.get("/distrakt/fragments/watchlists").text)
+        self.assertIn("On · 1 show added.", panel)
+        self.assertIn("1 refused: the list on Simkl is full.", panel)
+
     def test_a_switch_whose_link_went_can_be_turned_off_but_not_on(self):
         self.press(True)
         asyncio.run(db.execute("DELETE FROM linked_identities WHERE user_id = ? AND provider = ?",
@@ -136,3 +149,32 @@ class TheSwitchTests(SwitchTestCase):
         self.assertEqual(asyncio.run(ww.switched_on(self.user_id)), [])
         self.press(True)
         self.assertEqual(asyncio.run(ww.switched_on(self.user_id)), [])
+
+
+class BothServicesTests(SwitchTestCase):
+    """A viewer linked to Simkl and Trakt gets a switch for each, each linking
+    to its own list, with no change to the page for the second."""
+
+    def make_settings(self):
+        from app.config import Settings
+        return Settings(simkl_public_calendar_enabled=False, simkl_client_id="simkl-client",
+                        trakt_client_id="trakt-client")
+
+    def setUp(self):
+        super().setUp()
+        self.link_identity(self.user_id, "trakt", "30ee86b0-0000-4000-8000-000000000001",
+                           access_token="trakt-token")
+
+    def test_each_linked_service_has_its_switch_and_its_link(self):
+        html = self.page()
+        panel = text(html.split('id="watchlistPanel"', 1)[1].split("</div>", 1)[0])
+        self.assertIn("Add these shows to Simkl", panel)
+        self.assertIn("Add these shows to Trakt", panel)
+        self.assertIn(f'href="https://simkl.com/{SIMKL_ACCOUNT}/tv/plantowatch/"', html)
+        self.assertIn('href="https://app.trakt.tv/users/me/watchlist"', html)
+
+    def test_trakt_switches_on_by_itself(self):
+        self.add_listed(1)
+        answer = self.press(True, source=str(Source.TRAKT))
+        self.assertEqual(asyncio.run(ww.switched_on(self.user_id)), [str(Source.TRAKT)])
+        self.assertIn("Adding 1…", text(answer.text))
