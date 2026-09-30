@@ -1900,7 +1900,12 @@ button.search-row { width: 100%; background: none; font: inherit; text-align: le
 /* Every pane is a full-width row below that, and only the checked one is drawn.
    A pane that has never been opened holds its loading line and nothing else, so
    an unopened season costs a request only when it is asked for. */
-.ep-season-pane { order: 3; flex: 0 0 100%; display: none; }
+/* `min-width: 0` BECAUSE A FLEX ITEM WILL NOT OTHERWISE SHRINK BELOW ITS
+   CONTENT. The cast grid inside wants two 110px-minimum columns at their `1fr`
+   share, and a pane left at `min-width: auto` grew to fit them — 346px wide in
+   a 308px panel at 390, the right-hand column of faces hanging off the edge
+   (measured in Chromium and Firefox). */
+.ep-season-pane { order: 3; flex: 0 0 100%; min-width: 0; display: none; }
 .ep-season-radio:checked + .ep-season-tab + .ep-season-pane { display: block; }
 /* The season's own description, under the videos and visibly a caption to the
    season rather than a second copy of the show's blurb above the picker. */
