@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## 🏷️ [1.2.5] - UNRELEASED
+## 🏷️ [1.2.5] - 2026-09-30
 
 ### ⚠️ Upgrading
 - 🔐 **Reconnect Simkl once** from your Account page — Simkl is retiring its old sign-in. Administrators setting Simkl up now register a "Server apps & services" application, and there is no instance-wide Simkl token any more.
