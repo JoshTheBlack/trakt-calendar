@@ -19,7 +19,7 @@ from ...endpoints import Endpoint
 from .. import register
 from ..base import (Capabilities, Media, Record, SearchHit, SeasonsAnswer, Source,
                     TitleFacts)
-from . import by_id, calendar, detail, search, sync, titles
+from . import by_id, calendar, detail, search, sync, titles, watchlist
 from .transport import SimklBlockedError, SimklError, SimklRateLimitError
 
 __all__ = ["SimklError", "SimklRateLimitError", "SimklBlockedError"]
@@ -199,6 +199,29 @@ class _SimklSearchPort:
         return await by_id.find_by_shared_id(settings, media, ids)
 
 
+class _SimklWatchlistPort:
+    """Simkl's answer to "write this person's list" (app/providers/base.py's
+    WatchlistPort). A thin delegator over watchlist.py, through the MODULE
+    object, exactly as the ports above are over their own modules — what a
+    write to Simkl means, and what was measured before any of it was written,
+    is that module's to say."""
+
+    def list_url(self, account_id: str) -> str:
+        return watchlist.list_url(account_id)
+
+    async def holdings(self, settings: Settings, titles):
+        return await watchlist.holdings(settings, titles)
+
+    async def put(self, settings: Settings, titles):
+        return await watchlist.put(settings, titles)
+
+    async def drop(self, settings: Settings, titles):
+        return await watchlist.drop(settings, titles)
+
+    async def undo(self, settings: Settings, rows):
+        return await watchlist.undo(settings, rows)
+
+
 class _SimklProvider:
     """Simkl as the registry sees it: an id, a label, what it can answer, and
     whether it is configured. Everything this package actually DOES is called
@@ -249,6 +272,10 @@ class _SimklProvider:
     # missing search port has (see this port's own module for the fan-out it
     # hides).
     search_port = _SimklSearchPort()
+    # WHERE THE TRACKER'S SHOWS GO: this person's Plan to Watch list. Offered
+    # only with the viewer's own token (providers.for_watchlist), and the write
+    # scope it needs was asked for at link time (app/auth/simkl_routes.py).
+    watchlist_port = _SimklWatchlistPort()
 
     def is_configured(self, settings: Settings) -> bool:
         return settings.simkl_configured

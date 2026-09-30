@@ -2608,6 +2608,24 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .emoji-default-panel label { font-size: 0.78rem; font-weight: 600; color: var(--text-dim); }
 .emoji-default-panel input { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; }
 .emoji-default-panel .distrakt-note { margin: 0; font-size: 0.74rem; }
+/* The list switches' panel, a popover under its pill in the header
+   (_distrakt_watchlists.html). Its width never exceeds a phone's, less the
+   page's gutters, so the panel cannot push the page sideways. */
+.watchlist-panel { width: min(300px, calc(100vw - 32px)); padding: 10px; white-space: normal; }
+.watchlist-panel-body { display: flex; flex-direction: column; gap: 8px; }
+.watchlist-title { margin: 0; font-size: 0.78rem; font-weight: 600; color: var(--text-dim); }
+.watchlist-switch {
+    display: flex; flex-direction: column; gap: 4px; padding: 8px;
+    border: 1px solid var(--card-border); border-radius: 8px;
+}
+.watchlist-toggle { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; font-weight: 600; cursor: pointer; }
+.watchlist-panel .distrakt-note { margin: 0; font-size: 0.74rem; }
+.watchlist-panel .distrakt-warn { color: var(--danger, #e0736b); }
+/* Beats `.nav-menu-items a`, which draws every link in a menu as a full-width
+   row: this one is a link in a sentence's place, not a menu entry. */
+.nav-menu-items a.watchlist-link { display: inline; width: auto; margin-left: 6px; padding: 0; font-size: inherit; color: var(--gold); }
+.nav-menu-items a.watchlist-link:hover { background: none; text-decoration: underline; }
+.watchlist-failing { margin-left: 4px; color: var(--danger, #e0736b); }
 /* EVERY ROW GIVES THE SAME WIDTHS TO WHAT FOLLOWS ITS TITLE, whatever
    section it is in, so the columns line up down the whole list: the dates box
    (first, after the title, empty on a Cleanup or Completed row), the counts, and

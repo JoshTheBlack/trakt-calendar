@@ -27,6 +27,7 @@ from .base import (
     SeasonsAnswer,
     Source,
     SyncPort,
+    WatchlistPort,
     collect_ids,
     parse_media,
     render,
@@ -35,9 +36,9 @@ from .base import (
 __all__ = [
     "CalendarPort", "Capabilities", "ID_KEYS", "Item", "Media", "Provider",
     "Record", "SearchHit", "SearchPort", "SeasonsAnswer", "Source", "SyncPort",
-    "collect_ids", "parse_media", "render", "register", "get", "registered",
-    "calendar_sources", "for_calendar_sources", "for_tracker_ports",
-    "tracker_sources", "for_catalogue_search",
+    "WatchlistPort", "collect_ids", "parse_media", "render", "register", "get",
+    "registered", "calendar_sources", "for_calendar_sources", "for_tracker_ports",
+    "tracker_sources", "for_catalogue_search", "for_watchlist",
 ]
 
 _REGISTRY: dict[Source, Provider] = {}
@@ -297,3 +298,15 @@ def for_catalogue_search(settings) -> list[tuple[Source, SearchPort]]:
             continue
         out.append((source, provider.search_port))
     return out
+
+
+def for_watchlist(settings) -> list[tuple[Source, WatchlistPort]]:
+    """Every source whose own list can be written for this viewer right now, in
+    declared order: it carries a `watchlist_port`, and `settings` — the VIEWER's,
+    from auth.viewer.settings_for_user — holds a token for it (`is_configured`,
+    the private question, because a write to somebody's list is the most
+    private thing a token does). Which of these a viewer has switched on is the
+    tracker's to decide; this answers only which could be."""
+    return [(source, provider.watchlist_port)
+            for source, provider in registered().items()
+            if provider.watchlist_port is not None and provider.is_configured(settings)]

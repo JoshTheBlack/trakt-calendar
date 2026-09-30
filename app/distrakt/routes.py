@@ -24,11 +24,12 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from . import (arrival, backfill, counts, discord_fmt, episode_progress, lifecycle, live,
-               post_memo, prefs, rollover, slug_repair, unsettled, watch_history)
+               post_memo, prefs, rollover, slug_repair, unsettled, watch_history,
+               watchlist_writes)
 # The data layer is reached through this package's own public surface, the same
 # names an outside caller uses, rather than through the six modules those names
 # are defined in: a route handler has no business knowing which half of the
@@ -58,7 +59,55 @@ from ..templating import templates
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+
+async def _write_watchlists_after(request: Request) -> None:
+    """Start the viewer's watchlist pass, once their answer has gone, with the
+    departures this request said now whole. See `_owe_watchlist_pass`."""
+    user = await auth.current_user(request)
+    if user is not None:
+        await watchlist_writes.after_request(
+            user.user_id, getattr(request.state, "watchlist_departures", ()))
+
+
+def _departing(request: Request, user_id: int, key: ItemKey,
+               departure: watchlist_writes.Departure) -> watchlist_writes.Pending:
+    """Say, before a request changes anything, that it is taking a season of
+    `key` off the tracker by the viewer's hand (watchlist_writes.expect), and
+    keep the answer on the request so the hook above can say when the request
+    is whole."""
+    pending = watchlist_writes.expect(user_id, key, departure)
+    request.state.watchlist_departures = [
+        *getattr(request.state, "watchlist_departures", ()), pending]
+    return pending
+
+
+async def _owe_watchlist_pass(request: Request, background: BackgroundTasks) -> None:
+    """EVERY REQUEST TO THE TRACKER ENDS WITH A WATCHLIST PASS, and this is the one
+    place that says so — a dependency of the router itself, so no route is
+    written without it.
+
+    WHY EVERY REQUEST AND NOT A LIST OF THE ONES THAT ADD. The tracker's rows are
+    written by this router's handlers and by nothing else in the app, and not
+    only by the routes that look like adds: opening a month builds it and seeds
+    the viewer's list from their viewing, a refresh moves seasons between the
+    list and the months, a restore replaces the lot. A list of routes would be a
+    second statement of which requests change the tracker, and the next route
+    to change it would not be on it. The pass itself decides what is owed from
+    the tables (watchlist_writes), so a request that changed nothing costs one
+    query for whether the viewer switched anything on, and one more for what the
+    tracker holds when they have.
+
+    AFTER THE ANSWER, AND NOT EVEN THEN INSIDE IT. A background task runs once
+    the response has been sent, and all it does is start the pass as a task of
+    its own and return — so neither this response nor the next request on the
+    same connection waits for a service. A dependency that fails the request
+    (the access level refusing it) sends no answer that carries this, so a
+    refused request starts nothing.
+    """
+    background.add_task(_write_watchlists_after, request)
+
+
+router = APIRouter(dependencies=[Depends(_owe_watchlist_pass)])
 guard = authz.Guard(router)
 
 # Which ids arriving in a request body are read as integers. imdb ids are not
@@ -452,6 +501,9 @@ async def distrakt(request: Request):
         # Which share-link forms would actually resolve, so the selector offers
         # only the ones that produce a working link.
         "post_link": await _post_link_choices(user.user_id),
+        # The header's list switches, one per service this viewer could write
+        # the tracker's shows to (watchlist_writes.switches).
+        "watchlists": await watchlist_writes.switches(user.user_id, settings),
         **_modal_context(settings, year, month),
     }
     return templates.TemplateResponse(request, "distrakt.html", context)
@@ -2141,6 +2193,52 @@ async def api_distrakt_emoji_default(request: Request):
     }))
 
 
+async def _watchlists_answer(request: Request, user_id: int, settings, *,
+                             panel_oob: bool) -> Response:
+    """The list switches' pill and panel, drawn from what is stored now."""
+    return templates.TemplateResponse(request, "_distrakt_watchlists_answer.html", {
+        "request": request, "panel_oob": panel_oob,
+        "switches": await watchlist_writes.switches(user_id, settings),
+    })
+
+
+@guard.post("/api/distrakt/watchlist", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_watchlist(request: Request):
+    """Switch the tracker's writes to one service's list on or off, from its box
+    in the header's list panel.
+
+    ON WRITES EVERYTHING ALREADY ON THE TRACKER, and not here: the pass every
+    tracker request ends with (`_owe_watchlist_pass`) runs once this answer has
+    gone, finds every show owed, and writes them in one batch. The answer says
+    so, and the panel asks for itself again until the writing is done. OFF stops
+    future writes and changes nothing at the service.
+
+    ONLY A SERVICE THE PANEL OFFERS, and on only through a live link: a switch
+    left on after its link went can be turned off, never on.
+    """
+    user_id = await _distrakt_user_id(request)
+    data = await authz.json_body(request)
+    settings = await viewer.settings_for_user(user_id)
+    offered = {switch.source: switch
+               for switch in await watchlist_writes.switches(user_id, settings)}
+    chosen = offered.get(str(data.get("source") or ""))
+    on = route_params.ticked(data.get("on"))
+    if chosen is None or (on and not chosen.linked):
+        return _month_refusal(request, "That service's list can't be written from here.")
+    await watchlist_writes.switch(user_id, chosen.source, on)
+    return await _watchlists_answer(request, user_id, settings, panel_oob=True)
+
+
+@guard.get("/distrakt/fragments/watchlists", AuthLevel.DISTRAKT_APPROVED)
+async def watchlists_fragment(request: Request):
+    """The list panel again, asked for by itself while a write is under way —
+    see templates/_distrakt_watchlists.html. Reading it starts a pass like any
+    tracker request, which is harmless: a pass with nothing owed asks nobody."""
+    user_id = await _distrakt_user_id(request)
+    settings = await viewer.settings_for_user(user_id)
+    return await _watchlists_answer(request, user_id, settings, panel_oob=False)
+
+
 async def _network_tmdb(user_id: int, month_key: str, network: str) -> int | None:
     """A TMDB id for some title on `network` that this viewer's month shows — the
     lookup a network's logo is found by (TMDB lists a show's networks, not a
@@ -2232,12 +2330,20 @@ async def api_distrakt_remove(request: Request):
     except RequestError as exc:
         return _month_refusal(request, str(exc))
     month_key = distrakt_store.month_key(year, month)
+    # Said BEFORE anything is removed, for the reason watchlist_writes.expect
+    # gives, and taken back below if nothing was. The pass undoes the app's own
+    # write at a service only if this was the show's last season on the tracker.
+    # A month that is over holds history rather than anything on the tracker, so
+    # a ✕ there corrects a record and takes nothing off the tracker.
+    standing = distrakt_store.month_standing(month_key, clock.today())
+    departing = (None if standing is distrakt_store.MonthStanding.PAST
+                 else _departing(request, user_id, key, watchlist_writes.Departure.REMOVE))
     # The named month's records, whatever kind they are, and no other month's.
     # Asked of the MONTH rather than of whether it was frozen, for the reason
     # api_distrakt_add gives: a past month the rollover never reached is over just
     # the same, and a removal is not the place to discover that.
     gone = await distrakt_store.remove_season_from_month(user_id, month_key, key, season)
-    if distrakt_store.month_standing(month_key, clock.today()) is distrakt_store.MonthStanding.CURRENT:
+    if standing is distrakt_store.MonthStanding.CURRENT:
         # AND THE VIEWER'S LIST, because the month under way is the one page that
         # draws it. Not folded into the line above with `or`: the list has to be
         # asked either way, or a row that lives ONLY there — a season being kept up
@@ -2245,6 +2351,8 @@ async def api_distrakt_remove(request: Request):
         dropped = await distrakt_store.remove_user_record(user_id, key, season)
         gone = gone or dropped
     if not gone:
+        if departing is not None:
+            watchlist_writes.withdraw(user_id, departing)
         return _month_refusal(request, "Show/season not found in that month")
 
     settings = await viewer.settings_for_user(user_id)
@@ -3228,6 +3336,11 @@ async def api_distrakt_abandon(request: Request):
         placed = await lifecycle.find_season(user_id, key, season, month=viewed_month)
         if placed is None:
             return _month_refusal(request, "Show/season not found in that month")
+        # Said BEFORE the season moves, so a pass that runs meanwhile keeps the
+        # show's record at the service until this is answered; the pass then
+        # drops the show there only if this was its last season on the tracker.
+        # Taking it back needs nothing here: that is an arrival like any other.
+        _departing(request, user_id, key, watchlist_writes.Departure.ABANDON)
         show = await _live_form_source(settings, placed.record, season)
         rec = await lifecycle.give_up(
             user_id, show, month=acted_month,

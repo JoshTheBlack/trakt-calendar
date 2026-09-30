@@ -194,12 +194,11 @@ IDENTITY_COLUMNS = ("media", "match_source", "match_id")
 # uses, and a second table of the same fact would drift.
 ID_COLUMNS = {
     "trakt_id": "trakt", "simkl_id": "simkl", "tmdb": "tmdb",
-    "tvdb": "tvdb", "imdb": "imdb", "mal": "mal", "slug": "slug",
+    "tvdb": "tvdb", "imdb": "imdb", "mal": "mal",
     # A SLUG IS PER SERVICE, and these two are why. Both services call a title's
-    # readable name `slug` and disagree on it, so the single column above held
-    # whichever one wrote last — and a link built from it was wrong for the other
-    # service, in both directions. `slug` is kept because rows predate the split
-    # and it is still the only value they have; nothing writes it any more.
+    # readable name `slug` and disagree on it, so the single shared column that
+    # came before them held whichever one wrote last — and a link built from it
+    # was wrong for the other service, in both directions. That column is gone.
     "trakt_slug": "trakt_slug", "simkl_slug": "simkl_slug",
 }
 
@@ -946,6 +945,25 @@ async def month_records(user_id: int, month: str,
     rows = await db.fetch_all(
         "SELECT * FROM distrakt_month_records WHERE user_id = ? AND month = ?"
         + clause + " ORDER BY rowid",
+        (user_id, _validate_month(month), *params),
+    )
+    return [row_to_record(r) for r in rows]
+
+
+async def records_from(user_id: int, month: str,
+                       kinds: Iterable[RecordKind | str] | None = None) -> list[dict]:
+    """Every month record on `month` and every month after it, optionally
+    narrowed to some kinds, oldest month first.
+
+    One query rather than a month_records call per month, because the question
+    it answers — what does the month under way, and whatever has been built
+    ahead of it, still hold — spans a number of months nobody has to know first.
+    Relies on month_key's zero-padding, like every other comparison of keys.
+    """
+    clause, params = _kind_filter(kinds)
+    rows = await db.fetch_all(
+        "SELECT * FROM distrakt_month_records WHERE user_id = ? AND month >= ?"
+        + clause + " ORDER BY month, rowid",
         (user_id, _validate_month(month), *params),
     )
     return [row_to_record(r) for r in rows]

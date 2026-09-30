@@ -336,7 +336,7 @@ class MonthRecordTests(DistraktTestCase):
         month = month_back(2)
         doc = distrakt.new_month_doc(month)
         doc["shows"] = [{
-            "ids": {"trakt": 7, "tmdb": 42, "slug": "s"}, "media": "show", "title": "T",
+            "ids": {"trakt": 7, "tmdb": 42, "trakt_slug": "s"}, "media": "show", "title": "T",
             "season": 3, "network": "N", "kind": "completed",
             "watched": 8, "total": 8, "cadence": "Tue", "premiere": "5/1",
             "finale": "5/29", "started_airing": True, "finished_airing": True,
@@ -353,7 +353,7 @@ class MonthRecordTests(DistraktTestCase):
         self.assertTrue(rec["started_airing"])
         self.assertTrue(rec["finished_airing"])
         self.assertEqual(rec["bucket"], "completed")
-        self.assertEqual(rec["ids"], {"trakt": 7, "tmdb": 42, "slug": "s"})
+        self.assertEqual(rec["ids"], {"trakt": 7, "tmdb": 42, "trakt_slug": "s"})
         # frozen_shows reads them straight back with no Trakt call.
         self.assertTrue(distrakt.frozen_shows(back)[0]["started_airing"])
 

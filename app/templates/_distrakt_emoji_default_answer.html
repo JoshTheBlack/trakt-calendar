@@ -1,6 +1,6 @@
 {% import '_distrakt_emoji_default.html' as default %}
-{# A SAVED DEFAULT EMOJI: the header pill and its field, out of band, as stored.
+{# A SAVED DEFAULT EMOJI: the header pill's label and its field, out of band, as stored.
    Everything else the default changes comes with the month the answer asks the
    page to fetch (routes.api_distrakt_emoji_default). #}
-{{ default.pill(default_network_emoji, oob=true) }}
+{{ default.pill_label(default_network_emoji, oob=true) }}
 {{ default.field(default_network_emoji, month_query, oob=true) }}

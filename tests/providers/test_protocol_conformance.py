@@ -30,7 +30,8 @@ import unittest
 from app import providers
 from app.config import Settings
 from app.providers.base import (CalendarPort, DetailPort, LibraryPort, Media,
-                                PlayCountPort, Provider, SearchPort, Source, SyncPort)
+                                PlayCountPort, Provider, SearchPort, Source, SyncPort,
+                                WatchlistPort)
 from app.providers.trakt import detail as trakt_detail
 from tests.support import DatabaseTestCase
 
@@ -401,6 +402,78 @@ class EverySourceCanBeSearchedTests(unittest.TestCase):
                     self.assertTrue(provider.catalogue_is_configured(settings))
 
 
+class EveryWatchlistPortWritesTheSameWayTests(DatabaseTestCase):
+    """WatchlistPort, the one port that writes to somebody's own list.
+
+    What the Protocol can check is that the verbs exist. What it cannot check is
+    the shape of what comes back, and one caller records every service's answer
+    through one path — so the shape is declared as types (WatchlistResult,
+    WatchlistHolding) and what is asserted here is what every implementation
+    must do with them whichever service it speaks for.
+    """
+
+    def _ports(self):
+        return [(str(source), provider.watchlist_port)
+                for source, provider in providers.registered().items()
+                if provider.watchlist_port is not None]
+
+    def test_at_least_one_registered_source_writes_a_list(self):
+        """Or every other test in this class passes by iterating nothing."""
+        self.assertTrue(self._ports(), "no source can write a list; the checks below "
+                                       "prove nothing")
+
+    def test_every_watchlist_port_present_satisfies_watchlistport(self):
+        for source, port in self._ports():
+            with self.subTest(source=source):
+                self.assertIsInstance(port, WatchlistPort)
+
+    async def test_an_empty_batch_answers_nothing_and_calls_nothing(self):
+        """Every verb, every port. conftest's outbound guard is what says no
+        request left: a write step that finds nothing to do must cost nothing,
+        and must still get a mapping back rather than None."""
+        settings = Settings(**{f"{source}_client_id": "an-id" for source, _ in self._ports()})
+        for source, port in self._ports():
+            with self.subTest(source=source):
+                self.assertEqual(await port.holdings(settings, []), {})
+                self.assertEqual(await port.put(settings, []), {})
+                self.assertEqual(await port.drop(settings, []), {})
+                self.assertEqual(await port.undo(settings, []), {})
+
+    def test_every_port_links_out_without_a_call(self):
+        for source, port in self._ports():
+            with self.subTest(source=source):
+                self.assertTrue(port.list_url("12345").startswith("https://"))
+
+    def test_every_port_links_to_its_own_service(self):
+        """The link sits beside that service's switch; a copied port that kept
+        another service's address would send the viewer to the wrong site."""
+        from urllib.parse import urlparse
+        for source, port in self._ports():
+            with self.subTest(source=source):
+                host = urlparse(port.list_url("12345")).hostname or ""
+                self.assertTrue(host == f"{source}.com" or host.endswith(f".{source}.com")
+                                or host == f"{source}.tv" or host.endswith(f".{source}.tv"),
+                                f"{source} links to {host}")
+
+    def test_the_registry_offers_a_write_only_with_the_viewers_token(self):
+        """A write to a person's list is the most private thing a token does, so
+        a source is offered only where `is_configured` — the private question —
+        holds. A client id alone offers nothing."""
+        for source, _port in self._ports():
+            with self.subTest(source=source):
+                bare = Settings(**{f"{source}_client_id": "an-id"})
+                self.assertNotIn(source, [str(s) for s, _ in providers.for_watchlist(bare)])
+                linked = Settings(**{f"{source}_client_id": "an-id",
+                                     f"{source}_access_token": "a-token"})
+                self.assertIn(source, [str(s) for s, _ in providers.for_watchlist(linked)])
+
+    def test_a_source_with_no_port_is_never_offered(self):
+        linked = Settings(**{f"{source}_{field}": "x" for source in providers.registered()
+                             for field in ("client_id", "access_token")})
+        offered = {str(source) for source, _ in providers.for_watchlist(linked)}
+        self.assertEqual(offered, {source for source, _ in self._ports()})
+
+
 class TheCheckWouldActuallyFailTests(unittest.TestCase):
     """A conformance test that cannot fail is decoration.
 
@@ -437,7 +510,7 @@ class TheCheckWouldActuallyFailTests(unittest.TestCase):
         # somebody deleted a member outright. These are read by
         # app/providers/__init__.py itself.
         for name in ("source", "label", "capabilities", "sync_port", "calendar_port",
-                     "detail_port", "search_port", "is_configured",
+                     "detail_port", "search_port", "watchlist_port", "is_configured",
                      "catalogue_is_configured"):
             with self.subTest(member=name):
                 self.assertIn(name, Provider.__protocol_attrs__)
