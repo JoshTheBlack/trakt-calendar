@@ -82,7 +82,10 @@ is what holds the two packages to one shape.
 **A write to a person's own list at a service is read from its BODY and
 confirmed by READING THE LIST BACK, and it never blocks the tracker.**
 `WatchlistPort` in `app/providers/base.py` owns the rule and states it; each
-provider implements it (`app/providers/simkl/watchlist.py` first). A service may
+provider implements it (`app/providers/simkl/watchlist.py` and
+`app/providers/trakt/watchlist.py`, which reads its list EVERY PAGE — Trakt's
+watchlist pages at 100, and a read that stopped at one page once missed 46
+shows — and takes a full list's 420 as REFUSED, never retried). A service may
 answer success to a request that did nothing — Simkl answers any `/sync/` path
 and answered a put of a title already listed with the same body as a real move —
 so an outcome comes from the answer's body, a written title is WRITTEN only when
