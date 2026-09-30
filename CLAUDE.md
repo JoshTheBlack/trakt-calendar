@@ -93,6 +93,27 @@ dropping never adds a title and an undo never takes what the viewer did
 themselves. The tracker is the record: a failed write is logged and counted, and
 the tracker action that caused it goes through.
 
+**What the tracker owes those lists is ONE module's answer, and the tracker never
+waits for it.** `app/distrakt/watchlist_writes.py` owns both. No route says "write
+this show": every pass compares which shows are on the tracker now (`on_tracker`
+— the viewer's list and this and later months' premieres, less a season already
+settled in them; never a completed record, a past month or a film) with what
+`watchlist_writes` rows say was done, and writes the difference — so a new way
+onto the tracker needs nothing, and a pass lost to a restart is made up by the
+next. Passes run one at a time per viewer, which with the table deciding what is
+owed is what stops two requests writing one show twice. The trigger is a
+dependency of the tracker's ROUTER (`_owe_watchlist_pass` in
+`app/distrakt/routes.py`), so a route cannot be written without it
+(`tests/distrakt/test_watchlist_hook.py` holds every route to it); it runs after
+the answer has gone and only starts the pass as a task of its own, so no request
+— this one or the next on the connection — waits for a service. The only
+explicit hooks are the viewer's own departures, Abandon and ✕, which say so
+BEFORE changing anything (`expect`) and are acted on only once their request has
+finished, because a pass already running could otherwise read the tracker
+before the removal and decide it was not the last season. A show that leaves by
+any other road is forgotten, so its return is an arrival. Neither table travels
+in a tracker backup, and `app/distrakt/backup.py` says why.
+
 **The calendar cache stores the UNFILTERED window once per (endpoint, 7 days),
 holding EVERY source's records as ROWS.** There is no stored window object: a
 versioned compressed envelope with a `PAYLOAD_VERSION` used to live here, and it
