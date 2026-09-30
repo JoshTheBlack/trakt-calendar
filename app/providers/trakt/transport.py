@@ -9,6 +9,8 @@ is the module that knows how to read it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import logging
 import time as _time
 from urllib.parse import urlencode
@@ -61,6 +63,15 @@ class TraktRateLimitError(TraktError):
 # result a read of an empty library, which is how a viewer's stored counts get
 # replaced with "watched nothing".
 CREDENTIAL_STATUSES = (401, 403)
+
+
+# A WRITE REFUSED BECAUSE THE ACCOUNT'S LIST IS FULL. Trakt answers 420 when a
+# write would take a list past the account's limit (GET /users/settings
+# `limits.watchlist.item_count` — 5,000 on a VIP account, smaller on a free one),
+# naming it in X-Account-Limit, with X-VIP-User and X-Upgrade-URL beside it. It
+# is not a rate limit, and `send` hands it back untouched rather than retrying:
+# no amount of waiting makes room on somebody's list.
+ACCOUNT_LIMIT_STATUS = 420
 
 
 def is_credential_failure(error: TraktError) -> bool:
@@ -164,6 +175,59 @@ POOL = http_pool.Pool("trakt", max_connections=_POOL_LIMIT, timeout=30,
 # does needs more than one account's worth of Trakt at once.
 GET_PACER = http_pool.Pacer("trakt", limit=900, period=300, burst=150)
 
+# WRITES HAVE A LIMIT OF THEIR OWN, AND IT IS PER PERSON. Trakt publishes one
+# authenticated POST (and PUT, and DELETE) per second PER USER
+# (AUTHED_API_POST_LIMIT), where the read quota above is a count over five
+# minutes. So a write carrying a person's bearer waits its turn in that person's
+# LANE: one write in flight at a time, each leaving at least POST_MIN_INTERVAL
+# after the last one left — the margin over a second is for the clock not being
+# Trakt's. A write carrying no bearer (the sign-in flows' token exchanges) is
+# nobody's and is not laned: it spends no per-user allowance.
+POST_MIN_INTERVAL = 1.05
+
+
+class _Lane:
+    """One person's writes: the lock that keeps one in flight, and the moment
+    the next may leave."""
+
+    __slots__ = ("lock", "ready_at")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.ready_at = 0.0
+
+    async def wait_turn(self) -> None:
+        wait = self.ready_at - _time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+    def sent(self) -> None:
+        # Recorded even when the request failed: the limit counts writes Trakt
+        # received, and one that timed out on this side may well have arrived.
+        self.ready_at = _time.monotonic() + POST_MIN_INTERVAL
+
+
+# LOOP-KEYED, like the pool and the pacer: the suite runs each test on a fresh
+# loop, and a lock that has had to wait is bound to the loop it waited on.
+_lanes: dict[str, _Lane] = {}
+_lanes_loop = None
+
+
+def _lane_for(method: str, headers: dict | None) -> _Lane | None:
+    """The lane a write belongs to, or None for a read or a write with no bearer.
+    Keyed by a digest of the bearer, so the map holds no credential."""
+    global _lanes_loop
+    if method.upper() == "GET":
+        return None
+    bearer = (headers or {}).get("Authorization") or ""
+    if not bearer:
+        return None
+    loop = asyncio.get_running_loop()
+    if _lanes_loop is not loop:
+        _lanes.clear()
+        _lanes_loop = loop
+    return _lanes.setdefault(hashlib.sha256(bearer.encode()).hexdigest(), _Lane())
+
 
 def shared_client() -> httpx.AsyncClient:
     """The pooled Trakt client (created lazily on first use, on the current
@@ -244,8 +308,25 @@ async def send(client: httpx.AsyncClient, method: str, url: str, *,
 
     `timeout` lets a caller keep a tighter per-request bound (the OAuth calls pass
     their own 15s); it is further clamped to the budget remaining so a single hung
-    attempt can't blow the wall-clock cap."""
+    attempt can't blow the wall-clock cap.
+
+    A WRITE CARRYING A PERSON'S BEARER goes through that person's lane (see
+    POST_MIN_INTERVAL): taken before the gate and held across every attempt, so
+    a retried write is still the one write in flight, and each attempt leaves no
+    sooner than a second after the last. The budget starts once the lane is
+    held — waiting behind the same person's earlier write is not this call being
+    slow."""
     path = url.split("?", 1)[0].replace(API_BASE, "") or url
+    lane = _lane_for(method, headers)
+    async with (lane.lock if lane is not None else contextlib.nullcontext()):
+        return await _send_in_turn(client, method, url, path, lane,
+                                   headers=headers, json=json, timeout=timeout)
+
+
+async def _send_in_turn(client: httpx.AsyncClient, method: str, url: str, path: str,
+                        lane: _Lane | None, *, headers: dict | None, json,
+                        timeout: float | None) -> httpx.Response:
+    """`send`'s attempts, once any lane it needs is held."""
     sem = _rate_limit_semaphore()
     start = _time.monotonic()
     # Hold the gate across the request AND the backoff sleep, not just the request:
@@ -274,16 +355,25 @@ async def send(client: httpx.AsyncClient, method: str, url: str, *,
                 if wait:
                     await asyncio.sleep(wait)
                     remaining = _SEND_MAX_ELAPSED - (_time.monotonic() - start)
+            if lane is not None:
+                await lane.wait_turn()
+                remaining = _SEND_MAX_ELAPSED - (_time.monotonic() - start)
             attempt_timeout = remaining if timeout is None else min(timeout, remaining)
             # Dispatch to get/post (the shape every call site used before this
             # sender existed) rather than client.request, so the per-attempt timeout
             # bounds the request without changing how the call is issued.
-            if method_up == "GET":
-                resp = await client.get(url, headers=headers, timeout=attempt_timeout)
-            elif method_up == "POST":
-                resp = await client.post(url, headers=headers, json=json, timeout=attempt_timeout)
-            else:
-                resp = await client.request(method, url, headers=headers, json=json, timeout=attempt_timeout)
+            try:
+                if method_up == "GET":
+                    resp = await client.get(url, headers=headers, timeout=attempt_timeout)
+                elif method_up == "POST":
+                    resp = await client.post(url, headers=headers, json=json,
+                                             timeout=attempt_timeout)
+                else:
+                    resp = await client.request(method, url, headers=headers, json=json,
+                                                timeout=attempt_timeout)
+            finally:
+                if lane is not None:
+                    lane.sent()
             if resp.status_code != 429:
                 return resp
             if attempt >= _SEND_MAX_ATTEMPTS:
