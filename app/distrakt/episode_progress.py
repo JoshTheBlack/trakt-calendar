@@ -142,12 +142,6 @@ class SeasonProgress:
             for name in self._services)
 
     @property
-    def services(self) -> tuple[str, ...]:
-        """Every service this account syncs, which is who the ticks are drawn
-        for. Public because tests read it; no route branches on it."""
-        return self._services
-
-    @property
     def single(self) -> bool:
         """Whether a tick may be drawn without saying whose it is. With one
         service there is nothing to disambiguate, and a mark on every row of a

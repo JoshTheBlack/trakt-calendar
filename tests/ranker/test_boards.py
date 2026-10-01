@@ -505,6 +505,21 @@ class ValidationTests(RankerTestCase):
         # second spelling of the per-user one.
         asyncio.run(ranker.create_board(self.user_id, uid="other", year=2025))
 
+    def test_moving_a_board_into_a_full_year_is_refused_too(self):
+        """The cap is checked again on an EDIT, because a board created in a year
+        with room can otherwise be walked into one without: create it in 2025,
+        then change its year to a full 2026."""
+        for n in range(ranker.MAX_BOARDS_PER_YEAR):
+            asyncio.run(ranker.create_board(self.user_id, uid=f"y{n}", year=2026))
+        asyncio.run(ranker.create_board(self.user_id, uid="mover", year=2025))
+        with self.assertRaises(ranker.ValidationError):
+            asyncio.run(ranker.update_board(self.user_id, "mover", year=2026))
+        self.assertEqual(
+            self.value("SELECT year FROM tier_boards WHERE uid = 'mover'"), 2025)
+        # A board already in the full year may still be renamed or re-saved with
+        # its own year: only a MOVE into the year is counted against it.
+        asyncio.run(ranker.update_board(self.user_id, "y0", name="Renamed", year=2026))
+
     def test_the_item_cap_refuses_the_whole_request(self):
         asyncio.run(ranker.create_board(self.user_id, uid="b1"))
         with self.assertRaises(ranker.ValidationError):
@@ -1241,7 +1256,7 @@ class TrackerImportTests(RankerTestCase):
 
     def test_an_account_with_no_data_is_not_offered_it(self):
         self.assertFalse(asyncio.run(ranker_import.tracker_available(self.user_id)))
-        self.assertNotIn("import", self.client.get("/api/rankings/sources").json()["sources"])
+        self.assertNotIn("import", asyncio.run(ranker_routes._sources(self.user_id)))
 
     def test_an_unapproved_account_is_told_nothing(self):
         """The page draws neither the button nor the dialog for such an account —

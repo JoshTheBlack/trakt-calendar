@@ -124,8 +124,6 @@ class AssembleMonthTests(unittest.TestCase):
         self.assertEqual(assembly.new_ids, {"b"})
         self.assertEqual(assembly.delta["kind"], "up")
         self.assertEqual(assembly.history, [{"when": "now"}])
-        # Counted over the whole month, not per day: "a" airs twice.
-        self.assertEqual(dict(assembly.show_counts), {_key("a"): 2, _key("b"): 1})
 
     def test_how_many_cards_are_still_being_looked_up_reaches_the_page(self):
         """A title one source listed but nobody has looked up yet has no genres

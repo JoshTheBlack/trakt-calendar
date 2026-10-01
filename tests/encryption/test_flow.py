@@ -86,7 +86,7 @@ class EncryptionFlowTests(unittest.IsolatedAsyncioTestCase):
             # restart is required; nothing is encrypted.
             result = await encryption_flow.begin_enable(generate=True)
             self.assertTrue(result["restart_required"])
-            self.assertTrue(secrets_box.key_is_valid(result["key"]))
+            Fernet(result["key"])  # raises unless it is a usable key
             self.assertEqual(await encryption_flow.get_phase(), encryption_flow.PHASE_PENDING_KEY)
         with _KeyEnv(KEY):
             self.assertTrue(await encryption_flow.verify_key())

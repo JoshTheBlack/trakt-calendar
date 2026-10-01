@@ -14,8 +14,9 @@ from unittest import mock
 
 from app import db
 from app.auth import trakt_routes
-from app.providers.trakt import sync as trakt_sync
+from app.providers.trakt import TraktError, sync as trakt_sync
 from app.ranker import core as ranker, sources as ranker_sources
+from app.ranker.sources import SourceUnavailable
 from tests.ranker.test_standalone import StandaloneTestCase, _token_for
 
 SHOW = {"title": "The Bear", "year": 2022,
@@ -68,6 +69,25 @@ class RatingsSeedSeasonTests(StandaloneTestCase):
             [("show", 95396, None, 7), ("show", 136315, 2, 10), ("show", 136315, 3, 8),
              ("movie", 550, None, 6)])
         self.assertEqual(rated[1].title.title, "The Bear")
+
+    def test_a_trakt_failure_reaches_the_board_as_the_neutral_one(self):
+        """The board knows no provider's exception type — the seams exist so it
+        need not — so a Trakt refusal is translated at the adapter's edge, keeping
+        the status that lets a 401 read as a credential problem."""
+        async def refuse(settings):
+            raise TraktError("Trakt rejected the credentials", 401)
+
+        with mock.patch.object(trakt_sync, "fetch_ratings", refuse):
+            with self.assertRaises(SourceUnavailable) as caught:
+                asyncio.run(ranker_sources.ratings_source().fetch_ratings(self.user_id))
+        self.assertEqual(caught.exception.status, 401)
+        self.assertIsInstance(caught.exception.__cause__, TraktError)
+
+    def test_an_account_with_no_link_is_never_read_with_anybody_elses_token(self):
+        with mock.patch.object(trakt_routes, "access_token_for_user", _token_for(None)),              mock.patch.object(trakt_sync, "fetch_ratings",
+                               mock.AsyncMock(side_effect=AssertionError("read"))):
+            with self.assertRaises(ranker_sources.NoLinkedIdentity):
+                asyncio.run(ranker_sources.ratings_source().fetch_ratings(self.user_id))
 
     def test_a_seed_places_season_rows_with_their_own_scores(self):
         page = self.client.post("/rankings/boards/b1/seed", json={"commit": "1"}).text

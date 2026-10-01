@@ -935,12 +935,12 @@ def png_bytes(colour=(200, 30, 30)) -> str:
 class SavedImageRouteTests(FragmentTestCase):
     """The account's saved pictures, which the export dialog chooses between.
 
-    THE LIBRARY IS MARKUP NOW, so these ask the fragment what it drew rather than
-    a JSON list what it holds. The one route that still answers bytes is the
+    THE LIBRARY IS MARKUP NOW, drawn on the account page, so these ask the page
+    what it drew rather than a JSON list what it holds. The one route that still answers bytes is the
     picture itself, which is what an <img> asks for."""
 
     def test_the_library_starts_empty_and_reports_the_cap(self):
-        html = self.client.get("/me/fragments/images").text
+        html = self.client.get("/me").text
         self.assertIn("Nothing saved yet.", html)
         self.assertIn(f"0 of {user_images.MAX_IMAGES_PER_USER} saved.", html)
 
@@ -973,7 +973,7 @@ class SavedImageRouteTests(FragmentTestCase):
         self.assertIn("No such image.",
                       self.client.post(f"/me/images/{uid}/delete", json={}).text)
         self.sign_in_as(self.user_id)
-        self.assertIn(uid, self.client.get("/me/fragments/images").text)
+        self.assertIn(uid, self.client.get("/me").text)
 
     def test_a_traversal_uid_is_refused_before_it_becomes_a_path(self):
         self.assertEqual(

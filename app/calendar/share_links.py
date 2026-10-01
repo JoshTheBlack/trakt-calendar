@@ -4,9 +4,11 @@ back to before the app-wide default.
 
 A row is created lazily — the first time a signed-in user opens the Share
 panel — rather than for every account up front, since most accounts will never
-touch it. `enabled_token` starts on so a freshly-opened panel already has one
-working link; the human-readable forms are opt-in (a user whose username here
-differs from what they go by elsewhere may not want it handed out).
+touch it. All three forms start on and stay on — the panel's dropdown only
+chooses which one it shows you (set_active_kind) — so a link already handed out
+keeps working. A token link is retired by rotating it (the old token simply
+stops matching) and a slug link by clearing the slug, which also switches the
+slug form off until a new one is saved.
 
 This module owns storage and the cross-namespace validation rule. Resolving a
 public request to a page is app/calendar/share_routes.py's job.
@@ -61,9 +63,6 @@ LINK_VIEW_PARAMS = ("endpoint", "card", "packing", "hidenw", "tz", "year", "mont
 # rejected for being a couple of years old, narrow enough that a typo or a
 # hand-crafted body cannot publish a link to the year 40000.
 LINK_VIEW_YEAR_RANGE = (1970, 2100)
-
-# kind -> the column that gates whether that form of the link answers at all.
-_ENABLED_COLUMN = {"token": "enabled_token", "username": "enabled_username", "slug": "enabled_slug"}
 
 _SELECT = "SELECT * FROM share_links WHERE user_id = ?"
 
@@ -134,14 +133,6 @@ async def rotate_token(user_id: int) -> str:
     return new_token
 
 
-async def set_enabled(user_id: int, kind: str, enabled: bool) -> None:
-    if kind not in _ENABLED_COLUMN:
-        raise ValueError(f"Unknown share kind: {kind!r}")
-    await get_or_create(user_id)
-    column = _ENABLED_COLUMN[kind]
-    await db.execute(f"UPDATE share_links SET {column} = ? WHERE user_id = ?", (int(enabled), user_id))
-
-
 async def set_active_kind(user_id: int, kind: str) -> None:
     """Record which link form the Share panel hands out, and make sure all three
     still answer.
@@ -152,7 +143,8 @@ async def set_active_kind(user_id: int, kind: str) -> None:
     one. That is why this enables rather than swapping: the alternative silently
     revokes URLs that are already out in the world.
 
-    set_enabled remains the way to actually take a form out of service.
+    Nothing takes a form out of service any more: a token link is retired by
+    rotating it, and a slug link by clearing the slug.
     """
     if kind not in PREFERRED_KINDS:
         raise ValueError(f"Unknown share kind: {kind!r}")
@@ -162,13 +154,6 @@ async def set_active_kind(user_id: int, kind: str) -> None:
         "enabled_username = 1, enabled_slug = 1 WHERE user_id = ?",
         (kind, user_id),
     )
-
-
-async def set_preferred_kind(user_id: int, kind: str) -> None:
-    if kind not in PREFERRED_KINDS:
-        raise ValueError(f"Unknown share kind: {kind!r}")
-    await get_or_create(user_id)
-    await db.execute("UPDATE share_links SET preferred_kind = ? WHERE user_id = ?", (kind, user_id))
 
 
 async def set_post_link(user_id: int, *, kind: str | None = ..., endpoint: str | None = ...) -> None:
@@ -400,29 +385,18 @@ def generated_urls(row, username: str | None, base_url: str) -> dict[str, str | 
     return {kind: build_url(row, username, base_url, kind, view) for kind in PREFERRED_KINDS}
 
 
-def post_link_url(row, username: str | None, base_url: str) -> str | None:
-    """The share URL to embed in the tracker's announcement post, or None when
-    this account has no publishable link at all.
-
-    Falls back down the chain post_link_kind -> preferred_kind -> any enabled
-    form, because a stored choice can stop resolving after the fact (the user
-    disables that form, or clears the slug it pointed at) and silently dropping
-    the link from every future post is a worse answer than publishing the one
-    that still works.
-    """
-    urls = share_urls(row, username, base_url)
-    candidates = [row["post_link_kind"], row["preferred_kind"], *PREFERRED_KINDS] if row is not None else []
-    for kind in candidates:
-        if kind and urls.get(kind):
-            return urls[kind]
-    return None
-
-
 def post_link_with_view(row, username: str | None, base_url: str,
                         *, year: int | None = None, month: int | None = None) -> str | None:
-    """post_link_url plus the owner's chosen calendar view as a query param, so
-    an announcement can point at the premieres list while the owner's own share
-    page defaults to something else.
+    """The share URL to embed in the tracker's announcement post, carrying the
+    owner's chosen calendar view as a query param — so an announcement can point
+    at the premieres list while the owner's own share page defaults to something
+    else — or None when this account has no publishable link at all.
+
+    The form falls back down the chain post_link_kind -> preferred_kind -> any
+    enabled form, because a stored choice can stop resolving after the fact (the
+    user disables that form, or clears the slug it pointed at) and silently
+    dropping the link from every future post is a worse answer than publishing
+    the one that still works.
 
     `year`/`month` pin the link to the month the post is about — announcing
     August means handing out August, and a post is read for weeks after it goes
@@ -509,6 +483,11 @@ async def set_custom_slug(user_id: int, slug: str | None) -> str | None:
     The slug being replaced is retired, so a name whose links are already shared
     cannot be picked up by somebody else. Clearing the slug also disables the slug
     form: an enabled form with no slug set would have nowhere to resolve.
+
+    AND SAVING ONE ENABLES IT. Every form answers once it has something to answer
+    with (set_active_kind says why), and nothing else can switch a form back on
+    — so a slug saved after one was cleared stayed disabled, and its /c/ link
+    answered 404 from the moment it was handed out.
     """
     await get_or_create(user_id)
     candidate = (slug or "").strip().lower()
@@ -528,7 +507,8 @@ async def set_custom_slug(user_id: int, slug: str | None) -> str | None:
                 (candidate, user_id),
             )
             conn.execute(
-                "UPDATE share_links SET custom_slug = ? WHERE user_id = ?", (candidate, user_id),
+                "UPDATE share_links SET custom_slug = ?, enabled_slug = 1 WHERE user_id = ?",
+                (candidate, user_id),
             )
         else:
             conn.execute(

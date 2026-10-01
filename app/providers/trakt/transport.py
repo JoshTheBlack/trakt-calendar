@@ -231,18 +231,14 @@ def _lane_for(method: str, headers: dict | None) -> _Lane | None:
 
 def shared_client() -> httpx.AsyncClient:
     """The pooled Trakt client (created lazily on first use, on the current
-    running loop). Callers must NOT close it — see aclose_shared_client.
+    running loop). Callers must NOT close it: app shutdown closes every pool at
+    once, through http_pool.aclose_all.
 
     Kept as a function rather than collapsed into POOL.client(): this is the seam
     the test suite patches to hand Trakt calls a recording double, and a name two
     dozen tests reach for is worth keeping stable.
     """
     return POOL.client()
-
-
-async def aclose_shared_client() -> None:
-    """Close the Trakt client (call on app shutdown)."""
-    await POOL.aclose()
 
 
 # ---------------------------------------------------------------------------

@@ -262,25 +262,6 @@ def episode_coords(record: Record) -> tuple[int, int] | None:
     return None
 
 
-def group_key(record: Record) -> str:
-    """The key one record would take ON ITS OWN, before anything it was fetched
-    beside is considered.
-
-    (shared identity, season, episode) for an episodic and (shared identity) for
-    a film, exactly as two services listing the same S02E05 have to become one
-    card while one show's different episodes must never collapse.
-
-    THIS IS NOT THE FINAL KEY. A record stating no coordinates can still turn out
-    to be the same airing as one that states them, and deciding that needs the
-    other records in the window — see `match_keys`, which is what `group_records`
-    actually keys on. This function stays because "what does this record say
-    about itself" is a separate question worth asking on its own.
-    """
-    base = group_base(record)
-    coords = episode_coords(record)
-    return f"{base}|{coords[0]}|{coords[1]}" if coords else base
-
-
 def match_keys(records: list[Record]) -> list[str]:
     """The final group key for each of `records`, in the same order — THE
     MATCHER.

@@ -844,21 +844,26 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
         cached.assert_not_awaited()
 
 
+def _history_events():
+    """Three plays of one show: two episodes of season 1 and a special."""
+    return [
+        {"type": "episode", "watched_at": "2026-07-02T00:00:00Z",
+         "show": {"title": "Show", "ids": {"simkl": 55, "tmdb": "900"}},
+         "episode": {"season": 1, "number": 1}},
+        {"type": "episode", "watched_at": "2026-07-03T00:00:00Z",
+         "show": {"title": "Show", "ids": {"simkl": 55, "tmdb": "900"}},
+         "episode": {"season": 1, "number": 2}},
+        {"type": "episode", "watched_at": "2026-07-04T00:00:00Z",
+         "show": {"title": "Show", "ids": {"simkl": 55}},
+         "episode": {"season": 0, "number": 1}},   # specials
+    ]
+
+
 class DerivationTests(unittest.TestCase):
     """The two pure readers, which a caller uses to read one sweep twice."""
 
     def _events(self):
-        return [
-            {"type": "episode", "watched_at": "2026-07-02T00:00:00Z",
-             "show": {"title": "Show", "ids": {"simkl": 55, "tmdb": "900"}},
-             "episode": {"season": 1, "number": 1}},
-            {"type": "episode", "watched_at": "2026-07-03T00:00:00Z",
-             "show": {"title": "Show", "ids": {"simkl": 55, "tmdb": "900"}},
-             "episode": {"season": 1, "number": 2}},
-            {"type": "episode", "watched_at": "2026-07-04T00:00:00Z",
-             "show": {"title": "Show", "ids": {"simkl": 55}},
-             "episode": {"season": 0, "number": 1}},   # specials
-        ]
+        return _history_events()
 
     def test_seasons_are_counted_and_specials_are_not(self):
         self.assertEqual(sync.watched_progress_from(self._events()),
@@ -869,6 +874,27 @@ class DerivationTests(unittest.TestCase):
         """Simkl's library payload does not carry it, and every reader already
         treats an empty string as "not stated"."""
         self.assertEqual(sync.watched_progress_from(self._events())[0]["network"], "")
+
+
+class RecentProgressTests(unittest.IsolatedAsyncioTestCase):
+    """sync.fetch_watched_progress — the history sweep the rollover reads to
+    offer "you seem to be watching this", windowed to recent days."""
+
+    async def _progress(self, **kwargs):
+        sweep = AsyncMock(return_value=_history_events())
+        with patch.object(sync, "fetch_history", sweep):
+            return await sync.fetch_watched_progress(SETTINGS, **kwargs), sweep
+
+    async def test_it_reads_only_the_recent_window_and_counts_its_seasons(self):
+        from datetime import datetime, timedelta, timezone
+        progress, sweep = await self._progress(since_days=60)
+        expected = (datetime.now(timezone.utc).date() - timedelta(days=60)).isoformat()
+        self.assertEqual(sweep.await_args.kwargs["start_at"], expected)
+        self.assertEqual([(p["season"], p["watched"]) for p in progress], [(1, 2)])
+
+    async def test_no_window_reads_the_whole_history(self):
+        _progress, sweep = await self._progress(since_days=None)
+        self.assertIsNone(sweep.await_args.kwargs["start_at"])
 
 
 class LibraryIdsTests(unittest.IsolatedAsyncioTestCase):

@@ -165,7 +165,14 @@ class _SimklDetailPort:
             entry = {"ids": ids, "date": when,
                      "title": fields.get("title") or "",
                      "poster": fields.get("poster") or ""}
-            if season is not None and media is not Media.MOVIE:
+            if media is Media.MOVIE:
+                # A FILM'S ENTRY STATES ITS DAY AS `release_date`, which is the
+                # only key to_movie_record reads (its docstring says why a release
+                # is a day and never an instant). Handed `date` alone, every film
+                # this built came back as no record at all, so a film only Simkl
+                # knew could not be jumped to from a search.
+                entry["release_date"] = str(when)[:10]
+            elif season is not None:
                 entry["episode"] = {"season": int(season), "episode": 1}
             record = (calendar.to_movie_record(entry) if media is Media.MOVIE
                       else calendar.to_show_record(entry))

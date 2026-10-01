@@ -123,24 +123,6 @@ class KeepReleaseBlocksTests(unittest.TestCase):
             None, {"us"}, set(), set(), set()))
 
 
-class KeepReleaseTests(unittest.TestCase):
-    def test_a_record_with_no_release_map_is_always_kept(self):
-        """Three real situations produce one and none of them is "released
-        nowhere": a source whose calendar payload has no release schedule (the
-        other service's does not), a film enrichment has not reached, and a row
-        written before the schedule was extracted."""
-        trakt = Record(source=Source.TRAKT, media=Media.MOVIE, id="x", ids={},
-                       detail_url="", title="A Film", air_ts=_AIR_TS)
-        self.assertTrue(calendar_filter.keep_release(
-            trakt, {"us"}, set(), {THEATRICAL}, set()))
-        self.assertTrue(calendar_filter.keep_release(
-            _film(1), {"us"}, set(), {THEATRICAL}, set()))
-
-    def test_a_record_that_can_answer_is_judged(self):
-        self.assertFalse(calendar_filter.keep_release(
-            _film(1, releases={"BR": [PREMIERE]}), {"us"}, set(), set(), set()))
-
-
 class ParseReleaseTypeSpecTests(unittest.TestCase):
     def test_it_reads_numbers_and_the_same_exclude_convention(self):
         self.assertEqual(calendar_filter.parse_release_type_spec("3, 4, -1"),

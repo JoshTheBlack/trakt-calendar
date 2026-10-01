@@ -444,7 +444,6 @@ class SimklOnlyOnAPublicShareLinkTests(AppTestCase):
 
         self.user_id = self.make_user("shareowner", calendar_approved=True)
         self.token = asyncio.run(share_links.get_or_create(self.user_id))["token"]
-        asyncio.run(share_links.set_enabled(self.user_id, "token", True))
         record = Record(
             source=Source.SIMKL, media=Media.SHOW, id="3204421",
             ids={"simkl": 3204421, "slug": "somebody-knows-something"},

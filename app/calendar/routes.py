@@ -24,7 +24,6 @@ import dataclasses
 import logging
 import re
 import secrets
-from collections import Counter
 from datetime import date, datetime
 from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -439,10 +438,6 @@ class MonthAssembly:
     not_watching_keys: set[str] = dataclasses.field(default_factory=set)
     delta: dict = dataclasses.field(default_factory=lambda: {"text": "", "kind": "none"})
     history: list[dict] = dataclasses.field(default_factory=list)
-    # How many cards each show has this month. The stats tiles need it to keep
-    # counting correctly when one toggle flips a show that airs on a dozen days —
-    # without asking the DOM, which only ever knows about the cards it holds.
-    show_counts: dict[str, int] = dataclasses.field(default_factory=dict)
     error: str | None = None
     # A Simkl-only month outside the declared coverage window's explicit
     # empty state: set together, and only together, by _coverage_gap.
@@ -522,8 +517,6 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
         assembly.partial = meta["partial"]
         assembly.unenriched = meta["unenriched"]
         assembly.filtered = meta["filtered"]
-        assembly.show_counts = Counter(
-            item.mark_key for group in assembly.grouped for item in group["items"])
         # The is-new diff and its baseline commit belong to whoever produced
         # the cards, over the SERVER's full id list. Skipped on the error
         # paths: committing an empty month as the baseline would make the whole
@@ -2185,20 +2178,6 @@ def _network_list(value) -> list[str]:
     return names
 
 
-@guard.get("/api/me/prefs", AuthLevel.CALENDAR_APPROVED)
-async def get_me_prefs(request: Request):
-    """The viewer's own view preferences, for the Filters panel to populate from.
-
-    Separate from the Settings panel (app/settings_routes.py), which is
-    ADMIN-only and describes the instance.
-    These are the values that actually filter this person's calendar, so every
-    signed-in account has to be able to read them back.
-    """
-    user = await auth.current_user(request)
-    prefs = await auth.get_user_prefs(user.user_id)
-    return JSONResponse({"ok": True, "prefs": prefs})
-
-
 @guard.post("/api/me/prefs", AuthLevel.CALENDAR_APPROVED)
 async def post_me_prefs(request: Request):
     """Persist a partial update to the viewer's own calendar view preferences.
@@ -2745,16 +2724,3 @@ async def api_network_logo(request: Request):
     # ?download=1 -> attachment (for the emoji-map "download logo" button).
     filename = f"{logos.slug(name)}.png" if request.query_params.get("download") else None
     return FileResponse(path, media_type="image/png", filename=filename, headers=_LOGO_CACHE_HEADERS)
-
-
-@guard.post("/api/network-logo/regenerate", AuthLevel.ADMIN)
-async def api_network_logo_regenerate(request: Request):
-    """Re-resolve a single network's logo from TMDB, keeping the old tile when no
-    new one can be made (logos.regenerate)."""
-    data = await authz.json_body(request)
-    name = (data.get("name") or "").strip()
-    tmdb = data.get("tmdb")
-    if not name:
-        return JSONResponse({"ok": False, "error": "Missing network name"}, status_code=400)
-    path = await logos.regenerate(load_settings(), name, tmdb)
-    return JSONResponse({"ok": True, "network": name, "generated": bool(path and path.exists())})

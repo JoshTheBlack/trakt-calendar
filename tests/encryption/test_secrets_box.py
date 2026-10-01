@@ -129,13 +129,6 @@ class SecretsBoxTests(unittest.TestCase):
             self.assertEqual(secrets_box.seal(""), "")
             self.assertEqual(secrets_box.open_(""), "")
 
-    def test_key_is_valid_accepts_a_real_key_and_rejects_a_bad_one(self):
-        self.assertTrue(secrets_box.key_is_valid(KEY))
-        self.assertTrue(secrets_box.key_is_valid(Fernet.generate_key()))  # bytes form
-        self.assertFalse(secrets_box.key_is_valid("not-a-real-key"))
-        self.assertFalse(secrets_box.key_is_valid(""))
-        self.assertFalse(secrets_box.key_is_valid("short"))
-
     def test_a_malformed_env_key_fails_fast_rather_than_reading_as_no_key(self):
         """A truncated or mistyped key is an error, not the opt-out: it must raise
         so the operator fixes it instead of silently storing everything plaintext

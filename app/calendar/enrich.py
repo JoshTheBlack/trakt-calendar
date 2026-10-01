@@ -532,7 +532,7 @@ def _apply(record: Record, fields: dict[str, Any]) -> None:
     record.anime_type = value["anime_type"]
     # {country: [release type]} for a film, empty for everything else. An empty
     # map means "this record cannot answer" rather than "released nowhere" —
-    # see keep_release in app/calendar/filter.py.
+    # see keep_release_group in app/calendar/filter.py.
     record.release_types_by_country = dict(value["release_types_by_country"])
     _merge_ids(record, value["ids"])
     record.enriched = True

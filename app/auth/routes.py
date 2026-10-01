@@ -1398,12 +1398,6 @@ def _image_library(request: Request, user_id: int, message: str = "") -> Respons
     })
 
 
-@guard.get("/me/fragments/images", AuthLevel.SESSION)
-async def saved_images_fragment(request: Request):
-    user = await auth.require_session(request)
-    return _image_library(request, user.user_id)
-
-
 @guard.post("/me/images", AuthLevel.SESSION)
 async def upload_saved_image(request: Request):
     """Add a saved image, capped at user_images.MAX_IMAGES_PER_USER per account."""

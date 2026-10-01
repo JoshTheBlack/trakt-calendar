@@ -146,24 +146,6 @@ class ShareCardRouteTests(ShareCardTestCase):
         resp = self.client.get(f"/s/{self.token}/og.jpg?p={code}", follow_redirects=False)
         self.assertEqual(resp.status_code, 200)
 
-    def test_a_slug_only_share_still_has_a_card(self):
-        """The regression this design invites: the picture is addressed by token
-        from all three link forms, so gating it on the token FORM would leave a
-        live /c/ page with no preview at all."""
-        asyncio.run(share_links.set_custom_slug(self.user_id, "prettyslug"))
-        asyncio.run(share_links.set_enabled(self.user_id, "slug", True))
-        asyncio.run(share_links.set_enabled(self.user_id, "token", False))
-        self.assertEqual(self.client.get(f"/s/{self.token}", follow_redirects=False).status_code, 404)
-        resp = self.client.get(f"/s/{self.token}/og.jpg?year=2026&month=8")
-        self.assertEqual(resp.status_code, 200)
-
-    def test_everything_disabled_serves_the_banner(self):
-        for kind in ("token", "username", "slug"):
-            asyncio.run(share_links.set_enabled(self.user_id, kind, False))
-        resp = self.client.get(f"/s/{self.token}/og.jpg", follow_redirects=False)
-        self.assertEqual(resp.status_code, 302)
-        self.assertEqual(resp.headers["location"], share_routes.STATIC_CARD_URL)
-
     def test_an_unknown_token_serves_the_banner(self):
         resp = self.client.get("/s/nope/og.jpg", follow_redirects=False)
         self.assertEqual(resp.status_code, 302)
@@ -611,8 +593,6 @@ class SharePageOpenGraphTests(ShareCardTestCase):
         markup pasted into other people's channels names the owner, which is what
         the picture itself is built not to do."""
         asyncio.run(share_links.set_custom_slug(self.user_id, "prettyslug"))
-        for kind in ("username", "slug"):
-            asyncio.run(share_links.set_enabled(self.user_id, kind, True))
         for url in ("/u/cardowner?year=2026&month=8", "/c/prettyslug?year=2026&month=8"):
             with self.subTest(url=url):
                 image = self.og_image(url)

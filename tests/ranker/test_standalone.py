@@ -261,7 +261,7 @@ class JourneyTests(StandaloneTestCase):
 
 class AbsenceTests(StandaloneTestCase):
     def test_neither_optional_source_is_advertised(self):
-        sources = self.client.get("/api/rankings/sources").json()["sources"]
+        sources = asyncio.run(ranker_routes._sources(self.user_id))
         self.assertEqual(sources, {"search": True})
 
     def test_the_import_route_refuses_and_explains_nothing(self):
@@ -319,7 +319,7 @@ class CredentialTests(StandaloneTestCase):
 
     def test_the_seed_is_offered_once_an_account_has_something_to_read(self):
         with mock.patch.object(trakt_routes, "access_token_for_user", _token_for(USER_TOKEN)):
-            sources = self.client.get("/api/rankings/sources").json()["sources"]
+            sources = asyncio.run(ranker_routes._sources(self.user_id))
         self.assertEqual(sources, {"search": True, "ratings": True})
 
 

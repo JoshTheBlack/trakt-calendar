@@ -1544,61 +1544,8 @@ async def share_details_by_slug(request: Request, slug: str):
     return await _details(request, await share_links.resolve_by_slug(slug))
 
 
-# ---------------------------------------------------------------------------
-# owner-facing API — the Share panel on the logged-in calendar
-# ---------------------------------------------------------------------------
-
 def _public_base(settings) -> str:
     return (settings.public_base_url or "").rstrip("/")
-
-
-def _share_payload(row, username: str | None, settings) -> dict:
-    base = _public_base(settings)
-    return {
-        "ok": True,
-        # Every URL below is None without a configured base — there is no
-        # request-derived fallback (the request Host isn't trustworthy enough
-        # to advertise as the public origin), so the panel needs to say why the
-        # link boxes are empty rather than just rendering them blank.
-        "base_url_missing": not bool(base),
-        "token": row["token"],
-        "custom_slug": row["custom_slug"],
-        "preferred_kind": row["preferred_kind"],
-        "enabled": {
-            "token": bool(row["enabled_token"]),
-            "username": bool(row["enabled_username"]),
-            "slug": bool(row["enabled_slug"]),
-        },
-        # The links as handed out: carrying the owner's chosen view params, which
-        # is the ONLY thing those params affect — not the owner's own calendar,
-        # and not the share page's fallback for a link that omits them.
-        "urls": share_links.generated_urls(row, username, base),
-        # None == "use my current display", i.e. hand out a bare link and let the
-        # page resolve the owner's defaults.
-        "link_view": share_links.link_view(row),
-    }
-
-
-@guard.post("/api/me/share/enabled", AuthLevel.CALENDAR_APPROVED)
-async def post_share_enabled(request: Request):
-    user = await auth.current_user(request)
-    data = await authz.json_body(request)
-    if data.get("kind") not in share_links.PREFERRED_KINDS:
-        return JSONResponse({"ok": False, "error": "Expected {kind, enabled}"}, status_code=400)
-    await share_links.set_enabled(user.user_id, data["kind"], bool(data.get("enabled")))
-    row = await share_links.get(user.user_id)
-    return JSONResponse(_share_payload(row, user.username, load_settings()))
-
-
-@guard.post("/api/me/share/preferred", AuthLevel.CALENDAR_APPROVED)
-async def post_share_preferred(request: Request):
-    user = await auth.current_user(request)
-    data = await authz.json_body(request)
-    if data.get("kind") not in share_links.PREFERRED_KINDS:
-        return JSONResponse({"ok": False, "error": "Expected {kind}"}, status_code=400)
-    await share_links.set_preferred_kind(user.user_id, data["kind"])
-    row = await share_links.get(user.user_id)
-    return JSONResponse(_share_payload(row, user.username, load_settings()))
 
 
 # ---------------------------------------------------------------------------

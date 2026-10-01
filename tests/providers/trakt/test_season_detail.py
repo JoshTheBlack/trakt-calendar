@@ -29,6 +29,13 @@ SETTINGS = SimpleNamespace(trakt_client_id="id", trakt_access_token="",
 EPISODES = [{"number": n, "first_aired": f"2026-07-0{n}T01:00:00.000Z"}
             for n in (1, 2, 3)]
 
+# The REAL function, taken at import. tests/conftest.py's autouse
+# `no_background_episode_lookups` replaces it for every test so the per-episode
+# drain cannot reach the network, which also meant its own body never ran under
+# test at all. Collection imports this module before any fixture runs, so this
+# name still holds the original.
+REAL_FETCH_SEASON_EPISODES = detail.fetch_season_episodes
+
 
 class SeasonDetailTells0FromUnknownTests(unittest.IsolatedAsyncioTestCase):
     async def _detail(self, answer):
@@ -70,6 +77,50 @@ class SeasonDetailTells0FromUnknownTests(unittest.IsolatedAsyncioTestCase):
         """Trakt answered, with something this function cannot count. That is
         its answer, not a failure to get one."""
         self.assertEqual((await self._detail({"unexpected": "shape"}))["total"], 0)
+
+
+class SeasonEpisodesTests(unittest.IsolatedAsyncioTestCase):
+    """`fetch_season_episodes` keeps three answers apart: the episodes, "Trakt
+    has none" ([]), and "not without a request" (None), and raises for anything
+    that is not an answer at all."""
+
+    async def _episodes(self, answer, **kwargs):
+        stub = (AsyncMock(side_effect=answer) if isinstance(answer, Exception)
+                else AsyncMock(return_value=answer))
+        with patch.object(detail.transport, "cached_get", stub):
+            return await REAL_FETCH_SEASON_EPISODES(SETTINGS, 7, 1, client=object(), **kwargs), stub
+
+    async def test_each_episode_keeps_the_facts_a_card_draws(self):
+        raw = [{"number": 1, "title": "Pilot", "overview": "It begins.", "runtime": 50,
+                "first_aired": "2026-07-01T01:00:00.000Z", "episode_type": "series_premiere",
+                "rating": 8.1, "votes": 12},
+               {"number": 2}]
+        episodes, stub = await self._episodes(raw)
+        self.assertEqual(episodes[0], {
+            "number": 1, "title": "Pilot", "overview": "It begins.",
+            "first_aired": "2026-07-01T01:00:00.000Z", "episode_type": "series_premiere",
+            "runtime": 50, "rating": 8.1, "votes": 12})
+        self.assertEqual(episodes[1]["title"], "")
+        # `extended=full` is what carries first_aired; `episodes` alone does not.
+        self.assertEqual(stub.await_args.args[3], {"extended": "full"})
+
+    async def test_an_entry_with_no_number_or_no_shape_is_skipped(self):
+        episodes, _ = await self._episodes([{"title": "no number"}, "junk", {"number": 3}])
+        self.assertEqual([e["number"] for e in episodes], [3])
+
+    async def test_a_404_or_a_body_that_is_not_a_list_is_no_episodes(self):
+        for answer in (TraktError("Trakt API returned HTTP 404.", 404), {"unexpected": 1}):
+            with self.subTest(answer=answer):
+                self.assertEqual((await self._episodes(answer))[0], [])
+
+    async def test_any_other_failure_raises(self):
+        with self.assertRaises(TraktError):
+            await self._episodes(TraktError("Trakt rejected the credentials", 401))
+
+    async def test_not_yet_cached_is_none_rather_than_an_empty_season(self):
+        episodes, stub = await self._episodes(None, only_if_cached=True)
+        self.assertIsNone(episodes)
+        self.assertTrue(stub.await_args.kwargs["only_if_cached"])
 
 
 if __name__ == "__main__":  # pragma: no cover

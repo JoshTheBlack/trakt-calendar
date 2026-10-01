@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from urllib.parse import unquote, urlencode
+from urllib.parse import unquote
 
 from ...config import Settings
 from ...perftrace import span
@@ -158,17 +158,6 @@ LIBRARY_PARAMS = {
 # `imdb`, `tmdb` and `tvdb`. Everything this package used to derive with a
 # per-title lookup is in the payload.
 ANIME_EXTENDED = "full_anime_seasons"
-
-def _api_url(path: str, settings: Settings, params: dict | None = None) -> str:
-    """A URL for one of this module's calls, named for the TRACKER.
-
-    Everything here reads one person's watch history with that person's own
-    token, which is the half Simkl knows as `distrakkt` — see
-    transport.APP_NAME_TRACKER for why the two halves identify themselves
-    differently at all.
-    """
-    return (f"{transport.API_BASE}/{path}?"
-            f"{urlencode(transport.api_params(settings, params, app=transport.APP_NAME_TRACKER))}")
 
 
 def _latest(*values) -> str | None:

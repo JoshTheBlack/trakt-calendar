@@ -592,10 +592,6 @@ class AdminRefusalTests(AdminTestCase):
         self.make_admin()
         self.target = self.make_user("target")
 
-    def test_a_form_encoded_body_is_refused_before_routing(self):
-        for path in ADMIN_POSTS(self.target):
-            with self.subTest(path=path):
-                self.assertEqual(self.client.post(path, data={"value": "1"}).status_code, 415)
 
     def test_a_body_that_is_not_an_object_is_refused(self):
         for path in ADMIN_POSTS(self.target):

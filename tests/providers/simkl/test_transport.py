@@ -20,7 +20,7 @@ from unittest.mock import patch
 
 import httpx
 
-from app import changelog
+from app import changelog, http_pool
 from app.providers.simkl import SimklBlockedError, SimklRateLimitError
 from app.providers.simkl.transport import SimklUserQuotaError
 from app.providers.simkl import transport
@@ -791,6 +791,24 @@ class RedirectRoutingTests(TransportStateTestCase):
             transport.CATALOG_POOL._sem = original
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(client.requests), 2)
+
+    async def test_the_hop_reaches_each_pools_client_through_its_accessor(self):
+        """WHAT client_for IS FOR: the three accessors are the seam tests patch,
+        so a hop that went to `pool.client()` directly would step past a double
+        handed to `catalog_client` and make a real request. Each named pool is
+        asked for through its accessor; any other pool answers for itself."""
+        doubles = {name: object() for name in ("catalog", "sync", "cdn")}
+        with patch.object(transport, "catalog_client", lambda: doubles["catalog"]), \
+             patch.object(transport, "sync_client", lambda: doubles["sync"]), \
+             patch.object(transport, "cdn_client", lambda: doubles["cdn"]):
+            self.assertIs(transport.client_for(transport.CATALOG_POOL), doubles["catalog"])
+            self.assertIs(transport.client_for(transport.SYNC_POOL), doubles["sync"])
+            self.assertIs(transport.client_for(transport.CDN_POOL), doubles["cdn"])
+        other = http_pool.Pool("elsewhere")
+        try:
+            self.assertIs(transport.client_for(other), other.client())
+        finally:
+            http_pool._pools.remove(other)
 
 
 class HeaderTests(unittest.TestCase):

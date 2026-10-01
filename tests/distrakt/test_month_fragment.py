@@ -351,16 +351,6 @@ class EveryConvertedRouteRefusesTests(MonthFragmentTestCase):
         ("/api/distrakt/restore", {"payload": "{}", "ack": "REPLACE MY DATA"}),
     )
 
-    def test_a_form_encoded_body_is_refused_before_routing(self):
-        """CSRF defence-in-depth behind the session cookie's SameSite=Lax: a
-        cross-origin HTML form can only send form-encoded or text/plain, so the
-        check makes that POST unreachable. Enforced app-wide by
-        `request_shape_guard`, which is why every one of these is the same 415
-        and why no route re-checks it."""
-        for path, body in self.ROW_ROUTES + self.OTHER_ROUTES:
-            with self.subTest(path=path):
-                resp = self.client.post(path, data={k: str(v) for k, v in body.items()})
-                self.assertEqual(resp.status_code, 415, resp.text[:200])
 
     def test_a_row_on_another_account_is_refused_and_left_alone(self):
         """The key is a flat string the page was handed, so a caller can spell

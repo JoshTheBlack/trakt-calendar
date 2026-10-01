@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 🏷️ [1.2.6] - UNRELEASED
+
+### Fixed
+- 🎬 **A film only Simkl knows can be found and jumped to from the calendar search.** It used to come back with nowhere to land.
+- 🔗 **A custom share name saved after clearing one works.** Its `/c/` link used to answer "not found" from the start.
+
+### Under the hood
+- ⏱️ **The test suite runs in about two minutes instead of eleven**: it uses every CPU core and stops re-reading the certificate store for every test. Code nothing used any more is gone, and the code no test reached now has tests.
+
 ## 🏷️ [1.2.5] - 2026-09-30
 
 ### ⚠️ Upgrading

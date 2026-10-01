@@ -243,7 +243,7 @@ def keep_release_blocks(release_types_by_country, c_inc: set[str], c_exc: set[st
     Brazil-only film disappears.
 
     EMPTY IS NOT A DECISION. A film with no blocks at all cannot be judged, and
-    the caller (keep_release) is what decides that it is kept rather than
+    the caller (keep_release_group) is what decides that it is kept rather than
     dropped — this function is asked only about a film that has something to
     say.
     """
@@ -262,39 +262,27 @@ def keep_release_blocks(release_types_by_country, c_inc: set[str], c_exc: set[st
     return False
 
 
-def keep_release(record, c_inc: set[str], c_exc: set[str],
-                 t_inc: set[int], t_exc: set[int]) -> bool:
-    """keep_release_blocks, asked of a Record, with the "we do not know" case
-    answered here.
-
-    A RECORD CARRYING NO RELEASE MAP IS KEPT, ALWAYS. Three real situations
-    produce one and none of them is "this film is released nowhere": a source
-    whose calendar payload has no release schedule at all (Trakt's does not, so
-    every Trakt record answers this way), a Simkl film whose enrichment has not
-    landed yet, and a row written before the map was extracted. Dropping any of
-    them would let a filter delete titles it has no information about — the same
-    reasoning behind `exempt_unenriched` above, except that it needs no flag,
-    because an empty map already says exactly "nothing to judge".
-
-    THE COST OF THAT, STATED: a viewer who narrows to US theatrical still sees
-    the curated handful of films the other service listed, because that service
-    never says how a film is being released. That is the honest answer — this
-    filter can only act on what somebody actually published.
-    """
-    blocks = getattr(record, "release_types_by_country", None)
-    if not blocks:
-        return True
-    return keep_release_blocks(blocks, c_inc, c_exc, t_inc, t_exc)
-
-
 def keep_release_group(records, c_inc: set[str], c_exc: set[str],
                        t_inc: set[int], t_exc: set[int]) -> bool:
     """Whether a group of records for ONE film survives the release specs.
 
     The records that carry a release map are the ones asked; a group where none
     does is kept, because there is nothing to judge it on. See
-    filter_release_groups for why the two halves are not the same question, and
-    keep_release for the record-level rule this narrows.
+    filter_release_groups for why the two halves are not the same question.
+
+    A GROUP WITH NO RELEASE MAP IS KEPT, ALWAYS. Three real situations produce
+    one and none of them is "this film is released nowhere": a source whose
+    calendar payload has no release schedule at all (Trakt's does not), a Simkl
+    film whose enrichment has not landed yet, and a row written before the map
+    was extracted. Dropping any of them would let a filter delete titles it has
+    no information about — the same reasoning behind `exempt_unenriched` above,
+    except that it needs no flag, because an empty map already says exactly
+    "nothing to judge".
+
+    THE COST OF THAT, STATED: a viewer who narrows to US theatrical still sees
+    the curated handful of films only the other service listed, because that
+    service never says how a film is being released. That is the honest answer
+    — this filter can only act on what somebody actually published.
     """
     known = [record for record in records
              if getattr(record, "release_types_by_country", None)]

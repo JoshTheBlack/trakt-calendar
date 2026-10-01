@@ -89,7 +89,7 @@ class EncryptionRouteTestCase(unittest.TestCase):
         enable = self.client.post("/admin/encryption/enable", json={"generate": True})
         self.assertEqual(enable.status_code, 200, enable.text)
         key = re.search(r'id="encryptionKey" readonly value="([^"]+)"', enable.text).group(1)
-        self.assertTrue(secrets_box.key_is_valid(key))
+        Fernet(key)  # raises unless it is a usable key
         self.assertEqual(self._phase(), encryption_flow.PHASE_PENDING_KEY)
 
         # Operator saves the revealed key to the environment and restarts.
@@ -203,7 +203,7 @@ class EncryptionRouteTestCase(unittest.TestCase):
 
         resp = self.client.post("/admin/encryption/recovery/generate-key", json={})
         key1 = self._generated_key(resp)
-        self.assertTrue(secrets_box.key_is_valid(key1))
+        Fernet(key1)  # raises unless it is a usable key
         self.assertEqual(resp.headers["Cache-Control"], "no-store")
         self.assertIn("Generate a different key", resp.text)
         # Calling it again gives a FRESH key rather than this one again, and the

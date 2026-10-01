@@ -525,7 +525,7 @@ class ViewerFilterTests(CalendarRouteTestCase):
 
     def test_the_filter_endpoints_still_need_a_session(self):
         self.client.cookies.clear()
-        self.assertEqual(self.client.get("/api/me/prefs").status_code, 401)
+        self.assertEqual(self.client.get("/calendar/fragments/filters").status_code, 401)
         self.assertEqual(
             self.client.post("/calendar/filters", json={"filters_on": "0"}).status_code,
             401)

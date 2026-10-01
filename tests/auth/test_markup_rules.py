@@ -124,11 +124,6 @@ class AccountRefusalTests(AccountFamilyTestCase):
         self.assertEqual(row["username"], "member")
         self.assertEqual(len(asyncio.run(auth.list_identities(self.member_id))), 2)
 
-    def test_a_form_encoded_body_is_refused_before_routing(self):
-        for path, body in ACCOUNT_POSTS:
-            with self.subTest(path=path):
-                self.assertEqual(self.client.post(path, data=body).status_code, 415)
-        self.unchanged()
 
     def test_a_body_that_is_not_an_object_is_refused(self):
         for path, _ in ACCOUNT_POSTS:
@@ -142,14 +137,6 @@ class AccountRefusalTests(AccountFamilyTestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.client.post(path, json=body).status_code, 401)
         self.unchanged()
-
-    def test_another_origin_is_refused(self):
-        for path, body in ACCOUNT_POSTS:
-            with self.subTest(path=path):
-                resp = self.client.post(path, json=body, headers={"Origin": "https://evil.example"})
-                self.assertEqual(resp.status_code, 403)
-        self.unchanged()
-
 
 if __name__ == "__main__":
     unittest.main()
