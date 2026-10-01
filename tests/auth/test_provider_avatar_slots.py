@@ -439,3 +439,64 @@ class ThePickerOffersEveryPictureTests(AppTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn('data-source="trakt"', resp.text)
         self.assertEqual(user_images.list_avatar_sources(self.user_id), ["trakt"])
+
+
+class AskingTheServiceAgainTests(AppTestCase):
+    """`provider_avatars.current_url` — the refresh button's one outbound
+    question — and the route that serves a service's picture to the picker.
+
+    The refresh route's own tests stub `current_url` out; these are what read it:
+    which token it asks with, and that every way of not getting an answer is the
+    same quiet "no picture" rather than an error on the account page."""
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.make_user("asker")
+        user_images.delete_user_data(self.user_id)
+        self.addCleanup(user_images.delete_user_data, self.user_id)
+        self.sign_in_as(self.user_id)
+
+    def _current(self, provider):
+        return asyncio.run(provider_avatars.current_url(self.user_id, provider))
+
+    def test_it_asks_the_linked_service_with_this_accounts_own_token(self):
+        self.link_identity(self.user_id, "trakt", 7, access_token="the-users-token")
+        lookup = AsyncMock(return_value={"id": "u", "avatar": "https://media.trakt.tv/a.png"})
+        with patch("app.auth.trakt.fetch_account", lookup):
+            self.assertEqual(self._current("trakt"), "https://media.trakt.tv/a.png")
+        self.assertEqual(lookup.await_args.args[1], "the-users-token")
+
+    def test_each_service_is_asked_through_its_own_lookup(self):
+        self.link_identity(self.user_id, "plex", 8, access_token="plex-token")
+        lookup = AsyncMock(return_value={"id": 8, "avatar": "https://plex.tv/p.png"})
+        with patch("app.auth.plex.fetch_account", lookup),              patch("app.auth.plex.ensure_client_identifier", AsyncMock(return_value="cid")):
+            self.assertEqual(self._current("plex"), "https://plex.tv/p.png")
+        # Plex takes the token FIRST, which is why this dispatches by name.
+        self.assertEqual(lookup.await_args.args, ("plex-token", "cid"))
+
+    def test_no_link_no_token_a_failed_lookup_or_an_unknown_service_is_no_picture(self):
+        self.assertIsNone(self._current("trakt"))            # not linked
+        self.assertIsNone(self._current("uploaded"))         # nobody to ask
+        self.link_identity(self.user_id, "trakt", 7, access_token=None)
+        self.assertIsNone(self._current("trakt"))            # linked, no token
+        self.link_identity(self.user_id, "simkl", 9, access_token="tok")
+        with patch("app.auth.simkl.fetch_account",
+                   AsyncMock(side_effect=RuntimeError("simkl down"))):
+            self.assertIsNone(self._current("simkl"))         # lookup failed
+
+    def test_the_picker_is_served_a_services_picture_and_only_a_known_one(self):
+        asyncio.run(user_images.save_provider_avatar(self.user_id, "trakt", RED))
+        whole = self.client.get("/api/me/avatar/source/trakt")
+        self.assertEqual(whole.status_code, 200)
+        self.assertEqual(whole.headers["content-type"], "image/webp")
+        small = self.client.get("/api/me/avatar/source/trakt?size=48")
+        self.assertEqual(small.status_code, 200)
+        with Image.open(BytesIO(small.content)) as image:
+            self.assertEqual(image.size, (48, 48))
+        for bad in ("?size=4", "?size=big"):
+            with self.subTest(size=bad):
+                self.assertEqual(
+                    self.client.get(f"/api/me/avatar/source/trakt{bad}").status_code, 400)
+        # A slot with nothing in it, and a name outside the closed set.
+        self.assertEqual(self.client.get("/api/me/avatar/source/plex").status_code, 404)
+        self.assertEqual(self.client.get("/api/me/avatar/source/..%2fsettings").status_code, 404)

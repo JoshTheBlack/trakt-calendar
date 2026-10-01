@@ -540,18 +540,29 @@ written out, and that part is worth matching.
 ## Testing
 
 ```
-.venv/Scripts/python.exe -m pytest -q          # full suite, ~8.5 minutes
+.venv/Scripts/python.exe -m pip install -r requirements-dev.txt   # once: pytest + pytest-xdist
+.venv/Scripts/python.exe -m pytest -q          # full suite, ~2.5 minutes across every CPU
 .venv/Scripts/python.exe -m pytest -q tests/calendar/test_cache.py
+.venv/Scripts/python.exe -m pytest -q -n 0 tests/...   # one process, for a debugger or print()
 ```
+
+**THE SUITE RUNS IN PARALLEL BY DEFAULT** (`-n auto` in pytest.ini, one
+pytest-xdist worker per CPU), and that is safe only because every worker is its
+own process with its OWN data directory — tests/conftest.py makes one per worker
+rather than letting them inherit the controller's, which is what eight workers
+sharing one settings.json looked like (141 failures). A test that writes
+somewhere other than the data directory or its own database is a test that will
+race its neighbours.
 
 **WHICH RUN A COMMIT NEEDS DEPENDS ON WHERE IT LANDS.** A commit on a BRANCH
 needs the targeted files — the ones covering what changed, plus whatever the
 change reaches into. A commit on MAIN, and any merge back into main, needs the
-FULL SUITE. The full run is ~8.5 minutes (8m36s, measured 2026-09-23), which is
-cheap once at the point work becomes everybody's and expensive at every step of
-getting there; a branch is
-where the iterating happens, so the targeted run is what keeps it honest without
-making a commit something to put off.
+FULL SUITE. The full run is ~2.5 minutes (2m19s across eight workers, measured
+2026-09-30; it was 10m47s in one process before the suite went parallel and the
+trust store stopped being re-read — see app/http_pool.py), which is cheap once
+at the point work becomes everybody's; a branch is where the iterating happens,
+so the targeted run is what keeps it honest without making a commit something to
+put off.
 
 Run targeted files while iterating.
 `tests/` mirrors `app/`, so where a test lives says which part it covers.

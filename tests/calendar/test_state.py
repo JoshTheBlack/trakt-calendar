@@ -154,14 +154,12 @@ class UnmarkingClearsLegacySpellingsTests(StateTestCase):
 
 
 class WholeDocumentTests(StateTestCase):
-    async def test_save_then_load_round_trips_in_state_shape(self):
-        payload = {
-            "notWatching": ["slug-a", "slug-b"],
-            "history": [{"k": 1}],
-            "lastCount": 5,
-            "lastShowIds": ["slug-a", "slug-c"],
-        }
-        await calendar_state.save_state(self.user_id, "shows/new", 2026, 7, payload)
+    async def test_what_is_written_reads_back_in_state_shape(self):
+        await calendar_state.set_not_watching(self.user_id, "slug-a", True)
+        await calendar_state.set_not_watching(self.user_id, "slug-b", True)
+        await calendar_state.set_view_state(
+            self.user_id, "shows/new", 2026, 7, last_count=5,
+            last_show_ids=["slug-a", "slug-c"], history=[{"k": 1}])
         loaded = await calendar_state.load_state(self.user_id, "shows/new", 2026, 7)
         self.assertEqual(set(loaded["notWatching"]), {"slug-a", "slug-b"})
         self.assertEqual(loaded["history"], [{"k": 1}])
@@ -173,22 +171,12 @@ class WholeDocumentTests(StateTestCase):
         self.assertEqual(
             loaded, {"notWatching": [], "history": [], "lastCount": None, "lastShowIds": None})
 
-    async def test_save_adds_to_the_not_watching_set_rather_than_replacing_it(self):
-        """A document describes ONE view, so an id missing from it is not evidence
-        the user unmarked that show — it may have been marked from another month
-        entirely. Unmarking is set_not_watching's job."""
-        await calendar_state.save_state(self.user_id, "shows/new", 2026, 7, {"notWatching": ["a", "b"]})
-        await calendar_state.save_state(self.user_id, "shows", 2026, 8, {"notWatching": ["b", "c"]})
-        self.assertEqual(
-            set((await calendar_state.load_state(self.user_id, "shows/new", 2026, 7))["notWatching"]),
-            {"a", "b", "c"},
-        )
-
 
 class ViewStateTests(StateTestCase):
     async def test_set_view_state_preserves_history_when_not_resent(self):
-        await calendar_state.save_state(
-            self.user_id, "shows/new", 2026, 7, {"history": [{"seen": True}], "lastCount": 1})
+        await calendar_state.set_view_state(
+            self.user_id, "shows/new", 2026, 7, last_count=1, last_show_ids=None,
+            history=[{"seen": True}])
         # A change-detection write that omits history must not wipe it.
         await calendar_state.set_view_state(
             self.user_id, "shows/new", 2026, 7, last_count=9, last_show_ids=["x"])

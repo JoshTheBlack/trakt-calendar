@@ -97,15 +97,6 @@ def is_negative(network: str) -> bool:
     return bool(network) and _none_path(network).exists()
 
 
-def delete(network: str) -> None:
-    """Drop a network's cached tile + negative marker so it re-resolves next time."""
-    for p in (_tile_path(network), _none_path(network)):
-        try:
-            p.unlink()
-        except OSError:
-            pass
-
-
 def _norm(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (name or "").lower())
 

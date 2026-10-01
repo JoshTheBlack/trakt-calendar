@@ -41,41 +41,6 @@ def _headshot(person: dict) -> str | None:
     return None
 
 
-def _summarize_season(episodes: list[dict], tz: ZoneInfo) -> dict:
-    """Reduce a season's episode list to the tile summary: count + first/last/next air dates."""
-    aired, upcoming, total = [], [], 0
-    now = datetime.now(tz)
-    for ep in episodes or []:
-        total += 1
-        fa = ep.get("first_aired")
-        if not fa:
-            continue
-        try:
-            dt = datetime.fromisoformat(str(fa).replace("Z", "+00:00")).astimezone(tz)
-        except ValueError:
-            continue
-        (aired if dt <= now else upcoming).append(dt)
-    return {
-        "episode_count": total,
-        "first_aired": min(aired).strftime("%d %b %Y") if aired else None,
-        "last_aired": max(aired).strftime("%d %b %Y") if aired else None,
-        "next_aired": min(upcoming).strftime("%d %b %Y") if upcoming else None,
-    }
-
-
-async def fetch_tile_info(settings: Settings, media: str, trakt_id: str, season: int | None) -> dict:
-    """Compact season info for a tile. Movies have no seasons."""
-    if media == "movie" or season is None:
-        return {"episode_count": None, "first_aired": None, "last_aired": None, "next_aired": None}
-    tz = ZoneInfo(settings.timezone)
-    episodes = await transport.cached_get(
-        transport.shared_client(), settings, f"shows/{trakt_id}/seasons/{season}", {"extended": "full"},
-    )
-    if not isinstance(episodes, list):
-        return {"episode_count": None, "first_aired": None, "last_aired": None, "next_aired": None}
-    return {"season": season, **_summarize_season(episodes, tz)}
-
-
 # TWENTY, BECAUSE THE GRID IS FIVE WIDE. The cap is this app's own — a season's
 # cast runs to 118 on some titles and the panel is not a filmography — and it was
 # 16, which left the last row three short of full at the default width. Four rows

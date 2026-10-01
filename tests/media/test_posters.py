@@ -54,14 +54,14 @@ class ArtworkTestCase(unittest.TestCase):
 
 
 class RegistryTests(ArtworkTestCase):
-    def test_best_url_prefers_tmdb_over_trakt(self):
+    def test_every_source_recorded_is_offered_and_the_caller_picks(self):
         asyncio.run(artwork.record_poster_url("show", 1396, "trakt", "https://img/trakt.jpg"))
         asyncio.run(artwork.record_poster_url("show", 1396, "tmdb", "https://img/tmdb.jpg"))
-        self.assertEqual(
-            asyncio.run(artwork.best_url("show", 1396)), ("tmdb", "https://img/tmdb.jpg"))
+        self.assertEqual(asyncio.run(artwork.urls_for("show", 1396)),
+                         {"trakt": "https://img/trakt.jpg", "tmdb": "https://img/tmdb.jpg"})
 
     def test_no_row_is_no_url(self):
-        self.assertIsNone(asyncio.run(artwork.best_url("show", 999)))
+        self.assertEqual(asyncio.run(artwork.urls_for("show", 999)), {})
 
     def test_same_url_only_bumps_last_seen_at(self):
         asyncio.run(artwork.record_poster_url("show", 1396, "trakt", "https://img/a.jpg"))
@@ -93,15 +93,15 @@ class RegistryTests(ArtworkTestCase):
         asyncio.run(artwork.record_poster_url("show", 1396, "trakt", "https://img/a.jpg"))
         for _ in range(artwork.MAX_FAIL_COUNT):
             asyncio.run(artwork.record_failure("show", 1396, "trakt"))
-        self.assertIsNone(asyncio.run(artwork.best_url("show", 1396)))
+        self.assertEqual(asyncio.run(artwork.urls_for("show", 1396)), {})
 
     def test_media_namespacing_show_and_movie_never_collide(self):
         asyncio.run(artwork.record_poster_url("show", 550, "trakt", "https://img/show550.jpg"))
         asyncio.run(artwork.record_poster_url("movie", 550, "trakt", "https://img/movie550.jpg"))
         self.assertEqual(
-            asyncio.run(artwork.best_url("show", 550)), ("trakt", "https://img/show550.jpg"))
+            asyncio.run(artwork.urls_for("show", 550)), {"trakt": "https://img/show550.jpg"})
         self.assertEqual(
-            asyncio.run(artwork.best_url("movie", 550)), ("trakt", "https://img/movie550.jpg"))
+            asyncio.run(artwork.urls_for("movie", 550)), {"trakt": "https://img/movie550.jpg"})
         self.assertEqual(
             self.value("SELECT COUNT(*) FROM show_posters WHERE tmdb = 550"), 2)
 
@@ -141,7 +141,7 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
         # see each other's tiles.
         posters.POSTER_DIR = TMP / f"posters-{id(self)}"
         # The registry is read for real now that it leads the chain, so these
-        # need a database where they used to patch `best_url` and never touch one.
+        # need a database.
         migrated_db(f"posters-{id(self)}")
 
     def tearDown(self):
@@ -415,7 +415,6 @@ class SeasonRegistryTests(ArtworkTestCase):
     def test_a_miss_is_invisible_to_every_address_reader_and_known_to_known(self):
         asyncio.run(artwork.record_miss("show", 8))
         self.assertEqual(asyncio.run(artwork.urls_for("show", 8)), {})
-        self.assertIsNone(asyncio.run(artwork.best_url("show", 8)))
         known = asyncio.run(artwork.known([("show", 8, None)]))
         self.assertEqual((known.shows, known.missed), ({}, {("show", 8)}))
 
@@ -433,6 +432,23 @@ class SeasonRegistryTests(ArtworkTestCase):
         self.assertEqual(known.address("show", 550, 1, ("trakt",)), "https://x/s1.jpg")
         self.assertEqual(known.address("show", 550, 2, ("trakt",)), "https://x/show550.jpg")
         self.assertEqual(known.address("movie", 550, None, ("trakt",)), "https://x/film550.jpg")
+
+    def test_a_season_picture_that_keeps_failing_stops_being_offered(self):
+        """The season half of record_failure: a source whose season artwork will
+        not download is skipped once it has failed MAX_FAIL_COUNT times, so the
+        show's own picture is tried instead of the dead address on every warm.
+        Only that season's row is counted against."""
+        asyncio.run(artwork.record_season_poster_urls([
+            ("show", 7, 2, "trakt", "https://x/s2.jpg"),
+            ("show", 7, 3, "trakt", "https://x/s3.jpg")]))
+        for _ in range(artwork.MAX_FAIL_COUNT - 1):
+            asyncio.run(artwork.record_season_failure("show", 7, 2, "trakt"))
+        self.assertEqual(asyncio.run(artwork.season_urls_for("show", 7, 2)),
+                         {"trakt": "https://x/s2.jpg"}, "gave up before the ceiling")
+        asyncio.run(artwork.record_season_failure("show", 7, 2, "trakt"))
+        self.assertEqual(asyncio.run(artwork.season_urls_for("show", 7, 2)), {})
+        self.assertEqual(asyncio.run(artwork.season_urls_for("show", 7, 3)),
+                         {"trakt": "https://x/s3.jpg"})
 
     def test_the_sweep_ages_out_both_registries(self):
         asyncio.run(artwork.record_poster_url("show", 1, "trakt", "u"))

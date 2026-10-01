@@ -324,9 +324,6 @@ async def _sources(user_id: int) -> dict[str, object]:
     OMISSION: a source that is missing from this map is one the UI renders
     nothing for at all, rather than a disabled button that advertises a feature
     the account cannot reach.
-
-    Shared by the page and by GET /api/rankings/sources so first paint and any
-    later refresh can never disagree about what is on offer.
     """
     sources: dict[str, object] = {"search": True}
     if await ranker_sources.ratings_available(user_id):
@@ -1433,19 +1430,6 @@ def _media(value, default: Media | None = None) -> Media:
         return ranker_sources.parse_media(value, default)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
-
-
-@guard.get("/api/rankings/sources", AuthLevel.RANKER_APPROVED)
-async def list_sources(request: Request):
-    """Which ways of adding titles this account actually has.
-
-    ABSENCE, NOT A DISABLED BUTTON. A source the caller cannot use is missing
-    from this response entirely, so the UI has nothing to render for it. Search
-    is always here; the other two depend on what the account has linked and
-    what it has done elsewhere.
-    """
-    user = await auth.current_user(request)
-    return JSONResponse({"ok": True, "sources": await _sources(user.user_id)})
 
 
 def _search_context(*, query: str = "", media: Media | str = "", rows=(), typed: bool = False,

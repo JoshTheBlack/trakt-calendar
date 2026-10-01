@@ -228,7 +228,7 @@ class UnauthenticatedTests(GatingTestCase):
                      "/admin/encryption/enable", "/admin/encryption/verify",
                      "/admin/encryption/encrypt", "/admin/encryption/opt-out",
                      "/calendar/library/add", "/calendar/library/add-month",
-                     "/api/network-logo/regenerate", "/api/distrakt/network-logo"):
+                     "/api/distrakt/network-logo"):
             with self.subTest(path=path):
                 self.assertEqual(self.client.post(path, json={}).status_code, 401)
 
@@ -506,7 +506,6 @@ class RequestShapeTests(GatingTestCase):
         settings = Settings()
         settings.public_base_url = "https://shows.example.com"
         request = _request(host="testserver", origin=ORIGIN)
-        self.assertEqual(authz.expected_origin(request, settings), "https://shows.example.com")
         self.assertIsNotNone(authz.cross_origin_reason(request, settings))
         matching = _request(host="testserver", origin="https://shows.example.com")
         self.assertIsNone(authz.cross_origin_reason(matching, settings))

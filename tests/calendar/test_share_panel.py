@@ -265,12 +265,6 @@ class TheDisplayOptionsTests(SharePanelTestCase):
 
 
 class EveryWriteRefusesTests(SharePanelTestCase):
-    def test_a_form_encoded_body_is_refused_before_it_reaches_a_route(self):
-        for path, body in WRITES:
-            with self.subTest(path=path):
-                resp = self.client.post(path, data={k: str(v) for k, v in body.items()})
-                self.assertEqual(resp.status_code, 415, resp.text)
-        self.assertEqual(self.row()["preferred_kind"], "token")
 
     def test_a_viewer_without_calendar_access_is_refused(self):
         self.client.cookies.clear()

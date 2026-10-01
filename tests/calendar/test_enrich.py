@@ -1220,6 +1220,35 @@ class GivingUpOnATitleTests(EnrichTestCase):
         titles, _seasons = await calendar_enrich.backlog()
         self.assertEqual(titles, 0, "a title given up on is still holding the count up")
 
+    async def test_a_given_up_title_holding_an_outdated_answer_is_recorded_as_unanswered(self):
+        """A row given up on while holding an answer written by an OLDER
+        extraction: nothing will re-fetch it and nothing can use what it holds,
+        but the readout counted the non-empty payload as an answer owed to the
+        calendar row, so the box could not reach zero. The drain records it as
+        unanswered — the payload goes, the row and its failure count stay, so it
+        still ages out and is asked about afresh like any other given-up title."""
+        await self._stored([_simkl_record(9001, title="Outdated")])
+        older = {**_OK_FIELDS, "extract_version": simkl_titles.EXTRACT_VERSION - 1}
+        await calendar_enrich._upsert_success(9001, "show", older, now=1000)
+        # The calendar row still waiting, as it is when the answer it would have
+        # been given is one nothing can use.
+        await db.execute("UPDATE calendar_titles SET enriched = 0")
+        await db.execute("UPDATE simkl_titles SET fail_count = ?, failed_at = 2000",
+                         (calendar_enrich._GIVE_UP_AFTER,))
+        titles, _seasons = await calendar_enrich.backlog()
+        self.assertEqual(titles, 1, "the outdated answer was not holding the count up")
+
+        with patch("app.providers.simkl.titles.fetch_title", AsyncMock()) as fetch:
+            await calendar_enrich.drain(self.SETTINGS, now=3000)
+        fetch.assert_not_awaited()
+
+        row = await db.fetch_one(
+            "SELECT payload, fail_count FROM simkl_titles WHERE simkl_id = 9001")
+        self.assertEqual(row["payload"], calendar_enrich._compress({}))
+        self.assertEqual(row["fail_count"], calendar_enrich._GIVE_UP_AFTER)
+        titles, _seasons = await calendar_enrich.backlog()
+        self.assertEqual(titles, 0)
+
     async def test_a_title_with_a_real_answer_is_still_counted(self):
         """Failures AFTER a success leave the payload in place, and that row is
         an answer this title has not been given yet — a local write the drain

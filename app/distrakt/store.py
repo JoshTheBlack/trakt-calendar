@@ -759,31 +759,15 @@ async def month_is_tracked(user_id: int, month: str) -> bool:
     ONE month and does not want a viewing life's worth of keys read to answer it.
     Indexed on the primary key, so it is a lookup rather than a scan.
 
-    "Has a row" and "holds something" are different questions — see
-    months_with_shows beside this — and this is the first: a month that exists and
-    is empty is still a month the tracker knows about, and settling a verdict onto
-    it is not inventing history.
+    "Has a row" and "holds something" are different questions, and this is the
+    first: a month that exists and is empty is still a month the tracker knows
+    about, and settling a verdict onto it is not inventing history.
     """
     row = await db.fetch_one(
         "SELECT 1 FROM distrakt_months WHERE user_id = ? AND month = ? LIMIT 1",
         (user_id, month),
     )
     return row is not None
-
-
-async def months_with_shows(user_id: int) -> set[str]:
-    """The months that actually HOLD something for this user.
-
-    Distinct from list_months, which answers "has a month row", because the two
-    diverge the moment a month is emptied: removing its last record leaves the
-    month row behind, so the history backfill — which refuses to touch a month
-    somebody is already keeping — saw a curated month where there was nothing at
-    all, and could never refill it. What deserves protecting is the content, not
-    the row.
-    """
-    rows = await db.fetch_all(
-        "SELECT DISTINCT month FROM distrakt_month_records WHERE user_id = ?", (user_id,))
-    return {r["month"] for r in rows}
 
 
 async def _month_movies(user_id: int, month: str) -> list[dict] | None:

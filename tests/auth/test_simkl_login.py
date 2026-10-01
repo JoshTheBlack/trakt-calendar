@@ -35,6 +35,8 @@ from app import auth, db
 from app.auth import routes as auth_routes, simkl as simkl_auth, trakt_routes
 from app.auth import simkl_routes
 from app.config import Settings, save_settings
+from tests.auth._redirect_login import (SharedRedirectSignInTests,
+                                        SharedRedirectUnlinkTests, fill_attempts)
 from tests.support import AppTestCase, ORIGIN
 
 # The Simkl account the patched authorization returns unless a test says
@@ -65,6 +67,23 @@ class _Token(dict):
 
 
 class SimklOAuthTestCase(AppTestCase):
+    # What tests/auth/_redirect_login.py's shared policy tests need to know about
+    # this provider; its docstring lists them.
+    PROVIDER = "simkl"
+    ACCOUNT_ID, OTHER_ACCOUNT_ID = SIMKL_ID, OTHER_SIMKL_ID
+    ACCESS_PREFIX = simkl_auth.V2_ACCESS_TOKEN_PREFIX
+    REFRESH_PREFIX = "simkl_rt_"
+    CONFIG_FIELDS = ("simkl_client_id", "simkl_client_secret", "public_base_url")
+    SERVICE_HOST = "simkl.com"
+    auth_module, routes_module = simkl_auth, simkl_routes
+    Token = _Token
+
+    def settings_with(self, **overrides) -> Settings:
+        return _settings(**overrides)
+
+    def revoke_failure(self) -> Exception:
+        return simkl_transport().SimklError("down")
+
     def make_settings(self):
         return _settings()
 
@@ -96,14 +115,14 @@ class SimklOAuthTestCase(AppTestCase):
         if state:
             self.client.cookies.set(auth.HANDSHAKE_COOKIE_SECURE, state)
 
-    def callback(self, state, *, code="auth-code", simkl_id=SIMKL_ID, name="Josh",
+    def callback(self, state, *, code="auth-code", account_id=SIMKL_ID, name="Josh",
                  token=None, pin=True, **params):
         """Complete a callback with the authorization patched out."""
         if pin:
             self.pin_handshake_cookie(state)
         with patch.object(simkl_auth, "exchange_code", return_value=token or _Token()), \
              patch.object(simkl_auth, "fetch_account",
-                          return_value={"id": simkl_id, "name": name}):
+                          return_value={"id": account_id, "name": name}):
             return self.client.get("/auth/simkl/callback",
                                    params={"state": state, "code": code, **params},
                                    follow_redirects=False)
@@ -161,31 +180,6 @@ class HandshakeBindingTests(SimklOAuthTestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(len(self.identities()), 1)
 
-    def test_a_callback_with_no_state_at_all_is_refused(self):
-        self.start()
-        resp = self.client.get("/auth/simkl/callback", params={"code": "auth-code"},
-                               follow_redirects=False)
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(self.identities(), [])
-
-    def test_an_expired_state_is_refused(self):
-        state = self.start()
-        asyncio.run(db.execute(
-            "UPDATE auth_handshakes SET expires_at = ? WHERE state = ?",
-            (db.now() - 1, state)))
-        self.assertEqual(self.callback(state).status_code, 400)
-        self.assertEqual(self.identities(), [])
-
-    def test_a_callback_in_another_browser_is_refused(self):
-        state = self.start()
-        self.client.cookies.clear()  # a different browser
-        resp = self.callback(state, pin=False)
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(self.identities(), [])
-        # ...and the handshake was not spent, so the visitor who started it can
-        # still finish.
-        self.assertIsNone(asyncio.run(db.fetch_value(
-            "SELECT consumed_at FROM auth_handshakes WHERE state = ?", (state,))))
 
     def test_a_trakt_handshake_cannot_be_completed_at_the_simkl_callback(self):
         state = asyncio.run(auth.create_handshake(provider="trakt", purpose="login"))
@@ -225,24 +219,6 @@ class HandshakeBindingTests(SimklOAuthTestCase):
         self.assertEqual(self.identities(), [])
         self.assertEqual(self.user_count(), 1)
 
-    def test_every_refusal_reads_the_same(self):
-        """Unknown, expired and consumed must not be tellable apart, or the
-        callback becomes a probe for which guess was closest."""
-        expired = self.start()
-        asyncio.run(db.execute("UPDATE auth_handshakes SET expires_at = ? WHERE state = ?",
-                               (db.now() - 1, expired)))
-        consumed = self.start()
-        asyncio.run(db.execute("UPDATE auth_handshakes SET consumed_at = ? WHERE state = ?",
-                               (db.now(), consumed)))
-        bodies = set()
-        for state in ("never-existed", expired, consumed):
-            self.client.cookies.set(auth.HANDSHAKE_COOKIE_SECURE, state)
-            resp = self.callback(state)
-            self.assertEqual(resp.status_code, 400)
-            bodies.add(resp.text)
-        self.assertEqual(len(bodies), 1)
-
-
 class StartRouteTests(SimklOAuthTestCase):
     def test_start_redirects_to_simkl_with_the_configured_redirect_uri(self):
         resp = self.client.get("/auth/simkl/start", follow_redirects=False)
@@ -266,111 +242,10 @@ class StartRouteTests(SimklOAuthTestCase):
         self.assertNotEqual(challenge, row["pkce_verifier"])
         self.assertNotIn(row["pkce_verifier"], resp.headers["location"])
 
-    def test_the_redirect_uri_ignores_a_spoofed_host_header(self):
-        resp = self.client.get("/auth/simkl/start", follow_redirects=False,
-                               headers={"Host": "evil.example.com"})
-        query = parse_qs(urlsplit(resp.headers["location"]).query)
-        self.assertEqual(query["redirect_uri"], [f"{ORIGIN}/auth/simkl/callback"])
-
-    def test_start_is_unavailable_until_the_instance_is_configured(self):
-        for missing in ("simkl_client_id", "simkl_client_secret", "public_base_url"):
-            # Cleared explicitly: emptying a field on a Settings object no longer
-            # removes the stored credential on its own — see config.save_settings.
-            save_settings(_settings(**{missing: ""}), clear_unset_secrets=True)
-            resp = self.client.get("/auth/simkl/start", follow_redirects=False)
-            self.assertEqual(resp.status_code, 503, missing)
-        self.assertEqual(int(asyncio.run(db.fetch_value(
-            "SELECT COUNT(*) FROM auth_handshakes"))), 0)
-
-    def test_link_requires_a_session(self):
-        self.sign_out()
-        resp = self.client.get("/auth/simkl/link", follow_redirects=False,
-                               headers={"Accept": "application/json"})
-        self.assertEqual(resp.status_code, 401)
-
-    def test_the_invite_travels_in_the_handshake_row_not_the_redirect(self):
-        token = self.mint_invite()
-        state = self.start(invite=token)
-        row = asyncio.run(db.fetch_one("SELECT * FROM auth_handshakes WHERE state = ?", (state,)))
-        self.assertEqual(row["invite_token"], token)
-        self.assertIsNone(row["session_id"])
-        self.assertEqual(row["provider"], "simkl")
-        # The PKCE verifier rides the same row, generated fresh per handshake.
-        self.assertTrue(row["pkce_verifier"])
-
-
 class SignInOutcomeTests(SimklOAuthTestCase):
     """The register-or-sign-in matrix, answered entirely by the shared
     completion in app/auth/provider_login.py."""
 
-    def test_a_known_identity_signs_its_owner_in(self):
-        user = self.make_user("known", calendar_approved=True)
-        asyncio.run(db.transaction(lambda conn: auth.insert_linked_identity(
-            conn, user_id=user, provider="simkl", provider_user_id=SIMKL_ID,
-            display_name="Old Name")))
-        self.sign_out()
-
-        resp = self.callback(self.start(), name="New Name")
-        self.assertEqual(resp.status_code, 303)
-        self.assertEqual(resp.headers["location"], "/")
-        me = self.client.get("/me")
-        self.assertEqual(me.status_code, 200)
-        self.assertIn("known", me.text)
-        rows = self.identities()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["display_name"], "New Name")
-        self.assertEqual(rows[0]["access_token"], "simkl_at_access-1")
-
-    def test_an_unknown_identity_with_no_invite_creates_no_account(self):
-        """Registration through the provider path is invite-gated exactly as
-        registration with a password is — a Simkl sign-in proves only that
-        somebody controls some Simkl account."""
-        self.sign_out()
-        before = self.user_count()
-        resp = self.callback(self.start())
-        self.assertEqual(resp.status_code, 403)
-        self.assertIn(auth_routes.INVALID_INVITE, resp.text)
-        self.assertEqual(self.user_count(), before)
-        self.assertEqual(self.identities(), [])
-
-    def test_a_valid_invite_registers_and_grants_calendar(self):
-        self.sign_out()
-        token = self.mint_invite()
-        resp = self.callback(self.start(invite=token))
-        self.assertEqual(resp.status_code, 303)
-        self.assertEqual(resp.headers["location"], "/")
-
-        user = asyncio.run(db.fetch_one(
-            "SELECT u.* FROM users u JOIN linked_identities li ON li.user_id = u.id "
-            "WHERE li.provider_user_id = ?", (str(SIMKL_ID),)))
-        self.assertIsNotNone(user)
-        self.assertIsNone(user["username"])
-        self.assertIsNone(user["password_hash"])
-        self.assertTrue(user["calendar_approved"])
-        # An invite never grants the private-history feature: that one is always
-        # a separate manual grant.
-        self.assertFalse(user["distrakt_approved"])
-        self.assertEqual(int(asyncio.run(db.fetch_value(
-            "SELECT used_count FROM invites WHERE token = ?", (token,)))), 1)
-
-    def test_open_registration_needs_no_invite_but_grants_nothing(self):
-        save_settings(_settings(allow_open_registration=True))
-        self.sign_out()
-        resp = self.callback(self.start())
-        self.assertEqual(resp.status_code, 303)
-        self.assertEqual(resp.headers["location"], "/me")
-        user = asyncio.run(db.fetch_one(
-            "SELECT u.* FROM users u JOIN linked_identities li ON li.user_id = u.id "
-            "WHERE li.provider_user_id = ?", (str(SIMKL_ID),)))
-        self.assertFalse(user["calendar_approved"])
-
-    def test_registration_through_the_provider_path_is_rate_limited(self):
-        self.sign_out()
-        asyncio.run(_fill_attempts("register_ip", "testclient", auth.REGISTER_MAX_ATTEMPTS))
-        resp = self.callback(self.start(invite=self.mint_invite()))
-        self.assertEqual(resp.status_code, 429)
-        self.assertEqual(self.user_count(), 1)
-        self.assertEqual(self.identities(), [])
 
     def test_a_returning_identity_is_not_throttled(self):
         """Only a REGISTRATION spends the throttle budget. A household behind one
@@ -380,7 +255,7 @@ class SignInOutcomeTests(SimklOAuthTestCase):
         asyncio.run(db.transaction(lambda conn: auth.insert_linked_identity(
             conn, user_id=user, provider="simkl", provider_user_id=SIMKL_ID)))
         self.sign_out()
-        asyncio.run(_fill_attempts("register_ip", "testclient", auth.REGISTER_MAX_ATTEMPTS))
+        asyncio.run(fill_attempts("register_ip", "testclient", auth.REGISTER_MAX_ATTEMPTS))
         resp = self.callback(self.start())
         self.assertEqual(resp.status_code, 303)
 
@@ -401,17 +276,6 @@ class SignInOutcomeTests(SimklOAuthTestCase):
 
 
 class LinkOutcomeTests(SimklOAuthTestCase):
-    def test_linking_attaches_the_identity_to_the_signed_in_account(self):
-        user = self.make_user("linker", calendar_approved=True)
-        self.sign_in_as(user)
-        resp = self.callback(self.start("/auth/simkl/link"))
-        self.assertEqual(resp.status_code, 303)
-        self.assertEqual(resp.headers["location"], "/me")
-        rows = self.identities()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(int(rows[0]["user_id"]), user)
-        self.assertEqual(rows[0]["provider"], "simkl")
-        self.assertEqual(rows[0]["provider_user_id"], str(SIMKL_ID))
 
     def test_a_simkl_identity_coexists_with_a_trakt_one_on_the_same_account(self):
         """The point of the whole build: two sources, one account. Migration 21
@@ -424,30 +288,6 @@ class LinkOutcomeTests(SimklOAuthTestCase):
         providers = sorted(row["provider"] for row in self.identities())
         self.assertEqual(providers, ["simkl", "trakt"])
 
-    def test_an_identity_linked_elsewhere_is_refused_never_moved(self):
-        """Whoever authorizes last must not be able to take an identity away
-        from the account already holding it."""
-        owner = self.make_user("owner", calendar_approved=True)
-        asyncio.run(db.transaction(lambda conn: auth.insert_linked_identity(
-            conn, user_id=owner, provider="simkl", provider_user_id=SIMKL_ID)))
-        interloper = self.make_user("interloper", calendar_approved=True)
-        self.sign_in_as(interloper)
-
-        resp = self.callback(self.start("/auth/simkl/link"))
-        self.assertEqual(resp.status_code, 409)
-        self.assertIn(simkl_routes.ALREADY_LINKED, resp.text)
-        rows = self.identities()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(int(rows[0]["user_id"]), owner)
-
-    def test_relinking_the_same_account_refreshes_the_stored_token(self):
-        user = self.make_user("linker", calendar_approved=True)
-        self.sign_in_as(user)
-        self.callback(self.start("/auth/simkl/link"))
-        self.callback(self.start("/auth/simkl/link"), token=_Token(access="simkl_at_access-2"))
-        rows = self.identities()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["access_token"], "simkl_at_access-2")
 
     def test_a_link_is_refused_while_encryption_is_unhealthy(self):
         user = self.make_user("linker", calendar_approved=True)
@@ -462,38 +302,6 @@ class LinkOutcomeTests(SimklOAuthTestCase):
 
 
 class IdentityKeyTests(SimklOAuthTestCase):
-    def test_the_identity_is_keyed_on_the_numeric_id_not_the_display_name(self):
-        """A Simkl username can be changed by its owner and re-registered by
-        somebody else, so keying on one would let a released name inherit the
-        linked account."""
-        user = self.make_user("renamer", calendar_approved=True)
-        self.sign_in_as(user)
-        self.callback(self.start("/auth/simkl/link"), name="Before")
-        self.callback(self.start("/auth/simkl/link"), name="After")
-
-        rows = self.identities()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["display_name"], "After")
-        self.assertEqual(rows[0]["provider_user_id"], str(SIMKL_ID))
-
-    def test_a_different_numeric_id_is_a_different_identity(self):
-        user = self.make_user("collector", calendar_approved=True)
-        self.sign_in_as(user)
-        self.callback(self.start("/auth/simkl/link"), simkl_id=SIMKL_ID, name="Same Name")
-        self.callback(self.start("/auth/simkl/link"), simkl_id=OTHER_SIMKL_ID,
-                      name="Same Name")
-        self.assertEqual(len(self.identities()), 2)
-
-    def test_an_account_response_without_a_numeric_id_is_refused(self):
-        state = self.start()
-        with patch.object(simkl_auth, "exchange_code", return_value=_Token()), \
-             patch.object(simkl_auth, "fetch_account",
-                          side_effect=simkl_auth.AccountLookupError("no account id")):
-            resp = self.client.get("/auth/simkl/callback",
-                                   params={"state": state, "code": "c"},
-                                   follow_redirects=False)
-        self.assertEqual(resp.status_code, 502)
-        self.assertEqual(self.identities(), [])
 
     # The real /users/settings body, trimmed to what fetch_account reads. The
     # numeric id is under `account`; `user.name` is display-only.
@@ -758,21 +566,6 @@ class RefreshSerializationTests(SimklOAuthTestCase):
         self.assertIsNone(asyncio.run(db.fetch_value(
             "SELECT refreshing_until FROM linked_identities")))
 
-    def test_a_token_that_is_still_valid_is_not_refreshed(self):
-        user = self.make_user("watcher", calendar_approved=True)
-        asyncio.run(db.transaction(lambda conn: auth.insert_linked_identity(
-            conn, user_id=user, provider="simkl", provider_user_id=SIMKL_ID,
-            access_token=simkl_auth.V2_ACCESS_TOKEN_PREFIX + "fine",
-            token_expires_at=db.now() + 3600)))
-
-        def _explode(*a, **kw):  # pragma: no cover — asserting it isn't called
-            raise AssertionError("refreshed a token that had not expired")
-
-        with patch.object(simkl_auth, "refresh_access_token", side_effect=_explode):
-            self.assertEqual(asyncio.run(simkl_routes.access_token_for_user(user)),
-                             simkl_auth.V2_ACCESS_TOKEN_PREFIX + "fine")
-
-
 class PerUserTokenTests(SimklOAuthTestCase):
     """Reading back the token the tracker authenticates one person's reads
     with. A linked account's stored token round-trips through sealing exactly
@@ -800,7 +593,7 @@ class PerUserTokenTests(SimklOAuthTestCase):
         self.assertIsNone(asyncio.run(simkl_routes.access_token_for_user(other)))
 
 
-class UnlinkTests(SimklOAuthTestCase):
+class UnlinkTests(SharedRedirectUnlinkTests, SimklOAuthTestCase):
     """Unlinking now also asks Simkl to forget the authorization (v2 documents
     POST /oauth2/revoke where v1 documented none), so every test here patches
     that call — without it they reach the real api.simkl.com.
@@ -851,14 +644,6 @@ class UnlinkTests(SimklOAuthTestCase):
         self.assertEqual(self.said(resp), "")
         self.assertEqual(self.revoked, [])
 
-    def test_a_failed_revocation_still_unlinks_and_says_so(self):
-        user = self.make_user("warned", calendar_approved=True)
-        self.sign_in_as(user)
-        self.callback(self.start("/auth/simkl/link"))
-        self.revoke_mock.side_effect = simkl_transport().SimklError("down")
-        resp = self.unlink()
-        self.assertEqual(self.identities(), [])
-        self.assertIn("simkl.com", self.said(resp))
 
     def test_a_linked_simkl_account_can_be_unlinked(self):
         user = self.make_user("linker", calendar_approved=True)
@@ -867,18 +652,6 @@ class UnlinkTests(SimklOAuthTestCase):
         resp = self.unlink()
         self.assertEqual(self.identities(), [])
         self.assertEqual(self.said(resp), "")
-
-    def test_the_last_login_method_cannot_be_unlinked(self):
-        self.sign_out()
-        self.callback(self.start(invite=self.mint_invite()))
-        self.assertIn("only way you can sign in", self.said(self.unlink()))
-        self.assertEqual(len(self.identities()), 1)
-
-    def test_unlinking_something_that_is_not_linked_is_refused(self):
-        user = self.make_user("plain", calendar_approved=True)
-        self.sign_in_as(user)
-        self.assertEqual(self.said(self.unlink()), "That account isn&#39;t linked.")
-
 
 class ProviderButtonTests(SimklOAuthTestCase):
     def test_the_sign_in_page_offers_simkl_once_it_is_configured(self):
@@ -892,14 +665,6 @@ class ProviderButtonTests(SimklOAuthTestCase):
         self.assertNotIn('href="/auth/simkl/start"', body)
         self.assertIn("Continue with Simkl", body)
 
-    def test_the_account_page_offers_connect_then_unlink(self):
-        user = self.make_user("linker", calendar_approved=True)
-        self.sign_in_as(user)
-        self.assertIn('href="/auth/simkl/link"', self.client.get("/me").text)
-        self.callback(self.start("/auth/simkl/link"))
-        body = self.client.get("/me").text
-        self.assertIn('id="confirm-unlink-simkl"', body)
-        self.assertNotIn('href="/auth/simkl/link"', body)
 
     def test_the_settings_panel_shows_the_redirect_uri_to_register(self):
         """Simkl compares the registered redirect URI byte for byte and offers no
@@ -909,13 +674,6 @@ class ProviderButtonTests(SimklOAuthTestCase):
         body = self.client.get("/settings/fragments/panel").text
         self.assertIn(f'value="{ORIGIN}/auth/simkl/callback"', body)
         self.assertIn('data-copy="#s_simkl_redirect_uri"', body)
-
-    def test_the_registration_page_carries_the_invite_into_the_provider_flow(self):
-        self.sign_out()
-        token = self.mint_invite()
-        body = self.client.get("/register", params={"invite": token}).text
-        self.assertIn(f"/auth/simkl/start?invite={token}", body)
-
 
 class _StubResponse:
     """The two fields app/auth/simkl.py reads off a response, and a
@@ -939,9 +697,17 @@ def simkl_transport():
     return transport
 
 
-async def _fill_attempts(key_type: str, key_value: str, count: int) -> None:
-    for _ in range(count):
-        await auth.record_attempt(key_type, key_value, False)
+class SharedSignInTests(SharedRedirectSignInTests, SimklOAuthTestCase):
+    """The redirect sign-in policy Simkl shares with Trakt, run through Simkl's
+    own routes — see tests/auth/_redirect_login.py."""
+
+    def test_the_pkce_verifier_rides_the_handshake_row(self):
+        """Simkl's own addition to the shared start: PKCE is mandatory under its
+        OAuth v2, and the verifier is generated fresh per handshake and kept
+        server-side on the row, never in the redirect."""
+        state = self.start(invite=self.mint_invite())
+        row = asyncio.run(db.fetch_one("SELECT * FROM auth_handshakes WHERE state = ?", (state,)))
+        self.assertTrue(row["pkce_verifier"])
 
 
 if __name__ == "__main__":  # pragma: no cover

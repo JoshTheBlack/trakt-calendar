@@ -211,15 +211,6 @@ class Guard:
     def post(self, path: str, level: AuthLevel, **kwargs):
         return self._register("post", path, level, kwargs)
 
-    def put(self, path: str, level: AuthLevel, **kwargs):
-        return self._register("put", path, level, kwargs)
-
-    def patch(self, path: str, level: AuthLevel, **kwargs):
-        return self._register("patch", path, level, kwargs)
-
-    def delete(self, path: str, level: AuthLevel, **kwargs):
-        return self._register("delete", path, level, kwargs)
-
     def _register(self, method: str, path: str, level: AuthLevel, kwargs: dict):
         if not isinstance(level, AuthLevel):
             raise TypeError(f"{method.upper()} {path}: pass an AuthLevel, not {level!r}.")
@@ -315,15 +306,6 @@ def log_undeclared_routes(app: FastAPI) -> list[str]:
     return missing
 
 
-def routes_by_level(app: FastAPI) -> dict[str, list[str]]:
-    """The whole matrix, for a quick look at what is gated how."""
-    matrix: dict[str, list[str]] = {}
-    for route in iter_routes(app):
-        level = route_level(route)
-        matrix.setdefault(level.value if level else "UNDECLARED", []).append(_route_label(route))
-    return {key: sorted(value) for key, value in sorted(matrix.items())}
-
-
 # ---------------------------------------------------------------------------
 # origins
 # ---------------------------------------------------------------------------
@@ -376,22 +358,6 @@ def acceptable_origins(request: Request, settings: Settings) -> set[str]:
     if auth.request_is_https(request, settings):
         return {f"https://{host}"}
     return {f"http://{host}", f"https://{host}"}
-
-
-def expected_origin(request: Request, settings: Settings) -> str | None:
-    """The single origin this instance considers canonical, or None.
-
-    Kept for callers that want one value to show or log. The actual admission
-    decision uses acceptable_origins(), which may be broader — see there.
-    """
-    configured = _configured_origin(settings)
-    if configured:
-        return configured
-    host = (request.headers.get("host") or "").strip().lower()
-    if not host:
-        return None
-    scheme = "https" if auth.request_is_https(request, settings) else "http"
-    return f"{scheme}://{host}"
 
 
 def cross_origin_reason(request: Request, settings: Settings) -> str | None:

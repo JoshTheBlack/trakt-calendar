@@ -27,6 +27,7 @@ from app import auth, db
 from app.auth import routes as auth_routes, trakt as trakt_auth, trakt_routes
 from app.config import Settings, load_settings, public_base_url_error, save_settings
 from app.main import app
+from tests.auth._redirect_login import SharedRedirectSignInTests, SharedRedirectUnlinkTests
 from tests.support import AppTestCase, ORIGIN
 
 # The Trakt account the patched authorization returns unless a test says
@@ -57,6 +58,22 @@ class _Token(dict):
 
 
 class TraktOAuthTestCase(AppTestCase):
+    # What tests/auth/_redirect_login.py's shared policy tests need to know about
+    # this provider; its docstring lists them.
+    PROVIDER = "trakt"
+    ACCOUNT_ID, OTHER_ACCOUNT_ID = TRAKT_ID, OTHER_TRAKT_ID
+    ACCESS_PREFIX = REFRESH_PREFIX = ""
+    CONFIG_FIELDS = ("trakt_client_id", "trakt_client_secret", "public_base_url")
+    SERVICE_HOST = "trakt.tv"
+    auth_module, routes_module = trakt_auth, trakt_routes
+    Token = _Token
+
+    def settings_with(self, **overrides) -> Settings:
+        return _settings(**overrides)
+
+    def revoke_failure(self) -> Exception:
+        return httpx.HTTPError("down")
+
     def make_settings(self):
         return _settings()
 
@@ -91,14 +108,14 @@ class TraktOAuthTestCase(AppTestCase):
         if state:
             self.client.cookies.set(auth.HANDSHAKE_COOKIE_SECURE, state)
 
-    def callback(self, state, *, code="auth-code", trakt_id=TRAKT_ID, name="Josh",
+    def callback(self, state, *, code="auth-code", account_id=TRAKT_ID, name="Josh",
                  token=None, pin=True, **params):
         """Complete a callback with the authorization patched out."""
         if pin:
             self.pin_handshake_cookie(state)
         with patch.object(trakt_auth, "exchange_code", return_value=token or _Token()), \
              patch.object(trakt_auth, "fetch_account",
-                          return_value={"id": trakt_id, "name": name}):
+                          return_value={"id": account_id, "name": name}):
             return self.client.get("/auth/trakt/callback",
                                    params={"state": state, "code": code, **params},
                                    follow_redirects=False)
@@ -119,15 +136,6 @@ class HandshakeBindingTests(TraktOAuthTestCase):
         self.assertIsNotNone(asyncio.run(db.fetch_value(
             "SELECT consumed_at FROM auth_handshakes WHERE state = ?", (state,))))
 
-    def test_a_callback_with_no_state_at_all_is_refused(self):
-        """There is deliberately no "no state, so assume a sign-in" path — that
-        would restore the exact hole the handshake table exists to close."""
-        self.start()
-        with patch.object(trakt_auth, "exchange_code", return_value=_Token()):
-            resp = self.client.get("/auth/trakt/callback", params={"code": "auth-code"},
-                                   follow_redirects=False)
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(self.identities(), [])
 
     def test_an_unknown_state_is_refused(self):
         self.start()  # a real handshake exists; the callback just isn't for it
@@ -136,13 +144,6 @@ class HandshakeBindingTests(TraktOAuthTestCase):
         self.assertIn(auth.HANDSHAKE_REJECTED, resp.text)
         self.assertEqual(self.identities(), [])
 
-    def test_an_expired_state_is_refused(self):
-        state = self.start()
-        asyncio.run(db.execute(
-            "UPDATE auth_handshakes SET expires_at = ? WHERE state = ?",
-            (db.now() - 1, state)))
-        self.assertEqual(self.callback(state).status_code, 400)
-        self.assertEqual(self.identities(), [])
 
     def test_an_already_consumed_state_is_refused(self):
         """Replay: the same callback URL delivered a second time. The first use
@@ -190,19 +191,6 @@ class HandshakeBindingTests(TraktOAuthTestCase):
         self.assertIsNone(asyncio.run(db.fetch_one(
             "SELECT 1 FROM auth_handshakes WHERE state = ?", (state,))))
 
-    def test_a_callback_in_another_browser_is_refused(self):
-        """The handshake cookie pins the flow to the browser that started it, so
-        a callback URL forwarded to somebody else is worthless even while its
-        state row is still unconsumed."""
-        state = self.start()
-        self.client.cookies.clear()  # a different browser
-        resp = self.callback(state, pin=False)
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(self.identities(), [])
-        # ...and the handshake was not spent, so the visitor who started it can
-        # still finish.
-        self.assertIsNone(asyncio.run(db.fetch_value(
-            "SELECT consumed_at FROM auth_handshakes WHERE state = ?", (state,))))
 
     def test_a_plex_handshake_cannot_be_completed_at_the_trakt_callback(self):
         state = asyncio.run(auth.create_handshake(provider="plex", purpose="login"))
@@ -232,22 +220,6 @@ class HandshakeBindingTests(TraktOAuthTestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(self.identities(), [])
 
-    def test_every_refusal_reads_the_same(self):
-        """Unknown, expired, consumed, and foreign-session must not be tellable
-        apart, or the callback becomes a probe for which guess was closest."""
-        expired = self.start()
-        asyncio.run(db.execute("UPDATE auth_handshakes SET expires_at = ? WHERE state = ?",
-                               (db.now() - 1, expired)))
-        consumed = self.start()
-        asyncio.run(db.execute("UPDATE auth_handshakes SET consumed_at = ? WHERE state = ?",
-                               (db.now(), consumed)))
-        bodies = set()
-        for state in ("never-existed", expired, consumed):
-            self.client.cookies.set(auth.HANDSHAKE_COOKIE_SECURE, state)
-            resp = self.callback(state)
-            self.assertEqual(resp.status_code, 400)
-            bodies.add(resp.text)
-        self.assertEqual(len(bodies), 1)
 
     def test_consuming_a_handshake_is_single_use_under_concurrency(self):
         """Two callbacks racing on one state resolve to exactly one success."""
@@ -287,70 +259,9 @@ class StartRouteTests(TraktOAuthTestCase):
         # compares it against the registered value exactly.
         self.assertEqual(query["redirect_uri"], [f"{ORIGIN}/auth/trakt/callback"])
 
-    def test_the_redirect_uri_ignores_a_spoofed_host_header(self):
-        resp = self.client.get("/auth/trakt/start", follow_redirects=False,
-                               headers={"Host": "evil.example.com"})
-        query = parse_qs(urlsplit(resp.headers["location"]).query)
-        self.assertEqual(query["redirect_uri"], [f"{ORIGIN}/auth/trakt/callback"])
-
-    def test_start_is_unavailable_until_the_instance_is_configured(self):
-        for missing in ("trakt_client_id", "trakt_client_secret", "public_base_url"):
-            # Cleared explicitly: emptying a field on a Settings object no longer
-            # removes the stored credential on its own — see config.save_settings.
-            save_settings(_settings(**{missing: ""}), clear_unset_secrets=True)
-            resp = self.client.get("/auth/trakt/start", follow_redirects=False)
-            self.assertEqual(resp.status_code, 503, missing)
-        self.assertEqual(int(asyncio.run(db.fetch_value(
-            "SELECT COUNT(*) FROM auth_handshakes"))), 0)
-
-    def test_link_requires_a_session(self):
-        self.sign_out()
-        resp = self.client.get("/auth/trakt/link", follow_redirects=False,
-                               headers={"Accept": "application/json"})
-        self.assertEqual(resp.status_code, 401)
-
-    def test_the_invite_travels_in_the_handshake_row_not_the_redirect(self):
-        token = self.mint_invite()
-        state = self.start(invite=token)
-        row = asyncio.run(db.fetch_one("SELECT * FROM auth_handshakes WHERE state = ?", (state,)))
-        self.assertEqual(row["invite_token"], token)
-        self.assertIsNone(row["session_id"])
-
-
 class SignInOutcomeTests(TraktOAuthTestCase):
     """The register-or-sign-in-or-link matrix."""
 
-    def test_a_known_identity_signs_its_owner_in(self):
-        user = self.make_user("known", calendar_approved=True)
-        asyncio.run(db.transaction(lambda conn: auth.insert_linked_identity(
-            conn, user_id=user, provider="trakt", provider_user_id=TRAKT_ID,
-            display_name="Old Name")))
-        self.sign_out()
-
-        resp = self.callback(self.start(), name="New Name")
-        self.assertEqual(resp.status_code, 303)
-        self.assertEqual(resp.headers["location"], "/")
-        me = self.client.get("/me")
-        self.assertEqual(me.status_code, 200)
-        self.assertIn("known", me.text)
-        # One identity still, with its display name refreshed and its token
-        # written — the name is display-only, so keeping it current is free.
-        rows = self.identities()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["display_name"], "New Name")
-        self.assertEqual(rows[0]["access_token"], "access-1")
-
-    def test_an_unknown_identity_with_no_invite_creates_no_account(self):
-        """Registration through the provider path is invite-gated exactly as
-        registration with a password is — a Trakt sign-in proves only that
-        somebody controls some Trakt account."""
-        self.sign_out()
-        before = self.user_count()
-        resp = self.callback(self.start())
-        self.assertEqual(resp.status_code, 403)
-        self.assertIn(auth_routes.INVALID_INVITE, resp.text)
-        self.assertEqual(self.user_count(), before)
-        self.assertEqual(self.identities(), [])
 
     def test_an_unusable_invite_creates_no_account(self):
         self.sign_out()
@@ -369,27 +280,6 @@ class SignInOutcomeTests(TraktOAuthTestCase):
         self.assertEqual(len(bodies), 1)
         self.assertEqual(self.user_count(), 1)
 
-    def test_a_valid_invite_registers_and_grants_calendar(self):
-        self.sign_out()
-        token = self.mint_invite()
-        resp = self.callback(self.start(invite=token))
-        self.assertEqual(resp.status_code, 303)
-        self.assertEqual(resp.headers["location"], "/")
-
-        user = asyncio.run(db.fetch_one(
-            "SELECT u.* FROM users u JOIN linked_identities li ON li.user_id = u.id "
-            "WHERE li.provider_user_id = ?", (str(TRAKT_ID),)))
-        self.assertIsNotNone(user)
-        self.assertIsNone(user["username"])
-        self.assertIsNone(user["password_hash"])
-        self.assertTrue(user["calendar_approved"])
-        # An invite never grants distrakt: that one exposes a user's private
-        # watch history and is always a separate manual grant.
-        self.assertFalse(user["distrakt_approved"])
-        self.assertEqual(int(asyncio.run(db.fetch_value(
-            "SELECT used_count FROM invites WHERE token = ?", (token,)))), 1)
-        self.assertEqual(int(asyncio.run(db.fetch_value(
-            "SELECT COUNT(*) FROM invite_redemptions"))), 1)
 
     def test_an_invite_without_the_calendar_grant_lands_on_the_account_page(self):
         self.sign_out()
@@ -397,16 +287,6 @@ class SignInOutcomeTests(TraktOAuthTestCase):
         resp = self.callback(self.start(invite=token))
         self.assertEqual(resp.headers["location"], "/me")
 
-    def test_open_registration_needs_no_invite_but_grants_nothing(self):
-        save_settings(_settings(allow_open_registration=True))
-        self.sign_out()
-        resp = self.callback(self.start())
-        self.assertEqual(resp.status_code, 303)
-        self.assertEqual(resp.headers["location"], "/me")
-        user = asyncio.run(db.fetch_one(
-            "SELECT u.* FROM users u JOIN linked_identities li ON li.user_id = u.id "
-            "WHERE li.provider_user_id = ?", (str(TRAKT_ID),)))
-        self.assertFalse(user["calendar_approved"])
 
     def test_a_disabled_account_cannot_sign_in(self):
         user = self.make_user("banned")
@@ -420,52 +300,7 @@ class SignInOutcomeTests(TraktOAuthTestCase):
         # oracle for whether an account exists or has been disabled.
         self.assertIn(auth_routes.INVALID_CREDENTIALS, resp.text)
 
-    def test_registration_through_the_provider_path_is_rate_limited(self):
-        self.sign_out()
-        asyncio.run(_fill_attempts("register_ip", "testclient", auth.REGISTER_MAX_ATTEMPTS))
-        resp = self.callback(self.start(invite=self.mint_invite()))
-        self.assertEqual(resp.status_code, 429)
-        self.assertEqual(self.user_count(), 1)
-
-
 class LinkOutcomeTests(TraktOAuthTestCase):
-    def test_linking_attaches_the_identity_to_the_signed_in_account(self):
-        user = self.make_user("linker", calendar_approved=True)
-        self.sign_in_as(user)
-        resp = self.callback(self.start("/auth/trakt/link"))
-        self.assertEqual(resp.status_code, 303)
-        self.assertEqual(resp.headers["location"], "/me")
-        rows = self.identities()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(int(rows[0]["user_id"]), user)
-        self.assertEqual(rows[0]["provider_user_id"], str(TRAKT_ID))
-
-    def test_an_identity_linked_elsewhere_is_refused_never_moved(self):
-        """Whoever authorizes last must not be able to take an identity away
-        from the account already holding it."""
-        owner = self.make_user("owner", calendar_approved=True)
-        asyncio.run(db.transaction(lambda conn: auth.insert_linked_identity(
-            conn, user_id=owner, provider="trakt", provider_user_id=TRAKT_ID)))
-        interloper = self.make_user("interloper", calendar_approved=True)
-        self.sign_in_as(interloper)
-
-        resp = self.callback(self.start("/auth/trakt/link"))
-        self.assertEqual(resp.status_code, 409)
-        self.assertIn("already linked to another user", resp.text)
-        rows = self.identities()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(int(rows[0]["user_id"]), owner)
-
-    def test_relinking_the_same_account_refreshes_the_stored_token(self):
-        user = self.make_user("linker", calendar_approved=True)
-        self.sign_in_as(user)
-        self.callback(self.start("/auth/trakt/link"))
-        self.callback(self.start("/auth/trakt/link"),
-                      token=_Token(access="access-2", refresh="refresh-2"))
-        rows = self.identities()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["access_token"], "access-2")
-        self.assertEqual(rows[0]["refresh_token"], "refresh-2")
 
     def test_linking_makes_distrakt_reachable_for_an_approved_user(self):
         """The Trakt half of the distrakt gate has never had a flow that
@@ -507,38 +342,6 @@ class LinkOutcomeTests(TraktOAuthTestCase):
 
 
 class IdentityKeyTests(TraktOAuthTestCase):
-    def test_the_identity_is_keyed_on_the_numeric_id_not_the_display_name(self):
-        """A Trakt username or slug can be changed by its owner and re-registered
-        by somebody else, so keying on one would let a released name inherit the
-        linked account. Renaming must resolve to the SAME identity row."""
-        user = self.make_user("renamer", calendar_approved=True)
-        self.sign_in_as(user)
-        self.callback(self.start("/auth/trakt/link"), name="Before")
-        self.callback(self.start("/auth/trakt/link"), name="After")
-
-        rows = self.identities()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["display_name"], "After")
-        self.assertEqual(rows[0]["provider_user_id"], str(TRAKT_ID))
-
-    def test_a_different_numeric_id_is_a_different_identity(self):
-        user = self.make_user("collector", calendar_approved=True)
-        self.sign_in_as(user)
-        self.callback(self.start("/auth/trakt/link"), trakt_id=TRAKT_ID, name="Same Name")
-        self.callback(self.start("/auth/trakt/link"), trakt_id=OTHER_TRAKT_ID,
-                      name="Same Name")
-        self.assertEqual(len(self.identities()), 2)
-
-    def test_an_account_response_without_a_numeric_id_is_refused(self):
-        state = self.start()
-        with patch.object(trakt_auth, "exchange_code", return_value=_Token()), \
-             patch.object(trakt_auth, "fetch_account",
-                          side_effect=trakt_auth.AccountLookupError("no numeric id")):
-            resp = self.client.get("/auth/trakt/callback",
-                                   params={"state": state, "code": "c"},
-                                   follow_redirects=False)
-        self.assertEqual(resp.status_code, 502)
-        self.assertEqual(self.identities(), [])
 
     @staticmethod
     def _stub_client(payload, status=200):
@@ -683,24 +486,13 @@ class RefreshSerializationTests(TraktOAuthTestCase):
         self.assertTrue(asyncio.run(auth.claim_identity_refresh(
             identity_id, now=1000 + auth.REFRESH_LEASE_SECONDS)))
 
-    def test_a_token_that_is_still_valid_is_not_refreshed(self):
-        user = self.make_user("watcher", calendar_approved=True)
-        asyncio.run(db.transaction(lambda conn: auth.insert_linked_identity(
-            conn, user_id=user, provider="trakt", provider_user_id=TRAKT_ID,
-            access_token="fine", token_expires_at=db.now() + 3600)))
-
-        def _explode(*a, **kw):  # pragma: no cover — asserting it isn't called
-            raise AssertionError("refreshed a token that had not expired")
-
-        with patch.object(trakt_auth, "refresh_access_token", side_effect=_explode):
-            self.assertEqual(asyncio.run(trakt_routes.access_token_for_user(user)), "fine")
 
     def test_a_user_with_no_linked_trakt_account_has_no_token(self):
         user = self.make_user("plain")
         self.assertIsNone(asyncio.run(trakt_routes.access_token_for_user(user)))
 
 
-class UnlinkTests(TraktOAuthTestCase):
+class UnlinkTests(SharedRedirectUnlinkTests, TraktOAuthTestCase):
     """Unlinking now also asks Trakt to forget the authorization, so every test
     here patches that call — without it they reach the real api.trakt.tv.
 
@@ -749,17 +541,6 @@ class UnlinkTests(TraktOAuthTestCase):
         self.assertEqual(self.revoked, [])
         self.assertEqual(len(self.identities()), 1)
 
-    def test_a_failed_revocation_still_unlinks_and_says_so(self):
-        """Trakt being unreachable is not a reason to refuse someone the removal
-        of their own link — but they are told, because finishing the job on
-        trakt.tv is something only they can do."""
-        user = self.make_user("warned", calendar_approved=True)
-        self.sign_in_as(user)
-        self.callback(self.start("/auth/trakt/link"))
-        self.revoke_mock.side_effect = httpx.HTTPError("down")
-        resp = self.unlink()
-        self.assertEqual(self.identities(), [])
-        self.assertIn("trakt.tv", self.said(resp))
 
     def test_a_user_with_a_password_can_unlink(self):
         user = self.make_user("linker", calendar_approved=True)
@@ -768,18 +549,6 @@ class UnlinkTests(TraktOAuthTestCase):
         self.assertEqual(self.said(self.unlink()), "")
         self.assertEqual(self.identities(), [])
 
-    def test_the_last_login_method_cannot_be_unlinked(self):
-        """An account with no password and no identities cannot be signed in to
-        by anybody, including its owner, and there is no self-service way back."""
-        self.sign_out()
-        self.callback(self.start(invite=self.mint_invite()))
-        self.assertIn("only way you can sign in", self.said(self.unlink()))
-        self.assertEqual(len(self.identities()), 1)
-
-    def test_unlinking_something_that_is_not_linked_is_refused(self):
-        user = self.make_user("plain", calendar_approved=True)
-        self.sign_in_as(user)
-        self.assertEqual(self.said(self.unlink("plex")), "That account isn&#39;t linked.")
 
     def test_an_unknown_provider_is_rejected(self):
         user = self.make_user("plain", calendar_approved=True)
@@ -826,8 +595,6 @@ class PublicBaseUrlTests(TraktOAuthTestCase):
     def test_the_configured_origin_beats_the_host_header(self):
         """The origin check falls back to the request's Host only while no base
         URL is configured; setting one has to make it authoritative."""
-        from app import authz
-
         save_settings(_settings(public_base_url="https://real.example.com"))
         self.sign_in_as(self.admin_id)
         # The client's own Origin (https://testserver) now disagrees with the
@@ -839,8 +606,6 @@ class PublicBaseUrlTests(TraktOAuthTestCase):
         resp = self.client.post("/settings", json={},
                                 headers={"Origin": "https://real.example.com"})
         self.assertEqual(resp.status_code, 204)
-        self.assertTrue(hasattr(Settings(), "public_base_url"))
-        self.assertIsNotNone(authz.expected_origin)
 
     def test_the_settings_panel_shows_the_redirect_uri_to_register(self):
         self.sign_in_as(self.admin_id)
@@ -932,31 +697,15 @@ class ProviderButtonTests(TraktOAuthTestCase):
         self.assertNotIn('href="/auth/trakt/start"', body)
         self.assertIn("disabled", body)
 
-    def test_the_account_page_offers_connect_then_unlink(self):
-        user = self.make_user("linker", calendar_approved=True)
-        self.sign_in_as(user)
-        self.assertIn('href="/auth/trakt/link"', self.client.get("/me").text)
-        self.callback(self.start("/auth/trakt/link"))
-        body = self.client.get("/me").text
-        self.assertIn('id="confirm-unlink-trakt"', body)
-        self.assertIn('hx-vals=\'{"provider": "trakt"}\'', body)
-        self.assertNotIn('href="/auth/trakt/link"', body)
 
     def test_an_oauth_only_account_is_not_offered_an_unlink_it_cannot_use(self):
         self.sign_out()
         self.callback(self.start(invite=self.mint_invite()))
         self.assertNotIn('id="confirm-unlink-trakt"', self.client.get("/me").text)
 
-    def test_the_registration_page_carries_the_invite_into_the_provider_flow(self):
-        self.sign_out()
-        token = self.mint_invite()
-        body = self.client.get("/register", params={"invite": token}).text
-        self.assertIn(f"/auth/trakt/start?invite={token}", body)
-
-
-async def _fill_attempts(key_type: str, key_value: str, count: int) -> None:
-    for _ in range(count):
-        await auth.record_attempt(key_type, key_value, False)
+class SharedSignInTests(SharedRedirectSignInTests, TraktOAuthTestCase):
+    """The redirect sign-in policy Trakt shares with Simkl, run through Trakt's
+    own routes — see tests/auth/_redirect_login.py."""
 
 
 if __name__ == "__main__":  # pragma: no cover

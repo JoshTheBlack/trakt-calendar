@@ -118,22 +118,13 @@ ACTIONS = (
 
 
 class EveryControlSendsJsonTests(_ActionTestCase):
-    def test_a_form_encoded_body_is_refused_before_it_reaches_a_route(self):
-        """415 from the request-shape guard, which runs before routing. It is
-        CSRF defence-in-depth behind the session cookie's SameSite=Lax: a
-        cross-origin HTML form can only send form-encoded or text/plain, so this
-        makes that POST unreachable."""
-        for path, body in ACTIONS:
-            with self.subTest(path=path):
-                resp = self.client.post(path, data={k: str(v) for k, v in body.items()})
-                self.assertEqual(resp.status_code, 415, resp.text)
-        self.assertEqual(self.value("SELECT COUNT(*) FROM tier_items"), 3)
-        self.assertEqual(self.version(), 1)
 
     def test_every_control_that_writes_carries_the_encoder_that_makes_it_json(self):
-        """The markup half of the same rule: a form posting without hx-json-enc
-        would send its native encoding and be refused by the guard above, which
-        the person pressing it experiences as nothing happening."""
+        """The markup half of the JSON-only rule (app/authz.py's
+        request_shape_guard, held app-wide by tests/kernel/test_route_gating.py):
+        a form posting without hx-json-enc would send its native encoding and be
+        refused with a 415, which the person pressing it experiences as nothing
+        happening."""
         html = self.client.get(f"/rankings?board={BOARD}").text
         for element in re.findall(r"<(?:form|button|input|select)\b[^>]*hx-post[^>]*>", html):
             with self.subTest(element=element[:70]):

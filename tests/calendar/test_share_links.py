@@ -70,11 +70,12 @@ class ShareTestCase(AppTestCase):
             ttl, db.now(), sources=["trakt"]))
 
     def _enable_all_and_set_slug(self, user_id: int, slug: str) -> dict:
-        """Drive the whole panel through the real routes, as the owner would."""
+        """Drive the whole panel through the real routes, as the owner would.
+        Choosing a kind switches all three forms on (share_links.set_active_kind
+        says why), so one press is what "enable all" is."""
         self.sign_in_as(user_id)
-        for kind in ("token", "username", "slug"):
-            resp = self.client.post("/api/me/share/enabled", json={"kind": kind, "enabled": True})
-            self.assertEqual(resp.status_code, 200, resp.text)
+        resp = self.client.post("/calendar/share/kind", json={"kind": "token"})
+        self.assertEqual(resp.status_code, 200, resp.text)
         resp = self.client.post("/calendar/share/slug", json={"slug": slug})
         self.assertIn("Saved.", resp.text)
         return dict(asyncio.run(share_links.get(user_id)))
@@ -114,15 +115,14 @@ class ThreeShapesResolveTheSameUserTests(ShareTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Show A", resp.text)
 
-    def test_disabling_one_form_leaves_the_others_working(self):
-        self.sign_in_as(self.user_id)
-        resp = self.client.post("/api/me/share/enabled", json={"kind": "username", "enabled": False})
-        self.assertEqual(resp.status_code, 200, resp.text)
-        self.client.cookies.clear()
+    def test_retiring_one_form_leaves_the_others_working(self):
+        """Clearing the slug is how a /c/ link is taken back; the other two
+        forms have nothing to do with it and go on answering."""
+        asyncio.run(share_links.set_custom_slug(self.user_id, ""))
 
-        self.assertEqual(self.client.get("/u/share_owner").status_code, 404)
+        self.assertEqual(self.client.get("/c/owner-slug").status_code, 404)
         self.assertEqual(self.client.get(f"/s/{self.share['token']}").status_code, 200)
-        self.assertEqual(self.client.get("/c/owner-slug").status_code, 200)
+        self.assertEqual(self.client.get("/u/share_owner").status_code, 200)
 
 
 class IdenticalMissTests(ShareTestCase):
@@ -333,11 +333,20 @@ class CrossNamespaceTests(ShareTestCase):
     def test_clearing_the_slug_also_disables_the_slug_form(self):
         owner_id = self._make_user("clearer")
         asyncio.run(share_links.set_custom_slug(owner_id, "clear-me"))
-        asyncio.run(share_links.set_enabled(owner_id, "slug", True))
         asyncio.run(share_links.set_custom_slug(owner_id, ""))
         row = asyncio.run(share_links.get(owner_id))
         self.assertIsNone(row["custom_slug"])
         self.assertFalse(bool(row["enabled_slug"]))
+
+    def test_a_name_saved_after_clearing_one_answers_again(self):
+        """THE BUG THIS PINS: clearing switched the slug form off and saving a new
+        name never switched it back on, with no control left that could — so the
+        new /c/ link answered 404 from the moment it was handed out."""
+        owner_id = self._make_user("renamer")
+        asyncio.run(share_links.set_custom_slug(owner_id, "first-name"))
+        asyncio.run(share_links.set_custom_slug(owner_id, ""))
+        asyncio.run(share_links.set_custom_slug(owner_id, "second-name"))
+        self.assertIsNotNone(asyncio.run(share_links.resolve_by_slug("second-name")))
 
 
 # ---------------------------------------------------------------------------

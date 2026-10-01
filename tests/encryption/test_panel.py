@@ -153,7 +153,7 @@ class ActionRouteTests(AppTestCase):
     def test_generate_verify_encrypt_end_to_end(self):
         answer = self.act("enable", generate=True)
         key = re.search(r'id="encryptionKey" readonly value="([^"]+)"', answer).group(1)
-        self.assertTrue(secrets_box.key_is_valid(key))
+        Fernet(key)  # raises unless it is a usable key
         self.assertEqual(self.phase(), flow.PHASE_PENDING_KEY)
 
         # Shown once: nothing drawn afterwards carries it.

@@ -32,11 +32,6 @@ from .. import db
 # fails; pruning them re-spends API calls already paid for. Three years.
 POSTER_URL_RETENTION_SECONDS = 3 * 365 * 24 * 3600
 
-# Preference order when picking a fallback URL from the registry: TMDB is the
-# artwork source itself, so its own URL is trusted over a hotlinked one from
-# elsewhere.
-SOURCE_PREFERENCE = ("tmdb", "trakt")
-
 # A registry URL that has failed this many times running is skipped in favour
 # of trying a fresh provider lookup instead of retrying a source that keeps
 # not working.
@@ -127,11 +122,10 @@ async def urls_for(media: str, tmdb: int) -> dict[str, str]:
     """{source: url} for every registry row worth trying for (media, tmdb).
 
     THE CALLER SUPPLIES THE ORDER, which is why this returns the map rather than
-    a winner. `best_url` below answers with this module's own preference, and
-    that is the right answer for a caller who has no opinion; a caller resolving
-    artwork for one VIEWER has an opinion, and it is not this module's business
-    to hold it. Rows past MAX_FAIL_COUNT are left out here exactly as they are
-    there — a source that keeps not working is not a candidate for either.
+    a winner: a caller resolving artwork for one VIEWER has an opinion, and it is
+    not this module's business to hold it. Rows past MAX_FAIL_COUNT are left
+    out — a source that keeps not working is not a candidate until a fresh
+    sighting replaces it.
     """
     rows = await db.fetch_all(
         "SELECT source, url FROM show_posters "
@@ -139,27 +133,6 @@ async def urls_for(media: str, tmdb: int) -> dict[str, str]:
         (media, tmdb, MAX_FAIL_COUNT),
     )
     return {str(row["source"]): str(row["url"]) for row in rows}
-
-
-async def best_url(media: str, tmdb: int) -> tuple[str, str] | None:
-    """The best (source, url) registry row for (media, tmdb), or None if there
-    isn't one worth trying. Prefers 'tmdb' over 'trakt' over any other source,
-    and skips a source whose fail_count has crossed MAX_FAIL_COUNT until a
-    fresh sighting replaces it. The source is returned alongside the url so a
-    caller whose download fails can call record_failure on the right row."""
-    rows = await db.fetch_all(
-        "SELECT source, url FROM show_posters "
-        "WHERE media = ? AND tmdb = ? AND fail_count < ?",
-        (media, tmdb, MAX_FAIL_COUNT),
-    )
-    if not rows:
-        return None
-    by_source = {row["source"]: row["url"] for row in rows}
-    for source in SOURCE_PREFERENCE:
-        if source in by_source:
-            return source, by_source[source]
-    # An unrecognized future provider: any surviving row beats none at all.
-    return rows[0]["source"], rows[0]["url"]
 
 
 async def record_season_poster_urls(sightings) -> None:

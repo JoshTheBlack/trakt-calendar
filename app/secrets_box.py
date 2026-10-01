@@ -131,23 +131,6 @@ def is_enabled() -> bool:
     return _instance() is not None
 
 
-def key_is_valid(candidate: str | bytes) -> bool:
-    """Whether `candidate` is a usable Fernet key.
-
-    Used to VERIFY a pasted or env-provided key before anything is encrypted with
-    it, so a bad key is caught up front instead of after it has sealed real data."""
-    if isinstance(candidate, bytes):
-        candidate = candidate.decode("utf-8", "ignore")
-    candidate = (candidate or "").strip()
-    if not candidate:
-        return False
-    try:
-        Fernet(candidate)
-    except (ValueError, TypeError):
-        return False
-    return True
-
-
 def seal(plaintext: str | None) -> str | None:
     """Encrypt `plaintext` for storage, or pass it through when no key is set.
 

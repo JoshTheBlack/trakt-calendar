@@ -162,7 +162,6 @@ class ShareLinkViewOptionsTests(SharePageTestCase):
         self.assertIsNone(self._share()["link_view"])
 
     def test_the_options_apply_to_whichever_link_form_is_generated(self):
-        self.client.post("/api/me/share/enabled", json={"kind": "username", "enabled": True})
         self._set({"endpoint": "shows/premieres"})
         urls = self._share()["urls"]
         for kind in ("token", "username"):
@@ -708,7 +707,6 @@ class SharePageDetailsModalTests(_ShareDetailsTestCase):
             self.assertRefused(self._details("media=show&trakt=123&season=2"))
 
     def test_details_reach_through_the_username_url_form_too(self):
-        asyncio.run(share_links.set_enabled(self.user_id, "username", True))
         self._seed_detail_cache()
         with self._no_network():
             resp = self.client.get(
@@ -822,9 +820,7 @@ class ShareEmbedTextTests(SharePageTestCase):
         """/s/, /u/ and /c/ open the same page and describe it the same way; the
         username in a /u/ URL is the URL's business, not the text's."""
         self._set_name("Josh Black")
-        asyncio.run(share_links.set_enabled(self.user_id, "username", True))
         asyncio.run(share_links.set_custom_slug(self.user_id, "embed-cal"))
-        asyncio.run(share_links.set_enabled(self.user_id, "slug", True))
         for path in (f"/s/{self.token}", "/u/embedowner", "/c/embed-cal"):
             with self.subTest(path=path):
                 head = self._head(f"{path}?year=2026&month=8")

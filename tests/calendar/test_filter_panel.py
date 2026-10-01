@@ -543,21 +543,6 @@ class EveryWriteInThisPanelIsGuardedTests(CalendarRouteTestCase):
         self.user_id = self._make_user("guarded")
         self.serving_month()
 
-    def test_a_form_encoded_body_is_refused(self):
-        """A form-encoded cross-origin POST is a CORS "simple request": the
-        browser sends it with cookies and asks nobody's permission first. Not
-        accepting the shape at all is what removes the whole class."""
-        self.sign_in_as(self.user_id)
-        for path in self.WRITES:
-            with self.subTest(path=path):
-                self.assertEqual(
-                    self.client.post(path, data={"medium": "show"}).status_code, 415)
-
-    def test_a_body_with_no_content_type_is_refused(self):
-        self.sign_in_as(self.user_id)
-        for path in self.WRITES:
-            with self.subTest(path=path):
-                self.assertEqual(self.client.post(path, content=b"{}").status_code, 415)
 
     def test_an_account_without_the_calendar_grant_is_refused(self):
         unapproved = self._make_user("waiting", calendar_approved=False)

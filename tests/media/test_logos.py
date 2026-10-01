@@ -5,9 +5,14 @@ fetch_history mocked.
 """
 from __future__ import annotations
 
+import tempfile
 import unittest
+from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+
+from PIL import Image
 
 from app.media import logos
 from app.providers.trakt import sync as trakt_sync
@@ -179,6 +184,109 @@ class FetchWatchedProgressTests(unittest.IsolatedAsyncioTestCase):
         # what it holds.
         self.assertEqual(rec["ids"], {"trakt": 10, "tmdb": 111, "slug": "a",
                                       "trakt_slug": "a"})
+
+
+def _png(colour, size=(200, 80)) -> bytes:
+    """A logo-shaped PNG: an opaque block of `colour` inside transparent margins,
+    which is what a real network logo looks like to the trim step."""
+    img = Image.new("RGBA", size, (0, 0, 0, 0))
+    img.paste(Image.new("RGBA", (size[0] - 40, size[1] - 20), colour), (20, 10))
+    out = BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
+
+
+class RenderTileTests(unittest.TestCase):
+    """The tile is what a card draws, so its background has to keep the logo
+    readable whichever colour the logo is."""
+
+    def test_a_dark_logo_sits_on_white_and_a_light_one_on_dark(self):
+        for colour, background in (((20, 20, 20, 255), logos._WHITE_BG),
+                                   ((250, 250, 250, 255), logos._LIGHT_BG)):
+            with self.subTest(colour=colour):
+                tile = logos._render_tile(_png(colour))
+                self.assertEqual(tile.size, (logos.TILE, logos.TILE))
+                # A point inside the rounded corner's straight edge is background.
+                self.assertEqual(tile.getpixel((logos.TILE // 2, 3)), background)
+
+    def test_the_logo_is_trimmed_and_fitted_inside_the_padding(self):
+        tile = logos._render_tile(_png((200, 0, 0, 255), size=(1000, 300)))
+        drawn = [x for x in range(logos.TILE)
+                 if tile.getpixel((x, logos.TILE // 2))[:3] == (200, 0, 0)]
+        self.assertEqual((min(drawn), max(drawn) + 1),
+                         (logos.PAD, logos.TILE - logos.PAD))
+
+    def test_bytes_that_are_not_an_image_are_no_tile(self):
+        self.assertIsNone(logos._render_tile(b"<svg>not a raster</svg>"))
+
+
+class EnsureLogoTests(unittest.IsolatedAsyncioTestCase):
+    """Generating a tile from TMDB, with TMDB answered by stubs: which logo is
+    fetched, what is written to disk, and what is remembered when there is none."""
+
+    CFG = SimpleNamespace(tmdb_configured=True)
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="logos-"))
+        self.patches = [patch.object(logos, "LOGO_DIR", self.dir)]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+
+    def _tmdb(self, *, networks, images=None, downloads=None):
+        """Stub TMDB: /tv/{id} answers `networks`, /network/{id}/images answers
+        `images`, and a download answers from `downloads` by the url's tail."""
+        async def get_json(settings, path, label):
+            return {"networks": networks} if path.startswith("/tv/") else images
+
+        fetched = []
+
+        async def download(url):
+            fetched.append(url)
+            return (downloads or {}).get(url.rsplit("/", 1)[-1])
+
+        stack = [patch.object(logos.tmdb, "get_json", get_json),
+                 patch.object(logos.tmdb, "download", download)]
+        for p in stack:
+            p.start()
+            self.patches.append(p)
+        return fetched
+
+    async def test_a_raster_logo_is_fetched_once_and_kept_on_disk(self):
+        fetched = self._tmdb(networks=[{"id": 1, "name": "AMC", "logo_path": "/amc.png"}],
+                             downloads={"amc.png": _png((20, 20, 20, 255))})
+        tile = await logos.ensure_logo(self.CFG, "AMC", 99)
+        self.assertEqual(tile, self.dir / "amc.png")
+        with Image.open(tile) as written:
+            self.assertEqual(written.size, (logos.TILE, logos.TILE))
+        self.assertEqual(await logos.ensure_logo(self.CFG, "AMC", 99), tile)
+        self.assertEqual(len(fetched), 1, "a tile on disk is not fetched again")
+
+    async def test_an_svg_logo_prefers_the_networks_raster_alternative(self):
+        fetched = self._tmdb(
+            networks=[{"id": 7, "name": "HBO", "logo_path": "/hbo.svg"}],
+            images={"logos": [{"file_path": "/hbo-alt.svg"}, {"file_path": "/hbo-alt.png"}]},
+            downloads={"hbo-alt.png": _png((20, 20, 20, 255))})
+        self.assertIsNotNone(await logos.ensure_logo(self.CFG, "HBO", 5))
+        self.assertEqual([u.rsplit("/", 1)[-1] for u in fetched], ["hbo-alt.png"])
+
+    async def test_no_usable_logo_is_remembered_so_tmdb_is_not_asked_again(self):
+        self._tmdb(networks=[{"id": 1, "name": "Tiny", "logo_path": None}], images={"logos": []})
+        self.assertIsNone(await logos.ensure_logo(self.CFG, "Tiny", 3))
+        self.assertTrue(logos.is_negative("Tiny"))
+        with patch.object(logos, "_tmdb_tv_networks", AsyncMock()) as asked:
+            self.assertIsNone(await logos.ensure_logo(self.CFG, "Tiny", 3))
+        asked.assert_not_awaited()
+
+    async def test_nothing_is_asked_without_tmdb_or_without_an_id(self):
+        with patch.object(logos, "_tmdb_tv_networks", AsyncMock()) as asked:
+            self.assertIsNone(await logos.ensure_logo(SimpleNamespace(tmdb_configured=False), "AMC", 1))
+            self.assertIsNone(await logos.ensure_logo(self.CFG, "AMC", None))
+            self.assertIsNone(await logos.ensure_logo(self.CFG, "", 1))
+        asked.assert_not_awaited()
 
 
 if __name__ == "__main__":

@@ -481,13 +481,11 @@ class Post1ShareLinkTests(DistraktTestCase):
         self._assert_points_at(f"/s/{row['token']}")
 
     def test_the_selector_switches_which_form_is_embedded(self):
-        asyncio.run(share_links.set_enabled(self.user_id, "username", True))
         resp = self._save({"kind": "username"})
         self.assertEqual(resp.status_code, 200)
         self._assert_points_at("/u/poster")
 
     def test_the_choice_is_remembered_per_user(self):
-        asyncio.run(share_links.set_enabled(self.user_id, "username", True))
         self._save({"kind": "username"})
         self.assertEqual(self._stored()["kind"], "username")
 
@@ -497,7 +495,6 @@ class Post1ShareLinkTests(DistraktTestCase):
         self.assertEqual(self._stored()["kind"], "")
 
     def test_clearing_the_choice_goes_back_to_following_the_share_panel(self):
-        asyncio.run(share_links.set_enabled(self.user_id, "username", True))
         self._save({"kind": "username"})
         self._save({"kind": ""})
         row = asyncio.run(share_links.get(self.user_id))
@@ -520,7 +517,6 @@ class Post1ShareLinkTests(DistraktTestCase):
     def test_the_two_controls_save_independently(self):
         """Each field is only written when it is present, so changing the view
         does not silently reset which link form is embedded."""
-        asyncio.run(share_links.set_enabled(self.user_id, "username", True))
         self._save({"kind": "username"})
         self._save({"endpoint": "shows/finales"})
         stored = self._stored()
@@ -539,12 +535,13 @@ class Post1ShareLinkTests(DistraktTestCase):
         self.assertEqual((self._stored()["kind"], self._stored()["endpoint"]), ("", ""))
 
     def test_a_form_that_would_not_resolve_falls_back_rather_than_vanishing(self):
-        """A stored choice can stop working after the fact — the user disables
-        that form, or clears the slug it named. Publishing the link that still
-        works beats dropping it out of every future post without saying so."""
-        asyncio.run(share_links.set_enabled(self.user_id, "username", True))
-        self._save({"kind": "username"})
-        asyncio.run(share_links.set_enabled(self.user_id, "username", False))
+        """A stored choice can stop working after the fact — the user clears the
+        slug it named. Publishing the link that still works beats dropping it out
+        of every future post without saying so."""
+        asyncio.run(share_links.set_custom_slug(self.user_id, "poster-cal"))
+        self._save({"kind": "slug"})
+        self._assert_points_at("/c/poster-cal")
+        asyncio.run(share_links.set_custom_slug(self.user_id, ""))
         row = asyncio.run(share_links.get(self.user_id))
         self._assert_points_at(f"/s/{row['token']}")
 
@@ -561,11 +558,6 @@ class Post1ShareLinkTests(DistraktTestCase):
         # the post has no link for one to choose between.
         self.assertFalse(self._stored()["usable"])
         self.assertNotIn("postLinkKind", self.client.get(self.page).text)
-
-    def test_every_form_disabled_omits_the_link(self):
-        for kind in ("token", "username", "slug"):
-            asyncio.run(share_links.set_enabled(self.user_id, kind, False))
-        self.assertNotIn("Full calendar", self._post1())
 
     def test_the_link_is_bare_so_the_preview_card_draws(self):
         """Angle brackets around a URL are Discord's own way of suppressing the

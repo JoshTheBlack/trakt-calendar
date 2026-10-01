@@ -11,9 +11,10 @@ silently rather than loudly:
     through the route, and read back.
   - NO RESPONSE CONTAINS A STORED SECRET — not in plaintext, and not as the
     ciphertext encryption stores. The literal strings are asserted absent.
-  - EVERY WRITE REFUSES A FORM-ENCODED BODY (415), A NON-ADMINISTRATOR, AND A BAD
-    VALUE — the last drawn as a sentence at 200 with nothing written, because a
-    non-200 is never swapped.
+  - EVERY WRITE REFUSES A NON-ADMINISTRATOR AND A BAD VALUE — the latter drawn as
+    a sentence at 200 with nothing written, because a non-200 is never swapped.
+    (A form-encoded body is refused before routing, for every route at once;
+    tests/kernel/test_route_gating.py holds that.)
   - EVERY CONTROL THAT WRITES CARRIES THE ENCODER, and a read inside a writing form
     opts out of it (the encoder throws on a GET's empty body and the request is
     silently dropped).
@@ -321,12 +322,6 @@ class NoStoredSecretIsDrawnTests(PanelTestCase):
 # ---------------------------------------------------------------------------
 
 class EveryWriteRefusesTests(PanelTestCase):
-    def test_a_form_encoded_body_is_refused_before_it_reaches_a_route(self):
-        for path, body in WRITES:
-            with self.subTest(path=path):
-                resp = self.client.post(path, data={k: str(v) for k, v in body.items()})
-                self.assertEqual(resp.status_code, 415, resp.text)
-        self.assertEqual(load_settings().endpoint, Settings().endpoint)
 
     def test_a_non_administrator_is_refused_everything_including_the_panel(self):
         self.client.cookies.clear()
