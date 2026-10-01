@@ -38,7 +38,15 @@ from fastapi.testclient import TestClient
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-os.environ.setdefault("TRAKT_DATA_DIR", tempfile.mkdtemp(prefix="tns-test-"))
+# A pytest-xdist worker gets a directory of its OWN rather than the inherited one:
+# the controller imports this file first and sets the variable, every worker is
+# started from its environment, and a shared directory is one settings.json,
+# one user_data/ and one posters/ that eight processes write at once.
+if os.environ.get("PYTEST_XDIST_WORKER"):
+    os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(
+        prefix=f"tns-test-{os.environ['PYTEST_XDIST_WORKER']}-")
+else:
+    os.environ.setdefault("TRAKT_DATA_DIR", tempfile.mkdtemp(prefix="tns-test-"))
 
 ORIGIN = "https://testserver"
 _db_counter = itertools.count(1)

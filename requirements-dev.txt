@@ -1,0 +1,6 @@
+# What running the test suite needs on top of requirements.txt. Not installed in
+# the Docker image, which runs the app and never the tests.
+-r requirements.txt
+pytest==9.1.1
+# pytest.ini runs the suite across every CPU with it (-n auto); see the reason there.
+pytest-xdist==3.8.0

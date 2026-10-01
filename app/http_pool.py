@@ -60,6 +60,24 @@ logger = logging.getLogger(__name__)
 # references here costs nothing and keeps aclose_all honest.
 _pools: list[Pool] = []
 
+# THE TRUST STORE IS READ ONCE PER PROCESS, not once per client. Building an SSL
+# context parses the whole CA bundle — measured at a third of a second each — and
+# a context, unlike the client holding it, is bound to no event loop, so every
+# client on every loop can share one. The pools already build their client once
+# per loop; this makes a rebuild on a NEW loop cost a client and not a trust
+# store, which is what the test suite does thousands of times (each test runs on
+# a fresh loop) and what had made reading certificates most of its run time.
+_ssl_context = None
+
+
+def _shared_ssl_context():
+    """httpx's own default context, exactly as a bare AsyncClient would build it,
+    made once and handed to every client after."""
+    global _ssl_context
+    if _ssl_context is None:
+        _ssl_context = httpx.create_ssl_context()
+    return _ssl_context
+
 
 class Pool:
     """A lazily-built, loop-keyed httpx client for one outbound service.
@@ -116,7 +134,8 @@ class Pool:
             with span("http_pool.build", service=self.name):
                 limits = httpx.Limits(max_connections=self.max_connections,
                                       max_keepalive_connections=self.max_connections)
-                self._client = httpx.AsyncClient(timeout=self.timeout, limits=limits)
+                self._client = httpx.AsyncClient(timeout=self.timeout, limits=limits,
+                                                 verify=_shared_ssl_context())
         return self._client
 
     def gate(self):
