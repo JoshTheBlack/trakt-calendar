@@ -865,7 +865,16 @@ async def _account_orders(user_id: int, linked: dict, settings: Settings) -> _Or
     source_prefs = await _source_prefs().load(user_id)
     linked_trackers = [str(source) for source in providers.registered()
                        if str(source) in providers.tracker_sources() and str(source) in linked]
-    describing = [str(p.source) for p in providers.calendar_sources(settings=settings)]
+    # AND EVERY SOURCE THAT DESCRIBES TITLES WITHOUT PUBLISHING A CALENDAR, when
+    # this instance can ask it (TMDB): its answers are the pictures and the
+    # details a viewer reads, so an order that left it out would be an order the
+    # viewer could not put it in. A calendar source switched off by the operator
+    # still drops out, by the calendar's own rule above.
+    calendars = {str(p.source) for p in providers.calendar_sources(settings=settings)}
+    describing = [str(source) for source, provider in providers.registered().items()
+                  if str(source) in calendars
+                  or (not provider.capabilities.endpoints and provider.detail_port is not None
+                      and provider.detail_port.catalogue_configured(settings))]
 
     def entries(names: list[str]) -> list[dict]:
         return [{"source": name, "label": providers.registered()[name].label} for name in names]

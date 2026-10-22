@@ -928,6 +928,19 @@ class StatingWhichTrackerDecidesTests(AccountTestCase):
         self.assertEqual(self._stored().metadata_order[0], second)
         self.assertEqual(self._stored().tracker_priority, [])
 
+    def test_tmdb_is_in_the_metadata_order_and_never_the_tracker_order(self):
+        """TMDB describes titles and publishes no calendar: with its token here it
+        is offered in whose-description-is-read, first by default, and never as a
+        tracker."""
+        settings = load_settings()
+        settings.tmdb_api_key = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJtZSJ9.c2ln"
+        save_settings(settings)
+        page = self.client.get("/me").text
+        self.assertIn('id="metadata_order-tmdb-down"', page)
+        self.assertNotIn('id="tracker_order-tmdb', page)
+        self._move("tmdb", "down", kind="metadata_order")
+        self.assertNotEqual(self._stored().metadata_order[0], "tmdb")
+
 
 class PublishingWatchMarksOnASharedCalendarTests(AccountTestCase):
     """POST /me/share-watch-history — the one switch over a public fact.
