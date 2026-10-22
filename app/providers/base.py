@@ -1190,6 +1190,16 @@ class SeasonsAnswer(NamedTuple):
     network: str
 
 
+# HOW MANY OF A TITLE'S CAST THE DETAILS PANEL DRAWS, whichever service names
+# them — one number, because one panel draws every service's answer.
+# TWENTY, BECAUSE THE GRID IS FIVE WIDE. The cap is this app's own — a season's
+# cast runs to 118 on some titles and the panel is not a filmography — and it was
+# 16, which left the last row three short of full at the default width. Four rows
+# of five fills the grid; anything under a full row reads as the list having been
+# cut off mid-thought rather than deliberately bounded.
+CAST_SHOWN = 20
+
+
 class TitleFacts(NamedTuple):
     """A title's name and network as one service states them (see
     DetailPort.fetch_title_facts). "" where the service does not say."""

@@ -150,6 +150,29 @@ class VideosTests(unittest.TestCase):
         self.assertEqual(normalize.videos_from(payload), [])
 
 
+class CastTests(unittest.TestCase):
+    """normalize.cast_from — both of TMDB's cast shapes, as the panel's keys."""
+
+    def test_a_shows_aggregate_cast_names_each_persons_role(self):
+        cast = normalize.cast_from(fixture("cast_tv_severance"))
+        self.assertEqual(cast[0]["name"], "Adam Scott")
+        self.assertTrue(cast[0]["character"])
+        self.assertTrue(cast[0]["headshot"].startswith("https://wsrv.nl/"))
+        self.assertEqual(set(cast[0]), {"name", "character", "headshot"})
+
+    def test_a_films_cast_names_its_character(self):
+        cast = normalize.cast_from(fixture("cast_movie_dune_part_two"))
+        self.assertTrue(cast[0]["name"] and cast[0]["character"])
+
+    def test_the_cap_is_the_panels(self):
+        from app.providers.base import CAST_SHOWN
+        many = {"cast": [{"name": f"P{n}", "character": "x"} for n in range(50)]}
+        self.assertEqual(len(normalize.cast_from(many)), CAST_SHOWN)
+
+    def test_no_picture_is_no_headshot(self):
+        self.assertIsNone(normalize.cast_from({"cast": [{"name": "A"}]})[0]["headshot"])
+
+
 class SeasonsTests(unittest.TestCase):
 
     def test_a_season_summary(self):

@@ -679,13 +679,17 @@ class SharePageDetailsModalTests(_ShareDetailsTestCase):
             if path == "tv/789/season/2":
                 return {"episodes": [{"episode_number": 5, "name": "The One",
                                       "air_date": "2026-07-15"}]}
+            if path == "tv/789/season/2/aggregate_credits":
+                return {"cast": [{"name": "A Lead", "roles": [{"character": "Hero"}]}]}
             raise AssertionError(f"TMDB asked about {path}")
 
         with patch("app.providers.tmdb.transport.cached_get", tmdb_get):
             resp = self._details("media=show&tmdb=789&trakt=123&season=2")
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertIn("Described by TMDB.", resp.text)
-        self.assertEqual(set(asked), {"tv/789", "tv/789/season/2"})
+        self.assertEqual(set(asked), {"tv/789", "tv/789/season/2",
+                                      "tv/789/season/2/aggregate_credits"})
+        self.assertIn("A Lead", resp.text)
         self.assertIn('href="https://www.themoviedb.org/tv/789"', resp.text)
 
     # -- and the permission it grants --------------------------------------

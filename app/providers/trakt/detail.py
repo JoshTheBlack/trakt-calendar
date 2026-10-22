@@ -19,8 +19,8 @@ import httpx
 from ... import youtube
 from ...config import Settings
 from .. import season as season_rules
-from ..base import (MATCH_SOURCES, Media, Source, TitleFacts, Video, VideoKind,
-                    proxied_image)
+from ..base import (CAST_SHOWN, MATCH_SOURCES, Media, Source, TitleFacts, Video,
+                    VideoKind, proxied_image)
 from . import _ids, transport
 from .transport import TraktError
 
@@ -41,20 +41,14 @@ def _headshot(person: dict) -> str | None:
     return None
 
 
-# TWENTY, BECAUSE THE GRID IS FIVE WIDE. The cap is this app's own — a season's
-# cast runs to 118 on some titles and the panel is not a filmography — and it was
-# 16, which left the last row three short of full at the default width. Four rows
-# of five fills the grid; anything under a full row reads as the list having been
-# cut off mid-thought rather than deliberately bounded.
-_CAST_SHOWN = 20
 
 
 def _cast_from(people: dict) -> list[dict]:
     """The modal's cast list from a /people response: the top-billed
-    `_CAST_SHOWN`, name + character + headshot. `characters` (a list) is Trakt's
+    `CAST_SHOWN`, name + character + headshot. `characters` (a list) is Trakt's
     newer shape and `character` (a string) the older one; both still arrive."""
     cast = []
-    for member in (people.get("cast") or [])[:_CAST_SHOWN]:
+    for member in (people.get("cast") or [])[:CAST_SHOWN]:
         person = member.get("person") or {}
         character = member.get("character") or (member.get("characters") or [""])[0]
         cast.append({

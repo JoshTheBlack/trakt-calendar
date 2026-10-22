@@ -287,6 +287,8 @@ class ATitleOnlyTmdbKnowsTests(_BoardPanelTestCase):
                                      "air_date": "2024-01-01"},
                                     {"season_number": 2, "episode_count": 2,
                                      "air_date": "2025-01-01"}]}
+            if path.endswith("aggregate_credits"):
+                return {"cast": [{"name": "Board Lead", "roles": [{"character": "Hero"}]}]}
             if path.startswith("tv/42/season/"):
                 return {"episodes": [{"episode_number": n, "name": f"Ep {n}",
                                       "air_date": "2024-01-0%d" % n} for n in (1, 2)]}
@@ -301,3 +303,4 @@ class ATitleOnlyTmdbKnowsTests(_BoardPanelTestCase):
         self.assertEqual(panel.episodes, [1, 2])
         self.assertIn('href="https://www.themoviedb.org/tv/42"', html)
         self.assertIn("tv/42", asked)
+        self.assertIn("Board Lead", html)

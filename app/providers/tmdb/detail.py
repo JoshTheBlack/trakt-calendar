@@ -5,11 +5,12 @@ row is filed with, and calendar records for a search.
 EVERYTHING HERE IS PUBLIC CATALOGUE DATA, the same for every viewer, read with
 the instance's token and cached in the shared response cache (transport.py).
 
-ONE CALL PER TITLE AND ONE PER SEASON. `/tv/{id}` with `append_to_response`
-carries the ids, the ratings, the videos and the season list in one answer
-(measured 8.5 KB), so the panel, the picker, the facts and the record builder
-all read the SAME cached object — `title_payload` is the only place that asks
-for it, so its URL, and therefore its cache key, is one string.
+ONE CALL PER TITLE AND ONE PER SEASON, plus the panel's cast. `/tv/{id}` with
+`append_to_response` carries the ids, the ratings, the videos and the season
+list in one answer (measured 8.5 KB), so the panel, the picker, the facts and
+the record builder all read the SAME cached object — `title_payload` is the only
+place that asks for it, so its URL, and therefore its cache key, is one string.
+The cast is a call of its own that only the panel makes (`cast_payload`).
 """
 from __future__ import annotations
 
@@ -72,6 +73,38 @@ async def season_payload(settings: Settings, tmdb_id, season: int, *,
     return payload if isinstance(payload, dict) else None
 
 
+# WHERE A CAST IS LISTED, per medium, and for a season. Each is the list that
+# matches the cast Trakt's panel draws (normalize.cast_from says how closely).
+_CAST_PATHS = {Media.SHOW: "tv/{id}/aggregate_credits", Media.MOVIE: "movie/{id}/credits"}
+_SEASON_CAST_PATH = "tv/{id}/season/{season}/aggregate_credits"
+
+
+async def cast_payload(settings: Settings, tmdb_id, media: Media, season: int | None, *,
+                       cache_only: bool = False) -> dict | None:
+    """The raw cast listing for the title, or for one season of a show; None
+    when TMDB has none (404) or nothing is stored under `cache_only`.
+
+    ITS OWN CALL, NOT AN APPEND TO THE TITLE OR SEASON CALL, and the reason is
+    measured size. Appended, `aggregate_credits` took a show's title answer from
+    7 KB to 127-151 KB (every crew member of every season comes with it), a
+    season's from 46-69 KB to 89-119 KB, and a film's `credits` took 40 KB to
+    108 KB. Those two answers also feed the posters, the network logos, the
+    tracker's titles and every tracker season total, none of which draws a cast.
+    As a call of its own it is asked only by the panel, beside its other calls,
+    so the panel waits no longer and nothing else carries it.
+    """
+    if tmdb_id in (None, ""):
+        return None
+    path = (_SEASON_CAST_PATH.format(id=tmdb_id, season=int(season))
+            if media is Media.SHOW and season is not None
+            else _CAST_PATHS[media].format(id=tmdb_id))
+    try:
+        payload = await transport.cached_get(settings, path, cache_only=cache_only)
+    except transport.TmdbNotFound:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 async def fetch_videos(settings: Settings, media, tmdb_id, *,
                        cache_only: bool = False) -> list[Video]:
     """Every video TMDB lists for the title — from the same cached `/tv/{id}`
@@ -91,16 +124,23 @@ async def fetch_details(settings: Settings, media, tmdb_id, season: int | None, 
     has no episodes — detail_source.for_season then hands the season to the next
     service the title names.
 
-    NO CAST. TMDB publishes credits, but the panel's cast is one more call per
-    title and season that this answer does not make yet; the key is present and
-    empty, which the renderer already draws around (a Simkl title's is too).
+    THE CAST IS THE SEASON'S WHERE ONE IS NAMED, the title's otherwise, from a
+    call of its own asked beside the others (`cast_payload` says why it is not
+    an append). A season whose cast TMDB lists nothing for falls back to the
+    title's, as the Trakt package's does, rather than drawing an empty grid.
     """
     media = Media(media)
     per_season = media is Media.SHOW and season is not None
-    payload, season_body = await asyncio.gather(
+    payload, season_body, cast_body = await asyncio.gather(
         title_payload(settings, tmdb_id, media, cache_only=cache_only),
         season_payload(settings, tmdb_id, int(season), cache_only=cache_only)
-        if per_season else _nothing())
+        if per_season else _nothing(),
+        cast_payload(settings, tmdb_id, media, season if per_season else None,
+                     cache_only=cache_only))
+    cast = normalize.cast_from(cast_body or {})
+    if per_season and not cast:
+        cast = normalize.cast_from(
+            await cast_payload(settings, tmdb_id, media, None, cache_only=cache_only) or {})
     info = payload or {}
     entry = normalize.season_entry(info, season if per_season else None)
     return {
@@ -134,7 +174,7 @@ async def fetch_details(settings: Settings, media, tmdb_id, season: int | None, 
         "season": season,
         "season_title": normalize.season_name(entry),
         "season_count": len(normalize.picker_seasons(info)),
-        "cast": [],
+        "cast": cast,
         "episodes": normalize.panel_episodes(season_body or {}),
     }
 

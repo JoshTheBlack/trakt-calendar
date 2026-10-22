@@ -47,10 +47,13 @@ def answering(**answers):
 class TheDetailsPanelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_season_of_a_show(self):
-        tmdb, patched = answering(tv__95396=SEVERANCE, tv__95396__season__2=SEASON_2)
+        tmdb, patched = answering(tv__95396=SEVERANCE, tv__95396__season__2=SEASON_2,
+                                  tv__95396__season__2__aggregate_credits=fixture(
+                                      "cast_tv_severance_season_2"))
         with patched:
             got = await detail.fetch_details(SETTINGS, Media.SHOW, "95396", 2)
         self.assertEqual(got["title"], "Severance")
+        self.assertEqual(got["cast"][0]["name"], "Adam Scott")
         self.assertEqual(got["certification"], "TV-MA")
         self.assertEqual(got["season_count"], 2)
         self.assertIn("severance barrier", got["season_overview"])
@@ -59,16 +62,35 @@ class TheDetailsPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(got["genres"][0], "Drama")
         self.assertEqual(got["ids"]["tvdb"], 371980)
         self.assertEqual(got["videos"][0].sources, (str(Source.TMDB),))
-        # One call for the title (everything appended), one for the season.
+        # One call for the title (everything appended), one for the season, and
+        # the season's own cast beside them.
         self.assertEqual(sorted(path for path, _, _ in tmdb.asked),
-                         ["tv/95396", "tv/95396/season/2"])
+                         ["tv/95396", "tv/95396/season/2",
+                          "tv/95396/season/2/aggregate_credits"])
         appended = {path: params for path, params, _ in tmdb.asked}["tv/95396"]["append_to_response"]
         self.assertEqual(appended, "external_ids,content_ratings,videos")
 
+    async def test_a_whole_show_draws_the_shows_cast(self):
+        _tmdb, patched = answering(tv__95396=SEVERANCE,
+                                   tv__95396__aggregate_credits=fixture("cast_tv_severance"))
+        with patched:
+            got = await detail.fetch_details(SETTINGS, Media.SHOW, "95396", None)
+        self.assertEqual([c["name"] for c in got["cast"]][:1], ["Adam Scott"])
+
+    async def test_a_season_with_no_cast_listed_draws_the_shows(self):
+        tmdb, patched = answering(tv__95396=SEVERANCE, tv__95396__season__2=SEASON_2,
+                                  tv__95396__aggregate_credits=fixture("cast_tv_severance"))
+        with patched:
+            got = await detail.fetch_details(SETTINGS, Media.SHOW, "95396", 2)
+        self.assertEqual(got["cast"][0]["name"], "Adam Scott")
+        self.assertIn("tv/95396/aggregate_credits", [path for path, _, _ in tmdb.asked])
+
     async def test_a_film(self):
-        _tmdb, patched = answering(movie__693134=DUNE)
+        _tmdb, patched = answering(movie__693134=DUNE,
+                                   movie__693134__credits=fixture("cast_movie_dune_part_two"))
         with patched:
             got = await detail.fetch_details(SETTINGS, Media.MOVIE, "693134", None)
+        self.assertTrue(got["cast"])
         self.assertEqual((got["title"], got["runtime"], got["network"]),
                          ("Dune: Part Two", 167, ""))
         self.assertEqual(got["episodes"], [])

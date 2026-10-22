@@ -20,8 +20,8 @@ from typing import Any
 
 from ... import youtube
 from .. import season as season_rules
-from ..base import (Media, Record, Source, Video, VideoKind, collect_ids,
-                    epoch_seconds)
+from ..base import (CAST_SHOWN, Media, Record, Source, Video, VideoKind, collect_ids,
+                    epoch_seconds, proxied_image)
 from . import transport
 
 logger = logging.getLogger(__name__)
@@ -284,6 +284,45 @@ def videos_from(payload: dict) -> list[Video]:
             official=official if isinstance(official, bool) else None,
             published=str(entry.get("published_at") or "") or None,
             sources=(str(Source.TMDB),)))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Cast
+# ---------------------------------------------------------------------------
+
+# A headshot at TMDB's 185-pixel width: the panel's cast grid draws faces small,
+# and the original is several hundred kilobytes.
+_HEADSHOT_SIZE = "w185"
+
+
+def cast_from(credits: dict) -> list[dict]:
+    """The panel's cast — [{name, character, headshot}], the keys the Trakt
+    package's answer carries, top-billed first and capped at CAST_SHOWN — from
+    either shape TMDB lists a cast in.
+
+    A SHOW'S OR A SEASON'S `aggregate_credits` names each person once with every
+    ROLE they played across its episodes (`roles[].character`), most episodes
+    first — the list that matches the cast Trakt's panel draws (measured: 19 and
+    18 of Trakt's 20 for a show, 18 and 19 for a season). A film's `credits`
+    names a single `character`. The headshot is TMDB's origin address through
+    the shared image proxy, because a browser draws it.
+    """
+    out = []
+    for member in (credits or {}).get("cast") or ():
+        if not isinstance(member, dict) or not member.get("name"):
+            continue
+        roles = member.get("roles") or ()
+        character = (roles[0].get("character") if roles and isinstance(roles[0], dict)
+                     else member.get("character"))
+        out.append({
+            "name": str(member["name"]),
+            "character": str(character or ""),
+            "headshot": proxied_image(transport.image_url(member.get("profile_path"),
+                                                          _HEADSHOT_SIZE)) or None,
+        })
+        if len(out) >= CAST_SHOWN:
+            break
     return out
 
 
