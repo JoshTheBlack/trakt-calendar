@@ -220,3 +220,30 @@ class APanelPoolsEveryServicesVideosTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OutboundLinksAskEveryRegisteredServiceTests(unittest.TestCase):
+    """outbound_links reaches each service's own `title_url` through the
+    registry. It used to hold a table of two packages' builders, so a service
+    registered later got no button and nothing said so."""
+
+    def test_a_service_registered_later_gets_its_button(self):
+        third = mock.Mock(title_url=lambda media, ids: f"https://mercury.example/{ids['mercury']}")
+        registry = {**providers.registered(), "mercury": third}
+        with mock.patch.object(providers, "registered", lambda: registry):
+            links = detail_source.outbound_links({"mercury": "7", "trakt": "1"}, "show")
+        self.assertIn(detail_source.Outbound("mercury", "https://mercury.example/7"), links)
+
+    def test_only_services_the_title_names_are_asked(self):
+        third = mock.Mock(title_url=mock.Mock(return_value="https://mercury.example/x"))
+        registry = {**providers.registered(), "mercury": third}
+        with mock.patch.object(providers, "registered", lambda: registry):
+            links = detail_source.outbound_links({"trakt": "1"}, "show")
+        third.title_url.assert_not_called()
+        self.assertEqual([str(link.source) for link in links], ["trakt"])
+
+    def test_links_follow_the_declared_order(self):
+        links = detail_source.outbound_links({"simkl": "2", "trakt": "1"}, "movie")
+        self.assertEqual([str(link.source) for link in links],
+                         [str(s) for s in providers.registered()
+                          if str(s) in ("simkl", "trakt")])

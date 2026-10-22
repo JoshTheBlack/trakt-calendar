@@ -1774,6 +1774,19 @@ class Provider(Protocol):
         must answer without making a network call."""
         ...
 
+    def title_url(self, media: Media, ids: Mapping[str, Any]) -> str:
+        """This service's own page for the title `ids` names, or "" when the map
+        carries no id of this service's. Answered without a call.
+
+        ON THE PROVIDER, BECAUSE WHERE A SERVICE'S TITLES LIVE IS THAT SERVICE'S
+        FACT and every surface drawing an outbound button asks it of whichever
+        services a title names. It used to be a table of two packages' builders
+        in the one function that drew the buttons, so a service registered
+        later would silently have had no button at all — and TMDB, Simkl and
+        Trakt all ask in their terms that their data link back to the item.
+        """
+        ...
+
     def catalogue_is_configured(self, settings: Settings) -> bool:
         """Whether this instance can make this source's PUBLIC catalogue
         reads — the predicate `for_catalogue_search` gates on, and

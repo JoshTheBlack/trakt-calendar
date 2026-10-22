@@ -489,6 +489,43 @@ class EveryWatchlistPortWritesTheSameWayTests(DatabaseTestCase):
         self.assertEqual(offered, {source for source, _ in self._ports()})
 
 
+# Where each service's own pages live. A TABLE WITH AN ENTRY PER SERVICE, and
+# the test below fails for a registered source missing from it: the point of a
+# per-service table is that a new service is a visible decision here rather
+# than a silent pass.
+SERVICE_HOSTS = {"trakt": "trakt.tv", "simkl": "simkl.com"}
+
+
+class EveryProviderLinksToItsOwnPagesTests(unittest.TestCase):
+    """`Provider.title_url` — the outbound button on every card and panel.
+
+    Asked through the registry by detail_source.outbound_links, which used to
+    hold a table of two packages' builders and so would have given a third
+    service no button at all, with nothing failing.
+    """
+
+    def test_every_registered_source_has_a_host_entry(self):
+        self.assertEqual(set(SERVICE_HOSTS), {str(s) for s in providers.registered()})
+
+    def test_a_title_this_service_knows_links_to_this_service(self):
+        from urllib.parse import urlparse
+        for source, provider in providers.registered().items():
+            for media in Media:
+                with self.subTest(source=str(source), media=str(media)):
+                    url = provider.title_url(media, {str(source): "12345"})
+                    host = urlparse(url).hostname or ""
+                    self.assertTrue(host == SERVICE_HOSTS[str(source)]
+                                    or host.endswith("." + SERVICE_HOSTS[str(source)]), url)
+                    self.assertIn("12345", url)
+
+    def test_a_title_this_service_does_not_know_has_no_link(self):
+        """Not the service's homepage: a button that goes nowhere near the title
+        is worse than no button."""
+        for source, provider in providers.registered().items():
+            with self.subTest(source=str(source)):
+                self.assertEqual(provider.title_url(Media.SHOW, {"imdb": "tt1"}), "")
+
+
 class TheCheckWouldActuallyFailTests(unittest.TestCase):
     """A conformance test that cannot fail is decoration.
 
@@ -526,7 +563,7 @@ class TheCheckWouldActuallyFailTests(unittest.TestCase):
         # app/providers/__init__.py itself.
         for name in ("source", "label", "capabilities", "sync_port", "calendar_port",
                      "detail_port", "search_port", "watchlist_port", "is_configured",
-                     "catalogue_is_configured"):
+                     "catalogue_is_configured", "title_url"):
             with self.subTest(member=name):
                 self.assertIn(name, Provider.__protocol_attrs__)
 

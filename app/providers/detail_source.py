@@ -103,37 +103,29 @@ class Outbound(NamedTuple):
     url: str
 
 
-# The per-source page builders, reached through the MODULE rather than by
-# importing the functions off them, so a test double installed on a provider's
-# calendar module is the one this calls (see CLAUDE.md's rule about names bound
-# at import time).
 def outbound_links(ids, media) -> list[Outbound]:
     """Where a title lives at every registered service that knows it, in declared
     order — the outbound buttons a card and the details panel both draw.
 
-    BOTH SERVICES REQUIRE THIS AND ONE OF THEM SAYS SO IN WRITING. Simkl's API
-    rules ask that wherever their data appears it link back to the page for that
-    specific item rather than to a homepage, and the tracker had nowhere at all
-    to do it from — its rows carry a network logo and its panel carried no link
-    to either service. A calendar card has had these since it existed; this is
-    the same answer, asked once, for the surfaces that have only an id map.
+    EVERY SERVICE REQUIRES THIS AND TWO SAY SO IN WRITING. Simkl's API rules ask
+    that wherever their data appears it link back to the page for that specific
+    item rather than to a homepage, and TMDB's terms ask for a link back too; the
+    tracker had nowhere at all to do it from — its rows carry a network logo and
+    its panel carried no link to any service. A calendar card has had these since
+    it existed; this is the same answer, asked once, for the surfaces that have
+    only an id map.
 
     ONE ENTRY PER SERVICE THE MAP NAMES, so a title only one service knows gets
-    one button rather than a dead second. The URL shape is each package's own
-    (`title_url`), because where a service's titles live is that service's fact.
+    one button rather than a dead second. The URL is each provider's own
+    (`Provider.title_url`), reached through the registry: this used to hold a
+    table of two packages' builders, which would have given a third service no
+    button and no error.
     """
-    from ..providers.simkl import calendar as simkl_calendar
-    from ..providers.trakt import calendar as trakt_calendar
-
-    builders = {Source.TRAKT: trakt_calendar, Source.SIMKL: simkl_calendar}
     out = []
-    for source, _port in ports():
+    for source, provider in providers.registered().items():
         if not str((ids or {}).get(str(source)) or "").strip():
             continue
-        package = builders.get(source)
-        if package is None:
-            continue  # a source registered without a page builder links nowhere
-        if url := package.title_url(Media(media), ids):
+        if url := provider.title_url(Media(media), ids or {}):
             out.append(Outbound(source, url))
     return out
 

@@ -313,6 +313,14 @@ class _TraktProvider:
     def is_configured(self, settings: Settings) -> bool:
         return settings.trakt_configured
 
+    def title_url(self, media: Media, ids) -> str:
+        # Trakt's own builder falls back to its homepage for an id-less map,
+        # which is right for a calendar record (it always has an id) and wrong
+        # for a button, which must not exist at all without one.
+        if not (ids.get("trakt") or ids.get("trakt_slug")):
+            return ""
+        return calendar.title_url(media, ids)
+
     def catalogue_is_configured(self, settings: Settings) -> bool:
         # The client id alone, same question `_TraktDetailPort.catalogue_configured`
         # asks and for the same reason: a catalogue search authenticates with

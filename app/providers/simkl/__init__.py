@@ -296,6 +296,9 @@ class _SimklProvider:
     def is_configured(self, settings: Settings) -> bool:
         return settings.simkl_configured
 
+    def title_url(self, media: Media, ids) -> str:
+        return calendar.title_url(media, ids)
+
     def catalogue_is_configured(self, settings: Settings) -> bool:
         # NOT THE SAME QUESTION `_SimklDetailPort.catalogue_configured` ASKS,
         # not any more. Under Simkl's v2 API, search and /redirect require a
