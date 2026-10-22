@@ -550,7 +550,7 @@ _JWT = re.compile(r"eyJ[\w-]+\.[\w-]+\.[\w-]+")
 _TMDB_TOKEN_SENTENCE = (
     "That isn't a TMDB API Read Access Token. Paste the long token from "
     "themoviedb.org → Settings → API (\"API Read Access Token\"), not the short "
-    "API key above it.")
+    "API key.")
 # TMDB's language parameter is an ISO 639-1 language, optionally with an ISO
 # 3166-1 country ("en", "en-US"); its region parameter is the country alone.
 _TMDB_LANGUAGE = re.compile(r"[a-z]{2}(-[A-Z]{2})?")

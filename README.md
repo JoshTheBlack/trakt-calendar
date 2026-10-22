@@ -256,7 +256,7 @@ TMDB keeps no watch history, so it never backs the tracker, and it doesn't list 
 of its own yet.
 
 Get the token at [themoviedb.org → Settings → API](https://www.themoviedb.org/settings/api):
-copy the **API Read Access Token** (the long one). The short "API Key" above it is refused —
+copy the **API Read Access Token** (the long one). The short "API Key" is refused —
 it travels in the address of every request, where a credential ends up in logs. Nothing
 TMDB answers is kept longer than six months, which is TMDB's own limit.
 
