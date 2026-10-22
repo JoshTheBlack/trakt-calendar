@@ -913,6 +913,20 @@ class WarmRouteTests(RankerTestCase):
         asyncio.run(ranker.create_board(self.user_id, uid="b1"))
         asyncio.run(ranker.add_titles(self.user_id, "b1", [show_ref("1"), show_ref("2")]))
 
+    def trakt_catalogue(self):
+        """Trakt's catalogue credential on this instance, so a title's one
+        picture lookup has a service it may ask."""
+        import dataclasses
+        from app.config import load_settings, save_settings
+        save_settings(dataclasses.replace(load_settings(), trakt_client_id="cid"))
+
+    def test_nobody_asked_is_not_a_miss(self):
+        """With no service in the order this instance can ask, the title has
+        not been found to have no picture — nothing is remembered, so the
+        lookup happens once a credential is filled in."""
+        self.assertEqual(self.poster().status_code, 404)
+        self.assertIsNone(self.value("SELECT url FROM show_posters WHERE tmdb = 1"))
+
     def test_a_row_asks_for_its_own_tile_and_nothing_warms_it_first(self):
         """THE PAGE NO LONGER TELLS THE SERVER WHAT IT DREW. There was a route for
         that: the browser posted back the keys of the rows on screen and asked for
@@ -961,6 +975,7 @@ class WarmRouteTests(RankerTestCase):
         """The miss is recorded (artwork.record_miss) and the next load asks
         nobody — with the real lookup, a Trakt search answering nothing."""
         from app.providers.trakt import transport as trakt_transport
+        self.trakt_catalogue()
         searched = []
 
         async def _nothing(*args, **kwargs):
@@ -995,8 +1010,12 @@ class WarmRouteTests(RankerTestCase):
 
     def test_a_lookup_that_fails_is_not_remembered_as_a_miss(self):
         from app.providers.trakt import transport as trakt_transport
+        self.trakt_catalogue()
 
-        with patched(trakt_transport, "cached_get", _explode("Trakt is down")):
+        async def _down(*args, **kwargs):
+            raise trakt_transport.TraktError("Could not reach Trakt")
+
+        with patched(trakt_transport, "cached_get", _down):
             self.assertEqual(self.poster().status_code, 404)
         self.assertIsNone(self.value("SELECT url FROM show_posters WHERE tmdb = 1"))
 

@@ -19,12 +19,22 @@ from unittest.mock import AsyncMock, patch
 from PIL import Image
 
 from app import db
+from app.config import Settings
+from app.providers.base import Source
 from app.media import artwork, logos, posters
 from app.providers.tmdb import transport as tmdb_client
 from tests.support import TMP, migrated_db
 
-NOT_CONFIGURED = SimpleNamespace(tmdb_configured=False, tmdb_api_key="")
-CONFIGURED = SimpleNamespace(tmdb_configured=True, tmdb_api_key="deadbeef" * 5)
+# Trakt's catalogue is on in both — its lookup by tmdb id is the one a title
+# with no TMDB answer falls to — and TMDB's only in CONFIGURED.
+NOT_CONFIGURED = Settings(trakt_client_id="cid")
+CONFIGURED = Settings(trakt_client_id="cid",
+                      tmdb_api_key="eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJwb3N0ZXJzIn0.c2ln")
+
+
+def trakt_lookup(fake):
+    """Stand `fake` in for Trakt's entry in the per-service lookup table."""
+    return patch.dict(posters._ADDRESS_LOOKUPS, {"trakt": fake})
 
 
 def _jpeg_bytes(size=(300, 450)) -> bytes:
@@ -304,14 +314,15 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.media.posters.tmdb_transport.download",
                    new=AsyncMock(return_value=huge)), \
              patch("app.media.artwork.record_failure", new=AsyncMock()), \
-             patch("app.media.posters._fresh_provider_lookup",
-                   new=AsyncMock(return_value=None)):
+             trakt_lookup(AsyncMock(return_value=None)):
             result = await posters.ensure_poster(NOT_CONFIGURED, "show", 1396, ("trakt",))
 
         self.assertIsNone(result)
 
-    async def test_tmdb_is_the_fallback_and_records_the_url(self):
-        with patch("app.media.posters.tmdb_detail.title_payload",
+    async def test_tmdb_answers_where_the_order_reaches_it_and_records_the_url(self):
+        """The lookup follows the order: Trakt, first here, has nothing, and
+        TMDB's answer is the picture."""
+        with trakt_lookup(AsyncMock(return_value=None)),              patch("app.media.posters.tmdb_detail.title_payload",
                    new=AsyncMock(return_value={"poster_path": "/x.jpg"})), \
              patch("app.media.posters.tmdb_transport.download",
                    new=AsyncMock(return_value=_jpeg_bytes())), \
@@ -328,8 +339,7 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
         wants. Reaching past it to TMDB anyway would make the preference
         advisory."""
         with patch("app.media.posters.tmdb_detail.title_payload") as get_json, \
-             patch("app.media.posters._fresh_provider_lookup",
-                   new=AsyncMock(return_value=None)):
+             trakt_lookup(AsyncMock(return_value=None)):
             result = await posters.ensure_poster(CONFIGURED, "show", 1396, ("trakt",))
 
         self.assertIsNone(result)
@@ -340,7 +350,7 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("app.media.posters.tmdb_transport.download", new=AsyncMock(return_value=None)), \
              patch("app.media.artwork.record_failure", new=AsyncMock()) as record_failure, \
-             patch("app.media.posters._fresh_provider_lookup", new=AsyncMock(return_value=None)):
+             trakt_lookup(AsyncMock(return_value=None)):
             result = await posters.ensure_poster(NOT_CONFIGURED, "show", 1396, ("trakt",))
 
         self.assertIsNone(result)
@@ -357,15 +367,14 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.media.posters.tmdb_transport.download",
                    new=AsyncMock(return_value=b"not an image")), \
              patch("app.media.artwork.record_failure", new=AsyncMock()) as record_failure, \
-             patch("app.media.posters._fresh_provider_lookup", new=AsyncMock(return_value=None)):
+             trakt_lookup(AsyncMock(return_value=None)):
             result = await posters.ensure_poster(NOT_CONFIGURED, "show", 1396, ("trakt",))
 
         self.assertIsNone(result)
         record_failure.assert_awaited_once_with("show", 1396, "trakt")
 
-    async def test_fresh_provider_lookup_is_the_last_resort(self):
-        with patch("app.media.posters._fresh_provider_lookup",
-                   new=AsyncMock(return_value="https://fresh/x.jpg")), \
+    async def test_a_services_own_lookup_is_the_last_resort(self):
+        with trakt_lookup(AsyncMock(return_value="https://fresh/x.jpg")), \
              patch("app.media.posters.tmdb_transport.download",
                    new=AsyncMock(return_value=_jpeg_bytes())):
             result = await posters.ensure_poster(NOT_CONFIGURED, "show", 1396, self.ORDER)
@@ -377,7 +386,7 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
         """Against the FIRST source in the order, not against every one tried:
         enough to stop this order retrying, while leaving a viewer who prefers
         the other service free to try it."""
-        with patch("app.media.posters._fresh_provider_lookup", new=AsyncMock(return_value=None)):
+        with trakt_lookup(AsyncMock(return_value=None)):
             result = await posters.ensure_poster(NOT_CONFIGURED, "show", 1396, self.ORDER)
 
         self.assertIsNone(result)
@@ -385,7 +394,7 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(posters._none_path("show", 1396, self.ORDER[1]).exists())
 
     async def test_media_namespacing_show_and_movie_never_share_a_file(self):
-        with patch("app.media.posters.tmdb_detail.title_payload",
+        with trakt_lookup(AsyncMock(return_value=None)),              patch("app.media.posters.tmdb_detail.title_payload",
                    new=AsyncMock(return_value={"poster_path": "/x.jpg"})), \
              patch("app.media.posters.tmdb_transport.download",
                    new=AsyncMock(return_value=_jpeg_bytes())), \
@@ -492,34 +501,28 @@ class FindAddressTests(ArtworkTestCase):
 
     def test_a_recorded_address_costs_no_lookup(self):
         asyncio.run(artwork.record_poster_url("show", 9, "trakt", "https://x/9.jpg"))
-        with patch.object(posters, "_fresh_provider_lookup",
-                          AsyncMock(side_effect=AssertionError("looked up"))):
+        with trakt_lookup(AsyncMock(side_effect=AssertionError("looked up"))):
             self.assertEqual(self.find(), "https://x/9.jpg")
         self.assertFalse(posters.POSTER_DIR.exists(), "an address writes no tile")
 
     def test_an_unknown_title_is_looked_up_once_and_recorded(self):
         lookup = AsyncMock(return_value="https://x/found.jpg")
 
-        async def _recording(settings, media, tmdb):
-            url = await lookup(settings, media, tmdb)
-            await artwork.record_poster_url(media, tmdb, "trakt", url)
-            return url
-
-        with patch.object(posters, "_fresh_provider_lookup", _recording):
+        with trakt_lookup(lookup):
             self.assertEqual(self.find(), "https://x/found.jpg")
             self.assertEqual(self.find(), "https://x/found.jpg")
         self.assertEqual(lookup.await_count, 1)
 
     def test_a_known_miss_costs_no_lookup(self):
         lookup = AsyncMock(return_value=None)
-        with patch.object(posters, "_fresh_provider_lookup", lookup):
+        with trakt_lookup(lookup):
             self.assertEqual(self.find(), "")
             self.assertEqual(self.find(), "")
         self.assertEqual(lookup.await_count, 1)
 
     def test_a_failed_lookup_is_tried_again_next_time(self):
-        lookup = AsyncMock(side_effect=RuntimeError("unreachable"))
-        with patch.object(posters, "_fresh_provider_lookup", lookup):
+        lookup = AsyncMock(side_effect=posters._LookupFailed("unreachable"))
+        with trakt_lookup(lookup):
             self.assertEqual(self.find(), "")
             self.assertEqual(self.find(), "")
         self.assertEqual(lookup.await_count, 2)
@@ -564,9 +567,41 @@ class FindAddressTests(ArtworkTestCase):
                 NOT_CONFIGURED, [("show", 1), ("show", 2), ("show", 3), ("show", 3)], self.ORDER))
         self.assertEqual((count, asked), (1, [("show", 3)]))
 
-    def test_the_viewers_order_puts_tmdb_behind_it(self):
-        self.assertEqual(posters.order_for(["simkl", "trakt"]), ("simkl", "trakt", "tmdb"))
-        self.assertEqual(posters.order_for(["tmdb"]), ("tmdb",))
+    def test_the_viewers_order_is_the_order(self):
+        """No service is appended: the viewer's metadata order already places
+        every service they did not name after the ones they did, TMDB included,
+        and appending TMDB again listed it twice."""
+        from app.sources import prefs
+        stated = prefs.SourcePrefs(user_id=1, metadata_order=["simkl", "trakt"])
+        self.assertEqual(posters.order_for(stated.source_order(list(Source))),
+                         ("simkl", "trakt", "tmdb"))
+        self.assertEqual(posters.DEFAULT_ORDER, ("tmdb", "trakt", "simkl"))
+
+    def test_every_registered_source_has_a_lookup_entry(self):
+        self.assertEqual(set(posters._ADDRESS_LOOKUPS), {str(s) for s in Source})
+
+    def test_the_lookup_walks_the_order_and_skips_a_service_it_cannot_ask(self):
+        """TMDB first where it leads, Simkl never (its lookup by id needs a
+        viewer's token), and a service this instance holds no credential for is
+        not asked."""
+        asked = []
+
+        def recorder(name, answer):
+            async def lookup(settings, media, tmdb):
+                asked.append(name)
+                return answer
+            return lookup
+
+        with patch.dict(posters._ADDRESS_LOOKUPS, {"tmdb": recorder("tmdb", None),
+                                                   "trakt": recorder("trakt", "https://x/t.jpg")}):
+            found = asyncio.run(posters.find_address(
+                CONFIGURED, "show", 31, ("tmdb", "simkl", "trakt")))
+            asked_with_tmdb = list(asked)
+            asked.clear()
+            asyncio.run(posters.find_address(NOT_CONFIGURED, "show", 32, ("tmdb", "trakt")))
+        self.assertEqual(found, "https://x/t.jpg")
+        self.assertEqual(asked_with_tmdb, ["tmdb", "trakt"])
+        self.assertEqual(asked, ["trakt"])
 
 
 class EnsurePostersTests(unittest.IsolatedAsyncioTestCase):

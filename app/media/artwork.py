@@ -218,7 +218,7 @@ def pick(show: Mapping[str, str], season: Mapping[str, str], order: Iterable[str
     """THE ONE ANSWER TO "WHICH PICTURE": the season's own artwork from the first
     source in `order` that has one, else the show's the same way, else "".
 
-    `order` is the VIEWER's (sources.prefs' source_order, with TMDB behind it —
+    `order` is the VIEWER's (sources.prefs' source_order —
     app/media/posters.py order_for), which is what makes a picture on one
     surface the picture on the next. Pure, so a later way of choosing a picture
     by hand has one place to stand in front of.

@@ -49,11 +49,9 @@ class RowPosterTests(MonthFragmentTestCase):
 
         async def _lookup(settings, media, tmdb):
             calls.append((media, tmdb))
-            if answer:
-                await artwork.record_poster_url(media, tmdb, "trakt", answer)
             return answer
 
-        return calls, patch.object(posters, "_fresh_provider_lookup", _lookup)
+        return calls, patch.dict(posters._ADDRESS_LOOKUPS, {"trakt": _lookup})
 
     def test_the_calendars_own_picture_is_drawn_with_no_lookup(self):
         store(a_record("Listed Show", 500, poster="https://media.trakt.tv/cal.jpg"))

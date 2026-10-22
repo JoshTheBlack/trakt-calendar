@@ -36,8 +36,10 @@ _NOTHING_MORE = {
     "app.providers.trakt.detail.fetch_title_facts": AsyncMock(return_value=TitleFacts("", "")),
     "app.providers.simkl.detail.fetch_title_facts": AsyncMock(return_value=TitleFacts("", "")),
     "app.calendar.search.fill_one_gap": AsyncMock(return_value=""),
-    "app.media.posters._fresh_provider_lookup": AsyncMock(return_value=None),
 }
+
+# Each service's poster lookup by tmdb id answers nothing, entry by entry.
+_NO_PICTURE_FROM = ("tmdb", "trakt")
 
 
 @pytest.fixture(autouse=True)
@@ -46,3 +48,6 @@ def services_know_nothing_more(monkeypatch):
         module, name = target.rsplit(".", 1)
         monkeypatch.setattr(f"{module}.{name}", AsyncMock(
             return_value=stand_in.return_value))
+    from app.media import posters
+    for source in _NO_PICTURE_FROM:
+        monkeypatch.setitem(posters._ADDRESS_LOOKUPS, source, AsyncMock(return_value=None))
