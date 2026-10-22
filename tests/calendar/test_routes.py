@@ -2204,3 +2204,38 @@ class TheCalendarDoesNotGoDarkOverOneServicesCredentialTests(CalendarRouteTestCa
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class TheCoverageGapSwitchTests(unittest.TestCase):
+    """_coverage_gap: a viewer who named one calendar source and asked for a month
+    that source does not reach is told so, and offered a service that DOES fill
+    calendars here, publishes this one and reaches the month.
+
+    It used to offer whichever registered service came first, so a service that
+    describes titles and publishes no calendar would have been the link — to an
+    empty month with nothing saying why.
+    """
+
+    FAR = date.today().year + 3   # past Simkl's declared forward reach
+
+    def _gap(self, registry=None):
+        from app.endpoints import get_endpoint
+        prefs = source_prefs.SourcePrefs(user_id=1, calendar_source="simkl")
+        registry = registry or providers.registered()
+        with patch.object(providers, "registered", lambda: registry):
+            return calendar_routes._coverage_gap(
+                prefs, self.FAR, 1, Settings(), endpoint=get_endpoint("shows/new"))
+
+    def test_the_switch_names_a_service_that_reaches_the_month(self):
+        message, url = self._gap()
+        self.assertIn("doesn't reach", message)
+        self.assertIn("source=trakt", url)
+
+    def test_a_service_with_no_calendar_is_never_the_switch(self):
+        describer = type("Describer", (), {
+            "source": "mercury", "label": "Mercury", "calendar_port": None,
+            "capabilities": Capabilities(endpoints=frozenset(), days_before=None,
+                                         days_after=None, private_user_data=False)})()
+        _message, url = self._gap({"mercury": describer, **providers.registered()})
+        self.assertNotIn("mercury", url or "")
+        self.assertIn("source=trakt", url)

@@ -403,8 +403,16 @@ def _coverage_gap(prefs: source_prefs.SourcePrefs,
         return None, None
     named = admitted[0].label
     message = f"{named}'s calendar doesn't reach {_calendar.month_name[month]} {year}."
-    alternatives = [p for p in providers.registered().values()
-                   if str(p.source) not in named_sources]
+    # WHERE THE SWITCH MAY SEND THE VIEWER: a service that fills calendars on this
+    # instance at all, publishes this one, and reaches this month — the three
+    # things the switch promises by being offered. This used to walk the whole
+    # registry, so a service registered for some other job (one that describes
+    # titles and publishes no calendar) would have been offered first, and the
+    # link would have landed on an empty month with nothing saying why.
+    alternatives = [p for p in providers.calendar_sources(settings=settings)
+                    if str(p.source) not in named_sources
+                    and (endpoint is None or p.capabilities.answers(endpoint.key))
+                    and calendar_cache.month_covered(p, year, month)]
     switch_url = None
     if alternatives:
         switch_url = f"?year={year}&month={month}&source={alternatives[0].source}"
