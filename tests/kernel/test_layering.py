@@ -219,6 +219,12 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "the services through providers/title_search.py, the one fan-out, merge "
         "and read-back every searching feature shares, and a result's season "
         "checklist is that module's picker lookup"),
+    (SOURCES, PROVIDERS): Edge(
+        "a tracker preference — which linked service leads, and whose numbers "
+        "are retired — may name only a service that keeps a watch history, and "
+        "the registry's tracker_sources is the one answer to which those are; "
+        "validating against every Source let a catalogue with no history be "
+        "stored as a tracker"),
     (KERNEL, PROVIDERS): Edge(
         "config.py asks the registry which sources are configured when it "
         "validates settings, and templating.py's source_look reads a service's "

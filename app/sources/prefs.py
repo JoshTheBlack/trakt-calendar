@@ -44,7 +44,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field, replace
 
-from .. import db
+from .. import db, providers
 from ..providers.base import Media, Source
 
 # "Whatever there is to show", stated by nobody. THE DEFAULT, and for the
@@ -371,52 +371,41 @@ def _stored_tracker_priority(document) -> list[str]:
     return [str(name) for name in parsed if isinstance(name, str)]
 
 
-def _tracker_priority(value) -> list[str]:
-    """A supplied tracker order, validated on the way IN.
+def _service_names(value, column: str, allowed, *, ordered: bool) -> list[str]:
+    """A supplied list of service names, validated on the way IN.
 
     REFUSED RATHER THAN COERCED, exactly as `_selection` is and for the same
-    reason: an order naming a service this app has never heard of is a bug in
-    the caller, and silently dropping it would hide the screen sending the wrong
-    name. Duplicates are refused too — an order that names one service twice has
-    no single meaning.
+    reason: a list naming a service it may not name is a bug in the caller, and
+    silently dropping it would hide the screen sending the wrong name.
+
+    `allowed` IS THE QUESTION THE COLUMN ASKS, and the columns ask different
+    ones. A metadata order may name any service that describes titles; a tracker
+    order or a retired list may name only a service that keeps a watch history
+    (providers.tracker_sources), because nothing else has a count to lead with
+    or to retire. Validating both against every service let a tracker list store
+    a catalogue that keeps no history — a preference nothing could act on.
+
+    `ordered` is whether the list's order is the statement. An order naming one
+    service twice has no single meaning and is refused; a set of exclusions
+    naming one twice says exactly what naming it once says, so it is tolerated
+    and stored sorted.
     """
     if value is None:
         return []
     if not isinstance(value, (list, tuple)):
-        raise ValueError(f"tracker_order must be a list of service names, not {value!r}")
+        raise ValueError(f"{column} must be a list of service names, not {value!r}")
     names = [str(name) for name in value]
-    unknown = [name for name in names if name not in SOURCE_NAMES]
+    allowed = frozenset(str(name) for name in allowed)
+    unknown = sorted({name for name in names if name not in allowed})
     if unknown:
         raise ValueError(
-            f"tracker_order names {', '.join(sorted(unknown))}, which is not among "
-            f"{', '.join(sorted(SOURCE_NAMES))}")
+            f"{column} names {', '.join(unknown)}, which is not among "
+            f"{', '.join(sorted(allowed))}")
+    if not ordered:
+        return sorted(set(names))
     if len(set(names)) != len(names):
-        raise ValueError(f"tracker_order names a service more than once: {names}")
+        raise ValueError(f"{column} names a service more than once: {names}")
     return names
-
-
-def _tracker_retired(value) -> list[str]:
-    """The retired-tracker list, validated on the way IN.
-
-    Same rules as `_tracker_priority` above and for the same reasons — an unknown
-    service name is a bug in the caller rather than something to swallow — with
-    duplicates TOLERATED rather than refused, because this is a set of exclusions
-    and naming one twice says exactly what naming it once says. Order carries no
-    meaning here either, so it is stored sorted and reads back the same whatever
-    order the screen sent.
-    """
-    if value is None:
-        return []
-    if not isinstance(value, (list, tuple)):
-        raise ValueError(
-            f"tracker_retired must be a list of service names, not {value!r}")
-    names = {str(name) for name in value}
-    unknown = [name for name in names if name not in SOURCE_NAMES]
-    if unknown:
-        raise ValueError(
-            f"tracker_retired names {', '.join(sorted(unknown))}, which is not "
-            f"among {', '.join(sorted(SOURCE_NAMES))}")
-    return sorted(names)
 
 
 def _selection(value, column: str) -> str:
@@ -488,12 +477,16 @@ async def save(prefs: SourcePrefs) -> SourcePrefs:
     """
     calendar_source = _selection(prefs.calendar_source, "calendar_source")
     movie_calendar_source = _selection(prefs.movie_calendar_source, "movie_calendar_source")
-    # THE SAME VALIDATION THE TRACKER'S ORDER GETS, and for the same reason: a
-    # service this app has never heard of is a bug in the caller, and storing it
-    # would leave a screen offering a choice nothing can act on.
-    metadata_order = _tracker_priority(prefs.metadata_order)
-    tracker_priority = _tracker_priority(prefs.tracker_priority)
-    tracker_retired = _tracker_retired(prefs.tracker_retired)
+    # Each list against the services ITS question can name — see
+    # `_service_names`, which is also why the two tracker lists ask the registry
+    # rather than the whole Source enum.
+    trackers = providers.tracker_sources()
+    metadata_order = _service_names(prefs.metadata_order, "metadata_order",
+                                    SOURCE_NAMES, ordered=True)
+    tracker_priority = _service_names(prefs.tracker_priority, "tracker_order",
+                                      trackers, ordered=True)
+    tracker_retired = _service_names(prefs.tracker_retired, "tracker_retired",
+                                     trackers, ordered=False)
     await db.execute(
         "INSERT INTO source_prefs (user_id, calendar_source, movie_calendar_source, "
         "metadata_order_json, tracker_order_json, tracker_retired_json) "

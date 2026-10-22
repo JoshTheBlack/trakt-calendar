@@ -275,6 +275,23 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
                                          tracker_retired=["trakt", "trakt"]))
         self.assertEqual(saved.tracker_retired, ["trakt"])
 
+    async def test_a_service_keeping_no_history_is_not_a_tracker(self):
+        """The tracker lists may name only a service that keeps a watch history
+        (providers.tracker_sources); a metadata order may name any service. Both
+        used to be checked against every Source, so a catalogue with no history
+        could be stored as the tracker a viewer trusts most."""
+        from unittest import mock
+        from app import providers
+        with mock.patch.object(providers, "tracker_sources",
+                               lambda: frozenset({"trakt"})):
+            for column in ("tracker_priority", "tracker_retired"):
+                with self.subTest(column=column), self.assertRaises(ValueError):
+                    await prefs.save(replace(await prefs.load(self.user_id),
+                                             **{column: ["simkl"]}))
+            saved = await prefs.save(replace(await prefs.load(self.user_id),
+                                             metadata_order=["simkl"]))
+        self.assertEqual(saved.metadata_order, ["simkl"])
+
     async def test_the_two_preferences_do_not_overwrite_each_other(self):
         """They are stored in one row and written by one verb, so a save that
         forgot either column would silently discard whichever the screen was not
