@@ -405,7 +405,9 @@ class TwoShowsCanShareOneSlugTests(unittest.TestCase):
         self.assertEqual(str(record.ids.get("simkl")), "1775229")
         self.assertEqual(record.id, "1775229")
         from app.config import Settings
-        answerer = detail_source.choose(Settings(), record.ids)
+        # Simkl's catalogue alone configured: the title is describable through
+        # the id this record kept, whoever is ahead of Simkl in the order.
+        answerer = detail_source.choose(Settings(simkl_client_id="an-id"), record.ids)
         self.assertIsNotNone(answerer)
         self.assertEqual((answerer.source, answerer.source_id), (Source.SIMKL, "1775229"))
 

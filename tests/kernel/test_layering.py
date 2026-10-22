@@ -101,8 +101,8 @@ GROUPS: dict[str, str] = {
     "auth": AUTH, "authz": AUTH,
 
     # Pictures: where they are fetched from, how they are cached, how they are
-    # drawn. media/tmdb.py is here rather than with the integrations because
-    # network logos and poster art are the only things that read it.
+    # drawn. TMDB's client is not here: it is a source like the others
+    # (providers/tmdb/), and the pictures read it through MEDIA -> PROVIDERS.
     "media": MEDIA,
 
     # The three services a user points at their OWN server and adds titles to.
@@ -190,7 +190,12 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "the same API base the source itself uses, so the two cannot drift "
         "apart — and so the sign-in call is covered by whatever pacing, retry "
         "and circuit-breaking that source's transport already owes the service"),
-    (MEDIA, PROVIDERS): Edge("poster art is looked up per title through the source"),
+    (MEDIA, PROVIDERS): Edge(
+        "poster art is looked up per title through the source, and the TMDB "
+        "artwork and network logos are read through providers/tmdb/ — the one "
+        "TMDB client, whose pool, 429 circuit and six-month ceiling every "
+        "picture taken from TMDB is held to, and whose cached title answer the "
+        "details panel has usually already paid for"),
     (CALENDAR, PROVIDERS): Edge(
         "the cache asks a source what airs in a window, a card's details panel "
         "asks providers/detail_source.py which service can describe it, and the "

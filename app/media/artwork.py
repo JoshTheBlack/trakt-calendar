@@ -27,7 +27,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 from .. import db
-from . import tmdb
+from ..providers.tmdb import transport as tmdb_transport
 
 # Rows are tiny and are the fallback for exactly the moment a primary source
 # fails; pruning them re-spends API calls already paid for. Three years.
@@ -269,7 +269,7 @@ async def sweep(now: int | None = None) -> int:
     supplied goes at TMDB's six-month ceiling instead (TMDB_SOURCE)."""
     ts = db.now() if now is None else now
     cutoff = ts - POSTER_URL_RETENTION_SECONDS
-    tmdb_cutoff = ts - tmdb.MAX_CACHE_SECONDS
+    tmdb_cutoff = ts - tmdb_transport.MAX_CACHE_SECONDS
     removed = 0
     for table in ("show_posters", "season_posters"):
         result = await db.execute(

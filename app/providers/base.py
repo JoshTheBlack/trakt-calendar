@@ -160,10 +160,26 @@ class Source(StrEnum):
     An enum rather than a bare string because this value is written into
     `Item.source` by every provider and read back to decide who to ask for a
     detail lookup — a typo in either half would produce a record that silently
-    belongs to nobody. With two members that is no longer hypothetical: the same
-    title can arrive from both, and which one a given field came from is a fact
-    the reader has to be able to state.
+    belongs to nobody. With several members that is no longer hypothetical: the
+    same title can arrive from more than one, and which one a given field came
+    from is a fact the reader has to be able to state.
+
+    THE DECLARATION ORDER IS THE APP'S ONE ORDER, and every registry walk reads
+    it: who describes a title (the details panel AND the tracker's season
+    totals, app/providers/detail_source.py), whose value a card shows for a
+    viewer who has stated no preference (app/calendar/resolve.py), whose artwork
+    is tried first (app/media/posters.py), and which service a list of them names
+    first. A viewer's own metadata order still wins for that viewer; this is the
+    order for everybody who has not stated one.
+
+    TMDB IS FIRST because it is the widest catalogue of the three and the one
+    whose ids every other service already states: a title Trakt or Simkl lists
+    almost always carries a tmdb id, so leading with TMDB gives every title one
+    describer and one numbering, and leaves Trakt and Simkl to answer what TMDB
+    does not know or holds no episodes of (detail_source.for_season). It keeps no
+    watch history, so it is never a tracker source.
     """
+    TMDB = "tmdb"
     TRAKT = "trakt"
     SIMKL = "simkl"
 

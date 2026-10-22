@@ -1,0 +1,198 @@
+{
+ "adult": false,
+ "backdrop_path": "/ixgFmf1X59PUZam2qbAfskx2gQr.jpg",
+ "episode_run_time": [],
+ "first_air_date": "2022-02-17",
+ "genres": [
+  {
+   "id": 18,
+   "name": "Drama"
+  },
+  {
+   "id": 9648,
+   "name": "Mystery"
+  },
+  {
+   "id": 10765,
+   "name": "Sci-Fi & Fantasy"
+  }
+ ],
+ "homepage": "https://tv.apple.com/show/umc.cmc.1srk2goyh2q2zdxcx605w8vtx",
+ "id": 95396,
+ "in_production": true,
+ "languages": [
+  "en"
+ ],
+ "last_air_date": "2025-03-20",
+ "last_episode_to_air": {
+  "id": 5469142,
+  "name": "Cold Harbor",
+  "overview": "Mark forms a shaky alliance in an all-or-nothing play, while the team makes a dangerous last stand.",
+  "vote_average": 8.6,
+  "vote_count": 126,
+  "air_date": "2025-03-20",
+  "episode_number": 10,
+  "episode_type": "finale",
+  "production_code": "210",
+  "runtime": 80,
+  "season_number": 2,
+  "show_id": 95396,
+  "still_path": "/gXUvGwpZxrpqMRouxM7yI28lgNa.jpg"
+ },
+ "name": "Severance",
+ "next_episode_to_air": null,
+ "networks": [
+  {
+   "id": 2552,
+   "logo_path": "/bngHRFi794mnMq34gfVcm9nDxN1.png",
+   "name": "Apple TV",
+   "origin_country": ""
+  }
+ ],
+ "number_of_episodes": 19,
+ "number_of_seasons": 3,
+ "origin_country": [
+  "US"
+ ],
+ "original_language": "en",
+ "original_name": "Severance",
+ "overview": "Mark leads a team of office workers whose memories have been surgically divided between their work and personal lives. When a mysterious colleague appears outside of work, it begins a journey to discover the truth about their jobs.",
+ "popularity": 57.3111,
+ "poster_path": "/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg",
+ "production_countries": [
+  {
+   "iso_3166_1": "US",
+   "name": "United States of America"
+  }
+ ],
+ "seasons": [
+  {
+   "air_date": "2021-12-15",
+   "episode_count": 1,
+   "id": 443382,
+   "name": "Specials",
+   "overview": "",
+   "poster_path": "/f3E2o8DbW9QSzu31yY3Q1av5JO7.jpg",
+   "season_number": 0,
+   "vote_average": 0.0
+  },
+  {
+   "air_date": "2022-02-17",
+   "episode_count": 9,
+   "id": 135726,
+   "name": "Season 1",
+   "overview": "At Lumon Industries, employees undergo \"severance,\" a procedure dividing their work and personal memories. Mark, a grieving team leader, begins to uncover the dark secrets of the company, forcing him and his coworkers to confront questions of identity, free will, and corporate control.",
+   "poster_path": "/lFf6LLrQjYldcZItzOkGmMMigP7.jpg",
+   "season_number": 1,
+   "vote_average": 8.4
+  },
+  {
+   "air_date": "2025-01-16",
+   "episode_count": 10,
+   "id": 401674,
+   "name": "Season 2",
+   "overview": "Mark and his friends learn the dire consequences of trifling with the severance barrier, leading them further down a path of woe.",
+   "poster_path": "/Rb7sga832Cyqvafd7CqOzbwdK4.jpg",
+   "season_number": 2,
+   "vote_average": 8.0
+  },
+  {
+   "air_date": null,
+   "episode_count": 0,
+   "id": 447475,
+   "name": "Season 3",
+   "overview": "",
+   "poster_path": null,
+   "season_number": 3,
+   "vote_average": 0.0
+  }
+ ],
+ "softcore": false,
+ "spoken_languages": [
+  {
+   "english_name": "English",
+   "iso_639_1": "en",
+   "name": "English"
+  }
+ ],
+ "status": "Returning Series",
+ "tagline": "There's more to work than life.",
+ "type": "Scripted",
+ "vote_average": 8.39,
+ "vote_count": 3053,
+ "external_ids": {
+  "imdb_id": "tt11280740",
+  "freebase_mid": null,
+  "freebase_id": null,
+  "tvdb_id": 371980,
+  "tvrage_id": null,
+  "wikidata_id": "Q101096725",
+  "facebook_id": null,
+  "instagram_id": null,
+  "twitter_id": null
+ },
+ "content_ratings": {
+  "results": [
+   {
+    "descriptors": [],
+    "iso_3166_1": "US",
+    "rating": "TV-MA"
+   },
+   {
+    "descriptors": [],
+    "iso_3166_1": "DE",
+    "rating": "12"
+   },
+   {
+    "descriptors": [],
+    "iso_3166_1": "KR",
+    "rating": "15"
+   },
+   {
+    "descriptors": [],
+    "iso_3166_1": "GB",
+    "rating": "15"
+   }
+  ]
+ },
+ "videos": {
+  "results": [
+   {
+    "iso_639_1": "en",
+    "iso_3166_1": "US",
+    "name": "Mark and Helly: A Love Story",
+    "key": "ufaAnhgiERE",
+    "site": "YouTube",
+    "size": 1080,
+    "type": "Featurette",
+    "official": true,
+    "id": "68ae20c66776f2e6733d872a",
+    "published_at": "2025-08-23T14:59:55.000Z"
+   },
+   {
+    "iso_639_1": "en",
+    "iso_3166_1": "US",
+    "name": "Britt Lower's Casting Tape",
+    "key": "h61VI_62KYA",
+    "site": "YouTube",
+    "size": 1080,
+    "type": "Behind the Scenes",
+    "official": true,
+    "id": "68a4f4d89ecdba47d7bcb18b",
+    "published_at": "2025-08-19T21:59:53.000Z"
+   },
+   {
+    "iso_639_1": "en",
+    "iso_3166_1": "US",
+    "name": "Dichen's Casting Tape",
+    "key": "fgtlNQDP-XA",
+    "site": "YouTube",
+    "size": 1080,
+    "type": "Behind the Scenes",
+    "official": true,
+    "id": "68ae4e66404463089e0f88ac",
+    "published_at": "2025-06-20T16:03:05.000Z"
+   }
+  ]
+ }
+}

@@ -193,10 +193,11 @@ class ProxyDiagnosticsTests(RegressionTestCase):
         """The diagnostics sit alongside the redaction that is the whole point of
         this surface; assert it did not regress."""
         client = self.admin_client()
-        client.post("/settings", json={"tmdb_api_key": "super-secret-value"})
+        secret = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0eXBlZCJ9.dHlwZWQtc2lnbmF0dXJl"
+        client.post("/settings", json={"tmdb_api_key": secret})
         body = client.get(self.PANEL).text
         self.assertIn('name="clear:tmdb_api_key"', body)
-        self.assertNotIn("super-secret-value", body)
+        self.assertNotIn(secret, body)
 
 
 class AdminSessionScopingTests(RegressionTestCase):

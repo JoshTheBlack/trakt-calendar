@@ -40,7 +40,8 @@ from tests.support import ORIGIN, migrated_db, tracker_month
 SETTINGS = SimpleNamespace(configured=True, timezone="UTC",
                            trakt_configured=True, simkl_configured=False,
                            trakt_catalogue_configured=True,
-                           simkl_catalogue_configured=True)
+                           simkl_catalogue_configured=True,
+                           tmdb_configured=False)
 
 
 def _ep_event(trakt_id, season, number, watched_at, title="Show", network="Net"):

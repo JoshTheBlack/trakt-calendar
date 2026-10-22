@@ -448,8 +448,9 @@ class SettingsRedactionTests(GatingTestCase):
         self.assertEqual(config.load_settings().tmdb_api_key, SECRET_VALUES["tmdb_api_key"])
 
     def test_a_new_credential_replaces_the_stored_one(self):
-        self.client.post("/settings", json={"tmdb_api_key": "fresh-key"})
-        self.assertEqual(config.load_settings().tmdb_api_key, "fresh-key")
+        fresh = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJuZXcifQ.bmV3LXNpZ25hdHVyZQ"
+        self.client.post("/settings", json={"tmdb_api_key": fresh})
+        self.assertEqual(config.load_settings().tmdb_api_key, fresh)
 
     def test_a_ticked_clear_box_clears_a_credential(self):
         """Clearing has to be possible and has to be deliberate — otherwise the

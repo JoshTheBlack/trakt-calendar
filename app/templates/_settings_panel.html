@@ -313,9 +313,15 @@
                     {{ settings_fields.secret('seer_api_key', 'Seerr API key') }}
                 </div>
 
-                <div class="settings-section">🖼️ TMDB <span class="hint">(network logos for Discord emoji art)</span></div>
+                <div class="settings-section">🎬 TMDB <span class="hint">(describes titles first, plus posters and network logos)</span></div>
                 <div class="two-col">
-                    {{ settings_fields.secret('tmdb_api_key', 'TMDB API key') }}
+                    {{ settings_fields.secret('tmdb_api_key', 'TMDB API Read Access Token',
+                       hint=settings.tmdb_credential_problem
+                            or 'The long token from themoviedb.org → Settings → API, not the short API key.') }}
+                    {{ settings_fields.text('tmdb_language', 'TMDB language', settings.tmdb_language, 'en-US',
+                       'The language TMDB describes titles in, like en-US or de-DE.') }}
+                    {{ settings_fields.text('tmdb_region', 'TMDB region', settings.tmdb_region, 'US',
+                       'The country whose film releases the movie calendar lists.') }}
                 </div>
             </div>
         </div>

@@ -49,8 +49,9 @@ calendar itself merges the two services' cards on. Never a title search.
 ADD-ONLY, AND THAT IS `store.learn_ids`' RULE RATHER THAN THIS MODULE'S. A value
 already stored came off the payload the record was built from; a value arriving
 here is a join. Filling a blank cannot make a working record worse. Overwriting
-could — and a wrong Trakt id shadows a correct Simkl one, because the details
-layer prefers Trakt wherever it has an id.
+could — and a wrong id for an earlier service shadows a correct one for a later
+service, because the details layer asks the first declared service the record
+has an id for.
 """
 from __future__ import annotations
 

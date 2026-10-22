@@ -570,8 +570,10 @@ class SharePageDetailsModalTests(_ShareDetailsTestCase):
         self.assertNotIn("openShareDetails", body)
         self.assertNotIn("/static/js/share.js", body)
         # THE ADDRESS CARRIES the page's own view as well as the card's ids — the
-        # bound cannot be evaluated without the view.
-        self.assertIn(f"/s/{self.token}/details?media=show&amp;trakt=123", opener.group(1))
+        # bound cannot be evaluated without the view. TMDB's id first: it is
+        # first in the declared order, and the card carries it.
+        self.assertIn(f"/s/{self.token}/details?media=show&amp;tmdb=789&amp;trakt=123",
+                      opener.group(1))
         self.assertIn("year=2026&amp;month=7", opener.group(1))
 
     def test_details_serve_the_owners_cached_data_without_calling_trakt(self):
@@ -651,6 +653,40 @@ class SharePageDetailsModalTests(_ShareDetailsTestCase):
             resp = self._details("media=show&trakt=999&simkl=888&season=2")
         self.assertRefused(resp)
         simkl_get.assert_not_called()
+
+    def test_a_tmdb_id_is_bound_like_any_other(self):
+        """TMDB is first in the order, so a card's tmdb id is the one a panel
+        asks by — and a made-up one is refused before TMDB is reached."""
+        save_settings(Settings(public_base_url=ORIGIN, tmdb_api_key=self.TMDB_TOKEN))
+        with self._no_network(), \
+             patch("app.providers.tmdb.transport.cached_get") as tmdb_get:
+            self.assertRefused(self._details("media=show&tmdb=999&season=2"))
+        tmdb_get.assert_not_called()
+
+    TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJzaGFyZSJ9.c2lnbmF0dXJl"
+
+    def test_a_tmdb_id_the_link_shows_is_described_by_tmdb(self):
+        """The bound id is TMDB's to describe — and only that title, that season,
+        is asked about."""
+        save_settings(Settings(public_base_url=ORIGIN, tmdb_api_key=self.TMDB_TOKEN))
+        asked = []
+
+        async def tmdb_get(settings, path, params=None, **kw):
+            asked.append(path)
+            if path == "tv/789":
+                return {"id": 789, "name": "Test Show", "overview": "Described by TMDB.",
+                        "seasons": [{"season_number": 2, "episode_count": 6}]}
+            if path == "tv/789/season/2":
+                return {"episodes": [{"episode_number": 5, "name": "The One",
+                                      "air_date": "2026-07-15"}]}
+            raise AssertionError(f"TMDB asked about {path}")
+
+        with patch("app.providers.tmdb.transport.cached_get", tmdb_get):
+            resp = self._details("media=show&tmdb=789&trakt=123&season=2")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIn("Described by TMDB.", resp.text)
+        self.assertEqual(set(asked), {"tv/789", "tv/789/season/2"})
+        self.assertIn('href="https://www.themoviedb.org/tv/789"', resp.text)
 
     # -- and the permission it grants --------------------------------------
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -234,8 +235,29 @@ class Settings:
     # posts, and sharing it meant any user's roster import registered networks
     # into the operator's map. Nothing seeds a new user's map — it fills in from
     # their own roster, and travels via the tracker's Backup export.
-    # TMDB API key — used to fetch network logos (distrakt) for Discord emoji art.
+    # TMDB's API READ ACCESS TOKEN — the long one, sent as a bearer header. A
+    # catalogue every surface reads (a title's description, its season totals,
+    # its videos, network logos and posters), so it is an instance credential
+    # like Trakt's client id rather than anybody's account.
+    #
+    # THE FIELD KEEPS ITS OLD NAME, `tmdb_api_key`, because that is the key it is
+    # sealed under in app_secrets: renaming it would orphan every instance's
+    # stored credential. What it HOLDS is now only the read token — see
+    # `tmdb_token_error`, which refuses the short v3 key on save, and
+    # `tmdb_configured`, which reads a v3 key stored before that refusal existed
+    # as no credential at all rather than sending it.
     tmdb_api_key: str = ""
+    # THE LANGUAGE TMDB ANSWERS IN, an IETF tag TMDB accepts ("en-US", "de-DE").
+    # Sent on every catalogue read and part of every cached answer's key
+    # (providers/tmdb/transport.url_for), so changing it never serves an answer
+    # written in the old language. One instance setting, deliberately: catalogue
+    # answers are cached for everybody, and a per-viewer language would be a
+    # per-viewer value reaching shared storage.
+    tmdb_language: str = "en-US"
+    # THE COUNTRY WHOSE RELEASES THE FILM CALENDAR LISTS, as an ISO 3166-1 code.
+    # A film is released on different days in different countries; TMDB's
+    # release calendar is asked for one, and this is which.
+    tmdb_region: str = "US"
     # Session cookie Secure flag: "always" (default) | "never" | "auto".
     # Deliberately not scheme detection by default — behind a TLS-terminating
     # proxy the app itself is served over plain HTTP, so detection would report
@@ -494,7 +516,64 @@ class Settings:
 
     @property
     def tmdb_configured(self) -> bool:
-        return bool(self.tmdb_api_key.strip())
+        """Whether this instance holds a TMDB credential it will SEND.
+
+        A READ TOKEN AND NOTHING ELSE. A v3 key stored before the Settings field
+        began refusing one is still in app_secrets, and reading it as configured
+        would put TMDB first in front of every title and then answer 401 on every
+        call. Read as unset, TMDB simply steps aside and the other services
+        describe titles as they did; the Settings page says why
+        (`tmdb_credential_problem`).
+        """
+        token = self.tmdb_api_key.strip()
+        return bool(token) and tmdb_token_error(token) is None
+
+    @property
+    def tmdb_credential_problem(self) -> str:
+        """The sentence the Settings page draws under a stored TMDB credential
+        this app will not send, or "". Saving cannot have produced one any more;
+        an instance that stored a v3 key earlier sees this instead of a TMDB that
+        silently does nothing."""
+        token = self.tmdb_api_key.strip()
+        return (tmdb_token_error(token) or "") if token else ""
+
+
+# ---------------------------------------------------------------------------
+# TMDB's three settings, judged on the way in
+# ---------------------------------------------------------------------------
+
+# TMDB'S READ TOKEN IS A JWT: three base64url segments joined by dots, the first
+# of which decodes to a JSON header and so always begins "eyJ". The v3 key TMDB
+# also issues is 32 hex characters and travels in the query string, which this
+# app will not do — a credential in a URL reaches access logs and cache keys.
+_JWT = re.compile(r"eyJ[\w-]+\.[\w-]+\.[\w-]+")
+_TMDB_TOKEN_SENTENCE = (
+    "That isn't a TMDB API Read Access Token. Paste the long token from "
+    "themoviedb.org → Settings → API (\"API Read Access Token\"), not the short "
+    "API key above it.")
+# TMDB's language parameter is an ISO 639-1 language, optionally with an ISO
+# 3166-1 country ("en", "en-US"); its region parameter is the country alone.
+_TMDB_LANGUAGE = re.compile(r"[a-z]{2}(-[A-Z]{2})?")
+_TMDB_REGION = re.compile(r"[A-Z]{2}")
+
+
+def tmdb_token_error(value: str) -> str | None:
+    """The sentence refusing `value` as TMDB's credential, or None when it is
+    a read token. An empty value is not this function's concern — an empty
+    credential field means "leave it alone" (apply_form)."""
+    return None if _JWT.fullmatch(value.strip()) else _TMDB_TOKEN_SENTENCE
+
+
+def tmdb_language_error(value: str) -> str | None:
+    if _TMDB_LANGUAGE.fullmatch(value):
+        return None
+    return "TMDB language must look like en-US (a language, optionally a country)."
+
+
+def tmdb_region_error(value: str) -> str | None:
+    if _TMDB_REGION.fullmatch(value):
+        return None
+    return "TMDB region must be a two-letter country code, like US or GB."
 
 
 def public_base_url_error(value: str) -> str | None:
@@ -742,6 +821,8 @@ def apply_form(current: Settings, form: dict) -> Settings:
         if name in SECRET_FIELDS:
             typed = route_params.last_value(form.get(name))
             if isinstance(typed, str) and typed.strip():
+                if error := _typed_secret_error(name, typed):
+                    raise SettingsFormError(error)
                 update[name] = typed
             elif route_params.ticked(form.get(clear_field(name))):
                 update[name] = None
@@ -761,9 +842,24 @@ def apply_form(current: Settings, form: dict) -> Settings:
         else:
             update[name] = value
     settings = apply_update(current, update)
-    if error := public_base_url_error(settings.public_base_url):
-        raise SettingsFormError(error)
+    for error in (public_base_url_error(settings.public_base_url),
+                  tmdb_language_error(settings.tmdb_language),
+                  tmdb_region_error(settings.tmdb_region)):
+        if error:
+            raise SettingsFormError(error)
     return settings
+
+
+# A credential whose SHAPE says it is the wrong one, refused with a sentence
+# rather than stored. Judged only on a value somebody TYPED: a stored credential
+# is never drawn back, so a blank field (keep it) and a clear box (remove it)
+# have nothing to judge.
+_SECRET_SHAPES = {"tmdb_api_key": tmdb_token_error}
+
+
+def _typed_secret_error(name: str, typed: str) -> str | None:
+    judge = _SECRET_SHAPES.get(name)
+    return judge(typed) if judge else None
 
 
 def _as_bool(v) -> bool:

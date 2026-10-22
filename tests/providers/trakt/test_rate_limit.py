@@ -34,6 +34,7 @@ FAKE_SETTINGS = SimpleNamespace(
     # never fetched at all, so a stand-in Settings has to answer them or the
     # degrade path below is measuring the wrong thing.
     trakt_catalogue_configured=True, simkl_catalogue_configured=False,
+    tmdb_configured=False,
 )
 
 

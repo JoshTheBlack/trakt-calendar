@@ -730,19 +730,16 @@ class TheCardDrawsTheSameArtworkAsThePageTests(ShareCardTestCase):
         self.assertEqual(self._order_used(["simkl", "trakt"])[:2], ("simkl", "trakt"))
         self.assertEqual(self._order_used(["trakt", "simkl"])[:2], ("trakt", "simkl"))
 
-    def test_tmdb_is_the_backstop_and_never_the_default(self):
-        """It stays in the order — it is the only artwork the ranker's own
-        imported titles have, since they were never on anyone's calendar — but
-        it no longer decides what a share link advertises."""
+    def test_tmdb_lands_after_the_services_an_owner_named(self):
+        """An owner who stated an order keeps it: TMDB, which they did not name,
+        comes after the services they did — once."""
         order = self._order_used(["simkl", "trakt"])
-        self.assertEqual(order[-1], "tmdb")
-        self.assertNotEqual(order[0], "tmdb")
+        self.assertEqual(order, ("simkl", "trakt", "tmdb"))
 
     def test_an_owner_with_no_preference_still_gets_the_declared_order(self):
-        from app.providers.base import Source
-
-        order = self._order_used()
-        self.assertEqual(order, tuple(str(s) for s in Source) + ("tmdb",))
+        """TMDB first, as it is everywhere a viewer has not reordered — the same
+        order the page itself resolved its pictures in."""
+        self.assertEqual(self._order_used(), ("tmdb", "trakt", "simkl"))
 
     def test_the_card_draws_the_tile_of_the_service_the_page_RESOLVED(self):
         """THE BUG THIS CLASS EXISTS FOR, AND THE OWNER'S ORDER IS NOT ENOUGH TO

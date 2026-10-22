@@ -67,11 +67,11 @@ import anyio.to_thread
 from PIL import Image
 
 from . import artwork
-from . import tmdb as tmdb_client
 from ..providers.trakt import calendar as trakt_calendar, transport as trakt_transport
 from ..config import DATA_DIR
 from ..perftrace import span
 from ..providers.base import Media, POSTER_PARAMS, Source, proxied_image
+from ..providers.tmdb import detail as tmdb_detail, transport as tmdb_transport
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +232,7 @@ async def _try_source(url: str) -> bytes | None:
     None on ANY failure — network, non-200, or a body that will not open — so
     the caller falls through to the next source in the chain.
     """
-    raw = await tmdb_client.download(proxied_image(url, POSTER_PARAMS))
+    raw = await tmdb_transport.download(proxied_image(url, POSTER_PARAMS))
     if raw is None:
         return None
     return await anyio.to_thread.run_sync(_verify, raw)
@@ -291,12 +291,15 @@ async def _look_up_address(settings, media: str, tmdb: int,
     record where TMDB is configured and in `order`, then Trakt's search by tmdb
     id. The caller has already checked the registry and the miss.
     """
-    if "tmdb" in order and getattr(settings, "tmdb_configured", False):
-        path = f"/tv/{tmdb}" if media == "show" else f"/movie/{tmdb}"
-        data = await tmdb_client.get_json(settings, path, "posters.tmdb_detail")
-        poster_path = (data or {}).get("poster_path")
-        if poster_path:
-            fresh = f"{tmdb_client.IMG}/w500{poster_path}"
+    tmdb_failed = False
+    if "tmdb" in order and settings.tmdb_configured:
+        try:
+            data = await tmdb_detail.title_payload(settings, tmdb, media)
+        except tmdb_transport.TmdbError as exc:
+            logger.warning("poster[%s/%s]: TMDB could not be asked: %s", media, tmdb, exc)
+            data, tmdb_failed = None, True
+        fresh = tmdb_transport.image_url((data or {}).get("poster_path"))
+        if fresh:
             await artwork.record_poster_url(media, tmdb, "tmdb", fresh)
             return "tmdb", fresh
     try:
@@ -308,7 +311,10 @@ async def _look_up_address(settings, media: str, tmdb: int,
         return None
     if fresh:
         return "trakt", fresh
-    await artwork.record_miss(media, tmdb)
+    # A lookup that FAILED is not one that found nothing: with TMDB unreachable
+    # no miss is recorded, so the next reader may try again.
+    if not tmdb_failed:
+        await artwork.record_miss(media, tmdb)
     return None
 
 
@@ -527,7 +533,8 @@ def sweep(max_bytes: int, now: float | None = None) -> int:
     LRU by file mtime until the total is back under max_bytes.
 
     TWO RULES, AND THE AGE ONE IS NOT NEGOTIABLE. TMDB's terms cap how long
-    anything obtained from them may be kept (tmdb.MAX_CACHE_SECONDS), and a
+    anything obtained from them may be kept (providers/tmdb/transport.py's
+    MAX_CACHE_SECONDS), and a
     size cap does not satisfy that: an instance under its budget would keep a
     tile for ever, which is exactly the case the terms are about. The byte cap
     is this app's own housekeeping and runs after.
@@ -543,7 +550,7 @@ def sweep(max_bytes: int, now: float | None = None) -> int:
     """
     if not POSTER_DIR.exists() or max_bytes < 0:
         return 0
-    cutoff = (time.time() if now is None else now) - tmdb_client.MAX_CACHE_SECONDS
+    cutoff = (time.time() if now is None else now) - tmdb_transport.MAX_CACHE_SECONDS
     entries: list[tuple[float, int, Path]] = []
     total = 0
     removed = 0

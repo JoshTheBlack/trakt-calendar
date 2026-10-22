@@ -21,15 +21,16 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from . import tmdb
 from ..config import DATA_DIR
+from ..providers.base import Media
+from ..providers.tmdb import detail as tmdb_detail, transport as tmdb_transport
 from ..perftrace import span
 
 logger = logging.getLogger(__name__)
 _perf = logging.getLogger("app.perf")
 
 LOGO_DIR = DATA_DIR / "logos"
-TMDB_IMG = tmdb.IMG
+TMDB_IMG = tmdb_transport.IMAGE_BASE
 
 TILE = 128          # output square size (Discord emoji max)
 PAD = 14            # transparent padding inside the tile
@@ -121,7 +122,10 @@ def _pick_network(networks: list[dict], want: str) -> dict | None:
 
 
 async def _tmdb_tv_networks(settings, tmdb_id) -> list[dict]:
-    data = await tmdb.get_json(settings, f"/tv/{tmdb_id}", "logo.tmdb_tv")
+    """The show's networks, from the same cached `/tv/{id}` answer TMDB's
+    details panel reads — no second request for a show already described. []
+    for a show TMDB does not know; raises TmdbError when TMDB could not be asked."""
+    data = await tmdb_detail.title_payload(settings, tmdb_id, Media.SHOW)
     nets = (data or {}).get("networks") or []
     logger.info("TMDB tv/%s -> %d network(s): %s", tmdb_id, len(nets), [n.get("name") for n in nets])
     return nets
@@ -132,7 +136,10 @@ async def _network_raster_logo(settings, network_id) -> str | None:
     a network whose primary /tv logo is an SVG)."""
     if not network_id:
         return None
-    data = await tmdb.get_json(settings, f"/network/{network_id}/images", "logo.network_images")
+    try:
+        data = await tmdb_transport.cached_get(settings, f"network/{network_id}/images")
+    except tmdb_transport.TmdbNotFound:
+        return None
     for lg in (data or {}).get("logos") or []:
         fp = lg.get("file_path") or ""
         if fp and not fp.lower().endswith(".svg"):
@@ -218,6 +225,19 @@ async def ensure_logo(settings, network: str, tmdb_id) -> Path | None:
                     network, getattr(settings, "tmdb_configured", False), tmdb_id)
         return None
 
+    try:
+        return await _generate(settings, network, tmdb_id, tile)
+    except tmdb_transport.TmdbError as exc:
+        # A TMDB THAT COULD NOT BE ASKED IS NOT A NETWORK WITH NO LOGO, so no
+        # negative marker is written: the next request asks again, where a
+        # marker would have hidden the logo until it aged out.
+        logger.warning("logo[%s]: TMDB could not be asked (%s)", network, exc)
+        return None
+
+
+async def _generate(settings, network: str, tmdb_id, tile: Path) -> Path | None:
+    """`ensure_logo`'s TMDB half: look the logo up, render it, and either store
+    the tile or record that there is none."""
     with span("logo.generate", network=network, tmdb=tmdb_id):
         LOGO_DIR.mkdir(parents=True, exist_ok=True)
         networks = await _tmdb_tv_networks(settings, tmdb_id)
@@ -229,15 +249,15 @@ async def ensure_logo(settings, network: str, tmdb_id) -> Path | None:
 
         raw = None
         if logo_path and not logo_path.lower().endswith(".svg"):
-            raw = await tmdb.download(f"{TMDB_IMG}/w300{logo_path}")
+            raw = await tmdb_transport.download(f"{TMDB_IMG}/w300{logo_path}")
         else:
             # Primary logo is SVG (or missing): prefer a raster alternative from the
             # network's image list; only if there's none do we rasterize the SVG.
             alt = await _network_raster_logo(settings, network_id)
             if alt:
-                raw = await tmdb.download(f"{TMDB_IMG}/w300{alt}")
+                raw = await tmdb_transport.download(f"{TMDB_IMG}/w300{alt}")
             elif logo_path:
-                svg = await tmdb.download(f"{TMDB_IMG}/original{logo_path}")
+                svg = await tmdb_transport.download(f"{TMDB_IMG}/original{logo_path}")
                 raw = _rasterize_svg(svg) if svg else None
 
         img = _render_tile(raw) if raw else None
@@ -254,12 +274,11 @@ async def regenerate(settings, network: str, tmdb_id) -> Path | None:
     """Make `network`'s tile again from TMDB, and return it — or None, with the
     tile it had left exactly where it was.
 
-    THE OLD TILE IS SET ASIDE, NOT DELETED, until a new one exists. `ensure_logo`
-    cannot tell TMDB being unreachable from TMDB having no logo: both reach it as
-    no answer, and both end in a negative marker. So dropping the tile first and
-    re-resolving — which is what this was — turned a regenerate pressed while
-    TMDB was down into a network with NO logo, marked as having none until the
-    marker aged out. A regenerate that makes nothing now changes nothing.
+    THE OLD TILE IS SET ASIDE, NOT DELETED, until a new one exists. Dropping the
+    tile first and re-resolving — which is what this was — turned a regenerate
+    that made nothing into a network with NO logo. `ensure_logo` now tells an
+    unreachable TMDB apart from a missing logo and marks only the second, but a
+    regenerate that makes nothing should still change nothing.
     """
     tile = _tile_path(network)
     previous = tile.with_suffix(".previous")
@@ -335,7 +354,7 @@ def sweep(now: float | None = None) -> int:
 
     AGE ONLY, WITH NO SIZE CAP, and the asymmetry with the poster cache beside
     it is deliberate rather than an omission. These are TMDB-sourced, so
-    tmdb.MAX_CACHE_SECONDS applies to them exactly as it applies to posters —
+    tmdb_transport.MAX_CACHE_SECONDS (providers/tmdb/transport.py) applies to them exactly as it applies to posters —
     but there are as many of them as there are networks, measured at a few
     megabytes in total, so a byte budget would be a setting nobody could ever
     have a reason to change.
@@ -350,7 +369,7 @@ def sweep(now: float | None = None) -> int:
     """
     if not LOGO_DIR.exists():
         return 0
-    cutoff = (time.time() if now is None else now) - tmdb.MAX_CACHE_SECONDS
+    cutoff = (time.time() if now is None else now) - tmdb_transport.MAX_CACHE_SECONDS
     removed = 0
     for path in LOGO_DIR.rglob("*"):
         if not path.is_file():

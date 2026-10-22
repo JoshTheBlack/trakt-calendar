@@ -1,0 +1,120 @@
+{
+ "id": 401674,
+ "_id": "668e785777fb6dba5759dcba",
+ "air_date": "2025-01-16",
+ "episodes": [
+  {
+   "air_date": "2025-01-16",
+   "episode_number": 1,
+   "episode_type": "standard",
+   "id": 5469028,
+   "name": "Hello, Ms. Cobel",
+   "overview": "Mark returns to work under different circumstances. Secrets from the Outie world come to light.",
+   "production_code": "201",
+   "runtime": 54,
+   "season_number": 2,
+   "show_id": 95396,
+   "still_path": "/a97vNY8Knu45FLQib0uQZ2VReLy.jpg",
+   "vote_average": 7.985,
+   "vote_count": 137
+  },
+  {
+   "air_date": "2025-01-23",
+   "episode_number": 2,
+   "episode_type": "standard",
+   "id": 5469115,
+   "name": "Goodbye, Mrs. Selvig",
+   "overview": "Mark contemplates the meaning of a message.",
+   "production_code": "202",
+   "runtime": 49,
+   "season_number": 2,
+   "show_id": 95396,
+   "still_path": "/wjlSkqMoLngSO6fv2Ajt2CIeCSi.jpg",
+   "vote_average": 7.919,
+   "vote_count": 124
+  },
+  {
+   "air_date": "2025-01-30",
+   "episode_number": 3,
+   "episode_type": "standard",
+   "id": 5469117,
+   "name": "Who Is Alive?",
+   "overview": "Mark, Helly, Irving, and Dylan search for answers.",
+   "production_code": "203",
+   "runtime": 57,
+   "season_number": 2,
+   "show_id": 95396,
+   "still_path": "/j4AUAq1XJOBmfXsLphZzsCz6pZs.jpg",
+   "vote_average": 8.098,
+   "vote_count": 128
+  },
+  {
+   "air_date": "2025-03-20",
+   "episode_number": 10,
+   "episode_type": "finale",
+   "id": 5469142,
+   "name": "Cold Harbor",
+   "overview": "Mark forms a shaky alliance in an all-or-nothing play, while the team makes a dangerous last stand.",
+   "production_code": "210",
+   "runtime": 80,
+   "season_number": 2,
+   "show_id": 95396,
+   "still_path": "/gXUvGwpZxrpqMRouxM7yI28lgNa.jpg",
+   "vote_average": 8.6,
+   "vote_count": 126
+  }
+ ],
+ "name": "Season 2",
+ "networks": [
+  {
+   "id": 2552,
+   "logo_path": "/bngHRFi794mnMq34gfVcm9nDxN1.png",
+   "name": "Apple TV",
+   "origin_country": ""
+  }
+ ],
+ "overview": "Mark and his friends learn the dire consequences of trifling with the severance barrier, leading them further down a path of woe.",
+ "poster_path": "/Rb7sga832Cyqvafd7CqOzbwdK4.jpg",
+ "season_number": 2,
+ "vote_average": 8.0,
+ "videos": {
+  "results": [
+   {
+    "iso_639_1": "en",
+    "iso_3166_1": "US",
+    "name": "Tournament of Fripperies (Live Podcast Recording with the Cast and Creators)",
+    "key": "iH9L6bBEwgI",
+    "site": "YouTube",
+    "size": 1080,
+    "type": "Featurette",
+    "official": true,
+    "id": "68a7b49925ddc1dacac56d4d",
+    "published_at": "2025-08-21T11:59:48.000Z"
+   },
+   {
+    "iso_639_1": "en",
+    "iso_3166_1": "US",
+    "name": "Choreography and Merriment at Cinespia",
+    "key": "MYQMigZs-R4",
+    "site": "YouTube",
+    "size": 2160,
+    "type": "Featurette",
+    "official": true,
+    "id": "68a21bdb6dbdf9d78386ffec",
+    "published_at": "2025-08-17T15:01:18.000Z"
+   },
+   {
+    "iso_639_1": "en",
+    "iso_3166_1": "US",
+    "name": "The Ballad of Burt & Irving",
+    "key": "iygJb2DeIwA",
+    "site": "YouTube",
+    "size": 1080,
+    "type": "Teaser",
+    "official": true,
+    "id": "684b2db951197127641be59f",
+    "published_at": "2025-06-12T13:59:50.000Z"
+   }
+  ]
+ }
+}

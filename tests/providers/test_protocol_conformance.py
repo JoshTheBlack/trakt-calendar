@@ -36,6 +36,52 @@ from app.providers.trakt import detail as trakt_detail
 from tests.support import DatabaseTestCase
 
 
+# EACH SERVICE'S CATALOGUE CREDENTIAL, AND ONLY THAT — the instance-wide value
+# its public reads authenticate with. A TABLE WITH AN ENTRY PER SERVICE rather
+# than a field name spelled from the service's own name, because the services
+# do not share one shape: Trakt and Simkl take a client id, TMDB a read token. A
+# registered service missing here fails `test_every_registered_source_has_a_
+# credential_entry` rather than being quietly skipped.
+TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJ0ZXN0In0.c2lnbmF0dXJl"
+CATALOGUE_CREDENTIALS = {
+    "tmdb": {"tmdb_api_key": TMDB_TOKEN},
+    "trakt": {"trakt_client_id": "an-id"},
+    "simkl": {"simkl_client_id": "an-id"},
+}
+
+
+# And each service's PRIVATE credential — one person's own token — where it has
+# one. TMDB holds none: nobody here links a TMDB account, so its entry is empty
+# and says so rather than being absent.
+PRIVATE_CREDENTIALS = {
+    "tmdb": {},
+    "trakt": {"trakt_access_token": "a-token"},
+    "simkl": {"simkl_access_token": "a-token"},
+}
+
+# Whether each service's catalogue search is offered to the search boxes. TMDB's
+# is written (app/providers/tmdb/search.py, tested on its own) and is not wired
+# into any box yet, so its provider carries no search port.
+SEARCHABLE = {"tmdb": False, "trakt": True, "simkl": True}
+
+
+def catalogue_settings(*sources) -> Settings:
+    """A Settings carrying these services' catalogue credentials and nothing
+    private — the live instance's own shape."""
+    fields = {}
+    for source in sources:
+        fields.update(CATALOGUE_CREDENTIALS[str(source)])
+    return Settings(**fields)
+
+
+class EveryServiceHasACredentialEntryTests(unittest.TestCase):
+
+    def test_every_registered_source_has_a_credential_entry(self):
+        registered = {str(s) for s in providers.registered()}
+        for table in (CATALOGUE_CREDENTIALS, PRIVATE_CREDENTIALS, SEARCHABLE):
+            self.assertEqual(set(table), registered)
+
+
 class RegisteredProvidersConformTests(unittest.TestCase):
     """Walk the registry — not a hand-written list of sources, which would go
     stale the moment a second one is added without anybody updating it."""
@@ -137,7 +183,7 @@ class CalendarPortIsDeclaredAlongsideTheEndpointsTests(unittest.TestCase):
             if port is None:
                 continue
             with self.subTest(source=source):
-                settings = Settings(**{f"{source}_client_id": "an-id"})
+                settings = catalogue_settings(source)
                 self.assertFalse(provider.is_configured(settings))
                 self.assertTrue(port.calendar_configured(settings))
 
@@ -235,7 +281,7 @@ class EverySourceCanDescribeATitleTests(unittest.TestCase):
         """
         for source, provider in providers.registered().items():
             with self.subTest(source=source):
-                settings = Settings(**{f"{source}_client_id": "an-id"})
+                settings = catalogue_settings(source)
                 self.assertTrue(provider.detail_port.catalogue_configured(settings))
                 self.assertFalse(provider.is_configured(settings))
 
@@ -290,8 +336,7 @@ class EveryDetailPortAnswersTheSameKeysTests(DatabaseTestCase):
         """Every source's CATALOGUE credential and no private one — the live
         instance's own shape, and what makes each port take its real path rather
         than an unconfigured shortcut."""
-        return Settings(**{f"{source}_client_id": "an-id"
-                           for source, _port in self._ports()})
+        return catalogue_settings(*(source for source, _port in self._ports()))
 
     def _ports(self):
         return [(str(source), provider.detail_port)
@@ -379,12 +424,12 @@ class EverySourceCanBeSearchedTests(unittest.TestCase):
     instance in before this port existed.
     """
 
-    def test_every_registered_source_carries_a_search_port(self):
+    def test_a_search_port_is_carried_exactly_where_the_table_says(self):
         for source, provider in providers.registered().items():
             with self.subTest(source=source):
-                self.assertIsNotNone(
-                    provider.search_port,
-                    f"{source} can be described but cannot be searched")
+                self.assertEqual(
+                    provider.search_port is not None, SEARCHABLE[str(source)],
+                    f"{source}'s search port does not match SEARCHABLE")
 
     def test_every_search_port_present_satisfies_searchport(self):
         for source, provider in providers.registered().items():
@@ -409,7 +454,7 @@ class EverySourceCanBeSearchedTests(unittest.TestCase):
         """
         for source, provider in providers.registered().items():
             with self.subTest(source=source):
-                settings = Settings(**{f"{source}_client_id": "an-id"})
+                settings = catalogue_settings(source)
                 self.assertFalse(provider.is_configured(settings))
                 if source is Source.SIMKL:
                     self.assertFalse(provider.catalogue_is_configured(settings))
@@ -483,8 +528,9 @@ class EveryWatchlistPortWritesTheSameWayTests(DatabaseTestCase):
                 self.assertIn(source, [str(s) for s, _ in providers.for_watchlist(linked)])
 
     def test_a_source_with_no_port_is_never_offered(self):
-        linked = Settings(**{f"{source}_{field}": "x" for source in providers.registered()
-                             for field in ("client_id", "access_token")})
+        linked = Settings(**{field: value for source in providers.registered()
+                             for table in (CATALOGUE_CREDENTIALS, PRIVATE_CREDENTIALS)
+                             for field, value in table[str(source)].items()})
         offered = {str(source) for source, _ in providers.for_watchlist(linked)}
         self.assertEqual(offered, {source for source, _ in self._ports()})
 
@@ -493,7 +539,7 @@ class EveryWatchlistPortWritesTheSameWayTests(DatabaseTestCase):
 # the test below fails for a registered source missing from it: the point of a
 # per-service table is that a new service is a visible decision here rather
 # than a silent pass.
-SERVICE_HOSTS = {"trakt": "trakt.tv", "simkl": "simkl.com"}
+SERVICE_HOSTS = {"tmdb": "themoviedb.org", "trakt": "trakt.tv", "simkl": "simkl.com"}
 
 
 class EveryProviderLinksToItsOwnPagesTests(unittest.TestCase):

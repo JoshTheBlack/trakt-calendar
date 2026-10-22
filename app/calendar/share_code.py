@@ -107,7 +107,11 @@ TZ_CODES = (
 # ZERO IS `auto`, which is the one selection that is not a set: it names no
 # services, now or later. A named set always has at least one bit, so the two
 # cannot be confused.
-SOURCE_CODES = ("trakt", "simkl")
+#
+# TMDB IS BIT 2, APPENDED, though it is first in the app's declared order: the
+# bits are wire format and the order is a preference, and reordering the first
+# would repoint every link already handed out.
+SOURCE_CODES = ("trakt", "simkl", "tmdb")
 
 # The epoch the packed year+month counts from. Moving it would repoint every
 # existing code at a different month, so it is as fixed as the codebooks.

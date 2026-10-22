@@ -16,9 +16,10 @@ templating, endpoints and the rest, flat at the root — plus feature packages
 (`calendar/`, `distrakt/`, `ranker/`, `media/`, `integrations/`, `providers/`),
 with `auth/` as a LAYER rather than a peer: every feature may depend on it and it
 depends on no feature. The kernel imports no feature, with two declared
-exceptions — config.py reaching the provider registry, and reaching auth's
+exceptions — the provider registry (config.py asking which sources are
+configured, templating.py's `source_look` reading a service's label), and auth's
 `encryption_flow` to refuse writing a secret while the at-rest key is unhealthy.
-Both are function-local, both are declared DEFERRED, and hoisting either to
+All are function-local, both edges are declared DEFERRED, and hoisting one to
 module level fails the test: that placement is the only reason they do not close
 an import cycle at load time. Every cross-package import must appear in that file's `DECLARED_EDGES`
 with a sentence saying why; an undeclared edge fails and the failure names the
@@ -72,12 +73,15 @@ degrades.
 whose token asked must never be written to it — that is what `private=True` on
 `cached_get` is for, and why a provider package separates public per-title
 lookups (`detail.py`) from per-user reads (`sync.py`): "does this module cache?"
-then has one answer per module. THERE ARE NOW TWO IMPLEMENTATIONS OF THIS RULE,
-one per provider transport (`app/providers/trakt/transport.py` and
-`app/providers/simkl/transport.py`), and they are two because the services
-differ in what a request carries, not because the rule does. A change to what
-`private` MEANS belongs in both; `tests/providers/test_protocol_conformance.py`
-is what holds the two packages to one shape.
+then has one answer per module. THERE ARE NOW THREE PROVIDER TRANSPORTS
+(`app/providers/trakt/transport.py`, `app/providers/simkl/transport.py` and
+`app/providers/tmdb/transport.py`), and they differ because the services differ
+in what a request carries, not because the rule does. A change to what `private`
+MEANS belongs in the Trakt and Simkl ones; TMDB's makes only public catalogue
+reads with the instance's token and so has no `private` flag at all — a read
+made with a viewer's own TMDB token must not ride its `cached_get`.
+`tests/providers/test_protocol_conformance.py` is what holds the packages to one
+shape.
 
 **A write to a person's own list at a service is read from its BODY and
 confirmed by READING THE LIST BACK, and it never blocks the tracker.**
@@ -116,6 +120,26 @@ finished, because a pass already running could otherwise read the tracker
 before the removal and decide it was not the last season. A show that leaves by
 any other road is forgotten, so its return is an arrival. Neither table travels
 in a tracker backup, and `app/distrakt/backup.py` says why.
+
+**TMDB is first in `Source`, and nothing it supplies outlives six months.**
+`app/providers/base.py`'s `Source` declares TMDB first, and that ORDER is the
+app's one order: who describes a title (the details panel and the tracker's
+season totals, through `detail_source`), whose value a card shows for a viewer
+with no stated order, whose artwork is tried first. TMDB keeps no watch history,
+so it is never a tracker source (`providers.tracker_sources`), and a tracker
+preference may not name it (`app/sources/prefs.py`). TMDB's API terms forbid
+caching anything obtained from it for longer than six months: the ceiling is
+`app/providers/tmdb/transport.py`'s `MAX_CACHE_SECONDS`, response-cache rows are
+written with `CACHE_RETAIN_SECONDS` so the sweep's grace lands on it, and the
+poster registry's TMDB rows (`app/media/artwork.py`), the poster tiles and the
+network logos all read that constant. The credential is the v4 read token,
+sent only in the Authorization header (`config.tmdb_token_error` refuses the
+short key, `tmdb_configured` reads a stored one as unset). NO SERVICE IS
+ANOTHER'S FALLBACK: a per-service difference names each service explicitly —
+through the registry (`Provider.title_url`, `Provider.episode_url`,
+`DetailPort.fetch_season_summary`) or an explicit table with a test that every
+registered Source has an entry — and an unknown name is an error, never quietly
+read as one of the others.
 
 **The calendar cache stores the UNFILTERED window once per (endpoint, 7 days),
 holding EVERY source's records as ROWS.** There is no stored window object: a
@@ -244,7 +268,11 @@ nothing of that season hands it to the next service the title names that does �
 ids join two catalogues' SHOWS, and their seasons need not line up (Simkl's
 anthology "Monster" carries the ids of Trakt's one-season "DAHMER – Monster").
 It is decided after the first answer, so the common case costs nothing, and a
-failure is never read as an empty season. Because one renderer draws every
+failure is never read as an empty season. The same handover applies to a whole
+title (`describe_season` with no season): an answer that says nothing about the
+title — an id the first service does not know — goes to the next service the
+title names, which is also what keeps a share page drawing what an earlier
+describer had cached. Because one renderer draws every
 answer, `DetailPort`'s answer has ONE KEY SET whoever gives it, and
 `tests/providers/test_protocol_conformance.py`'s
 `EveryDetailPortAnswersTheSameKeysTests` asserts it — a Protocol checks methods,

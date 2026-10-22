@@ -297,8 +297,9 @@ class _TraktProvider:
     # carrying no port would be claiming a calendar this source cannot produce.
     calendar_port = _TraktCalendarPort()
     # And the same again for the modal: it asks the registry which source can
-    # describe the title in front of it, so a card carrying a Trakt id gets
-    # Trakt's richer answer without the route naming this package.
+    # describe the title in front of it, so a card carrying a Trakt id that the
+    # service declared ahead of Trakt cannot describe gets Trakt's answer
+    # without the route naming this package.
     detail_port = _TraktDetailPort()
     # And once more for the tracker's manual add flow: it asks the registry
     # which sources can be searched and never names Trakt, so a second

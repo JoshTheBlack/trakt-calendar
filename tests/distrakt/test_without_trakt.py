@@ -321,7 +321,7 @@ class TheRowSaysWhichSilenceItIsTests(_CatalogueFailureTestCase):
         not news, most viewers cannot act on it, and an instance deliberately
         running one service would otherwise carry a banner about the other for
         ever. It belongs on the rows it applies to."""
-        rows = await self._rows(NO_CATALOGUES)
+        rows = await self._rows(NO_CATALOGUES, ids={"trakt": 7})
         self.assertEqual(rows[0]["unavailable_source"], "trakt")
         self.assertEqual(rows[0]["unavailable_reason"], live.NOT_CONFIGURED)
         self.assertIn("Trakt", rows[0]["counts_note"])
@@ -370,7 +370,7 @@ class TheRowSaysWhichSilenceItIsTests(_CatalogueFailureTestCase):
         """No id any registered source issues: there is no credential an
         operator could add that would help, so the sentence must not send them
         to Settings."""
-        row, = await self._rows(BOTH_CATALOGUES, ids={"tmdb": 1})
+        row, = await self._rows(BOTH_CATALOGUES, ids={"tvdb": 1})
         self.assertTrue(row["unavailable"])
         self.assertNotIn("configured", row["counts_note"])
 

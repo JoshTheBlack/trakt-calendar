@@ -25,17 +25,17 @@ card carried and this decides who to ask; the alternative — the client naming 
 service — puts the choice on the one side that cannot see whether that service's
 credentials are filled in.
 
-TRAKT IS PREFERRED WHEREVER IT HAS AN ID, INCLUDING ON A CARD ATTRIBUTED TO
-SIMKL, and the asymmetry is deliberate rather than left over. The modal is about
-the TITLE; the card's attribution is about whose listing put it on the page.
-Trakt's per-title answer is strictly the larger one — it carries a cast, a
-per-episode air date and a per-episode rating, none of which Simkl publishes
-anywhere this app can reach — so preferring the card's own service would take
-those away from a merged title for no gain. It DOES mean a viewer who set Simkl's
-overview to win on the card can read Trakt's in the modal; that is a real
-inconsistency and the smaller of the two, because the modal is one click away
-from a source-flip control the card already has and the missing cast would not be
-recoverable at all.
+THE DECLARED ORDER DECIDES, AND TMDB IS FIRST IN IT, INCLUDING ON A CARD
+ATTRIBUTED TO ANOTHER SERVICE. The panel is about the TITLE; the card's
+attribution is about whose listing put it on the page. TMDB is first in `Source`
+(base.py says why): it knows almost every title the other services list, by an id
+they all state, so leading with it gives every title one describer whichever
+service's card it was opened from. Trakt answers a title TMDB does not know, and
+Simkl one neither knows — and either answers a SEASON the service before it holds
+nothing of (`for_season`), or a title the service before it could say nothing
+about. It does mean a viewer who set another service's overview to win on the
+card can read TMDB's in the panel; the card's own flip control is one click away
+and shows every service's.
 """
 from __future__ import annotations
 
@@ -56,9 +56,9 @@ logger = logging.getLogger(__name__)
 def ports():
     """Every registered source that can describe a title, in DECLARED order.
 
-    Declared order is the preference order — Trakt, then Simkl — for the reason
-    the module docstring gives, and it comes from the registry rather than from a
-    list here so a third source is a registration and not an edit.
+    Declared order is the preference order — TMDB, then Trakt, then Simkl — for
+    the reason the module docstring gives, and it comes from the registry rather
+    than from a list here so another source is a registration and not an edit.
     """
     return [(source, provider.detail_port)
             for source, provider in providers.registered().items()
@@ -68,7 +68,7 @@ def ports():
 def ids_from_query(params) -> dict[str, str]:
     """The id map a details request carried, read out of its query string.
 
-    ONE PARAMETER PER SOURCE, NAMED FOR THAT SOURCE — `?trakt=203330&simkl=2601798`
+    ONE PARAMETER PER SOURCE, NAMED FOR THAT SOURCE — `?tmdb=95396&trakt=154997`
     — rather than the `?id=` a single-source app could get away with. A card
     two services described has two ids and neither is "the" id; sending one plus
     a service name would put the choice on the client (see the module docstring),
@@ -222,16 +222,28 @@ async def for_season(settings, ids, chosen: Answerer, ask, holds):
 
 async def describe_season(settings, chosen: Answerer, ids, media, season: int | None, *,
                           cache_only: bool = False) -> tuple[Answerer, dict | None]:
-    """`describe`, with the season rule `for_season` states: (who answered, the
+    """`describe`, with the handover rule `for_season` states: (who answered, the
     answer). A panel draws the answering service's name and links, so it has to
-    be told which one that was. With no season there is nothing to hold, and it
-    is `describe` exactly."""
+    be told which one that was.
+
+    WITH A SEASON, an answer HOLDS it when it lists the season's episodes. WITH
+    NONE, an answer holds the title when it says anything at all
+    (`_says_anything`). The second is the same rule one level up: the ids on a
+    card can name a title the first service does not have — a stale or merged id,
+    answered with nothing — and with that service first in the order the panel
+    would otherwise open blank on a title the next service describes. It matters
+    most on a public share page, which asks `cache_only`: a title opened there
+    before TMDB led was cached by the service that described it then, and is
+    still drawn from that service's stored answer.
+    """
     if season is None:
-        return chosen, await describe(settings, chosen, media, season, cache_only=cache_only)
+        holds = lambda details: bool(details) and _says_anything(details)  # noqa: E731
+    else:
+        holds = lambda details: bool(details and details.get("episodes"))  # noqa: E731
     return await for_season(
         settings, ids, chosen,
         lambda answerer: describe(settings, answerer, media, season, cache_only=cache_only),
-        lambda details: bool(details and details.get("episodes")))
+        holds)
 
 
 async def describe_panel(settings, chosen: Answerer, ids, media, season: int | None, *,

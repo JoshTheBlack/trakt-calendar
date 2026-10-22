@@ -183,6 +183,8 @@ in an encryptable secrets store (see [At-rest encryption](#at-rest-encryption-of
 | **Trakt Client ID / Access Token** | Your Trakt API credentials |
 | **Simkl Client ID / Secret** | Optional — see [Simkl](#simkl--an-optional-second-source) for what each feature needs. Each person links their own account |
 | **Include Simkl results on the calendar** | Instance-wide, on by default. Untick it and Simkl leaves the calendar at once, cached months included |
+| **TMDB API Read Access Token** | Optional — see [TMDB](#tmdb--the-first-describer). The long token, not the short API key |
+| **TMDB language / region** | The language TMDB describes titles in (default `en-US`), and the country whose film releases count (default `US`) |
 | **Timezone** | Air times are converted to this zone |
 | **Default endpoint** | Which calendar to show by default |
 | **Pagination limit** | Max items fetched per request |
@@ -240,6 +242,26 @@ content off a family instance (Certifications uses the US TV Parental Guidelines
 film ratings). Blank — the default — filters nothing. A change applies at once, months
 already cached included, and undoing it brings those titles straight back.
 
+## TMDB — the first describer
+
+With a TMDB token in Settings, TMDB is the first service asked about any title that
+carries a TMDB id — which is nearly every title Trakt or Simkl lists. It describes the
+title in the details panel, gives the tracker its season totals, supplies posters and
+network logos, and adds its videos to the panel's menu. Trakt and Simkl answer what TMDB
+doesn't know, and a season TMDB has no episodes of goes to the next service that does.
+Anyone who set their own service order on their **Account** page keeps it; TMDB comes after
+the services they named.
+
+TMDB keeps no watch history, so it never backs the tracker, and it doesn't list a calendar
+of its own yet.
+
+Get the token at [themoviedb.org → Settings → API](https://www.themoviedb.org/settings/api):
+copy the **API Read Access Token** (the long one). The short "API Key" above it is refused —
+it travels in the address of every request, where a credential ends up in logs. Nothing
+TMDB answers is kept longer than six months, which is TMDB's own limit.
+
+Without a token, TMDB steps aside and the other services describe titles as before.
+
 ## Simkl — an optional second source
 
 Simkl fills the calendar alongside Trakt, can sign people in, and can read a linked
@@ -277,7 +299,7 @@ their own account from their **Account** page, and the link refreshes itself.
 
 ## At-rest encryption of stored secrets
 
-By default, credentials (Trakt tokens, Sonarr/Radarr/Seerr/TMDB API keys, and every linked
+By default, credentials (Trakt tokens, Sonarr/Radarr/Seerr API keys, the TMDB token, and every linked
 account's Trakt token) are stored in the database as plaintext. Turning on encryption seals
 them with a key that lives **only** in your environment, so a leaked `app.db` (a backup, a
 volume snapshot) does not hand over live credentials. It does not defend against full host
@@ -420,7 +442,6 @@ app/
                        title known to have none); no downloads
     user_images.py    Per-user avatar and grid-header images
     imaging.py        Font, text-in-a-box and circular-mask primitives
-    tmdb.py           The TMDB client posters and logos fetch through
   integrations/     The three services a user points at their OWN server
     routes.py         Sonarr / Radarr / Seerr: status, options, add-to-library
     arr.py            Sonarr / Radarr
@@ -432,6 +453,7 @@ app/
     detail_source.py  Which service a details panel asks about a given title
     title_search.py   The one title search the calendar, boards and add dialogs share
     videos.py         Every service's videos for a title, pooled into one ordered list
+    tmdb/             transport, normalize, detail, search (posters and logos fetch through it)
     trakt/            transport, calendar, detail, sync, releases, watchlist
     simkl/            transport, calendar, detail, sync, titles, watchlist
   templates/        Jinja2 templates

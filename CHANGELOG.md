@@ -4,9 +4,19 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ## 🏷️ [1.2.6] - UNRELEASED
 
+### ⚠️ Upgrading
+- 🎬 **TMDB takes its API Read Access Token now, not the short API key.** Paste the long token from themoviedb.org → Settings → API into Settings → TMDB. A short key saved earlier is not used, and Settings says so beside the field.
+
+### Added
+- 🎬 **TMDB describes titles first.** Wherever a title has a TMDB id, its details panel, its tracker season totals and its pictures come from TMDB, with Trakt and Simkl answering what TMDB doesn't know. TMDB's videos join the menu, and its page is one of the panel's outbound buttons. If you've set your own service order on your Account page, it still applies.
+- 🌐 **TMDB language and region settings**: the language TMDB describes titles in (default en-US), and the country whose film releases count (default US).
+
 ### Fixed
 - 🎬 **A film only Simkl knows can be found and jumped to from the calendar search.** It used to come back with nowhere to land.
 - 🔗 **A custom share name saved after clearing one works.** Its `/c/` link used to answer "not found" from the start.
+- 🔓 **An administrator can unlink a Simkl account** from the admin page, and the Simkl token is revoked like Trakt's.
+- 📅 **"This calendar doesn't reach that month" offers a service that does**, never one with no calendar.
+- 🖼️ **A network logo or poster TMDB couldn't be asked about is tried again later**, instead of being remembered as having none.
 
 ### Under the hood
 - ⏱️ **The test suite runs in about two minutes instead of eleven**: it uses every CPU core and stops re-reading the certificate store for every test. Code nothing used any more is gone, and the code no test reached now has tests.

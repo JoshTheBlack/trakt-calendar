@@ -1572,13 +1572,16 @@ class ExportRouteTests(RankerTestCase):
         asked = []
 
         async def _ensure(settings, media, tmdb, order, season=None):
-            asked.append((media, tmdb, season, order[-1]))
+            asked.append((media, tmdb, season, tuple(order)))
             return None
 
         with patched(posters, "ensure_poster", _ensure):
             self.export(top_x=3, columns=3, fmt="jpeg")
         # Title 0 has tmdb 0, which is no artwork id at all: nothing to fetch.
-        self.assertEqual(sorted(asked), [("show", 1, None, "tmdb"), ("show", 2, None, "tmdb")])
+        # The order is the viewer's — this one stated none, so the declared one.
+        declared = ("tmdb", "trakt", "simkl")
+        self.assertEqual(sorted(asked), [("show", 1, None, declared),
+                                         ("show", 2, None, declared)])
 
     def test_a_season_tile_is_its_own_file_and_the_export_draws_it(self):
         from app.media import artwork

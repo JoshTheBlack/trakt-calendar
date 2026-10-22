@@ -43,6 +43,7 @@ SETTINGS = SimpleNamespace(trakt_configured=True, simkl_configured=False,
                            calendar_source_configured=True,
                            trakt_catalogue_configured=True,
                            simkl_catalogue_configured=True,
+                           tmdb_configured=False,
                            network_emojis={}, default_network_emoji=":tv:",
                            timezone="UTC",
                            # The operator's content floor, all open: the import

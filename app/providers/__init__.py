@@ -70,7 +70,8 @@ def _load_builtins() -> None:
     # `Source` declaration, which is the app's one statement of the declared
     # order, precisely so that importing a provider for some unrelated reason
     # cannot decide which source is an account's primary.
-    from . import trakt  # noqa: F401  — registers itself on import
+    from . import tmdb  # noqa: F401  — registers itself on import
+    from . import trakt  # noqa: F401  — same
     from . import simkl  # noqa: F401  — same
 
 
@@ -285,10 +286,11 @@ def for_catalogue_search(settings) -> list[tuple[Source, SearchPort]]:
 
     THE LENGTH IS THE WHOLE ANSWER TO "A TRAKT-ONLY OR A SIMKL-ONLY INSTANCE
     MUST BOTH WORK ORDINARILY". 0 means no catalogue is reachable, 1 means one
-    source answers with nothing to disambiguate, 2 means a caller has two
-    answers to merge — and every behaviour downstream keys off that length
-    rather than off a source's name. Registry order, so Trakt leads where an
-    order is drawn from one, the same rule `for_tracker_ports` states in full.
+    source answers with nothing to disambiguate, more means a caller has
+    several answers to merge — and every behaviour downstream keys off that
+    length rather than off a source's name. Registry order, so the first
+    declared source with a search port leads where an order is drawn from one,
+    the same rule `for_tracker_ports` states in full.
     """
     out: list[tuple[Source, SearchPort]] = []
     for source, provider in registered().items():

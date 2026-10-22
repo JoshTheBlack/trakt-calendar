@@ -247,3 +247,51 @@ class OutboundLinksAskEveryRegisteredServiceTests(unittest.TestCase):
         self.assertEqual([str(link.source) for link in links],
                          [str(s) for s in providers.registered()
                           if str(s) in ("simkl", "trakt")])
+
+
+class AWholeTitleGoesToWhoCanDescribeItTests(unittest.TestCase):
+    """describe_season with NO season: an answer that says nothing about the
+    title hands it to the next service the card names. With TMDB first, a card
+    whose tmdb id TMDB does not know would otherwise open blank on a title the
+    next service describes — and a share page, reading cache_only, keeps drawing
+    what the service that described a title before TMDB led had stored."""
+
+    IDS = {"tmdb": "1", "trakt": "7"}
+
+    def _describe(self, answers, *, cache_only=False):
+        asked = []
+
+        def port_for(source):
+            async def fetch_details(settings, media, source_id, season, *, cache_only=False):
+                asked.append((str(source), cache_only))
+                return answers[str(source)]
+            return mock.Mock(detail_port=mock.Mock(
+                catalogue_configured=lambda settings: True, fetch_details=fetch_details))
+
+        ports = [(Source.TMDB, None), (Source.TRAKT, None)]
+        chosen = detail_source.Answerer(Source.TMDB, "1", stored_only=False)
+        with mock.patch.object(detail_source, "ports", lambda: ports), \
+                mock.patch.object(providers, "get", port_for):
+            who, answer = asyncio.run(detail_source.describe_season(
+                Settings(), chosen, self.IDS, "show", None, cache_only=cache_only))
+        return str(who.source), answer, asked
+
+    EMPTY = {"title": "", "overview": "", "episodes": []}
+
+    def test_an_answer_that_says_nothing_goes_to_the_next_service(self):
+        who, answer, asked = self._describe({"tmdb": self.EMPTY,
+                                             "trakt": {**self.EMPTY, "title": "Silo"}})
+        self.assertEqual((who, answer["title"]), ("trakt", "Silo"))
+        self.assertEqual([s for s, _ in asked], ["tmdb", "trakt"])
+
+    def test_an_answer_that_describes_the_title_stands(self):
+        who, _answer, asked = self._describe({"tmdb": {**self.EMPTY, "title": "Silo"},
+                                              "trakt": {**self.EMPTY, "title": "Other"}})
+        self.assertEqual((who, [s for s, _ in asked]), ("tmdb", ["tmdb"]))
+
+    def test_a_share_page_reads_the_next_services_store(self):
+        who, _answer, asked = self._describe(
+            {"tmdb": self.EMPTY, "trakt": {**self.EMPTY, "overview": "Stored."}},
+            cache_only=True)
+        self.assertEqual(who, "trakt")
+        self.assertTrue(all(cache_only for _, cache_only in asked))

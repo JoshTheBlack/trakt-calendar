@@ -237,10 +237,14 @@ class EnsureLogoTests(unittest.IsolatedAsyncioTestCase):
             p.stop()
 
     def _tmdb(self, *, networks, images=None, downloads=None):
-        """Stub TMDB: /tv/{id} answers `networks`, /network/{id}/images answers
-        `images`, and a download answers from `downloads` by the url's tail."""
-        async def get_json(settings, path, label):
-            return {"networks": networks} if path.startswith("/tv/") else images
+        """Stub TMDB: the show's `/tv/{id}` answer carries `networks`,
+        /network/{id}/images answers `images`, and a download answers from
+        `downloads` by the url's tail."""
+        async def title_payload(settings, tmdb_id, media, **kw):
+            return {"networks": networks}
+
+        async def cached_get(settings, path, params=None, **kw):
+            return images
 
         fetched = []
 
@@ -248,8 +252,9 @@ class EnsureLogoTests(unittest.IsolatedAsyncioTestCase):
             fetched.append(url)
             return (downloads or {}).get(url.rsplit("/", 1)[-1])
 
-        stack = [patch.object(logos.tmdb, "get_json", get_json),
-                 patch.object(logos.tmdb, "download", download)]
+        stack = [patch.object(logos.tmdb_detail, "title_payload", title_payload),
+                 patch.object(logos.tmdb_transport, "cached_get", cached_get),
+                 patch.object(logos.tmdb_transport, "download", download)]
         for p in stack:
             p.start()
             self.patches.append(p)
@@ -280,6 +285,15 @@ class EnsureLogoTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(logos, "_tmdb_tv_networks", AsyncMock()) as asked:
             self.assertIsNone(await logos.ensure_logo(self.CFG, "Tiny", 3))
         asked.assert_not_awaited()
+
+    async def test_a_tmdb_that_could_not_be_asked_leaves_no_marker(self):
+        """A failure is not a network with no logo: marking it would hide the
+        logo until the marker aged out, when the next request could have had it."""
+        async def down(*a, **kw):
+            raise logos.tmdb_transport.TmdbError("unreachable")
+        with patch.object(logos.tmdb_detail, "title_payload", down):
+            self.assertIsNone(await logos.ensure_logo(self.CFG, "AMC", 99))
+        self.assertFalse(logos.is_negative("AMC"))
 
     async def test_nothing_is_asked_without_tmdb_or_without_an_id(self):
         with patch.object(logos, "_tmdb_tv_networks", AsyncMock()) as asked:

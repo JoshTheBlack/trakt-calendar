@@ -1,0 +1,246 @@
+{
+ "adult": false,
+ "backdrop_path": "/eZ239CUp1d6OryZEBPnO2n87gMG.jpg",
+ "belongs_to_collection": {
+  "id": 726871,
+  "name": "Dune Collection",
+  "poster_path": "/lxIGYkpvYjLtYtZH684AQft0FhD.jpg",
+  "backdrop_path": "/fahk0Fu7VUUfK6IkTt1R3waOD9F.jpg"
+ },
+ "budget": 190000000,
+ "genres": [
+  {
+   "id": 878,
+   "name": "Science Fiction"
+  },
+  {
+   "id": 12,
+   "name": "Adventure"
+  }
+ ],
+ "homepage": "https://www.warnerbros.com/movies/dune-part-two",
+ "id": 693134,
+ "imdb_id": "tt15239678",
+ "origin_country": [
+  "US"
+ ],
+ "original_language": "en",
+ "original_title": "Dune: Part Two",
+ "overview": "Follow the mythic journey of Paul Atreides as he unites with Chani and the Fremen while on a path of revenge against the conspirators who destroyed his family. Facing a choice between the love of his life and the fate of the known universe, Paul endeavors to prevent a terrible future only he can foresee.",
+ "popularity": 63.3284,
+ "poster_path": "/6izwz7rsy95ARzTR3poZ8H6c5pp.jpg",
+ "production_countries": [
+  {
+   "iso_3166_1": "US",
+   "name": "United States of America"
+  }
+ ],
+ "release_date": "2024-02-27",
+ "revenue": 714844358,
+ "runtime": 167,
+ "softcore": false,
+ "spoken_languages": [
+  {
+   "english_name": "English",
+   "iso_639_1": "en",
+   "name": "English"
+  }
+ ],
+ "status": "Released",
+ "tagline": "Long live the fighters.",
+ "title": "Dune: Part Two",
+ "video": false,
+ "vote_average": 8.142,
+ "vote_count": 8792,
+ "external_ids": {
+  "imdb_id": "tt15239678",
+  "wikidata_id": "Q109228991",
+  "facebook_id": "dune",
+  "instagram_id": "dunemovie",
+  "twitter_id": "dunemovie"
+ },
+ "release_dates": {
+  "results": [
+   {
+    "iso_3166_1": "FR",
+    "release_dates": [
+     {
+      "certification": "",
+      "descriptors": [],
+      "iso_639_1": "",
+      "note": "Le Grand Rex",
+      "release_date": "2024-02-12T00:00:00.000Z",
+      "type": 1
+     },
+     {
+      "certification": "12",
+      "descriptors": [],
+      "iso_639_1": "",
+      "note": "",
+      "release_date": "2024-02-28T00:00:00.000Z",
+      "type": 3
+     },
+     {
+      "certification": "",
+      "descriptors": [],
+      "iso_639_1": "fr",
+      "note": "",
+      "release_date": "2024-07-10T00:00:00.000Z",
+      "type": 5
+     }
+    ]
+   },
+   {
+    "iso_3166_1": "GB",
+    "release_dates": [
+     {
+      "certification": "",
+      "descriptors": [],
+      "iso_639_1": "",
+      "note": "London, England",
+      "release_date": "2024-02-15T00:00:00.000Z",
+      "type": 1
+     },
+     {
+      "certification": "12A",
+      "descriptors": [],
+      "iso_639_1": "",
+      "note": "",
+      "release_date": "2024-03-01T00:00:00.000Z",
+      "type": 3
+     },
+     {
+      "certification": "12",
+      "descriptors": [],
+      "iso_639_1": "",
+      "note": "",
+      "release_date": "2024-04-15T00:00:00.000Z",
+      "type": 4
+     },
+     {
+      "certification": "12",
+      "descriptors": [],
+      "iso_639_1": "",
+      "note": "Blu-ray / DVD",
+      "release_date": "2024-05-27T00:00:00.000Z",
+      "type": 5
+     }
+    ]
+   },
+   {
+    "iso_3166_1": "JP",
+    "release_dates": [
+     {
+      "certification": "G",
+      "descriptors": [],
+      "iso_639_1": "",
+      "note": "Large Format Only",
+      "release_date": "2024-03-08T00:00:00.000Z",
+      "type": 2
+     },
+     {
+      "certification": "G",
+      "descriptors": [],
+      "iso_639_1": "",
+      "note": "",
+      "release_date": "2024-03-15T00:00:00.000Z",
+      "type": 3
+     },
+     {
+      "certification": "G",
+      "descriptors": [],
+      "iso_639_1": "",
+      "note": "",
+      "release_date": "2024-07-03T00:00:00.000Z",
+      "type": 5
+     }
+    ]
+   },
+   {
+    "iso_3166_1": "US",
+    "release_dates": [
+     {
+      "certification": "PG-13",
+      "descriptors": [],
+      "iso_639_1": "",
+      "note": "",
+      "release_date": "2024-03-01T00:00:00.000Z",
+      "type": 3
+     },
+     {
+      "certification": "PG-13",
+      "descriptors": [],
+      "iso_639_1": "",
+      "note": "",
+      "release_date": "2024-04-16T00:00:00.000Z",
+      "type": 4
+     },
+     {
+      "certification": "PG-13",
+      "descriptors": [],
+      "iso_639_1": "",
+      "note": "Max",
+      "release_date": "2024-05-21T00:00:00.000Z",
+      "type": 4
+     },
+     {
+      "certification": "PG-13",
+      "descriptors": [],
+      "iso_639_1": "",
+      "note": "4K Ultra HD / Blu-ray / DVD",
+      "release_date": "2024-05-14T00:00:00.000Z",
+      "type": 5
+     },
+     {
+      "certification": "PG-13",
+      "descriptors": [],
+      "iso_639_1": "",
+      "note": "HBO",
+      "release_date": "2024-06-01T00:00:00.000Z",
+      "type": 6
+     }
+    ]
+   }
+  ]
+ },
+ "videos": {
+  "results": [
+   {
+    "iso_639_1": "en",
+    "iso_3166_1": "US",
+    "name": "Timothée Chalamet & Zendaya Spice Harvester Attack - Movie Clip",
+    "key": "RT3zGuKkf7M",
+    "site": "YouTube",
+    "size": 1080,
+    "type": "Clip",
+    "official": true,
+    "id": "69b4115fdbdec439674a6ffa",
+    "published_at": "2026-03-13T12:01:01.000Z"
+   },
+   {
+    "iso_639_1": "en",
+    "iso_3166_1": "US",
+    "name": "Rise of the Fremen Leader",
+    "key": "8kopgAy4fwY",
+    "site": "YouTube",
+    "size": 1080,
+    "type": "Clip",
+    "official": true,
+    "id": "69339462c140d93719c1ef21",
+    "published_at": "2025-12-05T15:43:26.000Z"
+   },
+   {
+    "iso_639_1": "en",
+    "iso_3166_1": "US",
+    "name": "Paul Atreides Tries Riding A Sandworm",
+    "key": "WXFHNM-RuG8",
+    "site": "YouTube",
+    "size": 1080,
+    "type": "Clip",
+    "official": true,
+    "id": "67df567fc0b4387a6ec7072d",
+    "published_at": "2025-03-21T23:00:32.000Z"
+   }
+  ]
+ }
+}
