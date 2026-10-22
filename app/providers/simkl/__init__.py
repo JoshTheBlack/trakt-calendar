@@ -181,7 +181,11 @@ class _SimklDetailPort:
         return out
 
     async def fetch_season_summary(self, settings: Settings, source_id,
-                                   season: int, media: Media) -> dict:
+                                   season: int, media: Media, *,
+                                   fresh: bool = False) -> dict:
+        # `fresh` IS ACCEPTED AND IGNORED: an episode list is catalogue data on a
+        # day-long TTL, and re-fetching it on a button press would spend the
+        # instance's Simkl budget to learn nothing — see fetch_season_detail.
         return await detail.fetch_season_detail(settings, source_id, int(season), media)
 
     async def fetch_seasons(self, settings: Settings, source_id, media: Media, *,

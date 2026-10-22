@@ -304,7 +304,7 @@ def unavailable_notices(shows, *, unreadable=()) -> list[str]:
             "are only what could be read without it."]
 
 
-async def season_detail(settings, rec: dict, *, fresh: bool = False, client=None):
+async def season_detail(settings, rec: dict, *, fresh: bool = False):
     """One record's season summary, from whichever source can answer for it.
 
     PUBLIC BECAUSE THE ADD ROUTES ASK IT TOO. "How long is this season" is one
@@ -313,25 +313,24 @@ async def season_detail(settings, rec: dict, *, fresh: bool = False, client=None
     it with no episode total at all. A second source-picking rule beside
     `detail_source` would be a second place for "who can answer for this record"
     to drift, so there is one and both the live pass and the add routes call it.
+
+    THE ANSWERING SERVICE IS ASKED THROUGH ITS OWN DetailPort, never chosen by
+    name here. This used to read "Simkl, else Trakt", which sent any third
+    answerer's id to Trakt's season endpoint — a wrong number at best.
     """
     from ..providers import detail_source as catalogue_answerer
     from ..providers import season as season_rules
-    from ..providers.simkl import detail as simkl_detail
-    from ..providers.trakt.detail import fetch_season_detail
     ids = rec.get("ids") or {}
     season = int(rec["season"])
+    media = Media(rec.get("media") or Media.SHOW)
     if detail_source(rec, settings) is None:
         return season_rules.empty_season(season)
 
     async def ask(answerer) -> dict:
         # By the row's own id for that service, as stored, rather than the
         # answerer's text copy of it.
-        source_id = ids.get(str(answerer.source))
-        if str(answerer.source) == "simkl":
-            return await simkl_detail.fetch_season_detail(
-                settings, source_id, season, rec.get("media") or "show")
-        return await fetch_season_detail(settings, source_id, season,
-                                         fresh=fresh, client=client)
+        return await providers.get(answerer.source).detail_port.fetch_season_summary(
+            settings, ids.get(str(answerer.source)), season, media, fresh=fresh)
 
     # A SEASON THE CHOSEN SERVICE HAS NO EPISODES OF IS THE NEXT ONE'S TO ANSWER,
     # by the rule every details panel follows (detail_source.for_season, which
@@ -447,14 +446,11 @@ async def fetch_season_details(settings, records: list[dict], *, fresh: bool,
     quiet), and is computed here otherwise. One answer either way — asking twice
     is how the row's sentence and the lookup come to disagree.
     """
-    from ..providers.trakt.transport import shared_client
     if sources is None:
         sources = [detail_source(rec, settings) for rec in records]
-    # The app-wide shared client for the whole fan-out (no per-call client).
-    client = shared_client()
     askable = [index for index, source in enumerate(sources) if source]
     answers = await asyncio.gather(*(
-        season_detail(settings, records[index], fresh=fresh, client=client)
+        season_detail(settings, records[index], fresh=fresh)
         for index in askable
     ), return_exceptions=allow_degrade)
     details: list = [None] * len(records)

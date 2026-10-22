@@ -1354,10 +1354,21 @@ class DetailPort(Protocol):
         ...
 
     async def fetch_season_summary(self, settings: Settings, source_id,
-                                   season: int, media: Media) -> dict:
+                                   season: int, media: Media, *,
+                                   fresh: bool = False) -> dict:
         """ONE season reduced to the shape `app/providers/season.py` defines —
         total, cadence, premiere, finale, the started/finished flags and
         `air_dates` — in THIS SOURCE's own id space.
+
+        `fresh=True` is the tracker's Refresh button: skip a cached answer and
+        ask again. A source whose cached season is revalidated anyway, or whose
+        episode list is on a clock a button press should not override, may
+        ignore it and says so in its own implementation.
+
+        THE TRACKER ASKS THROUGH THIS AND NEVER BY NAME. It used to pick between
+        two packages' functions with an if on the service's name, which sent
+        every answerer that was not the one it named to the other — so a third
+        service would have been handed somebody else's id.
 
         A PORT BECAUSE THE ANSWER WAS ONLY REACHABLE FROM ONE SOURCE. Both
         packages have had this function with these exact keys for as long as the

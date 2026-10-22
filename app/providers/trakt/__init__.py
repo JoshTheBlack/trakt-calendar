@@ -118,12 +118,13 @@ class _TraktDetailPort:
         return out
 
     async def fetch_season_summary(self, settings: Settings, source_id,
-                                   season: int, media: Media) -> dict:
+                                   season: int, media: Media, *,
+                                   fresh: bool = False) -> dict:
         # Movies have no seasons, and answering an empty one is what lets the
         # caller treat every media the same rather than branching first.
         if media is Media.MOVIE or str(media) == "movie":
             return season_rules.empty_season(int(season))
-        return await detail.fetch_season_detail(settings, source_id, int(season))
+        return await detail.fetch_season_detail(settings, source_id, int(season), fresh=fresh)
 
     async def fetch_title_facts(self, settings: Settings, source_id,
                                 media: Media) -> TitleFacts:
