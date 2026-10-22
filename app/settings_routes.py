@@ -21,10 +21,11 @@ A REFUSAL IS DRAWN AT 200. A non-200 is never swapped (static/js/boost.js's
 `noSwap`), so a sentence answered with 400 would read as a press that did nothing.
 
 The token renewal the heartbeat performs (maybe_refresh_trakt_token) lives here
-too rather than in the bootstrap module, because it writes exactly the same
-fields the device flow does and for the same reason — Trakt issues a NEW
-refresh_token on every refresh and the old one stops working, so there must be
-one place that knows how to store a token pair.
+too rather than in the bootstrap module, because it renews the token the device
+flow issued. Trakt issues a NEW refresh_token on every refresh and the old one
+stops working, so a renewal is stored through trakt_routes.store_rotated_tokens —
+the app-wide copy and an administrator's linked identity can be one grant, and a
+renewal written to only one of them leaves the other dead.
 
 The per-user "Log in with Trakt" redirect flow is a different thing entirely and
 lives in app/auth/trakt_routes.py; this module only ever touches the ONE app-wide
@@ -81,9 +82,10 @@ _KEY_UNHEALTHY = (
 
 
 async def _apply_new_trakt_token(settings: Settings, token: dict) -> Settings:
-    """Write a fresh access/refresh token pair (from device-auth or a refresh
-    call) into `settings` and persist it. Trakt issues a NEW refresh_token on
-    every refresh — the old one stops working, so it must always be saved."""
+    """Write the token pair a NEW authorization issued (the device-code flow)
+    into `settings` and persist it. A REFRESH is not stored here: it replaces a
+    refresh token that may be held in more than one place, so it goes through
+    trakt_routes.store_rotated_tokens, which writes it everywhere it was."""
     settings.trakt_access_token = token["access_token"]
     settings.trakt_refresh_token = token.get("refresh_token", "")
     settings.trakt_token_expires_at = int(token.get("created_at", time.time())) + int(token.get("expires_in", 0))
@@ -111,10 +113,17 @@ async def maybe_refresh_trakt_token() -> None:
         # A rate-limited refresh is not an httpx error; catch it here too so the
         # background renewal just skips this cycle and tries again next tick rather
         # than letting the exception escape the heartbeat.
-        logger.warning("Trakt token auto-refresh failed: %s", exc)
+        # WHOSE TOKEN, AND TRAKT'S OWN REASON, so a failure says what to do: an
+        # `invalid_grant` means the refresh token was retired and only "Authorize
+        # with Trakt" in Settings brings it back.
+        logger.warning("Trakt token auto-refresh failed for %s: %s",
+                       await trakt_routes.holders_note(settings.trakt_refresh_token, app_wide=True),
+                       trakt_routes.refusal_reason(exc))
         return
-    await _apply_new_trakt_token(settings, token)
-    logger.info("Trakt token auto-refreshed (next expiry %s)", settings.trakt_token_expires_at)
+    # Stored wherever this grant is held — Settings AND the linked identity that
+    # adopted it — or the copy not written keeps a refresh token Trakt retired.
+    await trakt_routes.store_rotated_tokens(settings.trakt_refresh_token, token)
+    logger.info("Trakt token auto-refreshed (next expiry %s)", load_settings().trakt_token_expires_at)
 
 
 # ---------------------------------------------------------------------------
@@ -628,9 +637,11 @@ async def trakt_refresh(request: Request):
             settings.trakt_client_id, settings.trakt_client_secret, settings.trakt_refresh_token,
         )
     except (httpx.HTTPError, trakt_auth.TraktRateLimitError) as exc:
-        return _token(request, settings, f"Refresh failed: {exc}", ok=False)
-    settings = await _apply_new_trakt_token(settings, token)
-    return _token(request, settings, "Trakt token refreshed.", ok=True)
+        return _token(request, settings,
+                      f"Refresh failed ({trakt_routes.refusal_reason(exc)}) — use “Authorize "
+                      "with Trakt” to get a fresh token.", ok=False)
+    await trakt_routes.store_rotated_tokens(settings.trakt_refresh_token, token)
+    return _token(request, load_settings(), "Trakt token refreshed.", ok=True)
 
 
 def _token(request: Request, settings: Settings, message: str, *, ok: bool):

@@ -32,7 +32,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
 
 from .. import auth, authz, db, secrets_box
-from ..config import Settings, load_settings
+from ..config import Settings, load_settings, save_settings
 from ..templating import templates
 # Bound as `trakt_auth` because inside app/auth/ a bare `trakt` would read as the
 # Trakt SOURCE (app/providers/trakt/); this is the login flow.
@@ -452,6 +452,76 @@ async def revoke_token_value(token: str | None, settings: Settings | None = None
     return None
 
 
+# ---------------------------------------------------------------------------
+# one Trakt grant, possibly held in two places
+# ---------------------------------------------------------------------------
+#
+# THE APP-WIDE TOKEN AND AN ADMINISTRATOR'S LINKED IDENTITY CAN BE ONE GRANT.
+# `adopt_app_token` links the token pair Settings holds to the administrator who
+# authorized it, so the same refresh token is stored twice — and Trakt issues a
+# NEW refresh token on every refresh and retires the old one at once. Two
+# refreshers each storing the new pair only where they found the old one meant
+# whichever refreshed first left the other holding a dead refresh token: the
+# app-wide copy then failed every heartbeat with Trakt's 400 until somebody ran
+# "Authorize with Trakt" again (measured on a dev instance: the identity and
+# Settings held identical tokens, and the heartbeat logged a 400 a minute until
+# a re-authorization). So a rotation is stored wherever the old token was held.
+
+
+async def _identities_holding(refresh_token: str) -> list:
+    """The Trakt identity rows whose stored refresh token is `refresh_token`.
+    Few rows — one per linked Trakt account — so each is opened and compared."""
+    if not refresh_token:
+        return []
+    rows = await db.fetch_all(
+        "SELECT id, user_id, refresh_token FROM linked_identities WHERE provider = ?",
+        (PROVIDER,))
+    return [row for row in rows if secrets_box.open_(row["refresh_token"]) == refresh_token]
+
+
+async def store_rotated_tokens(old_refresh_token: str, token: dict) -> None:
+    """Store a refreshed Trakt pair EVERYWHERE the refresh token it replaced was
+    held — the app-wide Settings copy and every linked identity — because Trakt
+    has just retired that refresh token for all of them. THE ONE PLACE a Trakt
+    rotation is written; both the heartbeat's app-wide refresh and a user's own
+    refresh call it."""
+    new_refresh = token.get("refresh_token") or None
+    for row in await _identities_holding(old_refresh_token):
+        await auth.store_identity_tokens(
+            int(row["id"]), access_token=token.get("access_token"),
+            refresh_token=new_refresh, token_expires_at=_expires_at(token))
+    settings = load_settings()
+    if old_refresh_token and settings.trakt_refresh_token == old_refresh_token:
+        settings.trakt_access_token = token["access_token"]
+        settings.trakt_refresh_token = new_refresh or ""
+        settings.trakt_token_expires_at = _expires_at(token) or 0
+        save_settings(settings)
+
+
+async def holders_note(refresh_token: str, *, app_wide: bool) -> str:
+    """Who a failing Trakt token belongs to, in words for a log line: the
+    app-wide token in Settings, a user's linked account, or both at once."""
+    users = [int(row["user_id"]) for row in await _identities_holding(refresh_token)]
+    who = []
+    if app_wide:
+        who.append("the app-wide token in Settings > Trakt")
+    who += [f"user {user}'s linked Trakt account" for user in users]
+    return " and ".join(who) if who else "a Trakt token no longer stored anywhere"
+
+
+def refusal_reason(exc: Exception) -> str:
+    """Trakt's own reason for refusing a refresh — its `error` field, such as
+    `invalid_grant` for a refresh token it has already retired — or the bare
+    failure. Never the request, which carries the credentials."""
+    response = getattr(exc, "response", None)
+    try:
+        error = (response.json() or {}).get("error") if response is not None else None
+    except ValueError:
+        error = None
+    status = getattr(response, "status_code", None)
+    return f"HTTP {status} {error}" if status and error else type(exc).__name__
+
+
 async def access_token_for_user(user_id: int, settings: Settings | None = None) -> str | None:
     """A currently-valid Trakt access token for `user_id`, or None.
 
@@ -491,13 +561,14 @@ async def access_token_for_user(user_id: int, settings: Settings | None = None) 
             cfg.trakt_client_id, cfg.trakt_client_secret, refresh_token,
         )
     except (httpx.HTTPError, trakt_auth.TraktRateLimitError) as exc:
-        logger.warning("Trakt token refresh failed for a linked account: %s", exc)
+        logger.warning("Trakt token refresh failed for %s: %s",
+                       await holders_note(refresh_token,
+                                          app_wide=cfg.trakt_refresh_token == refresh_token),
+                       refusal_reason(exc))
         await auth.release_identity_refresh(int(row["id"]))
         return access_token
-    await auth.store_identity_tokens(
-        int(row["id"]),
-        access_token=token.get("access_token"),
-        refresh_token=token.get("refresh_token") or None,
-        token_expires_at=_expires_at(token),
-    )
+    # Wherever this grant is held — this identity, and the app-wide copy in
+    # Settings when it is the token this account adopted — or the copy not
+    # refreshed is left with a refresh token Trakt has just retired.
+    await store_rotated_tokens(refresh_token, token)
     return token.get("access_token")
