@@ -425,7 +425,7 @@ async def ensure_poster(settings, media: str, tmdb: object,
                 continue
             raw = await _try_source(own[source])
             if raw is not None:
-                return _store(media, tid, source, raw, season)
+                return await anyio.to_thread.run_sync(_store, media, tid, source, raw, season)
             await artwork.record_season_failure(media, tid, season, source)
 
     # EVERY SOURCE GIVEN UP ON MEANS NO CALLS AT ALL, checked before the loop
@@ -452,7 +452,7 @@ async def ensure_poster(settings, media: str, tmdb: object,
             if url:
                 raw = await _try_source(url)
                 if raw is not None:
-                    return _store(media, tid, source, raw)
+                    return await anyio.to_thread.run_sync(_store, media, tid, source, raw)
                 # Dead URL: rediscovery, not a permanent hole. Fall through to
                 # the next source rather than giving up on this poster.
                 await artwork.record_failure(media, tid, source)
@@ -469,16 +469,25 @@ async def ensure_poster(settings, media: str, tmdb: object,
             if found:
                 raw = await _try_source(found[1])
                 if raw is not None:
-                    return _store(media, tid, found[0], raw)
+                    return await anyio.to_thread.run_sync(_store, media, tid, found[0], raw)
 
         logger.info("poster[%s/%s]: nothing resolved -> negative marker", media, tid)
-        _dir(media).mkdir(parents=True, exist_ok=True)
-        _none_path(media, tid, order[0]).write_text("", encoding="utf-8")
+        await anyio.to_thread.run_sync(_mark_none, media, tid, order[0])
         return None
 
 
+def _mark_none(media: str, tmdb: int, source: str) -> None:
+    """Write the negative marker. In a worker thread, as `_store` is."""
+    _dir(media).mkdir(parents=True, exist_ok=True)
+    _none_path(media, tmdb, source).write_text("", encoding="utf-8")
+
+
 def _store(media: str, tmdb: int, source: str, raw: bytes, season: int | None = None) -> Path:
-    """Write one verified tile and answer where it went."""
+    """Write one verified tile and answer where it went.
+
+    RUN IN A WORKER THREAD by every caller: a tile is ~95 KB, and an export or a
+    share card writes dozens of them, each of which would otherwise be a disk
+    write on the event loop every other request waits behind."""
     _dir(media).mkdir(parents=True, exist_ok=True)
     tile = _tile_path(media, tmdb, source, season)
     tile.write_bytes(raw)

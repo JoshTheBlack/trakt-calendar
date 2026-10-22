@@ -414,6 +414,24 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
         marker.write_text("", encoding="utf-8")
         self.assertFalse(posters.is_negative("movie", 551, ("trakt",)))
 
+    async def test_a_tile_is_written_off_the_loop_thread(self):
+        """~95 KB a tile, dozens per export: a disk write every other request
+        would wait behind if it ran on the event loop."""
+        import threading
+        await artwork.record_poster_url("show", 1396, "trakt", "https://img/trakt.jpg")
+        seen = []
+        real = posters._store
+
+        def store(*args):
+            seen.append(threading.get_ident())
+            return real(*args)
+
+        with patch.object(posters, "_store", store),              patch("app.media.posters.tmdb_transport.download",
+                   new=AsyncMock(return_value=_jpeg_bytes())):
+            await posters.ensure_poster(CONFIGURED, "show", 1396, self.ORDER)
+        self.assertEqual(len(seen), 1)
+        self.assertNotEqual(seen[0], threading.get_ident())
+
     async def test_invalid_pairs_are_a_clean_none_not_an_error(self):
         self.assertIsNone(await posters.ensure_poster(CONFIGURED, "book", 1))
         self.assertIsNone(await posters.ensure_poster(CONFIGURED, "show", None))

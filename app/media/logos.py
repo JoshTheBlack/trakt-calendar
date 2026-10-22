@@ -20,6 +20,7 @@ import re
 from io import BytesIO
 from pathlib import Path
 
+import anyio.to_thread
 from PIL import Image, ImageDraw
 
 from ..config import DATA_DIR
@@ -34,6 +35,11 @@ LOGO_DIR = DATA_DIR / "logos"
 TMDB_IMG = tmdb_transport.IMAGE_BASE
 
 TILE = 128          # output square size (Discord emoji max)
+# How many network logos a warm builds at once: each is two or three TMDB reads
+# and an image download, so eight keeps a warm well inside the TMDB pool's twenty
+# and leaves room for the pages being served beside it. posters.py's fan-out is
+# the same eight, for the same reason.
+_BUILDS_AT_ONCE = 8
 PAD = 14            # transparent padding inside the tile
 RADIUS = 26         # corner radius
 _LIGHT_BG = (43, 45, 49, 255)      # for light/white logos
@@ -236,13 +242,52 @@ async def ensure_logo(settings, network: str, tmdb_id) -> Path | None:
         return None
 
     try:
-        return await _generate(settings, network, tmdb_id, tile)
+        return await _generate_once(settings, network, tmdb_id, tile)
     except tmdb_transport.TmdbError as exc:
         # A TMDB THAT COULD NOT BE ASKED IS NOT A NETWORK WITH NO LOGO, so no
         # negative marker is written: the next request asks again, where a
         # marker would have hidden the logo until it aged out.
         logger.warning("logo[%s]: TMDB could not be asked (%s)", network, exc)
         return None
+
+
+# The tiles being built, by file name, so a page's warm and a row's own request
+# for the same network share one build rather than fetching and writing it twice.
+# In process: one worker is what this app runs. The same shape as
+# posters._look_up_once.
+_BUILDING: dict[str, asyncio.Task] = {}
+
+
+async def _generate_once(settings, network: str, tmdb_id, tile: Path) -> Path | None:
+    """`_generate`, joined by anyone asking for the same network while it runs."""
+    key = slug(network)
+    task = _BUILDING.get(key)
+    if task is None:
+        task = asyncio.ensure_future(_generate(settings, network, tmdb_id, tile))
+        _BUILDING[key] = task
+        task.add_done_callback(lambda _done: _BUILDING.pop(key, None))
+    return await asyncio.shield(task)
+
+
+def _write_tile(raw: bytes | None, svg: bytes | None, tile: Path, marker: Path) -> bool:
+    """The CPU and disk half of a build, run in a worker thread: rasterize an SVG
+    if that is all there is, render the tile, and write it — or write the
+    negative marker. True when a tile was written.
+
+    OFF THE EVENT LOOP because Pillow and cairosvg are synchronous, and a failed
+    cairosvg import is retried (and searches for its native library) on every
+    call where it is missing. Measured on an empty logo cache, the whole build's
+    synchronous work came to ~1 ms a tile — but a month's warm builds hundreds,
+    and every millisecond of it on the loop is a millisecond every other request
+    waits."""
+    if raw is None and svg is not None:
+        raw = _rasterize_svg(svg)
+    img = _render_tile(raw) if raw else None
+    if img is None:
+        marker.write_text("", encoding="utf-8")
+        return False
+    img.save(tile, format="PNG")
+    return True
 
 
 async def _generate(settings, network: str, tmdb_id, tile: Path) -> Path | None:
@@ -257,7 +302,7 @@ async def _generate(settings, network: str, tmdb_id, tile: Path) -> Path | None:
         logger.info("logo[%s]: chosen network=%r id=%s logo_path=%s",
                     network, chosen.get("name"), network_id, logo_path)
 
-        raw = None
+        raw = svg = None
         if logo_path and not logo_path.lower().endswith(".svg"):
             raw = await tmdb_transport.download(f"{TMDB_IMG}/w300{logo_path}")
         else:
@@ -268,14 +313,11 @@ async def _generate(settings, network: str, tmdb_id, tile: Path) -> Path | None:
                 raw = await tmdb_transport.download(f"{TMDB_IMG}/w300{alt}")
             elif logo_path:
                 svg = await tmdb_transport.download(f"{TMDB_IMG}/original{logo_path}")
-                raw = _rasterize_svg(svg) if svg else None
 
-        img = _render_tile(raw) if raw else None
-        if img is None:
+        made = await anyio.to_thread.run_sync(_write_tile, raw, svg, tile, _none_path(network))
+        if not made:
             logger.info("logo[%s]: no usable raster logo -> negative marker", network)
-            _none_path(network).write_text("", encoding="utf-8")
             return None
-        img.save(tile)
         logger.info("logo[%s]: GENERATED -> %s", network, tile.name)
     return tile
 
@@ -345,9 +387,19 @@ async def ensure_logos(settings, roster) -> int:
         want[name] = int(tmdb)
     if not want:
         return 0
+    # AT MOST _BUILDS_AT_ONCE AT A TIME. Unbounded, a month's warm started every
+    # missing network at once — measured, 362 of them, ~700 requests queued on a
+    # 20-connection pool, one logo waiting up to 12 s and everything else on the
+    # instance waiting behind the backlog.
+    gate = asyncio.Semaphore(_BUILDS_AT_ONCE)
+
+    async def _one(name, tmdb):
+        async with gate:
+            return await ensure_logo(settings, name, tmdb)
+
     with span("logos.ensure_logos", n=len(want)):
         results = await asyncio.gather(
-            *(ensure_logo(settings, name, tmdb) for name, tmdb in want.items()),
+            *(_one(name, tmdb) for name, tmdb in want.items()),
             return_exceptions=True,
         )
     generated = 0

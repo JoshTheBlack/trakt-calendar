@@ -18,6 +18,8 @@ All notable changes to this project are documented here. Format loosely follows 
 - 📅 **"This calendar doesn't reach that month" offers a service that does**, never one with no calendar.
 - 🖼️ **A network logo or poster TMDB couldn't be asked about is tried again later**, instead of being remembered as having none.
 - 🔑 **The instance's Trakt token no longer needs re-authorizing after a while away.** When the administrator who authorized it had it linked to their account, renewing one copy left the other dead; a renewal now reaches both, and a failed renewal names whose token it was and why Trakt refused it.
+- 📡 **Networks named in non-Latin script get their logos** (哔哩哔哩, НТВ…). They all shared one file, so one without a logo hid the rest.
+- 🐢 **Filling an empty logo cache no longer slows the whole app.** Logos are built eight at a time and their image work runs off the request path; a month's worth now fills in seconds.
 - 🍞 **Admin actions confirm with a toast**, like the rest of the app; a refusal still appears beside the section it came from.
 
 ### Under the hood
