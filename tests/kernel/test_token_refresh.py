@@ -89,12 +89,8 @@ class HeartbeatRefreshTests(_RefreshCase):
                 self.assertEqual(load_settings().trakt_access_token, "old-access")
 
 
-class OneGrantHeldTwiceTests(_RefreshCase):
-    """The app-wide token and an administrator's linked identity can be ONE Trakt
-    grant (trakt_routes.adopt_app_token links the pair Settings holds). Trakt
-    retires a refresh token the moment it is spent, so a renewal stored in only
-    one place left the other with a dead token: the heartbeat then logged a 400
-    every minute until "Authorize with Trakt" was run again."""
+class _GrantCase(_RefreshCase):
+    """Linked Trakt identities to hold a grant, for the classes below."""
 
     def _identity(self, user_id: int, refresh: str) -> int:
         from app import auth, secrets_box
@@ -124,6 +120,14 @@ class OneGrantHeldTwiceTests(_RefreshCase):
 
     NEW = {"access_token": "new-access", "refresh_token": "new-refresh",
            "created_at": 1, "expires_in": 7776000}
+
+
+class OneGrantHeldTwiceTests(_GrantCase):
+    """The app-wide token and an administrator's linked identity can be ONE Trakt
+    grant (trakt_routes.adopt_app_token links the pair Settings holds). Trakt
+    retires a refresh token the moment it is spent, so a renewal stored in only
+    one place left the other with a dead token: the heartbeat then logged a 400
+    every minute until "Authorize with Trakt" was run again."""
 
     def test_the_heartbeat_renewal_reaches_the_identity_holding_the_same_grant(self):
         self._save()
@@ -164,3 +168,63 @@ class OneGrantHeldTwiceTests(_RefreshCase):
         self.assertIn(f"user {user}'s linked Trakt account", line)
         self.assertIn("HTTP 400 invalid_grant", line)
         self.assertNotIn("old-refresh", line)
+
+
+class ARenewalIsNeverLostTests(_GrantCase):
+    """The holder that renewed is written first, by its own id or as the
+    app-wide copy, before any matching; a row that cannot be opened (sealed
+    under a key this instance no longer has) is skipped and logged, never
+    allowed to stop the write after Trakt has retired the old token."""
+
+    def _unreadable_row(self):
+        """A second Trakt identity whose stored value raises SealedButWrongKey."""
+        from app import auth
+
+        other = asyncio.run(auth.create_user(username="other1", password="a-long-password-2"))
+
+        def _link(conn):
+            auth.insert_linked_identity(conn, user_id=other, provider="trakt",
+                                        provider_user_id="other")
+        asyncio.run(db.transaction(_link))
+        asyncio.run(db.execute(
+            "UPDATE linked_identities SET refresh_token = 'UNREADABLE' WHERE user_id = ?",
+            (other,)))
+        return other
+
+    def _opening(self):
+        from app import secrets_box
+        real = secrets_box.open_
+
+        def open_(value):
+            if value == "UNREADABLE":
+                raise secrets_box.SealedButWrongKey("sealed under another key")
+            return real(value)
+        return mock.patch.object(secrets_box, "open_", open_)
+
+    def test_a_users_renewal_is_kept_beside_an_unreadable_row(self):
+        from app.auth import trakt_routes
+        self._save(trakt_refresh_token="app-wide-refresh")
+        user = self._user()
+        row_id = self._identity(user, "users-refresh")
+        self._unreadable_row()
+
+        async def refresh(client_id, client_secret, refresh_token):
+            return dict(self.NEW, created_at=int(time.time()))
+        with mock.patch.object(trakt_auth, "refresh_access_token", refresh), self._opening(), \
+                self.assertLogs("app.auth.trakt_routes", "WARNING") as logs:
+            token = asyncio.run(trakt_routes.access_token_for_user(user))
+        self.assertEqual(token, "new-access")
+        self.assertEqual(self._identity_refresh(row_id), "new-refresh")
+        self.assertIn("could not be opened", "\n".join(logs.output))
+        self.assertNotIn("UNREADABLE", "\n".join(logs.output))
+        # A different grant: the app-wide copy is untouched.
+        self.assertEqual(load_settings().trakt_refresh_token, "app-wide-refresh")
+
+    def test_the_app_wide_renewal_is_kept_beside_an_unreadable_row(self):
+        self._save()
+        row_id = self._identity(self._user(), "old-refresh")
+        self._unreadable_row()
+        with self._opening(), self.assertLogs("app.auth.trakt_routes", "WARNING"):
+            self._tick(dict(self.NEW, created_at=int(time.time())))
+        self.assertEqual(load_settings().trakt_refresh_token, "new-refresh")
+        self.assertEqual(self._identity_refresh(row_id), "new-refresh")

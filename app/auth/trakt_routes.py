@@ -468,34 +468,74 @@ async def revoke_token_value(token: str | None, settings: Settings | None = None
 # a re-authorization). So a rotation is stored wherever the old token was held.
 
 
-async def _identities_holding(refresh_token: str) -> list:
-    """The Trakt identity rows whose stored refresh token is `refresh_token`.
-    Few rows — one per linked Trakt account — so each is opened and compared."""
+async def _identities_holding(refresh_token: str, *, besides: int | None = None) -> list:
+    """The Trakt identity rows whose stored refresh token is `refresh_token`,
+    other than row `besides`. Few rows — one per linked Trakt account — so each
+    is opened and compared.
+
+    TOLERANT OF A ROW THAT CANNOT BE OPENED. A row sealed under a key this
+    instance no longer has raises SealedButWrongKey; it is skipped and logged by
+    its id and user, never its contents, because one unreadable row must not
+    stop a renewal being stored for the rows that can be read.
+    """
     if not refresh_token:
         return []
     rows = await db.fetch_all(
         "SELECT id, user_id, refresh_token FROM linked_identities WHERE provider = ?",
         (PROVIDER,))
-    return [row for row in rows if secrets_box.open_(row["refresh_token"]) == refresh_token]
+    holding = []
+    for row in rows:
+        if besides is not None and int(row["id"]) == besides:
+            continue
+        try:
+            stored = secrets_box.open_(row["refresh_token"])
+        except secrets_box.SealedButWrongKey:
+            logger.warning("Trakt identity %s (user %s) could not be opened with the "
+                           "configured key; it is left as it is", row["id"], row["user_id"])
+            continue
+        if stored == refresh_token:
+            holding.append(row)
+    return holding
 
 
-async def store_rotated_tokens(old_refresh_token: str, token: dict) -> None:
+async def store_rotated_tokens(old_refresh_token: str, token: dict, *,
+                               identity_id: int | None) -> None:
     """Store a refreshed Trakt pair EVERYWHERE the refresh token it replaced was
     held — the app-wide Settings copy and every linked identity — because Trakt
     has just retired that refresh token for all of them. THE ONE PLACE a Trakt
     rotation is written; both the heartbeat's app-wide refresh and a user's own
-    refresh call it."""
-    new_refresh = token.get("refresh_token") or None
-    for row in await _identities_holding(old_refresh_token):
-        await auth.store_identity_tokens(
-            int(row["id"]), access_token=token.get("access_token"),
-            refresh_token=new_refresh, token_expires_at=_expires_at(token))
-    settings = load_settings()
-    if old_refresh_token and settings.trakt_refresh_token == old_refresh_token:
-        settings.trakt_access_token = token["access_token"]
-        settings.trakt_refresh_token = new_refresh or ""
-        settings.trakt_token_expires_at = _expires_at(token) or 0
-        save_settings(settings)
+    refresh call it.
+
+    THE COPY THAT WAS RENEWED IS WRITTEN FIRST AND UNCONDITIONALLY: the identity
+    row `identity_id` names, by its id, or — with None — the app-wide copy in
+    Settings. Nothing about matching may stand between Trakt retiring the old
+    token and the new pair being kept by the holder that asked; a renewal lost
+    there is an account that has to be linked again. Only then are the OTHER
+    holders found, by matching the old refresh token, tolerantly.
+    """
+    if identity_id is not None:
+        await _store_on_identity(identity_id, token)
+        settings = load_settings()
+        if old_refresh_token and settings.trakt_refresh_token == old_refresh_token:
+            _store_in_settings(settings, token)
+    else:
+        _store_in_settings(load_settings(), token)
+    for row in await _identities_holding(old_refresh_token, besides=identity_id):
+        await _store_on_identity(int(row["id"]), token)
+
+
+async def _store_on_identity(identity_id: int, token: dict) -> None:
+    await auth.store_identity_tokens(
+        identity_id, access_token=token.get("access_token"),
+        refresh_token=token.get("refresh_token") or None,
+        token_expires_at=_expires_at(token))
+
+
+def _store_in_settings(settings: Settings, token: dict) -> None:
+    settings.trakt_access_token = token["access_token"]
+    settings.trakt_refresh_token = token.get("refresh_token") or ""
+    settings.trakt_token_expires_at = _expires_at(token) or 0
+    save_settings(settings)
 
 
 async def holders_note(refresh_token: str, *, app_wide: bool) -> str:
@@ -570,5 +610,5 @@ async def access_token_for_user(user_id: int, settings: Settings | None = None) 
     # Wherever this grant is held — this identity, and the app-wide copy in
     # Settings when it is the token this account adopted — or the copy not
     # refreshed is left with a refresh token Trakt has just retired.
-    await store_rotated_tokens(refresh_token, token)
+    await store_rotated_tokens(refresh_token, token, identity_id=int(row["id"]))
     return token.get("access_token")

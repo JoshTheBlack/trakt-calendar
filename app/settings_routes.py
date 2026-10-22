@@ -122,7 +122,8 @@ async def maybe_refresh_trakt_token() -> None:
         return
     # Stored wherever this grant is held — Settings AND the linked identity that
     # adopted it — or the copy not written keeps a refresh token Trakt retired.
-    await trakt_routes.store_rotated_tokens(settings.trakt_refresh_token, token)
+    await trakt_routes.store_rotated_tokens(settings.trakt_refresh_token, token,
+                                              identity_id=None)
     logger.info("Trakt token auto-refreshed (next expiry %s)", load_settings().trakt_token_expires_at)
 
 
@@ -640,7 +641,8 @@ async def trakt_refresh(request: Request):
         return _token(request, settings,
                       f"Refresh failed ({trakt_routes.refusal_reason(exc)}) — use “Authorize "
                       "with Trakt” to get a fresh token.", ok=False)
-    await trakt_routes.store_rotated_tokens(settings.trakt_refresh_token, token)
+    await trakt_routes.store_rotated_tokens(settings.trakt_refresh_token, token,
+                                              identity_id=None)
     return _token(request, load_settings(), "Trakt token refreshed.", ok=True)
 
 
