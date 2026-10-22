@@ -137,7 +137,7 @@ def counting_sources(show: dict) -> list[str]:
     return [name for name in source_order() if name in named]
 
 
-def unasked_sources(show: dict, asked=()) -> list[str]:
+def unasked_sources(show: dict, asked=(), *, answered_total: str | None = None) -> list[str]:
     """The services whose number on this row was NOT read this pass, in declared
     order.
 
@@ -156,10 +156,18 @@ def unasked_sources(show: dict, asked=()) -> list[str]:
     names = {str(name) for name in asked}
     if not names:
         return []
-    return [name for name in counting_sources(show) if name not in names]
+    # THE SERVICE THAT ANSWERED THIS PASS'S SEASON LOOKUP (`answered_total`) WAS
+    # READ for the half it gave — the total — so a number of its that is ONLY a
+    # total is current. Its watched number, if it has one here, is still
+    # current only when its history was read. Without this, every total from a
+    # service that keeps no history (TMDB) read as "the last one read".
+    watched = show.get("watched_by_source") or {}
+    return [name for name in counting_sources(show)
+            if name not in names and not (name == answered_total and name not in watched)]
 
 
-def fresh_note(show: dict, *, missing=(), asked=(), retired=()) -> str:
+def fresh_note(show: dict, *, missing=(), asked=(), retired=(),
+               answered_total: str | None = None) -> str:
     """One row's sentence when its counts ARE this pass's — the tooltip behind
     the mark that says so.
 
@@ -207,7 +215,7 @@ def fresh_note(show: dict, *, missing=(), asked=(), retired=()) -> str:
                          if name not in set(missing))
         return (f"{absent} could not be read just now, so these counts are "
                 + (f"{spoke}'s alone." if spoke else "the last ones read."))
-    stored_only = [name for name in unasked_sources(show, asked)
+    stored_only = [name for name in unasked_sources(show, asked, answered_total=answered_total)
                    if name not in retired_names]
     read_from = and_list(labels.get(name, name) for name in counted
                          if name not in set(stored_only))
@@ -490,12 +498,17 @@ def _merge_available(rec: dict, detail: dict, watched: dict[str, int], settings,
     # stayed amber for ever with no way out. Once the account has said it no
     # longer counts that service, its number is not an unanswered question, it is
     # a decision — so the row goes green and the tooltip carries the explanation.
-    stored_only = [name for name in unasked_sources(show, asked)
+    # THE SERVICE THAT ANSWERED THIS SEASON WAS READ THIS PASS TOO, for its
+    # total: `asked` names the services whose HISTORY was read, and the total
+    # came from the describing service's own season lookup, which is what
+    # brought this row here (see unasked_sources' `answered_total`).
+    answered = detail.get("described_by")
+    stored_only = [name for name in unasked_sources(show, asked, answered_total=answered)
                    if name not in retired]
     show["counts_freshness"] = ("stale" if missing
                                 else "partial" if stored_only else "current")
     show["counts_note"] = fresh_note(show, missing=missing, asked=asked,
-                                     retired=retired)
+                                     retired=retired, answered_total=answered)
     return show
 
 

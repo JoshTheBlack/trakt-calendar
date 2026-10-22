@@ -65,3 +65,17 @@ class TheAnswererIsAskedThroughItsOwnPortTests(unittest.IsolatedAsyncioTestCase)
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class ATotalReadThisPassIsCurrentTests(unittest.TestCase):
+    """The describing service's season lookup is a read made THIS pass, so a
+    total it answered is current — even from a service that keeps no history
+    (TMDB) and so is never among the services whose history was read. Counting
+    only the history reads turned every TMDB-totalled row amber."""
+
+    def test_a_tmdb_total_beside_this_passs_history_is_current(self):
+        rec = dict(REC, key="k", watched=3, total=8, watched_by_source={"trakt": 3})
+        show = live._merge_available(rec, dict(SUMMARY, described_by="tmdb"), {"trakt": 3},
+                                     Settings(), asked=("trakt",))
+        self.assertEqual(show["counts_freshness"], "current")
+        self.assertNotIn("last one read", show["counts_note"])
