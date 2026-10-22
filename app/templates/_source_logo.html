@@ -31,7 +31,11 @@
    attribution. Anything new that wants to draw a mark has to be something a
    reader can act on. #}
 
-{% macro label(source) %}{{ 'Simkl' if source == 'simkl' else 'Trakt' }}{% endmacro %}
+{# EVERY SERVICE'S NAME AND PICTURES COME FROM ONE TABLE, app/templating.py's
+   `source_look`, and a service missing from it fails the render. This file used
+   to answer "Simkl, else Trakt", which drew any third service under Trakt's name
+   and logo — credit to the wrong company on every card it touched. #}
+{% macro label(source) %}{{ source_look(source).label }}{% endmacro %}
 
 {# SEVERAL SERVICES NAMED IN ONE SENTENCE, in prose rather than as a list. Two
    surfaces in the add flow want this and want it identically — the search
@@ -45,11 +49,11 @@
 {%- endfor %}{% endmacro %}
 
 {% macro mark(source, css='') %}<img class="source-logo {{ css }}"
-     src="/static/images/{{ 'simkllogo.svg' if source == 'simkl' else 'trakt-circlemark-dark.svg' }}"
+     src="/static/images/{{ source_look(source).mark }}"
      alt="{{ label(source) }}" loading="lazy">{% endmacro %}
 
 {% macro wordmark(source) %}<img class="source-wordmark"
-     src="/static/images/{{ 'simkl_white_with_shaddow_transparent.png' if source == 'simkl' else 'trakt-logo-dark.svg' }}"
+     src="/static/images/{{ source_look(source).wordmark }}"
      alt="{{ label(source) }}" loading="lazy">{% endmacro %}
 
 {# ONE OUTBOUND BUTTON, wearing the name of where it actually goes. Both card

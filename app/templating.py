@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urlencode
 
 from fastapi.templating import Jinja2Templates
@@ -73,6 +74,50 @@ templates.env.globals["assets"] = assets
 # by every one of its callers — which is the fifteen-literals problem again, one
 # level up.
 templates.env.globals["product"] = chrome.PRODUCT_NAME
+
+
+class SourceLook(NamedTuple):
+    """How one service is SHOWN: its name, and its two pictures under
+    /static/images/ — see templates/_source_logo.html for which goes where."""
+    label: str
+    mark: str
+    wordmark: str
+
+
+# EVERY SERVICE'S TWO PICTURES, BY NAME, AND ONE ENTRY EACH. The template these
+# feed used to draw every service that was not Simkl as Trakt — its name, its
+# mark and its wordmark — so a third service would have been credited to the
+# wrong company on every card and button it touched. A service with no entry
+# here now fails the render (`source_look`) rather than borrowing another's
+# face; tests/kernel/test_source_look.py holds the table to the registry.
+#   tmdb  TMDB's own "primary short" square logo (themoviedb.org's logos and
+#         attribution page) as the wordmark, and the same logo on TMDB's navy
+#         tile as the mark, so it stays legible over a poster the way the
+#         other two marks' discs and tiles do. Sized by the same CSS classes as
+#         theirs, so it is never drawn larger, which TMDB's terms ask.
+SOURCE_IMAGES: dict[str, tuple[str, str]] = {
+    "trakt": ("trakt-circlemark-dark.svg", "trakt-logo-dark.svg"),
+    "simkl": ("simkllogo.svg", "simkl_white_with_shaddow_transparent.png"),
+    "tmdb": ("tmdb-mark.svg", "tmdb-wordmark.svg"),
+}
+
+
+def source_look(source) -> SourceLook:
+    """`source`'s name and pictures. Raises KeyError for a name that is not a
+    registered service with pictures: a card is better refused than drawn under
+    somebody else's logo.
+
+    THE NAME IS THE PROVIDER'S OWN LABEL, read from the registry, so a badge can
+    never spell a service differently from the rest of the app. Function-local
+    because the registry imports config, which this kernel module must not close
+    a loop through at load time."""
+    from . import providers
+    name = str(source)
+    mark, wordmark = SOURCE_IMAGES[name]
+    return SourceLook(providers.registered()[name].label, mark, wordmark)
+
+
+templates.env.globals["source_look"] = source_look
 
 
 def details_url(base: str, media, ids, season, key: str = "") -> str:

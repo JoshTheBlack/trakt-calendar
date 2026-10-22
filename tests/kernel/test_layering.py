@@ -221,8 +221,10 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "checklist is that module's picker lookup"),
     (KERNEL, PROVIDERS): Edge(
         "config.py asks the registry which sources are configured when it "
-        "validates settings. Function-local because providers/ reads config, "
-        "and doing it at the top of the file would close that loop",
+        "validates settings, and templating.py's source_look reads a service's "
+        "label off its provider so a badge cannot spell it differently from the "
+        "rest of the app. Function-local in both because providers/ reads "
+        "config, and doing it at the top of either file would close that loop",
         deferred=True),
 
     # --- into auth. auth is a layer: every feature may depend on it ---------
