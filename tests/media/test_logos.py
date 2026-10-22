@@ -305,3 +305,15 @@ class EnsureLogoTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ANameWithNoLatinLettersTests(unittest.TestCase):
+
+    def test_a_name_with_no_latin_letters_gets_its_own_file(self):
+        """Every such name used to slug to "" — one shared ".png" and ".none"."""
+        names = ["哔哩哔哩", "НТВ", "テレビ東京"]
+        slugs = [logos.slug(n) for n in names]
+        self.assertTrue(all(slugs))
+        self.assertEqual(len(set(slugs)), 3)
+        self.assertEqual(logos.slug("哔哩哔哩"), slugs[0])  # stable
+        self.assertEqual(logos.slug("AMC+"), "amc")          # Latin names unchanged

@@ -13,6 +13,7 @@ every request). Delete the files to regenerate.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 import re
@@ -40,7 +41,16 @@ _WHITE_BG = (255, 255, 255, 255)   # for dark/colored logos
 
 
 def slug(network: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", (network or "").lower()).strip("-")
+    """`network` as a file name. A name with no Latin letter or digit in it —
+    哔哩哔哩, НТВ — slugs to nothing, and every such network used to share the
+    one file ".png" and the one marker ".none", so a single one with no logo
+    hid all the others and none could be written at all ("unknown file
+    extension"). Such a name is named by a digest of itself instead: stable,
+    and its own."""
+    text = re.sub(r"[^a-z0-9]+", "-", (network or "").lower()).strip("-")
+    if text or not network:
+        return text
+    return "n-" + hashlib.sha256(network.encode("utf-8")).hexdigest()[:16]
 
 
 def _tile_path(network: str) -> Path:
