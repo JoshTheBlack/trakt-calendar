@@ -119,6 +119,27 @@ class RegistryTests(ArtworkTestCase):
         remaining = {row["tmdb"] for row in self.rows("SELECT tmdb FROM show_posters")}
         self.assertEqual(remaining, {2})
 
+    def test_a_row_tmdb_supplied_goes_at_tmdbs_six_month_ceiling(self):
+        """TMDB's terms forbid keeping anything obtained from it for longer than
+        six months, and these rows used to stay three years like any other. Rows
+        from other services keep the long retention; the same age from TMDB is
+        gone. Both registries."""
+        from app.media import tmdb
+        now = db.now()
+        aged = now - tmdb.MAX_CACHE_SECONDS - 10
+        for source in ("tmdb", "trakt"):
+            asyncio.run(artwork.record_poster_url("show", 7, source, f"https://img/{source}.jpg"))
+            asyncio.run(artwork.record_season_poster_urls(
+                [("show", 7, 1, source, f"https://img/{source}-s1.jpg")]))
+        for table in ("show_posters", "season_posters"):
+            asyncio.run(db.execute(f"UPDATE {table} SET last_seen_at = ?", (aged,)))
+
+        self.assertEqual(asyncio.run(artwork.sweep(now)), 2)
+        for table in ("show_posters", "season_posters"):
+            with self.subTest(table=table):
+                self.assertEqual({r["source"] for r in self.rows(f"SELECT source FROM {table}")},
+                                 {"trakt"})
+
 
 # ---------------------------------------------------------------------------
 # app/media/posters.py — the tile cache and resolution chain

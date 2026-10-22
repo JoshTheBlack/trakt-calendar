@@ -27,10 +27,19 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 from .. import db
+from . import tmdb
 
 # Rows are tiny and are the fallback for exactly the moment a primary source
 # fails; pruning them re-spends API calls already paid for. Three years.
 POSTER_URL_RETENTION_SECONDS = 3 * 365 * 24 * 3600
+
+# EXCEPT A ROW TMDB SUPPLIED, which may not be kept past TMDB's own ceiling: its
+# API terms forbid caching "any information obtained through or from TMDB" for
+# longer than six months, and an address TMDB answered with is exactly that. The
+# number is the TMDB client's (`MAX_CACHE_SECONDS`), not restated here, and the
+# clock is `last_seen_at` like every other row's: a fresh answer from TMDB is
+# re-obtaining the address, which restarts it.
+TMDB_SOURCE = "tmdb"
 
 # A registry URL that has failed this many times running is skipped in favour
 # of trying a fresh provider lookup instead of retrying a source that keeps
@@ -256,11 +265,16 @@ async def sweep(now: int | None = None) -> int:
     Returns how many were removed. Age is judged by last_seen_at, not
     first_seen_at, so a poster that is still being observed regularly never
     ages out just because it was first recorded long ago. A known miss ages out
-    the same way, which is when its title gets one more lookup."""
+    the same way, which is when its title gets one more lookup. A row TMDB
+    supplied goes at TMDB's six-month ceiling instead (TMDB_SOURCE)."""
     ts = db.now() if now is None else now
     cutoff = ts - POSTER_URL_RETENTION_SECONDS
+    tmdb_cutoff = ts - tmdb.MAX_CACHE_SECONDS
     removed = 0
     for table in ("show_posters", "season_posters"):
-        result = await db.execute(f"DELETE FROM {table} WHERE last_seen_at <= ?", (cutoff,))
+        result = await db.execute(
+            f"DELETE FROM {table} WHERE last_seen_at <= ? "
+            f"OR (source = ? AND last_seen_at <= ?)",
+            (cutoff, TMDB_SOURCE, tmdb_cutoff))
         removed += result.rowcount
     return removed
