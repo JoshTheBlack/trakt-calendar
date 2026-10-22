@@ -28,7 +28,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from ... import cache
+from ... import cache, db
 from ... import http_pool
 from ...config import Settings
 from ...perftrace import span
@@ -54,6 +54,13 @@ MAX_CACHE_SECONDS = 180 * 24 * 60 * 60
 # re-stamped by every refresh and 304, which is re-obtaining it, so the clock
 # only ever runs on rows nothing has asked TMDB about for this long.
 CACHE_RETAIN_SECONDS = MAX_CACHE_SECONDS - cache.TTL_GRACE_SECONDS
+
+# HOW LONG TMDB'S "NOT FOUND" IS BELIEVED before it is asked again: a day, the
+# same re-ask clock the Trakt and Simkl lookups by shared id keep. A stale tmdb
+# id on a card or a tracker row would otherwise cost a request on every panel
+# open and every tracker pass, to learn the same 404. A title TMDB adds tomorrow
+# is found tomorrow.
+NOT_FOUND_SECONDS = 24 * 60 * 60
 
 # How long a catalogue answer is served before it is revalidated. TMDB's own
 # responses say `cache-control: public, max-age` of 1.3-6.6 hours (measured
@@ -226,9 +233,15 @@ async def cached_get(settings: Settings, path: str, params: dict | None = None, 
     stored = await cache.get(url, ttl_seconds)
     if _is_envelope(stored):
         return stored["body"]
+    stale = await cache.get_stale(url)
+    # A REMEMBERED 404 IS AN ANSWER, raised as the same TmdbNotFound a live one
+    # is — the season handover and every "TMDB has no such title" reader depend
+    # on that type — and never as a failure. Every flag honours it: a caller that
+    # may not make a call still learns what TMDB already said.
+    if _is_not_found(stale) and stale["at"] > db.now() - NOT_FOUND_SECONDS:
+        raise TmdbNotFound(path)
     if only_if_cached:
         return None
-    stale = await cache.get_stale(url)
     if cache_only:
         return stale["body"] if _is_envelope(stale) else None
     etag = str(stale.get("etag") or "") if _is_envelope(stale) else ""
@@ -240,6 +253,10 @@ async def cached_get(settings: Settings, path: str, params: dict | None = None, 
         await cache.set(url, stale, retain_seconds=CACHE_RETAIN_SECONDS)
         return stale["body"]
     if resp.status_code == 404:
+        # Remembered for NOT_FOUND_SECONDS, under the same six-month retain as
+        # every other TMDB row, in place of any answer stored before.
+        await cache.set(url, {"not_found": True, "at": db.now()},
+                        retain_seconds=CACHE_RETAIN_SECONDS)
         raise TmdbNotFound(path)
     if resp.status_code == 401:
         # Worded without the token, which the response does not echo anyway.
@@ -259,6 +276,10 @@ async def cached_get(settings: Settings, path: str, params: dict | None = None, 
 
 def _is_envelope(value) -> bool:
     return isinstance(value, dict) and "body" in value
+
+
+def _is_not_found(value) -> bool:
+    return isinstance(value, dict) and value.get("not_found") is True and "at" in value
 
 
 def image_url(path: str | None, size: str = "w500") -> str:

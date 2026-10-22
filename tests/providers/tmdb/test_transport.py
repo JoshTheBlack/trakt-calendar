@@ -166,6 +166,36 @@ class A404IsNotAFailureTests(_Fresh):
         with pooled(transport, "POOL", client), self.assertRaises(transport.TmdbNotFound):
             await transport.cached_get(SETTINGS, "tv/999999999")
 
+    async def test_a_404_is_remembered_for_a_day(self):
+        """A stale tmdb id costs one request a day, not one per panel open: the
+        second ask raises the same TmdbNotFound and sends nothing."""
+        client = RecordingClient(response(404, json={"status_code": 34}))
+        with pooled(transport, "POOL", client):
+            with self.assertRaises(transport.TmdbNotFound):
+                await transport.cached_get(SETTINGS, "tv/404")
+            for flags in ({}, {"cache_only": True}, {"only_if_cached": True}):
+                with self.subTest(flags=flags), self.assertRaises(transport.TmdbNotFound):
+                    await transport.cached_get(SETTINGS, "tv/404", **flags)
+        self.assertEqual(len(client.calls), 1)
+
+    async def test_after_a_day_tmdb_is_asked_again(self):
+        client = RecordingClient([response(404, json={}), response(200, json={"id": 404})])
+        with pooled(transport, "POOL", client):
+            with self.assertRaises(transport.TmdbNotFound):
+                await transport.cached_get(SETTINGS, "tv/404")
+            await db.execute("UPDATE api_cache SET payload = ?, cached_at = cached_at",
+                             (cache._encode({"not_found": True,
+                                             "at": db.now() - transport.NOT_FOUND_SECONDS - 1}),))
+            self.assertEqual(await transport.cached_get(SETTINGS, "tv/404"), {"id": 404})
+        self.assertEqual(len(client.calls), 2)
+
+    async def test_the_remembered_404_is_held_to_the_six_month_ceiling(self):
+        client = RecordingClient(response(404, json={}))
+        with pooled(transport, "POOL", client), self.assertRaises(transport.TmdbNotFound):
+            await transport.cached_get(SETTINGS, "tv/404")
+        self.assertEqual(await db.fetch_value("SELECT ttl_seconds FROM api_cache"),
+                         transport.CACHE_RETAIN_SECONDS)
+
     def test_the_type_is_not_the_could_not_answer_contract(self):
         """A caller catching SourceUnavailable must never swallow "TMDB has no
         such season" — that answer hands the season to the next service."""
