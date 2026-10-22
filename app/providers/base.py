@@ -1787,6 +1787,18 @@ class Provider(Protocol):
         """
         ...
 
+    def episode_url(self, ids: Mapping[str, Any], season: int, number: int) -> str:
+        """This service's page for one episode of a show — as deep as it can go
+        from an id map: the episode where it has an address for one, the show
+        otherwise — or "" without an id of its own. Answered without a call.
+
+        What an episode tick in the tracker's panel opens, so a viewer can go and
+        correct a count where the count lives. On the provider for the reason
+        `title_url` is: the panel used to know two services' addresses by name,
+        and any other service's tick linked nowhere.
+        """
+        ...
+
     def catalogue_is_configured(self, settings: Settings) -> bool:
         """Whether this instance can make this source's PUBLIC catalogue
         reads — the predicate `for_catalogue_search` gates on, and

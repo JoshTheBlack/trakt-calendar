@@ -321,6 +321,9 @@ class _TraktProvider:
             return ""
         return calendar.title_url(media, ids)
 
+    def episode_url(self, ids, season: int, number: int) -> str:
+        return calendar.episode_url(ids, season, number)
+
     def catalogue_is_configured(self, settings: Settings) -> bool:
         # The client id alone, same question `_TraktDetailPort.catalogue_configured`
         # asks and for the same reason: a catalogue search authenticates with

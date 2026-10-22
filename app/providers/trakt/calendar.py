@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import time as _time
 from datetime import date, datetime
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from ... import perftrace
 from ...config import Settings
@@ -173,6 +173,25 @@ def title_url(media: Media, ids: dict) -> str:
     kind = "movies" if media == Media.MOVIE else "shows"
     name = ids.get("trakt_slug") or ids.get("trakt")
     return f"https://trakt.tv/{kind}/{name}" if name else "https://trakt.tv"
+
+
+def episode_url(ids: dict, season: int, number: int) -> str:
+    """https://app.trakt.tv/shows/<slug|id>?season=N&view=episode&episode=M
+
+    THE SLUG IS PREFERRED AND THE ID IS THE FALLBACK, for the reason `title_url`
+    gives: Trakt resolves its own numeric id perfectly well, but doing so costs
+    it a title lookup and a redirect it would not have needed.
+
+    A MAP WITH NEITHER GETS NO LINK. Trakt's slug arrives on history events, so a
+    title with no recent play can carry an id for years and still have no name —
+    the id alone reaches the right page, which is why it is a fallback rather
+    than a second requirement.
+    """
+    name = str(ids.get("trakt_slug") or ids.get("trakt") or "")
+    if not name:
+        return ""
+    return (f"https://app.trakt.tv/shows/{quote(name, safe='')}"
+            f"?season={season}&view=episode&episode={number}")
 
 
 def to_record(entry: dict, kind: Media) -> Record | None:

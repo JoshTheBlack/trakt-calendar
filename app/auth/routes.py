@@ -53,7 +53,7 @@ from ..media import user_images
 from ..templating import templates
 # Bound as `trakt_auth` because inside app/auth/ a bare `trakt` would read as the
 # Trakt SOURCE (app/providers/trakt/); this is the login flow.
-from . import provider_avatars
+from . import provider_avatars, revocation
 from . import trakt as trakt_auth
 from .levels import AuthLevel
 
@@ -906,28 +906,14 @@ async def unlink_identity(request: Request):
     user = await auth.require_session(request)
     data = await authz.json_body(request)
     provider = str(data.get("provider") or "").strip().lower()
-    if provider not in ("trakt", "plex", "simkl"):
+    if not revocation.is_login_provider(provider):
         return await _card(request, user.session_id, link_message="Unknown provider.")
-    # Imported here rather than at module scope: trakt_routes.py and
-    # simkl_routes.py read this module's message constants, so the dependency
-    # only runs one way at import time.
-    from . import simkl_routes, trakt_routes
 
     # Read before the unlink (the token lives on the row it deletes), spent only
     # after one actually happened — an unlink that gets refused below must not
-    # leave the account linked to a token this app just killed.
-    #
-    # TRAKT AND SIMKL BOTH REVOKE NOW. Plex's token is invalidated by the user
-    # on plex.tv — there is no revocation endpoint to call for it, so it stays
-    # local-only. Simkl's v1 tokens documented no revocation at all, but v2
-    # does (app/auth/simkl.py.revoke_token); simkl_routes.revoke_token_value
-    # already reads a legacy-shaped stored token as nothing to revoke, so this
-    # call site does not need to tell the two apart itself.
-    stored_token = None
-    if provider == "trakt":
-        stored_token = await trakt_routes.stored_access_token(user.user_id)
-    elif provider == "simkl":
-        stored_token = await simkl_routes.stored_access_token(user.user_id)
+    # leave the account linked to a token this app just killed. Which services
+    # revoke at all, and how, is app/auth/revocation.py's table.
+    stored_token = await revocation.stored_token(provider, user.user_id)
     try:
         removed = await auth.unlink_identity(user.user_id, provider)
     except auth.LastLoginMethod:
@@ -938,11 +924,7 @@ async def unlink_identity(request: Request):
         return await _card(request, user.session_id, link_message="That account isn't linked.")
     # The unlink succeeded either way; a warning is about the part only the user
     # can finish, on the provider's own site, so it is said beside the rows.
-    warning = None
-    if provider == "trakt":
-        warning = await trakt_routes.revoke_token_value(stored_token)
-    elif provider == "simkl":
-        warning = await simkl_routes.revoke_token_value(stored_token)
+    warning = await revocation.revoke(provider, stored_token)
     return await _card(request, user.session_id, link_message=warning or "",
                        link_ok=not warning)
 

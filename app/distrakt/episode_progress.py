@@ -25,10 +25,9 @@ from __future__ import annotations
 
 import json
 from typing import Mapping, NamedTuple, Sequence
-from urllib.parse import quote
 
 from . import watch_history
-from .. import db
+from .. import db, providers
 from ..auth import viewer
 from ..providers.base import ItemKey
 
@@ -60,41 +59,6 @@ class SourceCount(NamedTuple):
     count: int
 
 
-def _trakt_episode_url(slug: str, trakt_id: str, season: int, number: int) -> str:
-    """https://app.trakt.tv/shows/<slug|id>?season=N&view=episode&episode=M
-
-    THE SLUG IS PREFERRED AND THE ID IS THE FALLBACK, the same order the Simkl
-    link uses and for the same reason: a service resolves its own numeric id
-    perfectly well, but doing so costs it a title lookup and a redirect it would
-    not have needed. Sending the readable name when we know it is what both
-    services ask for.
-
-    A ROW WITH NEITHER GETS NO LINK. Trakt's slug arrives on history events, so a
-    title with no recent play can carry an id for years and still have no name —
-    the id alone reaches the right page, which is why it is a fallback rather
-    than a second requirement.
-    """
-    name = slug or str(trakt_id or "")
-    if not name:
-        return ""
-    return (f"https://app.trakt.tv/shows/{quote(name, safe='')}"
-            f"?season={season}&view=episode&episode={number}")
-
-
-def _simkl_url(slug: str, simkl_id: str) -> str:
-    """https://simkl.com/tv/<id>[/<slug>]
-
-    THE ID IS THE STABLE IDENTIFIER AND THE SLUG IS DECORATION — Simkl says so
-    outright, and asks that the slug be included when it is known. So a title we
-    have no Simkl slug for still links, by id alone. Simkl is opened at the
-    TITLE, which is as deep as an id from a roster row reaches.
-    """
-    if not simkl_id:
-        return ""
-    base = f"https://simkl.com/tv/{quote(str(simkl_id), safe='')}"
-    return f"{base}/{quote(slug, safe='')}" if slug else base
-
-
 class SeasonProgress:
     """One viewer's record of one season, as the episode rows need it.
 
@@ -122,11 +86,9 @@ class SeasonProgress:
         # say about this season: a hollow tick is the whole answer to "which of
         # them is missing it", and a service dropped for having recorded nothing
         # would leave the reader unable to tell "Simkl has not seen this" from
-        # "this account has no Simkl". The two fallbacks behind it are for an
-        # account whose linked services cannot be listed at all — a season that
-        # recorded something still says who recorded it, and one that recorded
-        # nothing still draws the single tick this panel has always drawn.
-        self._services = _services_for(services, by_source)
+        # "this account has no Simkl". See `_services_for` for the fallbacks
+        # behind it.
+        self._services = _services_for(services, by_source, source_ids)
         self._by_source = {name: {_as_number(n) for n in numbers}
                            for name, numbers in by_source.items()}
         self._ids = {name: str(source_ids.get(name) or "") for name in self._services}
@@ -208,36 +170,49 @@ class SeasonProgress:
         return bool(self._ids[name]) or bool(self._by_source.get(name))
 
     def _url_for(self, name: str, number: int) -> str:
-        if name == "trakt":
-            return _trakt_episode_url(self._slugs["trakt"], self._ids["trakt"],
-                                      self._season, number)
-        if name == "simkl":
-            return _simkl_url(self._slugs["simkl"], self._ids["simkl"])
-        # A service registered later links nowhere until somebody says where its
-        # episodes live; its ticks still draw, as text.
-        return ""
+        """Where this service's tick goes: the service's own answer
+        (`Provider.episode_url`), from its own id and slug alone.
+
+        ASKED OF THE REGISTRY, NEVER BY NAME. This used to know two services'
+        addresses and send every other service's tick nowhere; a name the
+        registry does not know now raises rather than quietly drawing a tick
+        that cannot be followed — every name here came from the tracker's own
+        sources, so an unknown one is a bug to see, not a case to tolerate."""
+        ids = {name: self._ids[name], f"{name}_slug": self._slugs[name]}
+        return providers.get(name).episode_url(ids, self._season, number)
 
 
-def _services_for(services: Sequence[str], by_source: Mapping[str, Sequence[int]]
-                  ) -> tuple[str, ...]:
+def _services_for(services: Sequence[str], by_source: Mapping[str, Sequence[int]],
+                  ids: Mapping[str, object] | None = None) -> tuple[str, ...]:
     """Whose ticks a row draws, with the fallbacks applied ONCE.
 
     EVERY SERVICE THIS ACCOUNT SYNCS, not only the ones with something to say
     about this season: a hollow tick is the whole answer to "which of them is
     missing it", and a service dropped for having recorded nothing would leave the
     reader unable to tell "Simkl has not seen this" from "this account has no
-    Simkl". The two fallbacks behind it are for an account whose linked services
-    cannot be listed at all — a season that recorded something still says who
-    recorded it, and one that recorded nothing still draws the single tick this
-    panel has always drawn.
+    Simkl". Behind that, for an account whose linked services cannot be listed at
+    all, a season that recorded something still says who recorded it.
+
+    AND AN ACCOUNT SYNCING NOTHING STILL GETS A TICK PER TRACKER SERVICE THIS
+    TITLE CAN BE LOOKED UP AT, in declared order. A tick is a link before it is a
+    claim — it opens that episode at that service, which is worth having whether
+    or not the reader has an account there. It used to be one Trakt tick, a
+    default service named in a module that should know none; asking the registry
+    which services keep a watch history, and the title's ids which of those know
+    it, is the same row without the name.
 
     IT IS A FUNCTION RATHER THAN A LINE IN THE CONSTRUCTOR because the ids a tick
     LINKS to are gathered against this same list, and gathering them against the
-    raw one is a bug that shipped: an account syncing nothing fell back to Trakt
-    here and to nothing there, so the row drew a tick with no link on the one
+    raw one is a bug that shipped: the row drew a tick with no link on the one
     surface where the link is the entire point.
     """
-    return tuple(services) or tuple(sorted(by_source)) or ("trakt",)
+    if services:
+        return tuple(services)
+    if by_source:
+        return tuple(sorted(by_source))
+    trackers = providers.tracker_sources()
+    return tuple(str(source) for source in providers.registered()
+                 if str(source) in trackers and str((ids or {}).get(str(source)) or ""))
 
 
 def _as_number(value) -> int:
@@ -313,7 +288,7 @@ async def for_season(user_id: int, key: ItemKey, season: int,
     # gather ids for the SAME list the ticks are drawn for — see `_services_for`.
     services = _services_for(
         [str(name) for name, _port in await watch_history.tracker_ports(settings, user_id)],
-        by_source)
+        by_source, ids)
     return SeasonProgress(
         services, by_source,
         # WHAT EACH SERVICE'S TICK LINKS TO. A tick is where you go to correct a
@@ -326,8 +301,7 @@ async def for_season(user_id: int, key: ItemKey, season: int,
         # `slug` holds whichever service wrote last, which made the Trakt link
         # land nowhere whenever the value had come from Simkl — so it is not read
         # here at all. See store.ID_COLUMNS.
-        slugs={"trakt": str(ids.get("trakt_slug") or ""),
-               "simkl": str(ids.get("simkl_slug") or "")},
+        slugs={name: str(ids.get(f"{name}_slug") or "") for name in services},
         season=season)
 
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import re
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 from markupsafe import escape
@@ -498,6 +499,36 @@ class AdminUnlinkTests(AdminTestCase):
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertNotIn("Unlink anyway", resp.text)
         self.assertEqual(len(asyncio.run(auth.list_identities(oauth_only_id))), 0)
+
+
+    def test_a_simkl_link_can_be_unlinked_and_is_revoked(self):
+        """Every sign-in service, from app/auth/revocation.py's one table. This
+        route used to accept two of the three, so an administrator could not
+        remove somebody's Simkl link at all."""
+        self.make_admin()
+        member_id = asyncio.run(auth.create_user(username="m1", password="a-long-password-1"))
+
+        def _link(conn):
+            auth.insert_linked_identity(
+                conn, user_id=member_id, provider="simkl", provider_user_id="654",
+            )
+        asyncio.run(db.transaction(_link))
+
+        self.login_as(self.client, "admin1")
+        with patch("app.auth.simkl_routes.stored_access_token",
+                   AsyncMock(return_value="the-token")),              patch("app.auth.simkl_routes.revoke_token_value",
+                   AsyncMock(return_value=None)) as revoke:
+            resp = self.client.post(f"/admin/users/{member_id}/identities/unlink",
+                                    json={"provider": "simkl"})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(asyncio.run(auth.list_identities(member_id)), [])
+        revoke.assert_awaited_once_with("the-token")
+
+    def test_a_name_that_is_not_a_sign_in_service_is_refused(self):
+        self.make_admin()
+        self.login_as(self.client, "admin1")
+        resp = self.client.post("/admin/users/1/identities/unlink", json={"provider": "tmdb"})
+        self.assertDrawnIn(resp, "users", "Unknown provider.")
 
 
 # ---------------------------------------------------------------------------

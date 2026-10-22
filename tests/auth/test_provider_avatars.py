@@ -223,3 +223,33 @@ class FetchRefusesBeforeAnyRequestTests(unittest.IsolatedAsyncioTestCase):
                                   ("trakt", None)):
                 with self.subTest(provider=provider, url=url):
                     self.assertIsNone(await provider_avatars.fetch(provider, url))
+
+
+class EveryHostListedProviderHasAnAccountLookupTests(unittest.TestCase):
+    """The two per-provider tables agree. The refresh used to dispatch with an
+    if per name and read every name that was neither of two services as the
+    third; now a provider missing from either table is refused."""
+
+    def test_the_tables_name_the_same_providers(self):
+        self.assertEqual(set(provider_avatars.ALLOWED_HOSTS),
+                         set(provider_avatars._ACCOUNT_LOOKUPS))
+
+    def test_they_are_the_providers_anybody_signs_in_with(self):
+        from app.auth import revocation
+        self.assertEqual(set(provider_avatars.ALLOWED_HOSTS), set(revocation.LOGIN_PROVIDERS))
+
+
+class RevocationTableTests(unittest.IsolatedAsyncioTestCase):
+    """app/auth/revocation.py — which sign-in services revoke on unlink."""
+
+    def test_an_unknown_provider_is_refused_not_read_as_another(self):
+        from app.auth import revocation
+        self.assertFalse(revocation.is_login_provider("tmdb"))
+        with self.assertRaises(ValueError):
+            revocation.revoker("tmdb")
+
+    async def test_plex_has_nothing_to_revoke(self):
+        from app.auth import revocation
+        self.assertIsNone(revocation.revoker("plex"))
+        self.assertIsNone(await revocation.stored_token("plex", 1))
+        self.assertIsNone(await revocation.revoke("plex", "anything"))

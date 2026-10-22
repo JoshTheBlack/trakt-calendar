@@ -42,6 +42,7 @@ from fastapi.responses import Response
 from .. import auth, authz, chrome, clock, db, route_params
 from ..config import load_settings
 from ..templating import templates
+from . import revocation
 from .levels import AuthLevel
 
 router = APIRouter()
@@ -97,6 +98,9 @@ async def _admin_context(request: Request, *, section: str = "", message: str = 
         "retired": await auth.list_retired_identifiers(),
         "when": lambda timestamp: spell_time(timestamp, zone),
         "invite_base": _invite_base(request),
+        # The services an administrator can unlink, from the one table that
+        # also decides what unlinking each does (app/auth/revocation.py).
+        "login_providers": revocation.LOGIN_PROVIDERS,
         "notice": {"section": section, "message": message, "ok": ok},
         **extra,
     }
@@ -278,15 +282,17 @@ async def admin_unlink_identity(user_id: int, request: Request):
     would have raised, drawn with a second confirmation that sends `force`."""
     data = await authz.json_body(request)
     provider = str(data.get("provider") or "").strip().lower()
-    if provider not in ("trakt", "plex"):
+    if not revocation.is_login_provider(provider):
         return await _shell(request, "users", "Unknown provider.")
     force = route_params.ticked(data.get("force"))
-    from . import trakt_routes  # deferred: trakt_routes reads routes.py
 
     # Read before the unlink (the token lives on the row it deletes), spent only
     # after one actually happened — a first call that comes back asking for
     # `force` must not kill the token and leave the identity linked to it.
-    token = await trakt_routes.stored_access_token(user_id) if provider == "trakt" else None
+    # EVERY SIGN-IN SERVICE, from app/auth/revocation.py's one table: this
+    # route used to accept two of the three, so an administrator could not
+    # remove somebody's Simkl link at all.
+    token = await revocation.stored_token(provider, user_id)
     try:
         removed = await auth.unlink_identity(user_id, provider, force=force)
     except auth.LastLoginMethod:
@@ -298,7 +304,7 @@ async def admin_unlink_identity(user_id: int, request: Request):
         return await _shell(request, "users", "That account isn't linked.")
     # Unlinked locally regardless; a warning is about the authorization still
     # standing on the provider's side, which only its owner can clear.
-    warning = await trakt_routes.revoke_token_value(token)
+    warning = await revocation.revoke(provider, token)
     return await _shell(request, "users", warning or f"Unlinked {provider.title()}.", ok=not warning)
 
 

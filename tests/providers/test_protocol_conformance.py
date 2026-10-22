@@ -524,6 +524,18 @@ class EveryProviderLinksToItsOwnPagesTests(unittest.TestCase):
         for source, provider in providers.registered().items():
             with self.subTest(source=str(source)):
                 self.assertEqual(provider.title_url(Media.SHOW, {"imdb": "tt1"}), "")
+                self.assertEqual(provider.episode_url({"imdb": "tt1"}, 1, 1), "")
+
+    def test_an_episode_this_service_knows_links_to_this_service(self):
+        """`Provider.episode_url` — what an episode tick in the tracker's panel
+        opens."""
+        from urllib.parse import urlparse
+        for source, provider in providers.registered().items():
+            with self.subTest(source=str(source)):
+                url = provider.episode_url({str(source): "12345"}, 2, 3)
+                host = urlparse(url).hostname or ""
+                self.assertTrue(host == SERVICE_HOSTS[str(source)]
+                                or host.endswith("." + SERVICE_HOSTS[str(source)]), url)
 
 
 class TheCheckWouldActuallyFailTests(unittest.TestCase):
@@ -563,7 +575,7 @@ class TheCheckWouldActuallyFailTests(unittest.TestCase):
         # app/providers/__init__.py itself.
         for name in ("source", "label", "capabilities", "sync_port", "calendar_port",
                      "detail_port", "search_port", "watchlist_port", "is_configured",
-                     "catalogue_is_configured", "title_url"):
+                     "catalogue_is_configured", "title_url", "episode_url"):
             with self.subTest(member=name):
                 self.assertIn(name, Provider.__protocol_attrs__)
 

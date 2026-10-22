@@ -137,7 +137,7 @@
               {{ post(base ~ '/sessions/revoke-all', 'Log out', face='btn-primary small') }}
               {% endcall %}
 
-              {% for provider in ('trakt', 'plex') if provider in u.providers %}
+              {% for provider in login_providers if provider in u.providers %}
               {% call confirm_box.ask('unlink-' ~ provider ~ '-' ~ u.id,
                                       'Unlink ' ~ provider.title() ~ ' from this account?',
                                       'Unlink ' ~ provider.title(), danger=true, face='btn-ghost tiny') %}

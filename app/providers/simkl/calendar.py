@@ -35,6 +35,7 @@ import asyncio
 import logging
 import time as _time
 from datetime import date, datetime, timedelta
+from urllib.parse import quote
 
 from ... import perftrace
 from ...config import Settings
@@ -367,6 +368,24 @@ def title_url(media: Media, ids: dict) -> str:
     slug = str(ids.get("simkl_slug") or "").strip()
     path = f"{_SITE_PATHS[media]}/{simkl_id}"
     return f"https://simkl.com/{path}/{slug}" if slug else f"https://simkl.com/{path}"
+
+
+def episode_url(ids: dict, season: int, number: int) -> str:
+    """https://simkl.com/tv/<id>[/<slug>] — Simkl's page for the SHOW, because
+    an id from a roster row reaches no deeper: Simkl has no address for one
+    episode this app can build from what it holds.
+
+    THE ID IS THE STABLE IDENTIFIER AND THE SLUG IS DECORATION — Simkl says so
+    outright, and asks that the slug be included when it is known. So a title we
+    have no Simkl slug for still links, by id alone. Both are quoted, because
+    they come from stored rows rather than from this package's own reading.
+    """
+    simkl_id = str(ids.get("simkl") or "")
+    if not simkl_id:
+        return ""
+    base = f"https://simkl.com/tv/{quote(simkl_id, safe='')}"
+    slug = str(ids.get("simkl_slug") or "")
+    return f"{base}/{quote(slug, safe='')}" if slug else base
 
 
 def _detail_url(media: Media, entry_url, raw_ids: dict) -> str:
