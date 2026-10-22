@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import unittest
 from html import unescape
@@ -31,7 +32,7 @@ from zoneinfo import ZoneInfo
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, patch
 
-from app import db
+from app import clock, db
 from app.distrakt import routes as distrakt_routes
 from app.auth import viewer as auth_viewer
 from app.distrakt import store, watch_history
@@ -81,8 +82,18 @@ class _RosterAddCase(DistraktTestCase):
     OLD_RUN = {str(n): "2020-02-%02d" % (n + 1) for n in range(1, 14)}
     USER = "adder"
 
+    # THE MONTH THESE ADDS NAME IS SEPTEMBER 2026, and every one of them was
+    # written while September was the month under way: a search add to the
+    # month being lived through asks about a finished season, while an add to a
+    # month that has ended does not. So the clock is pinned inside it. Against
+    # the real date, the whole family failed the day October began.
+    TODAY = "2026-09-15"
+
     def setUp(self):
         super().setUp()
+        clock_pin = patch.dict(os.environ, {clock.FAKE_TODAY_ENV: self.TODAY})
+        clock_pin.start()
+        self.addCleanup(clock_pin.stop)
         self.user_id = self.tracker_user(self.USER)
         self.sign_in_as(self.user_id)
         self.baselines = 0

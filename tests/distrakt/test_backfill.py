@@ -8,6 +8,7 @@ the bucketing, the plan and the writes are all real.
 from __future__ import annotations
 
 import asyncio
+import os
 import unittest
 from zoneinfo import ZoneInfo
 from datetime import date, timedelta
@@ -17,7 +18,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.responses import Response
 from fastapi.testclient import TestClient
 
-from app import auth, db, distrakt
+from app import auth, clock, db, distrakt
 from app.distrakt import backfill, watch_history
 from app.providers import title_search
 from app.calendar import state as calendar_state
@@ -1144,8 +1145,13 @@ class BackfillRouteTests(unittest.TestCase):
         than inferred. A range holding nothing the sweep may read — here the
         month still under way, which a survey never touches — is not the same as
         a range that was read and held no finished season, and a reader told
-        "0 season(s)" cannot tell the two apart."""
-        html = " ".join(self._survey([], start="2026-09", end="2026-09").text.split())
+        "0 season(s)" cannot tell the two apart.
+
+        THE CLOCK IS PINNED INSIDE SEPTEMBER, because "the month still under way"
+        is a fact about today: written against the real date, this passed while
+        September was current and failed for ever after."""
+        with patch.dict(os.environ, {clock.FAKE_TODAY_ENV: "2026-09-15"}):
+            html = " ".join(self._survey([], start="2026-09", end="2026-09").text.split())
 
         self.assertIn("No month in that range was read for seasons", html)
         self.assertNotIn("season(s) ", html)
