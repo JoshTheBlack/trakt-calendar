@@ -17,6 +17,8 @@ All notable changes to this project are documented here. Format loosely follows 
 - 🔓 **An administrator can unlink a Simkl account** from the admin page, and the Simkl token is revoked like Trakt's.
 - 📅 **"This calendar doesn't reach that month" offers a service that does**, never one with no calendar.
 - 🖼️ **A network logo or poster TMDB couldn't be asked about is tried again later**, instead of being remembered as having none.
+- 🔑 **The instance's Trakt token no longer needs re-authorizing after a while away.** When the administrator who authorized it had it linked to their account, renewing one copy left the other dead; a renewal now reaches both, and a failed renewal names whose token it was and why Trakt refused it.
+- 🍞 **Admin actions confirm with a toast**, like the rest of the app; a refusal still appears beside the section it came from.
 
 ### Under the hood
 - ⏱️ **The test suite runs in about two minutes instead of eleven**: it uses every CPU core and stops re-reading the certificate store for every test. Code nothing used any more is gone, and the code no test reached now has tests.

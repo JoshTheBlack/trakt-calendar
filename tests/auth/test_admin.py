@@ -56,6 +56,11 @@ class AdminTestCase(AppTestCase):
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertIn('id="adminShell"', resp.text)
         self.assertIn(str(escape(message)), resp.text)
+        # A SUCCESS IS A TOAST, out of band into the page's host; only a refusal
+        # is drawn in its section.
+        toast = resp.text.split('id="toastHost" hx-swap-oob="beforeend"', 1)
+        if len(toast) == 2 and str(escape(message)) in toast[1]:
+            return
         heading = {"users": "Accounts", "invites": "Invites", "retired": "Retired identifiers"}[section]
         after_heading = resp.text.split(f"<h2>{heading}</h2>", 1)[1]
         self.assertLess(after_heading.index(str(escape(message))), after_heading.index("<table"))
@@ -523,6 +528,9 @@ class AdminUnlinkTests(AdminTestCase):
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(asyncio.run(auth.list_identities(member_id)), [])
         revoke.assert_awaited_once_with("the-token")
+        # Said as a toast, as a success is everywhere else in the app.
+        self.assertRegex(resp.text, r'id="toastHost" hx-swap-oob="beforeend">\s*<div class="toast ok[^>]*>'
+                                    r'Unlinked Simkl\.')
 
     def test_a_name_that_is_not_a_sign_in_service_is_refused(self):
         self.make_admin()
