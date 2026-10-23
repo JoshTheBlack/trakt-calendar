@@ -2703,9 +2703,17 @@ async def api_distrakt_add_movie(request: Request):
         return _month_refusal(request, _pick_gone(data))
     if unkeyable := _unkeyable_reason(pick.media, pick.ids, pick.title):
         return _month_refusal(request, unkeyable)
+    # EVERY SERVICE IS ASKED FOR ITS OWN ID, by the shared ids the pick names —
+    # the exact lookups a show's arrival makes (arrival.ask_services). A film the
+    # default catalogue found carries its tmdb id alone, and filed with nothing
+    # else it names no Trakt or Simkl page and no service's play of it says so
+    # until that service's history happens to report it. A service that cannot
+    # be asked costs the add nothing.
+    learned = await arrival.ask_services(settings, {"film": (Media.MOVIE, dict(pick.ids))})
+    ids = {**pick.ids, **learned.get("film", {})}
 
     recorded = await watch_history.record_movie_watches(user_id, [{
-        "ids": pick.ids,
+        "ids": ids,
         "title": pick.title,
         "year": pick.year,
         "watched_at": f"{watched_on.isoformat()}T12:00:00Z",

@@ -246,6 +246,35 @@ class AddingAFilmTests(AddFlowTestCase):
         self.assertIn("That search has expired", resp.text)
         self.assertEqual(self._watches(), {})
 
+    def test_a_film_the_default_catalogue_found_learns_each_services_id(self):
+        """A TMDB hit carries its tmdb id alone; the add asks each service for
+        its own id by that one, exactly — the lookup a show's arrival makes."""
+        pick = title_search.Pick(title="Heat", network="", year=1995, ids={"tmdb": 949},
+                                 seasons=[], named_season=None, media=Media.MOVIE)
+        find = AsyncMock(return_value={"trakt": 6, "slug": "heat-1995", "tmdb": 949})
+        with patch.object(title_search, "resolve_pick", AsyncMock(return_value=pick)), \
+             patch.object(trakt_detail, "find_by_shared_id", find):
+            resp = self.add("/api/distrakt/add-movie",
+                            {"q": "heat", "i": 0, "watched_on": "2026-01-05"})
+        self.assertEqual(resp.status_code, 200, resp.text[:300])
+        self.assertEqual(find.await_args.args[2], {"tmdb": 949})
+        (key, watch), = self._watches().items()
+        self.assertEqual(key, "movie:tmdb:949")
+        self.assertEqual(watch["ids"].get("trakt"), 6)
+
+    def test_a_service_that_cannot_be_asked_costs_the_add_nothing(self):
+        from app.providers.trakt import TraktError
+
+        pick = title_search.Pick(title="Heat", network="", year=1995, ids={"tmdb": 949},
+                                 seasons=[], named_season=None, media=Media.MOVIE)
+        with patch.object(title_search, "resolve_pick", AsyncMock(return_value=pick)), \
+             patch.object(trakt_detail, "find_by_shared_id",
+                          AsyncMock(side_effect=TraktError("down"))):
+            resp = self.add("/api/distrakt/add-movie",
+                            {"q": "heat", "i": 0, "watched_on": "2026-01-05"})
+        self.assertEqual(resp.status_code, 200, resp.text[:300])
+        self.assertEqual(list(self._watches()), ["movie:tmdb:949"])
+
 
 class AddingWhatOnlyTheOtherServiceListsTests(AddFlowTestCase):
     """A hit no Trakt search returned still adds.
