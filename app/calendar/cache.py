@@ -1096,44 +1096,12 @@ async def visible_records(groups, endpoint, *, genres="", countries="",
         # and asking per record would strip a service off a merged card to
         # enforce a rule about release formats. Counted rather than silently
         # applied, so a month this empties can say so — see meta below.
-        narrowed = calendar_filter.filter_release_groups(
-            parsed, endpoint.media, movie_release_countries, movie_release_types)
-        release_filtered = len(parsed) - len(narrowed)
-        records = [r for r in (calendar_resolve.resolve_records(group, rs, prefs)
-                               for group, rs in narrowed) if r is not None]
-        # A Simkl entry Simkl's OWN enrichment marks as a film (`anime_type ==
-        # "movie"`) does not belong on a series endpoint — see
-        # filter.prune_disguised_films for the measured rule and why this is
-        # a read-time exclusion rather than something fetch_window_records can
-        # do at fill. Same reasoning as the exemption below: it can only act
-        # on what enrichment has already found, so it runs right beside it.
-        records = calendar_filter.prune_disguised_films(records, endpoint.media)
-        # THE INSTANCE FLOOR, AND IT RUNS BEFORE THIS VIEWER'S OWN SPECS.
-        # It is applied at FILL as well (fetch_window_records), where it is a
-        # HARD exclusion — a floored title never enters the shared rows, so no
-        # per-account filter can bring it back, and that promise is the reason
-        # the fill keeps it. But the fill is the only moment that copy acts, so
-        # an operator who tightened the floor went on seeing a month that was
-        # already stored until its TTL ran out. Applying it here too is what
-        # makes the change reach windows already held — the shape the instance's
-        # "include Simkl results" switch already has, and for the same reason:
-        # it is one decision taken for every viewer, so it can narrow the shared
-        # rows without deciding anything on one viewer's behalf.
-        # THE OPERATOR'S SPEC IS NOT MERGED INTO THE VIEWER'S. They are two
-        # answers to the same question and either may be empty; applying them in
-        # turn is also what keeps the count below honest.
-        if settings is not None:
-            records = calendar_filter.filter_records(
-                records, settings.genres, settings.countries,
-                (settings.show_certifications if endpoint.media == "show"
-                 else settings.movie_certifications),
-                exempt_unenriched=True)
-        certifications = show_certifications if endpoint.media == "show" else movie_certifications
-        # exempt_unenriched=True on BOTH READS and never at the fill — see
-        # filter.keep_record for why a read gives a record enrichment has not
-        # answered for the benefit of the doubt and the fill does not.
-        kept = calendar_filter.filter_records(records, genres, countries, certifications,
-                                              exempt_unenriched=True)
+        kept, release_filtered, resolved = narrow_for_viewer(
+            parsed, endpoint.media, genres=genres, countries=countries,
+            show_certifications=show_certifications,
+            movie_certifications=movie_certifications,
+            movie_release_countries=movie_release_countries,
+            movie_release_types=movie_release_types, prefs=prefs, settings=settings)
         sp.set(kept=len(kept))
 
     # EVERY PER-VIEWER REMOVAL, IN ONE NUMBER. The release rule and the
@@ -1143,9 +1111,64 @@ async def visible_records(groups, endpoint, *, genres="", countries="",
     # the instance-wide floor and `prune_disguised_films` also remove records and
     # neither is this viewer's doing — attributing those to a filter somebody set
     # would send them looking for a setting that would not bring the title back.
-    return kept, release_filtered + (len(records) - len(kept))
+    return kept, release_filtered + (resolved - len(kept))
 
 
+def narrow_for_viewer(parsed, media, *, genres="", countries="", show_certifications="",
+                      movie_certifications="", movie_release_countries="",
+                      movie_release_types="", prefs=None, settings=None) -> tuple[list, int, int]:
+    """Every filter a calendar applies to the records it has admitted, in the
+    order it applies them: `(kept, how many groups the release narrowing
+    removed, how many records reached the rest)`. `parsed` is
+    `[(group, its admitted records)]`.
+
+    ONE IMPLEMENTATION OF "WOULD THIS VIEWER'S FILTERS HIDE IT", called by
+    `visible_records` for the stored calendar and by the search's season picker
+    (calendar/search.py's `picker`) for a title a service has just described —
+    which no source admission applies to, since the calendar would draw another
+    service's record of it, but every filter does: a picker that checked genre,
+    country and certification alone offered films the release narrowing hides
+    (measured: Sinners, under a US-releases-only filter).
+    """
+    narrowed = calendar_filter.filter_release_groups(
+        parsed, media, movie_release_countries, movie_release_types)
+    release_filtered = len(parsed) - len(narrowed)
+    records = [r for r in (calendar_resolve.resolve_records(group, rs, prefs)
+                           for group, rs in narrowed) if r is not None]
+    # A Simkl entry Simkl's OWN enrichment marks as a film (`anime_type ==
+    # "movie"`) does not belong on a series endpoint — see
+    # filter.prune_disguised_films for the measured rule and why this is
+    # a read-time exclusion rather than something fetch_window_records can
+    # do at fill. Same reasoning as the exemption below: it can only act
+    # on what enrichment has already found, so it runs right beside it.
+    records = calendar_filter.prune_disguised_films(records, media)
+    # THE INSTANCE FLOOR, AND IT RUNS BEFORE THIS VIEWER'S OWN SPECS.
+    # It is applied at FILL as well (fetch_window_records), where it is a
+    # HARD exclusion — a floored title never enters the shared rows, so no
+    # per-account filter can bring it back, and that promise is the reason
+    # the fill keeps it. But the fill is the only moment that copy acts, so
+    # an operator who tightened the floor went on seeing a month that was
+    # already stored until its TTL ran out. Applying it here too is what
+    # makes the change reach windows already held — the shape the instance's
+    # "include Simkl results" switch already has, and for the same reason:
+    # it is one decision taken for every viewer, so it can narrow the shared
+    # rows without deciding anything on one viewer's behalf.
+    # THE OPERATOR'S SPEC IS NOT MERGED INTO THE VIEWER'S. They are two
+    # answers to the same question and either may be empty; applying them in
+    # turn is also what keeps the count below honest.
+    if settings is not None:
+        records = calendar_filter.filter_records(
+            records, settings.genres, settings.countries,
+            (settings.show_certifications if media == "show"
+             else settings.movie_certifications),
+            exempt_unenriched=True)
+    certifications = show_certifications if media == "show" else movie_certifications
+    # exempt_unenriched=True on BOTH READS and never at the fill — see
+    # filter.keep_record for why a read gives a record enrichment has not
+    # answered for the benefit of the doubt and the fill does not.
+    kept = calendar_filter.filter_records(records, genres, countries, certifications,
+                                          exempt_unenriched=True)
+    return kept, release_filtered, len(records)
 
 
 # ---------------------------------------------------------------------------

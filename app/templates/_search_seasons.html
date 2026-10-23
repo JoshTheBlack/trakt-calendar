@@ -1,0 +1,21 @@
+{% import '_season_checklist.html' as seasons %}
+{#- One calendar search result's season picker (routes.calendar_search_seasons):
+    the app's one season checklist, its choices calendar/search.py's `picker`.
+
+    SUBMITTING IT IS THE JUMP: a plain GET to /calendar/jump naming the result by
+    the reference it was drawn with and the seasons ticked, followed as an
+    ordinary (boosted) navigation — so the address bar ends on the calendar and
+    Back returns here. `#jump-target` ON THE FORM'S OWN ADDRESS, as it was on the
+    old jump link: a boosted navigation is a fetch, and a fetch's final URL drops
+    the fragment a redirect's Location carried, while htmx scrolls to the anchor
+    of the address it was asked to follow.
+
+    Context: `options`, `ref`, `endpoint`, `title`, `media`, `note`, `ticked`
+    (the suggested season, or None — a film's one choice is None). -#}
+{%- if options %}
+{{ seasons.checklist(options, {"action": "/calendar/jump#jump-target", "method": "get"},
+                     ref=ref, hidden={"endpoint": endpoint}, ticked=ticked,
+                     button='Go to this season' if media == 'show' else 'Go to its release',
+                     heading=('Seasons of ' if media == 'show' else '') ~ title) }}
+{%- endif %}
+{%- if note %}<p class="search-hint">{{ note }}</p>{% endif %}

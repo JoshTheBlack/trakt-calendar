@@ -25,7 +25,7 @@
 - 📅 Browse premieres for any month, grouped by day
 - 📡 **Switchable endpoints** — new shows, season premieres, season finales, all episodes, or movies
 - 🔀 **Two sources, one calendar** — Trakt and, optionally, [Simkl](#simkl--an-optional-second-source). A title both list is one card; which services show is a tick-box in **🎚️ Filters**, and whose description wins is an order on your **Account** page. Simkl needs no credentials to fill a calendar
-- 🔍 **Find a title and jump to it** — search the calendar you're on as you type, or press Enter to also ask the services for titles your calendar hasn't loaded yet; opening one files it onto the day it airs
+- 🔍 **Find a title and jump to it** — search the calendar you're on as you type, or press Enter to also search TMDB (and any service you've linked) for titles your calendar hasn't loaded yet; opening one goes to where it airs
 - 🖼️ Rich poster tiles — rating, runtime, network and episode badges, plus language, country and a current-season summary
 - 🔍 **Details modal** — overview, every video both services list in one player, and each season's description, cast and episodes with your watched ones marked, plus a link out to each service
 - ✅ Mark shows **watching / not watching** — saved to your account, with a one-click filter to hide the ones you're not watching
@@ -255,12 +255,34 @@ the services they named.
 TMDB keeps no watch history, so it never backs the tracker, and it doesn't list a calendar
 of its own yet.
 
+**Every search box searches TMDB** when you press Enter, and all three behave alike: the
+calendar's Find a title, the tracker's Add show and Add film, and the rankings board.
+Twenty results at a time, with **More from TMDB** for the next twenty. Under the results,
+**Also search Trakt**, **Also search Simkl** and **Also search Simkl Anime** appear for each
+service *you* have linked; each adds that catalogue's results below the rest, searched with
+your own account, and then offers its own **More from …**. (Simkl keeps anime apart from its
+TV catalogue, and one search does not reach both.) Typing still lists only titles this
+instance already holds, and costs nothing.
+
+**Opening a show gives the same season checklist everywhere**: each season with its episode
+count, the suggested one marked, the ones you already have greyed. The tracker can add
+several seasons at once, and so can a rankings board, whose checklist also offers the
+**Whole show** (dragging a result into a tier adds the whole title). On the calendar, seasons your filters hide say so, seasons already
+on your calendar link to their day, and **Go** opens the month of the season you ticked,
+on its card when the calendar draws one. A title found on TMDB is looked up on Trakt and Simkl by its
+TMDB id when it's added, so the tracker can read your history for it. A show neither
+lists can still be added; its row is marked **untracked**, because nothing will count what
+you watch of it. A calendar season TMDB found opens the month it should be in; it doesn't add
+a card, because TMDB doesn't list a calendar yet.
+
 Get the token at [themoviedb.org → Settings → API](https://www.themoviedb.org/settings/api):
 copy the **API Read Access Token** (the long one). The short "API Key" is refused —
 it travels in the address of every request, where a credential ends up in logs. Nothing
 TMDB answers is kept longer than six months, which is TMDB's own limit.
 
-Without a token, TMDB steps aside and the other services describe titles as before.
+Without a token, TMDB steps aside and the other services describe titles as before. The
+search boxes say TMDB isn't configured rather than searching something else; anyone who
+has linked Trakt or Simkl can still add that service to a search.
 
 ## Simkl — an optional second source
 

@@ -11,7 +11,7 @@ a list of results carried back from the browser.
 from __future__ import annotations
 
 from ...config import Settings
-from ..base import MATCH_SOURCES, Media, SearchHit, Source
+from ..base import MATCH_SOURCES, Media, SearchHit, SearchPage, Source
 from . import normalize, transport
 
 _SEARCH_PATHS = {Media.SHOW: "search/tv", Media.MOVIE: "search/movie"}
@@ -31,8 +31,10 @@ REASK_SECONDS = 24 * 60 * 60
 
 
 async def search_titles(settings: Settings, media: Media, query: str, *,
-                        page: int = 1, cached_only: bool = False) -> list[SearchHit]:
-    """One page of TMDB's search for `query`, as SearchHits in TMDB's order.
+                        page: int = 1, cached_only: bool = False) -> SearchPage:
+    """One page of TMDB's search for `query`, as SearchHits in TMDB's order, and
+    whether TMDB holds a later page — its own `total_pages`, capped where TMDB
+    stops answering.
 
     `include_adult=false`, always: this app's calendars and boards are shared
     surfaces, and TMDB's adult catalogue is not something a search box here
@@ -42,14 +44,16 @@ async def search_titles(settings: Settings, media: Media, query: str, *,
     media = Media(media)
     text = (query or "").strip()
     if not text:
-        return []
+        return SearchPage([])
+    page = max(1, min(int(page), MAX_PAGE))
     body = await transport.cached_get(
         settings, _SEARCH_PATHS[media],
-        {"query": text, "include_adult": "false",
-         "page": str(max(1, min(int(page), MAX_PAGE)))},
-        cache_only=cached_only)
+        {"query": text, "include_adult": "false", "page": str(page)},
+        cache_only=cached_only) or {}
+    total = body.get("total_pages")
+    more = isinstance(total, int) and page < min(total, MAX_PAGE)
     out = []
-    for entry in (body or {}).get("results") or ():
+    for entry in body.get("results") or ():
         if not isinstance(entry, dict) or not entry.get("id"):
             continue
         ids = normalize.ids_of(entry)
@@ -63,7 +67,7 @@ async def search_titles(settings: Settings, media: Media, query: str, *,
             network="", runtime=None,
             overview=str(entry.get("overview") or "").strip(),
             poster=normalize.poster_of(entry)))
-    return out
+    return SearchPage(out, more)
 
 
 async def find_by_shared_id(settings: Settings, media: Media, ids: dict) -> dict:

@@ -1,38 +1,32 @@
-{#- The add's own address, spelled once for the picker and for the
-    picks-itself case. The month rides in the query string, as it does on every
-    other tracker mutation; the body names the result. The answer is the month
-    redrawn, which also brings the add modal back closed and empty — see
-    _distrakt_month.html. -#}
-{% macro season_post(season) -%}
-hx-post="{{ '/api/distrakt/add-completed' if as_finished else '/api/distrakt/add' }}{{ month_query }}"
-    hx-json-enc hx-vals='{{ dict(named, season=season) | tojson }}'
-    hx-target="#distraktShowList"
-    hx-swap="innerHTML swapEmpty:false show:top showTarget:.row-marked"
-{%- endmacro %}
+{% import '_season_checklist.html' as seasons %}
+{# WHAT A CLICK ON A SEARCH RESULT ANSWERS WITH, in either of its states: the
+   season checklist (a result that is one season arriving as that season,
+   ticked), or a refusal.
 
-{# WHAT A CLICK ON A SEARCH RESULT ANSWERS WITH, in all three of its states:
-   a season picker, a refusal, or a season that names itself.
+   ONE PARTIAL FOR ALL THREE because each of them fills the same slot — the
+   one under the row pressed (_distrakt_search_results.html) — and a state drawn
+   anywhere else is one the next answer cannot replace. The refusal used to be a
+   second element beside the picker, hidden and unhidden by hand, which is two
+   places for one answer to live.
 
-   ONE PARTIAL FOR ALL THREE because each of them replaces the same slot, and a
-   state drawn anywhere else is one the next answer cannot replace — the shape
-   _add_all.html established. The refusal used to be a second element beside the
-   picker, hidden and unhidden by hand, which is two places for one answer to
-   live.
-
-   A SEASON BUTTON NAMES THE RESULT AND NOTHING ELSE. It sends the reference
-   this fragment was asked with — the query that found it and its place in the
-   answer, or the identity a typed row is stored under — and the season picked;
-   the route reads the title, the network and every id back out of the same
-   answers this fragment was drawn from (routes._named_pick). No id the browser
-   could edit reaches a write.
+   THE PICKER IS THE APP'S ONE SEASON CHECKLIST (_season_checklist.html): tick
+   one season or several and Add. It sends the reference this fragment was
+   asked with — the query that found it and its place in the answer, or the
+   identity a typed row is stored under — and the seasons ticked; the route reads
+   the title, the network and every id back out of the same answers this
+   fragment was drawn from (routes._named_pick). No id the browser could edit
+   reaches a write. The add posts to the month's own route: a month behind the
+   clock records seasons as FINISHED (`as_finished`), and the answer is the
+   month redrawn, which also brings the add modal back closed and empty — see
+   _distrakt_month.html.
 
    Context: `pick` (a title_search.Pick, or None when nothing stored answers to
-   that name), `unkeyable` (the tracker's own sentence for a pick it has no
-   shared id to file under, else None), `unavailable` (why the service could
+   that name), `options` (season_choices.SeasonOption, from routes._season_options),
+   `unkeyable` (the tracker's own sentence for a pick it has no shared id to file
+   under, else None), `unavailable` (why the service could
    not be asked), `gone` (what to say when nothing answers), `named` (the
    reference, posted back as it came), `month_query`, `as_finished` (this month
    is behind the clock, so an add records something as finished during it). #}
-<div id="addSeasonPick" class="distrakt-season-pick">
 {%- if unavailable %}
 {# The service that knows this title could not be reached. Its own sentence,
    because the reason it gives is more use than a fixed one. #}
@@ -59,28 +53,19 @@ hx-post="{{ '/api/distrakt/add-completed' if as_finished else '/api/distrakt/add
    the honest answer is to send the viewer to the flow that does. #}
 <p class="distrakt-note distrakt-warn">{{ pick.title }} is a film, not a show —
     search for it from ➕ Add Film instead.</p>
-{%- elif pick.named_season is not none %}
-{# THE HIT IS A SEASON — a source that files each season of a series as its own
-   title knows which season of the underlying show it is. Asking which season
-   would be asking a question the row already answered, and offering the whole
-   show's list invites picking one nobody searched for. So the add is made on
-   sight: `hx-trigger="load"` is the declarative form of what the browser used
-   to do the moment the lookup came back. #}
-<p class="distrakt-note">Adding {{ pick.title }} season {{ pick.named_season }}…</p>
-<button type="button" hidden hx-trigger="load"
-        {{ season_post(pick.named_season) }}></button>
-{%- elif not pick.seasons %}
+{%- elif not options %}
 <div class="distrakt-empty">No aired seasons found.</div>
 {%- else %}
-<div class="field">
-    <label>Pick a season for <span>{{ pick.title }}</span></label>
-    <div class="distrakt-season-list">
-        {%- for season in pick.seasons %}
-        <button type="button" class="btn-ghost small" {{ season_post(season.season) }}>
-            S{{ '%02d' % season.season }} ({{ season.episode_count }} eps)
-        </button>
-        {%- endfor %}
-    </div>
-</div>
+{#- A RESULT THAT IS ONE SEASON (a source that files each season as its own
+    title) arrives as that one season, ticked: asking which would be asking a
+    question the row already answered. -#}
+{{ seasons.checklist(options,
+       {"hx-boost": "false",
+        "hx-post": ('/api/distrakt/add-completed' if as_finished else '/api/distrakt/add')
+                   ~ month_query,
+        "hx-json-enc": "", "hx-target": "#distraktShowList",
+        "hx-swap": "innerHTML swapEmpty:false show:top showTarget:.row-marked"},
+       ref=named, ticked=pick.named_season,
+       button='Add as finished' if as_finished else 'Add',
+       heading='Pick seasons of ' ~ pick.title) }}
 {%- endif %}
-</div>

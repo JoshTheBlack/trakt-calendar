@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app import db
@@ -37,6 +38,13 @@ from app.providers.base import Media
 from app.providers.simkl import transport as simkl_transport
 from app.providers.trakt import transport as trakt_transport
 from tests.support import AppTestCase, ORIGIN
+
+
+def publishing(**ports):
+    """A stand-in provider that publishes every calendar, so calendar/search.py's
+    rule that a service writes only to a calendar it publishes lets it write."""
+    return SimpleNamespace(calendar_port=object(),
+                           capabilities=SimpleNamespace(answers=lambda _key: True), **ports)
 
 # What Trakt's three catalogue paths answer for the merged title below. The cast
 # is the field that only exists on this side, and is what "Trakt still wins" is
@@ -595,9 +603,9 @@ class OpeningAOneServiceCardAsksTheOtherTests(AppTestCase):
 
         port = SimpleNamespace(fetch_seasons=_seasons, records_for=_records,
                                fetch_details=AsyncMock(return_value={}))
-        with patch("app.providers.for_catalogue_search", return_value=[
+        with patch("app.providers.for_shared_id_lookup", return_value=[
                     (Source.SIMKL, SimpleNamespace(find_by_shared_id=_find))]), \
-             patch("app.providers.get", return_value=SimpleNamespace(detail_port=port)):
+             patch("app.providers.get", return_value=publishing(detail_port=port)):
             resp = self.client.post(
                 "/api/calendar/complete-card?endpoint=shows%2Fpremieres&year=2026&month=7",
                 json={"key": self.KEY, "season": 1})
@@ -630,9 +638,9 @@ class OpeningAOneServiceCardAsksTheOtherTests(AppTestCase):
 
         port = SimpleNamespace(fetch_seasons=_seasons, records_for=_records,
                                fetch_details=AsyncMock(return_value={}))
-        with patch("app.providers.for_catalogue_search", return_value=[
+        with patch("app.providers.for_shared_id_lookup", return_value=[
                     (Source.SIMKL, SimpleNamespace(find_by_shared_id=_find))]), \
-             patch("app.providers.get", return_value=SimpleNamespace(detail_port=port)):
+             patch("app.providers.get", return_value=publishing(detail_port=port)):
             return self.client.post(
                 "/api/calendar/complete-card?endpoint=shows%2Fpremieres&year=2026&month=7",
                 json={"key": self.KEY, "season": 1, **body}).text

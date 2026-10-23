@@ -21,8 +21,8 @@ from ...endpoints import ENDPOINTS
 from datetime import date
 
 from .. import register
-from ..base import (Capabilities, Media, Record, SearchHit, SeasonsAnswer, Source,
-                    TitleFacts, Video)
+from ..base import (Capabilities, Media, Record, SearchCatalogue, SearchHit, SearchPage,
+                    SeasonsAnswer, Source, TitleFacts, Video)
 from . import calendar, detail, sync, watchlist
 from .transport import TraktError, TraktRateLimitError
 
@@ -168,11 +168,16 @@ class _TraktSearchPort:
     lose rows the merge exists to find.
     """
 
+    catalogues = (SearchCatalogue("trakt", "Trakt"),)
+
     async def search_titles(self, settings: Settings, media: Media, query: str, *,
-                            cached_only: bool = False) -> list[SearchHit]:
-        raw = await detail.search_titles(settings, str(media), query,
-                                         cache_only=cached_only)
-        return [
+                            page: int = 1, catalogue: str | None = None,
+                            cached_only: bool = False) -> SearchPage:
+        if catalogue not in (None, "trakt"):
+            raise ValueError(f"Trakt has no catalogue {catalogue!r}.")
+        raw, more = await detail.search_titles(settings, str(media), query, page=page,
+                                               cache_only=cached_only)
+        return SearchPage([
             SearchHit(
                 source=Source.TRAKT,
                 # A Trakt search hit has always carried a Trakt id in
@@ -194,7 +199,7 @@ class _TraktSearchPort:
                 poster=entry["poster"],
             )
             for entry in raw
-        ]
+        ], more)
 
     async def find_by_shared_id(self, settings: Settings, media: Media, ids: dict) -> dict:
         return await detail.find_by_shared_id(settings, str(media), ids)

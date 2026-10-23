@@ -64,7 +64,7 @@
                with have to be the results a search would have drawn. #}
             <div class="ranker-results" id="searchResults">
                 {%- with query = search.query, media = search.media, rows = search.rows,
-                        typed = search.typed, too_short = false, no_catalogue = false,
+                        typed = search.typed, too_short = false, controls = search.controls,
                         failed = search.failed, message = "", board_uid = board.uid %}
                 {%- include "_ranker_search_results.html" %}{%- endwith %}
             </div>

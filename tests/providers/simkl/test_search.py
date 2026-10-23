@@ -1,14 +1,14 @@
 """Simkl's SearchPort implementation (app/providers/simkl/search.py).
 
-Guards the two measured, non-obvious facts the module docstring documents:
-GET /search/tv answers nothing for anime, so a show query is two requests
-under one port call and the split must not leak into the returned list; and a
-search hit's `ids` block is thin (at most simkl_id, slug, tmdb) and has to be
-remapped onto the app's ID_KEYS spelling the same way every other Simkl
-payload is.
+Guards the measured, non-obvious facts the module docstring documents: GET
+/search/tv answers nothing for anime, so anime is its own catalogue ("simkl-anime")
+searched apart, each catalogue one page per ask; /search/anime mixes films in with
+TV, so each search keeps only the medium asked for; and a search hit's `ids` block
+is thin (at most simkl_id, slug, tmdb) and has to be remapped onto the app's
+ID_KEYS spelling the same way every other Simkl payload is.
 
-No network — the transport's two GET entry points are patched with a canned
-response per path.
+No network — the transport's page read and its per-title read are patched with a
+canned response per path.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.providers.base import Media, SearchHit, Source
+from app.providers.base import SEARCH_PAGE_SIZE, Media, SearchHit, Source
 from app.providers.simkl import _naming, search, transport
 
 SETTINGS = SimpleNamespace(simkl_client_id="cid", simkl_access_token="", cache_ttl_minutes=10)
@@ -42,215 +42,131 @@ BARE_ANIME = {
 }
 
 
-def _cached_get(by_path: dict):
-    """A transport.cached_get stand-in keyed by the path it was asked for, so
-    a show query's two endpoints can be told apart."""
+def _transport(pages: dict, records: dict | None = None):
+    """Stand-ins for the transport: `pages` answers a search page by path (a
+    list, (list, more), or an exception), `records` a per-title read by path."""
+    records = records or {}
+
+    async def _page(_client, _settings, path, params, page, **_kwargs):
+        answer = pages[path]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer if isinstance(answer, tuple) else (answer, False)
+
     async def _get(_client, _settings, path, _params=None, **_kwargs):
-        answer = by_path[path]
+        answer = records.get(path)
         if isinstance(answer, Exception):
             raise answer
         return answer
-    spy = AsyncMock(side_effect=_get)
-    return spy
 
-
-def _patched(spy):
-    """BOTH transport entry points, one stub. A search assembles its pages
-    through `cached_paged_get`; the season disambiguation behind it reads
-    per-title records through `cached_get`. The stub keys on the path, so one
-    serves either."""
-    return patch.multiple(transport, cached_get=spy, cached_paged_get=spy)
+    page_spy, get_spy = AsyncMock(side_effect=_page), AsyncMock(side_effect=_get)
+    return page_spy, get_spy, patch.multiple(transport, cached_page_get=page_spy,
+                                             cached_get=get_spy)
 
 
 class SearchTitlesTests(unittest.IsolatedAsyncioTestCase):
+    async def _hits(self, pages, media=Media.SHOW, query="x", **kwargs):
+        page_spy, _get, patched = _transport(pages)
+        with patched:
+            answer = await search.search_titles(SETTINGS, media, query, **kwargs)
+        return answer, page_spy
+
     async def test_an_empty_query_makes_no_call(self):
-        spy = _cached_get({})
-        with _patched(spy):
-            hits = await search.search_titles(SETTINGS, Media.SHOW, "   ")
-        self.assertEqual(hits, [])
+        answer, spy = await self._hits({}, query="   ")
+        self.assertEqual(answer.hits, [])
         spy.assert_not_called()
 
-    async def test_a_show_query_asks_both_tv_and_anime(self):
-        spy = _cached_get({"search/tv": [SEVERANCE], "search/anime": []})
-        with _patched(spy):
-            await search.search_titles(SETTINGS, Media.SHOW, "severance")
-        asked_paths = {call.args[2] for call in spy.await_args_list}
-        self.assertEqual(asked_paths, {"search/tv", "search/anime"})
+    async def test_each_catalogue_asks_its_own_endpoint_once(self):
+        cases = [(Media.SHOW, search.CATALOGUE, "search/tv"),
+                 (Media.MOVIE, search.CATALOGUE, "search/movie"),
+                 (Media.SHOW, search.ANIME_CATALOGUE, "search/anime"),
+                 (Media.MOVIE, search.ANIME_CATALOGUE, "search/anime")]
+        for media, catalogue, path in cases:
+            with self.subTest(media=media, catalogue=catalogue):
+                _answer, spy = await self._hits({path: []}, media=media, catalogue=catalogue)
+                self.assertEqual([call.args[2] for call in spy.await_args_list], [path])
 
-    async def test_a_movie_query_asks_only_the_movie_path(self):
-        spy = _cached_get({"search/movie": []})
-        with _patched(spy):
-            await search.search_titles(SETTINGS, Media.MOVIE, "dune part two")
-        asked_paths = {call.args[2] for call in spy.await_args_list}
-        self.assertEqual(asked_paths, {"search/movie"})
+    async def test_one_page_is_asked_by_number_with_the_shared_page_size(self):
+        _answer, spy = await self._hits({"search/tv": []}, query="  severance  ", page=3)
+        call, = spy.await_args_list
+        self.assertEqual(call.args[3], {"q": "severance", "limit": str(SEARCH_PAGE_SIZE)})
+        self.assertEqual(call.args[4], 3)
+        self.assertIs(call.kwargs["pool"], transport.CATALOG_POOL)
 
-    async def test_hits_from_both_endpoints_are_merged_into_one_list(self):
-        spy = _cached_get({"search/tv": [SEVERANCE], "search/anime": [BARE_ANIME]})
-        with _patched(spy):
-            hits = await search.search_titles(SETTINGS, Media.SHOW, "x")
-        self.assertEqual({h.title for h in hits}, {"Severance", "Shingeki no Kyojin Season 3"})
+    async def test_more_is_simkls_own_word(self):
+        answer, _spy = await self._hits({"search/tv": ([SEVERANCE], True)})
+        self.assertTrue(answer.more)
+
+    async def test_an_unknown_catalogue_is_refused(self):
+        with pytest.raises(ValueError):
+            await self._hits({}, catalogue="simkl-music")
 
     async def test_a_hit_is_a_searchhit_with_simkl_as_the_source(self):
-        spy = _cached_get({"search/tv": [SEVERANCE], "search/anime": []})
-        with _patched(spy):
-            hits = await search.search_titles(SETTINGS, Media.SHOW, "severance")
-        self.assertEqual(len(hits), 1)
-        hit = hits[0]
+        answer, _spy = await self._hits({"search/tv": [SEVERANCE]}, query="severance")
+        hit, = answer.hits
         self.assertIsInstance(hit, SearchHit)
         self.assertEqual(hit.source, Source.SIMKL)
         self.assertEqual(hit.source_id, "1203662")
         self.assertEqual(hit.media, Media.SHOW)
-        self.assertEqual(hit.title, "Severance")
-        self.assertEqual(hit.year, 2022)
+        self.assertEqual((hit.title, hit.year), ("Severance", 2022))
 
     async def test_the_poster_path_becomes_simkls_own_address(self):
         """Every entry measured live carried a poster path; the address is built
         by the calendar's own function, so a row and a card share one picture."""
-        spy = _cached_get({"search/tv": [dict(SEVERANCE, poster="12/12301659c2620e9486")],
-                           "search/anime": [BARE_ANIME]})
-        with _patched(spy):
-            hits = await search.search_titles(SETTINGS, Media.SHOW, "x")
-        posters = {h.title: h.poster for h in hits}
-        self.assertEqual(posters["Severance"],
+        answer, _spy = await self._hits(
+            {"search/tv": [dict(SEVERANCE, poster="12/12301659c2620e9486")]})
+        self.assertEqual(answer.hits[0].poster,
                          "https://simkl.in/posters/12/12301659c2620e9486_m.jpg")
-        self.assertEqual(posters["Shingeki no Kyojin Season 3"], "")
 
     async def test_simkl_id_is_remapped_onto_the_apps_own_id_spelling(self):
         """Simkl writes its own id as `simkl_id` in a search hit's ids block;
         `collect_ids` only knows `simkl`. Un-mapped, a Simkl-only hit would
         carry no id the tracker's identity waterfall recognises as Simkl's."""
-        spy = _cached_get({"search/tv": [SEVERANCE], "search/anime": []})
-        with _patched(spy):
-            hits = await search.search_titles(SETTINGS, Media.SHOW, "severance")
-        self.assertEqual(hits[0].ids, {"simkl": 1203662, "slug": "severance", "simkl_slug": "severance",
-                          "tmdb": "95396"})
+        answer, _spy = await self._hits({"search/tv": [SEVERANCE]})
+        self.assertEqual(answer.hits[0].ids, {"simkl": 1203662, "slug": "severance",
+                                              "simkl_slug": "severance", "tmdb": "95396"})
 
-    async def test_a_search_hit_typed_movie_is_dropped_from_a_show_search(self):
+    async def test_the_anime_catalogue_keeps_only_the_medium_asked_for(self):
         """GET /search/anime mixes films in with TV — measured LIVE against the
-        search endpoint itself 2026-09-27 (not the per-title record, which
-        spells the same fact `anime_type` instead — this app read that field
-        here first, by mistake, and a live search still misrouted the title
-        until this was corrected): searching "attack on titan" as a SHOW
-        returns "Shingeki no Kyojin: The Last Attack" (a 2024 recap film,
-        `type: "movie"`) beside the TV seasons, from the same endpoint. A film
-        has nowhere useful to go from a shows search — no season to pick, and
-        the show flow's add has no watched-on date to record one with — so it
-        is dropped rather than offered and then refused."""
-        film = {**SEVERANCE, "title": "Shingeki no Kyojin: The Last Attack",
-                "type": "movie",
-                "ids": {"simkl_id": 2544548, "slug": "shingeki-no-kyojin-the-last-attack"}}
-        spy = _cached_get({"search/tv": [], "search/anime": [film]})
-        with _patched(spy):
-            hits = await search.search_titles(SETTINGS, Media.SHOW, "attack on titan")
-        self.assertEqual(hits, [])
-
-    async def test_a_search_hit_typed_special_is_kept_in_a_show_search(self):
-        """A special's PER-TITLE record can still carry a real season mapping
-        and episode count (Attack on Titan's own 2023 special does) — the
-        season-picker's ordinary case, not a film's, so only `type == "movie"`
-        on the search hit is dropped."""
-        special = {**SEVERANCE, "type": "special"}
-        spy = _cached_get({"search/tv": [], "search/anime": [special]})
-        with _patched(spy):
-            hits = await search.search_titles(SETTINGS, Media.SHOW, "x")
-        self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0].media, Media.SHOW)
-
-    async def test_a_search_hit_with_no_type_field_is_kept_in_a_show_search(self):
-        """`/search/tv`'s own entries carry no `type` field at all (measured
-        live: every one reads None) — this must not accidentally match
-        anything, so an ordinary show hit is unaffected."""
-        spy = _cached_get({"search/tv": [SEVERANCE], "search/anime": []})
-        with _patched(spy):
-            hits = await search.search_titles(SETTINGS, Media.SHOW, "severance")
-        self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0].media, Media.SHOW)
+        search endpoint itself 2026-09-27: "attack on titan" answers "Shingeki no
+        Kyojin: The Last Attack" (a 2024 recap film, `type: "movie"`) beside the
+        TV seasons. A show search keeps the shows, a film search the films; a
+        `special` stays a show (its per-title record can carry a real season
+        mapping, as Attack on Titan's 2023 special's does)."""
+        film = {**SEVERANCE, "title": "The Last Attack", "type": "movie",
+                "ids": {"simkl_id": 2544548}}
+        special = {**SEVERANCE, "title": "A Special", "type": "special",
+                   "ids": {"simkl_id": 7}}
+        pages = {"search/anime": [film, special, BARE_ANIME]}
+        shows, _ = await self._hits(pages, catalogue=search.ANIME_CATALOGUE)
+        films, _ = await self._hits(pages, media=Media.MOVIE, catalogue=search.ANIME_CATALOGUE)
+        self.assertEqual([h.title for h in shows.hits],
+                         ["A Special", "Shingeki no Kyojin Season 3"])
+        self.assertEqual([h.title for h in films.hits], ["The Last Attack"])
 
     async def test_a_bare_hit_carries_no_shared_id_but_is_still_returned(self):
         """Measured live: a season-title's hit often carries only simkl_id and
         slug. It is under-described, not dropped — the port's job is to hand
         it over, not to decide whether it can be filed."""
-        spy = _cached_get({"search/tv": [], "search/anime": [BARE_ANIME]})
-        with _patched(spy):
-            hits = await search.search_titles(SETTINGS, Media.SHOW, "attack on titan")
-        self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0].ids, {"simkl": 694485, "slug": "shingeki-no-kyojin-season-3",
-                          "simkl_slug": "shingeki-no-kyojin-season-3"})
+        answer, _ = await self._hits({"search/anime": [BARE_ANIME]},
+                                     catalogue=search.ANIME_CATALOGUE)
+        self.assertEqual(answer.hits[0].ids, {"simkl": 694485,
+                                              "slug": "shingeki-no-kyojin-season-3",
+                                              "simkl_slug": "shingeki-no-kyojin-season-3"})
 
     async def test_network_runtime_overview_and_season_are_left_empty(self):
         """Measured live: a Simkl search hit carries none of the four — the
         merge's fill-empty-from-the-other rule is what covers this."""
-        spy = _cached_get({"search/tv": [SEVERANCE], "search/anime": []})
-        with _patched(spy):
-            hits = await search.search_titles(SETTINGS, Media.SHOW, "severance")
-        hit = hits[0]
-        self.assertEqual(hit.network, "")
-        self.assertIsNone(hit.runtime)
-        self.assertEqual(hit.overview, "")
-        self.assertIsNone(hit.season)
+        answer, _ = await self._hits({"search/tv": [SEVERANCE]})
+        hit = answer.hits[0]
+        self.assertEqual((hit.network, hit.runtime, hit.overview, hit.season), ("", None, "", None))
 
-    async def test_one_endpoint_failing_does_not_lose_the_others_hits(self):
-        """A show query is two requests under one port call; /search/anime
-        being down must not cost the /search/tv hits that DID come back."""
-        spy = _cached_get({
-            "search/tv": [SEVERANCE],
-            "search/anime": transport.SimklError("down", 503),
-        })
-        with _patched(spy):
-            hits = await search.search_titles(SETTINGS, Media.SHOW, "x")
-        self.assertEqual([h.title for h in hits], ["Severance"])
-
-    async def test_every_endpoint_failing_raises_rather_than_answering_empty(self):
-        """The one that matters: a total failure must not look like Simkl
-        genuinely finding nothing, the same distinction every other port in
-        this app draws between "no matches" and "could not be asked"."""
-        spy = _cached_get({
-            "search/tv": transport.SimklError("down", 503),
-            "search/anime": transport.SimklError("down", 503),
-        })
-        with _patched(spy):
-            with pytest.raises(transport.SimklError):
-                await search.search_titles(SETTINGS, Media.SHOW, "x")
-
-    async def test_a_movie_querys_one_endpoint_failing_raises(self):
-        """No sibling endpoint exists for a movie query, so its one failure
-        IS the whole search failing."""
-        spy = _cached_get({"search/movie": transport.SimklError("down", 503)})
-        with _patched(spy):
-            with pytest.raises(transport.SimklError):
-                await search.search_titles(SETTINGS, Media.MOVIE, "x")
-
-    async def test_the_query_is_stripped_and_sent_as_q(self):
-        spy = _cached_get({"search/tv": [], "search/anime": []})
-        with _patched(spy):
-            await search.search_titles(SETTINGS, Media.SHOW, "  severance  ")
-        for call in spy.await_args_list:
-            # The page size rides along; `page` deliberately does not — it is the
-            # transport's business and must stay out of the cache key, or every
-            # page of one search would address its own entry.
-            self.assertEqual(call.args[3],
-                             {"q": "severance", "limit": str(search.PAGE_SIZE)})
-
-    async def test_every_call_goes_through_the_catalog_pool(self):
-        spy = _cached_get({"search/tv": [], "search/anime": []})
-        with _patched(spy):
-            await search.search_titles(SETTINGS, Media.SHOW, "x")
-        for call in spy.await_args_list:
-            self.assertIs(call.kwargs["pool"], transport.CATALOG_POOL)
-
-    async def test_every_call_carries_the_callers_own_token(self):
-        """Simkl's v2 search requires a user token (401 user_token_required
-        otherwise) — every call here must ask cached_paged_get to attach one,
-        which is what `private=True` means to that function (see its own
-        docstring: unlike cached_get's flag of the same name, it does not skip
-        the shared cache — search answers identically under any viewer's own
-        token, measured live against two linked accounts on 2026-09-27)."""
-        spy = _cached_get({"search/tv": [], "search/anime": [], "search/movie": []})
-        with _patched(spy):
-            await search.search_titles(SETTINGS, Media.SHOW, "x")
-            await search.search_titles(SETTINGS, Media.MOVIE, "x")
-        for call in spy.await_args_list:
-            self.assertTrue(call.kwargs.get("private"))
+    async def test_a_failure_raises_rather_than_answering_empty(self):
+        """A failure must not look like Simkl genuinely finding nothing, the
+        distinction every port in this app draws between "no matches" and
+        "could not be asked"."""
+        with pytest.raises(transport.SimklError):
+            await self._hits({"search/tv": transport.SimklError("down", 503)})
 
 
 class CollidingSeasonTests(unittest.IsolatedAsyncioTestCase):
@@ -279,85 +195,90 @@ class CollidingSeasonTests(unittest.IsolatedAsyncioTestCase):
         "tv/2831384": {"ids": {"simkl": 2831384}, "mapped_tvdb_seasons": [3]},
     }
 
-    def _transport(self, tv=None, anime=None, records=None):
-        by_path = {"search/tv": tv if tv is not None else [],
-                   "search/anime": anime if anime is not None else []}
-        records = self.RECORDS if records is None else records
-
-        async def _get(_client, _settings, path, _params=None, **_kwargs):
-            if path.startswith("tv/"):
-                answer = records.get(path)
-                if isinstance(answer, Exception):
-                    raise answer
-                return answer
-            return by_path[path]
-
-        return AsyncMock(side_effect=_get)
-
-    async def _search(self, **kwargs):
-        spy = self._transport(**kwargs)
-        with _patched(spy):
-            hits = await search.search_titles(SETTINGS, Media.SHOW, "beastars")
-        return hits, spy
+    async def _search(self, hits, records=None, media=Media.SHOW):
+        _page, get_spy, patched = _transport({"search/anime": hits, "search/movie": hits},
+                                             self.RECORDS if records is None else records)
+        with patched:
+            answer = await search.search_titles(
+                SETTINGS, media, "beastars",
+                catalogue=search.ANIME_CATALOGUE if media is Media.SHOW else search.CATALOGUE)
+        return answer.hits, get_spy
 
     async def test_hits_sharing_one_identity_each_get_their_own_season(self):
-        hits, _spy = await self._search(anime=self.SERIES)
+        hits, _spy = await self._search(self.SERIES)
         self.assertEqual([(h.source_id, h.season) for h in hits],
                          [("1034467", 1), ("1231401", 2), ("2831384", 3)])
 
     async def test_a_hit_nothing_else_collides_with_costs_no_lookup(self):
-        """The cost bound, asserted rather than described: an ordinary search —
-        every film, every live-action show, any anime query answering one title
-        per series — makes no extra call at all."""
-        hits, spy = await self._search(tv=[SEVERANCE], anime=[BARE_ANIME])
+        """The cost bound, asserted rather than described: an ordinary search
+        makes no extra call at all."""
+        hits, spy = await self._search([SEVERANCE, BARE_ANIME])
         self.assertEqual([h.season for h in hits], [None, None])
-        self.assertEqual({call.args[2] for call in spy.await_args_list},
-                         {"search/tv", "search/anime"})
+        spy.assert_not_called()
 
     async def test_only_the_colliding_hits_are_looked_up(self):
-        hits, spy = await self._search(tv=[SEVERANCE], anime=self.SERIES)
-        looked_up = sorted(call.args[2] for call in spy.await_args_list
-                           if call.args[2].startswith("tv/"))
-        self.assertEqual(looked_up, ["tv/1034467", "tv/1231401", "tv/2831384"])
-        # Severance shares its key with nothing, so it keeps its unnamed season.
+        hits, spy = await self._search([SEVERANCE, *self.SERIES])
+        self.assertEqual(sorted(call.args[2] for call in spy.await_args_list),
+                         ["tv/1034467", "tv/1231401", "tv/2831384"])
         self.assertIsNone(next(h.season for h in hits if h.source_id == "1203662"))
 
     async def test_the_lookup_is_held_for_a_day_not_the_default_ttl(self):
         """A repeated search must not pay these again: a title's season mapping
         is about as static as catalogue data gets."""
-        _hits, spy = await self._search(anime=self.SERIES)
+        _hits, spy = await self._search(self.SERIES)
         for call in spy.await_args_list:
-            if call.args[2].startswith("tv/"):
-                with self.subTest(path=call.args[2]):
-                    self.assertEqual(call.kwargs["ttl_seconds"], _naming.CACHE_TTL_SECONDS)
+            with self.subTest(path=call.args[2]):
+                self.assertEqual(call.kwargs["ttl_seconds"], _naming.CACHE_TTL_SECONDS)
 
     async def test_a_record_that_names_no_season_leaves_its_hit_unnamed(self):
         """Falls back to what the merge already does with hits it cannot tell
         apart — keep them as separate rows — rather than guessing."""
         records = {**self.RECORDS,
-                   "tv/1231401": {"ids": {"simkl": 1231401},
-                                  "mapped_tvdb_seasons": [2, 3]}}
-        hits, _spy = await self._search(anime=self.SERIES, records=records)
+                   "tv/1231401": {"ids": {"simkl": 1231401}, "mapped_tvdb_seasons": [2, 3]}}
+        hits, _spy = await self._search(self.SERIES, records)
         self.assertEqual([h.season for h in hits], [1, None, 3])
 
     async def test_a_failed_lookup_costs_a_season_label_and_not_the_search(self):
         records = {**self.RECORDS, "tv/1231401": transport.SimklError("down", 503)}
-        hits, _spy = await self._search(anime=self.SERIES, records=records)
+        hits, _spy = await self._search(self.SERIES, records)
         self.assertEqual([h.source_id for h in hits], ["1034467", "1231401", "2831384"])
         self.assertEqual([h.season for h in hits], [1, None, 3])
 
     async def test_a_movie_query_never_asks_which_season_a_film_is(self):
         """Simkl's film catalogue does not follow the season-title convention,
         and this lookup reads /tv/{id} — a wrong question about a film id."""
-        films = [{"title": "Beastars", "year": 2019,
-                  "ids": {"simkl_id": 1, "tmdb": "500"}},
-                 {"title": "Beastars", "year": 2020,
-                  "ids": {"simkl_id": 2, "tmdb": "500"}}]
-        spy = AsyncMock(side_effect=lambda *a, **k: films)
-        with _patched(spy):
-            hits = await search.search_titles(SETTINGS, Media.MOVIE, "beastars")
-        self.assertEqual({call.args[2] for call in spy.await_args_list}, {"search/movie"})
+        films = [{"title": "Beastars", "year": 2019, "ids": {"simkl_id": 1, "tmdb": "500"}},
+                 {"title": "Beastars", "year": 2020, "ids": {"simkl_id": 2, "tmdb": "500"}}]
+        hits, spy = await self._search(films, media=Media.MOVIE)
+        spy.assert_not_called()
         self.assertEqual([h.season for h in hits], [None, None])
+
+
+class OnePageReadTests(unittest.IsolatedAsyncioTestCase):
+    """transport.cached_page_get: one page, its own cache entry, and Simkl's own
+    page count kept beside it so a re-read answers "is there more?" too."""
+
+    async def test_a_page_is_stored_with_whether_more_follows_and_re_read_without_a_call(self):
+        from tests.support import migrated_db
+        from app import db
+        migrated_db("simkl-page")
+        self.addCleanup(db.close_thread_connection)
+        fetch = AsyncMock(return_value=([SEVERANCE], 3))
+        with patch.object(transport, "_fetch_json", fetch):
+            live = await transport.cached_page_get(
+                None, SETTINGS, "search/tv", {"q": "x", "limit": "20"}, 2,
+                pool=transport.CATALOG_POOL)
+            again = await transport.cached_page_get(
+                None, SETTINGS, "search/tv", {"q": "x", "limit": "20"}, 2,
+                pool=transport.CATALOG_POOL, cache_only=True)
+            other = await transport.cached_page_get(
+                None, SETTINGS, "search/tv", {"q": "x", "limit": "20"}, 3,
+                pool=transport.CATALOG_POOL, cache_only=True)
+        self.assertEqual(live, ([SEVERANCE], True))
+        self.assertEqual(again, ([SEVERANCE], True))
+        self.assertEqual(other, ([], False))
+        fetch.assert_awaited_once()
+        self.assertTrue(fetch.await_args.kwargs["private"])
 
 
 if __name__ == "__main__":  # pragma: no cover

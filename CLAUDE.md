@@ -425,10 +425,11 @@ and that same search redrawn from the cache its own request filled — so a seco
 title from one search costs no second search, and whether a result is already
 held is drawn rather than swept on afterwards — and a held one refusing the
 click is `pointer-events: none`, not an event filter on its trigger. Adding
-several SEASONS of it at once is a checklist beside the row — a `<details>` whose
-`<summary>` asks for it `click once`, one checkbox per season, one json-enc post
-naming the result by reference — a sibling of the row and never inside it,
-because attribute inheritance would hand the row's request to the form.
+several SEASONS of it at once is a checklist UNDER the row — the row is the
+`<summary>` of its own `<details>` and asks for it `click once`, one checkbox per
+season (the board's leading with the whole show), one json-enc post naming the
+result by reference — the summary's sibling and never inside it, because
+attribute inheritance would hand the row's request to the form.
 Moving a title between tiers is one button per destination ON THE ROW, posting to the
 same route a bulk move already used — a menu shared by the whole board is what
 made "which row opened it" a question the browser had to answer. Setting which
@@ -526,6 +527,65 @@ BUTTON with it — a `type="reset"`, which empties the box with no script, askin
 the typed route for an empty query in the same queue — and that is why a box
 that must survive a whole-page answer (the rankings board's) is `hx-preserve`d
 rather than redrawn with a `value`: a drawn value is also what a reset restores.
+Its `widen` macro is what every box draws under a services' answer — one
+button per CATALOGUE, "Also search <service>" until it is added and "More
+from <service>" after, and the default catalogue not being configured — each
+control a GET of the surface's live route in the same queue.
+
+**ONE SEASON PICKER, AND ONE RULE FOR WHAT IT OFFERS.** `templates/_season_checklist.html`
+is the checklist the tracker's add, the rankings board's add and the calendar's jump
+all draw — a surface decides only what submitting it does (a json-enc post, or the
+calendar's plain GET to `/calendar/jump`) — and `app/providers/season_choices.py`
+decides what it offers, greys, refuses and suggests, with each surface's own words for
+"already here". Ticked seasons post as one flat field each, `season:<n>`
+(`season_choices.ticked`). A tracker add of several seasons asks the re-watch question
+per season, stopping at the first that needs it and re-posting it and the rest with
+`answering` naming which season the answer is about. The calendar's catalogue half
+lists titles like every box — the calendar's own medium, both only across every
+calendar — and DESCRIBES NOTHING. On the calendar, in the tracker's show box and
+on the rankings board the picker UNFOLDS UNDER ITS ROW: the row is the `<summary>` of its own
+`<details>`, asking `click once` for the picker into the `.search-pick` slot
+inside it, so a new search takes it down with the list and no slot beside the
+list needs resetting out of band. The calendar's picker is where a title is
+described, and the viewer's filters refuse a season with the reason — EVERY
+filter the calendar applies, through `calendar/cache.py`'s `narrow_for_viewer`,
+the one implementation `visible_records` also calls, and BEFORE a stored season
+is offered as a link to its day. A season the calendar ALREADY HOLDS is judged
+by the record it holds, through `visible_records` itself with the viewer's source
+choice (`calendar/search.py`'s `_drawn`), never by the describing service's
+answer: the two can disagree on a filter (a stored record with no country under
+a country filter), and a link judged by the description opens a day that draws
+nothing. The jump names the card it lands on whether or not it wrote one.
+
+**WHO A SEARCH ASKS IS THE REGISTRY'S, AND THE PAGE NAMES IT BY REFERENCE.**
+`providers.for_search` owns it: the catalogue `searched_by_default` (TMDB — a
+`Capabilities` flag each package declares, never a name in the registry), plus
+any other searchable service the VIEWER has linked (`is_configured` on their own
+Settings) when the request ADDS it. A default with no credential is named for
+the box to say so; NOTHING IS SEARCHED IN ITS PLACE, and a name the viewer may
+not add raises `UnknownSearchService` rather than being read as the default.
+`title_search.SearchRef` is the one spelling of which search a page drew —
+`also` (catalogue keys: `trakt`, `simkl`, `simkl-anime`) and `pages` (a count
+per catalogue, `tmdb:2`), never results — and every result
+row and widening control sends it back, so `resolve_hit` re-reads EXACTLY the
+list the row was numbered in: same services, same pages, from the cache. AN
+ADDED SERVICE'S TITLES COME BELOW THE DEFAULT'S on every box — the merge's own
+order, which the calendar keeps across both media (`calendar/search.py`'s
+`_default_first`) — because no common relevance exists to rank across services
+by, and rows shuffled above the ones being read would be confusing. EVERY
+CATALOGUE ANSWERS `base.SEARCH_PAGE_SIZE` A PAGE (TMDB's size; Trakt and Simkl
+are asked for it), and a port may hold more than one catalogue
+(`SearchPort.catalogues` — Simkl's TV and its anime, which one query does not
+reach together).
+`title_search.search` is the one search every box makes. THE LOOKUP BY SHARED ID
+IS A DIFFERENT QUESTION with its own function, `providers.for_shared_id_lookup`
+— every service that answers an exact lookup, whichever box found the title —
+because that lookup is how a title TMDB found learns its Trakt and Simkl ids;
+arrival and the calendar's card completion ask it, never the search list. And a
+service WRITES an airing only onto a calendar it publishes (`_publishes` in
+`app/calendar/search.py`, asked by `fill_one_gap` and the stored-season
+completion), so a catalogue with no calendar describes a search result and the
+jump opens the month.
 
 ## Conventions for code you add or change
 

@@ -9,9 +9,15 @@ against itself only where the season is known, whole shows absorbing their
 seasons) that a second implementation would get wrong from memory. Every
 feature may depend on providers/, which already owns the ports this asks
 (SearchPort, DetailPort.fetch_seasons) and the one function that decides who
-is asked (`providers.for_catalogue_search`); a feature owning it made every
-other searcher depend on that feature instead. What a result DOES once chosen
-stays each feature's own — this module ends at the chosen title.
+is asked (`providers.for_search`); a feature owning it made every other
+searcher depend on that feature instead. What a result DOES once chosen stays
+each feature's own — this module ends at the chosen title.
+
+WHICH SEARCH A PAGE DREW TRAVELS AS A REFERENCE (`SearchRef`): the services the
+viewer added to it and how many pages it shows — names and a number, never a
+result. `search` asks with it, every result row and widening control sends it
+back, and `resolve_hit` re-reads with it, so the same reference always names the
+same list and a result is named by its place in it.
 
 TWO THINGS HAPPEN HERE, DELIBERATELY KEPT APART. `search_catalogue` is the I/O
 edge: it fans a query out over whichever search ports its caller hands it,
@@ -22,23 +28,21 @@ reach of it. That split is what lets the dedupe rules below be tested with
 nothing but hand-built `SearchHit`s — which is the only way to trust them,
 given how easy the wrong dedupe unit is to get wrong (see `merge_search_hits`).
 
-`search_catalogue` DOES NOT CALL THE REGISTRY. It takes the list
-`providers.for_catalogue_search(settings)` already returns rather than asking
-for it itself, so a caller owns the one place that decides which sources are
-reachable and the merge only ever sees the answer to that question, never the
-question itself. `resolve_pick` is the exception, and has to be: it re-reads a
-search the caller made, so it must ask the very same question the caller did.
+`search_catalogue` DOES NOT CALL THE REGISTRY. It takes the list it is handed,
+so the merge only ever sees the answer to "who is asked", never the question.
+`search` and `resolve_hit` are where the question is asked — the same one, of
+the same reference, which is what makes a re-read land on the row the page drew.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
 from .. import providers
-from .base import ItemKey, Media, SearchHit, SearchPort, Source, resolve_key
+from .base import ItemKey, Media, SearchHit, SearchPage, SearchPort, Source, resolve_key
 
 logger = logging.getLogger(__name__)
 
@@ -128,9 +132,18 @@ class SearchMergeResult(NamedTuple):
     with `hits == []`, the second is `failed` covering every source that was
     asked, and a caller that only looked at `hits` would render the two
     identically as an honest-looking empty results list.
+
+    `more_from` names each catalogue (base.SearchCatalogue.key) that holds a
+    later page than the last one read — its own word for it (SearchPage.more).
     """
     hits: list[MergedSearchHit]
     failed: frozenset[Source]
+    more_from: frozenset[str] = frozenset()
+
+    @property
+    def more(self) -> bool:
+        """Whether any catalogue asked holds a later page."""
+        return bool(self.more_from)
 
 
 def _blank(value: Any) -> bool:
@@ -243,7 +256,8 @@ def fold_one_title(hits: Sequence[SearchHit], key: ItemKey | None, *,
 
 def merge_search_hits(
         per_source: Sequence[tuple[Source, Sequence[SearchHit]]],
-        *, failed: frozenset[Source] = frozenset()) -> SearchMergeResult:
+        *, failed: frozenset[Source] = frozenset(),
+        more_from: frozenset[str] = frozenset()) -> SearchMergeResult:
     """Fold every source's hits into one deduplicated list. Pure — no settings,
     no network, no provider object — so the dedupe rules below can be trusted
     on nothing but hand-built `SearchHit`s.
@@ -295,8 +309,9 @@ def merge_search_hits(
     named by mal comes out carrying both, which is a better record than either
     source returned alone.
 
-    `failed` PASSES THROUGH UNCHANGED. Which sources could not be asked is a
-    fact about the fan-out that produced `per_source`, not about the fold —
+    `failed` AND `more_from` PASS THROUGH UNCHANGED. Which sources could not be
+    asked, and whether any holds a later page, are facts about the fan-out that
+    produced `per_source`, not about the fold —
     threading it through rather than recomputing it is what keeps this
     function honest about being pure.
     """
@@ -342,7 +357,7 @@ def merge_search_hits(
                 by_dedupe_key.setdefault(dedupe_key, []).append(slot)
 
     return SearchMergeResult(hits=[slot.finish() for slot in _whole_shows_absorb_seasons(slots)],
-                             failed=failed)
+                             failed=failed, more_from=more_from)
 
 
 def _whole_shows_absorb_seasons(slots: list[_Merging]) -> list[_Merging]:
@@ -388,14 +403,38 @@ def _whole_shows_absorb_seasons(slots: list[_Merging]) -> list[_Merging]:
     return kept
 
 
-async def search_catalogue(asked: Sequence[tuple[Source, SearchPort]], settings,
-                           media: Media, query: str, *,
+def _asking(entry) -> tuple[Source, SearchPort, str | None]:
+    """An asked entry as (source, port, catalogue key) — a SearchPlan's
+    AskedCatalogue, or a bare (source, port) pair asking the port's first
+    catalogue, which is how a caller holding no plan names one."""
+    if isinstance(entry, providers.AskedCatalogue):
+        return entry.source, entry.port, entry.catalogue.key
+    source, port = entry
+    return source, port, None
+
+
+async def search_catalogue(asked: Sequence, settings, media: Media, query: str, *,
+                           pages: int | Mapping[str, int] = 1,
                            cached_only: bool = False) -> SearchMergeResult:
-    """Ask every `(Source, SearchPort)` in `asked` for `query` at once, and
-    merge whatever answers come back. `asked` is
-    `providers.for_catalogue_search(settings)`'s own return — this function
-    does not call the registry itself, so a caller owns the one decision about
-    which sources are reachable and this only ever sees the answer.
+    """Ask every catalogue in `asked` for its pages 1 to n of `query` — the
+    catalogues at once, each one's pages in turn — and merge whatever answers
+    come back. `asked` is a SearchPlan's (`search` below); this function does
+    not call the registry itself. `pages` is each catalogue's page count by key
+    (SearchRef.page_counts), or one count for every catalogue.
+
+    EVERY PAGE UP TO n, NOT ONLY THE LAST, AND MERGED AS ONE ANSWER. A title one
+    service lists on page 1 and another on page 2 is one row, and the rows are
+    numbered in the list a page actually draws — so "more from <service>"
+    redraws the whole list one page longer rather than appending a second list
+    beside it. The earlier pages were stored by the requests that drew them, so
+    they cost nothing to read again. A catalogue stops at the first page that
+    says it has no more.
+
+    EACH CATALOGUE'S ROWS FOLLOW THE ONE BEFORE IT, in the plan's order: the
+    default's, then each service added. No service carries a relevance a merge
+    could rank across services by (TMDB and Simkl answer in their own order
+    with no score), so what a service adds is appended below what was being
+    read, never shuffled in above it.
 
     ONE SOURCE FAILING IS NOT THE SEARCH FAILING, the same bargain the
     calendar's fill envelope makes: `asyncio.gather(..., return_exceptions=True)`
@@ -414,19 +453,159 @@ async def search_catalogue(asked: Sequence[tuple[Source, SearchPort]], settings,
     """
     if not asked:
         return SearchMergeResult(hits=[], failed=frozenset())
-    answers = await asyncio.gather(
-        *(port.search_titles(settings, media, query, cached_only=cached_only)
-          for _source, port in asked),
-        return_exceptions=True)
+    entries = [_asking(entry) for entry in asked]
+
+    def count(key: str | None, source: Source) -> int:
+        if isinstance(pages, int):
+            return pages
+        return int(pages.get(key or str(source), 1))
+
+    async def pages_of(source: Source, port: SearchPort, key: str | None) -> SearchPage:
+        hits: list[SearchHit] = []
+        more = True
+        named = {"catalogue": key} if key is not None else {}
+        for page in range(1, count(key, source) + 1):
+            if not more:
+                break
+            answer = await port.search_titles(settings, media, query, page=page,
+                                              cached_only=cached_only, **named)
+            hits.extend(answer.hits)
+            more = answer.more
+        return SearchPage(hits, more)
+
+    answers = await asyncio.gather(*(pages_of(*entry) for entry in entries),
+                                   return_exceptions=True)
     per_source: list[tuple[Source, Sequence[SearchHit]]] = []
     failed: set[Source] = set()
-    for (source, _port), answer in zip(asked, answers):
+    more_from: set[str] = set()
+    for (source, _port, key), answer in zip(entries, answers):
         if isinstance(answer, BaseException):
-            logger.warning("Catalogue search failed for %s.", source, exc_info=answer)
+            logger.warning("Catalogue search failed for %s.", key or source, exc_info=answer)
             failed.add(source)
             continue
-        per_source.append((source, answer))
-    return merge_search_hits(per_source, failed=frozenset(failed))
+        per_source.append((source, answer.hits))
+        if answer.more:
+            more_from.add(key or str(source))
+    return merge_search_hits(per_source, failed=frozenset(failed),
+                             more_from=frozenset(more_from))
+
+
+# How far "more from <service>" may page one catalogue. Far short of TMDB's own
+# ceiling (page 500): a list this long is no longer a picker, and a narrower
+# query is the better answer than a longer list.
+MAX_PAGES = 10
+
+
+@dataclass(frozen=True)
+class SearchRef:
+    """WHICH search a page drew, said as references: the catalogues the viewer
+    ADDED to the default (`also`, base.SearchCatalogue keys) and how many pages
+    each catalogue shows (`pages`, (key, count) for every count past the first).
+
+    A REFERENCE, NEVER DATA, so it may ride in an address: the server resolves
+    the keys against what this viewer may add (providers.for_search, which
+    refuses any other) and re-reads every page from what the search stored. It is
+    what every result row and every widening control sends back, which is how
+    an add re-reads EXACTLY the list the row was drawn in.
+
+    BOTH ARE SETS, kept sorted, because the catalogues asked are put in declared
+    order by the registry whatever order the viewer added them in.
+    """
+    also: tuple[str, ...] = ()
+    pages: tuple[tuple[str, int], ...] = ()
+
+    @classmethod
+    def named(cls, params: Mapping[str, Any]) -> "SearchRef":
+        """The reference a request carries — a GET's query or a POST's body,
+        which name it the same way: `also=trakt,simkl-anime`,
+        `pages=tmdb:2,trakt:3`. A count that is not one is left out (the first
+        page); a key is checked where it is resolved, not here."""
+        names = {name.strip() for name in str(params.get("also") or "").split(",")
+                 if name.strip()}
+        counts: dict[str, int] = {}
+        for part in str(params.get("pages") or "").split(","):
+            key, _, number = part.strip().partition(":")
+            try:
+                value = int(number)
+            except ValueError:
+                continue
+            if key and value > 1:
+                counts[key] = min(value, MAX_PAGES)
+        return cls(tuple(sorted(names)), tuple(sorted(counts.items())))
+
+    def page_count(self, key: str) -> int:
+        """How many pages catalogue `key` shows."""
+        return dict(self.pages).get(key, 1)
+
+    def page_counts(self) -> dict[str, int]:
+        return dict(self.pages)
+
+    def fields(self) -> dict[str, str]:
+        """The reference as request fields: nothing for the default first page,
+        so a plain search's rows carry exactly what they always did."""
+        out: dict[str, str] = {}
+        if self.also:
+            out["also"] = ",".join(self.also)
+        if self.pages:
+            out["pages"] = ",".join(f"{key}:{count}" for key, count in self.pages)
+        return out
+
+    def adding(self, key: str) -> "SearchRef":
+        """This search with catalogue `key` added, on its first page; what it
+        adds is appended below the rows already there (search_catalogue)."""
+        return SearchRef(tuple(sorted({*self.also, key})), self.pages)
+
+    def longer(self, key: str) -> "SearchRef":
+        """This search with catalogue `key` one page longer, or as it is at the
+        ceiling."""
+        counts = {**dict(self.pages), key: min(self.page_count(key) + 1, MAX_PAGES)}
+        return SearchRef(self.also, tuple(sorted(counts.items())))
+
+
+class SearchOutcome(NamedTuple):
+    """One search, answered: what the services found, the reference it was
+    asked with, and who was and was not asked — everything a box draws below
+    its results (`controls`)."""
+    result: SearchMergeResult
+    ref: SearchRef
+    plan: providers.SearchPlan
+
+    def controls(self) -> dict[str, Any]:
+        """What `_title_search.html`'s `widen` draws, ONE BUTTON PER CATALOGUE in
+        the plan's order: "More from <service>" for a catalogue asked that holds
+        a later page (short of the ceiling), and "Also search <service>" for one
+        this viewer could add — which, once pressed, is asked and so becomes its
+        "More from". Each names the search it would ask by its own reference.
+        And the default services this instance has no credential for, which the
+        box names rather than replacing."""
+        asked = {entry.catalogue.key for entry in self.plan.asked}
+        offered = {catalogue.key for catalogue in self.plan.offered}
+        buttons = []
+        for catalogue in self.plan.order:
+            if catalogue.key in asked:
+                if (catalogue.key in self.result.more_from
+                        and self.ref.page_count(catalogue.key) < MAX_PAGES):
+                    buttons.append({"label": f"More from {catalogue.label}",
+                                    "fields": self.ref.longer(catalogue.key).fields()})
+            elif catalogue.key in offered:
+                buttons.append({"label": f"Also search {catalogue.label}",
+                                "fields": self.ref.adding(catalogue.key).fields()})
+        return {"buttons": buttons, "unconfigured": list(self.plan.unconfigured),
+                "asked": [entry.catalogue.key for entry in self.plan.asked]}
+
+
+async def search(settings, media: Media, query: str, ref: SearchRef = SearchRef(), *,
+                 cached_only: bool = False) -> SearchOutcome:
+    """THE ONE SEARCH every box makes: the catalogues `ref` names for this viewer
+    (providers.for_search, which raises UnknownSearchService for a key the
+    viewer may not add), each asked for its own page count and merged.
+    `settings` is the viewer's own (auth.viewer.settings_for_user) — whom they
+    have linked is what may be added. `cached_only` re-reads the stored answer
+    and asks nobody, which is how an add redraws the list it came from."""
+    plan = providers.for_search(settings, ref.also)
+    result = await search_catalogue(plan.asked, settings, media, query,
+                                    pages=ref.page_counts(), cached_only=cached_only)
+    return SearchOutcome(result, ref, plan)
 
 
 class Pick(NamedTuple):
@@ -529,10 +708,10 @@ async def pick_from_hit(settings, hit: MergedSearchHit, *, cached_only: bool) ->
     )
 
 
-async def resolve_pick(settings, media: Media, query: str, index, *,
-                       cached_only: bool) -> Pick | None:
-    """The result at `index` of the search for `query`, or None when nothing
-    stored answers to that name.
+async def resolve_pick(settings, media: Media, query: str, index,
+                       ref: SearchRef = SearchRef(), *, cached_only: bool) -> Pick | None:
+    """The result at `index` of the search for `query` that `ref` names, or None
+    when nothing stored answers to that name.
 
     A RESULT IS NAMED BY ITS QUERY AND ITS PLACE IN THE ANSWER, not by an
     identity, and that is not a shortcut. A show hit CAN have no shared id at
@@ -553,28 +732,34 @@ async def resolve_pick(settings, media: Media, query: str, index, *,
     earlier, and a result the store no longer holds is one to search for again
     rather than one to guess at.
     """
-    hit = await resolve_hit(settings, media, query, index)
+    hit = await resolve_hit(settings, media, query, index, ref)
     if hit is None:
         return None
     return await pick_from_hit(settings, hit, cached_only=cached_only)
 
 
-async def resolve_hit(settings, media: Media, query: str, index) -> MergedSearchHit | None:
-    """The merged hit at `index` of the stored search for `query`, or None when
-    nothing stored answers to that name — the first half of `resolve_pick`, for a
-    caller that needs the hit itself rather than its season list.
+async def resolve_hit(settings, media: Media, query: str, index,
+                      ref: SearchRef = SearchRef()) -> MergedSearchHit | None:
+    """The merged hit at `index` of the stored search for `query` that `ref`
+    names, or None when nothing stored answers to that name — the first half of
+    `resolve_pick`, for a caller that needs the hit itself rather than its
+    season list.
 
     CACHE ONLY, ALWAYS: the search is re-read from where the caller's own
     earlier request stored it, merged again by the same pure rules, so the same
-    query lands on the same row and nothing is asked. `settings` must be the
-    ones that search was made with — `providers.for_catalogue_search` decides
-    from them who was asked, and a different answer would re-read a different
-    merge.
+    query lands on the same row and nothing is asked. THE SAME REFERENCE ASKS
+    THE SAME SERVICES — `search` puts `ref` to providers.for_search exactly as the
+    box's own request did — and the same pages, so the same place names the same
+    title. `settings` must be the viewer's that search was made with, for the
+    same reason. A reference naming a service this viewer may no longer add
+    (they unlinked it since) names nothing, and is answered as an expired
+    search.
     """
-    asked = providers.for_catalogue_search(settings)
-    if not asked:
+    try:
+        outcome = await search(settings, media, query, ref, cached_only=True)
+    except providers.UnknownSearchService:
         return None
-    result = await search_catalogue(asked, settings, media, query, cached_only=True)
+    result = outcome.result
     try:
         position = int(index)
     except (TypeError, ValueError):

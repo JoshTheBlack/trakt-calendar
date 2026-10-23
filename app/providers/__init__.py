@@ -14,6 +14,8 @@ module happens to be loaded first.
 """
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from .base import (
     ID_KEYS,
     CalendarPort,
@@ -22,7 +24,9 @@ from .base import (
     Media,
     Provider,
     Record,
+    SearchCatalogue,
     SearchHit,
+    SearchPage,
     SearchPort,
     SeasonsAnswer,
     Source,
@@ -35,10 +39,12 @@ from .base import (
 
 __all__ = [
     "CalendarPort", "Capabilities", "ID_KEYS", "Item", "Media", "Provider",
-    "Record", "SearchHit", "SearchPort", "SeasonsAnswer", "Source", "SyncPort",
-    "WatchlistPort", "collect_ids", "parse_media", "render", "register", "get",
-    "registered", "calendar_sources", "for_calendar_sources", "for_tracker_ports",
-    "tracker_sources", "for_catalogue_search", "for_watchlist",
+    "AskedCatalogue", "Record", "SearchCatalogue", "SearchHit", "SearchPage",
+    "SearchPlan", "SearchPort", "SeasonsAnswer",
+    "Source", "SyncPort", "UnknownSearchService", "WatchlistPort", "collect_ids",
+    "parse_media", "render", "register", "get", "registered", "calendar_sources",
+    "for_calendar_sources", "for_tracker_ports", "tracker_sources", "for_search",
+    "for_shared_id_lookup", "for_watchlist",
 ]
 
 _REGISTRY: dict[Source, Provider] = {}
@@ -258,48 +264,115 @@ def for_tracker_ports(prefs, linked, settings) -> list[tuple[Source, SyncPort]]:
     return ports
 
 
-def for_catalogue_search(settings) -> list[tuple[Source, SearchPort]]:
-    """Every source that can answer a catalogue search right now, in declared
-    order — the registry's answer to "who can I ask", following
-    `for_tracker_ports`'s shape above.
+def for_shared_id_lookup(settings) -> list[tuple[Source, SearchPort]]:
+    """Every source that can be asked RIGHT NOW which of its titles a shared id
+    names (SearchPort.find_by_shared_id), in declared order — what a title
+    arriving on the tracker, or a calendar card one service draws, asks each
+    service it holds no id for.
 
-    TWO CONDITIONS, DELIBERATELY NOT THREE. The source carries a
-    `search_port` — one usable for something else and with no search port is
-    simply not askable — and its CATALOGUE credential is present, asked
-    through `catalogue_is_configured`. That predicate answers a DIFFERENT
-    question per source rather than one fixed rule: Trakt's catalogue search
-    authenticates with the instance's own client id, the same as every other
-    Trakt catalogue read, so its `catalogue_is_configured` is `is_configured`
-    in spirit and asks nothing about any one viewer. Simkl's v2 API requires a
-    user token for search and /redirect (its per-title lookups by id stay
-    anonymous), so ITS `catalogue_is_configured` is `settings.simkl_configured`
-    — client id AND a token — which only reads true on a per-viewer Settings
-    object (see app/providers/simkl/__init__.py._SimklProvider). A caller
-    with a viewer in scope hands it that viewer's Settings
-    (auth.viewer.settings_for_user); a caller with no viewer hands it the
-    instance-wide one, which carries no Simkl token at all — config.load_settings
-    leaves any stored operator token out — so Simkl simply drops out for it.
+    NOT THE SEARCH LIST, AND THE DIFFERENCE IS THE POINT. A search box asks the
+    catalogue `searched_by_default` and only the services a viewer chose to add
+    (`for_search`); an exact lookup by id is how a title found anywhere learns
+    every service's id for it, so it asks every service that can answer one —
+    Trakt by /search/tmdb, Simkl by /redirect, TMDB by /find — whichever box
+    found the title. Reusing the search list here would stop a title found on
+    TMDB from ever learning its Trakt and Simkl ids, which is what lets the
+    tracker read the viewer's history for it.
 
-    NO ACCOUNT PREFERENCE, UNLIKE `for_tracker_ports`. `prefs.admits_tracker`
-    governs whose DATA a read touches, and a catalogue search touches nobody's
-    data — there is nothing here for a preference to admit or refuse.
-
-    THE LENGTH IS THE WHOLE ANSWER TO "A TRAKT-ONLY OR A SIMKL-ONLY INSTANCE
-    MUST BOTH WORK ORDINARILY". 0 means no catalogue is reachable, 1 means one
-    source answers with nothing to disambiguate, more means a caller has
-    several answers to merge — and every behaviour downstream keys off that
-    length rather than off a source's name. Registry order, so the first
-    declared source with a search port leads where an order is drawn from one,
-    the same rule `for_tracker_ports` states in full.
+    TWO CONDITIONS. The source carries a `search_port` (the lookup's home), and
+    its CATALOGUE credential is present, asked through `catalogue_is_configured`
+    — which answers a different question per source rather than one rule:
+    Trakt's and TMDB's lookups authenticate with the instance's own credential,
+    while Simkl's v2 API requires a user token for /redirect, so ITS
+    `catalogue_is_configured` reads true only on a per-viewer Settings
+    (auth.viewer.settings_for_user) for a viewer who linked Simkl. A caller with
+    no viewer hands in the instance-wide Settings, which carries no Simkl token
+    (config.load_settings leaves any stored operator token out), and Simkl drops
+    out for it.
     """
-    out: list[tuple[Source, SearchPort]] = []
+    return [(source, provider.search_port)
+            for source, provider in registered().items()
+            if provider.search_port is not None and provider.catalogue_is_configured(settings)]
+
+
+class UnknownSearchService(ValueError):
+    """A search named a service to add that is not one this viewer may add —
+    not registered, not searchable, already asked by default, or not linked. A
+    REFUSAL, never quietly read as the default search: a box that asked for one
+    service and silently got another would be one service standing in for
+    another."""
+
+
+class AskedCatalogue(NamedTuple):
+    """One catalogue a search asks: whose it is, the port to ask it through, and
+    which of that port's catalogues (base.SearchCatalogue)."""
+    source: Source
+    port: SearchPort
+    catalogue: SearchCatalogue
+
+
+class SearchPlan(NamedTuple):
+    """Who one search asks, and what the box can say about who it did not.
+
+    `asked` is every catalogue to ask, in declared order (a service's own
+    catalogues in the order it lists them). `offered` is each catalogue this
+    viewer could ADD and has not ("also search …"); `order` every catalogue the
+    box can name at all — asked or offered — in that same order, which is the
+    order its controls are drawn in; `unconfigured` the services searched by
+    default that this instance holds no credential for — said in the box rather
+    than replaced by anybody else.
+    """
+    asked: list[AskedCatalogue]
+    offered: tuple[SearchCatalogue, ...]
+    unconfigured: tuple[str, ...]
+    order: tuple[SearchCatalogue, ...] = ()
+
+
+def for_search(settings, also=()) -> SearchPlan:
+    """The catalogues a search box asks for this viewer, given the catalogues the
+    request ADDED (`also`, their keys — references, never data).
+
+    BY DEFAULT, every catalogue of every source that declares itself
+    `searched_by_default` and whose catalogue credential this instance holds. AN
+    ADDED CATALOGUE is one of any other searchable source the viewer has LINKED —
+    `is_configured` on the viewer's own Settings (auth.viewer.settings_for_user),
+    the private question, because what is offered is "also search the service
+    you use", asked with that viewer's own token where the service asks for one.
+    Nothing linked: the default alone. A service keeping two catalogues (Simkl's
+    TV and anime) offers each, to be added on its own.
+
+    NO SERVICE STANDS IN FOR ANOTHER. A default source with no credential is
+    named in `unconfigured` for the box to say so, and nothing is asked in its
+    place; an added key this viewer may not add raises UnknownSearchService.
+
+    THE SAME `also` GIVES THE SAME LIST, which is what lets a result be named by
+    its place in an answer (title_search.resolve_hit asks this again to re-read
+    exactly the search the page drew).
+    """
+    named = {str(name) for name in also}
+    every: list[tuple[AskedCatalogue, bool]] = []  # (catalogue, asked by default)
+    unconfigured: list[str] = []
     for source, provider in registered().items():
-        if provider.search_port is None:
+        port = provider.search_port
+        if port is None:
             continue
-        if not provider.catalogue_is_configured(settings):
-            continue
-        out.append((source, provider.search_port))
-    return out
+        if provider.capabilities.searched_by_default:
+            if not provider.catalogue_is_configured(settings):
+                unconfigured.append(str(source))
+                continue
+            every.extend((AskedCatalogue(source, port, c), True) for c in port.catalogues)
+        elif provider.is_configured(settings) and provider.catalogue_is_configured(settings):
+            every.extend((AskedCatalogue(source, port, c), False) for c in port.catalogues)
+    addable = {entry.catalogue.key for entry, default in every if not default}
+    refused = named - addable
+    if refused:
+        raise UnknownSearchService(f"Can't add {', '.join(sorted(refused))} to this search.")
+    return SearchPlan(
+        asked=[entry for entry, default in every if default or entry.catalogue.key in named],
+        offered=tuple(entry.catalogue for entry, default in every
+                      if not default and entry.catalogue.key not in named),
+        unconfigured=tuple(unconfigured),
+        order=tuple(entry.catalogue for entry, _default in every))
 
 
 def for_watchlist(settings) -> list[tuple[Source, WatchlistPort]]:

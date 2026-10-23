@@ -19,8 +19,8 @@ import httpx
 from ... import youtube
 from ...config import Settings
 from .. import season as season_rules
-from ..base import (CAST_SHOWN, MATCH_SOURCES, Media, Source, TitleFacts, Video,
-                    VideoKind, proxied_image)
+from ..base import (CAST_SHOWN, MATCH_SOURCES, SEARCH_PAGE_SIZE, Media, Source, TitleFacts,
+                    Video, VideoKind, proxied_image)
 from . import _ids, transport
 from .transport import TraktError
 
@@ -39,8 +39,6 @@ def _headshot(person: dict) -> str | None:
         url = imgs[0]
         return proxied_image(url if url.startswith("http") else "https://" + url)
     return None
-
-
 
 
 def _cast_from(people: dict) -> list[dict]:
@@ -632,10 +630,17 @@ def ids_map(media: dict) -> dict:
     return _ids.normalize(media.get("ids") or {})
 
 
-async def search_titles(settings: Settings, media: str, query: str, *,
-                        cache_only: bool = False) -> list[dict]:
-    """/search/{show|movie}?query=... -> [{media, ids, title, year, network,
-    runtime, overview, poster}], newest-match-first as Trakt orders it.
+async def search_titles(settings: Settings, media: str, query: str, *, page: int = 1,
+                        cache_only: bool = False) -> tuple[list[dict], bool]:
+    """/search/{show|movie}?query=...&page=N&limit=SEARCH_PAGE_SIZE -> one page
+    of [{media, ids, title, year, network, runtime, overview, poster}] in
+    Trakt's order, and whether Trakt holds a later page.
+
+    `page` AND `limit` ARE ASKED IN THE QUERY, which Trakt honours over the
+    X-Pagination-* request headers every call carries (measured 2026-10-23:
+    "heat" answered 100 under the headers alone, 20 a page with `limit=20`, and
+    page 2 the next 20). A later page exists when this one came back FULL —
+    counted before the id filter below, which is about rows, not pages.
 
     `images` IS ASKED FOR, so a result row can show the title's poster from
     this one answer rather than a lookup per row — measured live 2026-09-27,
@@ -646,7 +651,7 @@ async def search_titles(settings: Settings, media: str, query: str, *,
     ONE implementation for both media types. The two searches differ only in the
     path segment and in which key the result object hangs under, so a second
     copy shaped for movies would drift from this one the first time either is
-    touched. Empty query returns [] without a call.
+    touched. Empty query returns ([], False) without a call.
 
     `cache_only=True` reads back the answer this exact search already stored and
     never asks Trakt. It is how a caller that searched a moment ago names one of
@@ -657,13 +662,14 @@ async def search_titles(settings: Settings, media: str, query: str, *,
         raise ValueError(f"Unknown media type {media!r}.")
     q = (query or "").strip()
     if not q:
-        return []
+        return [], False
     # Deferred for the reason `fetch_details`'s own import of it gives.
     from . import calendar as trakt_calendar
 
     results = await transport.cached_get(
         transport.shared_client(), settings, f"search/{media}",
-        {"query": q, "extended": "full,images"},
+        {"query": q, "extended": "full,images", "page": str(max(1, int(page))),
+         "limit": str(SEARCH_PAGE_SIZE)},
         raise_errors=True, cache_only=cache_only,
     )
 
@@ -688,9 +694,10 @@ async def search_titles(settings: Settings, media: str, query: str, *,
             "overview": (item.get("overview") or "").strip(),
             "poster": trakt_calendar.poster(item) or "",
         })
-    logger.info("search_titles(%s, %r) -> %d raw / %d usable result(s)", media, q,
-                len(results) if isinstance(results, list) else 0, len(out))
-    return out
+    raw = len(results) if isinstance(results, list) else 0
+    logger.info("search_titles(%s, %r, page %s) -> %d raw / %d usable result(s)",
+                media, q, page, raw, len(out))
+    return out, raw >= SEARCH_PAGE_SIZE
 
 
 # The shared ids Trakt's id lookup accepts, in MATCH_SOURCES order. Trakt has no

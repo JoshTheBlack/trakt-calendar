@@ -172,16 +172,18 @@ class ThePickerFactsAndRecordsTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TheProviderTests(unittest.TestCase):
-    """TMDB as the registry holds it: a describer, never a tracker, its search,
-    calendar and list ports not yet offered."""
+    """TMDB as the registry holds it: a describer and every box's default
+    search, never a tracker, its calendar and list ports not yet offered."""
 
-    def test_it_is_first_and_describes_only(self):
+    def test_it_is_first_and_describes_and_searches_only(self):
         from app import providers
         self.assertEqual(list(providers.registered())[0], Source.TMDB)
         provider = providers.get(Source.TMDB)
         self.assertIsNotNone(provider.detail_port)
-        self.assertEqual((provider.sync_port, provider.calendar_port, provider.search_port,
-                          provider.watchlist_port), (None, None, None, None))
+        self.assertIsNotNone(provider.search_port)
+        self.assertTrue(provider.capabilities.searched_by_default)
+        self.assertEqual((provider.sync_port, provider.calendar_port,
+                          provider.watchlist_port), (None, None, None))
         self.assertFalse(provider.capabilities.private_user_data)
 
     def test_its_catalogue_is_the_instance_token_and_nobodys_account(self):
@@ -199,12 +201,13 @@ class TheProviderTests(unittest.TestCase):
 
 
 class TheSearchTests(unittest.IsolatedAsyncioTestCase):
-    """search.py is written and held here, and offered to no search box yet."""
+    """search.py: one page per ask, and TMDB's own word on whether there is more."""
 
     async def test_a_page_of_hits(self):
         tmdb, patched = answering(search__tv=fixture("search_tv_frieren"))
         with patched:
-            hits = await search.search_titles(SETTINGS, Media.SHOW, " frieren ")
+            answer = await search.search_titles(SETTINGS, Media.SHOW, " frieren ")
+        hits = answer.hits
         self.assertEqual(hits[0].source, Source.TMDB)
         self.assertEqual(hits[0].ids, {"tmdb": int(hits[0].source_id)})
         self.assertIsNone(hits[0].season)
@@ -221,8 +224,18 @@ class TheSearchTests(unittest.IsolatedAsyncioTestCase):
     async def test_an_empty_query_asks_nothing(self):
         tmdb, patched = answering()
         with patched:
-            self.assertEqual(await search.search_titles(SETTINGS, Media.SHOW, "  "), [])
+            self.assertEqual((await search.search_titles(SETTINGS, Media.SHOW, "  ")).hits, [])
         self.assertEqual(tmdb.asked, [])
+
+    async def test_more_is_tmdbs_page_count_capped_where_tmdb_stops(self):
+        cases = [(1, 3, True), (3, 3, False), (1, 1, False), (499, 900, True),
+                 (500, 900, False)]
+        for page, total, more in cases:
+            with self.subTest(page=page, total=total):
+                _tmdb, patched = answering(search__tv={"results": [], "total_pages": total})
+                with patched:
+                    answer = await search.search_titles(SETTINGS, Media.SHOW, "x", page=page)
+                self.assertEqual(answer.more, more)
 
     async def test_a_shared_id_finds_the_tmdb_id_exactly(self):
         _tmdb, patched = answering(**{"find__tt11280740": fixture("find_imdb_severance")})

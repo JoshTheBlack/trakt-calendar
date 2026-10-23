@@ -44,7 +44,8 @@ from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, endpoint_choices, get_endpo
 from ..integrations import routes as integrations_routes
 from ..media import logos
 from ..perftrace import span
-from ..providers import detail_source
+from ..providers import (UnknownSearchService, detail_source, season_choices,
+                        title_search)
 from ..providers.base import Media, Source, SourceUnavailable, parse_item_key, proxied_image
 from ..providers.trakt import TraktError
 from ..sources import prefs as source_prefs
@@ -1094,7 +1095,8 @@ async def search_the_calendar(request: Request):
     TWO ANSWERS, TWO PROMISES, AND THE ROUTE KEEPS THEM APART — see
     app/calendar/search.py, which is where the whole argument lives. The stored
     half is confirmed by the real read path so a jump lands on a card that is
-    actually there; the catalogue half links to a MONTH, which fills on arrival.
+    actually there; the catalogue half lists TITLES, as every box does, and a
+    title's season picker (`calendar_search_seasons`) is where its months are.
 
     `live=1` IS THE ONLY THING THAT SPENDS A REQUEST, and the client sends it on
     Enter or the button rather than on every keystroke. Typing therefore costs an
@@ -1104,11 +1106,15 @@ async def search_the_calendar(request: Request):
     A FRAGMENT, NOT A PAGE. It renders the same results partial the shell embeds,
     so the typing path and a full submit produce identical markup.
 
-    SETTINGS IS THIS VIEWER'S OWN, not the instance-wide one — the catalogue
-    half's Simkl search now genuinely requires a user token (see
-    providers.for_catalogue_search's docstring), so an instance-wide Settings
-    object — which never carries a Simkl token — would read as "no Simkl" for
-    every viewer, linked or not. auth/viewer.py builds it.
+    SETTINGS IS THIS VIEWER'S OWN, not the instance-wide one — which services
+    the catalogue half may add is whom the viewer has linked
+    (providers.for_search), and an instance-wide Settings carries nobody's
+    token. auth/viewer.py builds it.
+
+    WHICH CATALOGUE SEARCH, BY REFERENCE: `also` and `pages`
+    (title_search.SearchRef), sent by the box's own widening controls. A name
+    the viewer may not add is refused in the results, never searched as
+    something else.
     """
     user = await auth.current_user(request)
     settings = await viewer.settings_for_user(user.user_id)
@@ -1132,32 +1138,29 @@ async def search_the_calendar(request: Request):
     found = await calendar_search.stored(
         query, settings=settings, prefs=prefs, tz=tz,
         source_selection=source_selection, marks=marks, endpoints=scope)
-    elsewhere = calendar_search.Results()
+    catalogue = calendar_search.Results()
+    ref = title_search.SearchRef.named(request.query_params)
+    refused = ""
     if live and query:
-        # THE STORED ANSWERS ARE HANDED OVER so the catalogue half does not offer
-        # somewhere the calendar already draws: naming the day beats naming the
-        # month, and offering both would be two rows for one answer.
-        #
-        # KEYED ON THE SEASON AS WELL AS THE TITLE, because a catalogue row is a
-        # season premiere rather than a show. `mark_key` is deliberately the
-        # TITLE's identity and carries no season (see Item.mark_key), so keying
-        # the skip on it alone would drop every season of a title the calendar
-        # happens to hold one airing of — hiding exactly the season somebody is
-        # searching for because a different one is on screen.
-        known = frozenset((a.item.mark_key, a.item.season) for a in found.airings)
         try:
-            elsewhere = await calendar_search.catalogue(
-                query, settings=settings, prefs=prefs, tz=tz, known=known)
+            # THE CALENDAR'S OWN MEDIUM, both only across every calendar — so
+            # the box answers one page of titles like every other box.
+            catalogue = await calendar_search.catalogue(
+                query, settings=settings, ref=ref,
+                media=((Media.SHOW, Media.MOVIE) if everywhere else (Media(endpoint.media),)))
         except SourceUnavailable as exc:
             # The stored half already has an answer worth drawing; a catalogue
             # that could not be reached is a missing addition to it, not a failed
             # search.
             logger.warning("Catalogue search failed: %s", exc)
+        except UnknownSearchService as exc:
+            refused = str(exc)
 
     return templates.TemplateResponse(request, "_search_results.html", {
         "request": request, "query": query, "live": live,
-        "airings": found.airings, "elsewhere": elsewhere.elsewhere,
-        "truncated": found.truncated, "failed": sorted(str(s) for s in elsewhere.failed),
+        "airings": found.airings, "found": catalogue.found,
+        "controls": catalogue.controls, "refused": refused, "search_ref": ref.fields(),
+        "truncated": found.truncated, "failed": sorted(str(s) for s in catalogue.failed),
         "everywhere": everywhere, "endpoint": endpoint,
         "not_watching": set(), "new_ids": set(), "can_filter": False,
         "settings": settings, "is_admin": bool(user and user.is_admin),
@@ -1280,70 +1283,111 @@ async def calendar_day(request: Request):
     )
 
 
+async def _searched_title(request: Request, settings):
+    """The catalogue result a picker or a jump names — by the query, the
+    medium, the search's own reference and its place in that answer — re-read
+    from the stored search, or None. The medium is one the box searched."""
+    params = request.query_params
+    try:
+        media = Media(params.get("media") or "show")
+    except ValueError:
+        return None, Media.SHOW
+    hit = await title_search.resolve_hit(settings, media, str(params.get("q") or ""),
+                                         params.get("i"), title_search.SearchRef.named(params))
+    return hit, media
+
+
+@guard.get("/calendar/fragments/search-seasons", AuthLevel.CALENDAR_APPROVED)
+async def calendar_search_seasons(request: Request):
+    """A catalogue result's season picker — the app's one season checklist
+    (_season_checklist.html), asked for when the result's row is pressed, never
+    with the search. Its choices are calendar/search.py's `picker`: the seasons
+    the leading service dates, those the viewer's filters hide refused with the
+    reason, those the calendar already draws linking to their day. Submitting it
+    is the jump.
+
+    EVERY OUTCOME IS DRAWN, at 200, as a sentence where the list would be: a
+    non-200 is never swapped, and the slot would stay as it was."""
+    user = await auth.current_user(request)
+    settings = await viewer.settings_for_user(user.user_id)
+    hit, media = await _searched_title(request, settings)
+    context = {"request": request, "options": [], "note": "", "title": "", "ticked": None,
+               "media": str(media), "endpoint": request.query_params.get("endpoint") or "",
+               "ref": {name: request.query_params[name] for name in
+                       ("q", "media", "i", "also", "pages") if request.query_params.get(name)}}
+    if hit is None:
+        context["note"] = "That search has expired — search for it again."
+    else:
+        try:
+            chosen = await calendar_search.picker(
+                settings, hit, media, prefs=await auth.get_user_prefs(user.user_id),
+                tz=_resolve_viewer_tz(user, settings),
+                source_selection=await _viewer_source_selection(request, user))
+        except SourceUnavailable as exc:
+            logger.info("calendar picker: %s could not be described (%s)", hit.title, exc)
+            chosen = calendar_search.Picker([], [])
+            context["note"] = "Couldn't look this title up just now — try again in a moment."
+        context["options"] = chosen.options
+        context["title"] = hit.title
+        # THE SUGGESTED SEASON ARRIVES TICKED here, where pressing Go with nothing
+        # chosen would otherwise go nowhere; a film's one choice is its release.
+        context["ticked"] = next((option.season for option in chosen.options
+                                  if option.suggested and option.pickable), None)
+        if not chosen.options and not context["note"]:
+            context["note"] = ("No service here can date this film." if media is Media.MOVIE
+                               else "No season of this show has a date yet.")
+    return templates.TemplateResponse(request, "_search_seasons.html", context)
+
+
 @guard.get("/calendar/jump", AuthLevel.CALENDAR_APPROVED)
 async def jump_to_a_searched_title(request: Request):
-    """Follow a search result that this instance's calendar does not hold: write
-    the one airing, then send the reader to the month it lands on.
+    """Follow a catalogue result's picker: write the airings its ticked seasons
+    name (a film: its release), then send the reader to the first one's month.
 
     A REDIRECT AND NOT A PAGE, so the address bar ends up on the calendar itself.
     Back then returns to wherever the reader was rather than replaying a write,
     and a reload of the month is an ordinary month load.
 
-    IT WRITES ONE THING BECAUSE ONE THING WAS ASKED FOR. The search offers
-    everything that matched — sixteen rows for a franchise — and writing all of
-    them would turn one act of curiosity into sixteen decisions about a calendar
-    everybody on this instance shares. Following a result is the act that names
-    exactly one.
+    IT WRITES WHAT WAS TICKED AND NOTHING ELSE. The search offers everything that
+    matched — sixteen rows for a franchise — and writing all of them would turn
+    one act of curiosity into sixteen decisions about a calendar everybody on
+    this instance shares. The picker is the act that names them.
 
-    THE QUERY NAMES A SERVICE AND THAT SERVICE'S OWN ID, AND NOTHING ELSE IS
-    BELIEVED. Title, date, network, poster and the shared ids all come back from
-    the service, so this link cannot be hand-edited into a calendar row of
-    somebody's choosing — see calendar/search.py's `fill_one_gap`.
+    THE QUERY NAMES A RESULT BY REFERENCE, AND NOTHING ABOUT THE TITLE IS
+    BELIEVED. The result is re-read from the stored search; its title, dates,
+    network, poster and ids come back from the services, and each airing is
+    written by a service that lists the calendar (calendar/search.py's `jump`) —
+    so this link cannot be hand-edited into a calendar row of somebody's choosing.
 
     A WRITE THAT COULD NOT HAPPEN STILL REDIRECTS. The month is worth opening
-    either way: it may hold the title from an ordinary fill, and if it does not
-    the reader sees the month they asked for rather than an error about
-    machinery.
+    either way; a result the store no longer holds opens the calendar the reader
+    was on.
     """
-    settings = load_settings()
     user = await auth.current_user(request)
-    today = clock.today()
-    params = request.query_params
-    year = route_params.valid_year(params.get("year"), today.year)
-    month = route_params.valid_month(params.get("month"), today.month)
-    endpoint = get_endpoint(params.get("endpoint"))
-    destination = (f"/calendar?year={year}&month={month}"
-                   f"&endpoint={quote(endpoint.key, safe='')}")
-
-    # A NAME THIS APP DOES NOT KNOW IS NOT AN ERROR, it is a link from an older
-    # version or a hand-edited one; the reader still gets the month.
+    settings = await viewer.settings_for_user(user.user_id)
+    endpoint = get_endpoint(request.query_params.get("endpoint"))
+    fallback = f"/calendar?endpoint={quote(endpoint.key, safe='')}"
+    hit, media = await _searched_title(request, settings)
+    if hit is None:
+        return RedirectResponse(fallback, status_code=303)
+    # Each ticked choice, as a number — or None for the one choice that is not a
+    # season (a film's release, a show's premiere when no season list answered).
+    seasons: list = []
+    for value in season_choices.ticked(request.query_params):
+        try:
+            seasons.append(int(value) if value else None)
+        except ValueError:
+            continue
     try:
-        source = Source(str(params.get("source") or ""))
-    except ValueError:
-        source = None
-    source_id = str(params.get("id") or "").strip()
-    if source is None or not source_id:
-        return RedirectResponse(destination, status_code=303)
-    try:
-        media = Media(params.get("media") or "show")
-    except ValueError:
-        media = Media.SHOW
-    season = route_params.season(params.get("season"))
-
-    landing = await calendar_search.fill_one_gap(
-        settings, source=source, source_id=source_id, media=media,
-        season=season, endpoint_key=endpoint.key,
-        tz=_resolve_viewer_tz(user, settings), now=db.now())
-    if landing:
-        # THE DAY RIDES WITH THE MARK, as it does on a stored result's link
-        # (calendar/search.py's Jump.url): a card past the days the page draws
-        # inline does not exist when the browser looks for #jump-target, so a
-        # mark alone landed at the top of the month.
-        destination += (f"&highlight={quote(landing.mark, safe='')}"
-                        f"&day={quote(landing.day, safe='')}#jump-target")
+        destination = await calendar_search.jump(
+            settings, hit, media, seasons, tz=_resolve_viewer_tz(user, settings),
+            now=db.now())
+    except SourceUnavailable as exc:
+        logger.info("calendar jump: %s could not be described (%s)", hit.title, exc)
+        destination = ""
     # 303, so following this is a GET however the browser got here, and so a
     # reload of where it lands does not re-run the write.
-    return RedirectResponse(destination, status_code=303)
+    return RedirectResponse(destination or fallback, status_code=303)
 
 
 def _library_answer(request: Request, *, marks=(), message: str = "",
@@ -1776,7 +1820,7 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
         # see the route's own docstring — but deciding whether to ask Simkl
         # about a card its calendar is missing is the one question here that is
         # NOT public any more: Simkl's v2 search and /redirect require this
-        # viewer's own token (providers.for_catalogue_search's docstring), so an
+        # viewer's own token (providers.for_shared_id_lookup's docstring), so an
         # instance-wide object would silently never ask, for anybody.
         follow_up=await _completion_follow_up(
             await viewer.settings_for_user(user.user_id), params, season))
@@ -2044,7 +2088,7 @@ async def complete_card(request: Request):
 
     SETTINGS IS THIS VIEWER'S OWN. The service being asked may be Simkl, whose
     v2 search and /redirect require a user token (see
-    providers.for_catalogue_search's docstring) — an instance-wide Settings
+    providers.for_shared_id_lookup's docstring) — an instance-wide Settings
     object carries no such token at all (config.load_settings leaves any stored
     operator token out), which would make this ask silently never happen for
     anybody, linked or not — auth/viewer.py builds the viewer's own.

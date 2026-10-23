@@ -20,7 +20,7 @@ import functools
 import json
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -40,7 +40,7 @@ from ..auth import AuthLevel
 from ..config import load_settings
 from ..media import artwork, posters, user_images
 from ..perftrace import span
-from ..providers import detail_source
+from ..providers import UnknownSearchService, detail_source, season_choices, title_search
 from ..sources import prefs as source_prefs
 # THE DETAIL PORTS' failure type, which is not `ranker_sources.SourceUnavailable`:
 # that one is this feature's own translation for the search and ratings seams,
@@ -659,7 +659,7 @@ async def seasons_fragment(request: Request):
             note = "Couldn't list this show's seasons just now."
         if not listed and not note:
             note = "No seasons are listed for this show yet."
-    options = ranker_seasons.season_options(
+    options = season_choices.season_options(
         listed, held=held, current=item["season"],
         finished=await ranker_import.latest_finished_season(user.user_id, parsed.title),
         now=datetime.now(timezone.utc))
@@ -1237,7 +1237,7 @@ async def set_board_item_season(board_uid: str, request: Request):
                                                data.get("season"), listed)
         season = ranker.parse_key(row_key).season
         notice = ("This row is the whole show now." if season is None else
-                  f"This row is {ranker_seasons.season_word(season)} now.")
+                  f"This row is {season_choices.season_word(season)} now.")
     except ranker.RankerError as exc:
         notice, ok = str(exc), False
     return await _rankings_response(request, user, board_uid, notice=notice, notice_ok=ok,
@@ -1433,17 +1433,30 @@ def _media(value, default: Media | None = None) -> Media:
 
 
 def _search_context(*, query: str = "", media: Media | str = "", rows=(), typed: bool = False,
-                    too_short: bool = False, no_catalogue: bool = False, failed=(),
+                    too_short: bool = False, failed=(), controls=None,
                     message: str = "") -> dict[str, Any]:
     """What _ranker_search_results.html draws, in one shape for the fragment and
     for the page an add answers with — one builder, so the two cannot disagree
-    about what a search result carries."""
+    about what a search result carries. `controls` is what title_search's
+    `widen` draws under a services' answer (SearchOutcome.controls)."""
     return {"query": query, "media": str(media), "rows": list(rows), "typed": typed,
-            "too_short": too_short, "no_catalogue": no_catalogue,
+            "too_short": too_short, "controls": controls,
             "failed": sorted(str(source) for source in failed), "message": message}
 
 
-def _result_rows(hits, *, query: str, media: Media, held) -> list[dict[str, Any]]:
+def _searched(outcome: title_search.SearchOutcome, *, query: str, media: Media,
+              held) -> dict[str, Any]:
+    """A services' answer as the search context — the fragment's and an add's
+    redraw, from one place."""
+    return _search_context(
+        query=query, media=media, failed=outcome.result.failed,
+        controls=outcome.controls(),
+        rows=_result_rows(outcome.result.hits, query=query, media=media, held=held,
+                          ref=outcome.ref))
+
+
+def _result_rows(hits, *, query: str, media: Media, held,
+                 ref: title_search.SearchRef | None = None) -> list[dict[str, Any]]:
     """Search hits as the result rows the board draws — THE ONE PLACE A HIT
     BECOMES ONE, so the text a row shows and the reference it posts back are read
     off the same dict.
@@ -1451,9 +1464,10 @@ def _result_rows(hits, *, query: str, media: Media, held) -> list[dict[str, Any]
     `ref` IS HOW A ROW NAMES ITSELF, and the whole of what it sends: a stored
     title by the identity it is stored under (`t`, with the query only so the
     page an add answers with can list the same titles again), a service's hit by
-    the query and its place in the answer (`q`, `i`). `media` is the medium the
-    SEARCH was for, which is what reading that search back needs — not the hit's
-    own, which for a service that mixes films into a show search can differ.
+    the query, the search's own reference (`also`, `pages` — `ref`) and its
+    place in that answer (`i`). `media` is the medium the SEARCH was for, which
+    is what reading that search back needs — not the hit's own, which for a
+    service that mixes films into a show search can differ.
 
     `key` is the whole title's board key, None for a hit no id yet keys (a
     service's season-title before its season lookup): such a row cannot be drawn
@@ -1463,10 +1477,10 @@ def _result_rows(hits, *, query: str, media: Media, held) -> list[dict[str, Any]
     rows = []
     for index, hit in enumerate(hits):
         key = ranker_sources.hit_key(hit)
-        ref = ({"t": hit.title_key, "q": query} if hit.title_key
-               else {"q": query, "i": index})
+        named = ({"t": hit.title_key, "q": query} if hit.title_key
+                 else {"q": query, **(ref.fields() if ref else {}), "i": index})
         rows.append({
-            "ref": {**ref, "media": str(media)},
+            "ref": {**named, "media": str(media)},
             "key": key,
             "held": key is not None and key in held,
             "media": str(hit.media),
@@ -1531,10 +1545,13 @@ async def search_fragment(request: Request):
     """Enter's search: the titles the viewer's services find, drawn as the list
     under the pool's search box.
 
-    WHO IS ASKED is the viewer's settings' answer (ranker_sources.search_settings,
-    providers.for_catalogue_search): Trakt for every account, with the instance's
-    client id, and Simkl only for a viewer who has linked it, with their own
-    token. Each hit is marked with the services that found it.
+    WHO IS ASKED is every box's answer (title_search.search, with the viewer's
+    settings — ranker_sources.search_settings): the catalogue searched by
+    default, for every account, and a service the viewer has linked when they
+    add it from the list's "also search" control — named by reference in the
+    request (`also`, and `pages` for "more"). Each hit is marked with the
+    services that found it. The whole list is drawn: "more" lengthens it a page
+    at a time, and a row is named by its place in it.
 
     THIS IS WHAT THE SEARCH BUDGET COUNTS (`_search_over_budget`), and only this:
     it is the one read here that spends a service's rate limit. The list drawn
@@ -1558,21 +1575,20 @@ async def search_fragment(request: Request):
         return _search_results(request, board_uid, _search_context(
             message="Too many searches just now — give it a moment."))
     settings = await ranker_sources.search_settings(user.user_id)
-    if not ranker_sources.searchable(settings):
-        return _search_results(request, board_uid, _search_context(
-            query=query, media=media, no_catalogue=True))
-    result = await ranker_sources.catalogue_search(settings, query, media)
+    try:
+        outcome = await ranker_sources.catalogue_search(
+            settings, media, query, title_search.SearchRef.named(request.query_params))
+    except UnknownSearchService as exc:
+        return _search_results(request, board_uid, _search_context(message=str(exc)))
     held = await ranker.board_keys(user.user_id, board_uid)
-    return _search_results(request, board_uid, _search_context(
-        query=query, media=media, failed=result.failed,
-        rows=_result_rows(result.hits[:MAX_SEARCH_RESULTS], query=query, media=media,
-                          held=held)))
+    return _search_results(request, board_uid,
+                           _searched(outcome, query=query, media=media, held=held))
 
 
 @guard.get("/rankings/fragments/search-seasons", AuthLevel.RANKER_APPROVED)
 async def search_seasons_fragment(request: Request):
-    """One search result's season checklist — asked for the first time its
-    "Seasons…" is opened, never with the search.
+    """One search result's season checklist — asked for the first time its row
+    is pressed, never with the search.
 
     THE RESULT IS NAMED EXACTLY AS ITS ADD NAMES IT (`t`, or `q` and `i`) and
     read back from what a service said (ranker_sources.named_hit). Its seasons
@@ -1580,10 +1596,13 @@ async def search_seasons_fragment(request: Request):
     one the tracker's add opens — which also fills in the ids of a hit the search
     left keyless and names the season of a result that is one season.
 
-    WHAT IS OFFERED, GREYED AND SUGGESTED is app/ranker/seasons.py's, fed with
-    what this board already holds of the show (`held_seasons`) and the season the
-    viewer last finished, as a row's own season control is. The whole show is
-    not among them: the result's own row is what adds that.
+    WHAT IS OFFERED, GREYED AND SUGGESTED is app/providers/season_choices.py's,
+    fed with what this board already holds of the show (`held_seasons`) and the
+    season the viewer last finished, as a row's own season control is. THE WHOLE
+    SHOW LEADS THE LIST, because pressing a show's row opens this checklist
+    rather than adding: it is the board's one choice the tracker and the
+    calendar do not have, ticked beside seasons or alone, and greyed when the
+    board holds it. It is never "this row" — a result is not a row yet.
 
     EVERY OUTCOME IS DRAWN, at 200, as a sentence where the list would be.
     """
@@ -1623,31 +1642,19 @@ async def search_seasons_fragment(request: Request):
         held = await ranker.held_seasons(user.user_id, board_uid, str(title))
     except ranker.RankerError:
         held = set()
-    options = ranker_seasons.season_options(
+    whole_show, *seasons = season_choices.season_options(
         pick.seasons, held=held, current=None,
         finished=await ranker_import.latest_finished_season(user.user_id, title),
-        now=datetime.now(timezone.utc))[1:]
+        now=datetime.now(timezone.utc))
+    options = [replace(whole_show, current=False), *seasons]
     if pick.named_season is not None:
         # The result IS this season, so asking which would be a question it has
         # already answered.
         options = ([option for option in options if option.season == pick.named_season]
-                   or [ranker_seasons.SeasonOption(pick.named_season,
+                   or [season_choices.SeasonOption(pick.named_season,
                                                    held=pick.named_season in held)])
         return _answer(options, ticked=pick.named_season)
-    return _answer(options, note="" if options else "No seasons are listed for this show yet.")
-
-
-# The prefix a season checklist names each ticked season with, ONE FIELD PER
-# SEASON for the bulk Move's reason (PICK_PREFIX): json-enc makes a repeated name
-# a list only when there is more than one of it.
-SEASON_PREFIX = "season:"
-
-
-def _ticked_seasons(data: Mapping[str, Any]) -> list[str]:
-    """The seasons a checklist ticked, as the strings it posted — the data layer
-    validates each (item_keys.valid_season), so a bad one refuses the add."""
-    return [name[len(SEASON_PREFIX):] for name, value in data.items()
-            if name.startswith(SEASON_PREFIX) and value]
+    return _answer(options, note="" if seasons else "No seasons are listed for this show yet.")
 
 
 @dataclass(frozen=True)
@@ -1691,7 +1698,9 @@ async def _add_named(user, board_uid: str, data: Mapping[str, Any]) -> _Added:
     whole = item_keys.board_key(item["media"], item["match_source"], item["match_id"])
     items = [item]
     if data.get("want") == "seasons":
-        seasons = _ticked_seasons(data)
+        # The data layer validates each (item_keys.valid_season), so a bad
+        # one refuses the add.
+        seasons = season_choices.ticked(data)
         if not seasons:
             raise ranker.ValidationError("Tick at least one season to add.")
         # Each season's count and name, from the list its checklist was drawn from.
@@ -1715,12 +1724,18 @@ async def _add_named(user, board_uid: str, data: Mapping[str, Any]) -> _Added:
     return _Added(arrived, whole, first)
 
 
-def _added_notice(added: _Added, seasons: bool) -> str:
+def _added_notice(added: _Added, seasons: bool, whole: bool = False) -> str:
     """What an add says it did, in words that fit whether it made rows, took a
-    whole-show row over, or found everything already there."""
+    whole-show row over, or found everything already there. `whole` is a
+    checklist that ticked the whole show, which is a row but not a season."""
     count, converted = added.arrived
     if count:
-        what = f"{count} season{'s' if count != 1 else ''}" if seasons else "the title"
+        if not seasons or (whole and count == 1):
+            what = "the title"
+        elif whole:
+            what = f"the whole show and {count - 1} season{'s' if count != 2 else ''}"
+        else:
+            what = f"{count} season{'s' if count != 1 else ''}"
         return f"Added {what} to the pool{_converted(converted)}."
     if converted:
         return (f"Made {converted} whole-show row{'s' if converted != 1 else ''} "
@@ -1752,7 +1767,8 @@ async def add_searched_title(board_uid: str, request: Request):
     notice, ok, first = "", True, ""
     try:
         added = await _add_named(user, board_uid, data)
-        notice, first = _added_notice(added, seasons), added.first
+        notice, first = _added_notice(
+            added, seasons, whole="" in season_choices.ticked(data)), added.first
     except ranker.RankerError as exc:
         notice, ok = str(exc), False
     return await _rankings_response(
@@ -1780,11 +1796,13 @@ async def _redrawn_search(user, board_uid: str, data: Mapping[str, Any]) -> dict
     if not query:
         return _search_context(media=media)
     settings = await ranker_sources.search_settings(user.user_id)
-    result = await ranker_sources.catalogue_search(settings, query, media, cached_only=True)
-    return _search_context(
-        query=query, media=media, failed=result.failed,
-        rows=_result_rows(result.hits[:MAX_SEARCH_RESULTS], query=query, media=media,
-                          held=held))
+    try:
+        outcome = await ranker_sources.catalogue_search(settings, media, query,
+                                            title_search.SearchRef.named(data),
+                                            cached_only=True)
+    except UnknownSearchService:
+        return _search_context(media=media)
+    return _searched(outcome, query=query, media=media, held=held)
 
 
 @guard.post("/api/rankings/boards/{board_uid}/items", AuthLevel.RANKER_APPROVED)

@@ -33,30 +33,30 @@
    (routes._named_pick). Enter still asks the services, and those rows name
    their place as before.
 
-   A NEW SEARCH TAKES DOWN THE LAST PICK'S ANSWER, out of band, because the
-   season picker sits outside the list this fragment replaces and would otherwise
-   go on describing a title nobody is looking at any more. Shows only: the film
-   flow has no picker.
+   A SHOW ROW'S SEASON PICKER UNFOLDS UNDER IT, as the calendar's does
+   (_search_results.html): the row is the <summary> of its own <details>, so the
+   picker lives inside the list this fragment replaces and a new search takes it
+   down with everything else. Films have no picker; their row is the add.
+
+   A SERVICE ROW NAMES THE SEARCH TOO (`search_ref` — the services the viewer
+   added and the pages shown, title_search.SearchRef), because its place is a
+   place in THAT list: the same query asked of other services is another list.
 
    Context: `hits` (each `_search_hit_payload` plus `unkeyable`), `failed` (the
-   sources that could not be asked), `media`, `no_catalogue`, `typed` (these are
-   stored titles listed as somebody types, not a service's answer),
-   `too_short` (typed only: nothing worth listing yet), `query` and
-   `month_query`. #}
+   sources that could not be asked), `media`, `typed` (these are stored titles
+   listed as somebody types, not a service's answer), `too_short` (typed only:
+   nothing worth listing yet), `controls` (what title_search's `widen` draws
+   under a services' answer), `refused` (a service named that this viewer may
+   not add), `query`, `search_ref` and `month_query`. #}
 
-{%- if media != 'movie' %}
-<div id="addSeasonPick" class="distrakt-season-pick" hx-swap-oob="outerHTML"></div>
-{%- endif %}
-
+{%- set results = '#addMovieResults' if media == 'movie' else '#addSearchResults' %}
+{%- set live_url = ('/distrakt/fragments/search-movie' if media == 'movie'
+                    else '/distrakt/fragments/search') ~ month_query %}
 {% if typed and too_short %}
 {# Nothing to say yet: the box is still being typed into, and "no matches"
    would answer a question nobody has finished asking. #}
-{% elif no_catalogue %}
-{# NOT "search failed" — nothing was searched. An instance with neither client
-   id is a different situation from one query that went wrong, and saying so is
-   the difference between an operator fixing it and a viewer retyping. #}
-<div class="distrakt-empty">No catalogue is configured, so there is nothing to
-    search. An operator adds a Trakt or Simkl client id in Settings.</div>
+{% elif refused %}
+<div class="distrakt-empty">{{ refused }}</div>
 {% else %}
 
 {% if typed %}
@@ -78,7 +78,7 @@
     showing what the rest found.</div>
 {% endif %}
 
-{% if not hits and not typed %}
+{% if not hits and not typed and controls and controls.asked %}
 <div class="distrakt-empty">No matches.</div>
 {% endif %}
 
@@ -90,7 +90,6 @@
     appeared, while the box's last answer was still on its way. In the queue
     the waiting typed answer lands first, or is dropped for the press, and
     never after it. -#}
-{%- set results = '#addMovieResults' if media == 'movie' else '#addSearchResults' %}
 {% for hit in hits %}
 {#- THE ACTION SLOT OF THE SHARED ROW (_title_search.html's `row`): a <button>,
     which gives the row the keyboard for free — it used to be a div wearing
@@ -106,7 +105,8 @@
     one rule. It only ever happens on the film path: a show hit with no shared
     id is under-described rather than unfileable, and the season click it is
     about to get resolves it. -#}
-{%- set pick = {"t": hit.title_key} if hit.title_key else {"q": query, "i": loop.index0} %}
+{%- set pick = {"t": hit.title_key} if hit.title_key
+               else dict({"q": query, "i": loop.index0}, **search_ref) %}
 {%- if hit.unkeyable %}
 {%- set action = {"type": "button", "disabled": ""} %}
 {%- elif media == 'movie' %}
@@ -122,11 +122,17 @@
                   "hx-vals": pick | tojson | forceescape} %}
 {%- else %}
 {#- A show row fetches its season picker. A read that changes nothing, so it is
-    a GET, and the address names the result rather than describing it. -#}
-{%- set action = {"type": "button", "hx-sync": title_search.queue(results),
+    a GET, and the address names the result rather than describing it. THE ROW
+    IS A <summary>: pressing it opens its own <details> and asks — once — for
+    the picker into the slot under it; pressing it again folds it away. No
+    script: the open and close are the element's own. -#}
+{%- set action = {"hx-sync": title_search.queue(results),
                   "hx-get": "/distrakt/fragments/seasons" ~ month_query ~ "&" ~ (pick | urlencode),
-                  "hx-target": "#addSeasonPick", "hx-swap": "outerHTML"} %}
+                  "hx-trigger": "click once", "hx-target": "next .search-pick",
+                  "hx-swap": "innerHTML"} %}
 {%- endif %}
+{%- set unfolds = media != 'movie' and not hit.unkeyable %}
+{%- if unfolds %}<details class="search-hit">{% endif %}
 {#- A MARK PER SOURCE THAT RETURNED IT, ALWAYS — not only when more than one
     catalogue was askable. It is attribution as much as disambiguation: which
     service's own answer a row is drawn from is worth seeing even with one
@@ -134,7 +140,7 @@
     which of several services actually found this title, which matters for
     debugging a source's own data (a mis-shaped hit, a missing network) as much
     as for telling two services' answers apart. -#}
-{% call title_search.row('button', action, hit.title, hit.year, hit.poster,
+{% call title_search.row('summary' if unfolds else 'button', action, hit.title, hit.year, hit.poster,
                          sources=hit.source_ids, note=hit.unkeyable or '',
                          go='' if hit.unkeyable else ('Add →' if media == 'movie' else 'Seasons →'),
                          extra_class='is-unkeyable' if hit.unkeyable else '') %}
@@ -153,6 +159,11 @@
     {%- if media == 'movie' %}{{ (hit.runtime ~ ' min') if hit.runtime else '' }}
     {%- else %}{{ hit.network }}{% endif -%}
 {% endcall %}
+{%- if unfolds %}
+<div class="search-pick"></div>
+</details>
+{%- endif %}
 {% endfor %}
 
+{{ title_search.widen(results, live_url, query, controls) }}
 {% endif %}

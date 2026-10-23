@@ -17,12 +17,11 @@ named by reference and read back from what a service said (`named_hit`,
 CREDENTIALS ARE NOT THE SAME FOR BOTH SERVICE READS, and getting it backwards is
 the easy mistake:
   - SEARCH builds the viewer's settings (auth/viewer.py), which is how "who is
-    asked" is answered for every searching feature: Trakt authenticates a
-    catalogue search with the instance's own client id, so it answers for every
-    account — the rankings grant implies no linked account at all — while Simkl
-    searches only with the viewer's OWN token and so only for a viewer who has
-    linked one (`providers.for_catalogue_search`). Nobody's search is made with
-    the operator's token.
+    asked" is answered for every searching feature (`providers.for_search`): the
+    catalogue searched by default, with the instance's own credential, for every
+    account — the rankings grant implies no linked account at all — and a service
+    the viewer has linked only when they add it, with their own token. Nobody's
+    search is made with the operator's token.
   - RATINGS are private to one person and need THEIR token. With no linked
     identity there is no such token, and the action is hidden rather than
     offered and then failed.
@@ -37,7 +36,6 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from . import item_keys
-from .. import providers
 from ..auth import trakt_routes, viewer
 # The stored-title half of every search. See the module docstring for why the
 # ranker reads it through the calendar's verb rather than a query of its own.
@@ -314,22 +312,18 @@ def too_short(query: str) -> bool:
     return len(calendar_entries.fold_title(query)) < calendar_entries.MIN_QUERY
 
 
-def searchable(settings: Settings) -> bool:
-    """Whether any service can be asked at all with these settings."""
-    return bool(providers.for_catalogue_search(settings))
-
-
-async def catalogue_search(settings: Settings, query: str, media: Media, *,
-                           cached_only: bool = False) -> title_search.SearchMergeResult:
-    """Enter's search: every service these settings can ask, merged into one
-    list, each hit marked with who found it. The shared fan-out stores each
-    service's answer, which is what lets a pick be read back later by its place
-    in this list (`named_hit`). `cached_only` re-reads that stored answer and
-    asks nobody — how a page answering an add redraws the search it came from.
-    """
-    return await title_search.search_catalogue(
-        providers.for_catalogue_search(settings), settings, media, query,
-        cached_only=cached_only)
+async def catalogue_search(settings: Settings, media: Media, query: str,
+                           ref: title_search.SearchRef, *,
+                           cached_only: bool = False) -> title_search.SearchOutcome:
+    """Enter's search, and every widening of it: the services `ref` names for
+    this viewer, merged into one list, each hit marked with who found it — the
+    one search every box makes (title_search.search). Raises
+    providers.UnknownSearchService for a service this viewer may not add. The
+    shared fan-out stores each service's answer, which is what lets a pick be
+    read back later by its place in this list (`named_hit`); `cached_only`
+    re-reads that and asks nobody — how a page answering an add redraws the
+    search it came from."""
+    return await title_search.search(settings, media, query, ref, cached_only=cached_only)
 
 
 async def named_hit(settings: Settings, media: Media,
@@ -340,10 +334,12 @@ async def named_hit(settings: Settings, media: Media,
     TWO WAYS OF NAMING, ONE PER HALF OF THE SEARCH, and neither carries a title:
     a stored title by the identity it is stored under (`t`, a
     calendar_titles.title_key — app/calendar/entries.py's stored_title), and a
-    service's hit by the query that found it and its place in that answer (`q`
-    and `i` — title_search.resolve_hit, which re-reads the stored search and
-    asks nobody). So what a board stores is what a service said, never fields a
-    page handed back, and a key this instance does not hold is a refusal.
+    service's hit by the query that found it, the search's own reference (the
+    services added and the pages shown, title_search.SearchRef) and its place
+    in that answer (`q`, `also`, `pages`, `i` — title_search.resolve_hit, which
+    re-reads the stored search and asks nobody). So what a board stores is what a
+    service said, never fields a page handed back, and a key this instance does
+    not hold is a refusal.
     """
     title_key = str(named.get("t") or "")
     if title_key:
@@ -351,7 +347,8 @@ async def named_hit(settings: Settings, media: Media,
     query = str(named.get("q") or "").strip()
     if not query:
         return None
-    return await title_search.resolve_hit(settings, media, query, named.get("i"))
+    return await title_search.resolve_hit(settings, media, query, named.get("i"),
+                                          title_search.SearchRef.named(named))
 
 
 def gone_sentence(named: Mapping[str, Any]) -> str:

@@ -27,7 +27,7 @@
 <p class="search-hint">Type a title to find it on
     {% if everywhere %}any of your calendars{% else %}{{ endpoint.label }}{% endif %}.
     Two letters is the shortest search.</p>
-{% elif not airings and not elsewhere %}
+{% elif not airings and not found %}
 {# WHAT IS BEING SEARCHED IS SAID OUT LOUD, because "nothing matches" is a
    different claim depending on it — a title on the all-episodes calendar
    genuinely is not on the premieres one, and a reader who was not told which
@@ -57,29 +57,35 @@
 </div>
 {% endif %}
 
-{% if elsewhere %}
+{% if found %}
 <div class="search-section">
     <h3 class="search-heading">Not on your calendar</h3>
-    <p class="search-hint">Opening one of these adds it to your calendar on the day it
-        airs — including titles the services describe but leave off their own calendars,
-        which is the only way those ever show up here.</p>
-    {% for hit in elsewhere %}
-    {% call title_search.row('a', {'href': hit.url}, hit.item.title, hit.item.year,
-                             hit.item.poster, go='Jump →') %}
-        {# THE SEASON IS NAMED FIRST because it is what distinguishes these
-           rows from each other: one show's premieres share a title, a poster
-           and a description, and the number plus the date is the only thing
-           saying which month a row goes to. A film has no season and shows its
-           release date alone. #}
-        {% if hit.item.season is not none %}Season {{ hit.item.season }} · {% endif %}
-        {{ hit.item.air_display }} · {{ hit.endpoint_label }}
-        {% if hit.item.network %} · {{ hit.item.network }}{% endif %}
-        {# THE COUNTRY, BECAUSE ONE FORMAT IS MANY SHOWS. A franchise like The
-           Traitors returns a row per national version, all sharing a title and
-           several sharing a network, and the country is the only thing on the
-           row that tells them apart. #}
-        {% if hit.item.country %} · {{ hit.item.country }}{% endif %}
+    <p class="search-hint">Pick one to choose which seasons to go to. A season a service
+        lists on this calendar is added on its day — including titles a service
+        describes but leaves off its own calendar.</p>
+    {#- THE SAME ROW EVERY BOX DRAWS, naming the result by reference (`row.ref`:
+        the query, the medium, the search's own reference, its place), and every
+        service that found it marked. THE ROW IS A <summary>: pressing it opens
+        its own <details> and asks — once — for the result's season picker, the
+        app's one season checklist, into the slot UNDER IT; pressing it again
+        folds it away. No script: the open/close is the element's own, the
+        request `click once`, in the box's own queue. -#}
+    {% for row in found %}
+    <details class="search-hit">
+    {%- set action = {"hx-sync": title_search.queue('#searchResults'),
+                      "hx-get": "/calendar/fragments/search-seasons?"
+                                ~ (dict(row.ref, endpoint=endpoint.key) | urlencode),
+                      "hx-trigger": "click once", "hx-target": "next .search-pick",
+                      "hx-swap": "innerHTML"} %}
+    {% call title_search.row('summary', action, row.hit.title, row.hit.year,
+                             row.poster,
+                             sources=row.hit.source_ids,
+                             go='Seasons →' if row.media == 'show' else 'Release →') %}
+        {%- if row.hit.season is not none %}<span class="chip search-season">Season {{ row.hit.season }}</span> {% endif %}
+        {{- row.hit.network if row.media == 'show' else ('Film' ~ ((' · ' ~ row.hit.runtime ~ ' min') if row.hit.runtime else '')) -}}
     {% endcall %}
+    <div class="search-pick"></div>
+    </details>
     {% endfor %}
 </div>
 {% endif %}
@@ -88,6 +94,13 @@
 <p class="search-hint search-failed">Couldn't reach {{ failed | join(', ') }} — anything only they
     know about is missing from this list.</p>
 {% endif %}
+{% if refused %}<p class="search-hint search-failed">{{ refused }}</p>{% endif %}
+
+{#- WHO ELSE TO ASK, AND FURTHER — the shared controls every box draws under a
+    services' answer, carrying what this route's live request always carries. -#}
+{{ title_search.widen('#searchResults', '/calendar/search', query, controls,
+                      dict({'live': '1', 'endpoint': endpoint.key},
+                           **({'all': '1'} if everywhere else {}))) }}
 
 {# WIDENING TO THE OTHER CALENDARS, offered whether or not anything was found —
    "nothing here" is exactly when a reader wants to look further. Asking the
@@ -99,6 +112,7 @@
     <button type="button" class="btn-ghost small" hx-get="/calendar/search"
             hx-target="#searchResults" hx-include="#searchInput, #searchEndpoint"
             {{ title_search.sync('#searchResults') }}
-            hx-vals='{"all": "1"{% if live %}, "live": "1"{% endif %}}'>Search every calendar</button>
+            hx-vals="{{ dict({'all': '1'}, **(dict({'live': '1'}, **search_ref) if live else {}))
+                        | tojson | forceescape }}">Search every calendar</button>
 </p>
 {% endif %}

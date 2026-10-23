@@ -17,8 +17,8 @@ from datetime import date
 from ...config import Settings
 from ...endpoints import Endpoint
 from .. import register
-from ..base import (Capabilities, Media, Record, SearchHit, SeasonsAnswer, Source,
-                    TitleFacts, Video)
+from ..base import (Capabilities, Media, Record, SearchCatalogue, SearchPage, SeasonsAnswer,
+                    Source, TitleFacts, Video)
 from . import by_id, calendar, detail, search, sync, titles, watchlist
 from .transport import SimklBlockedError, SimklError, SimklRateLimitError
 
@@ -201,14 +201,18 @@ class _SimklDetailPort:
 class _SimklSearchPort:
     """Simkl's answer to "search this catalogue" (app/providers/base.py's
     SearchPort). A thin delegator over search.py, through the MODULE object,
-    exactly as the ports above are over their own modules — the two-endpoint
-    fan-out that search.py's own docstring explains lives entirely on that
-    side of this call.
+    exactly as the ports above are over their own modules. Two catalogues — TV
+    and films, and anime — for the reason search.py's own docstring measures.
     """
 
+    catalogues = (SearchCatalogue(search.CATALOGUE, "Simkl"),
+                  SearchCatalogue(search.ANIME_CATALOGUE, "Simkl Anime"))
+
     async def search_titles(self, settings: Settings, media: Media, query: str, *,
-                            cached_only: bool = False) -> list[SearchHit]:
-        return await search.search_titles(settings, media, query,
+                            page: int = 1, catalogue: str | None = None,
+                            cached_only: bool = False) -> SearchPage:
+        return await search.search_titles(settings, media, query, page=page,
+                                          catalogue=catalogue or search.CATALOGUE,
                                           cached_only=cached_only)
 
     async def find_by_shared_id(self, settings: Settings, media: Media, ids: dict) -> dict:
@@ -306,16 +310,15 @@ class _SimklProvider:
         # NOT THE SAME QUESTION `_SimklDetailPort.catalogue_configured` ASKS,
         # not any more. Under Simkl's v2 API, search and /redirect require a
         # user token — 401 user_token_required otherwise — where the per-title
-        # lookups that DetailPort answers with stay anonymous. THIS is the one
-        # method for_catalogue_search calls (see app/providers/__init__.py),
+        # lookups that DetailPort answers with stay anonymous. THIS is what
+        # for_search and for_shared_id_lookup ask (app/providers/__init__.py),
         # and it is handed the VIEWER's settings wherever a viewer is in scope.
         # A caller with no viewer hands it the instance-wide Settings, whose
         # `simkl_access_token` is always empty (config.load_settings leaves any
         # stored operator token out), so Simkl drops out there. So `simkl_configured`
         # (client id AND a token) is the right question here: a viewer with no
-        # linked Simkl account gets nothing from this source, and every Simkl
-        # search surface falls back to whatever else `for_catalogue_search`
-        # returns — Trakt, on this instance.
+        # linked Simkl account gets nothing from this source, and is not offered
+        # "also search Simkl" at all (providers.for_search).
         return settings.simkl_configured
 
 

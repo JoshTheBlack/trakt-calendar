@@ -32,7 +32,9 @@ from unittest.mock import AsyncMock, patch
 from app import cache, distrakt as distrakt_store
 from app.distrakt import watch_history
 from app.config import Settings
+from app.providers import title_search
 from app.providers.base import ItemKey, Media
+from app.providers.trakt import detail as trakt_detail
 from tests.support import AppTestCase, ORIGIN
 
 # The exact URLs the two Trakt reads store their answers under. Written out
@@ -40,8 +42,10 @@ from tests.support import AppTestCase, ORIGIN
 # pinned is that the route re-reads THE SAME REQUEST the page's search made, and
 # a test that derived the key the same way the code does could not tell a
 # changed key from a matching one.
-SEARCH_URL = "https://api.trakt.tv/search/show?query=severance&extended=full%2Cimages"
-MOVIE_SEARCH_URL = "https://api.trakt.tv/search/movie?query=heat&extended=full%2Cimages"
+SEARCH_URL = ("https://api.trakt.tv/search/show?query=severance&extended=full%2Cimages"
+              "&page=1&limit=20")
+MOVIE_SEARCH_URL = ("https://api.trakt.tv/search/movie?query=heat&extended=full%2Cimages"
+                    "&page=1&limit=20")
 SEASONS_URL = "https://api.trakt.tv/shows/95396/seasons?extended=full"
 
 SHOW_HIT = {"show": {"title": "Severance", "year": 2022, "network": "Apple TV+",
@@ -54,7 +58,7 @@ SEASONS = [{"number": 1, "episode_count": 9, "first_aired": "2022-02-18T00:00:00
 # sorts its parameters, so the URL is a different shape rather than the same one
 # with a different host — which is the reason a test cannot build either of these
 # from one helper and still be checking what it means to check.
-SIMKL_MOVIE_SEARCH_URL = "https://api.simkl.com/search/movie?limit=10&q=heat"
+SIMKL_MOVIE_SEARCH_URL = "https://api.simkl.com/search/movie?limit=20&page=1&q=heat"
 SIMKL_MOVIE_HIT = {"title": "Heat", "year": 1995,
                    "ids": {"simkl_id": 4242, "tmdb": 949, "slug": "heat-1995"}}
 
@@ -117,7 +121,7 @@ class AddFlowTestCase(AppTestCase):
 class AddingAShowTests(AddFlowTestCase):
     def test_it_stores_the_services_own_title_ids_and_network(self):
         self.warm((SEARCH_URL, [SHOW_HIT]), (SEASONS_URL, SEASONS))
-        resp = self.add("/api/distrakt/add", {"q": "severance", "i": 0, "season": 1})
+        resp = self.add("/api/distrakt/add", {"q": "severance", "also": "trakt", "i": 0, "season": 1})
         self.assertEqual(resp.status_code, 200, resp.text[:300])
         row, = self.listed()
         self.assertEqual(row["title"], "Severance")
@@ -130,7 +134,7 @@ class AddingAShowTests(AddFlowTestCase):
         differently."""
         self.warm((SEARCH_URL, [SHOW_HIT]), (SEASONS_URL, SEASONS))
         self.add("/api/distrakt/add", {
-            "q": "severance", "i": 0, "season": 1,
+            "q": "severance", "also": "trakt", "i": 0, "season": 1,
             "title": "Something Else", "network": "Nowhere",
             "ids": {"trakt": 1, "tmdb": 1}})
         row, = self.listed()
@@ -142,7 +146,7 @@ class AddingAShowTests(AddFlowTestCase):
         """Re-asking would make an add a way to search that no budget counts, so
         the honest answer is to send them back to the box."""
         self.warm((SEASONS_URL, SEASONS))
-        resp = self.add("/api/distrakt/add", {"q": "severance", "i": 0, "season": 1})
+        resp = self.add("/api/distrakt/add", {"q": "severance", "also": "trakt", "i": 0, "season": 1})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("That search has expired", resp.text)
         self.assertEqual(self.listed(), [])
@@ -159,29 +163,45 @@ class AddingAShowTests(AddFlowTestCase):
         bare = {"show": {"title": "Bare", "year": 2022,
                          "ids": {"trakt": 95396, "slug": "bare"}}}
         self.warm((SEARCH_URL, [bare]))
-        resp = self.add("/api/distrakt/add", {"q": "severance", "i": 0, "season": 1})
+        resp = self.add("/api/distrakt/add", {"q": "severance", "also": "trakt", "i": 0, "season": 1})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("shared ids the tracker files records under", resp.text)
         self.assertEqual(self.listed(), [])
 
     def test_a_place_past_the_end_of_the_answer_is_refused(self):
         self.warm((SEARCH_URL, [SHOW_HIT]), (SEASONS_URL, SEASONS))
-        resp = self.add("/api/distrakt/add", {"q": "severance", "i": 4, "season": 1})
+        resp = self.add("/api/distrakt/add", {"q": "severance", "also": "trakt", "i": 4, "season": 1})
         self.assertIn("That search has expired", resp.text)
         self.assertEqual(self.listed(), [])
 
     def test_a_missing_season_is_refused_before_anything_is_read(self):
         self.warm((SEARCH_URL, [SHOW_HIT]), (SEASONS_URL, SEASONS))
-        resp = self.add("/api/distrakt/add", {"q": "severance", "i": 0})
+        resp = self.add("/api/distrakt/add", {"q": "severance", "also": "trakt", "i": 0})
+        self.assertIn("Tick at least one season to add.", resp.text)
+        self.assertEqual(self.listed(), [])
+
+    def test_a_season_that_is_not_a_number_is_refused_before_anything_is_read(self):
+        self.warm((SEARCH_URL, [SHOW_HIT]), (SEASONS_URL, SEASONS))
+        resp = self.add("/api/distrakt/add", {"q": "severance", "also": "trakt", "i": 0,
+                                              "season:x": "1"})
         self.assertIn("Missing or invalid season", resp.text)
         self.assertEqual(self.listed(), [])
+
+    def test_several_ticked_seasons_are_each_added(self):
+        two = [*SEASONS, {"number": 2, "episode_count": 10,
+                          "first_aired": "2025-01-17T00:00:00.000Z"}]
+        self.warm((SEARCH_URL, [SHOW_HIT]), (SEASONS_URL, two))
+        resp = self.add("/api/distrakt/add", {"q": "severance", "also": "trakt", "i": 0,
+                                              "season:1": "1", "season:2": "1"})
+        self.assertEqual(resp.status_code, 200, resp.text[:300])
+        self.assertEqual(sorted(int(row["season"]) for row in self.listed()), [1, 2])
 
 
 class FillingInAPastMonthTests(AddFlowTestCase):
     def test_it_records_the_services_own_title_as_finished(self):
         self.warm((SEARCH_URL, [SHOW_HIT]), (SEASONS_URL, SEASONS))
         resp = self.add("/api/distrakt/add-completed",
-                        {"q": "severance", "i": 0, "season": 1}, month=self.past)
+                        {"q": "severance", "also": "trakt", "i": 0, "season": 1}, month=self.past)
         self.assertEqual(resp.status_code, 200, resp.text[:300])
         key = distrakt_store.month_key(*self.past)
         doc = asyncio.run(distrakt_store.load_month(self.user_id, key))
@@ -191,7 +211,7 @@ class FillingInAPastMonthTests(AddFlowTestCase):
 
     def test_a_result_no_longer_cached_is_refused_here_too(self):
         resp = self.add("/api/distrakt/add-completed",
-                        {"q": "severance", "i": 0, "season": 1}, month=self.past)
+                        {"q": "severance", "also": "trakt", "i": 0, "season": 1}, month=self.past)
         self.assertIn("That search has expired", resp.text)
         self.assertIsNone(asyncio.run(distrakt_store.load_month(
             self.user_id, distrakt_store.month_key(*self.past))))
@@ -207,7 +227,7 @@ class AddingAFilmTests(AddFlowTestCase):
     def test_it_stores_the_services_own_title_and_year(self):
         self.warm((MOVIE_SEARCH_URL, [MOVIE_HIT]))
         resp = self.add("/api/distrakt/add-movie",
-                        {"q": "heat", "i": 0, "watched_on": "2026-01-05"})
+                        {"q": "heat", "also": "trakt", "i": 0, "watched_on": "2026-01-05"})
         self.assertEqual(resp.status_code, 200, resp.text[:300])
         watch, = self._watches().values()
         self.assertEqual((watch["title"], watch["year"]), ("Heat", 1995))
@@ -215,14 +235,14 @@ class AddingAFilmTests(AddFlowTestCase):
     def test_a_title_the_page_sends_is_ignored(self):
         self.warm((MOVIE_SEARCH_URL, [MOVIE_HIT]))
         self.add("/api/distrakt/add-movie",
-                 {"q": "heat", "i": 0, "watched_on": "2026-01-05",
+                 {"q": "heat", "also": "trakt", "i": 0, "watched_on": "2026-01-05",
                   "title": "Not Heat", "year": 2099, "ids": {"tmdb": 1}})
         watch, = self._watches().values()
         self.assertEqual((watch["title"], watch["year"]), ("Heat", 1995))
 
     def test_a_result_no_longer_cached_is_refused(self):
         resp = self.add("/api/distrakt/add-movie",
-                        {"q": "heat", "i": 0, "watched_on": "2026-01-05"})
+                        {"q": "heat", "also": "trakt", "i": 0, "watched_on": "2026-01-05"})
         self.assertIn("That search has expired", resp.text)
         self.assertEqual(self._watches(), {})
 
@@ -251,9 +271,8 @@ class AddingWhatOnlyTheOtherServiceListsTests(AddFlowTestCase):
 
     def setUp(self):
         super().setUp()
-        # Simkl's v2 search now requires THIS viewer's own token (see
-        # providers.for_catalogue_search's docstring) — a client id alone no
-        # longer makes it askable, which is what this class is testing.
+        # Simkl's v2 search requires THIS viewer's own token, so a viewer must
+        # have linked it to add it to a search (providers.for_search).
         self.link_identity(self.user_id, "simkl", 4343, "simkl-token")
 
     def test_a_film_only_the_second_catalogue_lists_is_added_from_its_own_answer(self):
@@ -261,10 +280,11 @@ class AddingWhatOnlyTheOtherServiceListsTests(AddFlowTestCase):
             # Trakt answers, and answers nothing — the ordinary shape of a title
             # one catalogue carries and the other does not.
             (MOVIE_SEARCH_URL, []),
-            (SIMKL_MOVIE_SEARCH_URL, [SIMKL_MOVIE_HIT]),
+            # One page, stored with whether more follows (transport.cached_page_get).
+            (SIMKL_MOVIE_SEARCH_URL, {"items": [SIMKL_MOVIE_HIT], "more": False}),
         )
         resp = self.add("/api/distrakt/add-movie",
-                        {"q": "heat", "i": 0, "watched_on": "2026-01-05"})
+                        {"q": "heat", "also": "trakt,simkl", "i": 0, "watched_on": "2026-01-05"})
         self.assertEqual(resp.status_code, 200, resp.text[:300])
         watches = asyncio.run(watch_history.load_state(self.user_id))["movies"]
         self.assertEqual(list(watches), ["movie:tmdb:949"])
@@ -287,18 +307,20 @@ class TheSeasonPickerNamesTheResultTooTests(AddFlowTestCase):
         with self.no_calendar:
             html = self.client.get(
                 f"/distrakt/fragments/seasons?year={year}&month={month}"
-                f"&q=severance&i=0").text
-        self.assertIn("Pick a season for <span>Severance</span>", html)
-        self.assertIn("S01 (9 eps)", html)
+                f"&q=severance&also=trakt&i=0").text
+        # The app's one season checklist (_season_checklist.html).
+        self.assertIn("Pick seasons of Severance", html)
+        self.assertIn('name="season:1"', html)
+        self.assertIn("9 eps", html)
 
     def test_the_search_rows_own_request_names_the_query_and_the_place(self):
         self.warm((SEARCH_URL, [SHOW_HIT]))
         year, month = self.current
         with self.no_calendar:
             html = self.client.get(
-                f"/distrakt/fragments/search?year={year}&month={month}&q=severance").text
+                f"/distrakt/fragments/search?year={year}&month={month}&also=trakt&q=severance").text
         self.assertIn(f"/distrakt/fragments/seasons?year={year}&amp;month={month}"
-                      "&amp;q=severance&amp;i=0", html)
+                      "&amp;q=severance&amp;i=0&amp;also=trakt", html)
         # Nothing about the title travels: not its ids, not its network.
         self.assertNotIn("95396", html.split("<span class=\"search-title\">")[0])
 

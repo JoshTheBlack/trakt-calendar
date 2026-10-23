@@ -190,6 +190,19 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
 {%- endif %}
 {%- endmacro %}
 
+{# NO SERVICE THIS TRACKER READS LISTS THE TITLE (routes._untracked): it was
+   added from a catalogue that keeps no watch history, and neither tracking
+   service could be matched to it by id. Said on the row, because its counts
+   will sit at zero whatever is watched, which otherwise reads as "not watched
+   yet". Not a button, for `missing_mark`'s reason: a later lookup finding the
+   title clears it with nothing to press. #}
+{% macro untracked_mark(show) -%}
+{%- if show.untracked %}
+<span class="distrakt-missing distrakt-untracked"
+      title="None of the services you've linked for tracking lists this show, so nothing you watch will be counted here. It stays on your list, and the tracker asks those services again (at most once a day) as it loads.">untracked</span>
+{%- endif %}
+{%- endmacro %}
+
 {# ROOM FOR AN ABANDON BUTTON A ROW DOES NOT HAVE (a completed row, a closed
    month, a film), so its ✕ and every column before it line up with the rows
    that do. Invisible, unreachable and the same markup as the real one, so it is
@@ -242,7 +255,7 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
           role="img" title="{{ show.counts_note }}" aria-label="{{ show.counts_note }}"></span>
     {%- endif %}
     {{ picture(show) }}
-    <span class="distrakt-title"><span class="tt">{{ show.title }}</span>{{ return_mark(show) }}{{ missing_mark(show) }}</span>
+    <span class="distrakt-title"><span class="tt">{{ show.title }}</span>{{ return_mark(show) }}{{ missing_mark(show) }}{{ untracked_mark(show) }}</span>
     {#- The row's facts in one wrapper — `display: contents` on a wide list, so
         they stay the row's own columns, and one flexible line under the title
         on a phone. -#}

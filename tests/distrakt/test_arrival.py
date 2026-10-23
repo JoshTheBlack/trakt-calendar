@@ -33,7 +33,7 @@ from tests.distrakt.test_store import DistraktTestCase
 # A VIEWER'S OWN TOKEN, NOT JUST A CLIENT ID: arrival.describe's callers
 # (calendar_import, rollover, the tracker's own routes) are always processing
 # one account, and Simkl's v2 search/redirect now require that account's own
-# token (see providers.for_catalogue_search's docstring) — a client id alone
+# token (see providers.for_shared_id_lookup's docstring) — a client id alone
 # is no longer enough to make find_by_shared_id askable.
 SETTINGS = Settings(trakt_client_id="cid", simkl_client_id="scid",
                    simkl_access_token="viewer-simkl-token")

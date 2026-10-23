@@ -1,39 +1,28 @@
 {#- dedent -#}
-{# One search result's season checklist: which of a show's seasons to add to the
-   board at once. Asked for when the result's "Seasons…" is opened
+{% import '_season_checklist.html' as seasons %}
+{# One search result's season checklist: the whole show and which of its seasons
+   to add to the board at once. Asked for when the result's row is pressed
    (_ranker_search_results.html), never with the search, so listing a show's
    seasons costs a lookup only for the show somebody asked about.
 
-   ONE FORM, ONE POST, NAMING THE RESULT BY REFERENCE. The hidden fields are the
-   reference the result was drawn with (`t`, or `q` and `i`) and the search's
-   medium; each ticked season adds its own field, `season:<n>`, one flat field
-   per season because json-enc turns a repeated name into a list only when there
-   is more than one of it. The server reads the title back out of what a service
-   said and adds one season row per tick, through the board's arrival rule.
+   THE APP'S ONE SEASON PICKER (_season_checklist.html), naming the result by
+   the reference it was drawn with; the server adds one season row per tick,
+   through the board's arrival rule.
 
-   WHAT IS OFFERED, GREYED AND SUGGESTED is app/ranker/seasons.py's, as in a row's
-   own season control: a season the board already holds is disabled rather than
+   WHAT IS OFFERED, GREYED AND SUGGESTED is app/providers/season_choices.py's, as
+   in a row's own season control: the whole show leads, and what the board already holds is disabled rather than
    left out, the suggested one is said in words, and one not aired yet is listed
    with its date. A result that is itself one season (a service that files each
    season as its own title) offers only that season, already ticked.
 
    Context: `board_uid`, `ref`, `options`, `ticked`, `note`. #}
 {%- if options %}
-<form class="ranker-hit-form" hx-boost="false" hx-post="/rankings/boards/{{ board_uid }}/items/add"
-      hx-json-enc hx-target="body" hx-swap="innerHTML" hx-sync="#searchResults:queue last">
-    {%- for name, value in ref.items() %}
-    <input type="hidden" name="{{ name }}" value="{{ value }}">
-    {%- endfor %}
-    <input type="hidden" name="want" value="seasons">
-    {%- for option in options %}
-    <label class="ranker-hit-choice{% if option.suggested %} is-suggested{% endif %}{% if option.held %} is-held{% endif %}">
-        <input type="checkbox" name="season:{{ option.value }}" value="1"
-               {%- if option.held %} disabled{% elif option.season == ticked %} checked{% endif %}>
-        <span class="ranker-season-label">{{ option.label }}</span>
-        {%- if option.notes %}<span class="ranker-season-note">{{ option.notes | join(' · ') }}</span>{% endif %}
-    </label>
-    {%- endfor %}
-    <button type="submit" class="btn-ghost small">Add seasons</button>
-</form>
+{#- The app's one season picker (_season_checklist.html), posting the board's add:
+    `want=seasons` says the ticks are the add, not the whole title. -#}
+{{ seasons.checklist(options, {"hx-boost": "false",
+                               "hx-post": "/rankings/boards/" ~ board_uid ~ "/items/add",
+                               "hx-json-enc": "", "hx-target": "body", "hx-swap": "innerHTML",
+                               "hx-sync": "#searchResults:queue last"},
+                     ref=ref, hidden={"want": "seasons"}, ticked=ticked) }}
 {%- endif %}
 {%- if note %}<p class="ranker-season-wait">{{ note }}</p>{% endif %}

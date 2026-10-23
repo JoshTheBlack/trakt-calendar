@@ -1146,6 +1146,54 @@ async def cached_paged_get(
     return out
 
 
+async def cached_page_get(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    path: str,
+    params: dict,
+    page: int,
+    *,
+    pool: http_pool.Pool,
+    raise_errors: bool = False,
+    cache_only: bool = False,
+    app: str = DEFAULT_APP_NAME,
+) -> tuple[list, bool]:
+    """ONE page of a paginated GET, and whether Simkl holds a later one — its
+    own `X-Pagination-Page-Count`, kept beside the page so a cached read answers
+    "is there more?" as truthfully as the live one did.
+
+    FOR A CALLER THAT PAGES ON DEMAND (a search box's "more from Simkl"), where
+    `cached_paged_get` walks every page behind one ask. `page` IS PART OF THE KEY
+    here, deliberately the opposite of that function: each page is its own
+    answer, asked for by number and named by number when a result on it is
+    picked.
+
+    THE CALLER'S OWN BEARER RIDES ALONG and the shared cache is still used, for
+    the reason `cached_paged_get`'s `private` gives: Simkl's v2 search requires a
+    user token, and its answer does not depend on whose (measured 2026-09-27).
+
+    `cache_only=True` never asks: the stored page however old, or ([], False).
+    """
+    query = {**params, "page": str(max(1, int(page)))}
+    key = cache_key(path, query)
+    ttl = settings.cache_ttl_minutes * 60
+    cached = await cache.get(key, ttl)
+    if cached is None and cache_only:
+        cached = await cache.get_stale(key)
+    if isinstance(cached, dict) and isinstance(cached.get("items"), list):
+        return cached["items"], bool(cached.get("more"))
+    if cache_only:
+        return [], False
+    url = f"{API_BASE}/{path}?{urlencode(api_params(settings, query, app=app))}"
+    data, pages = await _fetch_json(client, settings, url, path, pool, fresh=False,
+                                    raise_errors=raise_errors, private=True)
+    if not isinstance(data, list):
+        return [], False
+    more = int(query["page"]) < int(pages or 1)
+    await cache.set(key, {"items": data, "more": more})
+    return data, more
+
+
 async def cached_get(
     client: httpx.AsyncClient,
     settings: Settings,

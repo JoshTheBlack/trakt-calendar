@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from app.providers import title_search as search
-from app.providers.base import ItemKey, Media, SearchHit, Source
+from app.providers.base import ItemKey, Media, SearchHit, SearchPage, Source
 from tests.support import APP_DIR
 
 SETTINGS = SimpleNamespace()
@@ -353,14 +353,19 @@ class FailedPassthroughTests(unittest.TestCase):
         self.assertEqual(result.failed, frozenset())
 
 
-def _port(*hits, error=None):
-    """A SearchPort stand-in. `cached_only` is taken and ignored, as a real port
-    that answers only from its store would take it — the merge does not decide
-    it, it passes it on."""
-    async def _search_titles(_settings, _media, _query, *, cached_only=False):
+def _port(*hits, error=None, pages=None):
+    """A SearchPort stand-in answering `hits` whole on page 1, or `pages` — one
+    list per page, each saying whether a later one exists. `cached_only` is taken
+    and ignored, as a real port that answers only from its store would take it —
+    the merge does not decide it, it passes it on."""
+    book = pages if pages is not None else [list(hits)]
+
+    async def _search_titles(_settings, _media, _query, *, page=1, cached_only=False):
         if error is not None:
             raise error
-        return list(hits)
+        if page > len(book):
+            return SearchPage([])
+        return SearchPage(list(book[page - 1]), page < len(book))
     return SimpleNamespace(search_titles=AsyncMock(side_effect=_search_titles))
 
 
@@ -400,22 +405,123 @@ class SearchCatalogueTests(unittest.IsolatedAsyncioTestCase):
         this to sequential awaits would still pass every other test here."""
         order: list[str] = []
 
-        async def _slow(_settings, _media, _query, *, cached_only=False):
+        async def _slow(_settings, _media, _query, *, page=1, cached_only=False):
             order.append("trakt-start")
             await asyncio.sleep(0.02)
             order.append("trakt-end")
-            return []
+            return SearchPage([])
 
-        async def _fast(_settings, _media, _query, *, cached_only=False):
+        async def _fast(_settings, _media, _query, *, page=1, cached_only=False):
             order.append("simkl-start")
             order.append("simkl-end")
-            return []
+            return SearchPage([])
 
         trakt = SimpleNamespace(search_titles=_slow)
         simkl = SimpleNamespace(search_titles=_fast)
         await search.search_catalogue(
             [(Source.TRAKT, trakt), (Source.SIMKL, simkl)], SETTINGS, Media.SHOW, "x")
         self.assertEqual(order, ["trakt-start", "simkl-start", "simkl-end", "trakt-end"])
+
+    async def test_more_pages_are_merged_into_one_list_and_more_is_the_services_word(self):
+        """Pages 1..n of a paging service, then the whole answer of one that does
+        not page, in that order: the list a page draws, numbered as it is."""
+        tmdb = _port(pages=[[hit(Source.TMDB, "1", tmdb="1", title="One")],
+                            [hit(Source.TMDB, "2", tmdb="2", title="Two")],
+                            [hit(Source.TMDB, "3", tmdb="3", title="Three")]])
+        trakt = _port(hit(Source.TRAKT, "9", tmdb="9", title="Nine"))
+        asked = [(Source.TMDB, tmdb), (Source.TRAKT, trakt)]
+        first = await search.search_catalogue(asked, SETTINGS, Media.SHOW, "x")
+        self.assertEqual([h.title for h in first.hits], ["One", "Nine"])
+        self.assertTrue(first.more)
+        longer = await search.search_catalogue(asked, SETTINGS, Media.SHOW, "x", pages=2)
+        self.assertEqual([h.title for h in longer.hits], ["One", "Two", "Nine"])
+        self.assertTrue(longer.more)
+        whole = await search.search_catalogue(asked, SETTINGS, Media.SHOW, "x", pages=3)
+        self.assertFalse(whole.more)
+
+    async def test_a_service_that_says_no_more_is_not_asked_for_a_later_page(self):
+        trakt = _port(hit(Source.TRAKT, "9", tmdb="9"))
+        await search.search_catalogue([(Source.TRAKT, trakt)], SETTINGS, Media.SHOW, "x",
+                                      pages=4)
+        self.assertEqual(trakt.search_titles.await_count, 1)
+
+
+class SearchRefTests(unittest.TestCase):
+    """The search's own reference — what a row and a widening control send back."""
+
+    def test_it_reads_what_a_request_carries_and_writes_only_what_is_not_default(self):
+        ref = search.SearchRef.named({"also": "simkl-anime,trakt,trakt",
+                                      "pages": "tmdb:2,trakt:3,simkl-anime:1"})
+        self.assertEqual(ref, search.SearchRef(("simkl-anime", "trakt"),
+                                               (("tmdb", 2), ("trakt", 3))))
+        self.assertEqual(ref.fields(), {"also": "simkl-anime,trakt", "pages": "tmdb:2,trakt:3"})
+        self.assertEqual(search.SearchRef().fields(), {})
+
+    def test_a_count_that_is_not_one_or_past_the_ceiling_is_bounded(self):
+        self.assertEqual(search.SearchRef.named({"pages": "tmdb:x"}).page_count("tmdb"), 1)
+        self.assertEqual(search.SearchRef.named({"pages": "tmdb:-4"}).page_count("tmdb"), 1)
+        self.assertEqual(search.SearchRef.named({"pages": "tmdb:999"}).page_count("tmdb"),
+                         search.MAX_PAGES)
+
+    def test_adding_keeps_the_pages_and_longer_lengthens_one_catalogue(self):
+        ref = search.SearchRef(("trakt",), (("tmdb", 2),))
+        self.assertEqual(ref.adding("simkl"),
+                         search.SearchRef(("simkl", "trakt"), (("tmdb", 2),)))
+        self.assertEqual(ref.longer("trakt"),
+                         search.SearchRef(("trakt",), (("tmdb", 2), ("trakt", 2))))
+
+
+class ControlsTests(unittest.TestCase):
+    """One button per catalogue: "Also search X" until it is added, then
+    "More from X" while it holds a later page."""
+
+    def test_the_buttons_follow_the_declared_order_and_each_catalogue_s_state(self):
+        from app import providers
+        cat = {key: providers.SearchCatalogue(key, label) for key, label in (
+            ("tmdb", "TMDB"), ("trakt", "Trakt"), ("simkl", "Simkl"),
+            ("simkl-anime", "Simkl Anime"))}
+        plan = providers.SearchPlan(
+            asked=[providers.AskedCatalogue(Source.TMDB, None, cat["tmdb"]),
+                   providers.AskedCatalogue(Source.TRAKT, None, cat["trakt"])],
+            offered=(cat["simkl"], cat["simkl-anime"]), unconfigured=(),
+            order=tuple(cat.values()))
+        result = search.SearchMergeResult(hits=[], failed=frozenset(),
+                                          more_from=frozenset({"tmdb"}))
+        ref = search.SearchRef(("trakt",))
+        controls = search.SearchOutcome(result, ref, plan).controls()
+        self.assertEqual([b["label"] for b in controls["buttons"]],
+                         ["More from TMDB", "Also search Simkl", "Also search Simkl Anime"])
+        self.assertEqual(controls["buttons"][0]["fields"], {"also": "trakt", "pages": "tmdb:2"})
+        self.assertEqual(controls["buttons"][1]["fields"], {"also": "simkl,trakt"})
+        self.assertEqual(controls["asked"], ["tmdb", "trakt"])
+
+
+class ResolveHitTests(unittest.IsolatedAsyncioTestCase):
+    """A row is named by its place in the list its own reference draws."""
+
+    async def test_the_same_reference_names_the_same_row(self):
+        from app.config import Settings
+
+        tmdb = _port(pages=[[hit(Source.TMDB, "1", tmdb="1", title="One")],
+                            [hit(Source.TMDB, "2", tmdb="2", title="Two")]])
+        simkl = _port(hit(Source.SIMKL, "5", tmdb="5", title="Five"))
+        plan = SimpleNamespace(asked=[(Source.TMDB, tmdb), (Source.SIMKL, simkl)],
+                               offered=(), unconfigured=(), order=())
+        with unittest.mock.patch.object(search.providers, "for_search",
+                                        return_value=plan) as for_search:
+            row = await search.resolve_hit(Settings(), Media.SHOW, "x", 1,
+                                           search.SearchRef(("simkl",), (("tmdb", 2),)))
+        self.assertEqual(row.title, "Two")
+        self.assertEqual(for_search.call_args.args[1], ("simkl",))
+        # Every read is a re-read: nothing is asked.
+        self.assertTrue(all(c.kwargs["cached_only"]
+                            for c in tmdb.search_titles.await_args_list))
+
+    async def test_a_service_the_viewer_may_no_longer_add_names_nothing(self):
+        from app.config import Settings
+
+        self.assertIsNone(await search.resolve_hit(
+            Settings(), Media.SHOW, "x", 0, search.SearchRef(("simkl",))))
 
 
 class FoldOneTitleTests(unittest.TestCase):

@@ -7,17 +7,18 @@ Trakt and Simkl packages, this file does not re-export them: a caller importing
 the module it needs says which half of TMDB it depends on.
 
 WHAT TMDB IS TO THIS APP TODAY: the first describer of every title it knows (it
-is first in `Source`, see base.py for why), through its DetailPort alone. Its
-search, calendar and list ports are None until each is built; the registry asks
-for a port and finds none, so nothing reaches for a half TMDB does not have yet.
+is first in `Source`, see base.py for why), through its DetailPort, and the
+catalogue every search box asks, through its SearchPort. Its calendar and list
+ports are None until each is built; the registry asks for a port and finds none,
+so nothing reaches for a half TMDB does not have yet.
 """
 from __future__ import annotations
 
 from ...config import Settings
 from .. import register
-from ..base import (Capabilities, Media, Record, SeasonsAnswer, Source, TitleFacts,
-                    Video)
-from . import detail, normalize
+from ..base import (Capabilities, Media, Record, SearchCatalogue, SearchPage,
+                    SeasonsAnswer, Source, TitleFacts, Video)
+from . import detail, normalize, search
 from .transport import TmdbError, TmdbNotFound, TmdbRateLimited
 
 __all__ = ["TmdbError", "TmdbNotFound", "TmdbRateLimited"]
@@ -61,6 +62,25 @@ class _TmdbDetailPort:
         return await detail.fetch_seasons(settings, source_id, media, cached_only=cached_only)
 
 
+class _TmdbSearchPort:
+    """TMDB's answer to "search this catalogue" (base.py's SearchPort), over
+    search.py through the MODULE object, as the detail port is over detail.py.
+    One catalogue: TMDB searches shows and films each in one place."""
+
+    catalogues = (SearchCatalogue("tmdb", "TMDB"),)
+
+    async def search_titles(self, settings: Settings, media: Media, query: str, *,
+                            page: int = 1, catalogue: str | None = None,
+                            cached_only: bool = False) -> SearchPage:
+        if catalogue not in (None, "tmdb"):
+            raise ValueError(f"TMDB has no catalogue {catalogue!r}.")
+        return await search.search_titles(settings, media, query, page=page,
+                                          cached_only=cached_only)
+
+    async def find_by_shared_id(self, settings: Settings, media: Media, ids: dict) -> dict:
+        return await search.find_by_shared_id(settings, media, ids)
+
+
 class _TmdbProvider:
     """TMDB as the registry sees it."""
 
@@ -76,11 +96,16 @@ class _TmdbProvider:
         # TMDB keeps no watch history, so it can never back the tracker — the
         # flag and the missing sync port below are one fact stated twice.
         private_user_data=False,
+        # EVERY SEARCH BOX ASKS TMDB, with the instance's read token, whoever is
+        # searching: its catalogue covers both media, it pages, and a search of it
+        # spends nobody's own account. Another service joins a search only when a
+        # viewer who linked it asks (providers.for_search).
+        searched_by_default=True,
     )
     sync_port = None
     calendar_port = None
     detail_port = _TmdbDetailPort()
-    search_port = None
+    search_port = _TmdbSearchPort()
     watchlist_port = None
 
     def is_configured(self, settings: Settings) -> bool:

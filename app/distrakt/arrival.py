@@ -226,7 +226,9 @@ async def write_missing_premieres(settings, record: dict) -> int:
     THROUGH calendar.search.fill_one_gap, whose contract is what makes a second
     caller sound: it is handed a service and THAT SERVICE'S OWN id and nothing
     else, and asks the service for the title, the date and every other field —
-    so this can no more invent a calendar row than a hand-made URL can.
+    so this can no more invent a calendar row than a hand-made URL can. A
+    service with no premieres calendar of its own (TMDB, today) writes nothing
+    there — fill_one_gap's own rule.
 
     ONLY FOR A TITLE ADDED ONE AT A TIME, BY HAND. The history backfill and the
     month rollover add in bulk, often old seasons, and writing each of their
@@ -240,7 +242,7 @@ async def write_missing_premieres(settings, record: dict) -> int:
     drawn = await calendar_entries.sources_airing(PREMIERES, str(key), int(record["season"]))
     ids = record.get("ids") or {}
     written = 0
-    for source, _port in providers.for_catalogue_search(settings):
+    for source, _port in providers.for_shared_id_lookup(settings):
         name = str(source)
         if name in drawn or ids.get(name) in (None, ""):
             continue
@@ -379,9 +381,11 @@ async def _ask_missing_services(settings, groups: dict, held: dict) -> None:
 
 async def ask_services(settings, titles: dict[str, tuple[Media, dict]]) -> dict[str, dict]:
     """{title key: the ids learned} for `titles` — {key: (media, ids held)} —
-    asking each catalogue this instance can search about every title it holds no
-    id for, by shared id, and keeping what an exact match answers that `ids held`
-    lacks. The one implementation for a title arriving and a title stored.
+    asking each service that answers an exact lookup by shared id
+    (providers.for_shared_id_lookup — every one, whichever search box found the
+    title) about every title it holds no id for, and keeping what an exact match
+    answers that `ids held` lacks. The one implementation for a title arriving
+    and a title stored.
 
     Every learned id is logged by name; a service that could not be asked is
     logged and skipped, never remembered as "not listed". THE RE-ASK CLOCK IS
@@ -392,7 +396,7 @@ async def ask_services(settings, titles: dict[str, tuple[Media, dict]]) -> dict[
     """
     asked = [(key, source, port)
              for key, (_media, ids) in titles.items()
-             for source, port in providers.for_catalogue_search(settings)
+             for source, port in providers.for_shared_id_lookup(settings)
              if ids.get(str(source)) in (None, "")]
     if not asked:
         return {}
@@ -434,7 +438,7 @@ async def ask_for_missing_ids(user_id: int, settings, *,
     """
     owed = [debt for debt in await store.identities_owing(user_id)
             if any(str(source) in debt.names
-                   for source, _port in providers.for_catalogue_search(settings))
+                   for source, _port in providers.for_shared_id_lookup(settings))
             and (within is None or str(debt.key) in within)]
     if not owed:
         return 0

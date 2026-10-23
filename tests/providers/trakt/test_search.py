@@ -47,24 +47,24 @@ NO_TRAKT_ID = {
 
 class TraktSearchPortTests(unittest.IsolatedAsyncioTestCase):
     async def test_delegates_to_search_titles(self):
-        spy = AsyncMock(return_value=[WITH_TRAKT_ID])
+        spy = AsyncMock(return_value=([WITH_TRAKT_ID], False))
         with patch.object(detail, "search_titles", spy):
-            hits = await _TraktSearchPort().search_titles(SETTINGS, Media.SHOW, "a show")
-        spy.assert_awaited_once_with(SETTINGS, "show", "a show", cache_only=False)
+            hits = (await _TraktSearchPort().search_titles(SETTINGS, Media.SHOW, "a show")).hits
+        spy.assert_awaited_once_with(SETTINGS, "show", "a show", page=1, cache_only=False)
         self.assertEqual(len(hits), 1)
 
     async def test_a_hit_with_no_trakt_id_is_not_dropped(self):
         """The add flow's old search helper filtered NO_TRAKT_ID out entirely,
         on a trailing `if entry["ids"].get("trakt") is not None`. The port must
         not repeat that filter."""
-        with patch.object(detail, "search_titles", AsyncMock(return_value=[NO_TRAKT_ID])):
-            hits = await _TraktSearchPort().search_titles(SETTINGS, Media.SHOW, "x")
+        with patch.object(detail, "search_titles", AsyncMock(return_value=([NO_TRAKT_ID], False))):
+            hits = (await _TraktSearchPort().search_titles(SETTINGS, Media.SHOW, "x")).hits
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0].source_id, "")
 
     async def test_a_hit_is_a_searchhit_with_trakt_as_the_source(self):
-        with patch.object(detail, "search_titles", AsyncMock(return_value=[WITH_TRAKT_ID])):
-            hits = await _TraktSearchPort().search_titles(SETTINGS, Media.SHOW, "a show")
+        with patch.object(detail, "search_titles", AsyncMock(return_value=([WITH_TRAKT_ID], False))):
+            hits = (await _TraktSearchPort().search_titles(SETTINGS, Media.SHOW, "a show")).hits
         hit = hits[0]
         self.assertIsInstance(hit, SearchHit)
         self.assertEqual(hit.source, Source.TRAKT)
@@ -77,8 +77,8 @@ class TraktSearchPortTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(hit.season)
 
     async def test_the_poster_travels_as_trakts_own_address(self):
-        with patch.object(detail, "search_titles", AsyncMock(return_value=[WITH_TRAKT_ID])):
-            hits = await _TraktSearchPort().search_titles(SETTINGS, Media.SHOW, "a show")
+        with patch.object(detail, "search_titles", AsyncMock(return_value=([WITH_TRAKT_ID], False))):
+            hits = (await _TraktSearchPort().search_titles(SETTINGS, Media.SHOW, "a show")).hits
         self.assertEqual(hits[0].poster, "https://media.trakt.tv/a-show.jpg")
 
     async def test_the_search_asks_for_images_and_reads_the_poster_from_them(self):
@@ -89,19 +89,36 @@ class TraktSearchPortTests(unittest.IsolatedAsyncioTestCase):
                {"show": {"ids": {"trakt": 3}, "title": "No Art", "year": 2022}}]
         spy = AsyncMock(return_value=raw)
         with patch.object(detail.transport, "cached_get", spy):
-            out = await detail.search_titles(SETTINGS, "show", "a show")
-        self.assertEqual(spy.await_args.args[3], {"query": "a show", "extended": "full,images"})
+            out, more = await detail.search_titles(SETTINGS, "show", "a show")
+        self.assertEqual(spy.await_args.args[3], {"query": "a show", "extended": "full,images",
+                                                  "page": "1", "limit": "20"})
+        self.assertFalse(more)
         self.assertEqual([e["poster"] for e in out],
                          ["https://media.trakt.tv/images/a.jpg.webp", ""])
 
     async def test_the_whole_id_map_travels_not_just_trakt(self):
-        with patch.object(detail, "search_titles", AsyncMock(return_value=[WITH_TRAKT_ID])):
-            hits = await _TraktSearchPort().search_titles(SETTINGS, Media.SHOW, "a show")
+        with patch.object(detail, "search_titles", AsyncMock(return_value=([WITH_TRAKT_ID], False))):
+            hits = (await _TraktSearchPort().search_titles(SETTINGS, Media.SHOW, "a show")).hits
         self.assertIn("tmdb", hits[0].ids)
 
+    async def test_a_page_is_asked_by_number_and_a_full_page_means_more(self):
+        """Measured 2026-10-23: `page` and `limit` in the query are honoured over
+        the X-Pagination-* request headers — "heat" answered 100 under the headers
+        alone and 20 a page with `limit=20`."""
+        full = [{"movie": {"ids": {"trakt": n}, "title": f"T{n}", "year": 2000}}
+                for n in range(20)]
+        spy = AsyncMock(side_effect=[full, full[:3]])
+        with patch.object(detail.transport, "cached_get", spy):
+            first = await _TraktSearchPort().search_titles(SETTINGS, Media.MOVIE, "heat", page=2)
+            last = await _TraktSearchPort().search_titles(SETTINGS, Media.MOVIE, "heat", page=3)
+        self.assertEqual(spy.await_args_list[0].args[3]["page"], "2")
+        self.assertEqual(spy.await_args_list[0].args[3]["limit"], "20")
+        self.assertEqual((len(first.hits), first.more), (20, True))
+        self.assertEqual((len(last.hits), last.more), (3, False))
+
     async def test_an_empty_result_stays_empty(self):
-        with patch.object(detail, "search_titles", AsyncMock(return_value=[])):
-            hits = await _TraktSearchPort().search_titles(SETTINGS, Media.MOVIE, "nothing")
+        with patch.object(detail, "search_titles", AsyncMock(return_value=([], False))):
+            hits = (await _TraktSearchPort().search_titles(SETTINGS, Media.MOVIE, "nothing")).hits
         self.assertEqual(hits, [])
 
 

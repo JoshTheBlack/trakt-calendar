@@ -27,6 +27,7 @@ from unittest import mock
 from app import db
 from app.providers import detail_source
 from app.providers.base import SeasonsAnswer, Source
+from app.providers import season_choices
 from app.ranker import core as ranker, seasons
 from tests.ranker.test_removals import BOARD, key, show_ref
 from tests.ranker.test_seasons import _SeasonsTestCase, season_key
@@ -52,7 +53,7 @@ def by_season(options) -> dict:
 class WhatIsOfferedTests(unittest.TestCase):
 
     def options(self, listed=LISTED, *, held=(None,), current=None, finished=None):
-        return seasons.season_options(listed, held=held, current=current,
+        return season_choices.season_options(listed, held=held, current=current,
                                       finished=finished, now=NOW)
 
     def test_the_whole_show_comes_first_then_every_season_in_order(self):
@@ -65,7 +66,7 @@ class WhatIsOfferedTests(unittest.TestCase):
         self.assertTrue(options[2].held and options[2].current)
         self.assertTrue(options[None].held and not options[None].current)
         self.assertFalse(options[1].held or options[3].held)
-        self.assertEqual(options[2].notes[0], "this row")
+        self.assertEqual(options[2].notes[:2], ("10 eps", "this row"))
         self.assertEqual(options[None].notes, ("on the board",))
 
     def test_a_season_no_service_listed_is_still_offered_when_the_row_is_it(self):
@@ -92,7 +93,7 @@ class WhatIsOfferedTests(unittest.TestCase):
 class WhatIsSuggestedTests(unittest.TestCase):
 
     def suggested(self, listed=LISTED, *, finished=None):
-        return [option.season for option in seasons.season_options(
+        return [option.season for option in season_choices.season_options(
             listed, held=(None,), current=None, finished=finished, now=NOW)
             if option.suggested]
 
@@ -100,7 +101,7 @@ class WhatIsSuggestedTests(unittest.TestCase):
         self.assertEqual(self.suggested(), [3])
 
     def test_never_a_season_still_to_air_but_it_is_listed_with_its_date(self):
-        options = by_season(seasons.season_options(
+        options = by_season(season_choices.season_options(
             LISTED, held=(), current=None, finished=None, now=NOW))
         self.assertFalse(options[4].suggested)
         self.assertFalse(options[4].aired)
@@ -118,17 +119,17 @@ class WhatIsSuggestedTests(unittest.TestCase):
         self.assertEqual(self.suggested([{"season": 0, "first_aired": "2026-09-20"}]), [])
 
     def test_a_suggestion_already_on_the_board_says_both(self):
-        options = by_season(seasons.season_options(
+        options = by_season(season_choices.season_options(
             LISTED, held=(None, 3), current=None, finished=None, now=NOW))
-        self.assertEqual(options[3].notes, ("on the board", "suggested"))
+        self.assertEqual(options[3].notes, ("9 eps", "on the board", "suggested"))
 
     def test_a_premiere_is_compared_as_the_service_states_it(self):
-        self.assertTrue(seasons.has_aired("2026-09-27T11:59:00.000Z", NOW))
-        self.assertFalse(seasons.has_aired("2026-09-27T12:01:00.000Z", NOW))
-        self.assertTrue(seasons.has_aired("2026-09-27", NOW))
-        self.assertFalse(seasons.has_aired("2026-09-28", NOW))
-        self.assertFalse(seasons.has_aired("", NOW))
-        self.assertFalse(seasons.has_aired("soon", NOW))
+        self.assertTrue(season_choices.has_aired("2026-09-27T11:59:00.000Z", NOW))
+        self.assertFalse(season_choices.has_aired("2026-09-27T12:01:00.000Z", NOW))
+        self.assertTrue(season_choices.has_aired("2026-09-27", NOW))
+        self.assertFalse(season_choices.has_aired("2026-09-28", NOW))
+        self.assertFalse(season_choices.has_aired("", NOW))
+        self.assertFalse(season_choices.has_aired("soon", NOW))
 
 
 def answer(listed=LISTED) -> SeasonsAnswer:
@@ -240,10 +241,10 @@ class WhatTheListDrawsTests(_ControlTestCase):
         body, _ = self.season_list(key(SHOW))
         self.assertEqual(self.choices(body), [
             ("", True, "this row"),
-            ("1", True, "on the board"),
-            ("2", True, "on the board"),
-            ("3", False, "suggested"),
-            ("4", False, "airs 15 Jan 2099"),
+            ("1", True, "8 eps · on the board"),
+            ("2", True, "10 eps · on the board"),
+            ("3", False, "9 eps · suggested"),
+            ("4", False, "10 eps · airs 15 Jan 2099"),
         ])
         self.assertIn(f'name="key" value="{key(SHOW)}"', body)
 
@@ -259,7 +260,7 @@ class WhatTheListDrawsTests(_ControlTestCase):
                 (self.user_id, SHOW, season)))
         # Season 3 finished and on no row of this board: suggested.
         body, _ = self.season_list(key(SHOW))
-        self.assertIn(("3", False, "suggested"), self.choices(body))
+        self.assertIn(("3", False, "9 eps · suggested"), self.choices(body))
 
     def test_an_account_without_the_tracker_gets_the_aired_suggestion(self):
         self.build_with_seasons()
@@ -271,7 +272,7 @@ class WhatTheListDrawsTests(_ControlTestCase):
         body, _ = self.season_list(key(SHOW), [LISTED[0], LISTED[1]])
         # Not approved for the tracker, so its record is not read: season 2 is
         # the latest aired, and it is on the board already.
-        self.assertIn(("2", True, "on the board · suggested"), self.choices(body))
+        self.assertIn(("2", True, "10 eps · on the board · suggested"), self.choices(body))
 
     def test_nobody_to_ask_still_draws_the_whole_show_and_says_why(self):
         self.build_with_seasons()

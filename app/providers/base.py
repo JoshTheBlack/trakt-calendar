@@ -761,6 +761,13 @@ class Capabilities:
     # history, progress, ratings. False means it can populate a calendar but can
     # never back the tracker.
     private_user_data: bool
+    # Whether every search box asks this source WITHOUT anybody choosing it. A
+    # source that is not is asked only when a viewer who has linked it adds it
+    # ("also search …" — providers.for_search), with that viewer's own token. A
+    # DECLARATION PER SOURCE rather than a name in the registry, so which
+    # catalogue a box searches first is a fact each package states about itself
+    # and never one service standing in for another.
+    searched_by_default: bool = False
 
     def answers(self, endpoint_key: str) -> bool:
         return endpoint_key in self.endpoints
@@ -1516,6 +1523,41 @@ class SearchHit(NamedTuple):
     poster: str = ""
 
 
+class SearchCatalogue(NamedTuple):
+    """One catalogue a search port can be asked, as a box offers it: `key` is the
+    name a request carries (a reference, unique app-wide — a service's own name,
+    or a service's name and its sub-catalogue), `label` what a button says.
+
+    A PORT MAY HOLD MORE THAN ONE because a service may keep separate catalogues
+    that one query does not reach together — measured 2026-10-23, Simkl's
+    /search/tv answers "frieren" and "kaiju no 8" with nothing, and its
+    /search/anime with 3 and 5 — and a box searches each as its own source of
+    results, with its own pages.
+    """
+    key: str
+    label: str
+
+
+# HOW MANY RESULTS ONE PAGE OF ANY CATALOGUE IS — one number, so every service a
+# box asks answers alike and "more from <service>" means the same next step for
+# each. TMDB's own page size, which it cannot be asked to change; the others are
+# asked for it (Trakt's and Simkl's `limit`).
+SEARCH_PAGE_SIZE = 20
+
+
+class SearchPage(NamedTuple):
+    """One page of one source's answer to a search: its hits, and whether the
+    source holds a further page.
+
+    `more` IS THE SOURCE'S OWN WORD, because only it knows how it pages — TMDB
+    states its page count in the answer, while a source that answers a search
+    whole says so by never having more. A box offers "more" from this and from
+    nothing it could infer, such as a page happening to be full.
+    """
+    hits: list[SearchHit]
+    more: bool = False
+
+
 @runtime_checkable  # see the note on SyncPort above
 class SearchPort(Protocol):
     """A source that can answer a free-text catalogue search — what the
@@ -1529,18 +1571,26 @@ class SearchPort(Protocol):
     not be registered honestly for the half it actually has.
 
     LIKE DetailPort AND CalendarPort, THIS ASKS ABOUT THE WORLD RATHER THAN
-    ABOUT ONE PERSON: a catalogue search authenticates with the instance's own
-    credential on every source registered so far, never with a viewer's token,
-    which is why `Provider.catalogue_is_configured` — the predicate that gates
-    this port, not `is_configured` — asks the same public question
-    `DetailPort.catalogue_configured` does for per-title lookups.
+    ABOUT ONE PERSON, which is why `Provider.catalogue_is_configured` — not
+    `is_configured` — is the credential that gates it. WHO IS ASKED is the
+    registry's (providers.for_search): a source `searched_by_default`, and any
+    other only for a viewer who has linked it and asked for it.
     """
 
+    # Every catalogue this port can be searched by, the first being the one a
+    # caller naming none gets. See SearchCatalogue.
+    catalogues: tuple[SearchCatalogue, ...]
+
     async def search_titles(self, settings: Settings, media: Media, query: str, *,
-                            cached_only: bool = False) -> list[SearchHit]:
-        """Every title this source's catalogue matches `query` on, for
-        `media`. An empty query answers [] without a call — there is nothing
-        to ask a service for.
+                            page: int = 1, catalogue: str | None = None,
+                            cached_only: bool = False) -> SearchPage:
+        """Page `page` — SEARCH_PAGE_SIZE results — of the titles `catalogue`
+        (one of this port's `catalogues`, by key; None for the first) matches
+        `query` on, for `media`. An empty query answers an empty page without a
+        call — there is nothing to ask a service for.
+
+        `page` IS A NUMBER, NEVER A LIST OF RESULTS, so "more" travels as a
+        reference, and `more` is the service's own word for a later page.
 
         `cached_only=True` NEVER MAKES A CALL: it answers from what an identical
         request already stored, and answers nothing at all when that has gone.
@@ -1784,8 +1834,8 @@ class Provider(Protocol):
     detail_port: DetailPort | None
     # How this source answers a catalogue search, or None for a source that
     # cannot be searched. Declared for the same reason as the three ports
-    # above: `for_catalogue_search` asks the registry which sources can answer
-    # a search and never names one, so a source claiming search while carrying
+    # above: `for_search` and `for_shared_id_lookup` ask the registry which
+    # sources can answer and never name one, so a source claiming search while carrying
     # no port would be lying in the one way the registry cannot catch.
     search_port: SearchPort | None
     # How this source's own list is written, or None for a source the tracker
@@ -1827,12 +1877,13 @@ class Provider(Protocol):
 
     def catalogue_is_configured(self, settings: Settings) -> bool:
         """Whether this instance can make this source's PUBLIC catalogue
-        reads — the predicate `for_catalogue_search` gates on, and
-        deliberately not `is_configured` above.
+        reads — the predicate `for_search` and `for_shared_id_lookup` gate on,
+        and deliberately not `is_configured` above (which `for_search` asks as
+        well, to decide whom a viewer may ADD to a search).
 
         THE SAME SPLIT `DetailPort.catalogue_configured` DRAWS, ASKED AT THE
-        PROVIDER LEVEL rather than the detail port's, because
-        `for_catalogue_search` picks which sources to ask before any of them
+        PROVIDER LEVEL rather than the detail port's, because the registry
+        picks which sources to ask before any of them
         has been asked to describe a title — it needs the answer off the
         Provider itself, the same object `is_configured` already lives on,
         not off a port that may be None for a source with no detail

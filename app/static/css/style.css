@@ -1570,6 +1570,10 @@ button.search-row { width: 100%; background: none; font: inherit; text-align: le
 .search-row.is-unkeyable { cursor: default; opacity: 0.62; }
 .search-row.is-unkeyable:hover { background: none; border-color: transparent; }
 .search-note { color: var(--gold-soft); font-size: 0.78rem; }
+/* Under a services' answer (_title_search.html's `widen`): who else to ask, and
+   "more". A wrapping row of small buttons, so a phone takes them two lines. */
+.search-widen { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 2px; }
+.search-unconfigured { display: block; margin: 8px 0 2px; }
 /* Which service(s) returned a row, before the rest of its line. */
 .search-marks { display: inline-flex; align-items: center; gap: 3px; margin-right: 6px;
                 vertical-align: middle; }
@@ -2461,6 +2465,9 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
     color: var(--muted, #8b93a7); border: 1px solid currentColor; opacity: 0.75;
     line-height: 1.6; cursor: help;
 }
+/* A title no tracking service lists: the same chip, in the warning colour,
+   because unlike "dropped" it means the row's counts can never move. */
+.distrakt-untracked { color: var(--warn, #d8a33a); opacity: 1; }
 /* An episode watched that nothing here knows about. Thin, and set apart from the
    bucket rows below it: it is a question rather than part of the month, and it
    sits above every section because a question under six headings is one nobody
@@ -2813,7 +2820,6 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 /* Narrower than the calendar's page-wide banner: this one sits inside a modal. */
 .distrakt-search-warn { margin: 0 0 8px 0; padding: 8px 12px; font-size: 0.82rem; }
 
-.distrakt-season-pick { margin-top: 14px; }
 .distrakt-season-list { display: flex; flex-wrap: wrap; gap: 8px; }
 
 /* The backfill plan's month rows. Two elements draw one kind of line: a month
@@ -2942,24 +2948,42 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
    is written. The stylesheet, not a filter on the result's trigger: htmx builds
    `click[...]` with the Function constructor, which the app's
    Content-Security-Policy refuses. The drag library already declines to pick a
-   held one up. Only the ROW: a held show's seasons can still be opened and added. */
+   held one up. A held SHOW's row is dimmed but still opens — its seasons can be
+   added, and its checklist greys the whole show. */
 .ranker-hit.is-held > .ranker-result { opacity: 0.45; pointer-events: none; }
-.ranker-hit-seasons { margin: 0 8px 4px 52px; font-size: 0.76rem; }
-.ranker-hit-seasons > summary {
-    cursor: pointer; color: var(--text-faint); width: fit-content; padding: 1px 4px;
-    border-radius: 6px;
-}
-.ranker-hit-seasons > summary:hover { color: var(--text); background: rgba(255,255,255,0.06); }
-.ranker-hit-form { display: flex; flex-direction: column; gap: 2px; padding: 4px 0; }
-.ranker-hit-choice {
+.ranker-hit.is-held > .search-hit > .ranker-result { opacity: 0.45; }
+/* THE ONE SEASON PICKER (_season_checklist.html) — the tracker's add, the board's
+   add and the calendar's jump draw it alike. */
+.season-checklist { display: flex; flex-direction: column; gap: 2px; padding: 4px 0;
+                    font-size: 0.8rem; }
+.season-checklist-heading { margin: 0 0 4px; font-weight: 600; }
+.season-choice {
     display: flex; align-items: baseline; gap: 8px; padding: 2px 4px; border-radius: 6px;
-    cursor: pointer;
+    cursor: pointer; color: inherit; text-decoration: none;
 }
-.ranker-hit-choice:hover { background: rgba(255,255,255,0.05); }
-.ranker-hit-choice.is-suggested .ranker-season-label { color: var(--gold-soft); font-weight: 600; }
-.ranker-hit-choice.is-held { cursor: default; opacity: 0.45; }
-.ranker-hit-choice .ranker-season-note { margin-left: auto; }
-.ranker-hit-form > button { align-self: flex-start; margin-top: 4px; }
+.season-choice:hover { background: rgba(255,255,255,0.05); }
+.season-choice.is-suggested .season-label { color: var(--gold-soft); font-weight: 600; }
+.season-choice.is-held { cursor: default; opacity: 0.45; }
+/* A held season the surface can send the viewer to stays readable: it is a way
+   there, not a refusal. */
+.season-choice.is-link { opacity: 1; cursor: pointer; text-decoration: underline; }
+.season-note { margin-left: auto; font-size: 0.7rem; color: var(--text-faint); white-space: nowrap; }
+.season-checklist > button { align-self: flex-start; margin-top: 4px; }
+/* A calendar or tracker search result is a <details> whose <summary> is the row: the
+   season picker unfolds UNDER the row pressed, sliding open, and folds away when
+   the row is pressed again (_search_results.html). The summary's own marker goes;
+   the row's "Seasons →" says what pressing it does. */
+.search-hit > summary { list-style: none; }
+.search-hit > summary::-webkit-details-marker { display: none; }
+.search-hit > .search-pick { margin: 0 8px 6px 54px; }
+.search-hit[open] > .search-pick > * { animation: search-pick-open 160ms ease-out; }
+@keyframes search-pick-open {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .search-hit[open] > .search-pick > * { animation: none; }
+}
 
 /* ---- what a board could put back ----
    HIDDEN WHILE IT HOLDS NOTHING, by asking whether it holds an entry. The

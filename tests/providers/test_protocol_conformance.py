@@ -59,10 +59,11 @@ PRIVATE_CREDENTIALS = {
     "simkl": {"simkl_access_token": "a-token"},
 }
 
-# Whether each service's catalogue search is offered to the search boxes. TMDB's
-# is written (app/providers/tmdb/search.py, tested on its own) and is not wired
-# into any box yet, so its provider carries no search port.
-SEARCHABLE = {"tmdb": False, "trakt": True, "simkl": True}
+# Whether each service carries a search port at all, and whether every box asks
+# it without anybody choosing it (Capabilities.searched_by_default) — one entry
+# per service, so a service registered later is a decision written here.
+SEARCHABLE = {"tmdb": True, "trakt": True, "simkl": True}
+SEARCHED_BY_DEFAULT = {"tmdb": True, "trakt": False, "simkl": False}
 
 
 def catalogue_settings(*sources) -> Settings:
@@ -78,7 +79,8 @@ class EveryServiceHasACredentialEntryTests(unittest.TestCase):
 
     def test_every_registered_source_has_a_credential_entry(self):
         registered = {str(s) for s in providers.registered()}
-        for table in (CATALOGUE_CREDENTIALS, PRIVATE_CREDENTIALS, SEARCHABLE):
+        for table in (CATALOGUE_CREDENTIALS, PRIVATE_CREDENTIALS, SEARCHABLE,
+                      SEARCHED_BY_DEFAULT):
             self.assertEqual(set(table), registered)
 
 
@@ -430,6 +432,20 @@ class EverySourceCanBeSearchedTests(unittest.TestCase):
                 self.assertEqual(
                     provider.search_port is not None, SEARCHABLE[str(source)],
                     f"{source}'s search port does not match SEARCHABLE")
+
+    def test_which_services_every_box_asks_is_exactly_the_table(self):
+        for source, provider in providers.registered().items():
+            with self.subTest(source=source):
+                self.assertEqual(provider.capabilities.searched_by_default,
+                                 SEARCHED_BY_DEFAULT[str(source)])
+
+    def test_a_service_searched_by_default_carries_a_search_port(self):
+        """Declaring the default without the port would leave every box saying
+        it searched a service it never asked."""
+        for source, provider in providers.registered().items():
+            if provider.capabilities.searched_by_default:
+                with self.subTest(source=source):
+                    self.assertIsNotNone(provider.search_port)
 
     def test_every_search_port_present_satisfies_searchport(self):
         for source, provider in providers.registered().items():

@@ -16,6 +16,7 @@ real.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 import dataclasses
 import json
 import re
@@ -1705,7 +1706,8 @@ class TheJumpAnchorIsRenderedByTheServerTests(CalendarRouteTestCase):
 
 
 class FollowingASearchResultWritesOneAiringTests(CalendarRouteTestCase):
-    """`/calendar/jump` — the click, and the only thing that writes.
+    """`/calendar/jump` — a result's season picker submitted, and the only thing
+    that writes.
 
     WHY A WRITE HAPPENS AT ALL. A service can be missing its own title: Trakt's
     show record dates Half Man's first season to 2026-04-28T20:00Z and Trakt's
@@ -1715,91 +1717,107 @@ class FollowingASearchResultWritesOneAiringTests(CalendarRouteTestCase):
     WHY IT HAPPENS HERE AND NOT IN THE SEARCH. The write first ran over every row
     a search returned, which turned typing "traitors" and pressing Enter into
     sixteen premieres written to a calendar everybody on the instance shares.
-    Following one result is the act that names exactly one thing.
+    The picker is the act that names what is written — and calendar/search.py's
+    `jump` (tested there) writes exactly that.
+
+    THE ADDRESS NAMES A RESULT BY REFERENCE: the query, the medium, the search's
+    own reference and its place, and the seasons ticked. Nothing about the title.
     """
 
-    MONTH = "/calendar?year=2026&month=4&endpoint=shows"
-    JUMP = ("/calendar/jump?source=trakt&id=246405&media=show&season=1"
-            "&endpoint=shows&year=2026&month=4")
+    JUMP = ("/calendar/jump?q=half%20man&media=show&i=0&also=trakt"
+            "&season:1=1&season:3=1&endpoint=shows")
 
     def setUp(self):
         super().setUp()
         self.sign_in_as(self._make_user("jumper2"))
 
-    def _go(self, url=None, mark="show:tmdb:1"):
-        from app.calendar.search import Landing
+    def _go(self, url=None, *, hit="found", destination="/calendar?year=2026&month=4"):
+        from app.providers import title_search
 
-        async def _fill(settings, **kw):
-            self.asked = kw
-            return Landing(mark, "2026-04-28") if mark else Landing()
+        self.named = []
+        self.jumped = []
 
-        with patch("app.calendar.search.fill_one_gap", _fill):
+        async def _resolve(settings, media, query, index, ref):
+            self.named.append((media, query, index, ref))
+            return SimpleNamespace(title="Half Man") if hit else None
+
+        async def _jump(settings, found, media, seasons, *, tz, now):
+            self.jumped.append((media, seasons))
+            return destination
+
+        with patch.object(title_search, "resolve_hit", _resolve), \
+             patch("app.calendar.search.jump", _jump):
             return self.client.get(url or self.JUMP, follow_redirects=False)
 
-    def test_it_redirects_to_the_month_with_the_card_named(self):
+    def test_it_re_reads_the_named_result_and_jumps_to_what_was_ticked(self):
         resp = self._go()
         self.assertEqual(resp.status_code, 303)
-        where = resp.headers["location"]
-        self.assertIn("year=2026", where)
-        self.assertIn("month=4", where)
-        self.assertIn("highlight=", where)
-        self.assertTrue(where.endswith("#jump-target"), where)
+        self.assertEqual(resp.headers["location"], "/calendar?year=2026&month=4")
+        (media, query, index, ref), = self.named
+        self.assertEqual((str(media), query, index, ref.also), ("show", "half man", "0", ("trakt",)))
+        self.assertEqual(self.jumped, [(self.jumped[0][0], [1, 3])])
 
-    def test_it_names_the_day_so_a_card_past_the_first_days_is_found(self):
-        """The page draws only its first few days inline and fetches the rest as
-        the reader scrolls, so a mark alone could name a card that did not exist
-        yet: the jump landed at the top of the month. The day is what the page
-        uses to draw that day's cards with the page, as a stored result's link
-        does."""
-        where = self._go().headers["location"]
-        self.assertIn("&day=2026-04-28", where)
+    def test_a_films_one_choice_is_its_release(self):
+        self._go("/calendar/jump?q=heat&media=movie&i=0&season:=1&endpoint=movies")
+        self.assertEqual(self.jumped[0][1], [None])
 
-    def test_it_asks_the_service_for_exactly_what_the_link_named(self):
-        self._go()
-        self.assertEqual(str(self.asked["source"]), "trakt")
-        self.assertEqual(self.asked["source_id"], "246405")
-        self.assertEqual(self.asked["season"], 1)
-        self.assertEqual(self.asked["endpoint_key"], "shows")
-
-    def test_a_write_that_could_not_happen_still_opens_the_month(self):
-        """The month is worth opening either way — it may hold the title from an
-        ordinary fill, and if it does not the reader sees the month they asked
-        for rather than an error about machinery."""
-        resp = self._go(mark="")
+    def test_a_result_the_store_no_longer_holds_opens_the_calendar_and_writes_nothing(self):
+        resp = self._go(hit=None)
         self.assertEqual(resp.status_code, 303)
-        where = resp.headers["location"]
-        self.assertNotIn("highlight=", where)
-        self.assertNotIn("#jump-target", where)
+        self.assertEqual(resp.headers["location"], "/calendar?endpoint=shows")
+        self.assertEqual(self.jumped, [])
 
-    def test_a_service_this_app_does_not_know_is_not_an_error(self):
-        """A link from an older version, or a hand-edited one. The reader still
-        gets the month; nothing is written."""
-        called = []
+    def test_a_jump_with_nowhere_to_land_still_opens_the_calendar(self):
+        """The month is worth opening either way; with nothing ticked there is no
+        month, so the reader stays on the calendar they were searching."""
+        resp = self._go(destination="")
+        self.assertEqual(resp.headers["location"], "/calendar?endpoint=shows")
 
-        async def _fill(settings, **kw):
-            called.append(kw)
-            return "x"
-
-        with patch("app.calendar.search.fill_one_gap", _fill):
-            resp = self.client.get(
-                "/calendar/jump?source=nosuchservice&id=1&endpoint=shows"
-                "&year=2026&month=4", follow_redirects=False)
+    def test_a_medium_this_app_does_not_know_is_not_an_error(self):
+        resp = self._go("/calendar/jump?q=x&media=album&i=0&endpoint=shows")
         self.assertEqual(resp.status_code, 303)
-        self.assertEqual(called, [], "an unknown service reached the writer")
+        self.assertEqual(self.jumped, [])
 
-    def test_a_link_naming_no_id_writes_nothing(self):
-        called = []
 
-        async def _fill(settings, **kw):
-            called.append(kw)
-            return "x"
+class ASearchResultsSeasonPickerTests(CalendarRouteTestCase):
+    """`/calendar/fragments/search-seasons` — the app's one season checklist for
+    a calendar search result, whose submit is the jump."""
 
-        with patch("app.calendar.search.fill_one_gap", _fill):
-            resp = self.client.get(
-                "/calendar/jump?source=trakt&endpoint=shows&year=2026&month=4",
-                follow_redirects=False)
-        self.assertEqual(resp.status_code, 303)
-        self.assertEqual(called, [])
+    URL = "/calendar/fragments/search-seasons?q=half%20man&media=show&i=0&endpoint=shows"
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in_as(self._make_user("picker2"))
+
+    def _get(self, *, hit=True, options=()):
+        from app.calendar import search as calendar_search
+        from app.providers import title_search
+
+        async def _resolve(settings, media, query, index, ref):
+            return SimpleNamespace(title="Half Man") if hit else None
+
+        async def _picker(settings, found, media, *, prefs, tz, source_selection=None):
+            return calendar_search.Picker(list(options), [])
+
+        with patch.object(title_search, "resolve_hit", _resolve),              patch("app.calendar.search.picker", _picker):
+            return self.client.get(self.URL).text
+
+    def test_it_draws_the_checklist_whose_submit_is_the_jump(self):
+        from app.providers.season_choices import SeasonOption
+        html = self._get(options=[SeasonOption(1), SeasonOption(2, suggested=True),
+                                  SeasonOption(3, blocked="your filters hide it")])
+        self.assertIn('action="/calendar/jump#jump-target"', html)
+        self.assertIn('method="get"', html)
+        for field in ('name="q" value="half man"', 'name="i" value="0"',
+                      'name="media" value="show"', 'name="endpoint" value="shows"'):
+            self.assertIn(field, html)
+        # The suggestion arrives ticked; a refused season says why and cannot be.
+        self.assertIn('name="season:2" value="1" checked', html)
+        self.assertIn('name="season:3" value="1" disabled', html)
+        self.assertIn("your filters hide it", html)
+
+    def test_a_result_the_store_no_longer_holds_says_so(self):
+        self.assertIn("That search has expired", self._get(hit=False))
 
 
 class CalendarSearchRouteTests(CalendarRouteTestCase):
@@ -1862,6 +1880,28 @@ class CalendarSearchRouteTests(CalendarRouteTestCase):
         # Asking the SERVICES is the panel's own always-visible Search button,
         # not a control the results repeat.
         self.assertIn("Search every calendar", resp.text)
+
+    def test_no_tmdb_token_says_so_and_still_offers_a_linked_service(self):
+        """Nothing is asked in TMDB's place; the box names it and offers the
+        services the viewer linked, each asked only when its button is pressed."""
+        from app import db
+        from app.providers import title_search
+        # The viewer has linked Trakt, which is what makes it theirs to add.
+        asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
+            conn, user_id=self.user_id, provider="trakt", provider_user_id=1,
+            access_token="viewer-trakt-token")))
+        asked = []
+
+        async def _catalogue(entries, settings, media, query, *, pages=1, cached_only=False):
+            asked.append([str(entry.source) for entry in entries])
+            return title_search.SearchMergeResult(hits=[], failed=frozenset())
+        with patch.object(title_search, "search_catalogue", _catalogue):
+            plain = self.client.get(f"{self.URL}&q=drama&live=1").text
+            added = self.client.get(f"{self.URL}&q=drama&live=1&also=trakt").text
+        self.assertIn("is not configured", plain)
+        self.assertIn(">Also search Trakt<", plain)
+        self.assertEqual(asked, [[], ["trakt"]])
+        self.assertIn("is not configured", added)
 
     def test_an_empty_query_asks_for_one_rather_than_listing_everything(self):
         resp = self.client.get(f"{self.URL}&q=")
