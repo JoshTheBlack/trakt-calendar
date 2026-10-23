@@ -231,14 +231,20 @@ async def cached_get(settings: Settings, path: str, params: dict | None = None, 
     """
     url = url_for(settings, path, params)
     stored = await cache.get(url, ttl_seconds)
-    if _is_envelope(stored):
+    if _is_envelope(stored) and not _is_not_found(stored):
         return stored["body"]
     stale = await cache.get_stale(url)
     # A REMEMBERED 404 IS AN ANSWER, raised as the same TmdbNotFound a live one
     # is — the season handover and every "TMDB has no such title" reader depend
-    # on that type — and never as a failure. Every flag honours it: a caller that
-    # may not make a call still learns what TMDB already said.
+    # on that type — and never as a failure. Every flag honours it but one: a
+    # caller that may not make a call still learns what TMDB already said...
     if _is_not_found(stale) and stale["at"] > db.now() - NOT_FOUND_SECONDS:
+        # ...except a `cache_only` reader, which is served the last good answer
+        # kept beside the marker. That reader is a public share page, drawing
+        # what it drew before; a 404 that may be TMDB's passing mistake about a
+        # real title must not blank a page nobody there can refill.
+        if cache_only and _is_envelope(stale):
+            return stale["body"]
         raise TmdbNotFound(path)
     if only_if_cached:
         return None
@@ -250,13 +256,13 @@ async def cached_get(settings: Settings, path: str, params: dict | None = None, 
     logger.debug("TMDB GET %s -> %s in %.0fms", path, resp.status_code,
                  (_time.perf_counter() - started) * 1000.0)
     if resp.status_code == 304 and _is_envelope(stale):
-        await cache.set(url, stale, retain_seconds=CACHE_RETAIN_SECONDS)
-        return stale["body"]
+        # TMDB has just said the stored answer is still its answer, which is
+        # obtaining it again: a clean envelope, its clock restarted.
+        body = stale["body"]
+        await _store(url, stale.get("etag") or "", body)
+        return body
     if resp.status_code == 404:
-        # Remembered for NOT_FOUND_SECONDS, under the same six-month retain as
-        # every other TMDB row, in place of any answer stored before.
-        await cache.set(url, {"not_found": True, "at": db.now()},
-                        retain_seconds=CACHE_RETAIN_SECONDS)
+        await _remember_not_found(url, stale)
         raise TmdbNotFound(path)
     if resp.status_code == 401:
         # Worded without the token, which the response does not echo anyway.
@@ -269,9 +275,46 @@ async def cached_get(settings: Settings, path: str, params: dict | None = None, 
         body = resp.json()
     except ValueError:
         raise TmdbError(f"TMDB answered {path} with an unreadable body.") from None
-    await cache.set(url, {"etag": resp.headers.get("etag") or "", "body": body},
-                    retain_seconds=CACHE_RETAIN_SECONDS)
+    await _store(url, resp.headers.get("etag") or "", body)
     return body
+
+
+async def _store(url: str, etag: str, body) -> None:
+    """One answer TMDB has just given, with its validator and the moment it was
+    obtained — `at`, which is what lets a copy kept past a later 404 still be
+    held to the six-month ceiling (`_remember_not_found`)."""
+    await cache.set(url, {"etag": etag, "body": body, "at": db.now()},
+                    retain_seconds=CACHE_RETAIN_SECONDS)
+
+
+async def _remember_not_found(url: str, stale) -> None:
+    """Remember TMDB's 404 for NOT_FOUND_SECONDS — and KEEP THE LAST GOOD ANSWER
+    BESIDE IT, which `cache_only` readers go on being served.
+
+    WHY KEEP IT: TMDB has answered 404 for real titles, briefly. Written in place
+    of the stored answer, one such 404 cost every public share page reading this
+    title (cache_only, never fetching) the copy it drew from, with no visitor
+    able to bring it back. Live callers are unaffected: for the day, they get
+    TmdbNotFound exactly as before.
+
+    THE SIX-MONTH CEILING STILL HOLDS FOR THE KEPT COPY. Rewriting the row resets
+    the sweep's clock, so the row is retained only until the KEPT body's own
+    ceiling — six months from when TMDB last gave it (`at`), the sweep's grace
+    included, exactly as if it had never been rewritten. A copy with no `at`
+    (stored before answers carried one) has an unknown age and is not kept.
+    """
+    marker = {"not_found": True, "at": db.now()}
+    # When the copy on hand was obtained: an answer's own `at`, or — a 404 again,
+    # a day on — the age the last marker kept for it.
+    obtained = (stale.get("body_at") if _is_not_found(stale) else stale.get("at")) \
+        if _is_envelope(stale) else None
+    left = (obtained + CACHE_RETAIN_SECONDS - db.now()
+            if isinstance(obtained, int) else 0)
+    if left > 0:
+        marker.update(etag=stale.get("etag") or "", body=stale["body"], body_at=obtained)
+        await cache.set(url, marker, retain_seconds=left)
+    else:
+        await cache.set(url, marker, retain_seconds=CACHE_RETAIN_SECONDS)
 
 
 def _is_envelope(value) -> bool:

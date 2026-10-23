@@ -196,6 +196,72 @@ class A404IsNotAFailureTests(_Fresh):
         self.assertEqual(await db.fetch_value("SELECT ttl_seconds FROM api_cache"),
                          transport.CACHE_RETAIN_SECONDS)
 
+    async def _good_then_404(self, path="tv/7"):
+        """A real answer stored, then a 404 for the same title a day later."""
+        client = RecordingClient([response(200, json={"name": "Kept"}),
+                                  response(404, json={})])
+        with pooled(transport, "POOL", client):
+            await transport.cached_get(SETTINGS, path)
+            await db.execute("UPDATE api_cache SET cached_at = cached_at - 999999")
+            with self.assertRaises(transport.TmdbNotFound):
+                await transport.cached_get(SETTINGS, path)
+        return client
+
+    async def test_a_404_keeps_the_last_good_answer_for_a_cache_only_reader(self):
+        """A share page reads cache-only and can never refill: a passing 404 on a
+        real title must not blank it. Live callers still learn the 404."""
+        client = await self._good_then_404()
+        with pooled(transport, "POOL", client):
+            self.assertEqual(await transport.cached_get(SETTINGS, "tv/7", cache_only=True),
+                             {"name": "Kept"})
+            for flags in ({}, {"only_if_cached": True}):
+                with self.subTest(flags=flags), self.assertRaises(transport.TmdbNotFound):
+                    await transport.cached_get(SETTINGS, "tv/7", **flags)
+        self.assertEqual(len(client.calls), 2)
+
+    async def test_the_kept_answer_is_still_gone_by_its_own_six_month_ceiling(self):
+        """Rewriting the row restarts the sweep's clock, so the row is retained
+        only to the kept answer's ceiling, counted from when TMDB gave it."""
+        client = RecordingClient([response(200, json={"name": "Kept"}), response(404, json={})])
+        with pooled(transport, "POOL", client):
+            await transport.cached_get(SETTINGS, "tv/7")
+            month_ago = db.now() - 30 * 24 * 60 * 60
+            stored = cache._decode(await db.fetch_value("SELECT payload FROM api_cache"))
+            await db.execute("UPDATE api_cache SET payload = ?, cached_at = ?",
+                             (cache._encode({**stored, "at": month_ago}), month_ago))
+            with self.assertRaises(transport.TmdbNotFound):
+                await transport.cached_get(SETTINGS, "tv/7")
+        retain = await db.fetch_value("SELECT ttl_seconds FROM api_cache")
+        self.assertAlmostEqual(retain, transport.CACHE_RETAIN_SECONDS - 30 * 24 * 60 * 60,
+                               delta=5)
+        await cache.sweep(now=month_ago + transport.MAX_CACHE_SECONDS + 1)
+        self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM api_cache"), 0)
+
+    async def test_an_answer_of_unknown_age_is_not_kept(self):
+        """Stored before answers carried their own time, its age cannot be held
+        to the ceiling, so the 404 replaces it as it always did."""
+        client = RecordingClient([response(200, json={"name": "Old"}), response(404, json={})])
+        with pooled(transport, "POOL", client):
+            await transport.cached_get(SETTINGS, "tv/7")
+            await db.execute("UPDATE api_cache SET payload = ?, cached_at = cached_at - 999999",
+                             (cache._encode({"etag": "", "body": {"name": "Old"}}),))
+            with self.assertRaises(transport.TmdbNotFound):
+                await transport.cached_get(SETTINGS, "tv/7")
+            with self.assertRaises(transport.TmdbNotFound):
+                await transport.cached_get(SETTINGS, "tv/7", cache_only=True)
+
+    async def test_a_title_tmdb_answers_again_drops_the_marker(self):
+        client = await self._good_then_404()
+        stored = cache._decode(await db.fetch_value("SELECT payload FROM api_cache"))
+        await db.execute("UPDATE api_cache SET payload = ?",
+                         (cache._encode({**stored,
+                                         "at": db.now() - transport.NOT_FOUND_SECONDS - 1}),))
+        client = RecordingClient(response(200, json={"name": "Back"}))
+        with pooled(transport, "POOL", client):
+            self.assertEqual(await transport.cached_get(SETTINGS, "tv/7"), {"name": "Back"})
+            self.assertEqual(await transport.cached_get(SETTINGS, "tv/7"), {"name": "Back"})
+        self.assertEqual(len(client.calls), 1)
+
     def test_the_type_is_not_the_could_not_answer_contract(self):
         """A caller catching SourceUnavailable must never swallow "TMDB has no
         such season" — that answer hands the season to the next service."""
