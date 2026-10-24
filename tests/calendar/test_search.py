@@ -171,6 +171,21 @@ class AJumpIsOnlyOfferedForACardThatWouldBeDrawnTests(SearchTestCase):
         prefs = dict(NO_FILTERS, tv_genres="-drama")
         self.assertEqual((await self.find("severance", prefs=prefs)).airings, ())
 
+    async def test_a_title_the_network_filter_removes_is_not_offered(self):
+        """THE FILTER THE SEARCH USED TO SKIP. The network lists judge a
+        rendered card, and only the month read applied them — so a search
+        offered a title on a network this viewer filters out, and its jump
+        opened a day that could not draw it."""
+        await self.store(dataclasses.replace(_record("Severance"), network="Apple TV"))
+        prefs = dict(NO_FILTERS, network_filter=["-Apple TV"])
+        self.assertEqual((await self.find("severance", prefs=prefs)).airings, ())
+        self.assertEqual(len((await self.find("severance")).airings), 1)
+
+    async def test_a_title_the_operators_network_list_removes_is_not_offered(self):
+        await self.store(dataclasses.replace(_record("Severance"), network="Apple TV"))
+        self.settings = dataclasses.replace(self.settings, network_filter=["-Apple TV"])
+        self.assertEqual((await self.find("severance")).airings, ())
+
     async def test_a_source_this_viewer_does_not_admit_is_not_offered(self):
         """Resolving to nobody is a real answer on the read path, and a search
         must inherit it rather than reaching past it into storage."""
@@ -578,6 +593,29 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         self.assertEqual(option.href, "")
         self.assertIn("your filters hide it", option.notes)
 
+    async def test_a_season_not_held_is_judged_by_the_title_the_calendar_holds(self):
+        """MEASURED on the owner's calendar: TMDB names Yellowjackets' network
+        "Showtime", both services' listings "Paramount+ with Showtime". With that
+        network filtered out, the season on the calendar was refused and the ones
+        not on it were offered — judged by TMDB's word rather than by the title
+        the calendar holds, whose card a written season would be."""
+        self.settings = Settings(simkl_public_calendar_enabled=True)
+        await self._stored_airing(Source.SIMKL, "4242", network="Paramount+ with Showtime")
+        described = {"first_aired": "2020-01-01T00:00:00Z", "network": "Showtime"}
+        seasons = [{"season": 1, "first_aired": "2020-01-01"},
+                   {"season": 2, "first_aired": "2021-03-04"}]
+        self.prefs = {**self.prefs, "network_filter": ["-Paramount+ with Showtime"]}
+        one, two = (await self._picker(described, seasons=seasons)).options
+        for option in (one, two):
+            with self.subTest(season=option.season):
+                self.assertFalse(option.pickable)
+                self.assertIn("your filters hide it", option.notes)
+        # ...and without the filter the season not held is offered, so the test
+        # is about the filter.
+        self.prefs = {**self.prefs, "network_filter": []}
+        _one, two = (await self._picker(described, seasons=seasons)).options
+        self.assertTrue(two.pickable)
+
     async def test_a_known_season_another_service_airs_learns_this_ones_airing(self):
         """THE SUPPRESSION WAS KEYED ON TITLE AND SEASON, NOT SOURCE. MEASURED:
         Groomed was searched for, answered by Trakt, and dropped as a duplicate
@@ -635,6 +673,17 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         """
         self.prefs = {**self.prefs, "tv_countries": "-in"}
         chosen = await self._picker({"first_aired": "2026-08-12T00:00:00Z", "country": "IN"})
+        option, = chosen.options
+        self.assertFalse(option.pickable)
+        self.assertIn("your filters hide it", option.notes)
+
+    async def test_a_network_this_viewer_excludes_is_refused_with_the_reason(self):
+        """Both network lists judge the card the calendar would draw, so a season
+        on a network the viewer filters out is listed and refused like any other
+        filtered season — not offered as somewhere the month cannot show it."""
+        self.prefs = {**self.prefs, "network_filter": ["-Apple TV"]}
+        chosen = await self._picker({"first_aired": "2026-08-12T00:00:00Z",
+                                     "network": "Apple TV"})
         option, = chosen.options
         self.assertFalse(option.pickable)
         self.assertIn("your filters hide it", option.notes)

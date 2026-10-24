@@ -1203,12 +1203,13 @@ async def visible_records(groups, endpoint, *, genres="", countries="",
     return kept, release_filtered + (resolved - len(kept))
 
 
-async def placed(groups, endpoint, *, tz: ZoneInfo, **narrowing) -> tuple[list[Item], int]:
+async def placed(groups, endpoint, *, tz: ZoneInfo, network_filter=None,
+                 **narrowing) -> tuple[list[Item], int]:
     """Every card `groups` make for ONE viewer, each rendered on the day it is
     PLACED on, and how many their filters removed. `narrowing` is
     `visible_records`' keywords — the viewer's record filters, their source
-    selection (`prefs`) and the operator's `settings`; the network lists, which
-    judge a RENDERED card, are applied by the caller (`_assembled_span`).
+    selection (`prefs`) and the operator's `settings` — and `network_filter` the
+    viewer's network list.
 
     THE ONE PLACEMENT FUNCTION, and every path that says where a card is drawn
     asks it: a month, a day that arrives late, a share page and its card, the
@@ -1226,7 +1227,23 @@ async def placed(groups, endpoint, *, tz: ZoneInfo, **narrowing) -> tuple[list[I
     with span("calcache.normalize", entries=len(kept)) as sp:
         items = [render(record, tz) for record in kept]
         sp.set(items=len(items))
-    return items, filtered_out
+    # THE NETWORK LISTS COME LAST BECAUSE THEY JUDGE THE RENDERED CARD: a
+    # network only exists on what resolution chose, so the fill's floor cannot
+    # judge a merged card's and this is the one place that can. The OPERATOR's
+    # list first — the floor's fourth field, not counted as this viewer's, as the
+    # floor's other three are not — and then the viewer's own, counted with the
+    # rest so a page it emptied can say so. HERE, in the one placement function,
+    # and not in the month read alone: the search, its season picker and the card
+    # its jump lands on read through this too, and while the lists were applied
+    # only to a month they offered a title the viewer's network filter hides,
+    # linking to a day that could not draw it.
+    settings = narrowing.get("settings")
+    if settings is not None:
+        items = calendar_filter.filter_by_network(
+            items, settings.network_filter, exempt_unenriched=True)
+    before_network = len(items)
+    items = calendar_filter.filter_by_network(items, network_filter, exempt_unenriched=True)
+    return items, filtered_out + before_network - len(items)
 
 
 def narrow_for_viewer(parsed, media, *, genres="", countries="", show_certifications="",
@@ -1648,7 +1665,7 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         movie_certifications=movie_certifications,
         movie_release_countries=movie_release_countries,
         movie_release_types=movie_release_types,
-        prefs=prefs, settings=settings)
+        network_filter=network_filter, prefs=prefs, settings=settings)
     # KEPT WHEN IT IS PLACED INSIDE THE SPAN, which is a question about the
     # CARD, not about any one listing: a card's other services may list it
     # outside the span, and a listing inside the span may belong to a card
@@ -1657,22 +1674,6 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
              if start_date <= date.fromisoformat(item.air_date) <= end_date]
 
     with span("calcache.trim", items=len(items)):
-        # THE OPERATOR'S NETWORK LIST IS THE FLOOR'S FOURTH FIELD, applied here
-        # and nowhere else: a network only exists on a RENDERED item, so the
-        # fill's floor cannot judge one and this is the only place it can. It
-        # runs before the viewer's list and is not counted as theirs, exactly as
-        # the three dimensions above are not. Until this, the Settings field sat
-        # beside them saying it filtered the calendar and reached only the public
-        # share pages (share_routes._resolve_networks' fallback).
-        items = calendar_filter.filter_by_network(
-            items, settings.network_filter, exempt_unenriched=True)
-        before_network = len(items)
-        items = calendar_filter.filter_by_network(items, network_filter, exempt_unenriched=True)
-        # THE NETWORK FILTER RUNS HERE AND NOT WITH THE OTHERS — it needs the
-        # rendered item, which is the shape a network only exists on — so its
-        # removals are counted here and added to the rest rather than being the
-        # one narrowing the page cannot account for.
-        filtered_out += before_network - len(items)
         # Sorted on the LOCAL DAY first and the instant second. The two agree for
         # anything converted through one timezone, but a date-only release is
         # pinned to its own calendar date rather than to an offset from an

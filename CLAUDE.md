@@ -195,7 +195,7 @@ airings once, with every other stored listing of each episode they name at any
 date (`entries.read_span_whole` — the per-title query shape is the measured one;
 a plain join picked a 39-second plan), and the search reads a title whole
 (`entries.read_groups`). And there is ONE PLACEMENT FUNCTION, `cache.placed`
-(resolution and render): the month, a late day, a share page and
+(resolution, render, both network lists): the month, a late day, a share page and
 its card, the tracker's calendar import (all through `assemble_range`), the
 search's "where it airs", its season picker and the card its jump lands on
 (`calendar/search.py`'s `_drawn`) all ask it, and none works a day out from one

@@ -19,6 +19,7 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ### Fixed
 - 📅 **One episode is one card.** When Trakt and Simkl gave an episode or film different dates, it could show up twice: Yellowjackets' season 4 premiere appeared on both Friday and Sunday. Now their listings count as one card whenever they fall in the same month, or within a week of each other across the end of a month. Listings further apart than that are usually a numbering mix-up, and still show separately.
+- 🔍 **The calendar search follows your network filter.** It used to offer a title on a network you've filtered out, and its link opened a day without it. The season picker says that title is hidden by your filters, like it does for genre or country — for its seasons not on your calendar yet too, judged by how your calendar already lists the show.
 - ⚠️ **No more "some calendar data couldn't be loaded" after a routine refresh.** It appeared when one service had nothing new and the other did.
 - 🎬 **A film only Simkl knows can be found and jumped to from the calendar search.** It used to come back with nowhere to land.
 - 🔗 **A custom share name saved after clearing one works.** Its `/c/` link used to answer "not found" from the start.

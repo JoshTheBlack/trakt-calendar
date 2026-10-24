@@ -49,6 +49,7 @@ from zoneinfo import ZoneInfo
 from . import cache as calendar_cache
 from . import enrich as calendar_enrich
 from . import entries
+from . import filter as calendar_filter
 from . import vocab
 from .. import cache, db, providers
 from ..endpoints import get_endpoint
@@ -242,11 +243,11 @@ async def stored(query: str, *, settings, prefs, tz: ZoneInfo,
 
 
 def _filters(prefs, media) -> dict:
-    """This viewer's filters for `media`, as the read path takes them — every
-    narrowing `vocab.active_specs` answers except the network list, which the
-    read path applies to rendered items rather than to records."""
-    specs = vocab.active_specs(prefs, media, honour_pause=True)
-    return {name: value for name, value in specs.items() if name != "network_filter"}
+    """This viewer's filters for `media`, as the read path takes them — EVERY
+    narrowing `vocab.active_specs` answers, the network list included, which is
+    what makes "would this viewer's calendar draw it" this module's question
+    asked the calendar's way."""
+    return vocab.active_specs(prefs, media, honour_pause=True)
 
 
 def landing_url(endpoint_key: str, item: Item) -> str:
@@ -385,6 +386,9 @@ async def picker(settings, hit, media: Media, *, prefs, tz: ZoneInfo,
     reasons: dict = {}
     links: dict = {}
     on_calendar: list[Elsewhere] = []
+    title_kept = (await _title_kept(rows[0].endpoint_key, rows[0].item.mark_key, media,
+                                    prefs=prefs, source_selection=source_selection,
+                                    settings=settings, tz=tz) if rows else None)
     for row in rows:
         season = row.item.season if media is not Media.MOVIE else None
         drawn = await _drawn(row.endpoint_key, row.item.mark_key, row.item.season, media,
@@ -394,9 +398,16 @@ async def picker(settings, hit, media: Media, *, prefs, tz: ZoneInfo,
             on_calendar.append(row)
         # THE FILTERS FIRST, a season the calendar holds included: a link to its
         # day would open a day that cannot draw it, which is what a filtered
-        # season's link did — the month opened with nothing to find.
-        if not (drawn if drawn is not None
-                else await _kept_by_filters(row.record, media, specs, settings)):
+        # season's link did — the month opened with nothing to find. A season it
+        # does not hold is judged by the title as the calendar holds it, when it
+        # holds any of it (`_title_kept`), and by the description only otherwise.
+        if drawn is not None:
+            kept = bool(drawn)
+        elif title_kept is not None:
+            kept = title_kept
+        else:
+            kept = await _kept_by_filters(row.record, media, specs, settings)
+        if not kept:
             reasons[season] = "your filters hide it"
         elif drawn:
             # TO THE DAY THE CALENDAR DRAWS IT ON, which is this viewer's first
@@ -459,12 +470,43 @@ async def _drawn(endpoint_key: str, title_key: str, season: int | None, media: M
     return sorted(items, key=lambda item: (item.air_date, item.air_ts))
 
 
+async def _title_kept(endpoint_key: str, title_key: str, media: Media, *, prefs,
+                      source_selection, settings, tz: ZoneInfo) -> bool | None:
+    """Whether this viewer's filters keep the TITLE as the calendar holds it on
+    `endpoint_key` — True when any of its stored cards is drawn, False when its
+    stored cards are there and the filters removed them, None when the calendar
+    holds none this viewer reads (nothing to judge by).
+
+    FOR A SEASON THE CALENDAR DOES NOT HOLD YET, of a title it does. The filters
+    rule on TITLE facts — network, genres, country, certification — and the
+    calendar's record of the title is what a season's card would carry once
+    written; the describing service's spelling of them can differ. MEASURED on
+    the owner's calendar: TMDB names Yellowjackets' network "Showtime" first,
+    while both services' listings say "Paramount+ with Showtime" — so with that
+    network filtered out, the seasons already on the calendar were refused and
+    the ones not on it were offered, judged by TMDB's word.
+    """
+    records = await entries.read_groups(endpoint_key, [title_key])
+    if not records:
+        return None
+    endpoint = get_endpoint(endpoint_key)
+    items, filtered = await calendar_cache.placed(
+        calendar_cache.group_records(records), endpoint, tz=tz,
+        **_filters(prefs, endpoint.media),
+        prefs=source_selection.for_media(endpoint.media) if source_selection else None,
+        settings=settings)
+    if items:
+        return True
+    return False if filtered else None
+
+
 async def _kept_by_filters(record, media: Media, specs, settings) -> bool:
     """Whether this viewer's filters keep a record a service has just described,
     for a title the calendar does not hold yet (`_drawn` answers one it does) —
     EVERY filter the calendar applies, through the calendar's own
-    (cache.narrow_for_viewer): the release narrowing, the instance's floor and
-    the viewer's genres, countries and certifications. No source admission: the
+    (cache.narrow_for_viewer): the release narrowing, the instance's floor, the
+    viewer's genres, countries and certifications, and both network lists. No
+    source admission: the
     calendar would draw another service's record of the title, and which
     service lists it is not a filter."""
     group = calendar_cache.group_records([record])[0]
@@ -474,6 +516,12 @@ async def _kept_by_filters(record, media: Media, specs, settings) -> bool:
         movie_certifications=specs["movie_certifications"],
         movie_release_countries=specs["movie_release_countries"],
         movie_release_types=specs["movie_release_types"], settings=settings)
+    # AND BOTH NETWORK LISTS, which judge a card rather than a record and so sit
+    # outside narrow_for_viewer — the operator's, then the viewer's, as
+    # cache.placed applies them to the calendar's own cards.
+    for networks in ((settings.network_filter if settings is not None else None),
+                     specs["network_filter"]):
+        kept = calendar_filter.filter_by_network(kept, networks, exempt_unenriched=True)
     return bool(kept)
 
 
