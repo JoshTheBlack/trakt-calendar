@@ -216,6 +216,24 @@ class TestCachedGetStoresOnlyRealAnswers:
         assert writes == []
 
 
+class TestALookupStillCarriesTheAccountsToken:
+    """Only the calendar goes without the bearer (see TestFetchWindow): a lookup
+    spends the asking account's own Trakt allowance, public or private
+    (transport.api_headers)."""
+
+    def _sent(self, **kwargs):
+        client = _CaptureClient(body={"ok": True})
+        with patch.object(transport, "cache", _FakeCache()):
+            asyncio.run(transport.cached_get(client, SETTINGS, "x", {}, **kwargs))
+        return client.sent_headers
+
+    def test_a_public_lookup_sends_the_accounts_bearer(self):
+        assert self._sent()["Authorization"] == "Bearer token"
+
+    def test_a_private_read_sends_it_too(self):
+        assert self._sent(private=True)["Authorization"] == "Bearer token"
+
+
 def _cached_get(*answers):
     """A stand-in for transport.cached_get that serves `answers` in order.
 
@@ -490,6 +508,53 @@ class TestFetchWindow:
         self._fetch(client)
         assert "X-Pagination-Page" not in client.sent_headers
         assert "X-Pagination-Limit" not in client.sent_headers
+
+    def _day_by_day(self, answers):
+        """A client answering each request from `answers` (status per call) and
+        recording which windows were asked for."""
+        asked = []
+
+        class _Client:
+            async def get(self, url, headers=None, timeout=None):
+                asked.append(url.split("/calendars/all/shows/")[1].split("?")[0])
+                return _WindowResponse([], answers.pop(0), {})
+
+        self._fetch(_Client())
+        return asked
+
+    def test_a_week_trakt_could_not_build_is_asked_for_a_day_at_a_time(self):
+        """MEASURED: Trakt answered whole All Episodes weeks with HTTP 500 after
+        five to ten seconds while it was slow; a day is a quarter of the build."""
+        asked = self._day_by_day([500] + [200] * 7)
+        assert asked == ["2026-07-06/7"] + [f"2026-07-{day:02d}/1" for day in range(6, 13)]
+
+    def test_one_day_failing_fails_the_week(self):
+        """A fill deletes the rows of a source that answered, so a week stored
+        from six of its days would lose the seventh's airings."""
+        with pytest.raises(TraktError):
+            self._day_by_day([500, 200, 200, 500, 200, 200, 200, 200])
+
+    def test_a_refusal_is_not_asked_seven_more_times(self):
+        with pytest.raises(TraktError):
+            assert self._day_by_day([403]) == ["2026-07-06/7"]
+
+    def test_our_own_timeout_on_a_slow_build_is_split_too(self):
+        error = TraktError("Could not reach Trakt: timed out")
+        error.__cause__ = httpx.ReadTimeout("timed out")
+        assert trakt_calendar._trakt_could_not_build(error)
+        unreachable = TraktError("Could not reach Trakt: no route")
+        unreachable.__cause__ = httpx.ConnectError("no route")
+        assert not trakt_calendar._trakt_could_not_build(unreachable)
+        assert not trakt_calendar._trakt_could_not_build(
+            transport.TraktRateLimitError("Trakt is rate-limiting", 429))
+
+    def test_the_calendar_goes_without_the_accounts_token(self):
+        """Every calendar is public, and the token is what stops Trakt caching
+        it — so a heavy week was built cold on every fill (see api_headers)."""
+        client = _CaptureClient(body=[])
+        self._fetch(client)
+        assert "Authorization" not in client.sent_headers
+        assert client.sent_headers["trakt-api-key"] == "id"
 
     def test_the_entries_come_back_as_records_and_unfiltered(self):
         """NORMALIZED but not filtered. Normalizing here is what lets the cache

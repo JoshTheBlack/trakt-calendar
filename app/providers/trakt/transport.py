@@ -84,8 +84,26 @@ def is_credential_failure(error: TraktError) -> bool:
     return error.status in CREDENTIAL_STATUSES
 
 
-def api_headers(settings: Settings, paginate: bool = True) -> dict:
-    """Trakt request headers. `paginate=False` OMITS the X-Pagination-* headers.
+def api_headers(settings: Settings, paginate: bool = True, *, account: bool = True) -> dict:
+    """Trakt request headers. `paginate=False` OMITS the X-Pagination-* headers;
+    `account=False` omits the account's bearer token.
+
+    THE CALENDAR GOES WITHOUT THE TOKEN (`account=False`), because the token is
+    what makes Trakt refuse to cache it. MEASURED against the live API,
+    2026-10-23: the same calendar week came back byte-identical either way — but
+    with the bearer Trakt sends no `cache-control` at all and every request
+    reaches its origin, while without it the answer is `public, s-maxage=3600`
+    and the next request is a Cloudflare HIT. An All Episodes week is up to
+    1.3 MB built on demand, and built cold on every fill it was what Trakt
+    answered with HTTP 500 after five to ten seconds whenever it was slow — the
+    "some calendar data couldn't be loaded" banner on that calendar. A calendar
+    is filled with the instance's own settings for every viewer at once, so no
+    account's allowance is in play there.
+    A PER-TITLE LOOKUP KEEPS IT although it behaves the same way (a season
+    lookup measured identically): a tracker read spends the ASKING ACCOUNT's own
+    Trakt allowance rather than the instance's shared one, which
+    tests/distrakt/test_gating.py holds, and trading that for Trakt's cache is a
+    decision about rate limits rather than a fix.
 
     THERE IS NO CHEAP WHOLE-LIBRARY READ BEHIND `paginate=False`, and this
     docstring used to claim there was. It said that omitting the pagination
@@ -126,7 +144,7 @@ def api_headers(settings: Settings, paginate: bool = True) -> dict:
     # no token was never going to get a useful answer out of those anyway; it now
     # gets Trakt's own 401 instead of a client-side crash.
     token = settings.trakt_access_token.strip()
-    if token:
+    if token and account:
         headers["Authorization"] = f"Bearer {token}"
     if paginate:
         headers["X-Pagination-Page"] = "1"

@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import logging
 import time as _time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from urllib.parse import quote, urlencode
+
+import httpx
 
 from ... import perftrace
 from ...config import Settings
@@ -82,15 +84,59 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
     Trakt that could not be reached at all (see transport.send_or_unavailable). A
     body that parses to something other than a list reads as an empty window —
     there is nothing to salvage from it and nothing to report about it.
+
+    A WINDOW TRAKT COULD NOT BUILD IS ASKED FOR AGAIN A DAY AT A TIME. Trakt
+    builds a calendar answer on demand, and an All Episodes week is up to 1.3 MB;
+    MEASURED 2026-10-23, while Trakt was slow its origin answered HTTP 500 after
+    five to ten seconds for whole weeks that a later try then built in under four.
+    A one-day request is about a quarter of the size (330–380 KB measured — Trakt
+    hands back several days for one, see the cache's `in_window`), so seven of
+    them are seven smaller builds rather than one large one, and each that
+    succeeds is cached by Trakt for an hour (transport.api_headers), so a retry
+    rebuilds only the days that failed. ALL SEVEN OR THE WINDOW FAILS: a fill
+    deletes the rows of a source that answered, so a week stored from five of its
+    seven days would lose the other two days' airings rather than keep them.
     """
+    try:
+        return await _fetch_days(endpoint, settings, start, days)
+    except TraktError as exc:
+        if days <= 1 or not _trakt_could_not_build(exc):
+            raise
+        logger.info("Trakt could not build the %s window starting %s (%s); asking for "
+                    "it a day at a time.", endpoint.key, start, exc)
+    records: list[Record] = []
+    for offset in range(days):
+        records.extend(await _fetch_days(endpoint, settings,
+                                         start + timedelta(days=offset), 1))
+    return records
+
+
+def _trakt_could_not_build(exc: TraktError) -> bool:
+    """Whether a failure is Trakt failing to BUILD an answer — a 5xx, or our own
+    request giving up on a slow one — rather than refusing the request (a 4xx, a
+    rate limit) or not being reachable at all, where asking seven more times
+    would only fail seven more times."""
+    if isinstance(exc, transport.TraktRateLimitError):
+        return False
+    if exc.status is not None:
+        return exc.status >= 500
+    return isinstance(exc.__cause__, httpx.TimeoutException)
+
+
+async def _fetch_days(endpoint: Endpoint, settings: Settings, start: date,
+                      days: int) -> list[Record]:
+    """ONE request for `days` days of Trakt's calendar from `start`, as Records —
+    the request `fetch_window` makes, once for a window or once per day of it."""
     url = (
         f"{transport.API_BASE}/calendars/all/{calendar_path(endpoint)}/{start.isoformat()}/{days}"
         f"?{urlencode({'extended': 'full,images'})}"
     )
     t0 = _time.perf_counter()
+    # WITHOUT THE ACCOUNT'S TOKEN: every calendar is public, and the token is
+    # what stops Trakt caching the answer (transport.api_headers measures it).
     resp = await transport.send_or_unavailable(
         transport.shared_client(), "GET", url,
-        headers=transport.api_headers(settings, paginate=False))
+        headers=transport.api_headers(settings, paginate=False, account=False))
     _perf.debug("netGET    calendar/%s/%s+%dd -> %s  %.0fms%s", endpoint.key, start.isoformat(),
                 days, resp.status_code, (_time.perf_counter() - t0) * 1000.0,
                 perftrace.activity_tag())

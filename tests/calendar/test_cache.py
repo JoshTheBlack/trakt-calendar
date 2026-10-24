@@ -1033,9 +1033,14 @@ class ReadPathTests(CacheTestCase):
         same span, and there is nothing a blocking fetch would have shown this
         viewer that the stored rows do not."""
         self.settings.calendar_cache_ttl_minutes = 10
+        # BOTH SOURCES IN PLAY ANSWER: a window one of them failed on is asked
+        # again after a minute whatever its TTL says (AWindowASourceFailedOn
+        # IsAskedAgainSoonTests), which is not what this test is about.
         fetch = AsyncMock(side_effect=[
-            (calendar_records([_entry("first", "2026-07-06T12:00:00Z")], SHOWS), ["trakt"], []),
-            (calendar_records([_entry("second", "2026-07-06T12:00:00Z")], SHOWS), ["trakt"], []),
+            (calendar_records([_entry("first", "2026-07-06T12:00:00Z")], SHOWS),
+             ["trakt", "simkl"], []),
+            (calendar_records([_entry("second", "2026-07-06T12:00:00Z")], SHOWS),
+             ["trakt", "simkl"], []),
         ])
         with patch("app.calendar.cache.fetch_window_records", fetch):
             window, _ = await calendar_cache.load_window(
@@ -1397,6 +1402,59 @@ class AssembleRangeTests(CacheTestCase):
             items, _as_of = await calendar_cache.read_month(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"), year=2026, month=7)
         self.assertEqual({i.id for i in items}, {"good"})
+
+
+class AWindowASourceFailedOnIsAskedAgainSoonTests(CacheTestCase):
+    """A stored window naming a source asked and not heard from is the one thing
+    KNOWN to be wrong in it, and its banner stood through every reload for the
+    whole staleness bound. It is asked again behind the reader once a minute has
+    passed (cache._FAILED_RETRY_SECONDS), well inside that bound."""
+
+    START = date(2026, 7, 6)
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        calendar_cache._failed_retried_at.clear()
+        in_play = [SimpleNamespace(source=base.Source.TRAKT),
+                   SimpleNamespace(source=base.Source.SIMKL)]
+        sources = patch("app.calendar.cache._window_sources", return_value=in_play)
+        sources.start()
+        self.addCleanup(sources.stop)
+        # Stored at 1000 with Trakt asked and silent; well inside the TTL below.
+        await calendar_cache.store_window(SHOWS.key, self.START, [], 600, 1000,
+                                          sources=["simkl"], asked=["trakt", "simkl"])
+
+    async def _read(self, now, *, allow_fetch=True):
+        with patch("app.calendar.cache.schedule_refill") as refill:
+            coverage = await calendar_cache.ensure_window(
+                SHOWS, self.settings, self.START, allow_fetch=allow_fetch, now=now)
+        return coverage, refill.call_count
+
+    async def test_not_before_a_minute(self):
+        coverage, refills = await self._read(1030)
+        self.assertEqual(refills, 0)
+        self.assertEqual(set(coverage.asked) - set(coverage.sources), {"trakt"})
+
+    async def test_after_a_minute_it_is_refilled_behind_the_reader(self):
+        coverage, refills = await self._read(1061)
+        self.assertEqual(refills, 1)
+        # The read itself is answered from what is stored, at once.
+        self.assertEqual(coverage.cached_at, 1000)
+
+    async def test_a_source_that_keeps_failing_is_asked_once_a_minute(self):
+        """An outright failure stores nothing, so the window's own clock does not
+        move — the attempt is what is timed."""
+        self.assertEqual((await self._read(1061))[1], 1)
+        self.assertEqual((await self._read(1090))[1], 0)
+        self.assertEqual((await self._read(1125))[1], 1)
+
+    async def test_a_share_page_never_asks(self):
+        self.assertEqual((await self._read(5000, allow_fetch=False))[1], 0)
+
+    async def test_a_window_every_source_answered_waits_its_ttl(self):
+        await calendar_cache.store_window(SHOWS.key, self.START, [], 600, 1000,
+                                          sources=["trakt", "simkl"], asked=["trakt", "simkl"])
+        self.assertEqual((await self._read(1500))[1], 0)
 
 
 # ---------------------------------------------------------------------------

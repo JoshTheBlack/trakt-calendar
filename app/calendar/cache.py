@@ -1002,7 +1002,8 @@ async def ensure_window(endpoint: Endpoint, settings, start: date, *,
         # cannot be made to fetch by anything.
         fresh = (ts - cached.cached_at) <= ttl and not force
         unasked = set(in_play) - set(cached.asked)
-        if not allow_fetch or (fresh and not unasked):
+        if not allow_fetch or (fresh and not unasked
+                               and not _failed_retry_due(endpoint, start, cached, ts)):
             return cached
         if not force:
             # STALE BUT SERVEABLE: hand over what is stored and renew it behind
@@ -1063,6 +1064,38 @@ async def ensure_window(endpoint: Endpoint, settings, start: date, *,
     replied = {*answered, *unchanged}
     return WindowCoverage(tuple(name for name in in_play if name in replied),
                           tuple(in_play), ts)
+
+
+# HOW SOON A WINDOW A SOURCE FAILED ON IS ASKED AGAIN, behind the reader, rather
+# than at the window's whole staleness bound. A failure is the one thing in a
+# stored window that is KNOWN to be wrong — the page says "some calendar data
+# couldn't be loaded" for as long as it stands — and waiting the operator's TTL
+# (ten minutes by default) to try again left that banner up through every reload
+# with no way to make it go. A minute is long enough not to hammer a service that
+# is struggling, and the retry runs behind the reader, one per window at a time
+# (`schedule_refill`), so the read that triggers it is answered at once.
+_FAILED_RETRY_SECONDS = 60
+
+# When each (endpoint, window) last had a failed source asked again, so a source
+# that keeps failing outright — which stores nothing, and so leaves the window's
+# own clock where it was — is retried once a minute rather than on every read.
+# In memory: a restart simply makes the first read after it try again.
+_failed_retried_at: dict[tuple[str, str], int] = {}
+
+
+def _failed_retry_due(endpoint: Endpoint, start: date, cached: WindowCoverage,
+                      ts: int) -> bool:
+    """Whether a source this stored window asked and did not hear from is due to
+    be asked again — see `_FAILED_RETRY_SECONDS` — and, when it is, notes the
+    attempt so the next one waits its minute too."""
+    if not set(cached.asked) - set(cached.sources):
+        return False
+    key = (endpoint.key, start.isoformat())
+    since = max(int(cached.cached_at or 0), _failed_retried_at.get(key, 0))
+    if ts - since < _FAILED_RETRY_SECONDS:
+        return False
+    _failed_retried_at[key] = ts
+    return True
 
 
 async def load_window(endpoint: Endpoint, settings, start: date, *,
