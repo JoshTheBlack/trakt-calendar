@@ -198,7 +198,7 @@ class TwoSeasonsOnOneDayMustStayTwoCardsTests(unittest.TestCase):
         and merge a season 4 listing into a season 5 card."""
         records = self.pair("Drag Race France", 152261, 5, 4, JUL08)
         records.append(simkl("Drag Race France", {"simkl": 9, "tmdb": "152261"}, air_ts=JUL08))
-        self.assertEqual(keys(records)[2], "show:tmdb:152261")
+        self.assertEqual(keys(records)[2], "show:tmdb:152261@2026-07-08")
         self.assertEqual(cards(records), 3)
 
 
@@ -296,7 +296,7 @@ class TheIdBridgeAtFillTests(unittest.IsolatedAsyncioTestCase):
         records = await calendar_enrich.overlay_match_ids(self.records())
         self.assertEqual(cards(records), 2)
         self.assertEqual(sorted(keys(records)),
-                         ["show:mal:60059", "show:tmdb:222623|2|1"])
+                         ["show:mal:60059@2026-07-17", "show:tmdb:222623|2|1"])
 
     async def test_the_stored_catalog_row_brings_them_onto_one_key(self):
         await self.store_catalog_row()
@@ -395,65 +395,155 @@ class TheMatchIsMadeAtReadTests(unittest.IsolatedAsyncioTestCase):
 # Dexter: Original Sin's premiere as the two services stored it on the owner's
 # instance: Simkl's per-title lookup gives the day (Sunday 15 December, pinned at
 # UTC midnight), Trakt the instant (10pm Eastern that Sunday, which is Monday
-# 03:00 UTC) — and the windows start on Mondays.
+# 03:00 UTC) — and the storage windows start on Mondays.
 DEC15_SIMKL_DAY = 1734220800.0
 DEC16_TRAKT_0300Z = 1734318000.0
+DAY = 86400
 
 
-class AnAiringAWindowEdgeCutInTwoTests(unittest.TestCase):
-    """One premiere, two services, two adjacent windows — and so, before this,
-    two cards on one day, because each window is matched on its own."""
+def _utc(year, month, day, hour=0):
+    from datetime import datetime, timezone
 
-    def windows(self, *records):
-        """The span as a month read assembles it: each record grouped in its own
-        UTC window, the windows in order, then joined."""
-        by_window = {}
-        for record in records:
-            start = calendar_cache.window_start(calendar_cache.record_utc_date(record))
-            by_window.setdefault(start, []).append(record)
-        groups = [group for start in sorted(by_window)
-                  for group in calendar_cache.group_records(by_window[start])]
-        return calendar_cache.dedupe_groups(groups)
+    return datetime(year, month, day, hour, tzinfo=timezone.utc).timestamp()
 
-    def original_sin(self, *, simkl_ts=DEC15_SIMKL_DAY, trakt_ts=DEC16_TRAKT_0300Z):
-        return (Record(source=Source.SIMKL, media="show", id="2091057",
-                       ids={"simkl": "2091057", "tmdb": "219937"}, detail_url="",
-                       title="Dexter: Original Sin", air_ts=simkl_ts, date_only=True,
-                       season=1, episode_number=1, enriched=False),
-                trakt("Dexter: Original Sin", {"trakt": 202335, "tmdb": 219937},
-                      air_ts=trakt_ts, season=1, episode=1))
 
-    def test_the_premiere_is_one_card_with_both_services(self):
-        simkl_record, trakt_record = self.original_sin()
+class TheJoinRuleTests(unittest.TestCase):
+    """`may_join`: whether two services' dates for ONE episode are one card —
+    the same calendar month, or at most a week apart across a month's edge."""
+
+    def test_the_rule_as_a_table(self):
+        from datetime import date
+
+        for first, second, joins, why in (
+            (date(2026, 11, 21), date(2026, 11, 23), True, "Yellowjackets S04E01"),
+            (date(2026, 11, 1), date(2026, 11, 21), True, "20 days, one month"),
+            (date(2026, 11, 1), date(2026, 11, 30), True, "a whole month apart inside it"),
+            (date(2026, 10, 28), date(2026, 11, 3), True, "6 days across an edge"),
+            (date(2026, 10, 25), date(2026, 11, 1), True, "7 days across an edge"),
+            (date(2026, 10, 24), date(2026, 11, 1), False, "8 days across an edge"),
+            (date(2026, 12, 28), date(2027, 1, 3), True, "across a year's edge"),
+            (date(2026, 9, 16), date(2026, 11, 16), False, "two months apart"),
+            (date(2026, 4, 8), date(2026, 9, 16), False, "Dimension 20 S29E1"),
+        ):
+            with self.subTest(why):
+                self.assertEqual(calendar_cache.may_join(first, second), joins)
+                self.assertEqual(calendar_cache.may_join(second, first), joins)
+
+
+class OneEpisodeIsOneCardTests(unittest.TestCase):
+    """`join_listings` and the groups built from it: every service's listing of
+    one episode is one card when the rule joins them, whatever storage window
+    each was filed in."""
+
+    def yellowjackets(self, *, simkl_ts=None, trakt_ts=None):
+        return [simkl("Yellowjackets", {"simkl": 1, "tmdb": "117488"},
+                      air_ts=simkl_ts or _utc(2026, 11, 21, 1), season=4, episode=1),
+                trakt("Yellowjackets", {"trakt": 2, "tmdb": 117488},
+                      air_ts=trakt_ts or _utc(2026, 11, 23, 2), season=4, episode=1)]
+
+    def test_yellowjackets_s04e01_is_one_card_across_a_monday(self):
+        """THE REPORTED CASE. Simkl dates it Saturday 01:00 UTC and Trakt the
+        following Monday 02:00 UTC — two storage windows, two days apart."""
+        listings = self.yellowjackets()
         self.assertNotEqual(
-            calendar_cache.window_start(calendar_cache.record_utc_date(simkl_record)),
-            calendar_cache.window_start(calendar_cache.record_utc_date(trakt_record)))
-        groups = self.windows(simkl_record, trakt_record)
+            *(calendar_cache.window_start(calendar_cache.record_utc_date(r)) for r in listings))
+        groups = calendar_cache.group_records(listings)
         self.assertEqual(len(groups), 1)
         self.assertEqual(sorted(groups[0]["by_source"]), ["simkl", "trakt"])
-        self.assertEqual(groups[0]["ids"]["simkl"], "2091057")
-        self.assertEqual(groups[0]["ids"]["trakt"], 202335)
+        self.assertEqual(groups[0]["key"], "show:tmdb:117488|4|1")
 
-    def test_a_week_apart_is_two_airings(self):
-        """A service listing the same episode a week later is a rerun or a
-        second market, not the same airing split by an edge."""
-        simkl_record, trakt_record = self.original_sin(simkl_ts=DEC15_SIMKL_DAY - 6 * 86400)
-        self.assertEqual(len(self.windows(simkl_record, trakt_record)), 2)
+    def test_dexters_premiere_across_a_windows_edge_is_one_card(self):
+        listings = [
+            Record(source=Source.SIMKL, media="show", id="2091057",
+                   ids={"simkl": "2091057", "tmdb": "219937"}, detail_url="",
+                   title="Dexter: Original Sin", air_ts=DEC15_SIMKL_DAY, date_only=True,
+                   season=1, episode_number=1, enriched=False),
+            trakt("Dexter: Original Sin", {"trakt": 202335, "tmdb": 219937},
+                  air_ts=DEC16_TRAKT_0300Z, season=1, episode=1)]
+        group, = calendar_cache.group_records(listings)
+        self.assertEqual(group["ids"]["simkl"], "2091057")
+        self.assertEqual(group["ids"]["trakt"], 202335)
 
-    def test_one_service_either_side_of_the_edge_stays_two(self):
+    def test_a_same_month_pair_20_days_apart_is_one_card(self):
+        listings = self.yellowjackets(simkl_ts=_utc(2026, 11, 1, 1),
+                                      trakt_ts=_utc(2026, 11, 21, 2))
+        self.assertEqual(cards(listings), 1)
+
+    def test_a_month_boundary_pair_6_days_apart_is_one_card(self):
+        listings = self.yellowjackets(simkl_ts=_utc(2026, 10, 28, 1),
+                                      trakt_ts=_utc(2026, 11, 3, 2))
+        self.assertEqual(cards(listings), 1)
+
+    def test_a_month_boundary_pair_8_days_apart_is_two_cards(self):
+        listings = self.yellowjackets(simkl_ts=_utc(2026, 10, 24, 1),
+                                      trakt_ts=_utc(2026, 11, 1, 2))
+        self.assertEqual(cards(listings), 2)
+        self.assertEqual(sorted(keys(listings)),
+                         ["show:tmdb:117488|4|1", "show:tmdb:117488|4|1#2"])
+
+    def test_a_pair_two_months_apart_stays_two(self):
+        """A numbering dispute, not one airing said twice: two cards in two
+        months is the honest drawing of it."""
+        listings = self.yellowjackets(simkl_ts=_utc(2026, 9, 16, 23),
+                                      trakt_ts=_utc(2026, 11, 16, 23))
+        self.assertEqual(cards(listings), 2)
+
+    def test_one_service_listing_an_episode_twice_stays_two(self):
         """Its own two listings: joining would collapse a service's listing
         rather than reconcile two services."""
-        first = trakt("Show", {"trakt": 1, "tmdb": 5}, air_ts=DEC15_SIMKL_DAY + 3600,
+        first = trakt("Show", {"trakt": 1, "tmdb": 5}, air_ts=_utc(2026, 11, 2),
                       season=1, episode=1)
-        second = trakt("Show", {"trakt": 1, "tmdb": 5}, air_ts=DEC16_TRAKT_0300Z,
+        second = trakt("Show", {"trakt": 1, "tmdb": 5}, air_ts=_utc(2026, 11, 9),
                        season=1, episode=1)
-        self.assertEqual(len(self.windows(first, second)), 2)
+        self.assertEqual(cards([first, second]), 2)
 
-    def test_the_windows_own_copies_are_left_alone(self):
-        """The join builds a new group: a window's groups can be held and served
-        again, and must not grow another service's record behind its back."""
-        simkl_record, trakt_record = self.original_sin()
-        first = calendar_cache.group_records([simkl_record])
-        second = calendar_cache.group_records([trakt_record])
-        calendar_cache.dedupe_groups(first + second)
-        self.assertEqual(list(first[0]["by_source"]), ["simkl"])
+    def test_a_listing_joins_only_when_it_may_join_every_listing_in_the_unit(self):
+        """EVERY, NOT ANY. Trakt 28 October and Simkl 2 November are one unit; a
+        third service's 29 November is the same month as Simkl's and a month
+        from Trakt's — so it starts a card of its own rather than gluing two
+        airings together through their neighbour."""
+        listings = [
+            trakt("Show", {"trakt": 1, "tmdb": 5}, air_ts=_utc(2026, 10, 28),
+                  season=1, episode=1),
+            simkl("Show", {"simkl": 2, "tmdb": "5"}, air_ts=_utc(2026, 11, 2),
+                  season=1, episode=1),
+            Record(source=Source.TMDB, media="show", id="5", ids={"tmdb": 5},
+                   detail_url="", title="Show", air_ts=_utc(2026, 11, 29),
+                   date_only=True, season=1, episode_number=1)]
+        units = calendar_cache.join_listings(listings)
+        self.assertEqual([sorted(str(r.source) for r in unit) for unit in units],
+                         [["simkl", "trakt"], ["tmdb"]])
+
+    def test_the_units_do_not_depend_on_the_order_they_were_read_in(self):
+        """A month, a day and a search read the same rows in different orders;
+        they have to make the same cards out of them."""
+        listings = self.yellowjackets() + [
+            Record(source=Source.TMDB, media="show", id="117488", ids={"tmdb": 117488},
+                   detail_url="", title="Yellowjackets", air_ts=_utc(2026, 11, 22),
+                   date_only=True, season=4, episode_number=1)]
+        forward = calendar_cache.join_listings(listings)
+        backward = calendar_cache.join_listings(list(reversed(listings)))
+        self.assertEqual([[str(r.source) for r in unit] for unit in forward],
+                         [[str(r.source) for r in unit] for unit in backward])
+        self.assertEqual(len(forward), 1)
+
+    def test_a_film_is_one_card_on_the_film_calendar(self):
+        """A film's release is the one airing it has, so its listings join by
+        title alone — measured: Coyote vs. Acme, 20 and 28 August, drew twice."""
+        left = Record(source=Source.TRAKT, media="movie", id="f", ids={"tmdb": 550},
+                      detail_url="", title="Film", air_ts=_utc(2026, 8, 20), date_only=True)
+        right = Record(source=Source.SIMKL, media="movie", id="g", ids={"tmdb": "550"},
+                       detail_url="", title="Film", air_ts=_utc(2026, 8, 28), date_only=True)
+        self.assertEqual(cards([left, right]), 1)
+
+    def test_an_uncoordinated_listing_still_folds_only_on_its_own_day(self):
+        """The same-day fold is not widened: an anime episode Simkl states as
+        "episode 1" on a day Trakt does not list S01E01 stays its own card, even
+        inside the month that joins two coordinated listings."""
+        coordinated = trakt("Anime", {"trakt": 1, "tmdb": 9}, air_ts=_utc(2026, 11, 2),
+                            season=1, episode=1)
+        loose = simkl("Anime", {"simkl": 2, "tmdb": "9"}, air_ts=_utc(2026, 11, 3), episode=1)
+        self.assertEqual(cards([coordinated, loose]), 2)
+        same_day = simkl("Anime", {"simkl": 2, "tmdb": "9"}, air_ts=_utc(2026, 11, 2, 5),
+                         episode=1)
+        self.assertEqual(cards([coordinated, same_day]), 1)

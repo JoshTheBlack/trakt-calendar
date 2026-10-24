@@ -176,6 +176,32 @@ on the read path belongs in it, and a key missing one does not fail loudly — i
 hands one reader somebody else's month. `tests/calendar/test_span_memo.py` holds
 the list against the fields a read actually uses.
 
+**One episode is ONE card, drawn on the day the viewer's first service gives
+it.** Which listings are one card is `app/calendar/cache.py`'s: every service's
+listing of one episode — `(title_key, season, episode)`, a film's title alone —
+joins when it is in the same calendar month as EVERY listing already in the card,
+or at most a week from it across a month's edge (`may_join`, `join_listings`, a
+date-ordered scan, one listing per service per card); a show listing with no
+full coordinate still folds into an episode only on its own day (`match_keys`).
+That is viewer-independent and computed at READ — no key is stored. Which day
+the card is drawn on is the viewer's: the first service in their order describes
+it, DATE AND TIME INCLUDED, and a date-only one borrows a time only from an
+instant that falls on its date somewhere on earth (`app/calendar/resolve.py`'s
+`_resolve_airing`, `falls_on`); the others' days are kept (`Record.listed_airings`)
+and the card draws them where they differ (`Item.air_choices`). Because the scan's
+units depend on every listing of an episode, A READ NEVER GROUPS PART OF ONE: a
+span makes its windows current coverage-only (`ensure_window`) and reads its
+airings once, with every other stored listing of each episode they name at any
+date (`entries.read_span_whole` — the per-title query shape is the measured one;
+a plain join picked a 39-second plan), and the search reads a title whole
+(`entries.read_groups`). And there is ONE PLACEMENT FUNCTION, `cache.placed`
+(resolution and render): the month, a late day, a share page and
+its card, the tracker's calendar import (all through `assemble_range`), the
+search's "where it airs", its season picker and the card its jump lands on
+(`calendar/search.py`'s `_drawn`) all ask it, and none works a day out from one
+listing. `tests/calendar/test_placement.py` holds the readers to one answer — a
+day against its month, two viewers on one span, a month's edge, the search.
+
 **A viewer's filters are per MEDIUM, and one function turns a medium into
 columns.** `app/calendar/vocab.py` owns it: `TV_FIELDS`/`MOVIE_FIELDS` say which
 `user_prefs` column belongs to which kind of title, and `active_specs` is what
@@ -305,7 +331,9 @@ refusal, so a stranger cannot probe what the owner's calendar contains. It is no
 a flag a caller passes; a second public details route calls that function.
 
 **A calendar day that arrives late is drawn whole by the server.** `calendar_day`
-in `app/calendar/routes.py` renders it through the shell's own partials: whether a
+in `app/calendar/routes.py` renders it through the shell's own partials, from the
+same placement the month made (the invariant above — a card the month draws on
+another day is not drawn here), and: whether a
 card is new comes from the SHELL's answer, filed once per load and named by a
 token on the day's own address (`_remember_new_marks` / `_new_marks`), because
 re-diffing from a fragment would read the shell's own commit and find nothing
@@ -535,8 +563,11 @@ control a GET of the surface's live route in the same queue.
 **ONE SEASON PICKER, AND ONE RULE FOR WHAT IT OFFERS.** `templates/_season_checklist.html`
 is the checklist the tracker's add, the rankings board's add and the calendar's jump
 all draw — a surface decides only what submitting it does (always a json-enc post;
-the calendar's to `/calendar/jump` WRITES the ticked seasons' airings and is answered
-with `HX-Redirect` to the card) — and `app/providers/season_choices.py`
+the calendar's to `/calendar/jump` WRITES the season's airing and is answered with
+`HX-Redirect` to the card) and whether a season is ticked or ONE PRESS
+(`one_press`: the calendar's, where a season it draws is a link to its card and
+any other a submit button carrying its own `season:<n>`, since only one place can
+be gone to) — and `app/providers/season_choices.py`
 decides what it offers, greys, refuses and suggests, with each surface's own words for
 "already here". Ticked seasons post as one flat field each, `season:<n>`
 (`season_choices.ticked`). A tracker add of several seasons asks the re-watch question

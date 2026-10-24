@@ -36,7 +36,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import NamedTuple
-from zoneinfo import ZoneInfo
 
 from .. import cache, db, providers
 from ..calendar import entries as calendar_entries
@@ -247,10 +246,9 @@ async def write_missing_premieres(settings, record: dict) -> int:
         if name in drawn or ids.get(name) in (None, ""):
             continue
         try:
-            mark = await calendar_search.fill_one_gap(
+            wrote = await calendar_search.fill_one_gap(
                 settings, source=Source(name), source_id=str(ids[name]), media=Media.SHOW,
-                season=int(record["season"]), endpoint_key=PREMIERES,
-                tz=ZoneInfo(settings.timezone), now=db.now(),
+                season=int(record["season"]), endpoint_key=PREMIERES, now=db.now(),
                 # THIS SEASON'S PREMIERE OR NOTHING: a service that cannot date
                 # the season must not write the show's own first-air date into
                 # the shared calendar in its place.
@@ -258,7 +256,7 @@ async def write_missing_premieres(settings, record: dict) -> int:
         except SourceUnavailable as exc:
             logger.info("tracker arrival: %s premiere for %s not written (%r)", name, key, exc)
             continue
-        if mark:
+        if wrote:
             logger.info("tracker arrival: wrote %s's premiere of %s S%s into the calendar",
                         name, key, record["season"])
             written += 1

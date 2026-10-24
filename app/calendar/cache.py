@@ -19,11 +19,18 @@ locked by live measurement against the real Trakt API:
     `air_ts`, by app/providers/base.py's `render`.
 
     THE GROUPING HAPPENS AT READ, NOT AT FILL, and that is a correction rather
-    than a move. Whether two records are one airing depends on WHAT ELSE IS IN
-    THE WINDOW (see match_keys: an uncoordinated record folds into a coordinated
-    one only when exactly one candidate exists), so storing the answer froze a
-    judgement made against whatever happened to be fetched beside it, and a later
-    fill supplying the missing airing could not revise it.
+    than a move. Whether two records are one card depends on WHAT ELSE IS STORED
+    (see match_keys: one episode's every listing decides its units, and an
+    uncoordinated record folds into one only when exactly one candidate exists),
+    so storing the answer froze a judgement made against whatever happened to be
+    fetched beside it, and a later fill supplying the missing listing could not
+    revise it.
+
+    AND IT IS NOT DONE WINDOW BY WINDOW. A window is the unit a FILL works in;
+    a card is ONE EPISODE whichever services list it (`may_join`), so a read
+    makes its windows current one by one and then reads its airings once, whole
+    — every listing of every episode it holds, at any date — and draws each card
+    on the day the viewer's own service gives it (`placed`).
 
     `asked` NAMES WHO WAS REACHED FOR AND `answered` NAMES WHO REPLIED — two
     columns of `calendar_coverage` — and the gap between them is the only thing
@@ -99,7 +106,7 @@ from ..media import artwork
 from ..perftrace import activity, job, span
 from ..endpoints import ENDPOINTS, Endpoint
 from ..providers.base import (
-    Item, Provider, Record, SourceNotModified, SourceUnavailable, epoch_moment,
+    Item, Provider, Record, Source, SourceNotModified, SourceUnavailable, epoch_moment,
     render, resolve_key)
 
 logger = logging.getLogger(__name__)
@@ -262,26 +269,126 @@ def episode_coords(record: Record) -> tuple[int, int] | None:
     return None
 
 
+def episode_of(record: Record) -> tuple | None:
+    """WHICH EPISODE a record lists, as something two services can agree on: the
+    title's base and (season, episode) for a show stating both, the base alone
+    for a film — a film is one title on the film calendar, and its release is
+    the one airing it has — and None for a show record that states no full
+    coordinate, which can only be joined to an episode by its day (`match_keys`).
+    """
+    base = group_base(record)
+    if str(record.media) == "movie":
+        return (base,)
+    coordinate = episode_coords(record)
+    return (base, coordinate) if coordinate is not None else None
+
+
+# HOW FAR APART, ACROSS A MONTH'S EDGE, TWO SERVICES' DATES FOR ONE EPISODE MAY BE
+# AND STILL BE ONE CARD. Inside one calendar month any distance joins.
+JOIN_ACROSS_MONTHS_DAYS = 7
+
+
+def may_join(first: date, second: date) -> bool:
+    """Whether two listings of ONE episode, on these UTC days, may be one card:
+    the same calendar month, or at most a week apart across a month's edge.
+
+    THE RULE IS ABOUT THE CALENDAR A READER SEES, NOT ABOUT STORAGE. It used to
+    be the storage's: listings were matched inside one seven-day window, and the
+    only repair across a window's edge joined halves at most a day apart. So the
+    same episode drew as two cards whenever two services dated it either side of
+    a Monday — MEASURED: Yellowjackets S04E01, which Simkl dates 21 November
+    01:00 UTC and Trakt 23 November 02:00 UTC (a Monday), drew on both days. On
+    the dev instance 30 episodes on All Episodes, 3 premieres and 4 films drew
+    twice that way.
+
+    A MONTH, BECAUSE THAT IS THE PAGE. Two services disagreeing about which day
+    of the month an episode airs on still mean the same episode on the same
+    page, and one card drawn on the day the viewer's own service gives is the
+    answer that cannot be confused with a second airing. Across the page's edge
+    a week is admitted, so a premiere dated the 31st by one service and the 2nd
+    by another is still one card. FURTHER APART THAN THAT STAYS TWO, and those
+    are not one airing said twice: they are numbering disputes — Dimension 20's
+    season 29 premiere is 8 April on Trakt and 16 September on Simkl — where two
+    cards in two months is the honest drawing of two services' disagreement.
+    """
+    return ((first.year, first.month) == (second.year, second.month)
+            or abs((first - second).days) <= JOIN_ACROSS_MONTHS_DAYS)
+
+
+_SOURCE_RANK = {str(source): rank for rank, source in enumerate(Source)}
+
+
+def _listing_order(record: Record) -> tuple:
+    """Date order, and a total one: a tie on the instant goes to the registry's
+    declared order and then the service's own id, so the same listings make the
+    same units however a reader happened to fetch them."""
+    return (float(record.air_ts), _SOURCE_RANK.get(str(record.source), len(_SOURCE_RANK)),
+            str(record.id))
+
+
+def join_listings(listings: list[Record]) -> list[list[Record]]:
+    """ONE EPISODE's listings — every service's records of it — as the units a
+    calendar draws, each unit one card. Pure, and deterministic in its input.
+
+    IN DATE ORDER, A LISTING JOINS THE CURRENT UNIT when its service is not in
+    it yet and it may join (`may_join`) EVERY listing already in it; otherwise
+    it starts the next unit. EVERY, not any: a unit is one airing, so each of
+    its listings has to be close enough to each other one, and a chain of
+    neighbours a month long would be several airings glued together.
+
+    ONE LISTING PER SERVICE PER UNIT. A service listing one episode twice is a
+    repeat the calendar has always drawn twice, and folding a service into its
+    own other listing would collapse it rather than reconcile two services.
+
+    VIEWER-INDEPENDENT, WHICH IS WHY IT MAY RUN ANYWHERE. Which units an episode
+    makes depends on what the services said and nothing else; which of a unit's
+    listings describes it, and so which DAY it is drawn on, is the viewer's
+    (app/calendar/resolve.py).
+
+    HANDED EVERY STORED LISTING OF THE EPISODE, NEVER A RANGE'S SHARE OF THEM.
+    The scan is in date order and each unit's membership depends on the one
+    before it, so a listing far outside a reader's range can still decide where
+    a unit inside it closes. A month, a day, a search and a share page all read
+    an episode whole (entries.read_span_whole, entries.read_groups), which is
+    what makes them draw the same cards on the same days by construction.
+    """
+    units: list[list[Record]] = []
+    for record in sorted(listings, key=_listing_order):
+        day = record_utc_date(record)
+        current = units[-1] if units else None
+        if (current is not None
+                and all(str(held.source) != str(record.source) for held in current)
+                and all(may_join(record_utc_date(held), day) for held in current)):
+            current.append(record)
+        else:
+            units.append([record])
+    return units
+
+
 def match_keys(records: list[Record]) -> list[str]:
     """The final group key for each of `records`, in the same order — THE
-    MATCHER.
+    MATCHER: which records are one card.
 
-    Everything above answers "what does one record call itself". This answers the
-    question that actually decides whether two services produce one card or two,
-    and it needs the whole window because the hard case cannot be seen from one
-    record: TWO SOURCES CAN AGREE PERFECTLY ABOUT THE ID AND STILL FAIL TO MATCH,
-    because they describe the airing at DIFFERENT RESOLUTIONS. Measured on real
-    stored windows: one service lists an anime premiere as episode 1 with no
-    season at all and the other lists it as S01E01, same title, same tmdb id,
-    same day — and the coordinates being part of the key is what made those two
-    cards instead of one.
+    TWO RULES, ONE FOR EACH KIND OF RECORD.
 
-    So a record that states no full coordinate is folded into a coordinated
-    airing of the SAME TITLE when exactly one of them can be the airing it means:
+    A RECORD THAT NAMES AN EPISODE (`episode_of`: a full coordinate, or a film)
+    is grouped with that episode's other listings by `join_listings`, whatever
+    their dates — the first unit of an episode is keyed `base|season|episode`
+    (a film's, `base`) and each later one carries a repeat marker (`#2`), which
+    is what keeps a numbering dispute months apart, or a service's own second
+    listing, its own card.
+
+    A RECORD THAT DOES NOT is folded into a unit of the SAME TITLE when exactly
+    one episode can be the airing it means. TWO SOURCES CAN AGREE PERFECTLY
+    ABOUT THE ID AND STILL FAIL TO MATCH, because they describe the airing at
+    DIFFERENT RESOLUTIONS. Measured on real stored windows: one service lists an
+    anime premiere as episode 1 with no season at all and the other lists it as
+    S01E01, same title, same tmdb id, same day. The conditions:
 
       - same base (the same title in the same shared id space),
-      - same UTC calendar day, because a show airing twice in one week is two
-        airings and nothing here may guess which one an uncoordinated record is,
+      - a listing of that episode on the same UTC calendar day, because a show
+        airing twice in one week is two airings and nothing here may guess which
+        one an uncoordinated record is,
       - and agreement on whichever half of the coordinate the record DID state.
         This is the condition that carries most of the weight: one live window
         holds eight uncoordinated records for a single title on one day, one per
@@ -290,93 +397,100 @@ def match_keys(records: list[Record]) -> list[str]:
         number picks each one out exactly.
 
     AMBIGUITY IS COUNTED BEFORE ANYTHING ELSE NARROWS IT, AND THAT ORDER IS THE
-    WHOLE SAFETY ARGUMENT. Every coordinated airing of the title on that day is a
+    WHOLE SAFETY ARGUMENT. Every episode of the title listed that day is a
     candidate, whoever listed it; only if there is EXACTLY ONE is the record
-    folded in, and only then is it asked whether that airing already carries a
-    record from this same source — in which case it is refused too, because
-    folding a service's uncoordinated listing into its own coordinated one would
-    be collapsing that service's listing rather than reconciling two of them, and
-    a service listing one airing twice is a repeat the calendar has always drawn
-    twice. Counting the other way round — narrowing by source and THEN counting —
-    is a real trap and not a theoretical one: on a day where one service lists
-    season 4 and the other season 5 of the same show, it would leave exactly one
-    survivor for an uncoordinated third record and merge it into the wrong
-    season, silently.
+    folded in, and only then is it asked whether the unit it would join already
+    carries a record from this same source — in which case it is refused too,
+    because folding a service's uncoordinated listing into its own coordinated
+    one would be collapsing that service's listing rather than reconciling two
+    of them. Counting the other way round — narrowing by source and THEN
+    counting — is a real trap and not a theoretical one: on a day where one
+    service lists season 4 and the other season 5 of the same show, it would
+    leave exactly one survivor for an uncoordinated third record and merge it
+    into the wrong season, silently.
 
-    ZERO CANDIDATES OR SEVERAL, AND THE RECORD KEEPS ITS OWN KEY and renders as
-    its own card. That is the direction this has to fail in: a visible duplicate
-    is a cosmetic complaint, and a wrong merge hides one title behind another
-    with nothing on the page to say so.
+    ZERO CANDIDATES OR SEVERAL, AND THE RECORD KEEPS A KEY OF ITS OWN — its
+    title and its day — and renders as its own card. That is the direction this
+    has to fail in: a visible duplicate is a cosmetic complaint, and a wrong
+    merge hides one title behind another with nothing on the page to say so. Its
+    DAY and not the storage week it was filed in: no live week holds two
+    services' unfolded records of one title (measured on the dev instance), and
+    keying on the day is what keeps this rule the same however a reader's range
+    falls across the weeks.
 
     WHAT THIS DELIBERATELY DOES NOT DO is match on title and day. Two different
     SEASONS of one show premiering on the same day is a real thing — three live
     examples, all with both records fully coordinated — and any rule of the form
     "same title, same day, one card" destroys them. They are untouched here
-    precisely because both sides state a full coordinate and neither is a
-    candidate for folding.
+    precisely because both sides name a different episode.
     """
-    bases = [group_base(record) for record in records]
-    coords = [episode_coords(record) for record in records]
-    keys = [f"{b}|{c[0]}|{c[1]}" if c else b for b, c in zip(bases, coords)]
-
-    # What each title's fully-coordinated airings are, and who listed them on
-    # which day — the only thing an uncoordinated record can be folded into.
-    coordinated: dict[str, dict[tuple[int, int], dict]] = {}
+    keys: list[str] = [""] * len(records)
+    episodes: dict[tuple, list[int]] = {}
     for index, record in enumerate(records):
-        if coords[index] is None:
-            continue
-        airing = coordinated.setdefault(bases[index], {}).setdefault(
-            coords[index], {"sources": set(), "days": set()})
-        airing["sources"].add(str(record.source))
-        airing["days"].add(record_utc_date(record))
+        episode = episode_of(record)
+        if episode is not None:
+            episodes.setdefault(episode, []).append(index)
+
+    # Each episode's units, and for every (title, day) the units that have a
+    # listing on it — the only things an uncoordinated record can be folded into.
+    position = {id(record): index for index, record in enumerate(records)}
+    on_day: dict[tuple[str, date], dict[str, dict]] = {}
+    for episode, members in episodes.items():
+        base = episode[0]
+        stem = base if len(episode) == 1 else f"{base}|{episode[1][0]}|{episode[1][1]}"
+        for number, listings in enumerate(join_listings([records[i] for i in members]), 1):
+            unit = {"key": stem if number == 1 else f"{stem}#{number}",
+                    "coordinate": episode[1] if len(episode) > 1 else None,
+                    "sources": {str(r.source) for r in listings}}
+            for record in listings:
+                keys[position[id(record)]] = unit["key"]
+                on_day.setdefault((base, record_utc_date(record)), {})[unit["key"]] = unit
 
     for index, record in enumerate(records):
-        if coords[index] is not None:
+        if keys[index]:
             continue
-        day = record_utc_date(record)
-        airings = coordinated.get(bases[index], {})
-        candidates = [
-            coordinate for coordinate, airing in airings.items()
-            if day in airing["days"]
-            and (record.episode_number is None or coordinate[1] == record.episode_number)
-            and (record.season is None or coordinate[0] == record.season)
-        ]
-        if len(candidates) != 1:
-            continue
-        coordinate = candidates[0]
-        if str(record.source) in airings[coordinate]["sources"]:
-            continue
-        keys[index] = f"{bases[index]}|{coordinate[0]}|{coordinate[1]}"
+        base, day = group_base(record), record_utc_date(record)
+        candidates = [unit for unit in on_day.get((base, day), {}).values()
+                      if unit["coordinate"] is not None
+                      and (record.episode_number is None
+                           or unit["coordinate"][1] == record.episode_number)
+                      and (record.season is None or unit["coordinate"][0] == record.season)]
+        coordinates = {unit["coordinate"] for unit in candidates}
+        if len(coordinates) == 1 and str(record.source) not in candidates[0]["sources"]:
+            candidates[0]["sources"].add(str(record.source))
+            keys[index] = candidates[0]["key"]
+        else:
+            keys[index] = f"{base}@{day.isoformat()}"
     return keys
 
 
 def group_records(records: list[Record]) -> list[dict]:
-    """The stored `entries` list: one group per airing, each source's record kept
-    whole under its own name.
+    """The read path's groups: one per card, each source's record kept whole
+    under its own name.
 
     PROVENANCE IS RECORDED FOR EVERY FIELD, not only for the ones that disagree,
     because "both sources agreed" and "only one source had it" must be able to
     render differently and the second is not recoverable from a de-duplicated
-    blob. Storage cost is not a concern here and must not be optimized against —
-    windows measure a few kilobytes compressed, and de-duplicating equal values
-    would destroy the agreement signal to save nothing.
+    blob.
 
     `ids` IS HOISTED onto the group because it is the MATCH RESULT rather than
     any one source's value, and it is what the arr/Seerr buttons, the tracker and
-    the ranker read. First writer wins per namespace, which with sources visited
-    in declared order means the earlier source's spelling of an id is the one
-    kept.
+    the ranker read. First writer wins per namespace, which with records visited
+    in date order and then the declared order means the earlier listing's
+    spelling of an id is the one kept.
 
-    A KEY COLLIDING WITH ITSELF FOR ONE SOURCE is a repeated airing — the same
-    episode listed twice at different times — and gets a distinct key rather than
-    overwriting, because the calendar has always drawn both and this is not the
-    place to decide it should stop. Two records from DIFFERENT sources under one
-    key is the ordinary case and is exactly what the group is for.
+    A KEY COLLIDING WITH ITSELF FOR ONE SOURCE is a repeated airing of a record
+    that names no episode — the same title listed twice on one day — and gets a
+    distinct key rather than overwriting, because the calendar has always drawn
+    both and this is not the place to decide it should stop. `match_keys` never
+    puts one service twice into an episode's unit, so this is the only way two
+    records of one source can meet here.
 
-    WHICH RECORDS SHARE A KEY IS `match_keys`' ANSWER, NOT THIS FUNCTION'S. This
-    one owns the shape of what gets stored; that one owns what "the same airing"
-    means, and the split is worth keeping because the second is the part with a
-    live-data argument behind every clause of it.
+    WHICH RECORDS SHARE A KEY IS `match_keys`' ANSWER, NOT THIS FUNCTION'S, and
+    it is only as good as the records handed to it: an episode's units are
+    decided by ALL its listings, so a caller grouping part of them may make
+    different cards from a reader holding the rest. Every read path hands over
+    an episode whole (entries.read_span_whole, entries.read_groups).
     """
     index: dict[str, dict] = {}
     out: list[dict] = []
@@ -420,6 +534,22 @@ class CachedWindow(NamedTuple):
     groups: list[dict]
     sources: tuple[str, ...]
     asked: tuple[str, ...] = ()
+
+
+class WindowCoverage(NamedTuple):
+    """One window's coverage and nothing else: who ANSWERED and who was ASKED —
+    the two facts `CachedWindow` explains — and when it was stored, None for a
+    window nothing has filled.
+
+    WHAT A SPAN READ ASKS OF EACH WINDOW IT COVERS, because the airings are no
+    longer read window by window: whether two services' listings are one card
+    depends on dates either side of any window's edge, so the span's airings are
+    read once, whole (`_assembled_span`), and a window contributes only whether
+    it is fresh, partial or missing.
+    """
+    sources: tuple[str, ...]
+    asked: tuple[str, ...]
+    cached_at: int | None
 
 
 def _poster_sighting(record: Record):
@@ -519,7 +649,7 @@ def _window_sources(endpoint: Endpoint, settings, start: date) -> list[Provider]
     can this instance read THIS source's calendar — and asking it here is what
     keeps "partial" meaning a source that FAILED. It also keeps the recovery
     working, without a special case: filling a credential in puts that source
-    back in play, `load_window` sees it in `in_play` and absent from the stored
+    back in play, `ensure_window` sees it in `in_play` and absent from the stored
     window's `asked`, and refills for exactly the reason that rule exists.
     """
     return [p for p in providers.calendar_sources(settings=settings)
@@ -642,6 +772,11 @@ async def read_cached_window(endpoint_key: str, start: date) -> tuple[CachedWind
     span a source truthfully reported as empty are the same query result and
     completely different facts, and answering the second as a miss would refetch
     an empty month on every read for ever.
+
+    THE GROUPS ARE THIS WINDOW'S ROWS ALONE, for a caller that wants one window
+    by itself. The calendar does not draw from them: an episode two services
+    date either side of the window's edge is half here, and only a read of the
+    episode whole (`_assembled_span`) makes it the one card it is.
     """
     records, answered, asked, stored_at = await entries.read_span(
         endpoint_key, start, start + timedelta(days=WINDOW_DAYS))
@@ -686,17 +821,17 @@ async def store_window(endpoint_key: str, start: date, records: list[Record],
     the first time was drawn without either. Measured: a search jump to Dexter's
     1 October 2006 premiere, which only Simkl's search-written row put on
     30 September, opened a month with no such card and nothing to land on; the
-    next visit, reading rows, found it. `load_window` reads the window back.
+    next visit, reading rows, found it. The read path reads the rows back.
 
     THE GROUPING IS NO LONGER WHAT IS STORED. It used to be: the window blob held
     the finished groups, so the match ran once at fill and every read served its
     answer. Rows store each source's records separately and `match_keys` runs at
     READ instead — which is not a regression but a correction. Whether two
-    records are one airing depends on WHAT ELSE IS IN THE WINDOW (see match_keys:
-    an uncoordinated record folds into a coordinated one only when exactly one
-    candidate exists), so a fill that stored the answer froze a judgement made
-    against whatever had been fetched alongside it. A later fill adding the
-    missing coordinated airing could not revise it.
+    records are one card depends on WHAT ELSE IS STORED (see match_keys: an
+    episode's every listing decides its units, and an uncoordinated record folds
+    into one only when exactly one candidate exists), so a fill that stored the
+    answer froze a judgement made against whatever had been fetched alongside
+    it. A later fill adding another service's listing could not revise it.
     """
     # WHAT IS ALREADY KNOWN GOES IN WITH THEM. A fresh calendar payload is
     # unenriched by construction, so storing it as-is would blank every title the
@@ -801,8 +936,8 @@ def schedule_refill(endpoint: Endpoint, settings, start: date) -> bool:
     async def _run() -> None:
         try:
             with activity("background refill"):
-                await load_window(endpoint, settings, start,
-                                  allow_fetch=True, force=True)
+                await ensure_window(endpoint, settings, start,
+                                    allow_fetch=True, force=True)
         except SourceUnavailable as exc:
             logger.debug("background refill of the %s span starting %s failed: %s",
                          endpoint.key, start, exc)
@@ -819,19 +954,24 @@ def schedule_refill(endpoint: Endpoint, settings, start: date) -> bool:
     return True
 
 
-async def load_window(endpoint: Endpoint, settings, start: date, *,
-                      allow_fetch: bool = True, force: bool = False,
-                      now: int | None = None,
-                      ) -> tuple[CachedWindow, int | None]:
-    """Return (window, cached_at) for one window.
+async def ensure_window(endpoint: Endpoint, settings, start: date, *,
+                        allow_fetch: bool = True, force: bool = False,
+                        now: int | None = None) -> WindowCoverage:
+    """Make one window as current as this read may, and say what it holds.
 
     Fetches and caches when the window is missing, past its TTL, or was filled
     without a source that is in play for it now — and allow_fetch is set. A
     public share page passes allow_fetch=False: it serves whatever is cached —
-    even stale, even nothing (returning an empty window, None) — and never asks a
+    even stale, even nothing (coverage with no `cached_at`) — and never asks a
     source, so an unauthenticated visitor can never spend the instance's rate
-    limit. cached_at is None only when nothing was cached and nothing was
+    limit. `cached_at` is None only when nothing was cached and nothing was
     fetched.
+
+    COVERAGE ONLY, NO AIRINGS. The span read that calls this reads the airings
+    of every window it covers in one go (`_assembled_span`), because an episode
+    two services date either side of a window's edge is one card only when both
+    halves are read together; reading each window's rows here as well would read
+    every row twice.
 
     A SOURCE THE WINDOW PREDATES MAKES IT A MISS, NOT A FAILURE. Admitting a new
     source, or moving to a month a source only reaches now, leaves stored windows
@@ -843,7 +983,9 @@ async def load_window(endpoint: Endpoint, settings, start: date, *,
     ts = db.now() if now is None else now
     ttl = _ttl_seconds(settings, start, ts)
     in_play = [str(p.source) for p in _window_sources(endpoint, settings, start)]
-    cached = await read_cached_window(endpoint.key, start)
+    answered_before, asked_before, stored_at = await entries.span_coverage(endpoint.key, start)
+    cached = (None if stored_at is None
+              else WindowCoverage(answered_before, asked_before, int(stored_at)))
     # Which sources this span ALREADY holds rows from — the only ones whose
     # "unchanged" is a usable answer rather than a silent gap. Asked of the
     # AIRINGS and not of the coverage table: coverage records who replied, and a
@@ -853,16 +995,15 @@ async def load_window(endpoint: Endpoint, settings, start: date, *,
     has_rows = await entries.sources_with_rows(
         endpoint.key, start, start + timedelta(days=WINDOW_DAYS))
     if cached is not None:
-        window, cached_at = cached
         # `force` IS THE SCHEDULED REFRESH'S OWN CADENCE OVERRIDING THE READ
         # PATH'S. The TTL here answers "is this fresh enough to serve", which
         # is a different question from "is this month due a look" — see
         # refresh_months. It never overrides allow_fetch, so a share page
         # cannot be made to fetch by anything.
-        fresh = (ts - cached_at) <= ttl and not force
-        unasked = set(in_play) - set(window.asked)
+        fresh = (ts - cached.cached_at) <= ttl and not force
+        unasked = set(in_play) - set(cached.asked)
         if not allow_fetch or (fresh and not unasked):
-            return window, cached_at
+            return cached
         if not force:
             # STALE BUT SERVEABLE: hand over what is stored and renew it behind
             # the request. Waiting here is what used to cost a page load seconds,
@@ -876,13 +1017,13 @@ async def load_window(endpoint: Endpoint, settings, start: date, *,
             # service while the banner said everything was fine.
             if not unasked:
                 schedule_refill(endpoint, settings, start)
-                return window, cached_at
+                return cached
         if unasked:
             logger.debug(
                 "the %s window starting %s was filled without %s; refilling.",
                 endpoint.key, start, ", ".join(sorted(unasked)))
     elif not allow_fetch:
-        return CachedWindow([], (), ()), None
+        return WindowCoverage((), (), None)
     try:
         records, answered, unchanged = await fetch_window_records(
             endpoint, settings, start, covered=has_rows)
@@ -892,15 +1033,14 @@ async def load_window(endpoint: Endpoint, settings, start: date, *,
         raise
     await store_window(endpoint.key, start, records, ttl, ts,
                        sources=answered, asked=in_play, unchanged=unchanged)
-    # SERVED FROM THE ROWS JUST WRITTEN, NOT FROM WHAT WAS FETCHED — see
-    # store_window for what the fetch alone leaves out. The sharpest case: EVERY
-    # SOURCE SAID "UNCHANGED", so this fetch brought no records at all while the
-    # stored rows are perfectly good, and serving what was fetched would blank
-    # the month on the very read that confirmed it was current. The store above
-    # still ran: it advanced the coverage clock without touching an airing.
-    stored = await read_cached_window(endpoint.key, start)
-    if unchanged and not answered and stored is not None:
-        return stored
+    if unchanged and not answered:
+        # EVERY SOURCE SAID "UNCHANGED", so this fetch brought no records at all
+        # while the stored rows are perfectly good. The store above still ran: it
+        # advanced the coverage clock without touching an airing, and the window
+        # is served exactly as the coverage now stands.
+        after = await entries.span_coverage(endpoint.key, start)
+        if after[2] is not None:
+            return WindowCoverage(after[0], after[1], int(after[2]))
     # A FILL, NOT A READ — this line only runs when the branch above actually
     # fetched and stored, never on a cache-hit return further up. That is
     # what lets it ask for enrichment sooner than the next heartbeat tick
@@ -914,16 +1054,41 @@ async def load_window(endpoint: Endpoint, settings, start: date, *,
     # than a per-view cost added to the hot render path.
     sightings = (s for s in (_poster_sighting(r) for r in records) if s is not None)
     await artwork.record_poster_urls(sightings)
-    # The GROUPS from the rows; who was asked and who answered from this fill,
-    # which knows them in the sources' declared order.
+    # Who was asked and who answered, from this fill, which knows them in the
+    # sources' declared order.
     # A SOURCE THAT SAID "UNCHANGED" ANSWERED, beside one that brought rows as
     # much as on its own: naming only the second made the very read this fill
     # served report the first as unreadable — the incomplete-data banner — and,
     # being partial, it was not kept for the reads after it.
     replied = {*answered, *unchanged}
-    groups = stored[0].groups if stored is not None else group_records(records)
-    return CachedWindow(groups, tuple(name for name in in_play if name in replied),
-                        tuple(in_play)), ts
+    return WindowCoverage(tuple(name for name in in_play if name in replied),
+                          tuple(in_play), ts)
+
+
+async def load_window(endpoint: Endpoint, settings, start: date, *,
+                      allow_fetch: bool = True, force: bool = False,
+                      now: int | None = None,
+                      ) -> tuple[CachedWindow, int | None]:
+    """(window, cached_at) for ONE window by itself: `ensure_window`, then that
+    window's own rows grouped (see `read_cached_window` for why those groups are
+    not what the calendar draws). An empty window, None, when nothing is stored
+    and nothing could be fetched.
+
+    SERVED FROM THE ROWS, NEVER FROM WHAT WAS FETCHED — see store_window for
+    what a fetch alone leaves out. The sharpest case: every source said
+    "unchanged", so a fill brought no records at all while the stored rows are
+    perfectly good, and serving what was fetched would blank the window on the
+    very read that confirmed it was current.
+    """
+    coverage = await ensure_window(endpoint, settings, start, allow_fetch=allow_fetch,
+                                   force=force, now=now)
+    if coverage.cached_at is None:
+        return CachedWindow([], coverage.sources, coverage.asked), None
+    records, _answered, _asked, _stored_at = await entries.read_span(
+        endpoint.key, start, start + timedelta(days=WINDOW_DAYS))
+    with span("calcache.group", records=len(records)):
+        groups = group_records(records)
+    return CachedWindow(groups, coverage.sources, coverage.asked), coverage.cached_at
 
 
 # ---------------------------------------------------------------------------
@@ -955,88 +1120,6 @@ def _local_span_utc_range(tz: ZoneInfo, start_date: date, end_date: date) -> tup
     utc_start = (local_start - timedelta(days=1)).astimezone(timezone.utc).date()
     utc_end = (local_end + timedelta(days=1)).astimezone(timezone.utc).date()
     return utc_start, utc_end
-
-
-def dedupe_groups(groups: list[dict]) -> list[dict]:
-    """First occurrence of each airing across the windows a span covers, order
-    preserved.
-
-    Keyed on the group key AND the primary source's instant, which is the same
-    identity the per-source dedupe uses one layer down: two adjacent windows both
-    handed the same airing are one card, while a title genuinely listed twice at
-    different times stays two, exactly as it has always rendered.
-
-    AND ONE AIRING TWO SERVICES PUT EITHER SIDE OF A WINDOW'S EDGE IS JOINED
-    HERE, because this is the only place both halves are in one list. The match
-    runs per window (`match_keys`), and a window starts on a Monday in UTC — which
-    is exactly where a Sunday-evening American premiere falls apart: one service
-    states the day (Sunday) and the other the instant (Monday, 01:00-04:00 UTC).
-    Measured: Dexter, Dexter: New Blood and Dexter: Original Sin each drew as two
-    cards on one day, the same key in two adjacent windows. See
-    `_one_airing_split` for what counts.
-    """
-    seen: set[tuple] = set()
-    out: list[dict] = []
-    first_with_key: dict[str, int] = {}
-    for group in groups:
-        order = calendar_resolve.source_order(group)
-        primary = (group.get("by_source") or {}).get(order[0], {}) if order else {}
-        identity = (group.get("key"), primary.get("air_ts"))
-        if identity in seen:
-            continue
-        seen.add(identity)
-        key = str(group.get("key") or "")
-        earlier = first_with_key.get(key)
-        if earlier is not None and _one_airing_split(out[earlier], group):
-            out[earlier] = _joined(out[earlier], group)
-            continue
-        first_with_key.setdefault(key, len(out))
-        out.append(group)
-    return out
-
-
-# How far apart two services' dates for one airing may be and still be joined
-# across a window's edge: a stated day against an instant is a day at most
-# anywhere on earth, and more than that is a different airing.
-_SPLIT_AIRING_DAYS = 1
-
-
-def _one_airing_split(first: dict, second: dict) -> bool:
-    """Whether two groups sharing a key are ONE airing that a window's edge cut
-    in two, rather than two airings.
-
-    THE SAME RULE A WINDOW ALREADY APPLIES, NARROWED. Inside one window a shared
-    key from two different services is one group whatever days they give; across
-    the edge only a day apart is admitted, so a show a service lists again weeks
-    later stays its own card. Every other condition refuses:
-
-      - a key with a repeat marker (`#2`) is one service listing an airing twice,
-        which the calendar has always drawn twice;
-      - a service in BOTH groups means they are that service's two listings, and
-        joining would collapse them rather than reconcile two services.
-    """
-    key = str(first.get("key") or "")
-    if not key or "#" in key:
-        return False
-    a, b = first.get("by_source") or {}, second.get("by_source") or {}
-    if not a or not b or set(a) & set(b):
-        return False
-    days = [epoch_moment(float(r.get("air_ts") or 0)).date()
-            for r in (*a.values(), *b.values())]
-    return (max(days) - min(days)).days <= _SPLIT_AIRING_DAYS
-
-
-def _joined(first: dict, second: dict) -> dict:
-    """The two halves as the one group `group_records` would have built had they
-    been in one window: every service's record under its own name, and ids first
-    writer wins. A new dict, because a window's groups may be held elsewhere."""
-    ids = dict(first.get("ids") or {})
-    for namespace, value in (second.get("ids") or {}).items():
-        if value not in (None, ""):
-            ids.setdefault(namespace, value)
-    return {**first, "ids": ids,
-            "by_source": {**(first.get("by_source") or {}),
-                          **(second.get("by_source") or {})}}
 
 
 async def visible_records(groups, endpoint, *, genres="", countries="",
@@ -1075,7 +1158,7 @@ async def visible_records(groups, endpoint, *, genres="", countries="",
         # holding its records. Reading it here is what makes that switch take
         # effect immediately instead of one TTL from now.
         parsed = [(group, calendar_resolve.admitted_records(group, prefs, endpoint.key, settings))
-                  for group in dedupe_groups(groups)]
+                  for group in groups]
         # THE SIMKL OVERLAY IS GONE FROM HERE, AND ITS ABSENCE IS THE POINT.
         # What used to happen on this line was a batched read of `simkl_titles`
         # to paint genres, network, country and certification onto this read's
@@ -1118,6 +1201,32 @@ async def visible_records(groups, endpoint, *, genres="", countries="",
     # neither is this viewer's doing — attributing those to a filter somebody set
     # would send them looking for a setting that would not bring the title back.
     return kept, release_filtered + (resolved - len(kept))
+
+
+async def placed(groups, endpoint, *, tz: ZoneInfo, **narrowing) -> tuple[list[Item], int]:
+    """Every card `groups` make for ONE viewer, each rendered on the day it is
+    PLACED on, and how many their filters removed. `narrowing` is
+    `visible_records`' keywords — the viewer's record filters, their source
+    selection (`prefs`) and the operator's `settings`; the network lists, which
+    judge a RENDERED card, are applied by the caller (`_assembled_span`).
+
+    THE ONE PLACEMENT FUNCTION, and every path that says where a card is drawn
+    asks it: a month, a day that arrives late, a share page and its card, the
+    tracker's calendar import (all through `assemble_range`), and the calendar
+    search's "where it airs", its season picker and the card its jump lands on
+    (calendar/search.py). WHICH DAY is decided by which of a card's services
+    describes it — the first in this viewer's order (resolve.py), date and time
+    included — and the day is that description rendered into the viewer's zone.
+    So two viewers with different orders, reading the very same rows, see one
+    card each, each on their own service's day; and no path works a day out from
+    one listing, which would put a card where some service said rather than
+    where this viewer's calendar draws it.
+    """
+    kept, filtered_out = await visible_records(groups, endpoint, **narrowing)
+    with span("calcache.normalize", entries=len(kept)) as sp:
+        items = [render(record, tz) for record in kept]
+        sp.set(items=len(items))
+    return items, filtered_out
 
 
 def narrow_for_viewer(parsed, media, *, genres="", countries="", show_certifications="",
@@ -1443,33 +1552,30 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     utc_start, utc_end = _local_span_utc_range(tz, start_date, end_date)
     windows = aligned_windows(utc_start, utc_end)
 
-    # gather preserves argument order, so `results` stays in ascending window
-    # order and extending `groups` in that order keeps the windows ordered —
-    # which dedupe_groups below relies on to keep the SAME copy of an
-    # overlapping airing the old sequential loop did (first window wins).
     # return_exceptions=True both lets a single window fail without aborting the
     # span and stops a still-running sibling fetch from surfacing as an
     # "exception was never retrieved" warning.
-    # THE ONLY AWAITED PHASE IN THIS FUNCTION, which is what makes it worth its
-    # own span: everything below is synchronous CPU on the event loop, so a
-    # read_month that is slow HERE was waiting on Trakt or the database, and one
-    # that is slow below was blocking every other request while it worked.
+    # THE FIRST OF TWO AWAITED PHASES, which is what makes it worth its own span:
+    # a read_month slow HERE was waiting on Trakt, Simkl or the database, and one
+    # slow in the CPU phases below was blocking every other request while it
+    # worked.
     with span("calcache.load_windows", n=len(windows), fetch=allow_fetch):
         results = await asyncio.gather(
-            *(load_window(endpoint, settings, start, allow_fetch=allow_fetch, now=now)
+            *(ensure_window(endpoint, settings, start, allow_fetch=allow_fetch, now=now)
               for start in windows),
             return_exceptions=True,
         )
 
-    groups: list[dict] = []
+    covered: set[date] = set()
     as_of: int | None = None
     errored = 0
     incomplete = False
     first_error: SourceUnavailable | None = None
-    for result in results:
+    for start, result in zip(windows, results):
         if isinstance(result, SourceUnavailable):
-            # load_window already served a stale copy when it had one, so getting
-            # here means this window had nothing cached AND its fetch failed.
+            # ensure_window already served a stale copy when it had one, so
+            # getting here means this window had nothing cached AND its fetch
+            # failed.
             errored += 1
             first_error = first_error or result
             continue
@@ -1478,10 +1584,9 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
             # bug, not a degraded window — surface it instead of hiding it behind
             # the partial flag.
             raise result
-        window, cached_at = result
-        groups.extend(window.groups)
-        if cached_at is not None:
-            as_of = cached_at if as_of is None else min(as_of, cached_at)
+        if result.cached_at is not None:
+            covered.add(start)
+            as_of = result.cached_at if as_of is None else min(as_of, result.cached_at)
         # THE WINDOW CARRIES ITS OWN VERDICT, and it is the only honest place for
         # it: a source it names as asked but not as having answered was reached
         # for at fill time and could not be read, which is the one thing this
@@ -1490,7 +1595,7 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         # simply predates a source, and so reported a failure nobody had.
         # A window nobody filled (an uncached one on a public page) asked nothing
         # and therefore stays quiet, rather than reporting every source missing.
-        if set(window.asked) - set(window.sources):
+        if set(result.asked) - set(result.sources):
             incomplete = True
 
     if errored and errored == len(windows):
@@ -1499,33 +1604,57 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         raise first_error
     partial = errored > 0 or incomplete
 
-    # The dedupe is belt and braces over the trim in fetch_window_records. That
-    # one keeps NEW windows disjoint; this one also covers windows cached BEFORE
-    # the trim existed, which overlap and would otherwise keep rendering doubled
-    # cards until their TTL expired.
-    # THE THREE PHASES BELOW ARE PURE CPU ON THE EVENT LOOP, and they are timed
-    # separately because they scale with different things and are fixed in
-    # different places. The filter is per-viewer work over resolved records; the
-    # render is per-entry object building and timezone arithmetic, and is the one
-    # that grows with a busy month; the grouping is a sort plus a walk.
-    with span("calcache.filter", entries=len(groups)) as sp:
-        kept, filtered_out = await visible_records(
-            groups, endpoint, genres=genres, countries=countries,
-            show_certifications=show_certifications,
-            movie_certifications=movie_certifications,
-            movie_release_countries=movie_release_countries,
-            movie_release_types=movie_release_types,
-            prefs=prefs, settings=settings)
-        sp.set(kept=len(kept))
+    # THE SPAN'S AIRINGS, READ ONCE AND WHOLE, and both halves of that are the
+    # point. ONCE: windows are where a fill is decided, not where a card is —
+    # matched window by window, one episode two services dated either side of a
+    # Monday drew as two cards (see may_join). WHOLE: every other stored listing
+    # of each episode the span holds comes with it, at whatever date, because
+    # whether a listing here is one card with a listing elsewhere decides which
+    # day this viewer's card is drawn on (entries.read_span_whole has the cost).
+    # A WINDOW NOTHING HAS FILLED CONTRIBUTES NO AIRINGS of its own, exactly as
+    # when it was read by itself: what sits in one is only what a search or a
+    # tracker wrote there, and a read that may not fill serves it as the empty
+    # span it is. The second awaited phase.
+    first, last = windows[0], windows[-1] + timedelta(days=WINDOW_DAYS)
+    with span("calcache.read", windows=len(windows)) as sp:
+        records = [record for record in await entries.read_span_whole(endpoint.key, first, last)
+                   if not first <= record_utc_date(record) < last
+                   or window_start(record_utc_date(record)) in covered]
+        sp.set(records=len(records))
 
-    with span("calcache.normalize", entries=len(kept)) as sp:
-        items: list[Item] = []
-        for record in kept:
-            item = render(record, tz)
-            air_day = date.fromisoformat(item.air_date)  # already in the viewer's tz
-            if start_date <= air_day <= end_date:
-                items.append(item)
-        sp.set(items=len(items))
+    # THE PHASES BELOW ARE PURE CPU ON THE EVENT LOOP, and they are timed
+    # separately because they scale with different things and are fixed in
+    # different places. The grouping is a sort plus a walk; the filter is
+    # per-viewer work over resolved records; the render is per-entry object
+    # building and timezone arithmetic, and is the one that grows with a busy
+    # month.
+    with span("calcache.group", records=len(records)) as sp:
+        groups = group_records(records)
+        # ONLY A CARD THAT COULD BE DRAWN INSIDE THE SPAN IS RESOLVED. A card is
+        # drawn at one of its own listings' instants (its describing service's,
+        # or the time it borrowed), and a zone moves an instant by less than a
+        # day — so a card none of whose listings falls inside the span padded a
+        # day each side cannot land in it. The windows a span reads hold up to a
+        # week either side of it, which for one day was every card of the week
+        # resolved and thrown away: measured, a day read resolved ~2,500 groups
+        # to draw ~350.
+        groups = [group for group in groups
+                  if any(utc_start <= epoch_moment(float(listing.get("air_ts") or 0)).date()
+                         <= utc_end for listing in group["by_source"].values())]
+        sp.set(groups=len(groups))
+    placed_items, filtered_out = await placed(
+        groups, endpoint, tz=tz, genres=genres, countries=countries,
+        show_certifications=show_certifications,
+        movie_certifications=movie_certifications,
+        movie_release_countries=movie_release_countries,
+        movie_release_types=movie_release_types,
+        prefs=prefs, settings=settings)
+    # KEPT WHEN IT IS PLACED INSIDE THE SPAN, which is a question about the
+    # CARD, not about any one listing: a card's other services may list it
+    # outside the span, and a listing inside the span may belong to a card
+    # placed outside it — which is then drawn there, once, and not here.
+    items = [item for item in placed_items
+             if start_date <= date.fromisoformat(item.air_date) <= end_date]
 
     with span("calcache.trim", items=len(items)):
         # THE OPERATOR'S NETWORK LIST IS THE FLOOR'S FOURTH FIELD, applied here
@@ -1556,7 +1685,7 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     #
     # A `allow_fetch=False` read is not merely cheaper — it can be SHORT. A window
     # with nothing stored returns EMPTY to it rather than raising (see
-    # load_window), so such a read can legitimately produce a month with days
+    # ensure_window), so such a read can legitimately produce a month with days
     # missing from it and no `partial` flag to say so. Memoising that would let
     # the first mark, share view or view toggle on a month nobody has opened yet
     # publish an under-filled span, which the next page load — the read that
@@ -1878,8 +2007,8 @@ async def refresh_months(settings, *, now: int | None = None) -> int:
                 if stored is not None and (ts - stored) < max_age:
                     continue
                 try:
-                    await load_window(endpoint, settings, start,
-                                      allow_fetch=True, force=True, now=ts)
+                    await ensure_window(endpoint, settings, start,
+                                        allow_fetch=True, force=True, now=ts)
                 except SourceUnavailable:
                     # A source that cannot answer is not a reason to abandon the
                     # rest of the month; the span keeps whatever it had and is

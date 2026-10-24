@@ -6,12 +6,12 @@
     offers, greys and suggests is app/providers/season_choices.py's, one rule for
     all three.
 
-    ONE FORM, ONE SUBMIT, NAMING THE RESULT BY REFERENCE. The hidden fields are
-    the reference the result was drawn with (`ref`) plus anything the surface's
-    route always needs (`hidden`); each ticked season adds its own field,
-    `season:<n>` (season_choices.FIELD_PREFIX — one flat field per season,
-    because json-enc turns a repeated name into a list only when there is more
-    than one of it). The server reads the title back out of what a service said.
+    ONE FORM, NAMING THE RESULT BY REFERENCE. The hidden fields are the reference
+    the result was drawn with (`ref`) plus anything the surface's route always
+    needs (`hidden`); each chosen season adds its own field, `season:<n>`
+    (season_choices.FIELD_PREFIX — one flat field per season, because json-enc
+    turns a repeated name into a list only when there is more than one of it).
+    The server reads the title back out of what a service said.
 
     A SEASON THAT CANNOT BE PICKED IS LISTED AND SAYS WHY: held already (greyed,
     in the surface's words), refused (the calendar's filters), or — where the
@@ -20,9 +20,18 @@
     `ticked` is the season to arrive ticked: a result that IS one season offers
     that season alone, ticked, so the answer to "which?" is already there.
 
-    NO SCRIPT: checkboxes, a submit button, and the browser's own form. -#}
+    TWO WAYS TO CHOOSE, AND A SURFACE NAMES WHICH (`one_press`). The tracker and
+    the board add several seasons at once, so theirs is a checklist and a submit.
+    The calendar's goes somewhere, and only one place can be gone to — so every
+    season is ONE PRESS: a season it already draws is a link to its card, and
+    any other is a SUBMIT BUTTON naming its own `season:<n>`, which the browser
+    sends alongside the form's fields as the one button pressed (htmx appends
+    the submitter's name and value to the body). A checkbox beside a link was two
+    kinds of row for one kind of choice.
+
+    NO SCRIPT: checkboxes or buttons, and the browser's own form. -#}
 {% macro checklist(options, form, ref={}, hidden={}, ticked=none, button='Add seasons',
-                   heading='') -%}
+                   heading='', one_press=false) -%}
 <form class="season-checklist"{{ form | xmlattr }}>
     {%- if heading %}
     <p class="season-checklist-heading">{{ heading }}</p>
@@ -38,6 +47,16 @@
         <span class="season-label">{{ option.label }}</span>
         {%- if option.notes %}<span class="season-note">{{ option.notes | join(' · ') }}</span>{% endif %}
     </a>
+    {%- elif one_press and option.pickable %}
+    <button type="submit" class="{{ classes }} is-link" name="season:{{ option.value }}" value="1">
+        <span class="season-label">{{ option.label }}</span>
+        {%- if option.notes %}<span class="season-note">{{ option.notes | join(' · ') }}</span>{% endif %}
+    </button>
+    {%- elif one_press %}
+    <span class="{{ classes }}">
+        <span class="season-label">{{ option.label }}</span>
+        {%- if option.notes %}<span class="season-note">{{ option.notes | join(' · ') }}</span>{% endif %}
+    </span>
     {%- else %}
     <label class="{{ classes }}">
         <input type="checkbox" name="season:{{ option.value }}" value="1"
@@ -48,8 +67,9 @@
     {%- endif %}
     {%- endfor %}
     {#- No submit when nothing can be ticked — every season already there, or
-        refused — since pressing it could do nothing. -#}
-    {%- if options | selectattr('pickable') | list %}
+        refused — since pressing it could do nothing; and none when every row is
+        its own press. -#}
+    {%- if not one_press and options | selectattr('pickable') | list %}
     <button type="submit" class="btn-ghost small">{{ button }}</button>
     {%- endif %}
 </form>

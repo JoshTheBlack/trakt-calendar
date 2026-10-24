@@ -297,11 +297,12 @@ class TheFieldsThatAreNotAContestTests(unittest.TestCase):
         second = calendar_resolve.resolve(group, _prefs("simkl"))
         self.assertEqual((second.air_ts, second.date_only), (2000.0, True))
 
-    def test_a_service_that_knows_the_time_beats_one_that_knows_the_day(self):
+    def test_a_date_only_primary_borrows_a_time_that_falls_on_its_date(self):
         """Dexter: Original Sin, as stored: Trakt's instant (10pm Eastern on the
-        15th) and Simkl's per-title date. Preferring Simkl made the merged card
-        lose its 22:00; the day is the same airing said less precisely, so the
-        instant wins whoever is preferred, and brings its own flag with it."""
+        15th, 03:00 UTC on the 16th) and Simkl's per-title date, the 15th.
+        Preferring Simkl made the merged card lose its 22:00 once; Simkl's date
+        is the same airing said less precisely, and Trakt's instant is on that
+        date somewhere on earth, so the card keeps the time either way."""
         group = _group(
             _record(Source.TRAKT, air_ts=1734318000.0, date_only=False),
             _record(Source.SIMKL, air_ts=1734220800.0, date_only=True),
@@ -310,6 +311,43 @@ class TheFieldsThatAreNotAContestTests(unittest.TestCase):
             with self.subTest(order=order):
                 record = calendar_resolve.resolve(group, _prefs(*order))
                 self.assertEqual((record.air_ts, record.date_only), (1734318000.0, False))
+
+    def test_a_time_on_another_date_is_not_borrowed(self):
+        """Simkl's date two days before Trakt's instant is Simkl's claim about a
+        different day: a viewer who prefers Simkl sees Simkl's day, and no time,
+        rather than a time that moves the card off it."""
+        group = _group(
+            _record(Source.TRAKT, air_ts=1734318000.0, date_only=False),
+            _record(Source.SIMKL, air_ts=1734220800.0 - 2 * 86400, date_only=True),
+        )
+        record = calendar_resolve.resolve(group, _prefs("simkl"))
+        self.assertEqual((record.air_ts, record.date_only), (1734220800.0 - 2 * 86400, True))
+
+    def test_the_first_service_in_the_order_says_when_even_against_a_time(self):
+        """Yellowjackets S04E01: Simkl's Friday evening, Trakt's Sunday evening.
+        Each viewer's first service decides the day, and both have a time — so
+        a time no longer outranks the viewer's order."""
+        simkl_ts, trakt_ts = 1795222800.0, 1795399200.0  # 21 Nov 01:00Z, 23 Nov 02:00Z
+        group = _group(_record(Source.TRAKT, air_ts=trakt_ts),
+                       _record(Source.SIMKL, air_ts=simkl_ts))
+        self.assertEqual(calendar_resolve.resolve(group).air_ts, trakt_ts)
+        self.assertEqual(calendar_resolve.resolve(group, _prefs("simkl")).air_ts, simkl_ts)
+
+    def test_falls_on_is_a_date_somewhere_on_earth(self):
+        from datetime import date, datetime, timezone
+
+        def at(*parts):
+            return datetime(*parts, tzinfo=timezone.utc).timestamp()
+
+        day = date(2026, 11, 22)
+        for instant, on, why in ((at(2026, 11, 21, 10), True, "midnight at UTC+14"),
+                                 (at(2026, 11, 21, 9, 59), False, "before anywhere's 22nd"),
+                                 (at(2026, 11, 23, 11, 59), True, "still the 22nd at UTC-12"),
+                                 (at(2026, 11, 23, 12), False, "after everywhere's 22nd"),
+                                 (at(2026, 11, 23, 2), True, "Yellowjackets on Trakt"),
+                                 (at(2026, 11, 21, 1), False, "Yellowjackets on Simkl")):
+            with self.subTest(why):
+                self.assertEqual(calendar_resolve.falls_on(instant, day), on)
 
 
 class WhatTheCardIsToldAboutProvenanceTests(unittest.TestCase):

@@ -4,12 +4,14 @@ THE SECOND HALF OF A SPLIT THE CACHE FORCED. Two operations sit between "what a
 source said" and "what a person sees", and they have different scopes, which is
 why they happen in different places:
 
-  MATCHING    is this record and that record the same airing? User-independent,
-              so it runs at FILL and is stored (app/calendar/cache.py groups the
-              records it stores).
-  RESOLUTION  which source's value does THIS VIEWER see for this field? Per
-              account by definition, so it runs at READ, over already-cached
-              data, and changing a preference therefore invalidates nothing.
+  MATCHING    is this record and that record the same card? User-independent:
+              one episode is one card whichever services list it
+              (app/calendar/cache.py's `match_keys` and `join_listings`, run at
+              read over the stored rows).
+  RESOLUTION  which source's value does THIS VIEWER see for this field — and so
+              on which DAY is the card drawn? Per account by definition, so it
+              runs at READ, over already-cached data, and changing a preference
+              therefore invalidates nothing.
 
 THAT SECOND SENTENCE IS THE DESIGN'S CENTRAL CLAIM AND IT CONSTRAINS THIS FILE.
 Nothing here may be moved to the fill path and nothing here may be written back
@@ -45,10 +47,11 @@ rendering until every window's TTL runs out.
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from .. import providers
-from ..providers.base import Record, Source
+from ..providers.base import Record, Source, epoch_moment
 
 # ---------------------------------------------------------------------------
 # the vocabulary a preference is written in
@@ -92,12 +95,11 @@ SOURCE_CARRIES = ("id", "detail_url", "anime_type")
 COORDINATE_FIELD = "coordinate"
 COORDINATE_FIELDS = ("season", "episode_number", "episode_label")
 
-# WHEN IT AIRS, and the flag saying whether that instant is really an instant.
-# One unit because `date_only` changes how `air_ts` is read: a timestamp from one
-# source under the other's flag renders a film a day early for half the world
-# (see Record.date_only).
+# WHEN IT AIRS — `air_ts` and the flag saying whether that instant is really an
+# instant, resolved as one by `_resolve_airing`. One unit because `date_only`
+# changes how `air_ts` is read: a timestamp from one source under the other's
+# flag renders a film a day early for half the world (see Record.date_only).
 AIRING_FIELD = "airing"
-AIRING_FIELDS = ("air_ts", "date_only")
 
 # The union field. Never a contest: two services listing different genres for one
 # title have both told the truth, and picking a winner would throw away a genre a
@@ -201,7 +203,7 @@ def admitted_order(group, prefs=None, endpoint=None, settings=None) -> list[str]
     it too, so the instance stops paying for records it will never show. Switching
     it back ON needs no cache clearing either: a stored window records which
     sources were ASKED for it, and one that never asked a source now in play is a
-    MISS that refills (app/calendar/cache.py's `load_window`).
+    MISS that refills (app/calendar/cache.py's `ensure_window`).
     """
     order = source_order(group)
     instance = instance_sources(settings)
@@ -279,23 +281,59 @@ def _winner(records: list[Record], order: list[str], field_name: str,
     return None
 
 
-def _resolve_airing(records: list[Record], order: list[str]) -> Record | None:
-    """The source whose date and time the card shows: ONE THAT KNOWS THE TIME
-    before one that knows only the day, the viewer's preference breaking ties.
+# WHERE A CALENDAR DATE IS CURRENT SOMEWHERE ON EARTH. The zones in use run from
+# UTC-12 to UTC+14, so a date D begins at D 00:00 in UTC+14 — 10:00 UTC the day
+# before — and ends at D 24:00 in UTC-12, 12:00 UTC the day after.
+_DATE_BEGINS_BEFORE_UTC = timedelta(hours=14)
+_DATE_ENDS_AFTER_UTC = timedelta(hours=12)
 
-    `_resolve_coordinate`'s reasoning, for the same kind of field. A date-only
-    record of an airing another service states as an instant is not a competing
-    claim — it is the same airing said less precisely, pinned at UTC midnight so
-    it lands on its day. Let it win and a merged card loses the time the other
-    service knew: MEASURED, Dexter: Original Sin's card showed Trakt's 22:00
-    until Simkl's per-title lookup (a bare "2024-12-15") joined it, and then
-    showed no time at all for a viewer whose order puts Simkl first. Two records
-    of the same precision are an ordinary contest, decided by preference — which
-    is every film, since a release is a date from both services.
+
+def falls_on(air_ts: float, day: date) -> bool:
+    """Whether the instant `air_ts` is on calendar date `day` somewhere on earth
+    — the test a date-only description puts to another service's time before
+    borrowing it (`_resolve_airing`)."""
+    midnight = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+    return (midnight - _DATE_BEGINS_BEFORE_UTC
+            <= epoch_moment(air_ts)
+            < midnight + timedelta(days=1) + _DATE_ENDS_AFTER_UTC)
+
+
+def _resolve_airing(records: list[Record], order: list[str]) -> tuple[float, bool]:
+    """(air_ts, date_only) for the card: THE PRIMARY'S DATE AND TIME — the first
+    service in the viewer's order, the one the card is attributed to.
+
+    WHEN IT AIRS IS THE PRIMARY'S TO SAY, because it decides WHERE THE CARD IS
+    DRAWN. One episode is one card however many services list it (cache.py's
+    `may_join`), and services disagree about days by more than a timezone:
+    Yellowjackets S04E01 is a Friday evening on Simkl and a Sunday evening on
+    Trakt. Taking the day from one service and the description from another
+    would draw a card nobody's service stands behind; taking it from the
+    viewer's own service is the one answer that cannot surprise them. So a
+    viewer who flips their order sees the same episode, still one card, on
+    their new first service's day. The other services' days are not thrown
+    away — `listed_airings` keeps each one, and the card says where they differ.
+
+    ONE THING IS BORROWED, AND ONLY WHEN IT AGREES. A date-only primary (TMDB
+    lists no times; a film is a date everywhere) leaves the time unsaid, so the
+    first other service in the viewer's order whose INSTANT falls on the
+    primary's date somewhere on earth (`falls_on`) lends its time — the same
+    airing said more precisely, which is the case that used to make a timed
+    source beat a date-only one outright: MEASURED, Dexter: Original Sin's card
+    lost Trakt's 22:00 when Simkl's bare "2024-12-15" joined it. A time from an
+    instant on another day is a different service's claim about a different
+    day, and borrowing it would move the card off the primary's date; nothing
+    agrees, and the card shows the primary's date with no time.
     """
-    stated = [r for r in records if _present(r.air_ts)]
-    timed = [r for r in stated if not r.date_only]
-    return _winner(timed or stated, order, AIRING_FIELD, lambda _r: True)
+    by_name = {str(r.source): r for r in records}
+    listed = [by_name[name] for name in order if name in by_name]
+    primary = listed[0]
+    if not primary.date_only:
+        return primary.air_ts, False
+    day = epoch_moment(primary.air_ts).date()
+    for other in listed[1:]:
+        if not other.date_only and falls_on(other.air_ts, day):
+            return other.air_ts, False
+    return primary.air_ts, True
 
 
 def _coordinate_rank(record: Record) -> int:
@@ -414,9 +452,8 @@ def resolve_records(group, records: list[Record], prefs=None) -> Record | None:
                 getattr(coordinate, field_name) if coordinate is not None
                 else getattr(primary, field_name))
 
-    airing = _resolve_airing(records, _order(prefs, AIRING_FIELD, names))
-    for field_name in AIRING_FIELDS:
-        setattr(resolved, field_name, getattr(airing or primary, field_name))
+    resolved.air_ts, resolved.date_only = _resolve_airing(
+        records, _order(prefs, AIRING_FIELD, names))
 
     # ENRICHED IS A PROPERTY OF THE GROUP, NOT OF THE CARD'S SOURCE. The flag
     # exists so app/calendar/filter.py can tell "empty because there is nothing to
@@ -446,6 +483,15 @@ def resolve_records(group, records: list[Record], prefs=None) -> Record | None:
         # because that is what SCALAR_FIELDS is for.
         resolved.source_links = {str(r.source): r.detail_url
                                  for r in records if r.detail_url}
+        # WHEN EACH SERVICE SAYS IT AIRS, in declared order. The card is drawn
+        # on the primary's day (`_resolve_airing`), and a reader whose services
+        # disagree about the day deserves to see that they do — the card draws
+        # every service's day and time beside its mark wherever they differ for
+        # this viewer, which only `render` can judge, since a difference is
+        # about the local day. Collected, not won, for the reason the links are.
+        resolved.listed_airings = {str(r.source): {"air_ts": r.air_ts,
+                                                   "date_only": r.date_only}
+                                   for r in records}
     return resolved
 
 

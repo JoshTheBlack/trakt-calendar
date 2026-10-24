@@ -1417,8 +1417,8 @@ class MonthRefreshTests(CacheTestCase):
     NOW = 1_784_000_000  # 2026-07-13T05:33:20Z — a fixed instant inside July
 
     async def _refresh(self, now=None):
-        with patch("app.calendar.cache.load_window", new_callable=AsyncMock) as mocked:
-            mocked.return_value = ([], None)
+        with patch("app.calendar.cache.ensure_window", new_callable=AsyncMock) as mocked:
+            mocked.return_value = calendar_cache.WindowCoverage((), (), None)
             await calendar_cache.refresh_months(self.settings, now=now or self.NOW)
         return mocked
 
@@ -1481,8 +1481,8 @@ class MonthRefreshTests(CacheTestCase):
         often warmed constantly and one that ran for a week warmed once. Nothing
         in this module remembers anything — a second pass reads the coverage the
         first one wrote."""
-        with patch("app.calendar.cache.load_window", new_callable=AsyncMock) as first:
-            first.return_value = ([], None)
+        with patch("app.calendar.cache.ensure_window", new_callable=AsyncMock) as first:
+            first.return_value = calendar_cache.WindowCoverage((), (), None)
             await calendar_cache.refresh_months(self.settings, now=self.NOW)
         self.assertGreater(first.call_count, 0)
         # The real fill was patched out, so write the coverage it would have left.
@@ -1494,7 +1494,7 @@ class MonthRefreshTests(CacheTestCase):
         self.assertEqual(second.call_count, 0)
 
     async def test_a_source_that_cannot_answer_does_not_abandon_the_month(self):
-        with patch("app.calendar.cache.load_window", new_callable=AsyncMock) as mocked:
+        with patch("app.calendar.cache.ensure_window", new_callable=AsyncMock) as mocked:
             mocked.side_effect = TraktError("Trakt unreachable", 503)
             refilled = await calendar_cache.refresh_months(self.settings, now=self.NOW)
         self.assertEqual(refilled, 0)          # nothing stored

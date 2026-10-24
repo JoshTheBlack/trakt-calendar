@@ -1741,7 +1741,7 @@ class FollowingASearchResultWritesOneAiringTests(CalendarRouteTestCase):
             self.named.append((media, query, index, ref))
             return SimpleNamespace(title="Half Man") if hit else None
 
-        async def _jump(settings, found, media, seasons, *, tz, now):
+        async def _jump(settings, found, media, seasons, *, tz, now, **_viewer):
             self.jumped.append((media, seasons))
             return destination
 
@@ -1822,10 +1822,16 @@ class ASearchResultsSeasonPickerTests(CalendarRouteTestCase):
         with patch.object(title_search, "resolve_hit", _resolve),              patch("app.calendar.search.picker", _picker):
             return self.client.get(self.URL).text
 
-    def test_it_draws_the_checklist_whose_submit_is_the_jump(self):
+    def test_every_season_is_one_press_and_pressing_one_is_the_jump(self):
+        """A season the calendar draws is a link to its card; any other is a
+        button naming its own season, pressed straight into the jump — one kind
+        of row, no checkbox and no Go. A refused season says why and is no
+        button at all."""
         from app.providers.season_choices import SeasonOption
-        html = self._get(options=[SeasonOption(1), SeasonOption(2, suggested=True),
-                                  SeasonOption(3, blocked="your filters hide it")])
+        html = self._get(options=[
+            SeasonOption(1), SeasonOption(2, suggested=True),
+            SeasonOption(3, blocked="your filters hide it"),
+            SeasonOption(4, href="/calendar?year=2026&month=11#jump-target")])
         # A json-enc POST, because following it writes; the answer is the
         # navigation, so nothing is swapped.
         self.assertIn('hx-post="/calendar/jump"', html)
@@ -1835,10 +1841,15 @@ class ASearchResultsSeasonPickerTests(CalendarRouteTestCase):
         for field in ('name="q" value="half man"', 'name="i" value="0"',
                       'name="media" value="show"', 'name="endpoint" value="shows"'):
             self.assertIn(field, html)
-        # The suggestion arrives ticked; a refused season says why and cannot be.
-        self.assertIn('name="season:2" value="1" checked', html)
-        self.assertIn('name="season:3" value="1" disabled', html)
+        self.assertNotIn('type="checkbox"', html)
+        self.assertNotIn("Go to", html)
+        self.assertRegex(html, r'<button type="submit" class="season-choice is-link" '
+                               r'name="season:1" value="1">')
+        self.assertRegex(html, r'<button type="submit" class="season-choice is-suggested is-link" '
+                               r'name="season:2" value="1">')
+        self.assertNotIn('name="season:3"', html)
         self.assertIn("your filters hide it", html)
+        self.assertIn('href="/calendar?year=2026&amp;month=11#jump-target"', html)
 
     def test_a_result_the_store_no_longer_holds_says_so(self):
         self.assertIn("That search has expired", self._get(hit=False))

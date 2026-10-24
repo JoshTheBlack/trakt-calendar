@@ -1304,6 +1304,10 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 .chip.dual { display: inline-flex; align-items: center; gap: 8px; border-color: rgba(232,181,69,0.35); }
 .dual-value { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .dual-value .source-logo { height: 11px; opacity: 0.85; }
+/* WHEN THE SERVICES DISAGREE ABOUT THE DAY the chip names two days and times,
+   which is wider than a narrow card: each value keeps itself on one line and the
+   chip wraps between them rather than running off the card's edge. */
+.chip.dual.day { flex-wrap: wrap; row-gap: 2px; }
 
 .premiere-info { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--card-border); font-size: 0.82rem; font-weight: 600; display: flex; justify-content: space-between; gap: 8px; }
 .premiere-info .time { color: var(--text-faint); font-weight: 400; }
@@ -2969,6 +2973,13 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .season-choice.is-link { opacity: 1; cursor: pointer; text-decoration: underline; }
 .season-note { margin-left: auto; font-size: 0.7rem; color: var(--text-faint); white-space: nowrap; }
 .season-checklist > button { align-self: flex-start; margin-top: 4px; }
+/* A SEASON THAT IS ONE PRESS (the calendar's picker) is a submit button drawn as
+   the same row as the link beside it, so a season on the calendar and one not
+   on it yet read as one list. */
+.season-checklist > button.season-choice {
+    align-self: stretch; margin-top: 0; background: none; border: 0; font: inherit;
+    text-align: left;
+}
 /* A calendar or tracker search result is a <details> whose <summary> is the row: the
    season picker unfolds UNDER the row pressed, sliding open, and folds away when
    the row is pressed again (_search_results.html). The summary's own marker goes;

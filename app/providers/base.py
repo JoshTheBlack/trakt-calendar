@@ -310,7 +310,7 @@ def resolve_key(media: Media | str, ids: Mapping[str, Any]) -> ItemKey | None:
 # The fields on `Record` that resolution writes and storage never does. See
 # `Record.field_sources` for what they hold and `Record.to_dict` for why they are
 # the one thing excluded from a stored record by name.
-PROVENANCE_FIELDS = ("field_sources", "alternatives", "source_links")
+PROVENANCE_FIELDS = ("field_sources", "alternatives", "source_links", "listed_airings")
 
 
 @dataclass
@@ -469,6 +469,13 @@ class Record:
     # after several records have been compared, which happens at read.
     source_links: dict[str, str] = field(default_factory=dict)
 
+    # {source: {"air_ts", "date_only"}} — WHEN EACH SERVICE THAT DESCRIBED THIS
+    # AIRING SAYS IT AIRS. The card is drawn on ONE service's day — the viewer's
+    # first, app/calendar/resolve.py's `_resolve_airing` — and this is what lets
+    # it say that the others gave a different one (`render`'s `air_choices`).
+    # Not stored, for the reason the maps above are not.
+    listed_airings: dict[str, dict[str, Any]] = field(default_factory=dict)
+
     def shown_source(self, field_name: str) -> str:
         """Which service's stored value this record is carrying for `field_name`.
 
@@ -583,6 +590,12 @@ class Item(Record):
     # matching the display form breaks every multi-word genre while leaving
     # single-word ones working.
     genre_slugs: list[str] = field(default_factory=list)
+    # [(service, "Fri 20 Nov 20:00")] — EVERY SERVICE'S DAY AND TIME, in this
+    # viewer's zone, when the services that described this airing disagree about
+    # either; empty when they agree, or only one spoke. The card draws them side
+    # by side under each service's mark, the way it draws two ratings: which day
+    # the card sits on is one service's answer, and the others are not lost.
+    air_choices: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def airing_key(self) -> str:
@@ -706,9 +719,7 @@ def render(record: Record, tz: ZoneInfo) -> Item:
     longer say where a picture came from. Proxying here reaches the browser and
     nothing else.
     """
-    moment = epoch_moment(record.air_ts)
-    if not record.date_only:
-        moment = moment.astimezone(tz)
+    moment = _local_moment(record.air_ts, record.date_only, tz)
     values = {f.name: getattr(record, f.name) for f in fields(Record)}
     slugs = [str(g) for g in record.genres]
     values["genres"] = [g.replace("-", " ").title() for g in slugs]
@@ -737,7 +748,36 @@ def render(record: Record, tz: ZoneInfo) -> Item:
         # claimed to air at 00:00.
         air_time="" if record.date_only else moment.strftime("%H:%M"),
         day_of_week=moment.strftime("%A"),
+        air_choices=_air_choices(record.listed_airings, tz),
     )
+
+
+def _local_moment(air_ts, date_only: bool, tz: ZoneInfo) -> datetime:
+    """An instant in the viewer's zone — or, for a date, the date itself, read
+    back in UTC where it was pinned and never converted (see Record.date_only)."""
+    moment = epoch_moment(air_ts)
+    return moment if date_only else moment.astimezone(tz)
+
+
+def _air_choices(listed: Mapping[str, Mapping[str, Any]], tz: ZoneInfo) -> list[tuple[str, str]]:
+    """Every service's day and time for one airing, in this viewer's zone, when
+    they DISAGREE — a different day, or two different times; a service that
+    gives only the date agrees with any time on it. Empty otherwise.
+
+    HERE AND NOT AT RESOLUTION, because a disagreement is about the LOCAL day:
+    01:00 UTC and 23:00 UTC the day before are one evening in New York and two
+    days in Tokyo."""
+    shown = []
+    for name, airing in listed.items():
+        date_only = bool(airing.get("date_only"))
+        moment = _local_moment(airing.get("air_ts") or 0, date_only, tz)
+        shown.append((name, moment.strftime("%a %d %b"),
+                      "" if date_only else moment.strftime("%H:%M")))
+    days = {day for _name, day, _time in shown}
+    times = {time for _name, _day, time in shown if time}
+    if len(days) < 2 and len(times) < 2:
+        return []
+    return [(name, f"{day} {time}".rstrip()) for name, day, time in shown]
 
 
 @dataclass(frozen=True)

@@ -1305,15 +1305,15 @@ async def calendar_search_seasons(request: Request):
     (_season_checklist.html), asked for when the result's row is pressed, never
     with the search. Its choices are calendar/search.py's `picker`: the seasons
     the leading service dates, those the viewer's filters hide refused with the
-    reason, those the calendar already draws linking to their day. Submitting it
-    is the jump.
+    reason, those the calendar already draws linking to their card, and pressing
+    any other season is the jump (one press per season — _search_seasons.html).
 
     EVERY OUTCOME IS DRAWN, at 200, as a sentence where the list would be: a
     non-200 is never swapped, and the slot would stay as it was."""
     user = await auth.current_user(request)
     settings = await viewer.settings_for_user(user.user_id)
     hit, media = await _searched_title(request.query_params, settings)
-    context = {"request": request, "options": [], "note": "", "title": "", "ticked": None,
+    context = {"request": request, "options": [], "note": "", "title": "",
                "media": str(media), "endpoint": request.query_params.get("endpoint") or "",
                "ref": {name: request.query_params[name] for name in
                        ("q", "media", "i", "also", "pages") if request.query_params.get(name)}}
@@ -1331,10 +1331,6 @@ async def calendar_search_seasons(request: Request):
             context["note"] = "Couldn't look this title up just now — try again in a moment."
         context["options"] = chosen.options
         context["title"] = hit.title
-        # THE SUGGESTED SEASON ARRIVES TICKED here, where pressing Go with nothing
-        # chosen would otherwise go nowhere; a film's one choice is its release.
-        context["ticked"] = next((option.season for option in chosen.options
-                                  if option.suggested and option.pickable), None)
         if not chosen.options and not context["note"]:
             context["note"] = ("No service here can date this film." if media is Media.MOVIE
                                else "No season of this show has a date yet.")
@@ -1396,9 +1392,12 @@ async def jump_to_a_searched_title(request: Request):
         except ValueError:
             continue
     try:
+        # LANDED WHERE THIS VIEWER'S CALENDAR DRAWS IT, so the jump reads the
+        # card under their own filters and sources (calendar/search.py's `jump`).
         destination = await calendar_search.jump(
             settings, hit, media, seasons, tz=_resolve_viewer_tz(user, settings),
-            now=db.now())
+            now=db.now(), prefs=await auth.get_user_prefs(user.user_id),
+            source_selection=await _viewer_source_selection(request, user))
     except SourceUnavailable as exc:
         logger.info("calendar jump: %s could not be described (%s)", hit.title, exc)
         destination = ""
@@ -1860,7 +1859,8 @@ async def _completion_follow_up(settings, params, season: int | None) -> str:
         "year": route_params.valid_year(params.get("year"), today.year),
         "month": route_params.valid_month(params.get("month"), today.month)})
     return Markup(templates.get_template("_details_follow_up.html").render(
-        query=query, key=key, season=season, airing=_airing_ref(params.get("airing"))))
+        query=query, key=key, season=season, airing=_airing_ref(params.get("airing")),
+        day=_day_ref(params.get("day"))))
 
 
 # What Item.airing_key looks like (a blake2s digest, 8 bytes as hex). It is only
@@ -1872,6 +1872,15 @@ _AIRING_REF = re.compile(r"[0-9a-f]{16}")
 def _airing_ref(value) -> str:
     text = str(value or "")
     return text if _AIRING_REF.fullmatch(text) else ""
+
+
+def _day_ref(value) -> str:
+    """A card's drawn day as the page drew it (YYYY-MM-DD), or "". It goes into
+    a selector too (`#day-…`), so only a real date is let through."""
+    try:
+        return date.fromisoformat(str(value or "")).isoformat()
+    except ValueError:
+        return ""
 
 
 async def _library_actions(request: Request, settings, media: str, params) -> str:
@@ -1972,7 +1981,7 @@ _CARD_KEY = re.compile(r"[A-Za-z0-9._-]+(?::[A-Za-z0-9._-]+){1,2}")
 
 
 async def _marked_answer(request: Request, user, endpoint, year: int, month: int,
-                         item_id: str, *, drawn_as: str = "",
+                         item_id: str, *, drawn_as: str = "", drawn_on: str = "",
                          season: int | None = None) -> Response:
     """What a mark looks like on screen, drawn by the side that decided it.
 
@@ -1996,7 +2005,11 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
     part of an airing's digest: MEASURED, Dexter: Original Sin's card was drawn as
     one airing and redrawn as another, so the answer addressed a card the page did
     not have and the page kept the Trakt-only card until a reload. The one card
-    of that season is sent to replace the card as it was drawn.
+    of that season is sent to replace the card as it was drawn — or, when the
+    service that joined comes first in this viewer's order and dates the episode
+    to another day (`drawn_on` is the day the page drew it on), to that day's
+    grid, with the card on the old day taken off: one episode is one card, on
+    the day the viewer's first service gives (calendar/cache.py's `placed`).
 
     A TITLE THAT IS NOT ON THIS MONTH ANSWERS WITH THE COUNTS ALONE. That is not
     an error: the mark is a statement about the show and it has been stored
@@ -2063,10 +2076,17 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
              for group in grouped if group["date"] in days]
     logo_networks = await _logo_networks(settings, items)
     completed = [item for item in items if season is None or item.season == season]
-    replaces = ({completed[0].airing_key: drawn_as}
-                if drawn_as and len(completed) == 1 else {})
+    replaces: dict = {}
+    moved = None
+    if drawn_as and len(completed) == 1:
+        if drawn_on and completed[0].air_date != drawn_on:
+            moved = completed[0]
+            items = [item for item in items if item is not moved]
+        else:
+            replaces = {completed[0].airing_key: drawn_as}
     return templates.TemplateResponse(request, "_marked_cards.html", {
         "chips": chips, "gone": gone, "replaces": replaces,
+        "moved": moved, "moved_from": drawn_as if moved is not None else "",
         "request": request, "items": items,
         "not_watching": marked, "new_ids": meta.get("new_ids") or set(),
         "can_filter": True, "badge_modes": vocab.BadgeModes(prefs),
@@ -2123,11 +2143,12 @@ async def complete_card(request: Request):
         return Response(status_code=200)
     stored = await calendar_search.complete_from_other_service(
         settings, source=source, endpoint_key=endpoint.key, title_key=key,
-        season=season, tz=_resolve_viewer_tz(user, settings), now=db.now())
+        season=season, now=db.now())
     if not stored:
         return Response(status_code=200)
     return await _marked_answer(request, user, endpoint, year, month, key,
-                                drawn_as=_airing_ref(payload.get("airing")), season=season)
+                                drawn_as=_airing_ref(payload.get("airing")),
+                                drawn_on=_day_ref(payload.get("day")), season=season)
 
 
 @guard.post("/api/state", AuthLevel.CALENDAR_APPROVED)

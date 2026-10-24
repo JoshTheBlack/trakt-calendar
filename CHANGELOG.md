@@ -11,10 +11,15 @@ All notable changes to this project are documented here. Format loosely follows 
 - 🎬 **TMDB describes titles first.** Wherever a title has a TMDB id, its details panel, its tracker season totals and its pictures come from TMDB, with Trakt and Simkl answering what TMDB doesn't know. TMDB's videos join the menu, and its page is one of the panel's outbound buttons. If you've set your own service order on your Account page, it still applies.
 - 🌐 **TMDB language and region settings**: the language TMDB describes titles in (default en-US), and the country whose film releases count (default US).
 - 🔍 **Every search box searches TMDB, and all three work the same way.** The calendar's Find a title, the tracker's Add show and Add film, and the rankings board ask TMDB when you press Enter, twenty results at a time. **Also search Trakt**, **Also search Simkl** and **Also search Simkl Anime** add a service you've linked, searched with your own account, its results listed below the others; once added, each has its own **More from …** button, like **More from TMDB**. Without a TMDB token, the box says TMDB isn't configured instead of quietly searching something else.
-- ☑️ **One season picker everywhere.** Opening a show from any search gives the same checklist: each season with its episode count, the suggested one marked, and the ones you already have greyed. On the tracker you can now add several seasons at once (the "watched this before" question is asked for each season that needs it). On a rankings board, clicking a show opens its checklist instead of adding it straight away, with **Whole show** as the first choice, so you can add the show, some of its seasons, or both in one go. Films still add with one click, and dragging a result into a tier still adds the whole title. On the calendar, a season your filters hide says so, a season already on your calendar links straight to its day, and **Go** takes you to the month of the season you ticked.
+- ☑️ **One season picker everywhere.** Opening a show from any search gives the same checklist: each season with its episode count, the suggested one marked, and the ones you already have greyed. On the tracker you can now add several seasons at once (the "watched this before" question is asked for each season that needs it). On a rankings board, clicking a show opens its checklist instead of adding it straight away, with **Whole show** as the first choice, so you can add the show, some of its seasons, or both in one go. Films still add with one click, and dragging a result into a tier still adds the whole title. On the calendar, every season is one press: a season already on your calendar takes you to its card, any other is added and takes you to its card, on the day your calendar draws it, and a season your filters hide says so.
 - ➕ **A show no tracking service lists can still go on the tracker**, described by TMDB. Its row is marked **untracked**, because nothing will count what you watch of it; the mark goes once Trakt or Simkl turns out to list it.
 
+### Changed
+- 📅 **Your first service decides when an episode airs.** Each calendar card shows the date and time from the first service in your order on your Account page, and sits on that day. Change the order and the card moves to the new service's day. When the services disagree, the card shows each one's date and time side by side. A share link uses its owner's order.
+
 ### Fixed
+- 📅 **One episode is one card.** When Trakt and Simkl gave an episode or film different dates, it could show up twice: Yellowjackets' season 4 premiere appeared on both Friday and Sunday. Now their listings count as one card whenever they fall in the same month, or within a week of each other across the end of a month. Listings further apart than that are usually a numbering mix-up, and still show separately.
+- ⚠️ **No more "some calendar data couldn't be loaded" after a routine refresh.** It appeared when one service had nothing new and the other did.
 - 🎬 **A film only Simkl knows can be found and jumped to from the calendar search.** It used to come back with nowhere to land.
 - 🔗 **A custom share name saved after clearing one works.** Its `/c/` link used to answer "not found" from the start.
 - 🔓 **An administrator can unlink a Simkl account** from the admin page, and the Simkl token is revoked like Trakt's.
@@ -25,11 +30,11 @@ All notable changes to this project are documented here. Format loosely follows 
 - 🐢 **Filling an empty logo cache no longer slows the whole app.** Logos are built eight at a time and their image work runs off the request path; a month's worth now fills in seconds.
 - 🍞 **Admin actions confirm with a toast**, like the rest of the app; a refusal still appears beside the section it came from.
 - 🔗 **A share page keeps a title's details through a passing TMDB "not found".** One such answer used to erase the copy a share page reads from.
-- ⚠️ **No more "some calendar data couldn't be loaded" after a routine refresh.** It appeared when one service had nothing new and the other did.
 
 ### Under the hood
 - ⏱️ **The test suite runs in about two minutes instead of eleven**: it uses every CPU core and stops re-reading the certificate store for every test. Code nothing used any more is gone, and the code no test reached now has tests.
 - 🔒 **Pressing Go in the calendar search is a form post, like every other change.** It writes the season into the shared calendar, and it used to do that through an ordinary link.
+- ⚡ **Calendar months open about a fifth faster**, because each month reads its stored episodes once instead of week by week.
 
 ## 🏷️ [1.2.5] - 2026-09-30
 

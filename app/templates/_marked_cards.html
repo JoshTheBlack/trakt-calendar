@@ -26,9 +26,18 @@
    of it means something changed since — its details arriving and naming a
    country the viewer filters out — and the page is told what a reload shows.
 
+   A CARD A JOINING SERVICE MOVED TO ANOTHER DAY (`moved`, complete_card's
+   answer only) is appended to that day's grid and the copy the page drew on the
+   old day (`moved_from`, its airing) is deleted — the service that joined came
+   first in this viewer's order, so the card is now drawn on its day. A day the
+   page is not holding swaps nothing, as above, and draws the card when fetched.
+
    Context: `items` (every airing of the marked title on this month, in the
-   viewer's own reading of it), `gone`, `chips` and `stats`. #}
+   viewer's own reading of it), `gone`, `chips`, `stats`, and `moved` /
+   `moved_from`. #}
 {% for item in items %}{% with oob = true %}{% include "_card.html" %}{% endwith %}{% endfor %}
+{% if moved %}<div hx-swap-oob="delete:.card[data-airing='{{ moved_from }}']"></div>
+{% with item = moved, oob_into = '#day-' ~ moved.air_date ~ '>.grid' %}{% include "_card.html" %}{% endwith %}{% endif %}
 {% if gone %}<div hx-swap-oob="delete:.card[data-id='{{ gone }}']"></div>{% endif %}
 {% for chip in chips %}{% with oob = true %}{% include "_day_chip.html" %}{% endwith %}{% endfor %}
 {{ watch_counts.counts(stats, oob=true) }}

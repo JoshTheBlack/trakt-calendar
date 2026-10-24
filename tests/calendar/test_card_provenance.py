@@ -262,6 +262,47 @@ class TwoNumbersRatherThanAnAverageTests(unittest.TestCase):
         self.assertNotIn('class="chip dual" data-field="network"', self.html)
 
 
+class WhenTheServicesDisagreeAboutTheDayTests(unittest.TestCase):
+    """The card sits on ONE service's day — the viewer's first — and says what
+    the others gave, under each one's mark, wherever they differ for this
+    viewer (Item.air_choices). Yellowjackets S04E01, Simkl's 21 November 01:00
+    UTC against Trakt's 23 November 02:00 UTC, read in UTC."""
+
+    def _chip(self, html: str) -> str | None:
+        found = re.search(r'<span class="chip dual day" data-field="airing".*?</span>\s*</span>',
+                          html, re.S)
+        return found.group(0) if found else None
+
+    def test_it_takes_the_day_chips_place(self):
+        """It names the days itself, so the card does not also draw "📆 Monday"."""
+        html = _card_html(_record(Source.TRAKT, air_ts=1795399200.0),
+                          _record(Source.SIMKL, air_ts=1795222800.0))
+        self.assertNotIn('<span class="chip day">', html)
+        self.assertIn('<span class="chip day">', _card_html(_record(Source.TRAKT)))
+
+    def test_both_days_are_on_the_card_under_their_services_marks(self):
+        html = _card_html(_record(Source.TRAKT, air_ts=1795399200.0),
+                          _record(Source.SIMKL, air_ts=1795222800.0))
+        chip = self._chip(html)
+        self.assertIn("Mon 23 Nov 02:00", chip)
+        self.assertIn("Sat 21 Nov 01:00", chip)
+        self.assertIn("trakt-circlemark-dark.svg", chip)
+        self.assertIn("simkllogo.svg", chip)
+
+    def test_services_that_agree_draw_no_chip(self):
+        self.assertIsNone(self._chip(_card_html(_record(Source.TRAKT), _record(Source.SIMKL))))
+
+    def test_a_date_with_no_time_agrees_with_a_time_on_that_date(self):
+        """TMDB's bare date and Trakt's evening on it are one claim, said at two
+        resolutions — nothing to choose between."""
+        html = _card_html(_record(Source.TRAKT, air_ts=AIR_TS + 3600),
+                          _record(Source.SIMKL, air_ts=AIR_TS - AIR_TS % 86400, date_only=True))
+        self.assertIsNone(self._chip(html))
+
+    def test_a_card_only_one_service_described_draws_none(self):
+        self.assertIsNone(self._chip(_card_html(_record(Source.TRAKT))))
+
+
 class AFlipIsAViewFlipAndNothingElseTests(unittest.TestCase):
     """Choosing a service mark changes one value on one card, on screen, until the
     page is left. It is not a preference, and the reason is not tidiness: whose

@@ -547,7 +547,7 @@ class OpeningAOneServiceCardAsksTheOtherTests(AppTestCase):
 
     def setUp(self):
         super().setUp()
-        user_id = self.make_user("viewer", calendar_approved=True)
+        self.viewer_id = user_id = self.make_user("viewer", calendar_approved=True)
         # Simkl's own search/redirect now require THIS viewer's own token (Simkl
         # AUTH V2 refuses them without one) — an instance client id alone is no longer enough to
         # offer "ask Simkl", so the ask this class is about needs a real link.
@@ -617,7 +617,7 @@ class OpeningAOneServiceCardAsksTheOtherTests(AppTestCase):
         self.assertIn("simkl=4242", resp.text, "the redrawn card does not carry Simkl's id")
         self.assertEqual(again.text, "", "a card two services draw was asked about again")
 
-    def _complete(self, body):
+    def _complete(self, body, *, simkl_day=date(2026, 7, 8)):
         from types import SimpleNamespace
         from app.providers.base import Record, Source
 
@@ -631,7 +631,8 @@ class OpeningAOneServiceCardAsksTheOtherTests(AppTestCase):
             return [Record(source=Source.SIMKL, media=media, id=str(source_id),
                            ids={"simkl": str(source_id), "tmdb": 777}, detail_url="",
                            title="The Elusive Samurai",
-                           air_ts=datetime(2026, 7, 8, tzinfo=timezone.utc).timestamp(),
+                           air_ts=datetime(simkl_day.year, simkl_day.month, simkl_day.day,
+                                           tzinfo=timezone.utc).timestamp(),
                            date_only=True, season=season, episode_number=1,
                            episode_label="S01E01", enriched=True)
                     for season, _when in moments]
@@ -655,6 +656,29 @@ class OpeningAOneServiceCardAsksTheOtherTests(AppTestCase):
         drawn = "0123456789abcdef"
         self.assertIn(f"hx-swap-oob=\"outerHTML:.card[data-airing='{drawn}']\"",
                       self._complete({"airing": drawn}))
+
+    def test_a_joining_service_that_moves_the_card_moves_it_to_its_day(self):
+        """ONE EPISODE IS ONE CARD, ON THE DAY THE VIEWER'S FIRST SERVICE GIVES.
+        This viewer puts Simkl first, and Simkl dates the premiere two days after
+        Trakt did: the card leaves the 8th and is appended to the 10th's grid —
+        a selector with no space in it, since htmx splits a swap spec there."""
+        from app.sources import prefs as source_prefs
+
+        asyncio.run(source_prefs.save(source_prefs.SourcePrefs(
+            user_id=self.viewer_id, metadata_order=["simkl", "trakt"])))
+        drawn = "0123456789abcdef"
+        answer = self._complete({"airing": drawn, "day": "2026-07-08"},
+                                simkl_day=date(2026, 7, 10))
+        self.assertIn(f"hx-swap-oob=\"delete:.card[data-airing='{drawn}']\"", answer)
+        # `>` is escaped in the attribute, and the browser hands htmx it decoded.
+        self.assertIn('hx-swap-oob="beforeend:#day-2026-07-10&gt;.grid"', answer)
+        self.assertNotIn("outerHTML:.card[data-airing=", answer)
+
+    def test_a_card_drawn_on_the_same_day_is_replaced_in_place(self):
+        drawn = "0123456789abcdef"
+        answer = self._complete({"airing": drawn, "day": "2026-07-08"})
+        self.assertIn(f"hx-swap-oob=\"outerHTML:.card[data-airing='{drawn}']\"", answer)
+        self.assertNotIn("beforeend:", answer)
 
     def test_an_airing_reference_is_only_ever_a_digest(self):
         """It goes into a selector, so anything but the digest's own shape is

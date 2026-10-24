@@ -1289,7 +1289,7 @@ def _forget_drain_task(task: asyncio.Task) -> None:
 def schedule_drain(settings) -> None:
     """Ask the drain to run soon rather than waiting for the next heartbeat
     tick. Call this when a window FILL stores new records (see
-    app/calendar/cache.py's `load_window`) — never from a read: the read path
+    app/calendar/cache.py's `ensure_window`) — never from a read: the read path
     already promises no outbound call (see the module docstring), and firing
     a drain from a read would put that promise in the same
     function it is meant to hold for.

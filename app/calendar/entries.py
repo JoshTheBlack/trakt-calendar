@@ -540,13 +540,83 @@ async def read_span(endpoint_key: str, span_start: date, span_end: date
     """
     first, last = span_start.isoformat(), span_end.isoformat()
     rows = await db.fetch_all(_READ_SQL, (endpoint_key, first, last))
+    answered, asked, stored_at = await span_coverage(endpoint_key, span_start)
+    return _in_fetch_order(rows), answered, asked, stored_at
+
+
+async def span_coverage(endpoint_key: str, span_start: date
+                        ) -> tuple[tuple[str, ...], tuple[str, ...], int | None]:
+    """(who answered, who was asked, when it was stored) for the span beginning
+    `span_start` — `read_span`'s coverage half, with no airing read at all.
+
+    FOR THE READ PATH, WHICH NO LONGER GROUPS A SPAN ON ITS OWN. Whether a span
+    is fresh, partial or missing is a question about coverage; its airings are
+    read once for the whole range a reader asked about (`read_span_whole`), so
+    reading them here as well would read every row twice.
+    """
     cover = await db.fetch_all(
         "SELECT source, asked, answered, stored_at FROM calendar_coverage "
-        "WHERE endpoint = ? AND span_start = ?", (endpoint_key, first))
+        "WHERE endpoint = ? AND span_start = ?", (endpoint_key, span_start.isoformat()))
     asked = tuple(str(r["source"]) for r in cover if r["asked"])
     answered = tuple(str(r["source"]) for r in cover if r["answered"])
     stored_at = min((int(r["stored_at"]) for r in cover), default=None)
-    return _in_fetch_order(rows), answered, asked, stored_at
+    return answered, asked, stored_at
+
+
+# EVERY OTHER STORED LISTING OF THE EPISODES A RANGE HOLDS, at any date. One
+# episode is ONE card whichever services list it, and whether two services'
+# listings are the same card is decided by comparing their DATES — so a listing
+# just outside the range, or weeks outside it within the same month, can decide
+# where a card inside it is drawn. Reading the range widened by that reach would
+# read a day's whole month, and a month's neighbours too; this reads exactly the
+# listings that can matter, which is every listing of each episode the range
+# names (app/calendar/cache.py's `join_listings` is the rule that compares them).
+#
+# THE EPISODE IS THE COORDINATE: (title_key, season, episode_number) for a show,
+# the title alone for a film. A show listing with no full coordinate is not an
+# episode this can name, and its own day is all that ever joins it to one
+# (cache.match_keys), so it never needs a listing from elsewhere.
+#
+# BY TITLE, THEN BY COORDINATE, AND THE ORDER IS THE COST. The only index that
+# reaches an airing by what it IS rather than when is `ix_calendar_airings_key`,
+# on the title alone. Joining each of a month's five thousand coordinates to it
+# visits every row of its title once PER COORDINATE — MEASURED on a copy of a
+# real instance, a plan that does that took 39 seconds for one `shows` month.
+# Materialising the distinct titles first visits each title's rows once and
+# tests the coordinate on the row in hand: 33ms for that month, 79ms for the
+# busiest one held, 16ms for a day — beside 206-384ms for the range's own rows.
+_HELD_EPISODES = f"""
+WITH held AS MATERIALIZED (
+    SELECT DISTINCT title_key, season, episode_number FROM calendar_airings
+    WHERE endpoint = :endpoint AND air_date >= :first AND air_date < :last
+      AND (media = 'movie' OR (season != {UNSTATED} AND episode_number != {UNSTATED}))),
+held_titles AS MATERIALIZED (SELECT DISTINCT title_key FROM held)
+"""
+_OTHER_LISTINGS_SQL = _HELD_EPISODES + _READ_SQL.replace(
+    "FROM calendar_airings a",
+    "FROM held_titles k CROSS JOIN calendar_airings a ON a.title_key = k.title_key",
+).replace(
+    "WHERE a.endpoint = ? AND a.air_date >= ? AND a.air_date < ?",
+    """WHERE +a.endpoint = :endpoint AND (a.air_date < :first OR a.air_date >= :last)
+  AND (a.title_key, a.season, a.episode_number) IN
+      (SELECT title_key, season, episode_number FROM held)""",
+)
+
+
+async def read_span_whole(endpoint_key: str, span_start: date, span_end: date
+                          ) -> list[Record]:
+    """Every stored airing for `endpoint_key` in [span_start, span_end), and every
+    other stored listing, at any date, of each episode those airings name — the
+    rows a reader of that range needs to say which cards it draws, and where.
+
+    No coverage is read: whether each span inside the range was filled is the
+    caller's question (`span_coverage`), asked once per span before this.
+    """
+    first, last = span_start.isoformat(), span_end.isoformat()
+    inside = await db.fetch_all(_READ_SQL, (endpoint_key, first, last))
+    outside = await db.fetch_all(_OTHER_LISTINGS_SQL,
+                                 {"endpoint": endpoint_key, "first": first, "last": last})
+    return _in_fetch_order([*inside, *outside])
 
 
 def _in_fetch_order(rows) -> list[Record]:

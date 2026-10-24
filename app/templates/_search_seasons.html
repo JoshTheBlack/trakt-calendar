@@ -2,22 +2,21 @@
 {#- One calendar search result's season picker (routes.calendar_search_seasons):
     the app's one season checklist, its choices calendar/search.py's `picker`.
 
-    SUBMITTING IT IS THE JUMP: a json-enc POST to /calendar/jump naming the result
-    by the reference it was drawn with and the seasons ticked — a POST because
-    following it WRITES the ticked seasons' airings into the shared calendar. The
-    route answers with `HX-Redirect` to the card's month, a navigation of the
-    whole window, so the address bar ends on the calendar, Back returns here and
-    the browser itself scrolls to the card's `#jump-target` (see the route for why
-    not `HX-Location`). Not boosted, and swapping nothing: the answer is the
-    navigation.
+    EVERY SEASON IS ONE PRESS (`one_press`): one the calendar already draws is a
+    link to its card, and pressing any other is the jump — a json-enc POST to
+    /calendar/jump naming the result by the reference it was drawn with and that
+    season, a POST because following it WRITES the season's airing into the
+    shared calendar. The route answers with `HX-Redirect` to the card, a
+    navigation of the whole window, so the address bar ends on the calendar, Back
+    returns here and the browser itself scrolls to the card's `#jump-target` (see
+    the route for why not `HX-Location`). Not boosted, and swapping nothing: the
+    answer is the navigation.
 
-    Context: `options`, `ref`, `endpoint`, `title`, `media`, `note`, `ticked`
-    (the suggested season, or None — a film's one choice is None). -#}
+    Context: `options`, `ref`, `endpoint`, `title`, `media`, `note`. -#}
 {%- if options %}
 {{ seasons.checklist(options, {"hx-boost": "false", "hx-post": "/calendar/jump",
                                "hx-json-enc": "", "hx-swap": "none"},
-                     ref=ref, hidden={"endpoint": endpoint}, ticked=ticked,
-                     button='Go to this season' if media == 'show' else 'Go to its release',
+                     ref=ref, hidden={"endpoint": endpoint}, one_press=true,
                      heading=('Seasons of ' if media == 'show' else '') ~ title) }}
 {%- endif %}
 {%- if note %}<p class="search-hint">{{ note }}</p>{% endif %}

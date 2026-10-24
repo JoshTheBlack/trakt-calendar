@@ -914,7 +914,7 @@ class AskingTheServiceACardIsMissingTests(SearchTestCase):
                 return source, False
             return source, await calendar_search.complete_from_other_service(
                 self.settings, source=source, endpoint_key=endpoint,
-                title_key=self.KEY, season=1, tz=self.tz, now=1000)
+                title_key=self.KEY, season=1, now=1000)
 
     async def test_a_one_service_premiere_gains_the_others_airing(self):
         source, stored = await self._ask({"simkl": "4242", "tmdb": 777})
@@ -1017,7 +1017,7 @@ class AServiceWritesOnlyACalendarItPublishesTests(SearchTestCase):
         with patch("app.providers.get", return_value=catalogue_only):
             landing = await calendar_search.fill_one_gap(
                 self.settings, source=Source.TMDB, source_id="777", media=Media.SHOW,
-                season=1, endpoint_key=SHOWS, tz=self.tz, now=db.now())
+                season=1, endpoint_key=SHOWS, now=db.now())
         self.assertFalse(landing)
         self.assertEqual(await calendar_entries.sources_airing(SHOWS, "show:tmdb:777", 1),
                          set())

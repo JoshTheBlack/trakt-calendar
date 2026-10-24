@@ -59,6 +59,18 @@ class KeyCoversEveryNarrowingTests(unittest.TestCase):
         # accounts reading one stored window legitimately get different answers.
         self.assertNotEqual(_key(self.settings), _key(self.settings, prefs="simkl-first"))
 
+    def test_a_viewers_service_order_moves_it(self):
+        """THE ORDER DECIDES WHICH DAY A CARD IS DRAWN ON — the first service in
+        it describes the card, date included (resolve.py's `_resolve_airing`) —
+        so two viewers differing only in order must never share a span: one
+        would be handed the other's days."""
+        from app.sources import prefs as source_prefs
+
+        trakt_first = source_prefs.SourcePrefs(user_id=1, metadata_order=["trakt", "simkl"])
+        simkl_first = source_prefs.SourcePrefs(user_id=1, metadata_order=["simkl", "trakt"])
+        self.assertNotEqual(_key(self.settings, prefs=trakt_first),
+                            _key(self.settings, prefs=simkl_first))
+
     def test_the_span_and_the_timezone_move_it(self):
         self.assertNotEqual(_key(self.settings), _key(self.settings, tz="America/New_York"))
         self.assertNotEqual(_key(self.settings), _key(self.settings, start_date=date(2026, 9, 2)))

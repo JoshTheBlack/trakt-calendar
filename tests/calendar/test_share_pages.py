@@ -1132,3 +1132,55 @@ class SharePageHasNoSeasonPickerTests(_ShareDetailsTestCase):
         with self._no_network():
             self.assertRefused(self._details("media=show&trakt=999&season=2"))
 
+
+
+class ASharePageDrawsEachEpisodeOnTheOwnersDayTests(SharePageTestCase):
+    """One episode two services date days apart is ONE card on a share page too,
+    on the day the OWNER's first service gives — the same placement the owner's
+    own calendar makes, read from the same rows (calendar/cache.py's `placed`).
+
+    Yellowjackets S04E01 as the dev instance holds it: Simkl's Friday evening in
+    New York (21 November 01:00 UTC) and Trakt's Sunday evening (23 November
+    02:00 UTC, a Monday — the other storage window)."""
+
+    def setUp(self):
+        super().setUp()
+        from app.providers.base import Record
+        from app.sources import prefs as source_prefs
+
+        save_settings(Settings(public_base_url=ORIGIN))
+        self.user_id = self._make_user("yjowner", calendar_approved=True)
+        self.source_prefs = source_prefs
+        self.sign_in_as(self.user_id)
+        self.token = asyncio.run(share_links.get_or_create(self.user_id))["token"]
+        self.client.cookies.clear()
+        for source, air_ts in ((Source.SIMKL, 1795222800.0), (Source.TRAKT, 1795399200.0)):
+            record = Record(source=source, media=Media.SHOW, id=f"{source}-yj",
+                            ids={"tmdb": 117488, str(source): f"{source}-yj"},
+                            detail_url="", title="Yellowjackets", air_ts=air_ts,
+                            season=4, episode_number=1, episode_label="S04E01")
+            start = calendar_cache.window_start(calendar_cache.record_utc_date(record))
+            asyncio.run(calendar_cache.store_window(
+                "shows", start, [record], 10**9, db.now(),
+                sources=[str(source)], asked=[str(source)]))
+        calendar_cache._forget_spans()
+
+    def _days_drawing_it(self) -> list[str]:
+        """The headings of the share page's day blocks that draw the episode."""
+        resp = self.client.get(
+            f"/s/{self.token}?year=2026&month=11&endpoint=shows&tz=America/New_York")
+        self.assertEqual(resp.status_code, 200)
+        blocks = re.findall(r'<section class="day-block">(.*?)</section>', resp.text, re.S)
+        return [re.search(r'class="day-title">📅 ([^<]+)<', block).group(1)
+                for block in blocks if "Yellowjackets" in block]
+
+    def _owner_prefers(self, *order):
+        asyncio.run(self.source_prefs.save(self.source_prefs.SourcePrefs(
+            user_id=self.user_id, metadata_order=list(order))))
+        calendar_cache._forget_spans()
+
+    def test_the_owners_order_decides_the_one_day_it_is_drawn_on(self):
+        self._owner_prefers("trakt", "simkl")
+        self.assertEqual(self._days_drawing_it(), ["Sunday, 22 November"])
+        self._owner_prefers("simkl", "trakt")
+        self.assertEqual(self._days_drawing_it(), ["Friday, 20 November"])
