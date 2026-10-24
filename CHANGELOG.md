@@ -28,6 +28,7 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ### Under the hood
 - ⏱️ **The test suite runs in about two minutes instead of eleven**: it uses every CPU core and stops re-reading the certificate store for every test. Code nothing used any more is gone, and the code no test reached now has tests.
+- 🔒 **Pressing Go in the calendar search is a form post, like every other change.** It writes the season into the shared calendar, and it used to do that through an ordinary link.
 
 ## 🏷️ [1.2.5] - 2026-09-30
 

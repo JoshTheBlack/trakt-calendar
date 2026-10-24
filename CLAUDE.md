@@ -534,8 +534,9 @@ control a GET of the surface's live route in the same queue.
 
 **ONE SEASON PICKER, AND ONE RULE FOR WHAT IT OFFERS.** `templates/_season_checklist.html`
 is the checklist the tracker's add, the rankings board's add and the calendar's jump
-all draw — a surface decides only what submitting it does (a json-enc post, or the
-calendar's plain GET to `/calendar/jump`) — and `app/providers/season_choices.py`
+all draw — a surface decides only what submitting it does (always a json-enc post;
+the calendar's to `/calendar/jump` WRITES the ticked seasons' airings and is answered
+with `HX-Redirect` to the card) — and `app/providers/season_choices.py`
 decides what it offers, greys, refuses and suggests, with each surface's own words for
 "already here". Ticked seasons post as one flat field each, `season:<n>`
 (`season_choices.ticked`). A tracker add of several seasons asks the re-watch question

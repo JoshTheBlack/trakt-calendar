@@ -1720,18 +1720,18 @@ class FollowingASearchResultWritesOneAiringTests(CalendarRouteTestCase):
     The picker is the act that names what is written — and calendar/search.py's
     `jump` (tested there) writes exactly that.
 
-    THE ADDRESS NAMES A RESULT BY REFERENCE: the query, the medium, the search's
+    THE BODY NAMES A RESULT BY REFERENCE: the query, the medium, the search's
     own reference and its place, and the seasons ticked. Nothing about the title.
     """
 
-    JUMP = ("/calendar/jump?q=half%20man&media=show&i=0&also=trakt"
-            "&season:1=1&season:3=1&endpoint=shows")
+    JUMP = {"q": "half man", "media": "show", "i": "0", "also": "trakt",
+            "season:1": "1", "season:3": "1", "endpoint": "shows"}
 
     def setUp(self):
         super().setUp()
         self.sign_in_as(self._make_user("jumper2"))
 
-    def _go(self, url=None, *, hit="found", destination="/calendar?year=2026&month=4"):
+    def _go(self, body=None, *, hit="found", destination="/calendar?year=2026&month=4"):
         from app.providers import title_search
 
         self.named = []
@@ -1747,35 +1747,55 @@ class FollowingASearchResultWritesOneAiringTests(CalendarRouteTestCase):
 
         with patch.object(title_search, "resolve_hit", _resolve), \
              patch("app.calendar.search.jump", _jump):
-            return self.client.get(url or self.JUMP, follow_redirects=False)
+            return self.client.post("/calendar/jump", json=body or self.JUMP,
+                                    follow_redirects=False)
 
     def test_it_re_reads_the_named_result_and_jumps_to_what_was_ticked(self):
         resp = self._go()
-        self.assertEqual(resp.status_code, 303)
-        self.assertEqual(resp.headers["location"], "/calendar?year=2026&month=4")
+        self.assertEqual(resp.status_code, 204)
+        self.assertEqual(resp.headers["hx-redirect"], "/calendar?year=2026&month=4")
         (media, query, index, ref), = self.named
         self.assertEqual((str(media), query, index, ref.also), ("show", "half man", "0", ("trakt",)))
         self.assertEqual(self.jumped, [(self.jumped[0][0], [1, 3])])
 
+    def test_a_get_writes_nothing(self):
+        """The jump WRITES airings into the calendar every viewer shares, so an
+        address alone — a prefetch, a crawler, a reload — must not reach it."""
+        from urllib.parse import urlencode
+
+        with patch("app.calendar.search.jump",
+                   AsyncMock(side_effect=AssertionError("a GET wrote"))):
+            resp = self.client.get("/calendar/jump?" + urlencode(self.JUMP),
+                                   follow_redirects=False)
+        self.assertEqual(resp.status_code, 405)
+
+    def test_a_form_encoded_post_is_refused_before_it_is_read(self):
+        """The request-shape guard every write in this app stands behind."""
+        with patch("app.calendar.search.jump",
+                   AsyncMock(side_effect=AssertionError("a form post wrote"))):
+            resp = self.client.post("/calendar/jump", data=self.JUMP)
+        self.assertGreaterEqual(resp.status_code, 400)
+
     def test_a_films_one_choice_is_its_release(self):
-        self._go("/calendar/jump?q=heat&media=movie&i=0&season:=1&endpoint=movies")
+        self._go({"q": "heat", "media": "movie", "i": "0", "season:": "1",
+                  "endpoint": "movies"})
         self.assertEqual(self.jumped[0][1], [None])
 
     def test_a_result_the_store_no_longer_holds_opens_the_calendar_and_writes_nothing(self):
         resp = self._go(hit=None)
-        self.assertEqual(resp.status_code, 303)
-        self.assertEqual(resp.headers["location"], "/calendar?endpoint=shows")
+        self.assertEqual(resp.status_code, 204)
+        self.assertEqual(resp.headers["hx-redirect"], "/calendar?endpoint=shows")
         self.assertEqual(self.jumped, [])
 
     def test_a_jump_with_nowhere_to_land_still_opens_the_calendar(self):
         """The month is worth opening either way; with nothing ticked there is no
         month, so the reader stays on the calendar they were searching."""
         resp = self._go(destination="")
-        self.assertEqual(resp.headers["location"], "/calendar?endpoint=shows")
+        self.assertEqual(resp.headers["hx-redirect"], "/calendar?endpoint=shows")
 
     def test_a_medium_this_app_does_not_know_is_not_an_error(self):
-        resp = self._go("/calendar/jump?q=x&media=album&i=0&endpoint=shows")
-        self.assertEqual(resp.status_code, 303)
+        resp = self._go({"q": "x", "media": "album", "i": "0", "endpoint": "shows"})
+        self.assertEqual(resp.status_code, 204)
         self.assertEqual(self.jumped, [])
 
 
@@ -1806,8 +1826,12 @@ class ASearchResultsSeasonPickerTests(CalendarRouteTestCase):
         from app.providers.season_choices import SeasonOption
         html = self._get(options=[SeasonOption(1), SeasonOption(2, suggested=True),
                                   SeasonOption(3, blocked="your filters hide it")])
-        self.assertIn('action="/calendar/jump#jump-target"', html)
-        self.assertIn('method="get"', html)
+        # A json-enc POST, because following it writes; the answer is the
+        # navigation, so nothing is swapped.
+        self.assertIn('hx-post="/calendar/jump"', html)
+        self.assertIn('hx-json-enc=""', html)
+        self.assertIn('hx-swap="none"', html)
+        self.assertNotIn('action="/calendar/jump', html)
         for field in ('name="q" value="half man"', 'name="i" value="0"',
                       'name="media" value="show"', 'name="endpoint" value="shows"'):
             self.assertIn(field, html)

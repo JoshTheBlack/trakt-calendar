@@ -1283,11 +1283,13 @@ async def calendar_day(request: Request):
     )
 
 
-async def _searched_title(request: Request, settings):
+async def _searched_title(params, settings):
     """The catalogue result a picker or a jump names — by the query, the
     medium, the search's own reference and its place in that answer — re-read
-    from the stored search, or None. The medium is one the box searched."""
-    params = request.query_params
+    from the stored search, or None. The medium is one the box searched.
+
+    `params` is whichever carries the reference: the picker's query string, or
+    the jump's posted body, which names the result the same way."""
     try:
         media = Media(params.get("media") or "show")
     except ValueError:
@@ -1310,7 +1312,7 @@ async def calendar_search_seasons(request: Request):
     non-200 is never swapped, and the slot would stay as it was."""
     user = await auth.current_user(request)
     settings = await viewer.settings_for_user(user.user_id)
-    hit, media = await _searched_title(request, settings)
+    hit, media = await _searched_title(request.query_params, settings)
     context = {"request": request, "options": [], "note": "", "title": "", "ticked": None,
                "media": str(media), "endpoint": request.query_params.get("endpoint") or "",
                "ref": {name: request.query_params[name] for name in
@@ -1339,41 +1341,56 @@ async def calendar_search_seasons(request: Request):
     return templates.TemplateResponse(request, "_search_seasons.html", context)
 
 
-@guard.get("/calendar/jump", AuthLevel.CALENDAR_APPROVED)
+@guard.post("/calendar/jump", AuthLevel.CALENDAR_APPROVED)
 async def jump_to_a_searched_title(request: Request):
     """Follow a catalogue result's picker: write the airings its ticked seasons
     name (a film: its release), then send the reader to the first one's month.
 
-    A REDIRECT AND NOT A PAGE, so the address bar ends up on the calendar itself.
-    Back then returns to wherever the reader was rather than replaying a write,
-    and a reload of the month is an ordinary month load.
+    A POST, BECAUSE IT WRITES. It was a GET, which put a write to the calendar
+    every viewer shares behind an address — one a prefetch, a crawler or a
+    reload could follow — and outside the request-shape guard that every other
+    write in this app stands behind. The checklist posts itself with json-enc,
+    so the body is the form's own fields and nothing else.
+
+    ANSWERED WITH `HX-Redirect`, a navigation of the whole window, so the
+    address bar ends up on the calendar itself, Back returns to wherever the
+    reader was rather than replaying a write, and a reload of the month is an
+    ordinary month load. NOT `HX-Location`: the vendored htmx follows that with
+    a fetch and never reads the `#jump-target` fragment off the path it was
+    given, so the page arrived at the top of the month instead of on the card.
+    A whole-window navigation keeps the fragment, and the browser scrolls to the
+    card the route shipped inline (`_month_context`'s anchor) on its own. 204
+    rather than an empty 200, as everywhere this app answers with a navigation:
+    htmx acts on the header before it decides anything about swapping.
 
     IT WRITES WHAT WAS TICKED AND NOTHING ELSE. The search offers everything that
     matched — sixteen rows for a franchise — and writing all of them would turn
     one act of curiosity into sixteen decisions about a calendar everybody on
     this instance shares. The picker is the act that names them.
 
-    THE QUERY NAMES A RESULT BY REFERENCE, AND NOTHING ABOUT THE TITLE IS
+    THE BODY NAMES A RESULT BY REFERENCE, AND NOTHING ABOUT THE TITLE IS
     BELIEVED. The result is re-read from the stored search; its title, dates,
     network, poster and ids come back from the services, and each airing is
     written by a service that lists the calendar (calendar/search.py's `jump`) —
-    so this link cannot be hand-edited into a calendar row of somebody's choosing.
+    so this request cannot be hand-made into a calendar row of somebody's
+    choosing.
 
-    A WRITE THAT COULD NOT HAPPEN STILL REDIRECTS. The month is worth opening
+    A WRITE THAT COULD NOT HAPPEN STILL NAVIGATES. The month is worth opening
     either way; a result the store no longer holds opens the calendar the reader
     was on.
     """
     user = await auth.current_user(request)
     settings = await viewer.settings_for_user(user.user_id)
-    endpoint = get_endpoint(request.query_params.get("endpoint"))
+    data = await authz.json_body(request)
+    endpoint = get_endpoint(route_params.last_value(data.get("endpoint")))
     fallback = f"/calendar?endpoint={quote(endpoint.key, safe='')}"
-    hit, media = await _searched_title(request, settings)
+    hit, media = await _searched_title(data, settings)
     if hit is None:
-        return RedirectResponse(fallback, status_code=303)
+        return Response(status_code=204, headers={"HX-Redirect": fallback})
     # Each ticked choice, as a number — or None for the one choice that is not a
     # season (a film's release, a show's premiere when no season list answered).
     seasons: list = []
-    for value in season_choices.ticked(request.query_params):
+    for value in season_choices.ticked(data):
         try:
             seasons.append(int(value) if value else None)
         except ValueError:
@@ -1385,9 +1402,7 @@ async def jump_to_a_searched_title(request: Request):
     except SourceUnavailable as exc:
         logger.info("calendar jump: %s could not be described (%s)", hit.title, exc)
         destination = ""
-    # 303, so following this is a GET however the browser got here, and so a
-    # reload of where it lands does not re-run the write.
-    return RedirectResponse(destination or fallback, status_code=303)
+    return Response(status_code=204, headers={"HX-Redirect": destination or fallback})
 
 
 def _library_answer(request: Request, *, marks=(), message: str = "",
