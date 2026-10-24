@@ -25,6 +25,7 @@ All notable changes to this project are documented here. Format loosely follows 
 - 🐢 **Filling an empty logo cache no longer slows the whole app.** Logos are built eight at a time and their image work runs off the request path; a month's worth now fills in seconds.
 - 🍞 **Admin actions confirm with a toast**, like the rest of the app; a refusal still appears beside the section it came from.
 - 🔗 **A share page keeps a title's details through a passing TMDB "not found".** One such answer used to erase the copy a share page reads from.
+- ⚠️ **No more "some calendar data couldn't be loaded" after a routine refresh.** It appeared when one service had nothing new and the other did.
 
 ### Under the hood
 - ⏱️ **The test suite runs in about two minutes instead of eleven**: it uses every CPU core and stops re-reading the certificate store for every test. Code nothing used any more is gone, and the code no test reached now has tests.

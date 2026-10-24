@@ -162,6 +162,20 @@ class ASourceReportingUnchangedTests(unittest.IsolatedAsyncioTestCase):
             "SELECT asked, answered FROM calendar_coverage WHERE source = 'trakt'")
         self.assertEqual((row["asked"], row["answered"]), (1, 1))
 
+    async def test_one_source_unchanged_beside_one_that_answered_is_not_partial(self):
+        """THE MIXED FILL, which is the ordinary one on an instance with two
+        services: one file comes back 304 and the other with rows. The window the
+        fill hands back named only the source that brought rows as having
+        answered, so the read it served drew the "some calendar data couldn't be
+        loaded" banner — and, being partial, was not kept, so the next read
+        assembled the month again from nothing."""
+        in_play = [SimpleNamespace(source=Source.TRAKT), SimpleNamespace(source=Source.SIMKL)]
+        with patch("app.calendar.cache._window_sources", return_value=in_play):
+            await self._fill(([self._record()], ["trakt", "simkl"], []), now=1000)
+            window, _ = await self._fill(([self._record()], ["trakt"], ["simkl"]),
+                                         now=999_999, force=True)
+        self.assertEqual(set(window.asked) - set(window.sources), set())
+
     async def test_the_schedule_still_advances(self):
         """Nothing changed, but the file WAS looked at — so the next scheduled
         pass must not treat the span as overdue and ask again immediately."""

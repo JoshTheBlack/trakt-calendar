@@ -916,8 +916,14 @@ async def load_window(endpoint: Endpoint, settings, start: date, *,
     await artwork.record_poster_urls(sightings)
     # The GROUPS from the rows; who was asked and who answered from this fill,
     # which knows them in the sources' declared order.
+    # A SOURCE THAT SAID "UNCHANGED" ANSWERED, beside one that brought rows as
+    # much as on its own: naming only the second made the very read this fill
+    # served report the first as unreadable — the incomplete-data banner — and,
+    # being partial, it was not kept for the reads after it.
+    replied = {*answered, *unchanged}
     groups = stored[0].groups if stored is not None else group_records(records)
-    return CachedWindow(groups, tuple(answered), tuple(in_play)), ts
+    return CachedWindow(groups, tuple(name for name in in_play if name in replied),
+                        tuple(in_play)), ts
 
 
 # ---------------------------------------------------------------------------
