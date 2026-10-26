@@ -1643,7 +1643,8 @@ async def _row_pictures(user_id: int, shows: list[dict], films: list[dict] | Non
 async def _month_answer(request: Request, user_id: int, year: int, month: int,
                         settings, *, message: str = "", ok: bool = True,
                         force_fresh: bool = False,
-                        point_at: tuple | None = None) -> Response:
+                        point_at: tuple | None = None,
+                        overlays: bool = True) -> Response:
     """The month, recomputed and drawn: the one answer every mutating tracker
     route gives.
 
@@ -1651,6 +1652,10 @@ async def _month_answer(request: Request, user_id: int, year: int, month: int,
     moved between buckets, a verdict withdrawn or a film forgotten all change what
     the page says about the rest of it. That was already true when this was JSON;
     what is new is that there is no second representation of it to keep in step.
+
+    `overlays` is whether the answer also brings the add flow's dialogs back
+    closed and empty (_distrakt_modals.html). Every answer to a press does; the
+    page's own load of its month passes False — distrakt_month_fragment says why.
 
     ALWAYS 200, WHATEVER THE PAYLOAD SAYS. A non-200 is never swapped
     (static/js/boost.js's `noSwap`), so a status code would leave the page holding
@@ -1673,8 +1678,9 @@ async def _month_answer(request: Request, user_id: int, year: int, month: int,
     user = await auth.current_user(request)
     return templates.TemplateResponse(
         request, "_distrakt_month.html",
-        _month_context(request, payload, year, month, emojis, default_emoji, settings,
-                       message=message, ok=ok, pictures=pictures, is_admin=user.is_admin))
+        {**_month_context(request, payload, year, month, emojis, default_emoji, settings,
+                          message=message, ok=ok, pictures=pictures, is_admin=user.is_admin),
+         "overlays": overlays})
 
 
 def _rewatch_answer(request: Request, ask: dict, resubmit_url: str,
@@ -1798,6 +1804,15 @@ async def distrakt_month_fragment(request: Request):
     CLOSED or past month: rendered from the frozen snapshot with NO provider
     calls. Opening an uninitialized month lazily rolls it over first (see
     ensure_month).
+
+    THIS ANSWER LEAVES THE ADD FLOW'S DIALOGS ALONE (`overlays=False`), because
+    nobody pressed anything in them to ask for it. It arrives on the page's own
+    `load`, which can take seconds, and on `month-changed`; the dialogs are open
+    to the person from the moment the shell paints. Redrawn closed by this answer,
+    a dialog opened while the month was still being worked out shut in the
+    middle of being typed into and took the query with it — measured in Chromium
+    and Firefox. The shell already draws them closed and empty, and none of the
+    routes that raise `month-changed` (_and_the_month) is pressed from inside one.
     """
     user_id = await _distrakt_user_id(request)
     today = clock.today()
@@ -1805,7 +1820,8 @@ async def distrakt_month_fragment(request: Request):
     month = route_params.valid_month(request.query_params.get("month"), today.month)
     with span("GET /distrakt/fragments/month", ym=f"{year}-{month:02d}"):
         settings = await viewer.settings_for_user(user_id)
-        return await _month_answer(request, user_id, year, month, settings)
+        return await _month_answer(request, user_id, year, month, settings,
+                                   overlays=False)
 
 
 @guard.post("/api/distrakt/refresh", AuthLevel.DISTRAKT_APPROVED)

@@ -6,13 +6,15 @@
 {# THE THREE OVERLAYS THE ADD FLOW USES, drawn together because they are reset
    together.
 
-   EVERY MONTH ANSWER BRINGS THEM BACK CLOSED AND EMPTY (`oob=true`), and that
-   is one rule rather than a decision per route. An answer is only ever produced
-   by something somebody pressed, and the two ways to press one of these — an add
-   that landed, an add that turned into a question and was then answered — both
-   end with the overlay having no business being open. Making it unconditional
-   means no route can forget, and re-sending a closed overlay costs a few hundred
-   bytes of markup that is identical every time.
+   EVERY ANSWER TO A PRESS BRINGS THEM BACK CLOSED AND EMPTY (`oob=true`), and
+   that is one rule rather than a decision per route. The two ways to press one
+   of these — an add that landed, an add that turned into a question and was
+   then answered — both end with the overlay having no business being open.
+   Making it the month answer's default means no route can forget, and re-sending
+   a closed overlay costs a few hundred bytes of markup that is identical every
+   time. THE ONE ANSWER NOBODY PRESSED is the page's own load of its month, which
+   can land seconds after the shell has painted these and somebody has opened
+   one: it leaves them alone (routes.distrakt_month_fragment).
 
    IT ALSO REPLACES WHAT `openAddShow` USED TO DO. That function cleared the
    query, cleared the results, took down the season panel and set the heading —

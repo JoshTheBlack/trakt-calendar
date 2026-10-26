@@ -443,14 +443,14 @@ class TheAddOverlaysCarryTheMonthTests(MonthFragmentTestCase):
             f'&amp;month={past_m}"', html)
 
     def test_the_month_answer_carries_it_too(self):
-        """The overlays come back with every month answer, closed and empty, so
-        an answer that redrew them without the month would undo this on the first
-        thing anybody pressed."""
+        """The overlays come back with every answer to a press, closed and
+        empty, so an answer that redrew them without the month would undo this
+        on the first thing anybody pressed."""
         past_y, past_m = self.past
         outer, season, calendar = self.offline()
         with outer, season, calendar:
-            resp = self.client.get(
-                f"/distrakt/fragments/month?year={past_y}&month={past_m}")
+            resp = self.client.post(
+                f"/api/distrakt/refresh?year={past_y}&month={past_m}", json={})
         self.assertIn(f"search?year={past_y}&amp;month={past_m}",
                       resp.text)
 
@@ -486,9 +486,9 @@ class TheAnswersOneHelperGivesTests(MonthFragmentTestCase):
                          9)
 
     def test_the_answer_brings_the_add_overlays_back_closed(self):
-        """Unconditional rather than per-route: an answer only ever exists
-        because somebody pressed something, and every way of pressing one of
-        these ends with the overlay having no business being open."""
+        """The month answer's default rather than per-route: every way of
+        pressing one of these ends with the overlay having no business being
+        open."""
         year, month = self.current
         outer, season, calendar = self.offline()
         with outer, season, calendar:
@@ -500,6 +500,21 @@ class TheAnswersOneHelperGivesTests(MonthFragmentTestCase):
                       resp.text)
         # Neither arrives asking to be shown — that marker is what opens one.
         self.assertNotIn("data-open-modal", resp.text)
+
+    def test_the_pages_own_load_of_its_month_leaves_the_overlays_alone(self):
+        """Nobody pressed anything to ask for it, and it lands seconds after the
+        shell painted dialogs somebody may already be typing into: redrawn
+        closed, the add dialog shut under the person using it and took their
+        query with it. The month-level pieces still travel."""
+        year, month = self.current
+        outer, season, calendar = self.offline()
+        with outer, season, calendar:
+            resp = self.client.get(f"/distrakt/fragments/month?year={year}&month={month}")
+        self.assertEqual(resp.status_code, 200)
+        for dialog in ("addShowModal", "addMovieModal", "rewatchModal", "importModal"):
+            self.assertNotIn(f'id="{dialog}"', resp.text)
+        for marker in ('id="distraktNotice"', 'id="distraktBanner"', 'id="distraktImport"'):
+            self.assertIn(marker, resp.text)
 
     def test_an_in_place_removal_answers_with_nothing_at_all(self):
         """The mark asked to be swapped out of existence, so having nothing to

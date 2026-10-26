@@ -3,8 +3,9 @@
 {# THE ADD-SHOW MODAL, DRAWN BY THE SERVER IN THE ONE STATE IT IS EVER IN:
    closed, empty, and worded for the month being looked at.
 
-   IT RIDES BACK WITH EVERY MONTH ANSWER (`oob=true`), which is how it closes
-   after an add and how it forgets the query and the results that produced one.
+   IT RIDES BACK WITH EVERY MONTH ANSWER TO A PRESS (`oob=true`), which is how it
+   closes after an add and how it forgets the query and the results that produced
+   one. The page's own load of its month is not a press and leaves it alone.
    That used to be four lines of script clearing three elements and setting a
    heading, run on OPEN — so the modal that opened was whatever the last one had
    left behind, tidied up. Redrawn on every answer it is simply never in a state
