@@ -1614,7 +1614,8 @@ async def _row_pictures(user_id: int, shows: list[dict], films: list[dict] | Non
     is safe to call while drawing it.
 
     THE ADDRESS, NEVER THE IMAGE: nothing here puts a picture on disk. The row
-    draws the address through the image proxy.
+    draws the address through the image proxy, with the other recorded pictures
+    behind it as the proxy's fallbacks (artwork.ranked says why).
     """
     rows = ([(Media.SHOW, show) for show in shows if show.get("key")]
             + [(Media.MOVIE, film) for film in films or [] if film.get("key")])
@@ -1632,10 +1633,13 @@ async def _row_pictures(user_id: int, shows: list[dict], films: list[dict] | Non
         pair = (str(media), tmdb)
         season = row.get("season")
         own = known.seasons.get((*pair, season), {}) if tmdb and season is not None else {}
-        address = artwork.pick({**known.shows.get(pair, {}), **stored[media].get(row["key"], {})},
-                               own, order)
-        pictures[(str(row["key"]), season)] = proxied_image(address) or ""
-        if not address and tmdb and pair not in known.missed:
+        # The picture and, behind it, every other one in the same order: an
+        # address recorded here can die at its host (artwork.ranked).
+        addresses = artwork.ranked(
+            {**known.shows.get(pair, {}), **stored[media].get(row["key"], {})}, own, order)
+        pictures[(str(row["key"]), season)] = (
+            (proxied_image(addresses[0], fallbacks=addresses[1:]) or "") if addresses else "")
+        if not addresses and tmdb and pair not in known.missed:
             unknown.add(pair)
     return pictures, sorted(unknown)
 

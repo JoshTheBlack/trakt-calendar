@@ -1027,8 +1027,10 @@ class WarmRouteTests(RankerTestCase):
         asyncio.run(artwork.record_season_poster_urls(
             [("show", 1, 2, "trakt", "https://media.trakt.tv/s2.jpg")]))
         no_artwork(self)
+        # The season's own first, and its show's behind it in case it is dead.
         self.assertEqual(self.poster("show:tmdb:1:s2").headers["location"],
-                         proxied_image("https://media.trakt.tv/s2.jpg"))
+                         proxied_image("https://media.trakt.tv/s2.jpg",
+                                       fallbacks=["https://media.trakt.tv/show.jpg"]))
         self.assertEqual(self.poster("show:tmdb:1:s3").headers["location"],
                          proxied_image("https://media.trakt.tv/show.jpg"))
 
@@ -1040,7 +1042,9 @@ class WarmRouteTests(RankerTestCase):
         prefs = asyncio.run(source_prefs.load(self.user_id))
         asyncio.run(source_prefs.save(dataclasses.replace(prefs, metadata_order=["simkl"])))
         no_artwork(self)
-        self.assertEqual(self.poster().headers["location"], proxied_image("https://x.test/simkl.jpg"))
+        self.assertEqual(self.poster().headers["location"],
+                         proxied_image("https://x.test/simkl.jpg",
+                                       fallbacks=["https://x.test/trakt.jpg"]))
 
     def test_a_title_on_somebody_elses_board_is_not_drawn(self):
         other = self.ranker_user("neighbour")

@@ -459,6 +459,16 @@ class SeasonRegistryTests(ArtworkTestCase):
         self.assertEqual(artwork.pick(show, {}, ("trakt", "simkl")), "t.jpg")
         self.assertEqual(artwork.pick({}, {}, ("trakt",)), "")
 
+    def test_ranked_is_picks_order_whole_and_each_address_once(self):
+        """What stands behind the picture a page draws: the next of these is what
+        the viewer sees when the first has died at its host."""
+        show = {"trakt": "t.jpg", "simkl": "s.jpg"}
+        self.assertEqual(artwork.ranked(show, {"trakt": "s2.jpg"}, ("simkl", "trakt")),
+                         ["s2.jpg", "s.jpg", "t.jpg"])
+        self.assertEqual(artwork.ranked(show, {"trakt": "t.jpg"}, ("trakt", "simkl")),
+                         ["t.jpg", "s.jpg"])
+        self.assertEqual(artwork.ranked({}, {}, ("trakt",)), [])
+
     def test_a_miss_is_invisible_to_every_address_reader_and_known_to_known(self):
         asyncio.run(artwork.record_miss("show", 8))
         self.assertEqual(asyncio.run(artwork.urls_for("show", 8)), {})

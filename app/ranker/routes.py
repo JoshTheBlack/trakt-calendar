@@ -821,7 +821,8 @@ async def _panel_picture(user_id: int, item: dict) -> str:
     broken picture where the empty string — which the panel reads as "use the
     describing service's own poster" — draws a real one.
     """
-    return proxied_image(await _row_address(user_id, item, look_up=False)) or ""
+    addresses = await _row_addresses(user_id, item, look_up=False)
+    return (proxied_image(addresses[0], fallbacks=addresses[1:]) or "") if addresses else ""
 
 
 def _fragment_failure(request: Request, message: str, retry_url: str, target: str):
@@ -1391,19 +1392,21 @@ async def rankings_poster(request: Request):
                                        request.query_params.get("key"))
     except ranker.RankerError:
         return Response(status_code=404)
-    address = await _row_address(user.user_id, item, look_up=True)
-    if not address:
+    addresses = await _row_addresses(user.user_id, item, look_up=True)
+    if not addresses:
         return Response(status_code=404, headers=_POSTER_MISS_HEADERS)
-    return RedirectResponse(proxied_image(address), status_code=302,
-                            headers=_POSTER_CACHE_HEADERS)
+    return RedirectResponse(proxied_image(addresses[0], fallbacks=addresses[1:]),
+                            status_code=302, headers=_POSTER_CACHE_HEADERS)
 
 
-async def _row_address(user_id: int, item: Mapping[str, Any], *, look_up: bool) -> str:
-    """A board row's picture as an ORIGIN address, or "". `look_up` False answers
-    from what is recorded alone — the details panel, which has the describing
-    service's own picture to fall back on and so never needs to spend a lookup."""
+async def _row_addresses(user_id: int, item: Mapping[str, Any], *, look_up: bool) -> list[str]:
+    """A board row's picture as ORIGIN addresses — the one to draw, then every
+    other recorded one behind it (artwork.ranked) — or none. `look_up` False
+    answers from what is recorded alone — the details panel, which has the
+    describing service's own picture to fall back on and so never needs to
+    spend a lookup."""
     if not item.get("tmdb"):
-        return ""
+        return []
     order = await _poster_order(user_id)
     media, tmdb, season = item["media"], int(item["tmdb"]), item.get("season")
     known = await artwork.known([(media, tmdb, season)])
@@ -1412,10 +1415,11 @@ async def _row_address(user_id: int, item: Mapping[str, Any], *, look_up: bool) 
         # stored, and carries the season's own artwork.
         await _stored_season_list(load_settings(), item.get("ids") or {}, tmdb)
         known = await artwork.known([(media, tmdb, season)])
-    address = known.address(media, tmdb, season, order)
-    if address or not look_up:
-        return address
-    return await posters.find_address(load_settings(), media, tmdb, order, season)
+    addresses = known.addresses(media, tmdb, season, order)
+    if addresses or not look_up:
+        return addresses
+    found = await posters.find_address(load_settings(), media, tmdb, order, season)
+    return [found] if found else []
 
 
 # ---------------------------------------------------------------------------

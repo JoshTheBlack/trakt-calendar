@@ -66,12 +66,21 @@ _IMAGE_PARAMS = "q=90&w=440&we"
 POSTER_PARAMS = "w=500&h=750&fit=contain&cbg=000000&output=jpg&q=88"
 
 
-def proxied_image(url: str | None, params: str | None = None) -> str | None:
+def proxied_image(url: str | None, params: str | None = None, *,
+                  fallbacks: Sequence[str] = ()) -> str | None:
     """A poster URL addressed through the shared image proxy.
 
     `params` overrides what is asked of the proxy, for a caller whose picture is
     not a card in a browser — see POSTER_PARAMS. The proxy HOST is not
     overridable, which is the part this function exists to keep in one place.
+
+    `fallbacks` ARE TRIED IN ORDER WHEN THE PICTURE WILL NOT LOAD, by the proxy
+    and with no script: each rides as its `default=`, itself proxied with the
+    rest behind it. MEASURED against wsrv.nl, 2026-10-26: an origin answering 404
+    with a proxied `default` answers 302 to that address, which a browser follows
+    and the Content-Security-Policy admits because it is this same host — a RAW
+    default is redirected to the origin's own host, which img-src refuses. Costs
+    nothing while the first picture loads (artwork.ranked says what goes here).
 
     ONE IMPLEMENTATION FOR EVERY SOURCE, which is the point of it living here
     rather than in either provider package. The rule is about how this app treats
@@ -91,7 +100,12 @@ def proxied_image(url: str | None, params: str | None = None) -> str | None:
     text = str(url)
     if text.startswith(_IMAGE_PROXY):
         return text
-    return f"{_IMAGE_PROXY}?url={quote(text, safe='')}&{params or _IMAGE_PARAMS}"
+    address = f"{_IMAGE_PROXY}?url={quote(text, safe='')}&{params or _IMAGE_PARAMS}"
+    rest = [str(fallback) for fallback in fallbacks if fallback and str(fallback) != text]
+    if rest:
+        behind = proxied_image(rest[0], params, fallbacks=rest[1:])
+        address += f"&default={quote(behind, safe='')}"
+    return address
 
 
 class SourceNotModified(Exception):

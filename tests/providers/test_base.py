@@ -614,3 +614,38 @@ class TheEpochConversionIsPortableTests(unittest.TestCase):
         zone themselves; a naive answer would silently be read as local."""
         self.assertEqual(epoch_moment(0).tzinfo, timezone.utc)
         self.assertEqual(epoch_moment(0).date(), date(1970, 1, 1))
+
+
+class APictureCarriesTheOnesBehindItTests(unittest.TestCase):
+    """providers.base.proxied_image's `fallbacks`: what the image proxy tries
+    when the first picture will not load. Measured against wsrv.nl: a proxied
+    `default` is answered with a 302 to it on the same host; a raw one would be
+    redirected to a host the page's img-src refuses."""
+
+    def test_no_fallbacks_is_the_address_it_always_was(self):
+        from urllib.parse import quote
+
+        from app.providers.base import proxied_image
+        self.assertEqual(proxied_image("https://a/1.jpg"),
+                         f"https://wsrv.nl/?url={quote('https://a/1.jpg', safe='')}&q=90&w=440&we")
+        self.assertEqual(proxied_image("https://a/1.jpg", fallbacks=[]),
+                         proxied_image("https://a/1.jpg"))
+
+    def test_each_fallback_is_proxied_with_the_rest_behind_it(self):
+        from urllib.parse import parse_qs, urlsplit
+
+        from app.providers.base import proxied_image
+        address = proxied_image("https://a/1.jpg", fallbacks=["https://b/2.jpg", "https://c/3.jpg"])
+        first = parse_qs(urlsplit(address).query)
+        self.assertEqual(first["url"], ["https://a/1.jpg"])
+        second = first["default"][0]
+        self.assertTrue(second.startswith("https://wsrv.nl/"), "a raw default leaves the host")
+        self.assertEqual(second, proxied_image("https://b/2.jpg", fallbacks=["https://c/3.jpg"]))
+        third = parse_qs(urlsplit(second).query)["default"][0]
+        self.assertEqual(third, proxied_image("https://c/3.jpg"))
+
+    def test_the_picture_itself_and_blanks_are_not_its_own_fallback(self):
+        from app.providers.base import proxied_image
+        self.assertEqual(proxied_image("https://a/1.jpg", fallbacks=["", "https://a/1.jpg"]),
+                         proxied_image("https://a/1.jpg"))
+        self.assertEqual(proxied_image("", fallbacks=["https://b/2.jpg"]), "")

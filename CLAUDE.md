@@ -303,7 +303,13 @@ time (`_warm_tiles` in `app/ranker/routes.py`). Which picture is ONE function,
 `artwork.pick`: a season's own artwork (`season_posters`, filed from season
 lists already read — only Trakt publishes it, measured) before its show's, each
 in the viewer's order; a later "choose or upload a poster" feature stands in
-front of it rather than beside it. A title nothing has recorded a picture for
+front of it rather than beside it. WHAT STANDS BEHIND IT is the same order
+whole (`artwork.ranked`): a page draws the first address with the rest as the
+image proxy's fallbacks (`proxied_image(..., fallbacks=)`, wsrv.nl's `default=`,
+each itself proxied so the redirect stays on the one host img-src admits),
+because a recorded address can die at its host and nothing tells the server —
+Trakt replaced Coyote vs. Acme's poster and the tracker drew an empty slot.
+A title nothing has recorded a picture for
 gets ONE lookup (`posters._look_up_address`, joined by any concurrent asker) and
 its answer is recorded — and so is a miss (`artwork.record_miss`, a
 `show_posters` row with source `missing`, an empty url and fail_count at the

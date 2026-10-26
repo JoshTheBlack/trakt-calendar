@@ -98,8 +98,10 @@ class RowPosterTests(MonthFragmentTestCase):
             [("show", 500, 2, "trakt", "https://x/s2.jpg")]))
         self.list_one(title="Season Two", season=2)
         self.list_one(title="Season One", season=1)
+        # The season's own first, and its show's behind it in case it is dead.
         self.assertEqual(sorted(self.pictures()),
-                         sorted([proxied_image("https://x/s2.jpg"),
+                         sorted([proxied_image("https://x/s2.jpg",
+                                               fallbacks=["https://x/show.jpg"]),
                                  proxied_image("https://x/show.jpg")]))
 
     def test_the_viewers_own_order_picks_the_picture(self):
@@ -111,7 +113,10 @@ class RowPosterTests(MonthFragmentTestCase):
         prefs = asyncio.run(source_prefs.load(self.user_id))
         asyncio.run(source_prefs.save(dataclasses.replace(prefs, metadata_order=["simkl"])))
         self.list_one()
-        self.assertEqual(self.pictures(), [proxied_image("https://x/simkl.jpg")])
+        # Simkl's first, as the viewer ordered, and Trakt's behind it in case
+        # the first address has died at its host.
+        self.assertEqual(self.pictures(), [proxied_image("https://x/simkl.jpg",
+                                                         fallbacks=["https://x/trakt.jpg"])])
 
     def test_nothing_is_written_to_disk(self):
         self.list_one()
@@ -249,7 +254,10 @@ class FilmRowPosterTests(MonthFragmentTestCase):
         prefs = asyncio.run(source_prefs.load(self.user_id))
         asyncio.run(source_prefs.save(dataclasses.replace(prefs, metadata_order=["simkl"])))
         self.watch_one()
-        self.assertEqual(self.pictures(), [proxied_image("https://x/simkl.jpg")])
+        # Simkl's first, as the viewer ordered, and Trakt's behind it in case
+        # the first address has died at its host.
+        self.assertEqual(self.pictures(), [proxied_image("https://x/simkl.jpg",
+                                                         fallbacks=["https://x/trakt.jpg"])])
 
     def test_nothing_is_written_to_disk(self):
         self.watch_one()

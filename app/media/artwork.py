@@ -209,9 +209,15 @@ class Known:
     def address(self, media: str, tmdb: int, season: int | None,
                 order: Iterable[str]) -> str:
         """The picture for one title (or season), in `order`: see `pick`."""
-        return pick(self.shows.get((media, tmdb), {}),
-                    self.seasons.get((media, tmdb, season), {}) if season is not None else {},
-                    order)
+        found = self.addresses(media, tmdb, season, order)
+        return found[0] if found else ""
+
+    def addresses(self, media: str, tmdb: int, season: int | None,
+                  order: Iterable[str]) -> list[str]:
+        """That picture and every one behind it, in `order`: see `ranked`."""
+        return ranked(self.shows.get((media, tmdb), {}),
+                      self.seasons.get((media, tmdb, season), {}) if season is not None else {},
+                      order)
 
 
 def pick(show: Mapping[str, str], season: Mapping[str, str], order: Iterable[str]) -> str:
@@ -221,14 +227,33 @@ def pick(show: Mapping[str, str], season: Mapping[str, str], order: Iterable[str
     `order` is the VIEWER's (sources.prefs' source_order —
     app/media/posters.py order_for), which is what makes a picture on one
     surface the picture on the next. Pure, so a later way of choosing a picture
-    by hand has one place to stand in front of.
+    by hand has one place to stand in front of. It is `ranked`'s first answer.
+    """
+    found = ranked(show, season, order)
+    return found[0] if found else ""
+
+
+def ranked(show: Mapping[str, str], season: Mapping[str, str],
+           order: Iterable[str]) -> list[str]:
+    """Every address `pick` would consider, in the order it considers them — the
+    season's own in `order`, then the show's — each once.
+
+    WHAT STANDS BEHIND THE PICTURE A PAGE DRAWS. A recorded address can die at
+    its host and nothing tells the server: Trakt replaced Coyote vs. Acme's
+    poster, the address recorded for it began answering 404, and the tracker drew
+    an empty slot while Simkl's still loaded. A page draws the first of these with
+    the rest as the image proxy's fallbacks (providers.base.proxied_image), so the
+    next one is what the viewer sees — the picture they would have been shown had
+    the dead one never been recorded.
     """
     order = tuple(order)
+    out: list[str] = []
     for urls in (season, show):
         for source in order:
-            if urls.get(source):
-                return urls[source]
-    return ""
+            url = urls.get(source)
+            if url and url not in out:
+                out.append(url)
+    return out
 
 
 async def known(refs: Iterable[tuple[str, int, int | None]]) -> Known:
