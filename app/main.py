@@ -217,6 +217,10 @@ async def _heartbeat_loop() -> None:
 async def lifespan(_app: FastAPI):
     # Schema first — everything after this point may touch the database.
     await db.init()
+    # Before anything builds an outbound client: the trust store is a third of a
+    # second of parsing, and read lazily it landed on the event loop in the first
+    # heartbeat, with requests already being served (http_pool.load_trust_store).
+    await http_pool.load_trust_store()
     # The detail-lookup cache moved into the api_cache table; drop the old
     # data/cache/*.json directory now that the schema that replaces it is in place.
     cache.discard_legacy_dir()

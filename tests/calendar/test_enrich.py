@@ -12,6 +12,7 @@ ever silently dropping a title the stored calendar names.
 from __future__ import annotations
 
 import asyncio
+import threading
 import unittest
 from datetime import date
 from types import SimpleNamespace
@@ -631,6 +632,32 @@ class SweepTests(EnrichTestCase):
             fetched = await calendar_enrich.drain(self.SETTINGS)
         self.assertEqual(fetched, 1)
         spy.assert_awaited_once()
+
+
+class StoredAnswersAreUnpackedOffTheLoopTests(EnrichTestCase):
+    """A drain reads every Simkl title the stored calendar names, and unpacking
+    that many stored answers on the event loop held it for a third of a second
+    on every heartbeat."""
+
+    async def test_the_payloads_are_decompressed_on_a_worker_thread(self):
+        await calendar_enrich._upsert_success(7, "show", dict(_OK_FIELDS, network="BBC"),
+                                              now=1000)
+        threads = []
+        real = calendar_enrich._decompress
+
+        def _watched(blob):
+            threads.append(threading.get_ident())
+            return real(blob)
+
+        with patch.object(calendar_enrich, "_decompress", _watched):
+            rows = await calendar_enrich._read_rows([(7, "show"), (8, "movie")])
+        self.assertEqual(rows[(7, "show")]["fields"]["network"], "BBC")
+        self.assertEqual(list(rows), [(7, "show")])
+        self.assertTrue(threads)
+        self.assertNotIn(threading.get_ident(), threads)
+
+    async def test_asking_for_nothing_reads_nothing(self):
+        self.assertEqual(await calendar_enrich._read_rows([]), {})
 
 
 class FilterExemptionThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase):

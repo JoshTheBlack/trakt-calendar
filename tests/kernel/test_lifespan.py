@@ -38,8 +38,12 @@ class StartAndStopTests(unittest.TestCase):
         # The REAL close, watched: shutting down really closes every pool, and a
         # stub here would leave that code as unexercised as it was before.
         closed = mock.AsyncMock(wraps=http_pool.aclose_all)
+        # And the trust store is read at start-up, off the loop, so the first
+        # outbound client does not read it where requests are waiting.
+        trust = mock.AsyncMock(wraps=http_pool.load_trust_store)
         with mock.patch.object(main, "_heartbeat_loop", heartbeat), \
              mock.patch.object(http_pool, "aclose_all", closed), \
+             mock.patch.object(http_pool, "load_trust_store", trust), \
              mock.patch.object(main.authz, "log_undeclared_routes",
                                wraps=main.authz.log_undeclared_routes) as audit, \
              TestClient(main.app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as client:
@@ -49,6 +53,7 @@ class StartAndStopTests(unittest.TestCase):
             # that refuses undeclared ones finds nothing to name.
             audit.assert_called_once_with(main.app)
             self.assertEqual(main.authz.undeclared_routes(main.app), [])
+            trust.assert_awaited_once()
         closed.assert_awaited_once()
 
 

@@ -48,6 +48,7 @@ import asyncio
 import contextlib
 import logging
 
+import anyio.to_thread
 import httpx
 
 from .perftrace import span
@@ -77,6 +78,20 @@ def _shared_ssl_context():
     if _ssl_context is None:
         _ssl_context = httpx.create_ssl_context()
     return _ssl_context
+
+
+async def load_trust_store() -> None:
+    """Read the trust store now, on a worker thread, so no client has to.
+
+    THE FIRST CLIENT OF A PROCESS USED TO PAY FOR IT ON THE EVENT LOOP. A client
+    is built inside a request or a heartbeat job, and building the context there
+    parsed the CA bundle where every other request was waiting — sampled at
+    ~350 ms on Windows, the first heartbeat's integration health check holding
+    the loop that long while pages were already being served. main.lifespan
+    calls this before the server takes a request; every client after finds the
+    context built. Calling it again costs nothing.
+    """
+    await anyio.to_thread.run_sync(_shared_ssl_context)
 
 
 class Pool:

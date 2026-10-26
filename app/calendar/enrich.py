@@ -218,26 +218,40 @@ async def _read_rows(keys) -> dict[tuple[int, str], dict]:
     """The stored `simkl_titles` rows for `keys` (an iterable of (simkl_id,
     media)), keyed the same way. ONE QUERY PER MEDIA KIND present in `keys` —
     at most two, since `media` is the app's own closed 'show'/'movie'
-    vocabulary — never one query per id."""
+    vocabulary — never one query per id.
+
+    READ AND DECOMPRESSED TOGETHER ON THE WORKER THREAD, never back on the event
+    loop. A drain pass reads every Simkl title the stored calendar names — 25,123
+    on the development copy, 13 MB compressed — and unpacking that many payloads
+    is ~430 ms of CPU. Done after the query returned, it blocked the loop for
+    250–350 ms on every heartbeat, and every one of those stalls, sampled from a
+    second thread, was in `_decompress` here.
+    """
     by_media: dict[str, list[int]] = {}
     for simkl_id, media in keys:
         by_media.setdefault(media, []).append(simkl_id)
-    out: dict[tuple[int, str], dict] = {}
-    for media, ids in by_media.items():
-        placeholders = ",".join("?" for _ in ids)
-        rows = await db.fetch_all(
-            f"SELECT simkl_id, payload, fetched_at, failed_at, fail_count "
-            f"FROM simkl_titles WHERE media = ? AND simkl_id IN ({placeholders})",
-            (media, *ids),
-        )
-        for row in rows:
-            out[(int(row["simkl_id"]), media)] = {
-                "fields": _decompress(row["payload"]),
-                "fetched_at": int(row["fetched_at"]),
-                "failed_at": int(row["failed_at"]) if row["failed_at"] is not None else None,
-                "fail_count": int(row["fail_count"]),
-            }
-    return out
+
+    def _work(conn) -> dict[tuple[int, str], dict]:
+        out: dict[tuple[int, str], dict] = {}
+        for media, ids in by_media.items():
+            placeholders = ",".join("?" for _ in ids)
+            rows = conn.execute(
+                f"SELECT simkl_id, payload, fetched_at, failed_at, fail_count "
+                f"FROM simkl_titles WHERE media = ? AND simkl_id IN ({placeholders})",
+                (media, *ids),
+            )
+            for row in rows:
+                out[(int(row["simkl_id"]), media)] = {
+                    "fields": _decompress(row["payload"]),
+                    "fetched_at": int(row["fetched_at"]),
+                    "failed_at": int(row["failed_at"]) if row["failed_at"] is not None else None,
+                    "fail_count": int(row["fail_count"]),
+                }
+        return out
+
+    if not by_media:
+        return {}
+    return await db.run(_work)
 
 
 async def _upsert_success(simkl_id: int, media: str, fields: dict, now: int) -> None:
