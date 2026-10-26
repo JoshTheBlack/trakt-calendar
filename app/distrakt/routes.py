@@ -1974,8 +1974,8 @@ async def day_label_fragment(request: Request):
 
 @guard.get("/distrakt/fragments/details", AuthLevel.DISTRAKT_APPROVED)
 async def details_fragment(request: Request):
-    """The details panel for one roster show, drawn with THIS user's own record of
-    that season."""
+    """The details panel for one tracker row: a roster show, drawn with THIS
+    user's own record of that season, or a watched film (`_film_details`)."""
     return await _details_view(request, episodes_only=False)
 
 
@@ -2064,6 +2064,11 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
         key = parse_item_key(request.query_params.get("key"))
     except ValueError as exc:
         return details_panel.gap(request, str(exc))
+    if key.media == Media.MOVIE:
+        # A film has no season and no tabs, so a tab's address never names one.
+        if episodes_only:
+            return details_panel.gap(request, "Missing season")
+        return await _film_details(request, user_id, key, settings)
     if season is None or row_season is None:
         return details_panel.gap(request, "Missing season")
 
@@ -2171,6 +2176,69 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
                                # the same search the panel did.
                                pinned={"row": str(row_season),
                                        "year": str(year), "month": str(month)})
+
+
+async def _film_details(request: Request, user_id: int, key: ItemKey, settings) -> Response:
+    """The details panel for one watched film on the tracker.
+
+    THE ROW NEVER OPENED ONE: a film row was drawn without `data-details-open`,
+    and this route answered only for a roster show and its season, so a film was
+    the one row on the page that did nothing when pressed.
+
+    THE SAME RULE AS A SHOW ROW ABOUT WHERE THE IDS COME FROM: the viewer's own
+    record of watching the film (`_watched_film`), never the query string, so the
+    lookup cannot be pointed at a title the page does not show. The title store
+    adds the ids the other services know the film by (identity.known) — a play
+    only Simkl reported carries Simkl's id and the key's, and TMDB describes it
+    by the key's while the outbound buttons need the rest.
+
+    NO TICKS AND NO TABS: a film is one play on a day, and its row says which.
+    The picture is the row's own, through the same `_row_pictures` that drew it.
+    """
+    year, month = _viewed_month(request)
+    film = await _watched_film(user_id, key, distrakt_store.month_key(year, month))
+    if film is None:
+        return details_panel.gap(request, "Not among your watched films")
+    known = await title_identity.known(str(key))
+    ids = {key.match_source: key.match_id, **(known.ids if known is not None else {}),
+           **(film.get("ids") or {})}
+    chosen = detail_source.choose(settings, ids)
+    if chosen is None:
+        return details_panel.gap(request, "Nothing here can describe this item.")
+    try:
+        chosen, details = await detail_source.describe_panel(
+            settings, chosen, ids, Media.MOVIE, None)
+    except Exception:
+        # Drawn rather than answered with a status, for the reason the show
+        # path above gives.
+        logger.warning("Detail lookup failed for %s", chosen.source, exc_info=True)
+        return details_panel.gap(request, "⚠️ Could not load details for this item.")
+    if details is None:
+        return details_panel.gap(request, "Nothing here can describe this item.")
+    pictures, _ = await _row_pictures(user_id, [], [{"key": str(key), "ids": ids}])
+    return details_panel.panel(
+        request, details, media=str(Media.MOVIE), season=None,
+        title=str(film.get("title") or ""), poster=pictures.get((str(key), None), ""),
+        # The row's ids first and the answer's beside them, as the rankings board
+        # builds its film panel's buttons: which services know a title is a fact
+        # about the row.
+        links=detail_source.outbound_links({**ids, **(details.get("ids") or {})},
+                                           Media.MOVIE),
+        carry=("key",))
+
+
+async def _watched_film(user_id: int, key: ItemKey, month_key: str) -> dict | None:
+    """The viewer's own record of watching `key`: the watch state a month draws
+    its Films from, else the month on screen's frozen snapshot of them — the two
+    places a film row on the page can have come from (_distrakt_month_payload).
+    None when the viewer has no such film."""
+    state = await watch_history.load_state(user_id)
+    film = (state.get("movies") or {}).get(str(key))
+    if film is not None:
+        return film
+    doc = await distrakt_store.load_month(user_id, month_key)
+    return next((movie for movie in (doc or {}).get("movies") or []
+                 if str(movie.get("key")) == str(key)), None)
 
 
 async def _post_link_choices(user_id: int) -> dict:

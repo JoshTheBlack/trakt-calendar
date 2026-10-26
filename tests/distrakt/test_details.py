@@ -28,9 +28,11 @@ import re
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import AsyncMock, patch
 
-from app import db, distrakt as distrakt_store
+from app import db, distrakt as distrakt_store, metadata
 from app.clock import today
 from app.config import Settings
+from app.distrakt import watch_history
+from app.providers.base import Media
 from app.providers.trakt import transport
 from tests.support import AppTestCase, DetailsPanel, ORIGIN
 
@@ -706,3 +708,61 @@ class SeasonTabsOnARosterRowTests(_DetailsRouteTestCase):
             (self.user_id, "show", "tmdb", "1", 1, "trakt",
              json.dumps({"6": "2026-08-01T00:00:00Z"}), 7)))
         self.assertEqual(self._press(self._open().tab_urls[1]).watched, [6])
+
+
+FILM = {"title": "Coyote vs. Acme", "year": 2026, "overview": "A coyote sues.",
+        "runtime": 100, "genres": ["comedy"], "rating": 7.5}
+
+
+class AWatchedFilmOpensItsPanelTests(_DetailsRouteTestCase):
+    """A film row was the one row on the tracker that opened nothing: it carried
+    no opener, and the route answered only for a roster show and its season."""
+
+    def _watch(self, ids=None) -> None:
+        day = today()
+        asyncio.run(watch_history.record_movie_watches(self.user_id, [{
+            "ids": ids or {"tmdb": 5, "trakt": 9}, "title": "Coyote vs. Acme",
+            "year": 2026, "watched_at": f"{day:%Y-%m}-01T12:00:00Z"}]))
+
+    def _film(self, key: str = "movie:tmdb:5", month: str = ""):
+        client = _CatalogueClient({"movies/9": FILM, "movies/9/people": PEOPLE})
+        viewed = ""
+        if month:
+            year, number = distrakt_store.parse_month_key(month)
+            viewed = f"&year={year}&month={number}"
+        with patch.object(transport, "shared_client", return_value=client), \
+             patch("app.providers.simkl.transport.cached_get",
+                   new=AsyncMock(return_value=None)):
+            resp = self.client.get(f"/distrakt/fragments/details?key={key}{viewed}")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return resp.text
+
+    def test_a_watched_film_opens_its_panel(self):
+        self._watch()
+        html = self._film()
+        self.assertIn("A coyote sues.", html)
+        self.assertIn('href="https://trakt.tv/movies/9"', html)
+        self.assertIn('href="https://www.themoviedb.org/movie/5"', html)
+
+    def test_the_store_lends_the_ids_the_watch_did_not_carry(self):
+        """A play only Simkl reported keeps Simkl's id and the key's; the store
+        knows the film's Trakt id, and that is who describes it here."""
+        asyncio.run(metadata.ensure(Media.MOVIE, {"tmdb": 5, "trakt": 9}))
+        self._watch({"tmdb": 5, "simkl": 77})
+        self.assertIn("A coyote sues.", self._film())
+
+    def test_a_film_the_viewer_has_not_watched_is_refused(self):
+        self._watch()
+        self.assertIn("Not among your watched films", self._film("movie:tmdb:6"))
+
+    def test_a_film_a_frozen_month_recorded_opens_from_that_month(self):
+        """Frozen months draw their Films from their own snapshot, so that is
+        where a row on one is found."""
+        month = _month_back(2)
+        year, number = distrakt_store.parse_month_key(month)
+        asyncio.run(distrakt_store.save_month(self.user_id, {
+            "month": month, "closed": True, "shows": [],
+            "movies": [{"key": "movie:tmdb:5", "ids": {"trakt": 9},
+                        "title": "Coyote vs. Acme", "year": 2026,
+                        "watched_at": f"{year:04d}-{number:02d}-02T12:00:00Z"}]}))
+        self.assertIn("A coyote sues.", self._film(month=month))

@@ -317,9 +317,18 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
 
 {# A watched film: no buckets, no counts, no progress — a play on a day. The one
    control it has is ✕, because a service's history is not always right about
-   what was watched and there is no roster row to correct it through. #}
+   what was watched and there is no roster row to correct it through.
+
+   IT OPENS THE DETAILS PANEL LIKE A SHOW ROW, by the same route named by its key
+   and nothing else (routes._film_details reads the rest from the viewer's own
+   watch). A film with no key has no identity to describe it by, and opens
+   nothing. #}
 {% macro film_row(film) %}
-<div class="distrakt-show-row distrakt-film-row">
+<div class="distrakt-show-row distrakt-film-row"
+     {%- if film.key %}
+     data-details-open="/distrakt/fragments/details{{ month_query }}&amp;key={{ film.key | urlencode }}"
+     data-details-heading="{{ film.title or 'Untitled' }}{{ ' (' ~ film.year ~ ')' if film.year }}"
+     {%- endif %}>
     {{ picture(film) }}
     <span class="distrakt-title"><span class="tt">{{ film.title or 'Untitled' }}</span></span>
     <span class="distrakt-facts">

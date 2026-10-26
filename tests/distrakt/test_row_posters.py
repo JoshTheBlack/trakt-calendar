@@ -300,3 +300,19 @@ class FilmRowPosterTests(MonthFragmentTestCase):
         self.assertIn('class="distrakt-poster"', row)
         self.assertIn("🎬", row)
         self.assertLess(row.index("distrakt-poster"), row.index("🎬"))
+
+
+class AFilmRowOpensItsPanelTests(MonthFragmentTestCase):
+    """The film row names itself to the details route by its key and nothing
+    else, as a show row does; the route reads the rest from the viewer's watch."""
+
+    watch_one = FilmRowPosterTests.watch_one
+    film_row = FilmRowPosterTests.film_row
+
+    def test_the_row_carries_the_opener(self):
+        self.watch_one()
+        year, month = self.current
+        row = self.film_row()
+        self.assertIn(f'data-details-open="/distrakt/fragments/details?year={year}&amp;month={month}'
+                      f'&amp;key=movie%3Atmdb%3A603"', row)
+        self.assertIn('data-details-heading="The Matrix (1999)"', row)
