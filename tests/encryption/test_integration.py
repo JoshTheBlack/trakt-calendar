@@ -4,12 +4,19 @@ The unit and boundary tests elsewhere (test_secrets_box, test_sealing,
 test_encryption_flow, test_encryption_routes) each prove one layer in isolation.
 This file proves the layers actually compose: that a per-user identity created
 today reads back through the real Trakt-call path with the plaintext token on the
-wire; that the app-wide Trakt credential the Trakt client uses on every calendar fetch
-does the same; and that a full enable -> encrypt -> lose-the-key -> recover cycle
-leaves every one of those call paths working at the far end.
+wire; that the app-wide Trakt credential does the same; and that a full enable ->
+encrypt -> lose-the-key -> recover cycle leaves every one of those call paths
+working at the far end.
 
 No network — the Trakt HTTP client is patched and its Authorization header
 inspected, which is the only place a token becomes observable.
+
+THE CALL WATCHED IS A RATINGS READ (sync.fetch_ratings), and it has to be a
+call that carries the account's token by definition — a calendar fetch goes to
+Trakt with no token at all (transport.api_headers says why). A ratings read is
+private to whoever's token asks, so it is never served from the shared response
+cache either: a cached call would let the end-to-end tests' later checks pass
+without anything reaching the wire.
 """
 from __future__ import annotations
 
@@ -17,26 +24,15 @@ import asyncio
 import dataclasses
 import os
 import unittest
-from datetime import date
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 
 from app import auth, db, main, secrets_box
 from app.auth import encryption_flow, secrets_backfill, trakt_routes
-from app.providers.trakt import calendar as trakt_calendar
+from app.providers.trakt import sync as trakt_sync
 from app.config import Settings, load_settings, save_settings
-from app.endpoints import get_endpoint
 from tests.support import migrated_db
-
-SHOWS = get_endpoint("shows")
-
-# Any window will do — the assertion is about the Authorization header, not the
-# entries — but it has to be the shape the LIVE path uses: fetch_window is what
-# the calendar cache calls, and it takes a start date and a day count rather
-# than a year and a month.
-WINDOW_START = date(2026, 7, 1)
-WINDOW_DAYS = 31
 
 KEY = Fernet.generate_key().decode()
 OTHER_KEY = Fernet.generate_key().decode()
@@ -122,7 +118,7 @@ class IdentityToProviderCallTests(EncryptionIntegrationTestCase):
         settings = dataclasses.replace(load_settings(), trakt_access_token=token)
         recorder = _RecordingClient()
         with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
-            asyncio.run(trakt_calendar.fetch_window(SHOWS, settings, WINDOW_START, WINDOW_DAYS))
+            asyncio.run(trakt_sync.fetch_ratings(settings))
         self.assertEqual(recorder.authorizations, ["Bearer alice-token"])
 
 
@@ -174,9 +170,10 @@ class SimklIdentityAndPkceSealingTests(EncryptionIntegrationTestCase):
 
 class AppLevelTraktTokenTests(EncryptionIntegrationTestCase):
     """The operator's own Trakt token, sealed in app_secrets and read through
-    load_settings() on the highest-traffic path: every calendar fetch."""
+    load_settings() — the settings every Trakt call made for the instance rather
+    than for one viewer is built from."""
 
-    def test_the_app_wide_token_is_sealed_at_rest_and_plaintext_on_a_calendar_fetch(self):
+    def test_the_app_wide_token_is_sealed_at_rest_and_plaintext_on_the_wire(self):
         _set_key(KEY)
         save_settings(Settings(
             trakt_client_id="client-id",
@@ -193,7 +190,7 @@ class AppLevelTraktTokenTests(EncryptionIntegrationTestCase):
 
         recorder = _RecordingClient()
         with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
-            asyncio.run(trakt_calendar.fetch_window(SHOWS, settings, WINDOW_START, WINDOW_DAYS))
+            asyncio.run(trakt_sync.fetch_ratings(settings))
         self.assertEqual(recorder.authorizations, ["Bearer operator-token"])
 
     def test_with_no_key_the_same_fetch_still_carries_the_plaintext_token(self):
@@ -204,7 +201,7 @@ class AppLevelTraktTokenTests(EncryptionIntegrationTestCase):
         settings = load_settings()
         recorder = _RecordingClient()
         with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
-            asyncio.run(trakt_calendar.fetch_window(SHOWS, settings, WINDOW_START, WINDOW_DAYS))
+            asyncio.run(trakt_sync.fetch_ratings(settings))
         self.assertEqual(recorder.authorizations, ["Bearer plain-token"])
 
 
@@ -212,17 +209,17 @@ class EndToEndEnableAndRecoverTests(EncryptionIntegrationTestCase):
     """From a plaintext instance, through the two-stage enable flow, to a lost-key
     recovery — checking at each stage that the real call paths still work."""
 
-    def _calendar_call_uses(self, expected_token: str) -> None:
+    def _trakt_read_uses(self, expected_token: str) -> None:
         settings = load_settings()
         recorder = _RecordingClient()
         with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
-            asyncio.run(trakt_calendar.fetch_window(SHOWS, settings, WINDOW_START, WINDOW_DAYS))
+            asyncio.run(trakt_sync.fetch_ratings(settings))
         self.assertEqual(recorder.authorizations, [f"Bearer {expected_token}"])
 
     def test_enable_encrypt_lose_key_restore_key_door_one(self):
         _set_key(None)
         save_settings(Settings(trakt_client_id="client-id", trakt_access_token="op-token"))
-        self._calendar_call_uses("op-token")
+        self._trakt_read_uses("op-token")
 
         # First phase: choose to enable, get a generated key, restart-required.
         result = asyncio.run(encryption_flow.begin_enable(generate=True))
@@ -242,8 +239,8 @@ class EndToEndEnableAndRecoverTests(EncryptionIntegrationTestCase):
             "SELECT value FROM app_secrets WHERE name = 'trakt_access_token'"))
         self.assertTrue(raw.startswith(secrets_box.PREFIX))
 
-        # The calendar fetch still works, transparently, after encryption.
-        self._calendar_call_uses("op-token")
+        # The Trakt call still carries the token, transparently, after encryption.
+        self._trakt_read_uses("op-token")
         self.assertEqual(asyncio.run(encryption_flow.refresh_health()), encryption_flow.HEALTHY)
 
         # The key is lost and a fresh one lands in the environment instead.
@@ -258,7 +255,7 @@ class EndToEndEnableAndRecoverTests(EncryptionIntegrationTestCase):
         raw_after = asyncio.run(db.fetch_value(
             "SELECT value FROM app_secrets WHERE name = 'trakt_access_token'"))
         self.assertEqual(raw_before, raw_after)
-        self._calendar_call_uses("op-token")
+        self._trakt_read_uses("op-token")
 
     def test_door_two_reset_after_a_lost_key_recovers_a_working_instance(self):
         _set_key(None)
@@ -297,12 +294,12 @@ class EndToEndEnableAndRecoverTests(EncryptionIntegrationTestCase):
         self.assertIsNone(asyncio.run(trakt_routes.access_token_for_user(user_id)))
 
         # The operator re-enters the app-wide token; it seals under the current
-        # (new) key and the calendar fetch path works again end to end.
+        # (new) key and the Trakt call path works again end to end.
         save_settings(Settings(trakt_client_id="client-id", trakt_access_token="fresh-op-token"))
         raw = asyncio.run(db.fetch_value(
             "SELECT value FROM app_secrets WHERE name = 'trakt_access_token'"))
         self.assertTrue(raw.startswith(secrets_box.PREFIX))
-        self._calendar_call_uses("fresh-op-token")
+        self._trakt_read_uses("fresh-op-token")
 
         # The user re-links; their fresh token seals under the new key too.
         asyncio.run(auth.store_identity_tokens(
