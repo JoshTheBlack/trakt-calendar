@@ -1,20 +1,29 @@
-"""The tracker keys what a service tells it by the title store's key.
+"""The tracker keys what a service tells it as the tracker files that title.
 
 WHY THIS NEEDS SAYING: a service names a title by the ids it knows, and the
 tracker files rows by the title store's answer — so a show Simkl knows only by its
 tvdb id is the tracker's row filed under its tmdb id. Keyed by Simkl's ids alone,
 that show's plays would fold into nothing and its library entry would read as "not
 in the library"; a backup naming a key the store has since retired would restore
-a second row beside the title's real one. Each test holds one of those three.
+a second row beside the title's real one.
+
+AND A SERVICE'S OWN ID COMES FIRST. Which TMDB title a service says its show is,
+is a pointer it can move: Simkl moved The Great British Bake Off's (Simkl 21506,
+one show of seventeen series) from TMDB's Channel 4 title to its BBC one, and the
+season the tracker held under the first stopped counting while its plays came back
+as a question about a show already on the page.
 """
 from __future__ import annotations
 
 import json
+from zoneinfo import ZoneInfo
 
-from app import db, metadata
-from app.distrakt import backup, watch_history
-from app.providers.base import LibraryEntry, LibraryRead, Media
-from tests.distrakt.test_store import DistraktTestCase
+from app import clock, db, metadata
+from app.distrakt import backup, lifecycle, store, watch_history
+from app.providers.base import ItemKey, LibraryEntry, LibraryRead, Media
+from tests.distrakt.test_store import DistraktTestCase, a_record
+
+TRACKED = "show:tmdb:87012"
 
 
 async def known_title():
@@ -22,12 +31,27 @@ async def known_title():
     await metadata.ensure(Media.SHOW, {"tmdb": 900, "tvdb": 4321})
 
 
+def _state(*keys: str, simkl: int = 21506) -> dict:
+    """Watch state holding each of `keys` by the one Simkl id."""
+    return {"shows": {key: {"ids": {"simkl": simkl}, "seasons": {}} for key in keys},
+            "movies": {}}
+
+
+def _simkl_play(number: int = 5) -> dict:
+    """A Simkl play after Simkl moved its pointer: its own id is the tracked
+    title's, its tmdb id is the other TMDB title."""
+    return {"type": "episode", "watched_at": "2026-10-25T20:12:07Z",
+            "show": {"title": "The Great British Bake Off",
+                     "ids": {"simkl": 21506, "tmdb": 34549, "tvdb": 184871}},
+            "episode": {"season": 17, "number": number}}
+
+
 class PlaysAreKeyedByTheStoreTests(DistraktTestCase):
     async def test_a_play_naming_a_show_by_tvdb_alone_keys_as_its_tmdb_row(self):
         await known_title()
         events = [{"type": "episode", "show": {"title": "A Show", "ids": {"tvdb": 4321}},
                    "episode": {"season": 1, "number": 2}}]
-        await watch_history._with_known_ids(events)
+        await watch_history._keyed_as_tracked(events, _state(), "simkl")
         self.assertEqual(str(watch_history._event_key(events[0]["show"], Media.SHOW)),
                          "show:tmdb:900")
         self.assertEqual(events[0]["show"]["ids"]["tvdb"], 4321)
@@ -35,7 +59,7 @@ class PlaysAreKeyedByTheStoreTests(DistraktTestCase):
     async def test_a_play_for_a_title_the_store_has_never_seen_is_left_alone(self):
         events = [{"type": "episode", "show": {"ids": {"tvdb": 77}},
                    "episode": {"season": 1, "number": 1}}]
-        await watch_history._with_known_ids(events)
+        await watch_history._keyed_as_tracked(events, _state(), "simkl")
         self.assertEqual(events[0]["show"]["ids"], {"tvdb": 77})
 
     async def test_a_library_entry_naming_a_show_by_tvdb_alone_keys_as_its_tmdb_row(self):
@@ -43,9 +67,64 @@ class PlaysAreKeyedByTheStoreTests(DistraktTestCase):
         read = LibraryRead(entries={"show:tvdb:4321": LibraryEntry({"tvdb": 4321, "simkl": 5}, {}),
                                     "show:tvdb:77": LibraryEntry({"tvdb": 77}, {})},
                            events=[], complete=True)
-        keyed = await watch_history._keyed_by_store(read)
+        keyed = await watch_history._keyed_as_tracked_library(read, {}, "simkl")
         self.assertEqual(set(keyed.entries), {"show:tmdb:900", "show:tvdb:77"})
         self.assertEqual(keyed.entries["show:tmdb:900"].ids["simkl"], 5)
+
+
+class AServicesOwnIdPlacesItsPlaysTests(DistraktTestCase):
+    async def test_a_play_keeps_to_the_title_the_tracker_holds_by_its_services_id(self):
+        events = [_simkl_play()]
+        await watch_history._keyed_as_tracked(events, _state(TRACKED), "simkl")
+        play = watch_history._episode_play(events[0])
+        self.assertEqual(str(play.key), TRACKED)
+        # What the service said is kept as it said it; only the filing moved.
+        self.assertEqual(play.ids["tmdb"], 34549)
+
+    async def test_only_the_reporting_services_own_id_places_it(self):
+        """A Trakt pass places by Trakt's id; a Simkl id on its payload is not
+        Trakt's statement about its own title."""
+        events = [_simkl_play()]
+        await watch_history._keyed_as_tracked(events, _state(TRACKED), "trakt")
+        self.assertEqual(str(watch_history._episode_play(events[0]).key), "show:tmdb:34549")
+
+    async def test_an_id_two_tracked_titles_hold_places_nothing(self):
+        events = [_simkl_play()]
+        await watch_history._keyed_as_tracked(
+            events, _state(TRACKED, "show:tmdb:34549000"), "simkl")
+        self.assertEqual(str(watch_history._episode_play(events[0]).key), "show:tmdb:34549")
+
+    async def test_a_library_entry_keeps_to_the_title_the_tracker_holds_by_its_services_id(self):
+        """And it wins the key over an entry whose shared ids merely land there."""
+        read = LibraryRead(entries={
+            "show:tmdb:34549": LibraryEntry({"simkl": 21506, "tmdb": 34549},
+                                            {17: {5: "2026-10-25T20:12:07Z"}}),
+            "show:tmdb:87012": LibraryEntry({"simkl": 999, "tmdb": 87012}, {}),
+        }, events=[], complete=True)
+        keyed = await watch_history._keyed_as_tracked_library(read, _state(TRACKED)["shows"],
+                                                              "simkl")
+        self.assertEqual(set(keyed.entries), {TRACKED})
+        self.assertEqual(keyed.entries[TRACKED].ids["simkl"], 21506)
+
+    async def test_a_question_stored_under_the_services_old_pointer_is_spent(self):
+        """The season is on the list under the tracked key; the question about
+        it was stored under the title Simkl's shared ids named. Judged where the
+        tracker holds it, it is no question at all."""
+        await store.add_user_record(self.user_id, a_record(
+            87012, season=17, kind=store.RecordKind.KEEPUP,
+            ids={"tmdb": 87012, "simkl": 21506}, title="The Great British Bake Off"))
+        state = await watch_history.load_state(self.user_id)
+        watch_history._set_show_baseline(state, TRACKED, {"simkl": 21506},
+                                         {17: {1: "2026-09-23T01:29:27Z"}}, "simkl")
+        await watch_history._save(self.user_id, state)
+        await store.open_prompt(self.user_id, ItemKey("show", "tmdb", "34549"), 17, 5,
+                                "The Great British Bake Off",
+                                {"simkl": 21506, "tmdb": 34549}, "2026-10-25T20:12:07Z")
+        today = clock.today()
+        questions = await lifecycle.standing_questions(
+            self.user_id, month=store.month_key(today.year, today.month), tz=ZoneInfo("UTC"))
+        self.assertEqual(questions.unknown, [])
+        self.assertEqual(await store.open_prompts(self.user_id), [])
 
 
 class ARestoreLandsOnTheTitlesKeyTests(DistraktTestCase):

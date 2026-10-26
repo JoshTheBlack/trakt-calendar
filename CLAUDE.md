@@ -160,7 +160,12 @@ only when exactly ONE title holds it — fifteen pairs of TMDB titles share a lo
 id on the development copy. A READER THAT KEYS FROM ONE SERVICE'S IDS COMPLETES
 THEM FROM THE STORE FIRST (`identity.complete`): the calendar's read, a history
 play, a library read, a search row drawn as a card — or a show one service knows
-only by its tvdb id splits from its tmdb self. `tests/metadata/test_holders.py`
+only by its tvdb id splits from its tmdb self. ONE THING OUTRANKS THAT for the
+watch tracker: a service's play or library entry lands on the tracked title
+holding THAT SERVICE'S OWN id, when exactly one does
+(`watch_history._tracked_by_own_id`), because a service re-points its shared ids
+and never its own — Simkl moved The Great British Bake Off between TMDB's two
+titles, and its episodes stopped reaching the season the tracker held. `tests/metadata/test_holders.py`
 fails when the schema grows a table neither holder list classifies, and SQL
 naming the store's tables lives in `app/metadata/` or names them through its
 constants (`rows.TITLES`, `rows.EPISODES`, `identity.TABLE`).
