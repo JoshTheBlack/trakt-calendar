@@ -1086,23 +1086,35 @@ async def ensure_window(endpoint: Endpoint, settings, start: date, *,
 # (`schedule_refill`), so the read that triggers it is answered at once.
 _FAILED_RETRY_SECONDS = 60
 
+# AND HOW SOON THE SCHEDULE DOES, with nobody reading. `refresh_months` judged a
+# window only by its age, so a failure in next month's weeks — refreshed weekly —
+# stood for up to seven days unless somebody opened that month, and then the
+# first view drew the banner while its retry ran behind it: a Trakt failure on
+# 2026-10-23 in the week of 30 November was still there on the 26th. Slower than
+# a reader's minute because the schedule walks every window of two months with
+# nobody waiting, and during an outage a minute would ask a struggling service
+# again for each of them every tick.
+_FAILED_REFRESH_SECONDS = 15 * 60
+
 # When each (endpoint, window) last had a failed source asked again, so a source
 # that keeps failing outright — which stores nothing, and so leaves the window's
 # own clock where it was — is retried once a minute rather than on every read.
+# Shared by the reader and the schedule, so neither repeats the other's attempt.
 # In memory: a restart simply makes the first read after it try again.
 _failed_retried_at: dict[tuple[str, str], int] = {}
 
 
 def _failed_retry_due(endpoint: Endpoint, start: date, cached: WindowCoverage,
-                      ts: int) -> bool:
+                      ts: int, *, after: int = _FAILED_RETRY_SECONDS) -> bool:
     """Whether a source this stored window asked and did not hear from is due to
-    be asked again — see `_FAILED_RETRY_SECONDS` — and, when it is, notes the
-    attempt so the next one waits its minute too."""
+    be asked again, `after` seconds from the later of the window's store and the
+    last attempt — see `_FAILED_RETRY_SECONDS` and `_FAILED_REFRESH_SECONDS` —
+    and, when it is, notes the attempt so the next one waits too."""
     if not set(cached.asked) - set(cached.sources):
         return False
     key = (endpoint.key, start.isoformat())
     since = max(int(cached.cached_at or 0), _failed_retried_at.get(key, 0))
-    if ts - since < _FAILED_RETRY_SECONDS:
+    if ts - since < after:
         return False
     _failed_retried_at[key] = ts
     return True
@@ -2047,8 +2059,14 @@ async def refresh_months(settings, *, now: int | None = None) -> int:
         first, last = _month_span(year, month)
         for endpoint in ENDPOINTS.values():
             for start in aligned_windows(first, last):
-                stored = await entries.span_stored_at(endpoint.key, start)
-                if stored is not None and (ts - stored) < max_age:
+                answered, asked, stored = await entries.span_coverage(endpoint.key, start)
+                # Due by age, or because a source it asked did not answer — see
+                # _FAILED_REFRESH_SECONDS for why age alone left a failure up for
+                # days.
+                if (stored is not None and (ts - stored) < max_age
+                        and not _failed_retry_due(
+                            endpoint, start, WindowCoverage(answered, asked, stored), ts,
+                            after=_FAILED_REFRESH_SECONDS)):
                     continue
                 try:
                     await ensure_window(endpoint, settings, start,

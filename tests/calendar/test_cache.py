@@ -1559,6 +1559,55 @@ class MonthRefreshTests(CacheTestCase):
         self.assertGreater(mocked.call_count, 1)  # but every span was still tried
 
 
+class AFailedWindowIsNotLeftToItsTierTests(CacheTestCase):
+    """A window a source failed on is KNOWN to be wrong, and judging it by age
+    alone left it so for up to a week in the month ahead — until somebody opened
+    that month, whose first view then drew "some calendar data couldn't be
+    loaded" while the retry ran behind it."""
+
+    NOW = MonthRefreshTests.NOW
+    AUGUST = calendar_cache.window_start(date(2026, 8, 12))
+    _refresh = MonthRefreshTests._refresh
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        calendar_cache._failed_retried_at.clear()
+        self.addCleanup(calendar_cache._failed_retried_at.clear)
+
+    async def _store_august(self, at, *, answered=("simkl",)):
+        await calendar_cache.store_window(SHOWS.key, self.AUGUST, [], 600, at,
+                                          sources=list(answered), asked=["trakt", "simkl"])
+
+    async def _august_refetched(self, now):
+        return (SHOWS.key, self.AUGUST) in {
+            (call.args[0].key, call.args[2])
+            for call in (await self._refresh(now=now)).call_args_list}
+
+    async def test_a_failure_in_the_month_ahead_is_due_long_before_its_week(self):
+        await self._store_august(self.NOW - 2 * 24 * 3600)
+        self.assertTrue(await self._august_refetched(self.NOW))
+
+    async def test_a_window_every_source_answered_still_waits_its_week(self):
+        await self._store_august(self.NOW - 2 * 24 * 3600, answered=("trakt", "simkl"))
+        self.assertFalse(await self._august_refetched(self.NOW))
+
+    async def test_a_failure_just_stored_waits_its_quarter_hour(self):
+        await self._store_august(self.NOW - 60)
+        self.assertFalse(await self._august_refetched(self.NOW))
+        self.assertTrue(await self._august_refetched(
+            self.NOW - 60 + calendar_cache._FAILED_REFRESH_SECONDS))
+
+    async def test_a_source_that_keeps_failing_is_asked_once_a_quarter_hour(self):
+        """The refill is patched out here, so the window's own clock never moves
+        — exactly what an outright failure looks like. The attempt is what is
+        timed, not every heartbeat tick."""
+        await self._store_august(self.NOW - 2 * 24 * 3600)
+        self.assertTrue(await self._august_refetched(self.NOW))
+        self.assertFalse(await self._august_refetched(self.NOW + 60))
+        self.assertTrue(await self._august_refetched(
+            self.NOW + calendar_cache._FAILED_REFRESH_SECONDS))
+
+
 # ---------------------------------------------------------------------------
 # eviction — TTL sweep and the size-cap LRU
 # ---------------------------------------------------------------------------

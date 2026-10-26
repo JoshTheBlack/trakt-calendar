@@ -318,6 +318,12 @@ async def span_coverage(endpoint_key: str, span_start: date
     is fresh, partial or missing is a question about coverage; its airings are
     read once for the whole range a reader asked about (`read_span_whole`), so
     reading them here as well would read every row twice.
+
+    AND FOR THE SCHEDULE (cache.refresh_months), whose clock this is: stored
+    rather than remembered, so a restart does not reset it. The EARLIEST source's
+    store rather than the latest: a span is only as fresh as its stalest source,
+    so one source refilled an hour ago must not make the whole span look current
+    while another has not been asked in a week.
     """
     cover = await db.fetch_all(
         "SELECT source, asked, answered, stored_at FROM calendar_coverage "
@@ -755,18 +761,3 @@ async def sources_with_rows(endpoint_key: str, span_start: date, span_end: date
         "WHERE endpoint = ? AND air_date >= ? AND air_date < ?",
         (endpoint_key, span_start.isoformat(), span_end.isoformat()))
     return {str(r["source"]) for r in found}
-
-
-async def span_stored_at(endpoint_key: str, span_start: date) -> int | None:
-    """When this span was last stored, or None if it never has been.
-
-    THE SCHEDULE'S CLOCK, and it is stored rather than remembered so a restart
-    does not reset it. `min` across the sources rather than `max`: a span is only
-    as fresh as its stalest source, so one source refilled an hour ago must not
-    make the whole span look current while another has not been asked in a week.
-    """
-    row = await db.fetch_one(
-        "SELECT MIN(stored_at) AS at FROM calendar_coverage "
-        "WHERE endpoint = ? AND span_start = ?",
-        (endpoint_key, span_start.isoformat()))
-    return None if row is None or row["at"] is None else int(row["at"])

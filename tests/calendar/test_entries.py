@@ -182,10 +182,9 @@ class ASourceReportingUnchangedTests(unittest.IsolatedAsyncioTestCase):
         pass must not treat the span as overdue and ask again immediately."""
         await self._fill(([self._record()], ["trakt"], []), now=1000)
         await self._fill(([], [], ["trakt"]), now=999_999, force=True)
-        self.assertEqual(
-            await calendar_entries.span_stored_at(
-                "shows", calendar_cache.window_start(date(2026, 7, 6))),
-            999_999)
+        _answered, _asked, stored_at = await calendar_entries.span_coverage(
+            "shows", calendar_cache.window_start(date(2026, 7, 6)))
+        self.assertEqual(stored_at, 999_999)
 
 
 class EpisodeLevelTests(unittest.IsolatedAsyncioTestCase):
