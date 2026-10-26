@@ -188,7 +188,7 @@ class FetchTitleTests(unittest.IsolatedAsyncioTestCase):
         payload = {"title": "X", "ids": {"simkl": 1}}
         with patch("app.providers.simkl.transport.cached_get", new=_cached_get(payload)):
             fields = await titles.fetch_title(SETTINGS, 1, Media.SHOW)
-        # `title` is HANDED BACK AND NOT STORED — `entries.enrichment_values`
+        # `title` is HANDED BACK AND NOT STORED — the title store's `enrichment_values`
         # names every field that reaches a column and this is not one, so no
         # stored row changed and no EXTRACT_VERSION bump was owed. It is here
         # because a record built from a lookup alone needs a name.

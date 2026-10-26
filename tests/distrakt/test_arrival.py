@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, patch
 
 from app.config import Settings
 from app.distrakt import arrival, backfill, calendar_import, rollover, store
+from app.metadata import ids as id_rules
 from app.providers.base import ItemKey, Media, SourceUnavailable, TitleFacts
 from tests.distrakt.test_naming import a_calendar_record, store_calendar
 from tests.distrakt.test_rewatch import KEY, _RosterAddCase
@@ -90,15 +91,33 @@ class TheIdsTests(DistraktTestCase):
             arrived, = await arrival.describe(SETTINGS, [a_filing()])
         self.assertEqual(arrived.record["ids"], {"tmdb": 900, "trakt": 111})
 
-    async def test_learning_an_id_never_moves_the_filing_identity(self):
-        """A title filed under tvdb that learns its tmdb id stays filed under
-        tvdb: otherwise it would split from its own earlier rows."""
+    async def test_learning_a_higher_id_files_the_title_there_with_its_earlier_rows(self):
+        """A title filed under tvdb that learns its tmdb id is filed under tmdb —
+        and the row already filed under tvdb moves with it in the same
+        transaction, so the title does not split from its own earlier rows."""
+        await store.add_user_record(self.user_id, {
+            "ids": {"tvdb": 4321, "simkl": 1}, "season": 1, "kind": "keepup",
+            "title": "Earlier"})
         with _season(), patch("app.providers.trakt.detail.find_by_shared_id",
                               AsyncMock(return_value={"trakt": 7, "tmdb": 900})):
             arrived, = await arrival.describe(
+                SETTINGS, [a_filing(ids={"tvdb": 4321, "simkl": 1}, season=2)])
+        self.assertEqual(store.record_key(arrived.record), ItemKey("show", "tmdb", "900"))
+        self.assertEqual(arrived.record["ids"]["tvdb"], 4321)
+        earlier = await store.find_user_record(self.user_id, ItemKey("show", "tmdb", "900"), 1)
+        self.assertEqual((earlier["title"], earlier["ids"]["tmdb"]), ("Earlier", 900))
+        self.assertIsNone(
+            await store.find_user_record(self.user_id, ItemKey("show", "tvdb", "4321"), 1))
+
+    async def test_a_title_the_store_already_keys_higher_is_filed_there_without_asking(self):
+        """A play naming a show only by its tvdb id is the title another service
+        already stated a tmdb id for: it is filed under that title's key."""
+        await store_calendar([a_calendar_record("trakt", {"tmdb": 900, "tvdb": 4321,
+                                                          "trakt": 111})])
+        with _season():
+            arrived, = await arrival.describe(
                 SETTINGS, [a_filing(ids={"tvdb": 4321, "simkl": 1})])
-        self.assertEqual(store.record_key(arrived.record), ItemKey("show", "tvdb", "4321"))
-        self.assertEqual(arrived.record["ids"]["tmdb"], 900)
+        self.assertEqual(store.record_key(arrived.record), ItemKey("show", "tmdb", "900"))
 
     async def test_a_held_service_id_is_never_replaced(self):
         await store_calendar([a_calendar_record("trakt", {"tmdb": 900, "trakt": 999})])
@@ -126,9 +145,9 @@ class TheIdsTests(DistraktTestCase):
         """The bare `slug` is ambiguous — each service calls its own name that —
         and Simkl states numeric ids as text where Trakt states numbers."""
         self.assertEqual(
-            arrival.canonical_ids({"slug": "the-rookie", "trakt_slug": "the-rookie-2018",
-                                   "tmdb": "79744", "tvdb": 350665, "imdb": "tt7587890",
-                                   "unknown": 1}),
+            id_rules.canonical({"slug": "the-rookie", "trakt_slug": "the-rookie-2018",
+                                "tmdb": "79744", "tvdb": 350665, "imdb": "tt7587890",
+                                "unknown": 1}),
             {"trakt_slug": "the-rookie-2018", "tmdb": 79744, "tvdb": 350665,
              "imdb": "tt7587890"})
 

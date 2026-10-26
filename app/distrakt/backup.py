@@ -10,8 +10,8 @@ from __future__ import annotations
 import json
 import logging
 
-from .. import db
-from ..providers.base import Media, collect_ids, resolve_key
+from .. import db, metadata
+from ..providers.base import Media, collect_ids, item_key, resolve_key
 from . import store
 from .store import IDENTITY_COLUMNS, MONTH_RECORD_COLUMNS, USER_RECORD_COLUMNS
 
@@ -371,6 +371,7 @@ async def restore_user_data(user_id: int, doc: dict) -> None:
         if not isinstance(rows, list):
             raise RestoreError(f"{table} must be a list")
         payload[table] = rows
+    titles = _restored_titles(payload)
 
     def _work(conn: db.Connection) -> None:
         for table in payload:
@@ -394,5 +395,34 @@ async def restore_user_data(user_id: int, doc: dict) -> None:
                 conn.execute(
                     f"INSERT INTO {table} ({collist}) VALUES ({placeholders})",
                     [user_id, *(row[column] for column in stated)])
+        # EVERY RESTORED TITLE GOES THROUGH THE TITLE STORE (metadata.register),
+        # in the same transaction as the rows. A backup is self-contained — ids
+        # and words, no reference to anything stored here — and it may name a
+        # title by a key the store has since retired; registering it moves the
+        # restored rows to the key the title answers to now, exactly as a re-key
+        # moves every other holder.
+        for key, (media, ids) in titles.items():
+            metadata.register(conn, media, ids, filed_under=key)  # moves rows if re-keyed
 
     await db.transaction(_work)
+
+
+# The id columns a restored row may carry, and the id space each is in.
+_RESTORED_IDS = {"trakt_id": "trakt", "simkl_id": "simkl", "tmdb": "tmdb", "tvdb": "tvdb",
+                 "imdb": "imdb", "mal": "mal", "trakt_slug": "trakt_slug",
+                 "simkl_slug": "simkl_slug"}
+
+
+def _restored_titles(payload: dict[str, list]) -> dict[str, tuple[str, dict]]:
+    """{key a restored row is filed under: (media, every id those rows state)}."""
+    out: dict[str, tuple[str, dict]] = {}
+    for rows in payload.values():
+        for row in rows:
+            if not isinstance(row, dict) or not all(row.get(c) for c in IDENTITY_COLUMNS):
+                continue
+            key = item_key(*(str(row[c]) for c in IDENTITY_COLUMNS))
+            held = out.setdefault(key, (str(row["media"]), {}))[1]
+            for column, name in _RESTORED_IDS.items():
+                if row.get(column) not in (None, ""):
+                    held.setdefault(name, row[column])
+    return out

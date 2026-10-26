@@ -141,12 +141,37 @@ through the registry (`Provider.title_url`, `Provider.episode_url`,
 registered Source has an entry — and an unknown name is an error, never quietly
 read as one of the others.
 
+**ONE TITLE STORE, AND ONE WAY IN.** `app/metadata/` owns what every service says
+about a title (`title_metadata`, `episode_metadata` — a row per service, each with
+its own expiry; `rows.py`), which title a set of ids is (`titles`,
+`title_aliases`; `identity.py`), and every column elsewhere that holds a title's
+key (`holders.py`). Every path that meets a title registers it there:
+`store_records` for a service's own listings, inside the caller's transaction and
+asking nobody (a fill names hundreds of titles); `ensure` / `ensure_many` for a
+title met by its ids — a search pick, a tracker arrival, a board add, an import, a
+restore — which, handed a viewer's settings, ask each service the title has no id
+from ONCE by shared id. THAT IS THE ONE PLACE THE APP ASKS BY SHARED ID
+(`providers.for_shared_id_lookup`; each port keeps its own day-long clock). A KEY
+ONLY MOVES UP the waterfall, once, everywhere: when a title learns a higher id,
+`identity.settle` re-keys it, keeps the old key as an alias one hop long, and
+`holders.repoint` moves every row holding the old key in the same transaction.
+Two titles in the same id space never merge, and a lower id joins a higher title
+only when exactly ONE title holds it — fifteen pairs of TMDB titles share a lower
+id on the development copy. A READER THAT KEYS FROM ONE SERVICE'S IDS COMPLETES
+THEM FROM THE STORE FIRST (`identity.complete`): the calendar's read, a history
+play, a library read, a search row drawn as a card — or a show one service knows
+only by its tvdb id splits from its tmdb self. `tests/metadata/test_holders.py`
+fails when the schema grows a table neither holder list classifies, and SQL
+naming the store's tables lives in `app/metadata/` or names them through its
+constants (`rows.TITLES`, `rows.EPISODES`, `identity.TABLE`).
+
 **The calendar cache stores the UNFILTERED window once per (endpoint, 7 days),
 holding EVERY source's records as ROWS.** There is no stored window object: a
 versioned compressed envelope with a `PAYLOAD_VERSION` used to live here, and it
-went with the blob — `app/calendar/entries.py` now writes each source's records
-into `calendar_titles`, `calendar_airings` and `calendar_episodes`, so a shape
-change is a migration rather than a version byte. The reasoning that version
+went with the blob — `app/calendar/entries.py` now writes each source's airings
+into `calendar_airings`, handing the records to the title store, which writes
+the title and episode rows (`title_metadata`, `episode_metadata`) in the same
+transaction — so a shape change is a migration rather than a version byte. The reasoning that version
 carried still binds, and `app/calendar/cache.py` keeps it: a month spans five or
 six windows, so nothing may leave the stored calendar half-converted or one
 airing would draw merged in the span that had been refilled and split in the one
@@ -613,7 +638,8 @@ reach together).
 IS A DIFFERENT QUESTION with its own function, `providers.for_shared_id_lookup`
 — every service that answers an exact lookup, whichever box found the title —
 because that lookup is how a title TMDB found learns its Trakt and Simkl ids;
-arrival and the calendar's card completion ask it, never the search list. And a
+the title store asks it (`metadata.ensure`) for an arrival, a board add and the
+calendar's card completion, never the search list. And a
 service WRITES an airing only onto a calendar it publishes (`_publishes` in
 `app/calendar/search.py`, asked by `fill_one_gap` and the stored-season
 completion), so a catalogue with no calendar describes a search result and the

@@ -438,6 +438,15 @@ app/
     share_code.py     The compact ?p= code a share link is handed out as
     share_card.py     The 1200x630 picture a share link unfurls into
     share_card_cache.py  Rendered cards on disk (data/share_cards), keyed by content
+  metadata/         The title store every feature reads: what each service says
+                     about a title, which title a set of ids is, and the one way in
+    __init__.py       ensure / store_records — registering a title, and the one
+                       place the app asks a service for its id by shared id
+    identity.py       A title's key, its aliases, and how a key moves up
+    holders.py        Every column holding a title's key, moved together on a re-key
+    rows.py           Each service's rows for a title and its episodes
+    typed_search.py   The stored titles an add box lists as you type
+    backfill.py       Registering, once, everything stored before the store existed
   ████████/         The █████ ███████: store, live counts, month rollover, backup,
                      per-user prefs, and the calendar premiere import
     routes.py         The ███████ page and its API
@@ -481,8 +490,8 @@ app/
   templates/        Jinja2 templates
   static/           CSS (one bundled stylesheet), JS (one directory per page), images
 run.py              Dev runner (Hypercorn)
-tests/              Mirrors app/ — kernel, providers, calendar, ████████, ranker,
-                     auth, media, integrations — plus encryption/, which is named
+tests/              Mirrors app/ — kernel, providers, calendar, metadata, ████████,
+                     ranker, auth, media, integrations — plus encryption/, which is named
                      for a concern because the at-rest key path spans two packages
 ```
 

@@ -36,10 +36,13 @@ from . import (arrival, backfill, counts, discord_fmt, episode_progress, lifecyc
 # are defined in: a route handler has no business knowing which half of the
 # tracker `load_month` or `compute_live_shows` lives in.
 from .. import distrakt as distrakt_store
-from .. import auth, authz, chrome, clock, db, details_panel, providers, route_params
+from .. import auth, authz, chrome, clock, db, details_panel, metadata, providers, route_params
 from ..auth import AuthLevel, viewer
-from ..calendar import entries as calendar_entries, share_links
+from ..calendar import share_links
 from ..config import load_settings
+from ..metadata import identity as title_identity
+from ..metadata import rows as title_rows
+from ..metadata import typed_search
 from ..endpoints import endpoint_choices
 from ..media import artwork, logos, posters
 from ..perftrace import span
@@ -569,7 +572,7 @@ def _untracked(show: Mapping, tracked_by: Sequence[str] | None) -> bool:
 
     A TITLE CAN BE ADDED THAT NO TRACKING SERVICE LISTS: the search finds it in
     a catalogue that keeps no watch history (TMDB), and the lookups by shared id
-    that teach a new row its Trakt and Simkl ids (arrival.ask_services) found it
+    that teach a new row its Trakt and Simkl ids (metadata.ensure) found it
     at neither. The add is allowed — the season is real and the viewer asked for
     it — but a row that silently stays at zero reads as "not watched yet". The
     answer is read off the row's own ids, so a later lookup that finds the title
@@ -1616,7 +1619,7 @@ async def _row_pictures(user_id: int, shows: list[dict], films: list[dict] | Non
     rows = ([(Media.SHOW, show) for show in shows if show.get("key")]
             + [(Media.MOVIE, film) for film in films or [] if film.get("key")])
     order = await _poster_order(user_id)
-    stored = {media: await calendar_entries.posters_for(
+    stored = {media: await title_rows.posters_for(
                   [row["key"] for kind, row in rows if kind == media], media)
               for media in (Media.SHOW, Media.MOVIE)}
     refs = [(str(media), tmdb, row.get("season")) for media, row in rows
@@ -2473,10 +2476,10 @@ async def _named_pick(settings, media: Media, named, *,
     title. A row a service answered just now names its query and its place in
     that answer (`q`, `i`), and the answer is re-read from where the search
     stored it (title_search.resolve_pick) — it may have no shared identity to be
-    named by until it is looked up. A row read from the stored calendar names
-    the identity it is stored under (`t`, a calendar_titles.title_key), and the
-    title, the ids and the network are read back out of the rows the services
-    wrote (calendar/entries.py's stored_title) — so a key this instance does not
+    named by until it is looked up. A row read from the title store names the
+    identity it is stored under (`t`, a title key), and the title, the ids and
+    the network are read back out of the rows the services wrote
+    (metadata/typed_search.py's stored_title) — so a key this instance does not
     hold is a refusal, never a title built from what the page sent. Either way
     the per-title season lookup then runs exactly as it always has
     (title_search.pick_from_hit).
@@ -2487,7 +2490,7 @@ async def _named_pick(settings, media: Media, named, *,
     """
     title_key = str(named.get("t") or "")
     if title_key:
-        hit = await calendar_entries.stored_title(title_key, media)
+        hit = await typed_search.stored_title(title_key, media)
         if hit is None:
             return None
         return await title_search.pick_from_hit(settings, hit, cached_only=cached_only)
@@ -2592,8 +2595,8 @@ async def _stored_fragment(request: Request, media: Media):
     same results list a submitted search swaps in.
 
     TYPING READS STORAGE AND NOTHING ELSE; ENTER ASKS THE SERVICES. Every title
-    some calendar month on this instance has loaded is in reach of an index read
-    (calendar/entries.py's titles_matching), which is cheap enough to run as
+    the title store holds is in reach of an index read
+    (metadata/typed_search.py's titles_matching), which is cheap enough to run as
     somebody types; asking a service spends somebody else's rate limit and is
     left to a deliberate act, the form's own submit (`_search_fragment`). So this
     builds no per-viewer settings at all — building them can refresh a token,
@@ -2608,14 +2611,14 @@ async def _stored_fragment(request: Request, media: Media):
     """
     query = request.query_params.get("q", "")
     year, month = _viewed_month(request)
-    hits = await calendar_entries.titles_matching(query, media, STORED_RESULT_LIMIT)
+    hits = await typed_search.titles_matching(query, media, STORED_RESULT_LIMIT)
     return templates.TemplateResponse(request, "_distrakt_search_results.html", {
         "request": request, "media": str(media), "hits": _search_rows(hits, media),
         "failed": [], "typed": True, "controls": None, "refused": "", "search_ref": {},
         # Under the shortest query the calendar's own search accepts there is
         # nothing to say yet — not "no matches", which would be an answer to a
         # question nobody has finished asking.
-        "too_short": len(calendar_entries.fold_title(query)) < calendar_entries.MIN_QUERY,
+        "too_short": typed_search.too_short(query),
         "query": query, "month_query": f"?year={year}&month={month}"})
 
 
@@ -2704,13 +2707,14 @@ async def api_distrakt_add_movie(request: Request):
     if unkeyable := _unkeyable_reason(pick.media, pick.ids, pick.title):
         return _month_refusal(request, unkeyable)
     # EVERY SERVICE IS ASKED FOR ITS OWN ID, by the shared ids the pick names —
-    # the exact lookups a show's arrival makes (arrival.ask_services). A film the
-    # default catalogue found carries its tmdb id alone, and filed with nothing
-    # else it names no Trakt or Simkl page and no service's play of it says so
-    # until that service's history happens to report it. A service that cannot
-    # be asked costs the add nothing.
-    learned = await arrival.ask_services(settings, {"film": (Media.MOVIE, dict(pick.ids))})
-    ids = {**pick.ids, **learned.get("film", {})}
+    # the title store's lookups, the ones a show's arrival makes (metadata.ensure).
+    # A film the default catalogue found carries its tmdb id alone, and filed with
+    # nothing else it names no Trakt or Simkl page and no service's play of it
+    # says so until that service's history happens to report it. A service that
+    # cannot be asked costs the add nothing.
+    film = await metadata.ensure(Media.MOVIE, pick.ids, settings=settings)
+    ids = {**(film.ids if film is not None else {}), **pick.ids}
+    film_key = film.key if film is not None else str(resolve_key(Media.MOVIE, pick.ids) or "")
 
     recorded = await watch_history.record_movie_watches(user_id, [{
         "ids": ids,
@@ -2730,10 +2734,9 @@ async def api_distrakt_add_movie(request: Request):
     filed = distrakt_store.month_key(watched_on.year, watched_on.month)
     state = await watch_history.load_state(user_id)
     mstart, mend = watch_history.month_bounds(filed)
-    filed_key = str(resolve_key(Media.MOVIE, pick.ids) or "")
     added = next((m for m in watch_history.movies_in_range(
                       state, mstart, mend, watch_history.viewer_tz(settings))
-                  if str(m.get("key") or "") == filed_key), None)
+                  if str(m.get("key") or "") == film_key), None)
     if added is not None:
         await _amend_closed_month_films(user_id, filed, add=added)
 
@@ -2742,7 +2745,7 @@ async def api_distrakt_add_movie(request: Request):
     # store._SEASON_WHERE).
     return await _month_answer(
         request, user_id, year, month, settings,
-        point_at=(resolve_key(Media.MOVIE, pick.ids) or "", -1),
+        point_at=(film_key, -1),
         message=f"Recorded {pick.title} — watched {day}")
 
 
@@ -2887,8 +2890,11 @@ async def _season_options(user_id: int, pick, year: int, month: int) -> list:
     """The add picker's choices for `pick`: the shared rule
     (season_choices.season_options), with a season already on this tracker — on
     the viewer's list, or recorded on the month being looked at — held. A pick
-    that IS one season offers that season alone."""
-    key = str(distrakt_store.record_key({"media": Media.SHOW, "ids": pick.ids,
+    that IS one season offers that season alone. The title is keyed with its
+    known ids completed from the title store, so a pick naming a show only by a
+    lower id finds the rows its add would file beside."""
+    known, = await title_identity.completed([(Media.SHOW, pick.ids)])
+    key = str(distrakt_store.record_key({"media": Media.SHOW, "ids": known,
                                          "title": pick.title}))
     month_key = distrakt_store.month_key(year, month)
     rows = [*await distrakt_store.user_records(user_id),
@@ -2994,6 +3000,7 @@ async def api_distrakt_add(request: Request):
     # one it answers (`answering`) — so an answer applies to its own season and
     # never to the rest, which are asked about in turn if they need it.
     added: list[int] = []
+    first_key = None
     for season in seasons:
         show = {
             "media": Media.SHOW,
@@ -3022,6 +3029,10 @@ async def api_distrakt_add(request: Request):
         # the refusals above, so a refused add spends no lookup.
         arrived, = await arrival.describe(settings, [show])
         show, detail = arrived.record, arrived.detail
+        # FILED WHERE THE TITLE STORE SAYS THE TITLE IS, which can be a higher
+        # key than the pick's own ids name — every write below addresses that.
+        key = distrakt_store.record_key(show)
+        first_key = first_key or key
 
         # A MONTH THAT IS OVER IS NOT ASKED ABOUT AT ALL: naming a past month
         # answers the re-watch question (see `_rewatch_question`'s callers) — the
@@ -3092,8 +3103,6 @@ async def api_distrakt_add(request: Request):
         # A hand-filled past month ends up closed like every other past month —
         # see `_record_past`.
         await distrakt_store.set_month_closed(user_id, month_key)
-    first_key = distrakt_store.record_key({"media": Media.SHOW, "ids": pick.ids,
-                                           "title": pick.title})
     return await _month_answer(
         request, user_id, year, month, settings, point_at=(first_key, added[0]),
         message=_added_message(pick.title, added,
@@ -3247,6 +3256,7 @@ async def api_distrakt_add_completed(request: Request):
         # mixes films in with TV, so a show-box pick can resolve to a film.
         return _month_refusal(
             request, f"{pick.title} is a film, not a show — add it from ➕ Add Film instead.")
+    first_key = None
     for season in seasons:
         try:
             # WHAT THE SEASON IS FILED AS is arrival.describe's, as for every way
@@ -3270,11 +3280,10 @@ async def api_distrakt_add_completed(request: Request):
                                      settings)
         if refusal:
             return _month_refusal(request, refusal)
+        first_key = first_key or distrakt_store.record_key(arrived.record)
     await distrakt_store.set_month_closed(user_id, month_key)
     return await _month_answer(
-        request, user_id, year, month, settings,
-        point_at=(distrakt_store.record_key({"media": Media.SHOW, "ids": pick.ids,
-                                             "title": pick.title}), seasons[0]),
+        request, user_id, year, month, settings, point_at=(first_key, seasons[0]),
         message=_added_message(pick.title, seasons, finished=True))
 
 
@@ -3535,6 +3544,9 @@ async def api_distrakt_unknown_add(request: Request):
     # ask-the-viewer path exists to avoid) — no network, one service's ids.
     arrived, = await arrival.describe(settings, [record])
     record, detail = arrived.record, arrived.detail
+    # Where the title store filed it, which a re-key the arrival caused may have
+    # moved — together with the question itself (app/metadata/holders.py).
+    key = distrakt_store.record_key(record)
     year, month = _viewed_month(request)
 
     # THE SAME QUESTION THE ORDINARY ADD ASKS, AND FOR A BETTER REASON HERE. This

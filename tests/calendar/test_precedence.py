@@ -477,7 +477,7 @@ class ChangingAPreferenceInvalidatesNothingTests(unittest.IsolatedAsyncioTestCas
             "WHERE endpoint = ? AND span_start = ? ORDER BY source",
             (SHOWS.key, self.window.isoformat()))
         titles = await db.fetch_all(
-            "SELECT source, source_id, fetched_at FROM calendar_titles "
+            "SELECT source, source_id, fetched_at FROM title_metadata "
             "ORDER BY source, source_id")
         return ([tuple(r) for r in airings], [tuple(r) for r in coverage],
                 [tuple(r) for r in titles])

@@ -11,10 +11,13 @@ settled row is never revisited, so the difference stayed for good.
 SO THE DESCRIPTION IS NOT THE PATH'S TO WRITE. Every path hands `describe` the
 identity and season it has, plus whatever it happened to be handed, and gets back
 one answer built by one rule:
-  - THE IDS: what the path had, plus each service's own stored calendar record of
-    the title, plus — for a service still missing — that service asked by shared
-    id (SearchPort.find_by_shared_id: an exact match on a shared id, never a title
-    search). Add-only throughout.
+  - THE TITLE is the title store's (app/metadata): the key a row is filed under
+    is the key the store answers for the path's ids, so a play naming a show by
+    its tvdb id lands on the row its tmdb id already filed.
+  - THE IDS: what the path had, plus what the store knows of the title, plus each
+    service's own stored record of it, plus — for a service still missing — that
+    service asked by shared id through the store (metadata.ensure: an exact match
+    on a shared id, never a title search). Add-only throughout.
   - THE DESCRIBING SERVICE is then `live.detail_source` over those ids — the one
     service a row's season lookups and counts already come from.
   - TITLE AND NETWORK are that service's words for that service's own id: its
@@ -37,11 +40,12 @@ import asyncio
 import logging
 from typing import NamedTuple
 
-from .. import cache, db, providers
+from .. import cache, db, metadata, providers
 from ..calendar import entries as calendar_entries
 from ..calendar import search as calendar_search
-from ..providers.base import (MATCH_SOURCES, Media, Source, SourceUnavailable,
-                              TitleFacts, collect_ids)
+from ..metadata import ids as id_rules
+from ..metadata import rows as title_rows
+from ..providers.base import MATCH_SOURCES, Media, Source, SourceUnavailable, TitleFacts
 from . import live, store
 from .lifecycle import CATALOGUE_FIELDS
 from .store import record_key
@@ -76,33 +80,61 @@ async def describe(settings, records: list[dict], *, strict: bool = False) -> li
     ONE TITLE IS DESCRIBED ONCE however many seasons of it arrive together, so a
     backfill naming six seasons of a show asks its lookups once.
     """
-    out = [{**rec, "ids": canonical_ids(rec.get("ids") or {})} for rec in records]
-    groups: dict[str, list[dict]] = {}
+    out = [{**rec, "ids": id_rules.canonical(rec.get("ids") or {})} for rec in records]
+    by_path: dict[str, list[dict]] = {}
     for rec in out:
         try:
             key = record_key(rec)
         except ValueError:
             continue  # unkeyable: the write will refuse it, with its own sentence
-        # THE FILING IDENTITY IS PINNED BEFORE ANY ID IS LEARNED. A learned tmdb
-        # on a title filed under tvdb would otherwise resolve to a different key
-        # and split the title from its own earlier rows — learning an id is a
-        # repair, never a re-identification.
-        rec.update(media=key.media, match_source=key.match_source, match_id=key.match_id)
-        groups.setdefault(str(key), []).append(rec)
-    if not groups:
+        by_path.setdefault(str(key), []).append(rec)
+    if not by_path:
         return [Arrival(rec, {}) for rec in out]
-    known = await calendar_entries.known_about(groups)
 
-    held = {key: _merged_ids(recs) for key, recs in groups.items()}
+    # WHICH TITLE EACH IS, IS THE TITLE STORE'S ANSWER (metadata.ensure), not the
+    # path's. A history play naming a show only by its tvdb id is the title the
+    # store already knows by its tmdb id, and it is filed there — one title, one
+    # key, whichever door it came through. Asked twice: first with no service
+    # asked, so the stored calendar can teach what it knows against the right
+    # key; then asking each service the title still has no id from.
+    registered = await metadata.ensure_many(
+        [(recs[0].get("media") or Media.SHOW, _merged_ids(recs), path_key)
+         for path_key, recs in by_path.items()])
+    groups: dict[str, list[dict]] = {}
+    held: dict[str, dict] = {}
+    for (path_key, recs), title in zip(by_path.items(), registered):
+        key = title.key if title is not None else path_key
+        groups.setdefault(key, []).extend(recs)
+        merged = held.setdefault(key, {})
+        _fill(merged, _merged_ids(recs))
+        if title is not None:
+            _fill(merged, title.ids)
+    known = await title_rows.known_about(groups)
     for key in groups:
         held[key].update(calendar_teaches(held[key], known.get(key) or {}))
-    await _ask_missing_services(settings, groups, held)
-    for key, recs in groups.items():
+    asked = await metadata.ensure_many(
+        [(groups[key][0].get("media") or Media.SHOW, held[key], key) for key in groups],
+        settings=settings)
+    for key, title in zip(list(groups), asked):
+        recs = groups[key]
+        if title is not None:
+            _fill(held[key], title.ids)
+        # THE KEY IS PINNED TO WHAT THE STORE ANSWERED, and a learned id that
+        # moved it moved every row already holding the old one in the same
+        # transaction (app/metadata/holders.py) — so this row joins the title's
+        # earlier rows rather than splitting from them.
+        filed = title.triple if title is not None else None
         _describing_service_states_the_shared_ids(settings, recs[0], held[key],
-                                                  known.get(key) or {})
-    for key, recs in groups.items():
+                                                  known.get(key) or {}, filed)
         for rec in recs:
-            rec["ids"] = canonical_ids(held[key])
+            if filed is not None:
+                rec.update(media=filed.media, match_source=filed.match_source,
+                           match_id=filed.match_id)
+            else:
+                path = record_key(rec)
+                rec.update(media=path.media, match_source=path.match_source,
+                           match_id=path.match_id)
+            rec["ids"] = id_rules.canonical(held[key])
 
     keyed = [rec for recs in groups.values() for rec in recs]
     details = await live.fetch_season_details(
@@ -303,35 +335,15 @@ def calendar_teaches(held: dict, by_source: dict) -> dict:
     return out
 
 
-# The id spaces whose ids are numbers. A service may state one as text — Simkl's
-# ids block carries tmdb as "315142" where Trakt's carries 315142 — and the same
-# title must not be filed with a different TYPE of id by a different door.
-_NUMERIC_IDS = frozenset({"trakt", "simkl", "tmdb", "tvdb", "mal"})
-
-
-def canonical_ids(ids: dict) -> dict:
-    """`ids` as every path files them: ID_KEYS only, numeric spaces as numbers,
-    and WITHOUT the bare `slug`.
-
-    THE BARE SLUG IS AMBIGUOUS BY DEFINITION — both services call their readable
-    name `slug` and disagree about it (`the-rookie` against `the-rookie-2018`) —
-    so it depended on which service the path happened to read. Each service's
-    name travels namespaced (`trakt_slug`, `simkl_slug`), which is what every
-    link is built from; the bare one survives only on rows written before the
-    split, as their readers' fallback.
-    """
-    out = {}
-    for name, value in collect_ids(ids).items():
-        if name == "slug":
-            continue
-        if name in _NUMERIC_IDS and isinstance(value, str) and value.strip().isdigit():
-            value = int(value.strip())
-        out[name] = value
-    return out
+def _fill(held: dict, ids: dict) -> None:
+    """Add what `ids` knows that `held` does not — never replacing a value."""
+    for name, value in (ids or {}).items():
+        if value not in (None, "") and held.get(name) in (None, ""):
+            held[name] = value
 
 
 def _describing_service_states_the_shared_ids(settings, rec: dict, held: dict,
-                                               by_source: dict) -> None:
+                                               by_source: dict, filed=None) -> None:
     """Where the two services DISAGREE about a shared id, the describing
     service's word is the one filed — the same authority the title and network
     come from. MEASURED on a live instance: Trakt states one imdb id for Little
@@ -347,7 +359,7 @@ def _describing_service_states_the_shared_ids(settings, rec: dict, held: dict,
     row = by_source.get(service) if service else None
     if row is None or str(row.ids.get(service)) != str(held.get(service)):
         return
-    filed_under = rec.get("match_source")
+    filed_under = (filed or record_key(rec)).match_source
     for shared in MATCH_SOURCES:
         stated = row.ids.get(shared)
         if shared == filed_under or stated in (None, ""):
@@ -368,56 +380,6 @@ def _merged_ids(recs: list[dict]) -> dict:
     return merged
 
 
-async def _ask_missing_services(settings, groups: dict, held: dict) -> None:
-    """A newly arriving title's missing service ids, asked — see ask_services."""
-    learned = await ask_services(settings, {
-        key: (Media(recs[0].get("media") or Media.SHOW), held[key])
-        for key, recs in groups.items()})
-    for key, ids in learned.items():
-        held[key].update(ids)
-
-
-async def ask_services(settings, titles: dict[str, tuple[Media, dict]]) -> dict[str, dict]:
-    """{title key: the ids learned} for `titles` — {key: (media, ids held)} —
-    asking each service that answers an exact lookup by shared id
-    (providers.for_shared_id_lookup — every one, whichever search box found the
-    title) about every title it holds no id for, and keeping what an exact match
-    answers that `ids held` lacks. The one implementation for a title arriving
-    and a title stored.
-
-    Every learned id is logged by name; a service that could not be asked is
-    logged and skipped, never remembered as "not listed". THE RE-ASK CLOCK IS
-    EACH PORT'S OWN: an answer, "not listed" included, is kept for a day by the
-    port (Trakt's response cache, Simkl's extracted-answer cache), so asking again
-    within the day costs no request — and a second viewer holding the same title
-    costs none either, since the answer is a fact about the title.
-    """
-    asked = [(key, source, port)
-             for key, (_media, ids) in titles.items()
-             for source, port in providers.for_shared_id_lookup(settings)
-             if ids.get(str(source)) in (None, "")]
-    if not asked:
-        return {}
-    answers = await asyncio.gather(
-        *(port.find_by_shared_id(settings, titles[key][0], dict(titles[key][1]))
-          for key, _source, port in asked),
-        return_exceptions=True)
-    out: dict[str, dict] = {}
-    for (key, source, _port), got in zip(asked, answers):
-        if isinstance(got, BaseException):
-            logger.info("tracker arrival: %s could not be asked about %s (%r)", source, key, got)
-            continue
-        held = {**titles[key][1], **out.get(key, {})}
-        learned = {name: value for name, value in canonical_ids(got or {}).items()
-                   if held.get(name) in (None, "")}
-        if learned.get(str(source)) in (None, ""):
-            continue  # an answer that does not name this service's own id is no answer
-        logger.info("tracker arrival: %s answered %s for %s by shared id",
-                    source, learned, key)
-        out.setdefault(key, {}).update(learned)
-    return out
-
-
 async def ask_for_missing_ids(user_id: int, settings, *,
                               within: set[str] | None = None) -> int:
     """Ask, by shared id, for every service id this viewer's STORED rows still
@@ -428,9 +390,13 @@ async def ask_for_missing_ids(user_id: int, settings, *,
     service's id from that service's own stored record; a title no stored record
     of that service names stays half-linked — MEASURED on the owner's copy, 54
     rows after that pass, Groomed: The Truth Behind the Lie among them, whose
-    Trakt id exists but whose Trakt airing no calendar feed carries. Asked here,
-    once per title a day (the ports' own clocks), exact matches only, add-only
-    through store.learn_ids, every learned id logged.
+    Trakt id exists but whose Trakt airing no calendar feed carries. Asked through
+    the title store (metadata.ensure — once per title a day, the ports' own
+    clocks, exact matches only), and written add-only through store.learn_ids,
+    every learned id logged.
+
+    A TITLE THE ANSWER RE-KEYED IS WRITTEN UNDER ITS NEW KEY: the re-key moved
+    this viewer's rows there in the same transaction it happened in.
 
     `within`, as for ask_for_missing_networks: the titles a load is drawing.
     """
@@ -440,17 +406,20 @@ async def ask_for_missing_ids(user_id: int, settings, *,
             and (within is None or str(debt.key) in within)]
     if not owed:
         return 0
-    learned = await ask_services(settings, {
-        str(debt.key): (Media(debt.key.media), dict(debt.ids)) for debt in owed})
+    found = await metadata.ensure_many(
+        [(debt.key.media, dict(debt.ids), str(debt.key)) for debt in owed], settings=settings)
     changed = 0
-    for debt in owed:
-        ids = learned.get(str(debt.key))
-        if not ids:
+    for debt, known in zip(owed, found):
+        if known is None or known.triple is None:
             continue
-        wrote = await store.learn_ids(user_id, debt.key, ids)
+        learned = {name: value for name, value in known.ids.items()
+                   if debt.ids.get(name) in (None, "")}
+        if not learned:
+            continue
+        wrote = await store.learn_ids(user_id, known.triple, learned)
         if wrote:
             logger.info("tracker arrival: user %s learned %s for %s by asking "
-                        "(%d row value(s))", user_id, ids, debt.key, wrote)
+                        "(%d row value(s))", user_id, learned, known.key, wrote)
         changed += wrote
     return changed
 
@@ -458,7 +427,7 @@ async def ask_for_missing_ids(user_id: int, settings, *,
 def stored_facts(settings, rec: dict, by_source: dict, *,
                  service: str | None = None) -> TitleFacts | None:
     """The describing service's title and network for `rec` from the stored
-    calendar (`by_source` is calendar.entries.known_about's answer for its
+    calendar (`by_source` is metadata/rows.py's known_about answer for its
     title), or None when disk does not hold exactly what a lookup would answer —
     see `_title_facts`. Also how naming.py repairs a row stored without a network,
     so a repaired row and a newly arrived one carry the same words. `service`

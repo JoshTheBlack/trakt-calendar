@@ -128,6 +128,7 @@ from typing import NamedTuple
 from . import arrival, counts, film_snapshots, naming, removals, store
 from .store import ID_COLUMNS, IDENTITY_COLUMNS, record_key
 from .. import cache, clock, db, providers
+from ..metadata import identity as title_identity
 from ..providers.base import (ItemKey, LibraryEntry, LibraryPort, LibraryRead, Media,
                               PlayCountPort, SourceUnavailable, UnlistedSeasons,
                               collect_ids, item_key, resolve_key)
@@ -699,8 +700,32 @@ def _watched_changed(old: dict | None, new: dict) -> bool:
 def _event_key(payload: dict, media: Media) -> ItemKey | None:
     """The identity of the title an event is about, or None when the event names
     no shared id — in which case there is nothing to file it under and nothing
-    the tracker could have been counting for it either."""
+    the tracker could have been counting for it either. The event's ids have
+    been completed from the title store first (`_with_known_ids`)."""
     return resolve_key(media, collect_ids(payload.get("ids") or {}))
+
+
+async def _with_known_ids(events: list) -> list:
+    """`events` with each title's ids completed from the title store, in place.
+
+    A SERVICE NAMES A TITLE BY THE IDS IT KNOWS, AND THE TRACKER FILES IT BY THE
+    STORE'S. A show a service knows only by its tvdb id is the title the store
+    knows by its tmdb id too, and the tracker's row for it is filed there; keying
+    the play by the service's ids alone would fold it into nothing and leave the
+    row's progress short. The title's shared ids are added beneath the service's
+    own (identity.complete), so a play keys as the row does — and nothing is
+    added for a title the store has never seen.
+    """
+    bodies, pairs = [], []
+    for event in events or ():
+        for kind, media in (("show", Media.SHOW), ("movie", Media.MOVIE)):
+            body = event.get(kind) if isinstance(event, dict) else None
+            if isinstance(body, dict) and isinstance(body.get("ids"), dict):
+                bodies.append(body)
+                pairs.append((media, collect_ids(body["ids"])))
+    for body, ids in zip(bodies, await title_identity.completed(pairs)):
+        body["ids"] = {**ids, **body["ids"]}
+    return events
 
 
 def _set_show_baseline(state: dict, key, ids: dict, season_to_eps: dict,
@@ -1533,8 +1558,11 @@ async def record_movie_watches(user_id: int, movies: list[dict], *,
     state = await _load(user_id)
     recorded = 0
     latest: dict[str, dict] = {}
-    for movie in movies:
-        ids = collect_ids(movie.get("ids") or {})
+    # Keyed as the store keys the film, for `_with_known_ids`' reason.
+    known = await title_identity.completed(
+        [(Media.MOVIE, collect_ids(movie.get("ids") or {})) for movie in movies])
+    for movie, completed in zip(movies, known):
+        ids = {**completed, **collect_ids(movie.get("ids") or {})}
         key = resolve_key(Media.MOVIE, ids)
         if key is None:
             continue
@@ -1938,6 +1966,7 @@ async def _sync_one(settings, state: dict, source, port, plays: list, *,
                 await _rebaseline_by_id(settings, state, name, source, port, span,
                                         reason="unwatch-implied")
 
+    await _with_known_ids(events)
     for event in events:
         _apply_event(state, event, name)
         # Taken from the RAW event rather than from the fold above, because the
@@ -2236,6 +2265,27 @@ def _fold_library(state: dict, name: str, read) -> bool:
     return False
 
 
+async def _keyed_by_store(read: LibraryRead) -> LibraryRead:
+    """`read` with each title keyed as the title store keys it.
+
+    A SERVICE KEYS ITS OWN LIBRARY BY THE IDS IT KNOWS (LibraryRead.entries), and
+    the tracker's rows are filed by the store's: a show the service knows only by
+    its tvdb id is the store's tmdb title, and a row filed there would read as
+    "not in this library" and be marked missing. Completing each entry's ids
+    from the store (identity.complete) re-keys it the way the row was keyed; an
+    entry the store has never seen keeps the key the service gave it. Where two
+    entries come to the same key the first is kept — they are one title.
+    """
+    keys = list(read.entries)
+    known = await title_identity.completed(
+        [(Media.SHOW, read.entries[key].ids) for key in keys])
+    entries: dict[str, LibraryEntry] = {}
+    for key, ids in zip(keys, known):
+        found = resolve_key(Media.SHOW, collect_ids(ids))
+        entries.setdefault(str(found) if found is not None else key, read.entries[key])
+    return read._replace(entries=entries)
+
+
 async def _sync_from_library(settings, state: dict, name: str, library, span, *,
                              start_at, activities, since) -> list[dict]:
     """One source's half of a sync when it can hand over the whole library.
@@ -2250,6 +2300,7 @@ async def _sync_from_library(settings, state: dict, name: str, library, span, *,
                                            activities=activities, since=since)
         sp.set(titles=len(read.entries), events=len(read.events),
                complete=read.complete)
+    read = await _keyed_by_store(read)
     # THE FOLD DECIDES WHETHER THE READ COUNTS AS COMPLETE, not the read itself:
     # a complete read that fails the floor is downgraded there, and stashing it
     # here on its own say-so would hand the baseline that follows a read the fold
@@ -2312,6 +2363,7 @@ async def _baseline_from_library(settings, user_id: int, state: dict, name: str,
             if name not in state[_UNREADABLE]:
                 state[_UNREADABLE].append(name)
             return False
+        read = await _keyed_by_store(read)
         state[_LIBRARY] = {**(state.get(_LIBRARY) or {}), name: read}
     for key, record in missing.items():
         found = read.entries.get(key)

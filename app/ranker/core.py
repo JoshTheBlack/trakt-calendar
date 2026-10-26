@@ -46,7 +46,8 @@ from typing import Any, NamedTuple
 
 from . import item_keys
 from . import seasons as ranker_seasons
-from .. import db
+from .. import db, metadata
+from ..metadata import ids as metadata_ids
 # The identity a board row is keyed on is the app's notion of "the same title",
 # not this feature's — the tracker files its own rows under the same triple — so
 # the vocabulary is read from where it lives. What a BOARD adds to it, the
@@ -696,7 +697,8 @@ async def add_titles(
     def _work(conn: db.Connection) -> Arrivals:
         board = _resolve_board(conn, user_id, board_uid)
         board_id = int(board["id"])
-        plan = _plan_arrivals(rows, _item_ids(conn, board_id))
+        filed = [_filed(conn, row, register=True) for row in rows]
+        plan = _plan_arrivals(filed, _item_ids(conn, board_id))
         # Counted against the cap before anything is written, so a request that
         # would overflow is refused whole rather than half applied.
         _check_room(conn, board_id, sum(1 for step in plan if step.item_id is None))
@@ -712,6 +714,43 @@ async def add_titles(
         return Arrivals(added, converted)
 
     return await db.transaction(_work)
+
+
+def _filed(conn: db.Connection, row: dict[str, Any], *, register: bool) -> dict[str, Any]:
+    """`row` filed where the title store says its title is.
+
+    EVERY WAY A TITLE REACHES A BOARD COMES THROUGH HERE, BEFORE THE BOARD ASKS
+    WHETHER IT ALREADY HOLDS IT: a search add, an import of what somebody
+    finished, a ratings seed, a removal put back, a restored backup. A title the
+    store knows by its tmdb id is that title however its arrival named it — a
+    ratings list naming a show by its tvdb id would otherwise land beside the row
+    the board already holds for it. Registering it (metadata.register) is also
+    how a board row's title becomes one the rest of the app can describe.
+
+    `register` False decides the key WITHOUT writing anything — a seed's preview
+    must not change the store it is previewing against.
+    """
+    ids = json.loads(row["ids_json"] or "{}")
+    if row.get("tmdb") is not None:
+        ids.setdefault("tmdb", row["tmdb"])
+    # THE ID THE ROW IS FILED BY IS THE ROW'S OWN STATEMENT, so it wins over an id
+    # map that disagrees: a row's key may move UP to a title its ids name above it,
+    # never sideways to a different title in the same id space.
+    ids[row["match_source"]] = metadata_ids.typed(row["match_source"], row["match_id"])
+    flat = item_keys.board_key(row["media"], row["match_source"], row["match_id"])
+    if register:
+        found = metadata.register(conn, row["media"], ids, filed_under=flat)
+        key = found.triple if found is not None else None
+    else:
+        key = metadata.resolve_triple(conn, row["media"], ids)
+    if key is None or (key.match_source, key.match_id) == (row["match_source"], row["match_id"]):
+        return row
+    own = metadata_ids.typed(key.match_source, key.match_id)
+    out = {**row, "match_source": key.match_source, "match_id": key.match_id,
+           "ids_json": json.dumps({**ids, key.match_source: own}, sort_keys=True)}
+    if key.match_source == "tmdb" and out.get("tmdb") is None:
+        out["tmdb"] = own
+    return out
 
 
 class _Arrival(NamedTuple):
@@ -1031,7 +1070,7 @@ async def remove_items(user_id: int, board_uid: str, keys: list[Any]) -> int:
         ts = db.now()
         removed = 0
         for item_id in ids:
-            _remember_removal(conn, board_id, item_id, ts)
+            remember_removal(conn, board_id, item_id, ts)
             cur = conn.execute(
                 "DELETE FROM tier_items WHERE id = ? AND board_id = ?", (item_id, board_id)
             )
@@ -1068,8 +1107,13 @@ _TITLE_HISTORY = "tier_item_removals"
 _TIER_HISTORY = "tier_category_removals"
 
 
-def _remember_removal(conn: db.Connection, board_id: int, item_id: int, ts: int) -> None:
+def remember_removal(conn: db.Connection, board_id: int, item_id: int, ts: int) -> None:
     """Write one title into its board's removal history, just before it goes.
+
+    PUBLIC BECAUSE A SECOND CALLER REMOVES ROWS: the title store's re-key, which
+    drops a board row its title is already held under at its new key, keeps the
+    dropped one here so its owner can put it back (app/metadata/holders.py).
+    Inside the caller's transaction.
 
     ONE ROW PER BOARD KEY — a title, or one season of it, exactly as the board
     holds them. A title removed, re-added by hand and removed again keeps only
@@ -1261,10 +1305,10 @@ async def restore_removal(user_id: int, board_uid: str, key: Any) -> bool:
         _check_room(conn, board_id, 1)
 
         record = _json_object(found["item_json"])
-        row = _normalize_ref({**record, "media": found["media"],
-                              "match_source": found["match_source"],
-                              "match_id": found["match_id"],
-                              "season": found["season"]})
+        row = _filed(conn, _normalize_ref({**record, "media": found["media"],
+                                           "match_source": found["match_source"],
+                                           "match_id": found["match_id"],
+                                           "season": found["season"]}), register=True)
         category_id = found["category_id"]
         rank = 0
         if category_id is not None:
@@ -1519,7 +1563,7 @@ def _remember_tier_removal(conn: db.Connection, board_id: int, row, ts: int) -> 
     """Write one tier into its board's removal history, just before it goes, and
     return how many titles it held.
 
-    ONE ROW PER TIER uid, the rule `_remember_removal` keeps for a title and for
+    ONE ROW PER TIER uid, the rule `remember_removal` keeps for a title and for
     its reason: a tier deleted, re-created and deleted again keeps only its
     newest deletion, and that is also what lets a restore be addressed by the
     uid rather than by a history row's integer id.
@@ -1893,7 +1937,9 @@ async def seed_ratings(
         board = _resolve_board(conn, user_id, board_uid)
         board_id = int(board["id"])
         scope = board["media_scope"]
-        in_scope = [(row, score) for row, score in rated
+        # Filed as every arrival is (`_filed`); a preview decides the keys without
+        # registering anything.
+        in_scope = [(_filed(conn, row, register=commit), score) for row, score in rated
                     if scope == "mixed" or row["media"] == scope]
 
         placements = _item_placements(conn, board_id)
@@ -2173,8 +2219,11 @@ async def restore_user_data(user_id: int, doc: Any) -> int:
                 category_ids[category["uid"]] = int(cur.lastrowid)
             for item in board["items"]:
                 category_uid = item["category_uid"]
+                # A backup names each title by ids and words alone; filing it
+                # through the title store puts it under the key its title has
+                # now, whatever key it was saved under.
                 _insert_item(
-                    conn, board_id, item["row"], item["added_from"],
+                    conn, board_id, _filed(conn, item["row"], register=True), item["added_from"],
                     item["created_at"] or ts,
                     category_id=None if category_uid is None else category_ids[category_uid],
                     rank=item["rank_in_category"],

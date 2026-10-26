@@ -19,6 +19,7 @@ from app import db, distrakt
 from app.config import Settings
 from app.calendar import cache as calendar_cache
 from app.calendar import entries as calendar_entries
+from app.metadata import rows as title_rows
 from app.distrakt import naming, store
 from app.providers.base import ItemKey, Media, Record, Source
 from tests.distrakt.test_store import DistraktTestCase, a_record, month_back
@@ -304,14 +305,14 @@ class NotLookingAgainForNothingTests(DistraktTestCase):
         every load, and it still earns its keep against a keyed read — a query
         nobody needs is still a query.
         """
-        real = calendar_entries.known_about
+        real = title_rows.known_about
 
         async def counting(keys):
             self.walks += 1
             return await real(keys)
 
-        naming.calendar_entries.known_about = counting
-        self.addCleanup(setattr, naming.calendar_entries, "known_about", real)
+        naming.title_rows.known_about = counting
+        self.addCleanup(setattr, naming.title_rows, "known_about", real)
 
     async def test_an_unpayable_debt_is_not_re_examined_every_pass(self):
         """A title the calendar has never named. The first pass has to look; the

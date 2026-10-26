@@ -335,7 +335,7 @@ class ThePanelDrawsWhatTheCardIsShowingTests(ThePanelHeaderCarriesTheSameButtons
         for source, overview, title in (("trakt", "Trakt words.", "Trakt Name"),
                                         ("simkl", "Simkl words.", "Simkl Name")):
             asyncio.run(db.execute(
-                "INSERT INTO calendar_titles (source, media, source_id, title_key, title,"
+                "INSERT INTO title_metadata (source, media, source_id, title_key, title,"
                 " title_fold, overview, poster, fetched_at) VALUES (?,?,?,?,?,?,?,?,0)",
                 (source, "show", source + "-1", self.key, title, title.lower(),
                  overview, "/" + source + ".jpg")))
@@ -365,7 +365,7 @@ class ThePanelDrawsWhatTheCardIsShowingTests(ThePanelHeaderCarriesTheSameButtons
         panel = self._panel_for(title="simkl", poster="trakt", overview="simkl")
         self.assertIn("Simkl words.", panel)
         # THROUGH THE SHARED IMAGE PROXY, not the stored column's raw address —
-        # this route reads calendar_titles.poster directly (stored_values, not
+        # this route reads title_metadata.poster directly (stored_values, not
         # render()) and has to proxy it itself before handing it to an <img src>,
         # the same way render() already does for the calendar CARD's own poster.
         self.assertIn('src="https://wsrv.nl/?url=%2Ftrakt.jpg&amp;q=90&amp;w=440&amp;we"', panel)

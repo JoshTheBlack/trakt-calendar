@@ -7,12 +7,13 @@ downstream names a provider.
 
 THE SEARCH IS THE APP'S, NOT THIS FEATURE'S. The board asks exactly what the
 calendar's and the tracker's add boxes ask: TYPING reads the titles this instance
-already stores (app/calendar/entries.py's titles_matching — the calendar owns
-those rows, so it owns the verb), and ENTER asks the services through
+already stores (app/metadata/typed_search.py's titles_matching — the title store
+owns those rows, so it owns the verb), and ENTER asks the services through
 app/providers/title_search.py, the one fan-out and merge every searching feature
 shares. What is the ranker's is what a chosen result BECOMES — a board item,
 named by reference and read back from what a service said (`named_hit`,
-`board_item`).
+`board_item`), and registered with the title store, which is what teaches it
+every service's id.
 
 CREDENTIALS ARE NOT THE SAME FOR BOTH SERVICE READS, and getting it backwards is
 the easy mistake:
@@ -36,10 +37,11 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from . import item_keys
+from .. import metadata
 from ..auth import trakt_routes, viewer
 # The stored-title half of every search. See the module docstring for why the
-# ranker reads it through the calendar's verb rather than a query of its own.
-from ..calendar import entries as calendar_entries
+# ranker reads it through the title store's verb rather than a query of its own.
+from ..metadata import typed_search as stored_search
 from ..providers import title_search
 from ..providers.trakt import TraktError, detail as trakt_detail, sync as trakt_sync
 from ..config import Settings, load_settings
@@ -302,14 +304,14 @@ async def typed_search(query: str, media: Media, limit: int) -> list[title_searc
     """The stored titles matching what is being TYPED, whoever's calendar
     loaded them. UNFILTERED — adding a title is not asking where it is on
     anybody's calendar — and no service is asked and nothing is budgeted: it is
-    an index read (app/calendar/entries.py's titles_matching)."""
-    return await calendar_entries.titles_matching(query, media, limit)
+    an index read (app/metadata/typed_search.py's titles_matching)."""
+    return await stored_search.titles_matching(query, media, limit)
 
 
 def too_short(query: str) -> bool:
     """Whether a typed query is still too short to list anything for — the rule
     the stored-title search itself keeps, asked of it rather than restated."""
-    return len(calendar_entries.fold_title(query)) < calendar_entries.MIN_QUERY
+    return stored_search.too_short(query)
 
 
 async def catalogue_search(settings: Settings, media: Media, query: str,
@@ -332,8 +334,8 @@ async def named_hit(settings: Settings, media: Media,
     when nothing this instance holds answers to that name.
 
     TWO WAYS OF NAMING, ONE PER HALF OF THE SEARCH, and neither carries a title:
-    a stored title by the identity it is stored under (`t`, a
-    calendar_titles.title_key — app/calendar/entries.py's stored_title), and a
+    a stored title by the identity it is stored under (`t`, a title key —
+    app/metadata/typed_search.py's stored_title), and a
     service's hit by the query that found it, the search's own reference (the
     services added and the pages shown, title_search.SearchRef) and its place
     in that answer (`q`, `also`, `pages`, `i` — title_search.resolve_hit, which
@@ -343,7 +345,7 @@ async def named_hit(settings: Settings, media: Media,
     """
     title_key = str(named.get("t") or "")
     if title_key:
-        return await calendar_entries.stored_title(title_key, media)
+        return await stored_search.stored_title(title_key, media)
     query = str(named.get("q") or "").strip()
     if not query:
         return None
@@ -411,6 +413,15 @@ async def board_item(settings: Settings,
     still answers, carrying the hit's own ids and so keying nothing — measured,
     that is what made the add refuse all four keyless "attack on titan" results.
     So the lookup is made whenever the stored answer cannot key the title.
+
+    EVERY SERVICE'S ID IS LEARNED HERE, through the title store (metadata.ensure,
+    with the viewer's settings — the one place the app asks a service by shared
+    id). A title found through TMDB's search arrives with its tmdb id alone, and
+    a board row holding only that offered no Trakt or Simkl button on its details
+    panel although both services list the title; asked here, each service the
+    title has no id from is asked once, its answer held for a day by its port.
+    The row is filed under the key the store answers, so a title already on the
+    board under it is recognised as held.
     """
     ids = dict(hit.ids)
     network = hit.network
@@ -421,8 +432,17 @@ async def board_item(settings: Settings,
         if pick is not None:
             ids = {**pick.ids, **ids}
             network = network or pick.network
-    return TitleRef(media=hit.media, title=hit.title, ids=ids, year=hit.year,
+    item = TitleRef(media=hit.media, title=hit.title, ids=ids, year=hit.year,
                     network=network or "", runtime=hit.runtime).as_item()
+    if item is None:
+        return None
+    known = await metadata.ensure(hit.media, ids, settings=settings)
+    if known is None or known.triple is None:
+        return item
+    learned = {**known.ids, **ids}
+    return {**item, "match_source": known.triple.match_source,
+            "match_id": known.triple.match_id, "ids": learned,
+            "tmdb": int_or_none(learned.get("tmdb"))}
 
 
 def ratings_source() -> RatingsSource:

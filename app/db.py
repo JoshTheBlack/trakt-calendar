@@ -3450,6 +3450,235 @@ def MIGRATION_46(conn: sqlite3.Connection) -> None:
         conn.execute(f"ALTER TABLE {table} DROP COLUMN slug")
 
 
+# ---------------------------------------------------------------------------
+# 47 — one store of title facts, a title's identity, and every column the
+#      store's later readers will need
+# ---------------------------------------------------------------------------
+#
+# THE SAME TITLE WAS DESCRIBED IN UP TO FIVE PLACES, each learning ids its own
+# way: the calendar's per-service title rows, the tracker's rows, a board's rows,
+# the film watch state and the response cache. Measured on the development copy
+# before this was written: a board title found through TMDB held {"tmdb"} and
+# nothing else, so its details panel could offer no Trakt or Simkl button, while
+# the calendar's own rows for the same title knew both ids.
+#
+# SO THE CALENDAR'S TITLE AND EPISODE TABLES BECOME THE STORE, RENAMED IN PLACE.
+# They already hold one row per (service, title) and per (service, episode) with
+# every descriptive field and their own expiry; copying ~29,000 and ~48,000 rows
+# into new tables would be the same rows under a second name for one migration's
+# duration. app/metadata/ owns them from here, and the calendar reads them like
+# every other feature. `calendar_airings` and `calendar_coverage` stay the
+# calendar's: they are about what a calendar LISTS, not about what a title IS.
+#
+# THE INDEXES ARE RE-CREATED UNDER THE NEW NAMES rather than left saying
+# "calendar". SQLite has no ALTER INDEX ... RENAME, so each is dropped and
+# created again with the same columns — under a second on the measured copy —
+# and a query that names one (`INDEXED BY`) names it by what it now indexes.
+#
+# EVERY COLUMN A LATER READER NEEDS IS ADDED NOW, unused until its code lands, so
+# the store's schema is written once. Each says below who reads it.
+MIGRATION_47 = """
+ALTER TABLE calendar_titles RENAME TO title_metadata;
+ALTER TABLE calendar_episodes RENAME TO episode_metadata;
+
+DROP INDEX ix_calendar_titles_fold;
+DROP INDEX ix_calendar_titles_key;
+DROP INDEX ix_calendar_titles_due;
+DROP INDEX ix_calendar_titles_fetched;
+DROP INDEX ix_calendar_episodes_due;
+DROP INDEX ix_calendar_episodes_fetched;
+-- The same four questions migration 35 indexed for: a search over folded titles,
+-- every service's row for one identity, the drain's owed set, and retention.
+CREATE INDEX ix_title_metadata_fold ON title_metadata(title_fold);
+CREATE INDEX ix_title_metadata_key ON title_metadata(title_key);
+CREATE INDEX ix_title_metadata_due ON title_metadata(enriched, stale_after);
+CREATE INDEX ix_title_metadata_fetched ON title_metadata(fetched_at);
+CREATE INDEX ix_episode_metadata_due ON episode_metadata(stale_after);
+CREATE INDEX ix_episode_metadata_fetched ON episode_metadata(fetched_at);
+
+-- WHAT A SERVICE SAYS ABOUT A TITLE THAT ONLY THE DETAILS PANEL DRAWS TODAY,
+-- fetched on every panel open and held nowhere. Stored on the service's own row,
+-- like every other field, so the panel can draw from the store and refresh
+-- behind the reader. Empty is "not looked up yet", never "the service says none"
+-- — the same reading `enriched` already gives the fields above it.
+--
+-- `keywords_json`: TMDB's keywords for the title, a list of names. A calendar
+-- filter dimension reads it, typed rather than offered as chips.
+ALTER TABLE title_metadata ADD COLUMN keywords_json TEXT NOT NULL DEFAULT '[]';
+-- When the title itself first aired, as the service spells it (an instant from
+-- Trakt, a day from TMDB and Simkl). What a film always dates by, and what a
+-- show falls back to when no season can be dated.
+ALTER TABLE title_metadata ADD COLUMN first_aired TEXT NOT NULL DEFAULT '';
+ALTER TABLE title_metadata ADD COLUMN homepage TEXT NOT NULL DEFAULT '';
+-- How many numbered seasons the service lists — the whole-show count a board row
+-- and the panel draw — kept on the title so it needs no season row per season.
+ALTER TABLE title_metadata ADD COLUMN season_count INTEGER;
+-- [{name, character, headshot}], top-billed first, capped at what the panel
+-- draws. Headshots are ORIGIN addresses; a page proxies them.
+ALTER TABLE title_metadata ADD COLUMN cast_json TEXT NOT NULL DEFAULT '[]';
+-- THIS service's own video list. The panel pools every service's list at read
+-- (app/providers/videos.py), so storing them per service keeps who listed what.
+ALTER TABLE title_metadata ADD COLUMN videos_json TEXT NOT NULL DEFAULT '[]';
+-- The title's own logo artwork (TMDB's language-filtered `logos`), an origin
+-- address drawn through the image proxy in the panel's header; '' draws text.
+ALTER TABLE title_metadata ADD COLUMN logo TEXT NOT NULL DEFAULT '';
+-- A film's collection, {id, name}, for adding a whole collection to a board.
+ALTER TABLE title_metadata ADD COLUMN collection_json TEXT NOT NULL DEFAULT '{}';
+-- The next episode the service has scheduled, {season, number, air_date, name},
+-- for the panel's "next episode" line.
+ALTER TABLE title_metadata ADD COLUMN next_episode_json TEXT NOT NULL DEFAULT '{}';
+
+-- WHAT A SERVICE SAYS ABOUT ONE SEASON, per service, the level between a title
+-- and its episodes. A tracker row's total, cadence and dates, a board season
+-- row's count and name, the season picker and the panel's season tab are all
+-- answers about a season, and every one of them is asked live today.
+--
+-- `air_dates_json` IS THE SEASON'S WHOLE SHAPE IN ONE COLUMN: one entry per
+-- episode in episode order, a 'YYYY-MM-DD' or null for an episode nobody has
+-- dated. That is exactly app/providers/season.py's `derive_season` input, so a
+-- total, a cadence, a premiere and a finale come out of a stored row by the same
+-- rule they come out of a lookup — and "has it started airing" is decided at
+-- read against today, never frozen at write. Its length is the episode total;
+-- `episode_count` beside it is the service's own number, which a season list
+-- states without reading the episodes.
+CREATE TABLE season_metadata (
+    source         TEXT    NOT NULL,
+    media          TEXT    NOT NULL,
+    -- The service's own id for the TITLE, as title_metadata.source_id.
+    source_id      TEXT    NOT NULL,
+    season         INTEGER NOT NULL,
+    -- The season's own name ('' where the service only restates the number).
+    name           TEXT    NOT NULL DEFAULT '',
+    overview       TEXT    NOT NULL DEFAULT '',
+    episode_count  INTEGER,
+    -- The premiere as the service spells it: an instant or a bare day.
+    premiere       TEXT    NOT NULL DEFAULT '',
+    air_dates_json TEXT    NOT NULL DEFAULT '[]',
+    -- The season's own artwork, an ORIGIN address; '' where the service has none.
+    poster         TEXT    NOT NULL DEFAULT '',
+    cast_json      TEXT    NOT NULL DEFAULT '[]',
+    -- The season's own videos, drawn ahead of the title's on a season tab.
+    videos_json    TEXT    NOT NULL DEFAULT '[]',
+    fetched_at     INTEGER NOT NULL,
+    stale_after    INTEGER NOT NULL DEFAULT 0,
+    failed_at      INTEGER,
+    fail_count     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (source, media, source_id, season)
+);
+CREATE INDEX ix_season_metadata_due ON season_metadata(stale_after);
+CREATE INDEX ix_season_metadata_fetched ON season_metadata(fetched_at);
+
+-- A TITLE'S IDENTITY: one row per title whoever describes it, keyed on the
+-- shared identity every feature already files rows under (the waterfall in
+-- app/providers/base.py's resolve_key, stringified), with every id any service
+-- or exact lookup has stated for it.
+--
+-- `ids_json` IS MERGED AND CANONICAL: numeric id spaces as numbers, imdb as
+-- text, no bare `slug`. The types matter here and not only as tidiness — the
+-- indexes below compare json_extract's answer, and SQLite never finds the text
+-- '366850' equal to the integer 366850, which is how a Simkl id map and a Trakt
+-- one spell the same tvdb id.
+--
+-- The service rows stay what each service SAID; this row is what is KNOWN. A
+-- calendar read merges it under each row's own ids, which is what lets a
+-- tvdb-only listing and a tmdb listing of one title draw as one card.
+CREATE TABLE titles (
+    title_key      TEXT    PRIMARY KEY,
+    media          TEXT    NOT NULL,
+    ids_json       TEXT    NOT NULL DEFAULT '{}',
+    created_at     INTEGER NOT NULL,
+    -- When a surface last drew the title, and when its service rows were last
+    -- refreshed because of that. NULL until the view-triggered refresh exists;
+    -- nothing reads them before then.
+    last_viewed_at INTEGER,
+    refreshed_at   INTEGER
+) WITHOUT ROWID;
+-- FINDING A TITLE BY A LOWER SHARED ID. A listing that states only a tvdb id
+-- belongs to the title some other service states that tvdb id FOR, when exactly
+-- one title does; without these a {tvdb} record and a {tmdb} record of one show
+-- are two titles for ever. No tmdb index: a title holding a tmdb id is keyed on
+-- it, so the key IS that lookup.
+CREATE INDEX ix_titles_tvdb ON titles(media, json_extract(ids_json, '$.tvdb'));
+CREATE INDEX ix_titles_imdb ON titles(media, json_extract(ids_json, '$.imdb'));
+CREATE INDEX ix_titles_mal ON titles(media, json_extract(ids_json, '$.mal'));
+
+-- A KEY A TITLE USED TO HAVE. Ids arrive piecemeal, so a title filed under its
+-- tvdb id can later learn its tmdb id and change key; every row holding the old
+-- key is repointed in the same transaction, and this is what a LATE arrival —
+-- a service still listing the title under the old id — is resolved through.
+CREATE TABLE title_aliases (
+    old_key    TEXT    PRIMARY KEY,
+    title_key  TEXT    NOT NULL,
+    aliased_at INTEGER NOT NULL
+) WITHOUT ROWID;
+-- A second re-key repoints the aliases that named the first's target, so no
+-- chain is ever more than one hop.
+CREATE INDEX ix_title_aliases_title ON title_aliases(title_key);
+
+-- THE REFRESH QUEUE: service rows a viewer's surface found stale, waiting to be
+-- re-read in budgeted batches. A table rather than a process-local set so a
+-- restart does not forget what was owed, and keyed on the row so asking twice
+-- queues once. `season` -1 is the title itself — -1 rather than NULL because
+-- SQLite lets NULLs repeat inside a primary key.
+CREATE TABLE metadata_refresh (
+    source    TEXT    NOT NULL,
+    media     TEXT    NOT NULL,
+    source_id TEXT    NOT NULL,
+    season    INTEGER NOT NULL DEFAULT -1,
+    queued_at INTEGER NOT NULL,
+    reason    TEXT    NOT NULL DEFAULT '',
+    PRIMARY KEY (source, media, source_id, season)
+);
+CREATE INDEX ix_metadata_refresh_queued ON metadata_refresh(queued_at);
+
+-- PICTURES FOR A TITLE WITH NO TMDB ID — about one stored title in ten, mostly
+-- anime and titles only Simkl lists. show_posters is keyed on a tmdb id and has
+-- nowhere to put them, so they are filed under the title's identity instead,
+-- with show_posters' columns and meanings (the sweep, the failure bookkeeping
+-- and the `missing` convention carry over unchanged).
+--
+-- NO SEASON COUNTERPART, on a measurement: season artwork comes from Trakt alone,
+-- and Trakt lists five stored titles with no tmdb id on the development copy and
+-- one on production. season_metadata.poster holds what those few have.
+CREATE TABLE title_posters (
+    media          TEXT    NOT NULL,
+    title_key      TEXT    NOT NULL,
+    source         TEXT    NOT NULL,
+    url            TEXT    NOT NULL,
+    first_seen_at  INTEGER NOT NULL,
+    last_seen_at   INTEGER NOT NULL,
+    last_ok_at     INTEGER,
+    last_failed_at INTEGER,
+    fail_count     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (media, title_key, source)
+);
+CREATE INDEX ix_title_posters_seen ON title_posters(last_seen_at);
+
+-- WHICH LOGO A NETWORK HAS, by the name cards draw it under: TMDB's network id
+-- and logo path, whether the logo is light (drawn on a dark frame), a recorded
+-- "has none", and the bookkeeping to re-check it. Badges draw the logo through
+-- the image proxy from this row rather than from a tile written to disk. TMDB-
+-- derived, so `fetched_at` is what the six-month sweep reads.
+CREATE TABLE network_logos (
+    network         TEXT    PRIMARY KEY,
+    tmdb_network_id INTEGER,
+    logo_path       TEXT    NOT NULL DEFAULT '',
+    light           INTEGER NOT NULL DEFAULT 0,
+    missing         INTEGER NOT NULL DEFAULT 0,
+    checked_at      INTEGER,
+    fetched_at      INTEGER,
+    fail_count      INTEGER NOT NULL DEFAULT 0,
+    last_failed_at  INTEGER
+);
+CREATE INDEX ix_network_logos_fetched ON network_logos(fetched_at);
+
+-- WHICH CATALOGUE A VIEWER'S TRACKER TOTALS ARE ASKED OF, in order — the same
+-- shape as `metadata_order_json` beside it. '[]' means no stated order, which
+-- reads as the registry's own.
+ALTER TABLE source_prefs ADD COLUMN season_totals_order_json TEXT NOT NULL DEFAULT '[]';
+"""
+
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -3497,6 +3726,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (44, MIGRATION_44),
     (45, MIGRATION_45),
     (46, MIGRATION_46),
+    (47, MIGRATION_47),
 ]
 
 

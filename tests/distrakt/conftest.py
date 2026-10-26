@@ -33,6 +33,7 @@ from app.providers.base import TitleFacts
 _NOTHING_MORE = {
     "app.providers.trakt.detail.find_by_shared_id": AsyncMock(return_value={}),
     "app.providers.simkl.by_id.find_by_shared_id": AsyncMock(return_value={}),
+    "app.providers.tmdb.search.find_by_shared_id": AsyncMock(return_value={}),
     "app.providers.trakt.detail.fetch_title_facts": AsyncMock(return_value=TitleFacts("", "")),
     "app.providers.simkl.detail.fetch_title_facts": AsyncMock(return_value=TitleFacts("", "")),
     "app.calendar.search.fill_one_gap": AsyncMock(return_value=""),

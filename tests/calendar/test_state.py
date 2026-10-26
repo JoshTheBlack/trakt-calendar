@@ -76,9 +76,9 @@ class UnmarkingClearsLegacySpellingsTests(StateTestCase):
     """
 
     async def _store_title(self, title_key: str, ids: dict) -> None:
-        """One calendar_titles row, which is where the spellings are read from."""
+        """One title_metadata row, which is where the spellings are read from."""
         await db.execute(
-            "INSERT INTO calendar_titles (source, media, source_id, title_key, "
+            "INSERT INTO title_metadata (source, media, source_id, title_key, "
             "title, title_fold, ids_json, fetched_at) VALUES (?,?,?,?,?,?,?,?)",
             ("simkl", "show", ids.get("simkl") or "1", title_key, "T", "t",
              json.dumps(ids), db.now()),

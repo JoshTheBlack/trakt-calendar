@@ -28,6 +28,7 @@ from zoneinfo import ZoneInfo
 from app import db, providers
 from app.calendar import cache as calendar_cache, entries as calendar_entries
 from app.calendar import search as calendar_search
+from app.metadata import typed_search
 from app.providers import title_search
 from app.config import Settings
 from app.endpoints import get_endpoint
@@ -238,14 +239,14 @@ class TheNeedleIsEscapedTests(unittest.TestCase):
     matches far more than it should. Both are ordinary things to type."""
 
     def test_a_wildcard_typed_by_a_person_is_a_literal(self):
-        self.assertEqual(calendar_entries.like_needle("100%"), r"%100\%%")
-        self.assertEqual(calendar_entries.like_needle("a_b"), r"%a\_b%")
+        self.assertEqual(typed_search.like_needle("100%"), r"%100\%%")
+        self.assertEqual(typed_search.like_needle("a_b"), r"%a\_b%")
 
     def test_the_escape_character_cannot_smuggle_itself(self):
-        self.assertEqual(calendar_entries.like_needle("a\\b"), r"%a\\b%")
+        self.assertEqual(typed_search.like_needle("a\\b"), r"%a\\b%")
 
     def test_it_folds_the_needle_the_same_way_a_stored_title_was_folded(self):
-        self.assertEqual(calendar_entries.like_needle("Pokémon"), "%pokemon%")
+        self.assertEqual(typed_search.like_needle("Pokémon"), "%pokemon%")
 
 
 class WhichGroupsAQueryLoadsTests(SearchTestCase):
@@ -298,9 +299,9 @@ class WhichGroupsAQueryLoadsTests(SearchTestCase):
         planner left to itself walked the endpoint's every airing — 38-112ms a
         keystroke for a query naming one title — and this order is 2ms."""
         plan = await self.plan(calendar_entries._SEARCH_SQL, (SHOWS, "%x%", 40))
-        self.assertIn("ix_calendar_titles_fold", plan)
+        self.assertIn("ix_title_metadata_fold", plan)
         self.assertNotIn("ix_calendar_airings_month", plan)
-        self.assertLess(plan.index("ix_calendar_titles_fold"),
+        self.assertLess(plan.index("ix_title_metadata_fold"),
                         plan.index("sqlite_autoindex_calendar_airings_1"))
 
     async def test_a_group_is_read_through_its_key_and_not_the_endpoints_month(self):

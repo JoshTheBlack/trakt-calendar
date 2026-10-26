@@ -91,7 +91,7 @@ class MergedSearchHit(NamedTuple):
     FROM, and None for a hit a service answered just now. It is the one field
     that differs between the two halves of a search, and it is what a pick
     NAMES each by: a stored hit by that identity, which the server reads the
-    stored rows back by (app/calendar/entries.py's `stored_title`); a service
+    stored rows back by (app/metadata/typed_search.py's `stored_title`); a service
     hit by its query and its place in the answer (`resolve_pick`), because a
     service hit can have no shared identity at all until it is looked up.
     Carried rather than re-derived from `key`, because a stored title the
@@ -241,8 +241,8 @@ def fold_one_title(hits: Sequence[SearchHit], key: ItemKey | None, *,
     with — the first leads, the rest fill what it left blank, the ids union.
 
     FOR A CALLER THAT HAS DECIDED IDENTITY ITSELF, which is why it takes `key`
-    rather than resolving one: the stored calendar groups its rows by the
-    identity it wrote them under (`calendar_titles.title_key`), and asking the
+    rather than resolving one: the title store groups its rows by the identity
+    it filed them under (`title_metadata.title_key`), and asking the
     waterfall again of ids enrichment has since added to could split one stored
     title in two. What this shares with `merge_search_hits` is how a row's
     FIELDS are chosen, so a title reads the same whichever half of a search

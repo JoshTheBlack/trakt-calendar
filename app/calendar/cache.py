@@ -9,8 +9,10 @@ locked by live measurement against the real Trakt API:
     five or six window reads, each cached and TTL'd independently.
 
   - STORE EACH SOURCE'S NORMALIZED RECORD AS ROWS. app/calendar/entries.py owns
-    the tables; this module owns the window arithmetic and the read path over
-    them, and a "window" is now a DATE RANGE rather than a stored object.
+    the airings and coverage, and the title store (app/metadata/) what each
+    service says about a title; this module owns the window arithmetic and the
+    read path over them, and a "window" is now a DATE RANGE rather than a stored
+    object.
     Normalizing on the way IN is what lets a second source fill the same tables:
     a payload stored raw would have to be interpreted at read time by something
     that knows every source's field layout, and that something is exactly what a
@@ -103,6 +105,7 @@ from . import state as calendar_state
 from .. import db
 from .. import providers
 from ..media import artwork
+from ..metadata import identity as title_identity
 from ..perftrace import activity, job, span
 from ..endpoints import ENDPOINTS, Endpoint
 from ..providers.base import (
@@ -246,10 +249,17 @@ def group_base(record: Record) -> str:
     A TITLE THE WATERFALL CANNOT KEY GETS A PER-SOURCE BASE and so can never
     merge with anything. That is deliberate: a visible duplicate is safer than a
     wrong merge, and a title nobody can name in a shared id space is one there is
-    no honest way to recognize.
+    no honest way to recognize. The title store files such a title under the same
+    spelling (app/metadata/identity.py's per_source_key).
+
+    A STORED RECORD CARRIES ITS TITLE'S SHARED IDS AS WELL AS ITS SERVICE'S, put
+    there by the read (entries._record_from_row) — so this answers the title
+    store's key, and two services' listings of one title share it even when one
+    of them names the title only by a lower id.
     """
     identity = resolve_key(record.media, record.ids)
-    return str(identity) if identity is not None else f"{record.source}:{record.id}"
+    return str(identity) if identity is not None else title_identity.per_source_key(
+        record.source, record.id)
 
 
 def episode_coords(record: Record) -> tuple[int, int] | None:
@@ -1198,8 +1208,8 @@ async def visible_records(groups, endpoint, *, genres="", countries="",
         # Simkl records, because the stored window could not hold them: a fill
         # replaced the whole blob with a fresh, unenriched payload, so anything
         # written into it was erased on the next refill. Rows do not have that
-        # problem — the drain writes `calendar_titles` and a refill is forbidden
-        # to demote it (see entries._UPSERT_TITLE) — so the fields are already on
+        # problem — the drain writes the title store's row and a refill is
+        # forbidden to demote it (app/metadata/rows.py) — so the fields are already on
         # the records read_span handed back, and `enriched` is a statement about
         # what the row CONTAINS rather than about what a reader must look up.
         flat = [r for _, rs in parsed for r in rs]

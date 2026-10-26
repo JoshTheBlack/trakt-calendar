@@ -33,11 +33,12 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from markupsafe import Markup
 
 from . import (cache as calendar_cache, enrich as calendar_enrich,
-               entries as calendar_entries, filter as calendar_filter,
+               filter as calendar_filter,
                resolve as calendar_resolve, search as calendar_search,
                share_links, state as calendar_state, vocab)
-from .. import (auth, authz, cache, chrome, clock, db, details_panel,
+from .. import (auth, authz, cache, chrome, clock, db, details_panel, metadata,
                 route_params)
+from ..metadata import rows as title_rows
 from ..auth import AuthLevel, viewer
 from ..config import load_settings
 from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, endpoint_choices, get_endpoint
@@ -1450,7 +1451,7 @@ async def add_to_library(request: Request):
     IT NAMES THE CARD AND NOT THE TITLE'S IDS. The body is `{key, target}`: the
     shared identity the card already carries and which service to add to. The ids
     are read back off the rows this instance drew that card from
-    (`entries.group_identity`), so a page-supplied id can never reach a write into
+    (`metadata.group_identity`), so a page-supplied id can never reach a write into
     the operator's own library — the rule the rankings board already follows for
     the same reason, and the one that makes an edited attribute worth nothing.
 
@@ -1465,7 +1466,7 @@ async def add_to_library(request: Request):
         return _library_answer(
             request, ok=False,
             message=f"{integrations_routes.LIBRARY_NAMES[target]} isn't configured.")
-    held = await calendar_entries.group_identity(str(data.get("key") or ""))
+    held = await metadata.group_identity(str(data.get("key") or ""))
     if held is None:
         return _library_answer(request, message="This calendar no longer holds that title.",
                                ok=False)
@@ -1734,7 +1735,7 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     just looking at.
 
     THE REQUEST NAMES A SERVICE FOR EACH, NOT THE VALUE. `?title=simkl` is read
-    back out of the row this card was drawn from (`entries.stored_values`), which
+    back out of the row this card was drawn from (`title_rows.stored_values`), which
     is one indexed lookup on the `key` the card already sends, and it means
     nothing a caller WROTE is rendered into a response served from the owner's
     origin — the rule share_routes._Described has always held the public panel to,
@@ -1800,10 +1801,10 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
                                          season=season, progress=progress)
     # WHAT THE CARD IS SHOWING, read back from the row it was drawn from — one
     # lookup for all three, and the only thing the request itself supplied is a
-    # service's name per field. See the docstring, and `entries.stored_values`.
-    shown = await calendar_entries.stored_values(
+    # service's name per field. See the docstring, and `title_rows.stored_values`.
+    shown = await title_rows.stored_values(
         params.get("key", ""),
-        {name: params.get(name, "") for name in calendar_entries.SHOWN_FIELDS})
+        {name: params.get(name, "") for name in title_rows.SHOWN_FIELDS})
     # `stored_values` reads the STORED column, which is the source's own raw
     # address (the calendar cache holds every source's records unfiltered and
     # unproxied — see app/calendar/cache.py; proxying is `render()`'s job, done

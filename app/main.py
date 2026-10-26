@@ -55,6 +55,7 @@ from .calendar import share_routes
 from .distrakt import routes as distrakt_routes
 from .integrations import routes as integrations_routes
 from .media import artwork, logos, posters
+from .metadata import backfill as metadata_backfill
 from .ranker import core as ranker_core
 from .ranker import routes as ranker_routes
 from .auth import AuthLevel
@@ -134,8 +135,9 @@ async def _sweep_auth_rows() -> None:
     # title just queues it again (see app/calendar/enrich.py).
     await calendar_enrich.sweep(now)
     # And the calendar's own rows, which left api_cache with the window blobs and
-    # so are no longer reached by the sweep above. Six months from last store —
-    # see entries.RETAIN_SECONDS, which records what that costs a share link to a
+    # so are no longer reached by the sweep above — and after them the title
+    # store's rows no airing names any more. Six months from last store — see
+    # entries.RETAIN_SECONDS, which records what that costs a share link to a
     # months-old page.
     await calendar_entries.sweep(now)
     # Drop poster-URL sightings past their retention window, and hold the
@@ -186,6 +188,10 @@ async def _heartbeat_tick() -> None:
     for job in (
         integrations_routes.refresh_integration_health,
         settings_routes.maybe_refresh_trakt_token,
+        # Once after an upgrade, then a single app_meta read per tick: every title
+        # already stored is registered with the title store and any key its own
+        # ids have outgrown is moved (app/metadata/backfill.py).
+        metadata_backfill.run_once,
         _sweep_auth_rows,
         lambda: calendar_cache.refresh_months(settings),
         # run_drain, not drain directly — the same coalescing latch a fill

@@ -40,6 +40,7 @@ not make, and nobody waits on one to see what their own calendar already holds.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -51,8 +52,11 @@ from . import enrich as calendar_enrich
 from . import entries
 from . import filter as calendar_filter
 from . import vocab
-from .. import cache, db, providers
+from .. import cache, db, metadata, providers
 from ..endpoints import get_endpoint
+from ..metadata import identity as title_identity
+from ..metadata import rows as title_rows
+from ..metadata import typed_search
 from ..perftrace import span
 # The catalogue fan-out and merge every searching feature shares, whose dedupe
 # rules carry measured findings a second implementation would get wrong.
@@ -195,10 +199,10 @@ async def stored(query: str, *, settings, prefs, tz: ZoneInfo,
     month nobody has opened is a job for the catalogue half, which the viewer has
     to ask for.
     """
-    # entries.MIN_QUERY, enforced here rather than in the route so the typing
-    # path and the Enter path cannot disagree about it.
-    needle = entries.fold_title(query)
-    if len(needle) < entries.MIN_QUERY:
+    # The title store's MIN_QUERY, enforced here rather than in the route so the
+    # typing path and the Enter path cannot disagree about it.
+    needle = title_rows.fold_title(query)
+    if typed_search.too_short(query):
         return Results()
 
     found: list[Airing] = []
@@ -227,7 +231,7 @@ async def stored(query: str, *, settings, prefs, tz: ZoneInfo,
                 # loaded whole and the card may end up carrying the OTHER
                 # source's spelling — which is the right card, and may not be
                 # the string that matched.
-                if needle not in entries.fold_title(item.title):
+                if needle not in title_rows.fold_title(item.title):
                     continue
                 day = date.fromisoformat(item.air_date)
                 found.append(Airing(
@@ -312,8 +316,7 @@ THE MEDIUM OF THE CALENDAR BEING SEARCHED (`media`), so a box answers
     what the calendar already draws are read — so a search costs the services'
     search answers and nothing else, whatever they return.
     """
-    needle = entries.fold_title(query)
-    if len(needle) < entries.MIN_QUERY:
+    if typed_search.too_short(query):
         return Results()
     found: list[Found] = []
     failed: set = set()
@@ -776,12 +779,13 @@ async def other_service_to_ask(settings, *, endpoint_key: str, title_key: str,
 async def complete_from_other_service(settings, *, source: str, endpoint_key: str,
                                       title_key: str, season: int | None,
                                       now: int) -> bool:
-    """Ask `source` whether it lists the title, by shared id, and store its own
+    """Learn whether `source` lists the title, by shared id, and store its own
     airing of this season's premiere (or the film's release) on `endpoint_key`
     if it does. Returns whether an airing was stored.
 
-    THE SAME TWO STEPS AS ELSEWHERE, NOT A THIRD WAY. The ask is the search port's
-    exact lookup (find_by_shared_id — an answer is taken only when that service's
+    THE SAME TWO STEPS AS ELSEWHERE, NOT A THIRD WAY. The ask is the title store's
+    (metadata.ensure — the one place the app asks a service by shared id, every
+    service the title has no id from, an answer taken only when that service's
     own record states the id asked about), and the write is fill_one_gap, the
     search's own gap fill: that service's own record, built by its own builder,
     stored as its calendar feed would have stored it. So the airing joins this
@@ -789,27 +793,27 @@ async def complete_from_other_service(settings, *, source: str, endpoint_key: st
     stands as that service's own card when they do not, exactly as its calendar
     would draw it.
 
-    THE IDS COME FROM THE STORE (entries.group_identity), never from the request:
+    THE IDS COME FROM THE STORE (metadata.group_identity), never from the request:
     a write whose subject is a key the server resolves can only land on a title
     this instance already holds.
 
     AN ANSWER IS REMEMBERED FOR A WEEK, "not listed" included; a failure to ask
-    is not, so a service that was down is asked again on the next open.
+    is not, so a service that was down is asked again on the next open. The
+    store's own lookup is also held a day by each service's port, so a second
+    panel opened on the title within the day asks nobody.
     """
-    identity = await entries.group_identity(title_key)
-    port = dict((str(s), p) for s, p in providers.for_shared_id_lookup(settings)).get(source)
-    if identity is None or port is None:
+    held = await metadata.group_identity(title_key)
+    asked = source in {str(s) for s, _port in providers.for_shared_id_lookup(settings)}
+    if held is None or not asked:
         return False
-    media_name, ids, title = identity
+    media_name, ids, title = held
     media = Media(media_name)
-    try:
-        found = await port.find_by_shared_id(settings, media, dict(ids))
-    except SourceUnavailable as exc:
-        logger.info("calendar: %s could not be asked about %s (%s)", source, title_key, exc)
+    answer = await metadata.ask(media, ids, settings=settings, filed_under=title_key)
+    if answer.identity is None or source in answer.unreachable:
         return False
     await cache.set(_asked_key(source, endpoint_key, title_key, season), 1,
                     retain_seconds=OTHER_SERVICE_ASK_SECONDS)
-    source_id = (found or {}).get(source)
+    source_id = answer.identity.ids.get(source)
     if not source_id:
         logger.info("calendar: %s does not list %s (%s)", source, title, title_key)
         return False
@@ -864,11 +868,17 @@ async def _describe(settings, hit, media: Media, tz: ZoneInfo) -> list[Elsewhere
 
     records = await _records_for(provider, settings, source_id, media, moments)
     endpoint_key = _endpoint_for(media)
+    # DRAWN WITH THE TITLE'S KNOWN IDS, the way the calendar's read draws its own
+    # listings (identity.complete), so the card a row names — and the stored
+    # airing it is checked against — carries the title store's key even when this
+    # service knows the title only by a lower id. The record itself stays what
+    # the service said: it is what gets stored if the row is followed.
+    known = await title_identity.completed((record.media, record.ids) for record in records)
     rows = []
-    for record in records:
+    for record, ids in zip(records, known):
         day = _local_day(record.air_ts, record.date_only, tz)
         rows.append(Elsewhere(
-            item=render(record, tz), endpoint_key=endpoint_key,
+            item=render(dataclasses.replace(record, ids=ids), tz), endpoint_key=endpoint_key,
             endpoint_label=get_endpoint(endpoint_key).label,
             year=day.year, month=day.month, day=day.isoformat(), record=record,
             source=str(source), source_id=str(source_id), media=str(media)))

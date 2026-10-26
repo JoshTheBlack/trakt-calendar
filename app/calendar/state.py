@@ -27,6 +27,7 @@ from datetime import date, datetime, timedelta
 
 from .. import db
 from ..config import DATA_DIR
+from ..metadata import rows as title_rows
 from ..providers.base import MATCH_SOURCES, item_key, parse_item_key
 from ..endpoints import ENDPOINTS
 
@@ -227,12 +228,11 @@ async def spellings_of(mark_key: str) -> set[str]:
     there. Measured on one real account: 909 of its 1,038 marks were in a legacy
     spelling, which is the majority of every mark it held.
 
-    THE STORED ROW FOR THE TITLE is what knows which spellings it has ever
-    answered to, so no card has to carry them. It is found by its title key OR by
-    the id the mark key names, because the two can differ: `Item.mark_key` is
-    `resolve_key` over the ids as they are NOW, and enrichment adds ids to a row
-    without re-keying it (see key_spellings). Every key those ids spell is cleared
-    too, so a mark made under the title's earlier key comes off.
+    THE STORED ROWS FOR THE TITLE are what know which spellings it has ever
+    answered to, so no card has to carry them (app/metadata/rows.py's id_maps).
+    They are found by the title key OR by the id the mark key names, because a
+    mark can predate the key its title has now. Every key those ids spell is
+    cleared too, so a mark made under the title's earlier key comes off.
 
     A SPELLING TWO TITLES SHARE UNMARKS BOTH, and that is the honest answer
     rather than a flaw. 21 of that account's legacy marks are slugs naming more
@@ -245,24 +245,14 @@ async def spellings_of(mark_key: str) -> set[str]:
         key = parse_item_key(mark_key)
     except ValueError:
         key = None
-    if key is None:
-        rows = await db.fetch_all(
-            "SELECT media, ids_json FROM calendar_titles WHERE title_key = ?",
-            (str(mark_key),))
-    else:
-        rows = await db.fetch_all(
-            "SELECT media, ids_json FROM calendar_titles WHERE title_key = ? "
-            "OR (media = ? AND CAST(json_extract(ids_json, '$.' || ?) AS TEXT) = ?)",
-            (str(mark_key), key.media, key.match_source, key.match_id))
+    maps = await title_rows.id_maps(
+        str(mark_key), key.media if key else None,
+        (key.match_source, key.match_id) if key else None)
     found = {str(mark_key)}
-    for row in rows:
-        try:
-            ids = json.loads(row["ids_json"] or "{}")
-        except (TypeError, ValueError):
-            continue
+    for media, ids in maps:
         found.update(str(ids[name]) for name in _LEGACY_ID_NAMESPACES
                      if ids.get(name) not in (None, ""))
-        found.update(key_spellings(row["media"], ids))
+        found.update(key_spellings(media, ids))
     return found
 
 

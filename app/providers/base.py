@@ -200,7 +200,7 @@ class Source(StrEnum):
 # where it is unambiguous: a Trakt record's slug is Trakt's, and the Trakt
 # calendar addresses its records by it. Nothing stores it — the tracker's rows
 # keep the namespaced pair only — and an id map merged from two services must
-# not carry it (see distrakt/arrival.py's `canonical_ids`).
+# not carry it (see app/metadata/ids.py's `canonical`).
 ID_KEYS = ("trakt", "slug", "trakt_slug", "simkl", "simkl_slug",
            "tvdb", "tmdb", "imdb", "mal")
 

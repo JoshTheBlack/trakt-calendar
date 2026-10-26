@@ -566,6 +566,109 @@ class MigrationTests(DbTestCase):
             conn.close()
             path.unlink(missing_ok=True)
 
+    def _at_version_with_titles(self, path, version: int):
+        """A database at schema `version` holding one service's title row, one
+        episode row and the airing that names them — the shape every instance
+        upgrading to 47 has."""
+        import sqlite3
+
+        from unittest.mock import patch
+
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        conn.execute("PRAGMA foreign_keys=ON")
+        with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= version]):
+            db.migrate_sync(conn)
+        conn.execute(
+            "INSERT INTO calendar_titles (source, media, source_id, title_key, title, ids_json, "
+            "network, enriched, fetched_at, stale_after) VALUES ('simkl', 'show', '55', "
+            "'show:tvdb:4321', 'A Show', '{\"simkl\": 55, \"tvdb\": 4321}', 'HBO', 1, 10, 20)")
+        conn.execute(
+            "INSERT INTO calendar_episodes (source, media, source_id, season, number, title, "
+            "fetched_at, stale_after) VALUES ('simkl', 'show', '55', 1, 2, 'Second', 10, 20)")
+        conn.execute(
+            "INSERT INTO calendar_airings (source, media, source_id, endpoint, title_key, air_ts, "
+            "air_date, season, episode_number, stored_at) VALUES ('simkl', 'show', '55', "
+            "'shows', 'show:tvdb:4321', 1783540800, '2026-07-08', 1, 2, 10)")
+        return conn
+
+    def _assert_the_store_after_47(self, conn):
+        title = dict(conn.execute("SELECT * FROM title_metadata").fetchone())
+        self.assertEqual((title["title_key"], title["title"], title["network"], title["enriched"]),
+                         ("show:tvdb:4321", "A Show", "HBO", 1))
+        # The columns later readers need, empty until their writers exist.
+        self.assertEqual((title["keywords_json"], title["cast_json"], title["videos_json"],
+                          title["collection_json"], title["next_episode_json"],
+                          title["first_aired"], title["logo"], title["season_count"]),
+                         ("[]", "[]", "[]", "{}", "{}", "", "", None))
+        self.assertEqual(conn.execute("SELECT title FROM episode_metadata").fetchone()[0], "Second")
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertFalse({"calendar_titles", "calendar_episodes"} & tables)
+        self.assertTrue({"titles", "title_aliases", "season_metadata", "metadata_refresh",
+                         "title_posters", "network_logos"} <= tables)
+        for table in ("titles", "title_aliases", "season_metadata", "metadata_refresh",
+                      "title_posters", "network_logos"):
+            self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0, table)
+        indexes = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        self.assertTrue({"ix_title_metadata_fold", "ix_title_metadata_key",
+                         "ix_title_metadata_due", "ix_title_metadata_fetched",
+                         "ix_episode_metadata_due", "ix_episode_metadata_fetched",
+                         "ix_titles_tvdb", "ix_titles_imdb", "ix_titles_mal"} <= indexes)
+        self.assertFalse([name for name in indexes if "calendar_titles" in name
+                          or "calendar_episodes" in name])
+        # The airing still joins its title and episode under the new names.
+        joined = conn.execute(
+            "SELECT t.title, e.title FROM calendar_airings a "
+            "JOIN title_metadata t ON t.source = a.source AND t.source_id = a.source_id "
+            "JOIN episode_metadata e ON e.source = a.source AND e.source_id = a.source_id "
+            "AND e.season = a.season AND e.number = a.episode_number").fetchone()
+        self.assertEqual(tuple(joined), ("A Show", "Second"))
+        self.assertIn("season_totals_order_json",
+                      [c[1] for c in conn.execute("PRAGMA table_info(source_prefs)")])
+        self.assertEqual(conn.execute("SELECT version FROM schema_version").fetchone()[0], 47)
+
+    async def test_migration_47_from_the_development_schema_renames_the_store_in_place(self):
+        """The development database is at 46: the calendar's title and episode
+        rows become the title store's, with every row and every index carried."""
+        path = TMP / "migration-47-from-46.db"
+        conn = self._at_version_with_titles(path, 46)
+        try:
+            db.migrate_sync(conn)
+            self._assert_the_store_after_47(conn)
+        finally:
+            conn.close()
+            path.unlink(missing_ok=True)
+
+    async def test_migration_47_from_the_production_schema_runs_everything_after_it(self):
+        """Production lags at 39, so 40-46 run first; the store's rows come
+        through all eight unchanged."""
+        path = TMP / "migration-47-from-39.db"
+        conn = self._at_version_with_titles(path, 39)
+        try:
+            db.migrate_sync(conn)
+            self._assert_the_store_after_47(conn)
+            self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        finally:
+            conn.close()
+            path.unlink(missing_ok=True)
+
+    async def test_the_identity_indexes_find_an_id_only_by_its_stored_type(self):
+        """Why the store keeps ids canonical: SQLite never finds the text '4321'
+        equal to the integer 4321, so an index lookup is only as good as the type
+        it was written in."""
+        await db.execute("INSERT INTO titles (title_key, media, ids_json, created_at) "
+                         "VALUES ('show:tmdb:1', 'show', '{\"tmdb\": 1, \"tvdb\": 4321}', 0)")
+        found = await db.fetch_value("SELECT COUNT(*) FROM titles WHERE media = 'show' AND "
+                                     "json_extract(ids_json, '$.tvdb') = ?", (4321,))
+        missed = await db.fetch_value("SELECT COUNT(*) FROM titles WHERE media = 'show' AND "
+                                      "json_extract(ids_json, '$.tvdb') = ?", ("4321",))
+        self.assertEqual((found, missed), (1, 0))
+        plan = " ".join(r["detail"] for r in await db.fetch_all(
+            "EXPLAIN QUERY PLAN SELECT title_key FROM titles WHERE media = ? AND "
+            "json_extract(ids_json, '$.tvdb') = ?", ("show", 1)))
+        self.assertIn("ix_titles_tvdb", plan)
+
     async def test_migration_21_opens_the_provider_column_and_keeps_every_row(self):
         """Both provider tables carried `CHECK (provider IN ('plex','trakt'))`,
         which made admitting a third service a table rebuild.

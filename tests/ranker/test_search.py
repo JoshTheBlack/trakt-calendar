@@ -31,6 +31,7 @@ from urllib.parse import parse_qs, urlsplit
 from app import db, providers
 from app.auth import prefs as auth_prefs, simkl_routes, viewer
 from app.calendar import entries
+from app.metadata import typed_search
 from app.config import Settings, save_settings
 from app.providers import title_search
 from app.providers.base import ItemKey, Media, Record, Source, proxied_image
@@ -313,6 +314,44 @@ class AddTests(_SearchTestCase):
         self.assertEqual((item["title"], item["ids"]), ("Title 3", {"tmdb": 3, "trakt": 30}))
         # The pick and the redraw both read the search back; nothing asked again.
         self.assertEqual([c["cached_only"] for c in self.catalogue.calls], [False, True, True])
+
+    def test_a_title_found_through_tmdb_learns_every_services_id(self):
+        """A board title found through TMDB's search held its tmdb id alone, so its
+        details panel had no Trakt or Simkl button though both list the title. The
+        add asks each service the title has no id from, by shared id, through the
+        title store — with the viewer's own settings, which is what lets Simkl be
+        asked at all."""
+        self.catalogue.hits = [a_hit(5, ids={"tmdb": 5}, source_ids={Source.TMDB: "5"})]
+
+        async def _token(user_id, *args, **kwargs):
+            return "viewer-simkl-token" if user_id == self.user_id else None
+        trakt = mock.AsyncMock(return_value={"trakt": 50, "trakt_slug": "title-5", "tmdb": 5})
+        simkl = mock.AsyncMock(return_value={"simkl": 500, "simkl_slug": "title-5"})
+        with mock.patch.object(simkl_routes, "access_token_for_user", _token), \
+             mock.patch("app.providers.trakt.detail.find_by_shared_id", trakt), \
+             mock.patch("app.providers.simkl.by_id.find_by_shared_id", simkl):
+            self.enter("title")
+            self.assertEqual(self.add({"q": "title", "i": 0, "media": "show"}).status_code, 200)
+        item = asyncio.run(ranker.fetch_item(self.user_id, "b1", "show:tmdb:5"))
+        self.assertEqual({name: item["ids"].get(name) for name in ("tmdb", "trakt", "simkl")},
+                         {"tmdb": 5, "trakt": 50, "simkl": 500})
+        self.assertEqual((item["ids"]["trakt_slug"], item["ids"]["simkl_slug"]),
+                         ("title-5", "title-5"))
+        trakt.assert_awaited_once()
+        simkl.assert_awaited_once()
+
+    def test_a_title_the_store_knows_by_a_higher_id_is_filed_there(self):
+        """A result naming a show only by its tvdb id is the title the store
+        already knows by its tmdb id; the board files it there, so it is drawn
+        as held beside the row already on the board rather than added again."""
+        store(a_record("Known", 900, ids={"trakt": 9, "tmdb": 900, "tvdb": 4321}))
+        asyncio.run(ranker.add_titles(self.user_id, "b1", [show_ref("900")]))
+        self.catalogue.hits = [a_hit(4321, ids={"tvdb": 4321}, key=ItemKey("show", "tvdb", "4321"),
+                                     source_ids={Source.SIMKL: "77"})]
+        self.enter("title")
+        self.assertIn("already on this board", self.add({"q": "title", "i": 0,
+                                                         "media": "show"}).text)
+        self.assertEqual(self.keys(), ["show:tmdb:900"])
 
     def test_a_simkl_only_pick_files_the_poster_its_row_was_drawn_with(self):
         """The row's picture is asked for by key afterwards, and a title nothing
@@ -653,15 +692,15 @@ class TheRankerDefinesNoSearchOfItsOwnTests(_SearchTestCase):
                 self.assertFalse(named & retired)
                 self.assertNotIn("search_titles", called)
 
-    def test_the_typed_half_is_the_calendars_verb_and_enter_is_the_shared_fan_out(self):
+    def test_the_typed_half_is_the_title_stores_verb_and_enter_is_the_shared_fan_out(self):
         """Pinned by behaviour as well as by name: typing reads through
-        entries.titles_matching, and Enter through title_search.search_catalogue."""
+        typed_search.titles_matching, and Enter through title_search.search_catalogue."""
         seen = []
 
         async def _typed(query, media, limit):
             seen.append(("typed", query))
             return []
-        with mock.patch.object(entries, "titles_matching", _typed), \
+        with mock.patch.object(typed_search, "titles_matching", _typed), \
              mock.patch.object(trakt_detail, "search_titles",
                                mock.AsyncMock(side_effect=AssertionError("provider"))), \
              mock.patch.object(simkl_search, "search_titles",

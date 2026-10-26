@@ -6,6 +6,7 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ### ⚠️ Upgrading
 - 🎬 **TMDB takes its API Read Access Token now, not the short API key.** Paste the long token from themoviedb.org → Settings → API into Settings → TMDB. A short key saved earlier is not used, and Settings says so beside the field.
+- 🗃️ **The first start of this version updates the database, then files every title it already holds in the background** — a few seconds on a small instance, under a minute on a large one. Back up `data/app.db` before upgrading, as for any version that changes the database.
 
 ### Added
 - 🎬 **TMDB describes titles first.** Wherever a title has a TMDB id, its details panel, its tracker season totals and its pictures come from TMDB, with Trakt and Simkl answering what TMDB doesn't know. TMDB's videos join the menu, and its page is one of the panel's outbound buttons. If you've set your own service order on your Account page, it still applies.
@@ -18,7 +19,8 @@ All notable changes to this project are documented here. Format loosely follows 
 - 📅 **Your first service decides when an episode airs.** Each calendar card shows the date and time from the first service in your order on your Account page, and sits on that day. Change the order and the card moves to the new service's day. When the services disagree, the card shows each one's date and time side by side. A share link uses its owner's order.
 
 ### Fixed
-- 📅 **One episode is one card.** When Trakt and Simkl gave an episode or film different dates, it could show up twice: Yellowjackets' season 4 premiere appeared on both Friday and Sunday. Now their listings count as one card whenever they fall in the same month, or within a week of each other across the end of a month. Listings further apart than that are usually a numbering mix-up, and still show separately.
+- 📅 **One episode is one card.** When Trakt and Simkl gave an episode or film different dates, it could show up twice: Yellowjackets' season 4 premiere appeared on both Friday and Sunday. Now their listings count as one card whenever they fall in the same month, or within a week of each other across the end of a month. Listings further apart than that are usually a numbering mix-up, and still show separately. The same goes for a show one service knows only by its TVDB id while the other knows its TMDB id: that used to be two cards, and it's one.
+- 🏆 **A show added to a rankings board from TMDB's search has its Trakt and Simkl buttons.** Its details panel used to offer TMDB alone, though both services list the show; adding it now looks the show up on each service you can search.
 - 🔍 **The calendar search follows your network filter.** It used to offer a title on a network you've filtered out, and its link opened a day without it. The season picker says that title is hidden by your filters, like it does for genre or country — for its seasons not on your calendar yet too, judged by how your calendar already lists the show.
 - 🌐 **The All Episodes calendar holds up when Trakt is slow.** The app asked Trakt for each week signed in, which stopped Trakt caching the answer, so every refresh made Trakt rebuild the whole week, and when Trakt was slow that failed with "some calendar data couldn't be loaded". Calendars are now asked for anonymously, so Trakt serves them from its cache. A week Trakt can't build is asked for again a day at a time, and a week a service failed on is retried a minute later instead of ten.
 - ⚠️ **No more "some calendar data couldn't be loaded" after a routine refresh.** It appeared when one service had nothing new and the other did.
@@ -34,6 +36,7 @@ All notable changes to this project are documented here. Format loosely follows 
 - 🔗 **A share page keeps a title's details through a passing TMDB "not found".** One such answer used to erase the copy a share page reads from.
 
 ### Under the hood
+- 🗂️ **One store of what each service says about a title**, shared by the calendar, the tracker and the rankings board. Every title is filed under one identity; when a title learns a better id, everything filed under the old one moves with it at once, so the tracker, the boards and the calendar never disagree about which title is which.
 - ⏱️ **The test suite runs in about two minutes instead of eleven**: it uses every CPU core and stops re-reading the certificate store for every test. Code nothing used any more is gone, and the code no test reached now has tests.
 - 🔒 **Pressing Go in the calendar search is a form post, like every other change.** It writes the season into the shared calendar, and it used to do that through an ordinary link.
 - ⚡ **Calendar months open about a fifth faster**, because each month reads its stored episodes once instead of week by week.

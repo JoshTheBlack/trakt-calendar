@@ -64,6 +64,7 @@ AUTH = "auth"
 MEDIA = "media"
 INTEGRATIONS = "integrations"
 CALENDAR = "calendar"
+METADATA = "metadata"
 DISTRAKT = "distrakt"
 RANKER = "ranker"
 SOURCES = "sources"
@@ -109,6 +110,12 @@ GROUPS: dict[str, str] = {
     "integrations": INTEGRATIONS,
 
     "calendar": CALENDAR,
+
+    # The title store: what every service says about a title, the title's
+    # identity, and every column elsewhere holding a title's key. A feature-tier
+    # package every feature reads and writes through — its own group because no
+    # one feature owns a title, which is the whole reason it left the calendar.
+    "metadata": METADATA,
 
     "distrakt": DISTRAKT,
 
@@ -160,6 +167,8 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
     (RANKER, KERNEL): Edge("boards are stored, rendered and configured"),
     (SETTINGS, KERNEL): Edge("the Settings screen reads and writes the settings themselves"),
     (SOURCES, KERNEL): Edge("a source preference is one row in the database, per account"),
+    (METADATA, KERNEL): Edge("the title store is database tables, written in the caller's "
+                             "transaction where a feature's own write needs it to be"),
 
     # --- the value-type contract, which everything may name ----------------
     (KERNEL, PROVIDER_TYPES): Edge(
@@ -174,6 +183,10 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
     (CALENDAR, PROVIDER_TYPES): Edge("the cache stores and replays Items"),
     (DISTRAKT, PROVIDER_TYPES): Edge("watch state is keyed by ItemKey across sources"),
     (RANKER, PROVIDER_TYPES): Edge("a board entry is a title identified the same way"),
+    (METADATA, PROVIDER_TYPES): Edge(
+        "a title's key IS the shared waterfall (resolve_key, MATCH_SOURCES), and a "
+        "service's listing arrives as a Record — the store files what the value "
+        "types already say rather than defining identity a second time"),
     (SOURCES, PROVIDER_TYPES): Edge(
         "the services a preference may name ARE the Source members, read from "
         "there rather than spelled again, so a preference cannot name a service "
@@ -201,9 +214,7 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "asks providers/detail_source.py which service can describe it, and the "
         "search's catalogue half asks the services through "
         "providers/title_search.py — the one fan-out and merge every searching "
-        "feature shares. The stored-title search (entries.titles_matching) "
-        "answers with that module's hit type, folded by its rules, so a title "
-        "reads the same whichever half of a search found it"),
+        "feature shares"),
     (DISTRAKT, PROVIDERS): Edge(
         "the tracker reads the viewer's own history and progress. Its add flow "
         "searches the catalogues and reads a chosen result back through "
@@ -224,6 +235,13 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "the services through providers/title_search.py, the one fan-out, merge "
         "and read-back every searching feature shares, and a result's season "
         "checklist is that module's picker lookup"),
+    (METADATA, PROVIDERS): Edge(
+        "the title store is the ONE place the app asks a service by shared id, "
+        "through the registry's for_shared_id_lookup and each service's "
+        "SearchPort, so every service's port, cache and re-ask clock is the one "
+        "it already owns; and a stored title is answered to a search box as the "
+        "shared search's own hit type (title_search), so a title reads the same "
+        "whichever half of a search found it"),
     (SOURCES, PROVIDERS): Edge(
         "a tracker preference — which linked service leads, and whose numbers "
         "are retired — may name only a service that keeps a watch history, and "
@@ -306,6 +324,27 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "which services fill a viewer's calendar is that account's stated "
         "preference, so the route reads it before asking the registry which "
         "sources may fill a window — the same reason the tracker reaches SOURCES"),
+    (CALENDAR, METADATA): Edge(
+        "a fill hands its records to the title store, which files each under its "
+        "title's key and writes the service's own rows in the fill's transaction; "
+        "the calendar's reads join its airings to those rows and to the title's "
+        "known ids by the table names the store spells, and a card's details, "
+        "library add and completion read the title back from the store"),
+    (DISTRAKT, METADATA): Edge(
+        "a tracker row is filed under the key the title store answers "
+        "(arrival.describe), its missing service ids are asked for through the "
+        "store, a history play is keyed with the title's known ids, and the add "
+        "box's typed list and a row's picture read the store's rows"),
+    (RANKER, METADATA): Edge(
+        "every board row is filed under the key the title store answers before "
+        "the board asks whether it already holds it, a search add learns every "
+        "service's id through the store, and the board's typed list reads it"),
+    (METADATA, RANKER): Edge(
+        "a re-key that finds a board already holding the title under its new key "
+        "keeps the dropped row in that board's removal history through the "
+        "board's own writer (ranker.core.remember_removal), so its owner can put "
+        "it back. Deferred because the board imports the store",
+        deferred=True),
     (CALENDAR, DISTRAKT): Edge(
         "the calendar READS THE VIEWER'S OWN WATCHED EPISODES for the card a details "
         "panel was opened from, through episode_progress — the tracker files "
@@ -325,27 +364,13 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         deferred=True),
     (DISTRAKT, CALENDAR): Edge(
         "the tracker imports a month's premieres, honours 'not watching', and "
-        "links a Discord post at the viewer's own calendar. It also reads the "
-        "STORED calendar windows back for the per-service slugs they already carry, so "
-        "a settled record can learn what a service calls a title without a "
-        "request being spent on asking. And a title added to a tracker by hand "
-        "writes the premiere airing no feed carried, through the calendar "
-        "search's own fill_one_gap — the same one-title write a followed search "
-        "result makes. The add modals' as-you-type list is the titles the "
-        "calendar already stores (entries.titles_matching), and a pick from it "
-        "is read back out of those stored rows by identity (entries.stored_title) "
-        "— the calendar owns those rows, so it owns the verbs that read them. A "
-        "row's picture is first the one the calendar's own record of the title "
-        "carries (entries.posters_for), so a title a month has loaded costs no "
-        "lookup"),
-    (RANKER, CALENDAR): Edge(
-        "the board's search lists, as somebody types, the titles this instance "
-        "already stores (entries.titles_matching), and a result picked from that "
-        "list is read back out of those stored rows by identity "
-        "(entries.stored_title) — the calendar owns those rows, so it owns the "
-        "verbs that read them, and the board reads them through the same two the "
-        "tracker's add does rather than a query of its own. Only "
-        "ranker/sources.py reaches it"),
+        "links a Discord post at the viewer's own calendar. Its name repair "
+        "re-reads the title store only when the stored calendar's signature has "
+        "moved. And a title added to "
+        "a tracker by hand writes the premiere airing no feed carried, through "
+        "the calendar search's own fill_one_gap — the same one-title write a "
+        "followed search result makes — after asking the calendar's airings "
+        "which services already draw it"),
     (RANKER, DISTRAKT): Edge(
         "one adapter module imports the tracker's public surface so a board can "
         "be seeded from what the viewer finished. THE ONLY ranker module allowed "

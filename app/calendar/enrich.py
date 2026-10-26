@@ -15,11 +15,12 @@ GET/second, so a viewer loading a month would wait on it. Instead:
           One batched query, no network call. A title nobody has looked up is
           stored `enriched=False`, which is what lets app/calendar/filter.py
           exempt it rather than judge it on values nobody has fetched yet.
-  DRAIN   the heartbeat calls `drain()`, which asks app/calendar/entries.py for
-          every Simkl id the stored calendar names, subtracts the ones
-          `simkl_titles` already answers for (or a failure still inside its
-          backoff), fetches a bounded batch of what is left, and writes the
-          answer to BOTH `simkl_titles` and the calendar row it belongs to. A
+  DRAIN   the heartbeat calls `drain()`, which asks the title store
+          (app/metadata/rows.py) for every Simkl id it holds a row for,
+          subtracts the ones `simkl_titles` already answers for (or a failure
+          still inside its backoff), fetches a bounded batch of what is left,
+          and writes the answer to BOTH `simkl_titles` and the title row it
+          belongs to. A
           FILL also asks for a drain the moment it stores new records, through
           `run_drain`/`schedule_drain` below.
   READ    does nothing. The fields are on the row.
@@ -30,7 +31,7 @@ one compressed blob: a refill replaced it wholesale with a fresh, unenriched
 payload, so anything written into it was erased and the only way a viewer saw
 enrichment was to reapply it on every single read. Rows removed what that rested
 on — a refill rewrites the airings but is forbidden to demote an enriched title
-(entries._UPSERT_TITLE), and the drain updates the row directly — so a stored
+(app/metadata/rows.py's listing upsert), and the drain updates the row directly — so a stored
 value is never older than the last drain pass rather than as old as the window,
 and `enriched` records what the row CONTAINS instead of what a reader would have
 to look up to find out.
@@ -84,6 +85,7 @@ from . import cache as calendar_cache
 from . import entries
 from .. import db
 from .. import perftrace
+from ..metadata import rows as title_rows
 from ..providers.base import Media, Record, Source, SourceUnavailable
 from ..providers.simkl import titles as simkl_titles
 from ..providers.simkl import transport as simkl_transport
@@ -246,12 +248,14 @@ async def _upsert_success(simkl_id: int, media: str, fields: dict, now: int) -> 
     makes a re-fetch decidable: a row written by a narrower extraction is owed
     again, and only the payload can say which extraction wrote it.
 
-    `calendar_titles` takes the PROJECTION of that answer onto the stored title,
-    which is what the read path serves. Writing it here is what retired the
-    read-time overlay: the fields are on the row a viewer's month already reads,
-    so nothing has to be joined back in per request, and `enriched` becomes a
-    statement about what the row CONTAINS rather than about what a reader would
-    have to look up to find out.
+    The title store's row (app/metadata/rows.py) takes the PROJECTION of that
+    answer onto the stored title, which is what every reader serves. Writing it
+    here is what retired the read-time overlay: the fields are on the row a
+    viewer's month already reads, so nothing has to be joined back in per request,
+    and `enriched` becomes a statement about what the row CONTAINS rather than
+    about what a reader would have to look up to find out. The ids the answer
+    learned reach the title's identity in the same write, so a title that learns
+    enough to be re-keyed is re-keyed then.
 
     The second write is a projection of the first and can be rebuilt from it, so
     this is one fact stored once and materialized once, not two truths to keep
@@ -266,7 +270,7 @@ async def _upsert_success(simkl_id: int, media: str, fields: dict, now: int) -> 
         "failed_at = NULL, fail_count = 0",
         (simkl_id, media, blob, now),
     )
-    await entries.apply_enrichment(str(Source.SIMKL), simkl_id, media, fields, now)
+    await title_rows.apply_enrichment(str(Source.SIMKL), simkl_id, media, fields, now)
 
 
 async def _upsert_failure(simkl_id: int, media: str, now: int) -> int:
@@ -474,7 +478,7 @@ async def apply_stored_enrichment(records: list[Record]) -> list[Record]:
     to reapply it on every single read.
 
     Rows removed what that rested on. A refill rewrites the airings but is
-    forbidden to demote an enriched title (entries._UPSERT_TITLE), and the drain
+    forbidden to demote an enriched title (app/metadata/rows.py), and the drain
     writes the row directly, so a stored value is never older than the last drain
     pass rather than as old as the window.
 
@@ -501,7 +505,7 @@ async def apply_stored_enrichment(records: list[Record]) -> list[Record]:
 def _apply(record: Record, fields: dict[str, Any]) -> None:
     """Put what a lookup found onto one record.
 
-    IT READS THE PAYLOAD THROUGH `entries.enrichment_values` AND NOT ITSELF. The
+    IT READS THE PAYLOAD THROUGH `title_rows.enrichment_values` AND NOT ITSELF. The
     other writer — the drain updating a stored row directly — goes through the
     same function, and when each had its own reading they drifted: one looked for
     `ratings` where the payload says `rating`, and 225 titles on a live instance
@@ -509,7 +513,7 @@ def _apply(record: Record, fields: dict[str, Any]) -> None:
     is the RECORD-shaped half of the write; what a field means lives in one
     place.
     """
-    value = entries.enrichment_values(fields)
+    value = title_rows.enrichment_values(fields)
     record.genres = list(value["genres"])
     record.network = value["network"]
     record.country = value["country"]
@@ -550,9 +554,9 @@ def _apply(record: Record, fields: dict[str, Any]) -> None:
 # what the window contained.
 #
 # BOTH HALVES ARE ANSWERED BY THE DRAIN BECOMING A WRITER OF THE ROW. It updates
-# `calendar_titles` when it learns something, so a stored value is never older
+# the title store's row when it learns something, so a stored value is never older
 # than the last drain pass rather than as old as the window; and a refill is
-# forbidden to demote an enriched field (entries._UPSERT_TITLE), so the fields
+# forbidden to demote an enriched field (app/metadata/rows.py), so the fields
 # survive the thing that used to erase them. `enriched` now records what the row
 # CONTAINS instead of what a reader would have to look up to find out, which
 # makes it more accurate, not less.
@@ -601,7 +605,7 @@ async def _owed_titles() -> dict[tuple[int, str], str]:
     this function's — it stays a pure "what does the cache currently name"
     question so it has exactly one reason to change.
     """
-    return await entries.stored_titles(str(Source.SIMKL), "simkl", _media_values())
+    return await title_rows.stored_titles(str(Source.SIMKL), "simkl", _media_values())
 
 
 async def _fetch_one(settings, simkl_id: int, media: str, now: int) -> bool:
@@ -702,7 +706,7 @@ async def drain(settings, *, now: int | None = None) -> int:
     # that was wrong: the fill covers rows it CREATES, not rows that already
     # exist and are waiting. Five films on one real August calendar sat unenriched
     # with complete stored answers beside them.
-    unprojected = await entries.unenriched(str(Source.SIMKL), "simkl")
+    unprojected = await title_rows.unenriched(str(Source.SIMKL), "simkl")
     rebuild: list[tuple[int, str, dict]] = []
     stale: list[tuple[int, str]] = []
     batch: list[tuple[int, str, str]] = []
@@ -770,7 +774,7 @@ async def drain(settings, *, now: int | None = None) -> int:
         # already paid for; handing them to the rows that lack them is a local
         # write, and doing it first means a pass with nothing to fetch still
         # makes progress.
-        written = await entries.apply_enrichment_many(str(Source.SIMKL), rebuild, ts)
+        written = await title_rows.apply_enrichment_many(str(Source.SIMKL), rebuild, ts)
         logger.info("Simkl enrichment: gave %d stored answer(s) to calendar rows "
                     "that did not have them; no lookup was needed.", written)
     if not batch:
@@ -930,7 +934,7 @@ async def _owed_films() -> dict[int, str]:
     which about 25 came from Trakt. This costs tens of calls a month, not
     thousands.
     """
-    films = await entries.stored_titles(str(Source.TRAKT), "trakt", (str(Media.MOVIE),))
+    films = await title_rows.stored_titles(str(Source.TRAKT), "trakt", (str(Media.MOVIE),))
     return {trakt_id: title for (trakt_id, _media), title in films.items()}
 
 
@@ -1092,7 +1096,7 @@ async def drain_episodes(settings, *, now: int | None = None) -> int:
 
     IT DOES NOT STOP WHEN EVERY SEASON HAS BEEN ANSWERED ONCE. A season falls due
     again on a clock keyed to when its episodes AIRED — see
-    entries.episode_stale_after — because the titles and overviews this fills in
+    app/metadata/rows.py's episode_stale_after — because the titles and overviews this fills in
     are routinely corrected in the days after broadcast, not only published
     before it. Never-answered seasons still take the batch first.
 
@@ -1186,7 +1190,7 @@ async def backlog(*, now: int | None = None) -> tuple[int, int]:
     """
     ts = db.now() if now is None else now
     titles = await db.fetch_value(
-        "SELECT COUNT(*) FROM calendar_titles t "
+        f"SELECT COUNT(*) FROM {title_rows.TITLES} t "
         "LEFT JOIN simkl_titles s "
         "  ON s.simkl_id = json_extract(t.ids_json, '$.simkl') AND s.media = t.media "
         "WHERE t.enriched = 0 "

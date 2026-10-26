@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 from app.calendar import cache as calendar_cache, entries as calendar_entries
 from app.calendar import enrich as calendar_enrich
+from app.metadata import rows as title_rows
 from app.providers.base import Media, Record, Source
 from app.config import Settings
 from app.endpoints import get_endpoint
@@ -80,7 +81,7 @@ class RetentionTests(unittest.IsolatedAsyncioTestCase):
         await self._store([_record("still", 5, 9, AIR + 7 * 86400)],
                           start=date(2026, 7, 13), now=self.new)
         await calendar_entries.sweep(now=self.new)
-        self.assertEqual(await self._count("calendar_titles"), 1)
+        self.assertEqual(await self._count("title_metadata"), 1)
         records, *_ = await calendar_entries.read_span(
             SHOWS, date(2026, 7, 13), date(2026, 7, 20))
         self.assertEqual([r.title for r in records], ["Still"])
@@ -95,7 +96,7 @@ class RetentionTests(unittest.IsolatedAsyncioTestCase):
                           start=date(2026, 7, 13), now=self.new)
         await calendar_entries.sweep(now=self.new)
         rows = await db.fetch_all(
-            "SELECT season, number FROM calendar_episodes ORDER BY season")
+            "SELECT season, number FROM episode_metadata ORDER BY season")
         self.assertEqual([(r["season"], r["number"]) for r in rows], [(5, 9)])
 
     async def test_a_files_validator_does_not_outlive_its_rows(self):
@@ -240,7 +241,7 @@ class EpisodeLevelTests(unittest.IsolatedAsyncioTestCase):
         nominal runtime, and stamping the show's figure on it is what the level-2
         row exists to stop."""
         await self._store(1)
-        await db.execute("UPDATE calendar_titles SET runtime = 40, enriched = 1")
+        await db.execute("UPDATE title_metadata SET runtime = 40, enriched = 1")
         trakt_id = abs(hash("severance")) % 9999
         await calendar_entries.store_episodes(
             "trakt", trakt_id, "show", 1, [{"number": 1, "runtime": 82}], now=2000)
@@ -444,24 +445,24 @@ class EpisodesFallDueAgainTests(unittest.IsolatedAsyncioTestCase):
 
     def test_an_upcoming_episode_is_on_the_fast_tier(self):
         now = int(AIR) - 30 * 86400
-        self.assertEqual(calendar_entries.episode_stale_after(AIR, now),
+        self.assertEqual(title_rows.episode_stale_after(AIR, now),
                          now + 86400)
 
     def test_the_week_after_air_is_still_the_fast_tier(self):
         now = int(AIR) + 3 * 86400
-        self.assertEqual(calendar_entries.episode_stale_after(AIR, now),
+        self.assertEqual(title_rows.episode_stale_after(AIR, now),
                          now + 86400)
 
     def test_a_settled_episode_drops_to_the_slow_tier(self):
         now = int(AIR) + 30 * 86400
-        self.assertEqual(calendar_entries.episode_stale_after(AIR, now),
+        self.assertEqual(title_rows.episode_stale_after(AIR, now),
                          now + 30 * 86400)
 
     def test_an_undated_episode_is_treated_as_upcoming(self):
         """The cheap direction to be wrong in: an airing the feed could not pin
         down is far likelier to be imminent than settled, and parking it on the
         slow tier would freeze a placeholder title for a month."""
-        self.assertEqual(calendar_entries.episode_stale_after(None, 5000),
+        self.assertEqual(title_rows.episode_stale_after(None, 5000),
                          5000 + 86400)
 
     async def _fill(self, now):

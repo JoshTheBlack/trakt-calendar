@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 from app import db
 from app.calendar import cache as calendar_cache, enrich as calendar_enrich
 from app.calendar import entries as calendar_entries
+from app.metadata import rows as title_rows
 from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Media, Record, Source
@@ -86,7 +87,7 @@ class EnrichmentReachesTheStoredRowTests(EnrichTestCase):
     comes back filled, a narrower answer leaves the fields it never carried at
     their defaults, ids are added but never overwritten, and one row answers
     twenty airings. What changed is where the answer lives: the drain writes it
-    onto `calendar_titles` and the read serves the row, instead of every read
+    onto `title_metadata` and the read serves the row, instead of every read
     joining `simkl_titles` back in.
 
     So each of these stores a window FIRST and enriches after, which is the real
@@ -183,7 +184,7 @@ class EnrichmentReachesTheStoredRowTests(EnrichTestCase):
         self.assertTrue(all(r.enriched for r in records))
         self.assertTrue(all(r.genres == ["drama"] for r in records))
         self.assertEqual(
-            await db.fetch_value("SELECT COUNT(*) FROM calendar_titles"), 1)
+            await db.fetch_value("SELECT COUNT(*) FROM title_metadata"), 1)
 
     async def test_a_trakt_record_is_left_alone(self):
         """Trakt's calendar carries these fields already, so its records arrive
@@ -498,7 +499,7 @@ class AnAnswerThatArrivedAfterTheRowStillReachesItTests(EnrichTestCase):
             "extract_version": simkl_titles.EXTRACT_VERSION,
             "genres": ["drama"], "network": "AMC",
         }, now=1000)
-        await db.execute("UPDATE calendar_titles SET enriched = 0, genres_json = '[]', "
+        await db.execute("UPDATE title_metadata SET enriched = 0, genres_json = '[]', "
                          "network = '' WHERE source = 'simkl'")
         self.assertFalse((await self._one()).enriched)
 
@@ -530,12 +531,12 @@ class AnAnswerThatArrivedAfterTheRowStillReachesItTests(EnrichTestCase):
         await calendar_enrich._upsert_success(1, "show", {
             "extract_version": simkl_titles.EXTRACT_VERSION, "genres": ["drama"],
         }, now=1000)
-        await db.execute("UPDATE calendar_titles SET enriched = 0 WHERE source = 'simkl'")
+        await db.execute("UPDATE title_metadata SET enriched = 0 WHERE source = 'simkl'")
         with patch("app.providers.simkl.titles.fetch_title",
                    AsyncMock(return_value=_OK_FIELDS)):
             await calendar_enrich.drain(self.SETTINGS, now=2000)
         self.assertEqual(
-            await calendar_entries.unenriched("simkl", "simkl"), set())
+            await title_rows.unenriched("simkl", "simkl"), set())
 
 
 class AnAnswerAlreadyPaidForGoesInWithTheFillTests(EnrichTestCase):
@@ -1066,7 +1067,7 @@ class BothWritersReadThePayloadTheSameWayTests(EnrichTestCase):
 
     A lookup's answer is written in two places: onto a RECORD on the way into a
     fill (`_apply`), and onto a stored ROW when the drain answers for a title
-    whose row already exists (`entries.apply_enrichment`). Each used to read the
+    whose row already exists (`title_rows.apply_enrichment`). Each used to read the
     payload itself, and they disagreed — one looked for `ratings` where the
     payload says `rating`. Measured on a live instance: 1,505 titles kept their
     score and 225 lost it, decided by nothing but which path happened to reach
@@ -1094,7 +1095,7 @@ class BothWritersReadThePayloadTheSameWayTests(EnrichTestCase):
 
     async def _row(self):
         row = await db.fetch_one(
-            f"SELECT {', '.join(self.COLUMNS)} FROM calendar_titles WHERE source = 'simkl'")
+            f"SELECT {', '.join(self.COLUMNS)} FROM title_metadata WHERE source = 'simkl'")
         return tuple(row[name] for name in self.COLUMNS)
 
     async def test_the_fill_path_and_the_row_path_store_the_same_thing(self):
@@ -1105,7 +1106,7 @@ class BothWritersReadThePayloadTheSameWayTests(EnrichTestCase):
         through_the_fill = await self._row()
 
         # PATH B — the row exists first and the drain updates it in place.
-        await db.execute("DELETE FROM calendar_titles")
+        await db.execute("DELETE FROM title_metadata")
         await db.execute("DELETE FROM simkl_titles")
         await self._stored([_simkl_record(1)])
         await calendar_enrich._upsert_success(1, "show", self.PAYLOAD, now=1000)
@@ -1119,7 +1120,7 @@ class BothWritersReadThePayloadTheSameWayTests(EnrichTestCase):
         await self._stored([_simkl_record(1)])
         await calendar_enrich._upsert_success(1, "show", self.PAYLOAD, now=1000)
         self.assertEqual(
-            await db.fetch_value("SELECT ratings_json FROM calendar_titles"),
+            await db.fetch_value("SELECT ratings_json FROM title_metadata"),
             '{"simkl": 8.4}')
         records, *_ = await calendar_entries.read_span(
             SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
@@ -1232,7 +1233,7 @@ class GivingUpOnATitleTests(EnrichTestCase):
         await calendar_enrich._upsert_success(9001, "show", older, now=1000)
         # The calendar row still waiting, as it is when the answer it would have
         # been given is one nothing can use.
-        await db.execute("UPDATE calendar_titles SET enriched = 0")
+        await db.execute("UPDATE title_metadata SET enriched = 0")
         await db.execute("UPDATE simkl_titles SET fail_count = ?, failed_at = 2000",
                          (calendar_enrich._GIVE_UP_AFTER,))
         titles, _seasons = await calendar_enrich.backlog()
@@ -1257,7 +1258,7 @@ class GivingUpOnATitleTests(EnrichTestCase):
         with patch("app.providers.simkl.titles.fetch_title",
                    AsyncMock(return_value=_OK_FIELDS)):
             await calendar_enrich.drain(self.SETTINGS, now=1000)
-        await db.execute("UPDATE calendar_titles SET enriched = 0")
+        await db.execute("UPDATE title_metadata SET enriched = 0")
         await db.execute("UPDATE simkl_titles SET fail_count = ?, failed_at = 2000",
                          (calendar_enrich._GIVE_UP_AFTER + 10,))
 

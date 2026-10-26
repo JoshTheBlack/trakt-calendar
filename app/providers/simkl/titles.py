@@ -322,7 +322,7 @@ def _extract(payload: dict) -> dict[str, Any]:
     return {
         "extract_version": EXTRACT_VERSION,
         # RETURNED, NOT STORED, AND SO NOT AN EXTRACT_VERSION CHANGE.
-        # `entries.enrichment_values` names every field it keeps and this is not
+        # The title store's `enrichment_values` names every field it keeps and this is not
         # one of them, so no stored row gains a column and nothing is re-fetched.
         # What it is for: the calendar SEARCH builds a record for a title this
         # instance has never listed, and `calendar.to_show_record` needs a name.
