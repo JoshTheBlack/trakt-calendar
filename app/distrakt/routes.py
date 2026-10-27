@@ -1616,6 +1616,11 @@ async def _row_pictures(user_id: int, shows: list[dict], films: list[dict] | Non
     THE ADDRESS, NEVER THE IMAGE: nothing here puts a picture on disk. The row
     draws the address through the image proxy, with the other recorded pictures
     behind it as the proxy's fallbacks (artwork.ranked says why).
+
+    THE REGISTRY'S ADDRESS FOR A SERVICE WINS over the title store's own row of
+    it, which only fills a service the registry holds nothing for — and never with
+    an address the registry has given up on, or a picture known to be failing
+    would be drawn again from the copy.
     """
     rows = ([(Media.SHOW, show) for show in shows if show.get("key")]
             + [(Media.MOVIE, film) for film in films or [] if film.get("key")])
@@ -1635,8 +1640,9 @@ async def _row_pictures(user_id: int, shows: list[dict], films: list[dict] | Non
         own = known.seasons.get((*pair, season), {}) if tmdb and season is not None else {}
         # The picture and, behind it, every other one in the same order: an
         # address recorded here can die at its host (artwork.ranked).
-        addresses = artwork.ranked(
-            {**known.shows.get(pair, {}), **stored[media].get(row["key"], {})}, own, order)
+        kept = {source: url for source, url in stored[media].get(row["key"], {}).items()
+                if url not in known.capped}
+        addresses = artwork.ranked({**kept, **known.shows.get(pair, {})}, own, order)
         pictures[(str(row["key"]), season)] = (
             (proxied_image(addresses[0], fallbacks=addresses[1:]) or "") if addresses else "")
         if not addresses and tmdb and pair not in known.missed:

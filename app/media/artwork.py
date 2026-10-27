@@ -205,6 +205,11 @@ class Known:
     shows: dict[tuple[str, int], dict[str, str]] = field(default_factory=dict)
     seasons: dict[tuple[str, int, int], dict[str, str]] = field(default_factory=dict)
     missed: set[tuple[str, int]] = field(default_factory=set)
+    # The addresses left out for failing: what a reader merging in another copy
+    # of a service's address (the title store's own row of it) must leave out,
+    # or a picture the registry has given up on would be drawn again from the
+    # copy.
+    capped: set[str] = field(default_factory=set)
 
     def address(self, media: str, tmdb: int, season: int | None,
                 order: Iterable[str]) -> str:
@@ -275,10 +280,15 @@ async def known(refs: Iterable[tuple[str, int, int | None]]) -> Known:
             out.missed.add(pair)
         elif row["fail_count"] < MAX_FAIL_COUNT:
             out.shows.setdefault(pair, {})[str(row["source"])] = str(row["url"])
+        elif row["url"]:
+            out.capped.add(str(row["url"]))
     if any(s is not None for _, _, s in refs):
         for row in await db.fetch_all(
-                f"SELECT media, tmdb, season, source, url FROM season_posters "
-                f"WHERE tmdb IN ({marks}) AND fail_count < ?", (*tmdbs, MAX_FAIL_COUNT)):
+                f"SELECT media, tmdb, season, source, url, fail_count FROM season_posters "
+                f"WHERE tmdb IN ({marks})", tmdbs):
+            if row["fail_count"] >= MAX_FAIL_COUNT:
+                out.capped.add(str(row["url"]))
+                continue
             out.seasons.setdefault(
                 (str(row["media"]), int(row["tmdb"]), int(row["season"])),
                 {})[str(row["source"])] = str(row["url"])

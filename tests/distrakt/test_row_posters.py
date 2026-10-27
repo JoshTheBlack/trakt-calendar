@@ -70,6 +70,27 @@ class RowPosterTests(MonthFragmentTestCase):
             self.assertEqual(self.pictures(), [proxied_image("https://x/reg.jpg")])
         self.assertEqual(calls, [])
 
+    def test_the_registrys_address_for_a_service_wins_over_the_stores_copy(self):
+        """The calendar's record of the title keeps the address it was listed
+        with; the registry is where a service's address is kept current. The
+        copy drawn over the registry put back a picture Trakt had replaced."""
+        store(a_record("Listed Show", 500, poster="https://media.trakt.tv/old.jpg"))
+        asyncio.run(artwork.record_poster_url("show", 500, "trakt", "https://media.trakt.tv/new.jpg"))
+        self.list_one()
+        self.assertEqual(self.pictures(), [proxied_image("https://media.trakt.tv/new.jpg")])
+
+    def test_an_address_the_registry_gave_up_on_is_not_drawn_from_the_copy(self):
+        """A failing address is left out of what the registry answers; the
+        store's copy of the same address must not put it back in front."""
+        dead = "https://media.trakt.tv/dead.jpg"
+        store(a_record("Listed Show", 500, poster=dead))
+        asyncio.run(artwork.record_poster_url("show", 500, "trakt", dead))
+        asyncio.run(artwork.record_poster_url("show", 500, "simkl", "https://x/simkl.jpg"))
+        for _ in range(artwork.MAX_FAIL_COUNT):
+            asyncio.run(artwork.record_failure("show", 500, "trakt"))
+        self.list_one()
+        self.assertEqual(self.pictures(), [proxied_image("https://x/simkl.jpg")])
+
     def test_an_unknown_title_costs_exactly_one_lookup_ever(self):
         self.list_one()
         calls, patched = self.lookups("https://x/found.jpg")
