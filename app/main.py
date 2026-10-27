@@ -56,6 +56,7 @@ from .distrakt import routes as distrakt_routes
 from .integrations import routes as integrations_routes
 from .media import artwork, logos, posters
 from .metadata import backfill as metadata_backfill
+from .metadata import picture_routes
 from .ranker import core as ranker_core
 from .ranker import routes as ranker_routes
 from .auth import AuthLevel
@@ -192,6 +193,9 @@ async def _heartbeat_tick() -> None:
         # already stored is registered with the title store and any key its own
         # ids have outgrown is moved (app/metadata/backfill.py).
         metadata_backfill.run_once,
+        # Then, once, the words the tracker's and boards' rows carry copies of,
+        # seeded into the store before anything drops those copies.
+        metadata_backfill.seed_words_once,
         _sweep_auth_rows,
         lambda: calendar_cache.refresh_months(settings),
         # run_drain, not drain directly — the same coalescing latch a fill
@@ -316,6 +320,7 @@ app.include_router(plex_routes.router)
 app.include_router(admin_routes.router)
 app.include_router(encryption_routes.router)
 app.include_router(share_routes.router)
+app.include_router(picture_routes.router)
 app.include_router(ranker_routes.router)
 app.include_router(calendar_routes.router)
 app.include_router(distrakt_routes.router)

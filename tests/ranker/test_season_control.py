@@ -25,6 +25,7 @@ from datetime import date, datetime, timezone
 from unittest import mock
 
 from app import db
+from app.metadata import descriptions, rows
 from app.providers import detail_source
 from app.providers.base import SeasonsAnswer, Source
 from app.providers import season_choices
@@ -286,7 +287,7 @@ class WhatTheListDrawsTests(_ControlTestCase):
         from app.providers.base import SourceUnavailable
         self.build_with_seasons()
 
-        async def _down(settings, chosen, media):
+        async def _down(settings, chosen, media, *, cached_only=False):
             raise SourceUnavailable("down")
 
         with mock.patch.object(detail_source, "seasons", _down):
@@ -376,17 +377,14 @@ NAMED = [
 
 
 class WhatAChoiceWritesTests(_ControlTestCase):
-    """Choosing a season writes what the row now COUNTS and is CALLED, read from
-    the season list the control was drawn from — out of the store, never a
-    second request — and never leaves the old definition's numbers behind."""
+    """Choosing a season makes the row COUNT and be CALLED what that season is,
+    from the season list the control was drawn from — kept in the title store,
+    read back with no second request — and never leaves the old definition's
+    numbers behind: the row keeps no numbers of its own to leave."""
 
     def facts(self, row_key: str) -> tuple:
-        season = None if row_key == key(SHOW) else int(row_key.rsplit(":s", 1)[1])
-        row = asyncio.run(db.fetch_one(
-            "SELECT season_count, episode_count, season_name FROM tier_items "
-            " WHERE match_id = ? AND IFNULL(season, -1) = ?",
-            (SHOW, -1 if season is None else season)))
-        return row["season_count"], row["episode_count"], row["season_name"]
+        item = asyncio.run(ranker.fetch_item(self.user_id, BOARD, row_key))
+        return item["season_count"], item["episode_count"], item["season_name"]
 
     def choose(self, row_key: str, season, listed=LISTED) -> tuple[str, list, list]:
         cached: list = []
@@ -397,8 +395,6 @@ class WhatAChoiceWritesTests(_ControlTestCase):
 
     def test_a_season_counts_its_own_episodes_and_no_seasons(self):
         self.build_with_seasons()
-        asyncio.run(db.execute("UPDATE tier_items SET season_count = 5, episode_count = 38 "
-                               " WHERE match_id = ? AND season IS NULL", (SHOW,)))
         _, calls, cached = self.choose(key(SHOW), 3)
         self.assertEqual(self.facts(season_key(SHOW, 3)), (None, 9, None))
         self.assertEqual(calls, [(Source.TRAKT, "70")])
@@ -409,13 +405,17 @@ class WhatAChoiceWritesTests(_ControlTestCase):
         self.choose(key(SHOW), 3)
         body, _, _ = self.choose(season_key(SHOW, 3), "")
         self.assertIn("This row is the whole show now.", body)
+        # A season list alone is not the whole show's count: only the service's
+        # description says how many seasons there are (labels.board_columns).
+        self.assertEqual(self.facts(key(SHOW)), (None, None, None))
+        asyncio.run(db.execute(
+            f"UPDATE {rows.TITLES} SET season_count = 4 "
+            "WHERE source = 'trakt' AND title_key = ?", (key(SHOW),)))
         # Four listed seasons, 8 + 10 + 9 + 10 episodes.
         self.assertEqual(self.facts(key(SHOW)), (4, 37, None))
 
     def test_a_list_nobody_stored_leaves_the_counts_blank_not_stale(self):
         self.build_with_seasons()
-        asyncio.run(db.execute("UPDATE tier_items SET season_count = 5, episode_count = 38 "
-                               " WHERE match_id = ? AND season IS NULL", (SHOW,)))
         self.choose(key(SHOW), 3, listed=[])
         self.assertEqual(self.facts(season_key(SHOW, 3)), (None, None, None))
 
@@ -461,23 +461,40 @@ class TheLabelTests(unittest.TestCase):
         self.assertEqual(seasons.season_part(4, "Night Country"), "Night Country")
 
 
-class TheFactsTests(unittest.TestCase):
-    """seasons.season_facts — a row's counts describe what the row is."""
+class WhatTheWholeShowCountsTests(_ControlTestCase):
+    """The whole show's counts, from the title store: its numbered seasons and
+    their episodes, from the first service whose description vouches for its
+    season list (app/metadata/labels.py)."""
 
-    def test_a_season(self):
-        self.assertEqual(seasons.season_facts(NAMED, 4),
-                         {"season_count": None, "episode_count": 6,
-                          "season_name": "Night Country"})
+    def facts(self) -> tuple:
+        item = asyncio.run(ranker.fetch_item(self.user_id, BOARD, key(SHOW)))
+        return item["season_count"], item["episode_count"]
 
-    def test_the_whole_show_counts_numbered_seasons_only(self):
-        listed = [{"season": 0, "episode_count": 3}, *LISTED]
-        self.assertEqual(seasons.season_facts(listed, None),
-                         {"season_count": 4, "episode_count": 37, "season_name": None})
+    def file(self, listed, *, described: int | None) -> None:
+        asyncio.run(db.transaction(lambda conn: descriptions.write_season_list(
+            conn, "trakt", "show", "70", listed, now=db.now(),
+            ids={"trakt": 70, "tmdb": int(SHOW)})))
+        if described is not None:
+            asyncio.run(db.execute(
+                f"UPDATE {rows.TITLES} SET season_count = ? WHERE source = 'trakt'",
+                (described,)))
 
-    def test_nothing_known_is_none_not_zero(self):
-        blank = {"season_count": None, "episode_count": None, "season_name": None}
-        self.assertEqual(seasons.season_facts([], 3), blank)
-        self.assertEqual(seasons.season_facts([], None), blank)
+    def test_the_specials_are_not_a_season_of_the_count(self):
+        self.build_with_seasons()
+        self.file([{"season": 0, "episode_count": 3}, *LISTED], described=4)
+        self.assertEqual(self.facts(), (4, 37))
+
+    def test_a_list_no_description_vouches_for_counts_nothing(self):
+        """Season rows come from three writers, so the rows that happen to exist
+        are not a list until a description says how many seasons there are."""
+        self.build_with_seasons()
+        self.file(LISTED[:2], described=None)
+        self.assertEqual(self.facts(), (None, None))
+
+    def test_a_list_shorter_than_the_description_counts_nothing(self):
+        self.build_with_seasons()
+        self.file(LISTED[:2], described=4)
+        self.assertEqual(self.facts(), (4, None))
 
 
 if __name__ == "__main__":

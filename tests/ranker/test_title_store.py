@@ -69,5 +69,9 @@ class EveryArrivalIsFiledByTheStoreTests(RankerTestCase):
             "added_from": "manual", "rank_in_category": 0, "created_at": 1,
             "category_uid": None}]
         asyncio.run(ranker.restore_user_data(self.user_id, doc))
-        row = self.rows("SELECT match_source, match_id, tmdb, title FROM tier_items")[0]
-        self.assertEqual(tuple(row), ("tmdb", "55", 55, "Restored"))
+        row = self.rows("SELECT match_source, match_id, tmdb FROM tier_items")[0]
+        self.assertEqual(tuple(row), ("tmdb", "55", 55))
+        # The words the file drew it with are seeded into the store, under the
+        # key the title answers to now.
+        item, = asyncio.run(ranker.fetch_board(self.user_id, "b1"))["pool"]
+        self.assertEqual(item["title"], "Restored")

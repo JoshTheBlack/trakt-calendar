@@ -34,6 +34,7 @@ from unittest.mock import AsyncMock, patch
 
 from app import db
 from app.config import Settings, save_settings
+from app.metadata import refresh as metadata_refresh
 from app.providers.base import Media
 from app.providers.simkl import transport as simkl_transport
 from app.providers.trakt import transport as trakt_transport
@@ -161,6 +162,17 @@ class DetailModalSourceTests(AppTestCase):
         self.assertIn("Longing for Sea Bream!", html)
         self.assertIn("⭐ 8.1", html)
 
+    def test_opening_the_panel_names_the_title_and_its_season(self):
+        """To the title store's refresh queue (app/metadata/refresh.py)."""
+        seen = []
+        with patch.object(metadata_refresh, "viewed",
+                          lambda settings, wanted, **kw: seen.append((list(wanted), kw))):
+            self._both()
+        (wanted, kw), = seen
+        self.assertEqual(kw["budget"], metadata_refresh.PANEL_BUDGET)
+        self.assertEqual([(w.media, w.season) for w in wanted], [("show", 2)])
+        self.assertEqual(str(wanted[0].ids.get("trakt")), "203330")
+
     def test_the_preference_is_trakts_id_and_not_the_cards_attribution(self):
         """The card the author tested against is a Simkl-attributed card for a
         title Trakt also lists. Nothing about which service the CARD wears
@@ -204,8 +216,8 @@ class DetailModalSourceTests(AppTestCase):
         tests/providers/test_protocol_conformance.py holds for an EMPTY answer;
         what this adds is a pair of answers with real data in them, where a source
         can leave out a key it has nothing to say for."""
+        from app import providers
         from app.config import load_settings
-        from app.providers import detail_source
         from app.providers.base import Source
 
         trakt_client = _TraktClient({"shows/203330": TRAKT_SHOW,
@@ -216,10 +228,10 @@ class DetailModalSourceTests(AppTestCase):
                           new=_simkl_answers({"tv/3204421": SIMKL_TITLE,
                                               "tv/episodes/3204421": SIMKL_EPISODES})):
             settings = load_settings()
-            trakt_body = asyncio.run(detail_source.fetch(
-                settings, Source.TRAKT, "show", "203330", 2))
-            simkl_body = asyncio.run(detail_source.fetch(
-                settings, Source.SIMKL, "show", "3204421", 1))
+            trakt_body = asyncio.run(providers.get(Source.TRAKT).detail_port.fetch_details(
+                settings, "show", "203330", 2))
+            simkl_body = asyncio.run(providers.get(Source.SIMKL).detail_port.fetch_details(
+                settings, "show", "3204421", 1))
         for key in trakt_body:
             with self.subTest(key=key):
                 self.assertIn(key, simkl_body)
@@ -244,6 +256,10 @@ class DetailModalSourceTests(AppTestCase):
         html = self._simkl_only().text
         self.assertNotIn("youtube.com/watch", html)
         self.assertNotIn("<iframe", html)
+        # The title store kept that answer; the second half is a different
+        # answer about the same title, so the store starts empty again.
+        for table in ("title_metadata", "season_metadata", "episode_metadata"):
+            asyncio.run(db.execute(f"DELETE FROM {table}"))
         real = {**SIMKL_TITLE,
                 "trailers": [{"name": "Trailer", "youtube": "dQw4w9WgXcQ"}]}
         html = self._get("media=show&simkl=3204421&season=1",
@@ -471,6 +487,22 @@ class SimklOnlyOnAPublicShareLinkTests(AppTestCase):
 
     def _details(self, query):
         return self.client.get(f"/s/{self.token}/details?{query}&{SHARE_VIEW}")
+
+    def test_a_public_read_never_queues_a_refresh(self):
+        """A stranger's visit spends nothing of the owner's: neither the shared
+        page nor its panel names a title to the refresh queue."""
+        from app import cache
+        asyncio.run(cache.set(simkl_transport.cache_key("tv/3204421"), SIMKL_TITLE))
+        asyncio.run(cache.set(simkl_transport.cache_key("tv/episodes/3204421"),
+                              SIMKL_EPISODES))
+
+        def _refused(*args, **kwargs):
+            raise AssertionError("a public read queued a refresh")
+
+        with self._no_network(), patch.object(metadata_refresh, "viewed", _refused),                 patch.object(metadata_refresh, "queue_viewed", _refused):
+            page = self.client.get(f"/s/{self.token}?{SHARE_VIEW}")
+            panel = self._details("media=show&simkl=3204421&season=1")
+        self.assertEqual((page.status_code, panel.status_code), (200, 200))
 
     def test_a_simkl_only_card_on_a_public_page_serves_what_is_cached(self):
         from app import cache

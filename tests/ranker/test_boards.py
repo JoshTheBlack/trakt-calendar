@@ -957,6 +957,32 @@ class WarmRouteTests(RankerTestCase):
         self.assertEqual(asked, [])
         self.assertFalse(list(posters.POSTER_DIR.glob("show/1.*")), "a page's picture is never a tile")
 
+    def test_a_title_with_no_tmdb_id_draws_what_is_filed_under_its_key(self):
+        """artwork's title_posters, keyed on the title store's key the row is filed
+        under; such a title has no lookup, which asks by tmdb id."""
+        from app.media import artwork
+        asyncio.run(ranker.add_titles(self.user_id, "b1", [{
+            "media": "show", "match_source": "tvdb", "match_id": "81189",
+            "title": "Tvdb Only", "ids": {"tvdb": 81189}}]))
+        asyncio.run(artwork.record_title_poster_urls(
+            [("show", "show:tvdb:81189", "simkl", "https://simkl.in/k.jpg")]))
+        asked = no_artwork(self)
+        resp = self.poster("show:tvdb:81189")
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.headers["location"], proxied_image("https://simkl.in/k.jpg"))
+        self.assertEqual(asked, [])
+
+    def test_a_row_with_no_tmdb_id_asks_for_its_picture(self):
+        """The row's <img> asks by board and key whatever the title is: a row
+        that skipped titles with no tmdb id drew an empty frame for a picture its
+        details panel and the board's export both drew."""
+        asyncio.run(ranker.add_titles(self.user_id, "b1", [{
+            "media": "show", "match_source": "mal", "match_id": "36106",
+            "title": "Mal Only", "ids": {"mal": 36106}}]))
+        html = self.client.get("/rankings").text
+        self.assertIn("/api/rankings/poster?board=b1&amp;key=show%3Amal%3A36106", html)
+        self.assertNotIn("ranker-thumb is-missing", html)
+
     def test_a_title_nobody_knows_costs_one_lookup_ever(self):
         from app.media import artwork
         asked = []
@@ -1231,8 +1257,14 @@ class TrackerImportTests(RankerTestCase):
         self.assertIn("Found 2, added 1, and made 1 whole-show row into the season.",
                       resp.text)
         rows = asyncio.run(db.fetch_all(
-            "SELECT id, season, category_id, episode_count FROM tier_items ORDER BY season"))
-        self.assertEqual([(r["season"], r["episode_count"]) for r in rows], [(1, 10), (2, 8)])
+            "SELECT id, season, category_id FROM tier_items ORDER BY season"))
+        # Each season draws the episode total the tracker recorded for it, seeded
+        # into the title store as it arrived.
+        board = asyncio.run(ranker.fetch_board(self.user_id, "b1"))
+        drawn = {item["season"]: item["episode_count"]
+                 for item in [*board["pool"], *(i for c in board["categories"]
+                                                 for i in c["items"])]}
+        self.assertEqual(drawn, {1: 10, 2: 8})
         converted = rows[1]
         self.assertEqual(converted["id"], whole_id)
         self.assertIsNotNone(converted["category_id"])
@@ -1260,10 +1292,14 @@ class TrackerImportTests(RankerTestCase):
                                    Source.TRAKT, "10", stored_only=False)), \
                 mock.patch.object(detail_source, "seasons", _seasons):
             self.client.post("/rankings/boards/b1/import", json={"media": "show"})
-        row = asyncio.run(db.fetch_one(
-            "SELECT season, season_count, episode_count, season_name FROM tier_items"))
-        self.assertEqual(dict(row), {"season": 3, "season_count": None, "episode_count": 17,
-                                     "season_name": "The Return"})
+        item, = asyncio.run(ranker.fetch_board(self.user_id, "b1"))["pool"]
+        # The season list the instance held is kept in the title store, and the
+        # row draws its season from there: the service's name for it and the
+        # service's count — the tracker's count seeds a season no service lists.
+        self.assertEqual({k: item[k] for k in ("season", "season_count", "episode_count",
+                                                 "season_name")},
+                         {"season": 3, "season_count": None, "episode_count": 18,
+                          "season_name": "The Return"})
         self.assertEqual(asked, [True])
 
     def test_the_year_list_is_a_fragment_of_its_own(self):

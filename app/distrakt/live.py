@@ -12,6 +12,7 @@ import logging
 
 from . import counts, discord_fmt
 from .. import providers
+from ..metadata import panel as store_panel
 from ..perftrace import span
 from ..providers.base import Media, SourceUnavailable, TitleFacts
 from ..sources import prefs as source_prefs
@@ -325,6 +326,12 @@ async def season_detail(settings, rec: dict, *, fresh: bool = False):
     THE ANSWERING SERVICE IS ASKED THROUGH ITS OWN DetailPort, never chosen by
     name here. This used to read "Simkl, else Trakt", which sent any third
     answerer's id to Trakt's season endpoint — a wrong number at best.
+
+    FROM THE TITLE STORE (app/metadata/panel.py's `season_facts`): the season's
+    stored description where there is one, and the service asked — and its
+    answer kept — only where there is not, or when `fresh` says the viewer
+    pressed Refresh. A month of rows is then a few indexed reads rather than a
+    lookup per row, and a stale season is re-read behind the page.
     """
     from ..providers import detail_source as catalogue_answerer
     from ..providers import season as season_rules
@@ -337,8 +344,9 @@ async def season_detail(settings, rec: dict, *, fresh: bool = False):
     async def ask(answerer) -> dict:
         # By the row's own id for that service, as stored, rather than the
         # answerer's text copy of it.
-        return await providers.get(answerer.source).detail_port.fetch_season_summary(
-            settings, ids.get(str(answerer.source)), season, media, fresh=fresh)
+        own = answerer._replace(source_id=ids.get(str(answerer.source)))
+        return await store_panel.season_facts(settings, own, media, season,
+                                              ids=ids, fresh=fresh)
 
     # A SEASON THE CHOSEN SERVICE HAS NO EPISODES OF IS THE NEXT ONE'S TO ANSWER,
     # by the rule every details panel follows (detail_source.for_season, which
@@ -427,7 +435,7 @@ async def title_facts(settings, rec: dict, *, service: str | None = None) -> Tit
             logger.info("title facts: %s could not be asked for a network (%s)", other, exc)
             continue
         if network:
-            return TitleFacts(facts.title, network)
+            return TitleFacts(facts.title, network, network_from=str(other))
     return facts
 
 

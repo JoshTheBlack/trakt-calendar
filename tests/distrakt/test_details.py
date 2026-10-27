@@ -32,6 +32,7 @@ from app import db, distrakt as distrakt_store, metadata
 from app.clock import today
 from app.config import Settings
 from app.distrakt import watch_history
+from app.metadata import refresh as metadata_refresh
 from app.providers.base import Media
 from app.providers.trakt import transport
 from tests.support import AppTestCase, DetailsPanel, ORIGIN
@@ -766,3 +767,33 @@ class AWatchedFilmOpensItsPanelTests(_DetailsRouteTestCase):
                         "title": "Coyote vs. Acme", "year": 2026,
                         "watched_at": f"{year:04d}-{number:02d}-02T12:00:00Z"}]}))
         self.assertIn("A coyote sues.", self._film(month=month))
+
+
+class APanelOpenedIsATitleViewedTests(_DetailsRouteTestCase):
+    """Opening a row's panel names the title, and the season on screen, to the
+    title store's refresh queue (app/metadata/refresh.py) — behind the page."""
+
+    def setUp(self):
+        super().setUp()
+        self.seen = []
+        recorder = patch.object(metadata_refresh, "viewed",
+                                lambda settings, wanted, **kw: self.seen.append(
+                                    (list(wanted), kw)))
+        recorder.start()
+        self.addCleanup(recorder.stop)
+
+    def test_a_shows_panel_names_its_season(self):
+        self._settle(_month_back(0))
+        self._panel()
+        (wanted, kw), = self.seen
+        self.assertEqual(kw["budget"], metadata_refresh.PANEL_BUDGET)
+        self.assertEqual([(w.media, w.season, str(w.ids.get("trakt"))) for w in wanted],
+                         [("show", 2, "7")])
+
+    def test_a_films_panel_names_the_film(self):
+        AWatchedFilmOpensItsPanelTests._watch(self)
+        AWatchedFilmOpensItsPanelTests._film(self)
+        (wanted, kw), = self.seen
+        self.assertEqual(kw["budget"], metadata_refresh.PANEL_BUDGET)
+        self.assertEqual([(w.media, w.season, str(w.ids.get("tmdb"))) for w in wanted],
+                         [("movie", None, "5")])

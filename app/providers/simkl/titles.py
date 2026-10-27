@@ -374,7 +374,7 @@ def _extract(payload: dict) -> dict[str, Any]:
 
 
 async def fetch_title(settings: Settings, simkl_id: int, media: Media | str,
-                      *, cache_only: bool = False) -> dict | None:
+                      *, cache_only: bool = False, fresh: bool = False) -> dict | None:
     """One title's catalogue fields, or None when Simkl could not answer for
     `simkl_id` — a real failure (network, rate limit, an instance-wide block)
     or an id it does not recognise. The enrichment drain (app/calendar/enrich.py)
@@ -387,9 +387,10 @@ async def fetch_title(settings: Settings, simkl_id: int, media: Media | str,
     reference costs one call regardless of how many times the drain is asked
     about it before that TTL turns over.
 
-    `cache_only=True` makes no outbound call and answers None when nothing is
-    cached, which is a THIRD indistinguishable way of failing and is handled by
-    the same caller branch. It is what the public share pages read with: a
+    `fresh=True` asks Simkl again past the cached answer (the title store's
+    refresh). `cache_only=True` makes no outbound call and answers None when
+    nothing is cached, which is a THIRD indistinguishable way of failing and is
+    handled by the same caller branch. It is what the public share pages read with: a
     visitor's click serves what the owner's own views already warmed and can
     never spend the instance's Simkl budget.
     """
@@ -400,7 +401,7 @@ async def fetch_title(settings: Settings, simkl_id: int, media: Media | str,
         payload = await transport.cached_get(
             transport.catalog_client(), settings, f"{path}/{simkl_id}", {},
             pool=transport.CATALOG_POOL, ttl_seconds=DETAIL_CACHE_TTL_SECONDS,
-            cache_only=cache_only,
+            cache_only=cache_only, fresh=fresh,
         )
     except transport.SimklError:
         return None

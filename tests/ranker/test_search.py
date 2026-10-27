@@ -581,9 +581,12 @@ class SeasonChecklistTests(_SearchTestCase):
         with mock.patch.object(self, "PICK", named):
             self.add({"q": "title", "i": "0", "media": "show", "want": "seasons",
                       "season:1": "1", "season:3": "1"})
+        board = asyncio.run(ranker.fetch_board(self.user_id, "b1"))
+        drawn = sorted([*board["pool"], *(i for c in board["categories"] for i in c["items"])],
+                       key=lambda item: item["season"])
         self.assertEqual(
             [(r["season"], r["season_count"], r["episode_count"], r["season_name"])
-             for r in self.rows("SELECT * FROM tier_items ORDER BY season")],
+             for r in drawn],
             [(1, None, 8, None), (3, None, 10, "The Return")])
         self.assertIn(("Title 1", True), self.picks, "the list must be read from the cache")
 

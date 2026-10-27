@@ -27,18 +27,21 @@ from __future__ import annotations
 import json
 import logging
 import unicodedata
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .. import db
+from .. import db, providers
+from ..media import artwork
 from ..providers.base import Record, Source
-from . import identity
+from . import holders, identity
 
 logger = logging.getLogger(__name__)
 
 # The tables, named once. The calendar's own reads join its airings to these and
 # name them through here rather than spelling them again.
 TITLES = "title_metadata"
+SEASONS = "season_metadata"
 EPISODES = "episode_metadata"
 # The index over folded titles, which the calendar's search names in INDEXED BY.
 FOLD_INDEX = "ix_title_metadata_fold"
@@ -65,6 +68,106 @@ def fold_title(title: str) -> str:
     decomposed = unicodedata.normalize("NFKD", str(title or ""))
     stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
     return " ".join(stripped.casefold().split())
+
+
+# ---------------------------------------------------------------------------
+# the clock a ceiling reads
+# ---------------------------------------------------------------------------
+
+# THE WORDS A ROW HOLDS: what a service said about a title, as opposed to the
+# keys the row is filed by (its coordinates, `title_key`, `ids_json` — an id is
+# what a title IS — and `detail_url`, built from the service's own id) and the
+# clocks it is kept by (`NOT_WORDS`). tests/metadata/test_retention.py fails on a
+# column of these tables that neither names, because a word nobody listed is a
+# word `ceiling_clock` cannot see left behind.
+WORDS = {
+    TITLES: ("title", "year", "network", "country", "language", "certification", "status",
+             "overview", "poster", "runtime", "genres_json", "ratings_json", "anime_type",
+             "release_types_json", "keywords_json", "first_aired", "homepage",
+             "season_count", "cast_json", "videos_json", "logo", "collection_json",
+             "next_episode_json"),
+    SEASONS: ("name", "overview", "episode_count", "premiere", "air_dates_json", "poster",
+              "cast_json", "videos_json"),
+    EPISODES: ("title", "overview", "still", "first_aired", "episode_type", "runtime",
+               "rating", "votes"),
+}
+NOT_WORDS = {
+    TITLES: ("source", "media", "source_id", "title_key", "title_fold", "ids_json",
+             "detail_url", "enriched", "fetched_at", "stale_after", "failed_at", "fail_count"),
+    SEASONS: ("source", "media", "source_id", "season", "fetched_at", "stale_after",
+              "failed_at", "fail_count"),
+    EPISODES: ("source", "media", "source_id", "season", "number", "fetched_at",
+               "stale_after"),
+}
+
+
+def ceiling_sources() -> tuple[str, ...]:
+    """Every registered service whose terms bound how long what it supplies may
+    be kept (`Capabilities.retain_seconds`), by name."""
+    return tuple(str(source) for source, provider in providers.registered().items()
+                 if provider.capabilities.retain_seconds is not None)
+
+
+def _held(table: str, column: str) -> str:
+    """SQL: the stored row's `column` holds a word — anything but nothing, an
+    empty string, an empty list or an empty map."""
+    return (f"({table}.{column} IS NOT NULL "
+            f"AND {table}.{column} NOT IN ('', '[]', '{{}}'))")
+
+
+def ceiling_clock(table: str, rewrites: Mapping[str, str | None], *,
+                  new: str = "excluded.fetched_at") -> str:
+    """The SQL a write onto `table` sets `fetched_at` to — `new`, the moment the
+    service answered, or the row's older clock where the write leaves an older
+    word in place.
+
+    A CEILING IS ABOUT EVERY WORD, AND A ROW HAS ONE CLOCK. A service with a
+    ceiling (TMDB: nothing it supplied may be kept past six months) is read by
+    `sweep_past_ceilings` from `fetched_at`, so for its rows that clock must be
+    the age of the OLDEST word the row holds. Writers rewrite parts of a row —
+    a calendar listing its name and picture, a season list a season's name and
+    count, a description everything it states — and a partial write that
+    renewed the clock would keep the words it left behind past the ceiling: a
+    season's cast described once and re-listed every few days would never age.
+    So a write renews the clock only when it rewrites every word the row holds,
+    and otherwise keeps the older one. A row two kinds of answer wrote goes at
+    its oldest word's ceiling and the next view of it builds it again
+    (app/metadata/refresh.py) — a few requests every six months, against a
+    word kept for ever.
+
+    `rewrites` names each word the write rewrites, with the SQL condition under
+    which it does NOT (None: always) — a listing that keeps the stored picture
+    when it states none, say. Every word not named is left. An episode row at
+    `fetched_at` 0 is a listing's stub no answer has reached, which no clock
+    describes; the answer's clock is its first. A service with no ceiling is
+    always given `new`: for it the clock says when it last answered, which is
+    what its own readers read.
+
+    `new` appears twice; an UPDATE passing it as `?` passes the moment twice.
+    """
+    left = [_held(table, column) if column not in rewrites
+            else f"(({rewrites[column]}) AND {_held(table, column)})"
+            for column in WORDS[table]
+            if column not in rewrites or rewrites[column] is not None]
+    names = ", ".join(f"'{name}'" for name in ceiling_sources())
+    condition = (f"{table}.source IN ({names}) AND {table}.fetched_at > 0 "
+                 f"AND ({' OR '.join(left)})") if names and left else "0"
+    return f"CASE WHEN {condition} THEN MIN({table}.fetched_at, {new}) ELSE {new} END"
+
+
+def kept_clock(source: str, table: str, row: Mapping[str, Any] | None,
+               rewrites: Iterable[str], now: int) -> int:
+    """`ceiling_clock` for a write made from Python over a row it has read
+    (app/metadata/descriptions.py's `write`): `now`, or the row's older clock
+    where the write leaves a word of a ceiling-bound service in place."""
+    if row is None or str(source) not in ceiling_sources():
+        return now
+    stored = int(row["fetched_at"] or 0)
+    rewritten = set(rewrites)
+    if stored > 0 and any(row[column] not in (None, "", "[]", "{}")
+                          for column in WORDS[table] if column not in rewritten):
+        return min(stored, now)
+    return now
 
 
 def as_year(stored) -> int | str:
@@ -166,8 +269,19 @@ ON CONFLICT(source, media, source_id) DO UPDATE SET
     anime_type = CASE WHEN {TITLES}.enriched = 1 THEN {TITLES}.anime_type
                       ELSE excluded.anime_type END,
     enriched   = MAX({TITLES}.enriched, excluded.enriched),
-    fetched_at = excluded.fetched_at
 """
+
+# What a listing rewrites of a title row: its name always, its picture when it
+# states one, and the enriched fields until a lookup has answered for them.
+_LISTING_REWRITES: dict[str, str | None] = {
+    "title": None, "poster": "excluded.poster = ''",
+    **{name: f"{TITLES}.enriched = 1"
+       for name in ("year", "network", "country", "language", "certification", "status",
+                    "overview", "runtime", "genres_json", "ratings_json", "anime_type")}}
+
+
+def _upsert_title_sql() -> str:
+    return _UPSERT_TITLE + f"    fetched_at = {ceiling_clock(TITLES, _LISTING_REWRITES)}\n"
 # `release_types_json` IS ABSENT FROM THE UPDATE ABOVE ON PURPOSE, and it is the
 # only enrichment-owned column that is, so it reads like an oversight and is
 # worth stating. A column left out of DO UPDATE SET keeps whatever it holds, so
@@ -229,8 +343,16 @@ def write_listing(conn: db.Connection, record: Record, title_key: str, *, now: i
     Measured over 45,827 stored records: 7,387 state no coordinate and NOT ONE of
     them carries an episode title, so nothing is lost by having nowhere to put one.
     """
-    conn.execute(_UPSERT_TITLE, (str(record.source), str(record.media), str(record.id),
-                                 title_key, *_title_values(record), now, stale_after))
+    conn.execute(_upsert_title_sql(), (str(record.source), str(record.media),
+                                       str(record.id), title_key, *_title_values(record),
+                                       now, stale_after))
+    # A TITLE WITH NO TMDB ID HAS ITS LISTING'S PICTURE FILED UNDER ITS KEY, as
+    # the store knows it only here (app/media/artwork.py's `title_posters`). One
+    # with a tmdb id is filed by the calendar's fill, which records every
+    # picture a fetch brought (app/calendar/cache.py's `_poster_sighting`).
+    if record.poster and identity.tmdb_of(title_key) is None:
+        artwork.file_sighting(conn, str(record.media), None, title_key, str(record.source),
+                              str(record.poster), now)
     if record.season is not None and record.episode_number is not None:
         conn.execute(_UPSERT_EPISODE_STUB, (
             str(record.source), str(record.media), str(record.id), int(record.season),
@@ -264,12 +386,18 @@ _ENRICHED_FIELDS = ("network", "country", "language", "certification", "status",
 # matched on, and a lookup overwriting it would re-identify a title under cover of
 # enriching it. Patching the learned map UNDER the stored one adds what is new and
 # keeps every value already there.
-_UPDATE_ENRICHED = (
-    f"UPDATE {TITLES} SET {', '.join(f'{n} = ?' for n in _ENRICHED_FIELDS)}, "
-    "genres_json = ?, ratings_json = ?, anime_type = ?, release_types_json = ?, "
-    "ids_json = json_patch(?, ids_json), "
-    "enriched = 1, fetched_at = ?, failed_at = NULL, fail_count = 0 "
-    "WHERE source = ? AND media = ? AND json_extract(ids_json, '$.' || ?) = ?")
+def _update_enriched_sql() -> str:
+    """The enrichment UPDATE — `ceiling_clock` with the moment passed as `?`,
+    twice (`_enrichment_params`)."""
+    rewrites = dict.fromkeys(
+        (*_ENRICHED_FIELDS, "genres_json", "ratings_json", "anime_type", "release_types_json"))
+    return (
+        f"UPDATE {TITLES} SET {', '.join(f'{n} = ?' for n in _ENRICHED_FIELDS)}, "
+        "genres_json = ?, ratings_json = ?, anime_type = ?, release_types_json = ?, "
+        "ids_json = json_patch(?, ids_json), "
+        f"enriched = 1, fetched_at = {ceiling_clock(TITLES, rewrites, new='?')}, "
+        "failed_at = NULL, fail_count = 0 "
+        "WHERE source = ? AND media = ? AND json_extract(ids_json, '$.' || ?) = ?")
 
 
 def enrichment_values(fields: dict) -> dict:
@@ -329,7 +457,7 @@ def _enrichment_params(source: str, service_id: int, media: str, fields: dict,
             value["anime_type"],
             json.dumps(value["release_types_by_country"]),
             json.dumps(value["ids"]),
-            now, source, media, ID_NAMESPACE.get(source, source), service_id)
+            now, now, source, media, ID_NAMESPACE.get(source, source), service_id)
 
 
 def _enrich_and_settle(conn: db.Connection, params: tuple, *, now: int) -> None:
@@ -344,7 +472,7 @@ def _enrich_and_settle(conn: db.Connection, params: tuple, *, now: int) -> None:
     same show. Settling the row's ids against its key re-keys the title at the
     moment it learns enough to, everywhere it is held.
     """
-    conn.execute(_UPDATE_ENRICHED, params)
+    conn.execute(_update_enriched_sql(), params)
     source, media, namespace, service_id = params[-4:]
     rows = conn.execute(
         f"SELECT title_key, ids_json, source_id FROM {TITLES} "
@@ -396,25 +524,39 @@ async def apply_enrichment_many(source: str, items, now: int) -> int:
     return await db.transaction(_work)
 
 
-async def unenriched(source: str, id_namespace: str) -> set[tuple[int, str]]:
-    """{(service id, media)} for stored titles still carrying no answer.
+async def unenriched(source: str, id_namespace: str,
+                     media: tuple[str, ...] | None = None) -> dict[tuple[int, str], str]:
+    """{(service id, media): title} for stored titles still carrying no answer —
+    the rows a service's enrichment drain owes, read through the index on
+    `enriched` rather than out of every row the service has.
 
-    IT NAMES THE ROWS A REBUILD IS FOR: ones where the ANSWER EXISTS in the
+    THIS IS THE DRAIN'S WHOLE WORKLIST, and it used to be every title the service
+    had a row for, each one's stored answer read back and decompressed every tick
+    only to find most of them already answered (25,123 Simkl titles on the
+    development copy, ~0.7 s of worker time a minute). A row that IS answered is
+    kept current by being viewed (app/metadata/refresh.py), not by being re-read
+    on a clock.
+
+    IT ALSO NAMES THE ROWS A REBUILD IS FOR: ones where the ANSWER EXISTS in the
     per-title table and this row was never given it — a lookup that lands a
     moment after the row is written, or any row whose listing and whose drain
     crossed. Without this the drain cannot tell "nobody has looked this up" from
     "the answer is here and this row has not been handed it".
     """
-    rows = await db.fetch_all(
-        f"SELECT json_extract(ids_json, '$.' || ?) AS service_id, media "
-        f"FROM {TITLES} WHERE source = ? AND enriched = 0",
-        (id_namespace, source))
-    out: set[tuple[int, str]] = set()
-    for row in rows:
+    sql = (f"SELECT json_extract(ids_json, '$.' || ?) AS service_id, media, title "
+           f"FROM {TITLES} WHERE enriched = 0 AND source = ?")
+    params: list = [id_namespace, source]
+    if media:
+        sql += f" AND media IN ({', '.join('?' * len(media))})"
+        params.extend(media)
+    sql += " ORDER BY fetched_at DESC"
+    out: dict[tuple[int, str], str] = {}
+    for row in await db.fetch_all(sql, tuple(params)):
         try:
-            out.add((int(row["service_id"]), str(row["media"])))
+            key = (int(row["service_id"]), str(row["media"]))
         except (TypeError, ValueError):
-            continue
+            continue  # a title this service never named in its own id space
+        out.setdefault(key, str(row["title"] or ""))
     return out
 
 
@@ -516,9 +658,12 @@ ON CONFLICT(source, media, source_id, season, number) DO UPDATE SET
     title = CASE WHEN excluded.title != '' THEN excluded.title ELSE {EPISODES}.title END,
     overview = excluded.overview, first_aired = excluded.first_aired,
     episode_type = excluded.episode_type, runtime = excluded.runtime,
-    rating = excluded.rating, votes = excluded.votes,
-    fetched_at = excluded.fetched_at, stale_after = excluded.stale_after
+    rating = excluded.rating, votes = excluded.votes, stale_after = excluded.stale_after,
 """
+
+_EPISODE_ANSWER_REWRITES: dict[str, str | None] = {
+    "title": "excluded.title = ''", "overview": None, "first_aired": None,
+    "episode_type": None, "runtime": None, "rating": None, "votes": None}
 
 
 def write_episode_answer(conn: db.Connection, source: str, media: str, source_id: str,
@@ -526,7 +671,8 @@ def write_episode_answer(conn: db.Connection, source: str, media: str, source_id
                          stale_after: int) -> None:
     """What a service's own episode list says about one episode, written over the
     listing's stub. Inside the caller's transaction."""
-    conn.execute(_UPSERT_EPISODE_ANSWER, (
+    conn.execute(_UPSERT_EPISODE_ANSWER + "    fetched_at = "
+                 + ceiling_clock(EPISODES, _EPISODE_ANSWER_REWRITES), (
         source, media, source_id, int(season), int(number),
         str(fields.get("title") or ""), str(fields.get("overview") or ""),
         str(fields.get("first_aired") or ""), str(fields.get("episode_type") or ""),
@@ -538,27 +684,103 @@ def write_episode_answer(conn: db.Connection, source: str, media: str, source_id
 # retention
 # ---------------------------------------------------------------------------
 
-def sweep_unlisted(conn: db.Connection, cutoff: int) -> None:
-    """Delete title and episode rows untouched since `cutoff` that NO CALENDAR
-    AIRING STILL NAMES, inside the caller's transaction — after the calendar has
-    swept its own airings, which is the order that keeps a row while anything
-    still draws it.
+def _delete_rowids(conn: db.Connection, table: str, rowids: list[int]) -> int:
+    """Delete rows by rowid, in chunks under SQLite's bound-parameter ceiling."""
+    removed = 0
+    for start in range(0, len(rowids), 400):
+        chunk = rowids[start:start + 400]
+        removed += conn.execute(
+            f"DELETE FROM {table} WHERE rowid IN ({', '.join('?' * len(chunk))})",
+            chunk).rowcount
+    return removed
 
-    THE EPISODE CHECK IS PER COORDINATE, NOT PER TITLE: a series in its fifth
-    season stops carrying rows for its first, while a title still airing keeps
-    everything that still airs.
+
+# An airing naming a service's title, and one naming a service's episode, as SQL
+# over a row aliased `r`. Constants, never input.
+_AIRED_TITLE = ("EXISTS (SELECT 1 FROM calendar_airings a WHERE a.source = r.source "
+                "AND a.media = r.media AND a.source_id = r.source_id)")
+_AIRED_EPISODE = ("EXISTS (SELECT 1 FROM calendar_airings a WHERE a.source = r.source "
+                  "AND a.media = r.media AND a.source_id = r.source_id "
+                  "AND a.season = r.season AND a.episode_number = r.number)")
+
+
+def sweep_unlisted(conn: db.Connection, cutoff: int) -> dict[str, int]:
+    """Delete title, season and episode rows untouched since `cutoff` that NO
+    CALENDAR AIRING STILL NAMES AND NO FEATURE ROW HOLDS, inside the caller's
+    transaction — after the calendar has swept its own airings, which is the order
+    that keeps a row while anything still draws it. Returns {table: rows removed}.
+
+    A HELD TITLE KEEPS EVERY SERVICE'S DESCRIPTION, whatever the calendar thinks
+    of it. A tracker row, a board row and what either may put back are drawn with
+    the store's words for the title and keep no copy of their own, so a show that
+    stopped airing in March cannot lose its name in September because no calendar
+    lists it any more (holders.held_keys says which rows hold).
+
+    THE EPISODE CHECK IS PER COORDINATE FOR A TITLE NOBODY HOLDS: a series in its
+    fifth season stops carrying rows for its first, while a title still airing
+    keeps everything that still airs. A held title keeps all of its episodes and
+    seasons — they are what its details panel and its tracker row read.
     """
-    conn.execute(
-        f"DELETE FROM {TITLES} WHERE fetched_at <= ? AND NOT EXISTS ("
-        "  SELECT 1 FROM calendar_airings a"
-        f"  WHERE a.source = {TITLES}.source AND a.media = {TITLES}.media"
-        f"    AND a.source_id = {TITLES}.source_id)", (cutoff,))
-    conn.execute(
-        f"DELETE FROM {EPISODES} WHERE fetched_at <= ? AND NOT EXISTS ("
-        "  SELECT 1 FROM calendar_airings a"
-        f"  WHERE a.source = {EPISODES}.source AND a.media = {EPISODES}.media"
-        f"    AND a.source_id = {EPISODES}.source_id AND a.season = {EPISODES}.season"
-        f"    AND a.episode_number = {EPISODES}.number)", (cutoff,))
+    held = holders.held_keys(conn)
+
+    def unheld(rows) -> list[int]:
+        return [int(row[0]) for row in rows if row[1] not in held]
+
+    removed = {TITLES: _delete_rowids(conn, TITLES, unheld(conn.execute(
+        f"SELECT r.rowid, r.title_key FROM {TITLES} r "
+        f"WHERE r.fetched_at <= ? AND NOT {_AIRED_TITLE}", (cutoff,))))}
+    # A SEASON OR AN EPISODE BELONGS TO ITS SERVICE'S TITLE ROW, which says whose
+    # title it is; one whose title row has already gone is held by nothing.
+    removed[SEASONS] = _delete_rowids(conn, SEASONS, unheld(conn.execute(
+        f"SELECT r.rowid, t.title_key FROM {SEASONS} r LEFT JOIN {TITLES} t "
+        "ON t.source = r.source AND t.media = r.media AND t.source_id = r.source_id "
+        f"WHERE r.fetched_at <= ? AND NOT {_AIRED_TITLE}", (cutoff,))))
+    removed[EPISODES] = _delete_rowids(conn, EPISODES, unheld(conn.execute(
+        f"SELECT r.rowid, t.title_key FROM {EPISODES} r LEFT JOIN {TITLES} t "
+        "ON t.source = r.source AND t.media = r.media AND t.source_id = r.source_id "
+        f"WHERE r.fetched_at <= ? AND NOT {_AIRED_EPISODE}", (cutoff,))))
+    return removed
+
+
+def sweep_past_ceilings(conn: db.Connection, now: int) -> dict[str, int]:
+    """Delete every row a service's own terms say may not be kept any longer —
+    whoever holds or airs it — inside the caller's transaction. Returns
+    {source: rows removed}.
+
+    A SERVICE DECLARES ITS CEILING (`Capabilities.retain_seconds`, read through
+    the registry), so this names no service: TMDB's terms forbid keeping anything
+    obtained from it for longer than six months, and a second service with a rule
+    of its own is a declaration in its package, not an edit here.
+
+    THE CLOCK IS `fetched_at`, WHEN THE SERVICE LAST ANSWERED FOR THE ROW. Every
+    answer re-obtains it — a refresh, a 304 confirming nothing changed, a listing
+    naming it — and a row a viewer keeps looking at is refreshed long before this
+    (app/metadata/refresh.py), so what goes here is what nobody has looked at in
+    half a year. AN EPISODE STUB a listing wrote has never been answered for
+    (`fetched_at` 0) and lives as long as the title row it came with.
+    """
+    removed: dict[str, int] = {}
+    for source, provider in providers.registered().items():
+        retain = provider.capabilities.retain_seconds
+        if retain is None:
+            continue
+        cutoff = now - int(retain)
+        name = str(source)
+        count = 0
+        for table in (TITLES, SEASONS):
+            count += conn.execute(f"DELETE FROM {table} WHERE source = ? AND fetched_at <= ?",
+                                  (name, cutoff)).rowcount
+        count += conn.execute(
+            f"DELETE FROM {EPISODES} WHERE source = ? AND ("
+            "  (fetched_at > 0 AND fetched_at <= ?)"
+            f"  OR (fetched_at = 0 AND NOT EXISTS (SELECT 1 FROM {TITLES} t "
+            f"      WHERE t.source = {EPISODES}.source AND t.media = {EPISODES}.media "
+            f"        AND t.source_id = {EPISODES}.source_id)))", (name, cutoff)).rowcount
+        if count:
+            logger.info("title store: removed %d %s row(s) not re-obtained inside the "
+                        "%d days that service's terms allow", count, name, retain // 86400)
+        removed[name] = count
+    return removed
 
 
 # ---------------------------------------------------------------------------

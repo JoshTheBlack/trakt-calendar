@@ -131,9 +131,10 @@ class _SimklDetailPort:
         return settings.simkl_catalogue_configured
 
     async def fetch_details(self, settings: Settings, media, source_id,
-                            season: int | None, *, cache_only: bool = False) -> dict:
+                            season: int | None, *, cache_only: bool = False,
+                            fresh: bool = False) -> dict:
         return await detail.fetch_details(settings, media, source_id, season,
-                                          cache_only=cache_only)
+                                          cache_only=cache_only, fresh=fresh)
 
     async def fetch_videos(self, settings: Settings, media, source_id, *,
                            cache_only: bool = False) -> list[Video]:
@@ -189,9 +190,9 @@ class _SimklDetailPort:
         return await detail.fetch_season_detail(settings, source_id, int(season), media)
 
     async def fetch_seasons(self, settings: Settings, source_id, media: Media, *,
-                            cached_only: bool = False) -> SeasonsAnswer:
+                            cached_only: bool = False, fresh: bool = False) -> SeasonsAnswer:
         return await detail.fetch_seasons(settings, source_id, media,
-                                          cached_only=cached_only)
+                                          cached_only=cached_only, fresh=fresh)
 
     async def fetch_title_facts(self, settings: Settings, source_id,
                                 media: Media) -> TitleFacts:
@@ -275,6 +276,10 @@ class _SimklProvider:
         # stated twice and must never be changed apart. The conformance test is
         # what fails if only one of them moves.
         private_user_data=True,
+        # No storage ceiling is applied to Simkl's answers: its rows go by this
+        # app's own retention, and never while a feature row holds the title
+        # (app/metadata/rows.py's sweep_unlisted).
+        retain_seconds=None,
     )
     sync_port = _SimklSyncPort()
     # THE CALENDAR PORT, DECLARED IN THE SAME CHANGE AS THE ENDPOINT SET ABOVE

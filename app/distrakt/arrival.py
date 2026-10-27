@@ -43,6 +43,7 @@ from typing import NamedTuple
 from .. import cache, db, metadata, providers
 from ..calendar import entries as calendar_entries
 from ..calendar import search as calendar_search
+from ..metadata import descriptions
 from ..metadata import ids as id_rules
 from ..metadata import rows as title_rows
 from ..providers.base import MATCH_SOURCES, Media, Source, SourceUnavailable, TitleFacts
@@ -163,13 +164,20 @@ async def describe(settings, records: list[dict], *, strict: bool = False) -> li
         for rec in recs:
             answered = (found.get(id(rec)) or {}).get("described_by")
             named.setdefault((key, answered), []).append(rec)
-    facts = await _title_facts(settings, named, known)
+    facts, asked_of = await _title_facts(settings, named, known)
+    # WHAT A SERVICE WAS ASKED, KEPT IN THE TITLE STORE under the service that
+    # said it: a row on the viewer's own list is drawn with the store's words
+    # for its title and keeps none of its own (store._SNAPSHOT_COLUMNS), so the
+    # words this arrival paid for are the label the row draws. Words read off the
+    # stored calendar are in the store already.
+    await _keep_the_words(facts, asked_of, named)
     for group, recs in named.items():
-        title, network = facts.get(group) or TitleFacts("", "")
+        title, network, _from = facts.get(group) or TitleFacts("", "")
         for rec in recs:
             # A BLANK ANSWER KEEPS THE PATH'S VALUE: the service could not be
-            # asked or has nothing to say, and a row with the path's words is
-            # better than a row with none.
+            # asked or has nothing to say, and a record with the path's words is
+            # better than one with none. A month record keeps them; a row on
+            # the viewer's own list is drawn with the store's.
             rec["title"] = title or str(rec.get("title") or "")
             rec["network"] = network or str(rec.get("network") or "")
     logger.info("tracker arrival: described %d record(s) of %d title(s)",
@@ -444,10 +452,48 @@ def stored_facts(settings, rec: dict, by_source: dict, *,
     return TitleFacts(row.title, row.network)
 
 
-async def _title_facts(settings, groups: dict, known: dict) -> dict[tuple, TitleFacts]:
-    """{(title key, service): that service's title and network}, for `groups`
-    keyed the same way — the service being the one that answered those records'
-    season, or None for the describing service (see `describe`).
+async def _keep_the_words(facts: dict, asked_of: dict, groups: dict) -> None:
+    """File each looked-up title and network in the title store, under the
+    service that stated it (TitleFacts.network_from names a borrowed network's).
+    A failed write costs the row its label until the title is next described,
+    never the arrival."""
+    now = db.now()
+    writes = []
+    for group, service in asked_of.items():
+        got = facts.get(group)
+        if got is None:
+            continue
+        rec = groups[group][0]
+        media = str(rec.get("media") or Media.SHOW)
+        ids = rec.get("ids") or {}
+        own_network = got.network if not got.network_from else ""
+        writes.append((service, media, ids.get(service), ids, got.title, own_network))
+        if got.network_from:
+            writes.append((got.network_from, media, ids.get(got.network_from), ids, "",
+                           got.network))
+
+    def _work(conn) -> None:
+        for service, media, own, ids, title, network in writes:
+            if own in (None, ""):
+                continue
+            descriptions.write_title_facts(conn, service, media, own, ids=ids, title=title,
+                                           network=network, now=now)
+
+    if writes:
+        try:
+            await db.transaction(_work)
+        except db.DatabaseError:
+            logger.warning("tracker arrival: the words for %d title(s) could not be kept "
+                           "in the title store", len(writes), exc_info=True)
+
+
+async def _title_facts(settings, groups: dict, known: dict
+                       ) -> tuple[dict[tuple, TitleFacts], dict[tuple, str]]:
+    """({(title key, service): that service's title and network}, {that key: the
+    service that was ASKED}), for `groups` keyed the same way — the service being
+    the one that answered those records' season, or None for the describing
+    service (see `describe`). A group answered from disk is not in the second
+    map: its words are the store's already.
 
     FROM DISK ONLY WHEN DISK HOLDS EXACTLY THE ANSWER A LOOKUP WOULD GIVE: the
     describing service's own stored record, for the very id the row carries, and
@@ -458,6 +504,7 @@ async def _title_facts(settings, groups: dict, known: dict) -> dict[tuple, Title
     titles a history backfill had filed blank.
     """
     out: dict[tuple, TitleFacts] = {}
+    asked_of: dict[tuple, str] = {}
     lookups: list[tuple] = []
     for group, recs in groups.items():
         key, service = group
@@ -474,6 +521,9 @@ async def _title_facts(settings, groups: dict, known: dict) -> dict[tuple, Title
             logger.info("tracker arrival: no title facts for %s (%r)", group[0], got)
             continue
         out[group] = got
+        service = group[1] or live.detail_source(groups[group][0], settings)
+        if service:
+            asked_of[group] = str(service)
     logger.info("tracker arrival: title facts for %d title(s), %d from the stored "
                 "calendar, %d asked for", len(groups), len(groups) - len(lookups), len(lookups))
-    return out
+    return out, asked_of

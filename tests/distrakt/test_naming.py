@@ -430,7 +430,10 @@ class WhoIsOwedANameTests(DistraktTestCase):
                                       "trakt", "trakt_slug", "tvdb"))
         self.assertEqual(owed.ids, {"trakt": 111, "trakt_slug": "t", "simkl": 222,
                                     "simkl_slug": "s", "tmdb": 900})
-        self.assertEqual(owed.network, "HBO")
+        # THE LISTED ROW KEEPS NO NETWORK: it draws the title store's
+        # (store._SNAPSHOT_COLUMNS), so the only network a row of this title holds
+        # is the month record's own — none — and that is what is owed.
+        self.assertEqual(owed.network, "")
 
     async def test_a_complete_record_owes_nothing(self):
         await distrakt.add_month_record(self.user_id, self.month, a_record(

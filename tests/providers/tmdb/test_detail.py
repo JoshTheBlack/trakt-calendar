@@ -58,7 +58,8 @@ class TheDetailsPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(got["season_count"], 2)
         self.assertIn("severance barrier", got["season_overview"])
         self.assertEqual([e["number"] for e in got["episodes"]], [1, 2, 3, 10])
-        self.assertTrue(got["poster"].startswith("https://wsrv.nl/"))
+        # TMDB's origin address, which the title store keeps; a page proxies it.
+        self.assertTrue(got["poster"].startswith("https://image.tmdb.org/"))
         self.assertEqual(got["genres"][0], "Drama")
         self.assertEqual(got["ids"]["tvdb"], 371980)
         self.assertEqual(got["videos"][0].sources, (str(Source.TMDB),))
@@ -160,7 +161,8 @@ class ThePickerFactsAndRecordsTests(unittest.IsolatedAsyncioTestCase):
         _tmdb, patched = answering(tv__95396=SEVERANCE)
         with patched:
             facts = await detail.fetch_title_facts(SETTINGS, "95396", Media.SHOW)
-        self.assertEqual(tuple(facts), ("Severance", "Apple TV"))
+        self.assertEqual((facts.title, facts.network, facts.network_from),
+                         ("Severance", "Apple TV", ""))
 
     async def test_records_come_from_the_one_record_builder(self):
         _tmdb, patched = answering(tv__95396=SEVERANCE)

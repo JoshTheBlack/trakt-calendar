@@ -226,11 +226,14 @@
             as a sibling here any more: it has to travel WITH the value it names,
             or the stylesheet would have to name services to pair the two. -#}
         {%- call(name, value) swap('poster') -%}
-        <img src="{{ value or '/static/images/nopostertv.png' }}" alt="{{ item.title }} poster"
+        <img src="{{ (card_pictures(item, name, value) if card_pictures is defined else value) or '/static/images/nopostertv.png' }}" alt="{{ item.title }} poster"
              loading="lazy" data-field="poster" data-source="{{ name }}">
         {%- endcall %}
         {%- else %}
-        <img src="{{ item.poster or '/static/images/nopostertv.png' }}" alt="{{ item.title }} poster" loading="lazy">
+        {#- A VIEWER'S OWN CARD reports a picture that will not load (`card_pictures`,
+            app/metadata/pictures.py's CardPictures); a share page is never handed
+            one and draws the static fallback chain. -#}
+        <img src="{{ (card_pictures(item, item.shown_source('poster'), item.poster) if card_pictures is defined else item.poster) or '/static/images/nopostertv.png' }}" alt="{{ item.title }} poster" loading="lazy">
         {%- endif %}
     </div>
     <div class="card-body">

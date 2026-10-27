@@ -16,11 +16,12 @@ GET/second, so a viewer loading a month would wait on it. Instead:
           stored `enriched=False`, which is what lets app/calendar/filter.py
           exempt it rather than judge it on values nobody has fetched yet.
   DRAIN   the heartbeat calls `drain()`, which asks the title store
-          (app/metadata/rows.py) for every Simkl id it holds a row for,
-          subtracts the ones `simkl_titles` already answers for (or a failure
-          still inside its backoff), fetches a bounded batch of what is left,
-          and writes the answer to BOTH `simkl_titles` and the title row it
-          belongs to. A
+          (app/metadata/rows.py) for every Simkl row still carrying no answer,
+          hands over any answer `simkl_titles` already holds for one, fetches a
+          bounded batch of what is left (less a failure still inside its
+          backoff), and writes the answer to BOTH `simkl_titles` and the title
+          row it belongs to. A row that HAS its answer is kept current by being
+          viewed (app/metadata/refresh.py), not by this. A
           FILL also asks for a drain the moment it stores new records, through
           `run_drain`/`schedule_drain` below.
   READ    does nothing. The fields are on the row.
@@ -59,19 +60,20 @@ NEITHER THIS MODULE NOR THE READ PATH MAKES A NETWORK CALL FOR ENRICHMENT.
 a public share page — which reaches the calendar with allow_fetch=False — store
 and serve without ever spending the instance's Simkl budget.
 
-"ALREADY ANSWERED" ALSO MEANS "UNDER THE CURRENT EXTRACTION". A row a narrower
-extraction wrote — every simkl_titles row that existed before ids/type/
-anime_type/trailers/etc. were added to what app/providers/simkl/titles.py's
-`_extract` keeps — carries no `extract_version` key at all, and `drain` reads
-that the same way it reads a version number that does not match: owed, not done,
-exactly like a title never attempted. Without this an already-answered row from
-the old shape would sit there for its full 30-day retention before the wider
-extraction ever touched it. Backoff still governs FAILURES (a stored empty
-payload); a stale-shaped SUCCESS is re-fetched on the next drain tick regardless
-of backoff, because nothing about it failed. `apply_stored_enrichment` is NOT
-gated on the version — it applies whatever fields an old row already carries, so
-a title enriched under the old shape stays enriched (just missing the newer
-fields) while it waits its turn.
+"ALREADY ANSWERED" ALSO MEANS "UNDER THE CURRENT EXTRACTION", for the rows this
+drain owes. A row a narrower extraction wrote — every simkl_titles row that
+existed before ids/type/anime_type/trailers/etc. were added to what
+app/providers/simkl/titles.py's `_extract` keeps — carries no `extract_version`
+key at all, and `drain` reads that the same way it reads a version number that
+does not match: owed, not done, exactly like a title never attempted. Backoff
+still governs FAILURES (a stored empty payload); a stale-shaped SUCCESS is
+re-fetched on the next drain tick regardless of backoff, because nothing about
+it failed. A title row ALREADY ANSWERED is not this drain's: the title store
+re-reads it whole when somebody views it past its clock, which reads it under
+whatever extraction is current. `apply_stored_enrichment` is NOT gated on the
+version — it applies whatever fields an old row already carries, so a title
+enriched under the old shape stays enriched (just missing the newer fields)
+while it waits its turn.
 """
 from __future__ import annotations
 
@@ -85,6 +87,7 @@ from . import cache as calendar_cache
 from . import entries
 from .. import db
 from .. import perftrace
+from ..metadata import refresh as metadata_refresh
 from ..metadata import rows as title_rows
 from ..providers.base import Media, Record, Source, SourceUnavailable
 from ..providers.simkl import titles as simkl_titles
@@ -608,18 +611,25 @@ async def _forget_unusable(rows: list[tuple[int, str]]) -> None:
 
 
 async def _owed_titles() -> dict[tuple[int, str], str]:
-    """Every (simkl_id, media) any currently-stored calendar window names,
-    mapped to that title's display name — the full set of Simkl titles this
-    instance's calendar could show, independent of whether a viewer has ever
-    read the window naming them. See the module docstring for why this
-    replaces an in-memory queue fed by reads.
+    """Every (simkl_id, media) the title store holds a Simkl row for that has no
+    answer yet, mapped to that title's display name — derived from storage, so
+    it is complete whether or not a viewer has ever read the window naming them.
+    See the module docstring for why this replaces an in-memory queue fed by
+    reads.
 
-    Filtering OWED down to what is actually worth fetching (excluding a title
-    already answered, and one still inside its backoff) is `drain`'s job, not
-    this function's — it stays a pure "what does the cache currently name"
-    question so it has exactly one reason to change.
+    ONLY THE UNANSWERED, READ THROUGH THE INDEX ON `enriched`. It used to be every
+    Simkl title the store holds, each one's stored answer decompressed every tick
+    to check which extraction wrote it — 25,123 of them on the development copy,
+    about 0.7 s of worker time a minute, nearly all of it confirming answers that
+    were already there. A title that IS answered is kept current by being viewed
+    while stale (app/metadata/refresh.py), which re-reads it under whatever
+    extraction is current.
+
+    Filtering OWED down to what is actually worth fetching (excluding one still
+    inside its backoff, or one answered by an older extraction) is `drain`'s job,
+    not this function's.
     """
-    return await title_rows.stored_titles(str(Source.SIMKL), "simkl", _media_values())
+    return await title_rows.unenriched(str(Source.SIMKL), "simkl", _media_values())
 
 
 async def _fetch_one(settings, simkl_id: int, media: str, now: int) -> bool:
@@ -707,11 +717,12 @@ async def drain(settings, *, now: int | None = None) -> int:
     if not owed:
         return 0
     rows = await _read_rows(owed.keys())
-    # WHICH STORED TITLES HAVE AN ANSWER BUT HAVE NOT BEEN GIVEN IT. A calendar
-    # row starts unenriched and only a write marks it otherwise, so a title whose
-    # lookup landed a moment after its row was written — or whose answer was
-    # stored by a version of this app that did not yet project onto the calendar
-    # — is answered in `simkl_titles` and blank on the row a viewer reads.
+    # A TITLE OWED HERE MAY ALREADY HAVE ITS ANSWER. Every owed row is one the
+    # title store holds unanswered, so a title whose lookup landed a moment after
+    # its row was written — or whose answer was stored by a version of this app
+    # that did not yet project onto the calendar — is answered in `simkl_titles`
+    # and blank on the row a viewer reads, and is handed it below without a
+    # lookup.
     #
     # THE SKIP BELOW IS WHY THIS CANNOT BE LEFT TO SORT ITSELF OUT. A title the
     # per-title table already answers is never fetched again, so nothing would
@@ -720,7 +731,6 @@ async def drain(settings, *, now: int | None = None) -> int:
     # that was wrong: the fill covers rows it CREATES, not rows that already
     # exist and are waiting. Five films on one real August calendar sat unenriched
     # with complete stored answers beside them.
-    unprojected = await title_rows.unenriched(str(Source.SIMKL), "simkl")
     rebuild: list[tuple[int, str, dict]] = []
     stale: list[tuple[int, str]] = []
     batch: list[tuple[int, str, str]] = []
@@ -733,11 +743,10 @@ async def drain(settings, *, now: int | None = None) -> int:
             current = bool(fields) and fields.get("extract_version") == simkl_titles.EXTRACT_VERSION
             if current:
                 # Already answered under the current extraction: NOTHING TO
-                # FETCH, but possibly something to write. Bounded like the fetch
+                # FETCH, but the row is owed the answer. Bounded like the fetch
                 # batch, so a large backlog is many small ticks rather than one
                 # long one.
-                if ((simkl_id, media) in unprojected
-                        and len(rebuild) < DRAIN_BATCH_SIZE):
+                if len(rebuild) < DRAIN_BATCH_SIZE:
                     rebuild.append((simkl_id, media, fields))
                 continue
             # A SUCCESS ROW WITH NO fields IS A STORED FAILURE (see
@@ -1268,6 +1277,17 @@ async def run_drain(settings) -> int:
         # ITS COUNT IS NOT ADDED TO THE RETURN, which is the Simkl drain's own
         # number and is what the latch's callers and its tests are written
         # against. This one reports itself in its own log line.
+        try:
+            # THE TITLE STORE'S REFRESH QUEUE, SECOND: rows a viewer's page found
+            # stale, and a dead picture's whole title at the front of it
+            # (app/metadata/refresh.py). After the Simkl half for the same reason
+            # the others follow it, and ahead of them because a viewer asked.
+            # Held rows nearing a service's ceiling join it first, behind what
+            # viewers queued.
+            await metadata_refresh.queue_ceiling(settings)
+            await metadata_refresh.run(settings)
+        except Exception:
+            logger.error("Title store refresh failed.", exc_info=True)
         try:
             await drain_releases(settings)
         except Exception:

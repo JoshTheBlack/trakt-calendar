@@ -815,7 +815,7 @@ class ASimklOnlyRosterRowOpensItsModalTests(AppTestCase):
         self.sign_in_as(self.user_id)
 
     def _details(self, asked: list | None = None):
-        async def _fetch(settings, media, source_id, season, *, cache_only=False):
+        async def _fetch(settings, media, source_id, season, *, cache_only=False, fresh=False):
             if asked is not None:
                 asked.append((str(source_id), season))
             return dict(self.SIMKL_DETAIL)
@@ -859,7 +859,7 @@ class ASimklOnlyRosterRowOpensItsModalTests(AppTestCase):
         }))
         trakt_asked: list = []
 
-        async def _trakt(settings, media, source_id, season, *, cache_only=False):
+        async def _trakt(settings, media, source_id, season, *, cache_only=False, fresh=False):
             trakt_asked.append(str(source_id))
             return {"title": "Both", "episodes": []}
 

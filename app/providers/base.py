@@ -22,7 +22,7 @@ from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta, timezone
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:  # import-only-for-annotations: endpoints.py imports Media from here
@@ -67,7 +67,7 @@ POSTER_PARAMS = "w=500&h=750&fit=contain&cbg=000000&output=jpg&q=88"
 
 
 def proxied_image(url: str | None, params: str | None = None, *,
-                  fallbacks: Sequence[str] = ()) -> str | None:
+                  fallbacks: Sequence[str] = (), report: str = "") -> str | None:
     """A poster URL addressed through the shared image proxy.
 
     `params` overrides what is asked of the proxy, for a caller whose picture is
@@ -90,6 +90,13 @@ def proxied_image(url: str | None, params: str | None = None, *,
     per-provider copy would be the same policy written twice, free to drift, with
     neither copy able to say it was the rule.
 
+    `report` IS THIS APP'S OWN ADDRESS FOR "THIS PICTURE WILL NOT LOAD", and it
+    replaces the fallbacks: carried RAW as the `default`, so the proxy sends the
+    browser to it — the same host the page is on, which img-src admits — and
+    the server decides what comes next (app/metadata/pictures.py). Only an
+    address on this app's own origin belongs here: a raw default anywhere else
+    is the hotlink the proxy exists to prevent.
+
     RETURNS THE INPUT UNCHANGED WHEN THERE IS NOTHING TO PROXY -- an empty or
     absent URL stays empty, so a title with no artwork does not acquire a proxy
     address that resolves to nothing. An already-proxied URL is left alone too,
@@ -101,11 +108,25 @@ def proxied_image(url: str | None, params: str | None = None, *,
     if text.startswith(_IMAGE_PROXY):
         return text
     address = f"{_IMAGE_PROXY}?url={quote(text, safe='')}&{params or _IMAGE_PARAMS}"
+    if report:
+        return address + f"&default={quote(str(report), safe='')}"
     rest = [str(fallback) for fallback in fallbacks if fallback and str(fallback) != text]
     if rest:
         behind = proxied_image(rest[0], params, fallbacks=rest[1:])
         address += f"&default={quote(behind, safe='')}"
     return address
+
+
+def proxied_origin(address: str | None) -> str:
+    """The origin address a `proxied_image` result was made from, or "" for
+    anything else — what a page that re-addresses a picture it was handed reads
+    back, rather than carrying a second copy of the origin beside the proxied
+    one (app/metadata/pictures.py's CardPictures)."""
+    text = str(address or "")
+    if not text.startswith(_IMAGE_PROXY):
+        return ""
+    found = parse_qs(urlsplit(text).query).get("url")
+    return found[0] if found else ""
 
 
 class SourceNotModified(Exception):
@@ -705,6 +726,25 @@ def epoch_moment(air_ts) -> datetime:
 
 
 
+# HOW A DAY IS WRITTEN FOR A READER: a card's date and every episode row in a
+# details panel, whichever service dated it — one spelling, so two lists read
+# alike.
+AIR_DISPLAY = "%d %b %Y"
+
+
+def genre_label(slug: str) -> str:
+    """A genre's slug in its display form ("game-show" -> "Game Show"). Every
+    service stores slugs, because filters match on them; this is the one reading
+    of them a person sees — a card, a details panel's chips."""
+    return str(slug).replace("-", " ").title()
+
+
+def status_label(status: str) -> str:
+    """A title's status as a details panel draws it ("returning series" ->
+    "Returning Series"), from the lower-case word a service's row stores."""
+    return str(status or "").replace("_", " ").title()
+
+
 def render(record: Record, tz: ZoneInfo) -> Item:
     """The Item one viewer sees for `record`.
 
@@ -736,7 +776,7 @@ def render(record: Record, tz: ZoneInfo) -> Item:
     moment = _local_moment(record.air_ts, record.date_only, tz)
     values = {f.name: getattr(record, f.name) for f in fields(Record)}
     slugs = [str(g) for g in record.genres]
-    values["genres"] = [g.replace("-", " ").title() for g in slugs]
+    values["genres"] = [genre_label(g) for g in slugs]
     # BOTH SIDES OR NEITHER. `alternatives["poster"]` holds each service's own
     # address, and the card decides which service is on screen by asking which of
     # those the rendered poster EQUALS (see _card.html's `won_by`) — so proxying
@@ -755,7 +795,7 @@ def render(record: Record, tz: ZoneInfo) -> Item:
         **values,
         genre_slugs=slugs,
         air_date=moment.strftime("%Y-%m-%d"),
-        air_display=moment.strftime("%d %b %Y"),
+        air_display=moment.strftime(AIR_DISPLAY),
         # NO TIME FOR A DATE. A date-only record is pinned at UTC midnight so it
         # lands on its day for everyone, and that midnight is bookkeeping, not an
         # hour anybody named: printed, every film card and every day-only premiere
@@ -815,6 +855,14 @@ class Capabilities:
     # history, progress, ratings. False means it can populate a calendar but can
     # never back the tracker.
     private_user_data: bool
+    # HOW LONG ANYTHING THIS SOURCE ANSWERED MAY BE KEPT after it was last
+    # obtained, in seconds — a term of the service's own, which the title store's
+    # sweep enforces on every row it holds (app/metadata/rows.py's
+    # sweep_past_ceilings) — or None where the service sets none and this app's
+    # own retention decides. REQUIRED, with no default: a service that forgot to
+    # say would be kept for ever by omission, which is the one way to be wrong
+    # about another party's terms that nothing would ever notice.
+    retain_seconds: int | None
     # Whether every search box asks this source WITHOUT anybody choosing it. A
     # source that is not is asked only when a viewer who has linked it adds it
     # ("also search …" — providers.for_search), with that viewer's own token. A
@@ -1263,9 +1311,16 @@ CAST_SHOWN = 20
 
 class TitleFacts(NamedTuple):
     """A title's name and network as one service states them (see
-    DetailPort.fetch_title_facts). "" where the service does not say."""
+    DetailPort.fetch_title_facts). "" where the service does not say.
+
+    `network_from` names ANOTHER service where the network was that one's — a
+    caller that asked the next service for a network the first left blank
+    (app/distrakt/live.py's title_facts) — and is "" where the network is the
+    same service's as the title, which is every port's own answer. The title
+    store files each word under the service that said it."""
     title: str
     network: str
+    network_from: str = ""
 
 
 class VideoKind(StrEnum):
@@ -1378,7 +1433,8 @@ class DetailPort(Protocol):
         ...
 
     async def fetch_details(self, settings: Settings, media, source_id,
-                            season: int | None, *, cache_only: bool = False) -> dict:
+                            season: int | None, *, cache_only: bool = False,
+                            fresh: bool = False) -> dict:
         """One title, in THIS SOURCE's own id space, as the modal's field set.
 
         `source_id` is the id this source knows the title by — the value under
@@ -1389,7 +1445,19 @@ class DetailPort(Protocol):
         `cache_only=True` serves whatever is already cached and makes no outbound
         call, which is what the public share pages use so a visitor's click can
         never spend the owner's rate limit. Fields with nothing cached behind them
-        come back empty and the modal renders around them.
+        come back empty and the modal renders around them. `fresh=True` is the
+        opposite: what the response cache holds is not answer enough, and the
+        service is asked again (revalidated where it states a validator) — what
+        the title store's refresh asks with (app/metadata/refresh.py).
+
+        THE ANSWER IS WHAT THE SERVICE SAID, NOT HOW A PAGE DRAWS IT, because the
+        title store keeps it (app/metadata/descriptions.py) and every surface
+        draws the stored copy: `poster` and each cast member's `headshot` are
+        ORIGIN addresses, and each episode is {number, title, rating, overview,
+        first_aired} with `first_aired` as the service spells it — an instant, or
+        a bare day for a service that dates without timing. Proxying the pictures
+        and writing the dates for a reader happen once, for every service,
+        at app/providers/detail_source.py's `presented`.
 
         `videos` is THIS SERVICE's own list, as `Video`s, [] when it has none.
         What the panel plays is every service's lists pooled (see
@@ -1493,10 +1561,11 @@ class DetailPort(Protocol):
         ...
 
     async def fetch_seasons(self, settings: Settings, source_id, media: Media, *,
-                            cached_only: bool = False) -> SeasonsAnswer:
+                            cached_only: bool = False, fresh: bool = False) -> SeasonsAnswer:
         """The season picker's answer for one title, in THIS SOURCE's own id
         space — see `SeasonsAnswer` for why the season list, a self-named
-        season and newly-surfaced ids all come back from one call.
+        season and newly-surfaced ids all come back from one call. `fresh` asks
+        past the response cache, as `fetch_details` does.
 
         `source_id` is this source's own id for the title, the same value
         `fetch_details` takes it as and for the same reason: a source cannot

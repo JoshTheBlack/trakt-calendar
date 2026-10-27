@@ -979,6 +979,10 @@ class BackupCoversTheWholeSchemaTests(unittest.IsolatedAsyncioTestCase):
             for column in (row["name"] for row in info):
                 if column in cols or (table, column) in self.NOT_BACKED_UP:
                     continue
+                # A listed row's words travel in the document, read from the title
+                # store rather than from a column of the row (backup._EXPORTED_WORDS).
+                if table in backup._EXPORTED_WORDS and column in backup.WORDS_FROM_THE_STORE:
+                    continue
                 missed.append(f"{table}.{column}")
         self.assertEqual(missed, [], "columns in the schema that no backup carries "
                                      "and nothing has declared as deliberate")

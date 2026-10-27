@@ -132,7 +132,16 @@ caching anything obtained from it for longer than six months: the ceiling is
 `app/providers/tmdb/transport.py`'s `MAX_CACHE_SECONDS`, response-cache rows are
 written with `CACHE_RETAIN_SECONDS` so the sweep's grace lands on it, and the
 poster registry's TMDB rows (`app/media/artwork.py`), the poster tiles and the
-network logos all read that constant. The credential is the v4 read token,
+network logos all read that constant; the title store's rows declare it through
+the registry (`Capabilities.retain_seconds`) and `rows.sweep_past_ceilings`
+deletes by it, held or not. A CEILING IS ABOUT EVERY WORD AND A ROW HAS ONE
+CLOCK, so for such a service a store row's `fetched_at` is its OLDEST word's: a
+write renews it only when it rewrites everything the row holds
+(`rows.ceiling_clock` for an upsert, `rows.kept_clock` for a write made from
+Python; `rows.WORDS` names the words, and tests/metadata/test_retention.py fails
+on a column of the three tables that neither it nor `rows.NOT_WORDS` names), and
+the heartbeat re-reads a held row before its ceiling (`refresh.queue_ceiling`).
+The credential is the v4 read token,
 sent only in the Authorization header (`config.tmdb_token_error` refuses the
 short key, `tmdb_configured` reads a stored one as unset). NO SERVICE IS
 ANOTHER'S FALLBACK: a per-service difference names each service explicitly —
@@ -169,6 +178,28 @@ titles, and its episodes stopped reaching the season the tracker held. `tests/me
 fails when the schema grows a table neither holder list classifies, and SQL
 naming the store's tables lives in `app/metadata/` or names them through its
 constants (`rows.TITLES`, `rows.EPISODES`, `identity.TABLE`).
+READERS READ THE STORE, AND A FEATURE'S ROW KEEPS NO WORDS OF ITS OWN. A tracker
+row's and a board row's name, network, year and counts are columns their own
+SELECT adds (`app/metadata/labels.py`): each word from the first service in the
+declared order that states it, the service HOLDING THE ROW'S SEASON naming it,
+and a whole show's counts only from a description that vouches for its season
+list. Nothing falls back to a copy — a frozen month's record is a snapshot, not a
+copy, and keeps its words. A details panel answers from the store first
+(`app/metadata/panel.py`), a tracker total and a board season row from
+`season_metadata`. Words a feature's record carries SEED the store only where no
+service states them (`descriptions.seed_words`), and give way to the service's.
+EVERY SERVICE'S ROWS — TMDB'S TOO — STAY CURRENT BY BEING VIEWED: a details panel,
+a tracker's or board's rows and a calendar month name what they drew to
+`refresh.viewed`, which queues what is due (a description past its clock; a
+missing one only where the page draws its words) behind the page, within the
+trigger's budget, and a pass re-reads it past the response cache at each
+service's per-minute allowance (`refresh.PER_MINUTE` — a budget per pass was a
+budget per reload, and spent the pages' Trakt quota). A PUBLIC READ NEVER QUEUES.
+A HOLDER KEEPS ITS TITLE'S ROWS (`rows.sweep_unlisted` asks
+`holders.held_keys`); only a service's ceiling takes them. A RE-KEY THAT FINDS A
+ROW UNDER BOTH KEYS keeps the MORE COMPLETE one — one rank per table,
+`holders.more_complete` — re-keyed, its gaps filled from the other, the other
+logged in full and a board row sent to its board's removal history.
 
 **The calendar cache stores the UNFILTERED window once per (endpoint, 7 days),
 holding EVERY source's records as ROWS.** There is no stored window object: a
@@ -317,6 +348,27 @@ cap, which every address reader already skips). A lookup that FAILS is not a
 miss. Anything that decides "settled" for a cached render — the share card, an
 export — treats a recorded miss as settled; the per-source negative marker
 alone cannot say so, since it is written against an order's first source.
+A TITLE WITH NO TMDB ID has its pictures in `title_posters`, under the title
+store's key, with show_posters' columns and meanings, read through the same
+`artwork.known` and `ranked` — so `pick` stays the one answer — and filed by the
+store as it learns them (`artwork.file_sighting`, called from a description or a
+listing). A DEAD PICTURE REPORTS ITSELF AND THE TITLE HEALS
+(`app/metadata/pictures.py`): a signed-in surface draws its first address with
+THIS APP'S report address as the image proxy's default (`pictures.drawn`; a
+card through `CardPictures`), replacing the static fallback chain, and
+`/api/posters/missed` — PUBLIC, because Firefox sends no cookie on the proxy's
+redirect; a short-lived token signed with a key derived from ENCRYPTION_KEY
+(`secrets_box.derived_key`, never the sealing key itself) decides what it acts
+on; an image's request only — answers at once with the first address, in the
+viewer's order and from what the registry holds NOW, that the token's chain of
+hops has not tried (so two dead pictures never bounce a browser between them),
+and confirms BEHIND the answer: a HEAD of the registry's address, never the
+request's. Dead caps it (`artwork.cap`; the same address re-stated stays capped,
+a new one starts fresh) and queues the WHOLE TITLE from every service at the
+front of the refresh queue; transient notes when and nothing else. Deduped per
+address, bounded per minute, one heal per title per few hours, and every step
+logged at INFO by the title's key. A share page keeps the static chain, and an
+instance with no public base URL has no absolute address to report to.
 
 **There is one details panel, and one way of opening it.** `templates/_details.html`
 draws what a title is, rendered through `app/details_panel.py` — which names the

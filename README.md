@@ -100,13 +100,20 @@ It is file-only because a wrong value would log you out of the screen that fixes
 > **If it is ever wrong**, sign-in succeeds and the very next request is anonymous, looping
 > back to `/login`. Both `/login` and Settings detect the mismatch and say so.
 
-### `public_base_url` — required for provider login and share links
+### `public_base_url` — required for provider login, share links and self-healing posters
 
 The origin people reach this instance on, e.g. `https://shows.example.com` — no path, no
 trailing slash. Every absolute URL the app generates is built from it, never from the `Host`
 header, and Trakt and Simkl compare the redirect URI byte for byte. Required for "Log in with
 Trakt" and public share links; setting it also narrows the same-origin check on mutating
 requests to that one origin.
+
+It is also how a poster that won't load comes back to this instance: the image service the
+pages draw pictures through sends the browser to `<public base URL>/api/posters/missed`,
+which answers with the next service's poster and checks whether the first is really gone —
+and if it is, has every service describe the title again, so its current poster is picked up.
+Without a public base URL a failing poster still falls back to the next one, but nothing is
+checked or looked up again.
 
 **Locked out** (unset, or wrong)? Set the `PUBLIC_BASE_URL` environment variable and restart.
 It overrides the saved value — the startup log and the Settings screen both say so while it
@@ -157,6 +164,14 @@ services:
 Then set `public_base_url` to `https://shows.example.com` in Settings and leave
 `cookie_secure` at `always`.
 </details>
+
+### `/api/posters/missed` — leave it reachable without signing in
+
+That address is public on purpose: it is reached by the browser following the image
+service's redirect, and Firefox sends no session cookie on that hop. It acts only on a
+signed, short-lived token the page was drawn with, and refuses any request that isn't an
+image loading. If a single-sign-on proxy sits in front of the app, let this one path through,
+or failing posters will draw an empty frame instead of the next service's.
 
 ### Content-Security-Policy — the app sends its own
 
@@ -278,7 +293,8 @@ a card, because TMDB doesn't list a calendar yet.
 Get the token at [themoviedb.org → Settings → API](https://www.themoviedb.org/settings/api):
 copy the **API Read Access Token** (the long one). The short "API Key" is refused —
 it travels in the address of every request, where a credential ends up in logs. Nothing
-TMDB answers is kept longer than six months, which is TMDB's own limit.
+TMDB answers is kept longer than six months, which is TMDB's own limit; titles on your
+tracker or a rankings board are re-read shortly before then, so they never lose their names.
 
 Without a token, TMDB steps aside and the other services describe titles as before. The
 search boxes say TMDB isn't configured rather than searching something else; anyone who
@@ -444,9 +460,17 @@ app/
                        place the app asks a service for its id by shared id
     identity.py       A title's key, its aliases, and how a key moves up
     holders.py        Every column holding a title's key, moved together on a re-key
-    rows.py           Each service's rows for a title and its episodes
+    rows.py           Each service's rows for a title and its episodes, and how
+                       long each may be kept
+    descriptions.py   A service's description of a title, filed and read back
+    panel.py          The details panel's answer, from the store first
+    labels.py         What a tracker or board row is called and counts, read with it
+    refresh.py        Re-reading what a page found stale, behind the page
+    pictures.py       A picture that won't load: the next one, and the title healed
+    picture_routes.py The public address such a picture reports to
     typed_search.py   The stored titles an add box lists as you type
-    backfill.py       Registering, once, everything stored before the store existed
+    backfill.py       Registering, once, everything stored before the store existed,
+                       and the words the tracker's and boards' rows carried
   ████████/         The █████ ███████: store, live counts, month rollover, backup,
                      per-user prefs, and the calendar premiere import
     routes.py         The ███████ page and its API
@@ -459,8 +483,7 @@ app/
                        board keeps of the titles and tiers taken off it
     routes.py         The rankings page and its board API
     item_keys.py      What a board row is called: a title, or one season of it
-    seasons.py        What a show row's season choice offers, and what a season
-                       row is called and counts
+    seasons.py        What a season row is called
     sources.py        Where rankable titles come from
     imports.py        Seeding a board from what the viewer has finished
     exports.py        Turning a board into the thing a user takes away

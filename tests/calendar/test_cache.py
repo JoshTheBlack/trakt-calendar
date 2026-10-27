@@ -280,7 +280,7 @@ class FetchShapeTests(CacheTestCase):
             label = "Nobody"
             capabilities = base.Capabilities(
                 endpoints=frozenset({"movies"}), days_before=None, days_after=None,
-                private_user_data=False)
+                private_user_data=False, retain_seconds=None)
 
             class calendar_port:
                 @staticmethod

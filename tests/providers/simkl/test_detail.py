@@ -202,13 +202,14 @@ class TheModalsFieldSetTests(unittest.IsolatedAsyncioTestCase):
             got, _calls = await self._details()
         self.assertEqual([v.video_id for v in got["videos"]], ["dQw4w9WgXcQ"])
 
-    async def test_the_poster_is_addressed_through_the_shared_proxy(self):
-        """Simkl's own address (simkl_calendar.poster_url) must never reach the
-        browser directly — the details panel hands this straight to an <img
-        src>, and only the proxy host is admitted by this app's CSP img-src."""
+    async def test_the_poster_is_simkls_own_full_address(self):
+        """The ORIGIN address, built by this package's one reading of Simkl's
+        poster fragment: the title store keeps what Simkl said, and the panel
+        proxies it when it draws it (app/metadata/panel.py's `presented`)."""
         got, _calls = await self._details()
-        self.assertTrue(got["poster"].startswith("https://wsrv.nl/?url="))
-        self.assertIn("simkl.in%2Fposters%2Fabc123_m.jpg", got["poster"])
+        self.assertTrue(got["poster"].startswith("https://"))
+        self.assertIn("simkl.in/posters/abc123_m.jpg", got["poster"])
+        self.assertNotIn("wsrv.nl", got["poster"])
 
     async def test_a_title_simkl_cannot_place_still_answers_with_every_key(self):
         """Simkl's "not found" is a 200 with a body that is not a title, so the

@@ -23,6 +23,8 @@ shared storage, which is exactly what the calendar's own storage rules forbid.
     DATA_DIR/posters/<media>/<tmdb>.<source>.jpg       500x750, from the proxy
     DATA_DIR/posters/<media>/<tmdb>.s<N>.<source>.jpg  season N's own
     DATA_DIR/posters/<media>/<tmdb>.<source>.none      negative marker
+    DATA_DIR/posters/<media>/k<digest>.<source>.jpg    a title with no tmdb id,
+                                                       by its title store key
 
 A SEASON IS TRIED FOR ITS OWN ARTWORK FIRST — the season registry, which a
 season list somebody already read filled (only Trakt publishes season artwork,
@@ -58,6 +60,7 @@ rediscovery, not a permanent hole.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from io import BytesIO
@@ -474,6 +477,75 @@ async def ensure_poster(settings, media: str, tmdb: object,
         logger.info("poster[%s/%s]: nothing resolved -> negative marker", media, tid)
         await anyio.to_thread.run_sync(_mark_none, media, tid, order[0])
         return None
+
+
+def _key_tile_path(media: str, title_key: str, source: str) -> Path:
+    """The tile of a title with no tmdb id, named by a digest of the title
+    store's key for it — a key carries characters (`:`, an imdb id's letters) a
+    file name should not have to be trusted with — and prefixed so it can never
+    be read as a tmdb id's tile."""
+    digest = hashlib.sha1(str(title_key).encode("utf-8")).hexdigest()[:20]
+    return _dir(media) / f"k{digest}.{source}.jpg"
+
+
+def cached_title_poster(media: str, title_key: str,
+                        order: tuple[str, ...] = DEFAULT_ORDER) -> Path | None:
+    """`cached_poster` for a title with no tmdb id, by the title store's key."""
+    if media not in MEDIA_VALUES or not title_key:
+        return None
+    for source in order:
+        path = _key_tile_path(media, title_key, source)
+        if path.exists():
+            return path
+    return None
+
+
+async def ensure_title_posters(settings, keys, order: tuple[str, ...] = DEFAULT_ORDER) -> int:
+    """`ensure_posters` for titles with no tmdb id — `keys` is (media, title store
+    key) — from what the registry recorded for them (artwork's `title_posters`),
+    in `order`. Returns how many tiles were written.
+
+    NO LOOKUP: the one lookup asks a service by tmdb id, which these titles do
+    not have. Their pictures arrive as the title store learns them (a listing, a
+    description), and a surface drawing the title queues its description
+    (app/metadata/refresh.py) — so a title with nothing recorded draws its
+    placeholder until then. A dead address is counted against its row, as
+    ensure_poster counts one, and the next source in the order is tried."""
+    want = {(str(media), str(key)) for media, key in keys
+            if media in MEDIA_VALUES and key
+            and not _key_tile_path(str(media), str(key), order[0]).exists()}
+    if not want:
+        return 0
+    sem = asyncio.Semaphore(_FAN_OUT)
+
+    async def _one(media: str, key: str) -> bool:
+        async with sem:
+            urls = await artwork.title_urls_for(media, key)
+            for source in order:
+                tile = _key_tile_path(media, key, source)
+                if tile.exists():
+                    return False
+                if not urls.get(source):
+                    continue
+                raw = await _try_source(urls[source])
+                if raw is not None:
+                    await anyio.to_thread.run_sync(_store_keyed, media, key, source, raw)
+                    return True
+                await artwork.record_title_failure(media, key, source)
+            return False
+
+    with span("posters.ensure_title_posters", n=len(want)):
+        results = await asyncio.gather(*(_one(*pair) for pair in want), return_exceptions=True)
+    return sum(1 for result in results if result is True)
+
+
+def _store_keyed(media: str, title_key: str, source: str, raw: bytes) -> Path:
+    """`_store`, for a title with no tmdb id. In a worker thread, as `_store` is."""
+    _dir(media).mkdir(parents=True, exist_ok=True)
+    tile = _key_tile_path(media, title_key, source)
+    tile.write_bytes(raw)
+    logger.info("poster[%s/%s]: GENERATED from %s -> %s", media, title_key, source, tile.name)
+    return tile
 
 
 def _mark_none(media: str, tmdb: int, source: str) -> None:

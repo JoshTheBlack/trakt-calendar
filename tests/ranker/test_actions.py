@@ -486,22 +486,24 @@ class TierStripTests(_ActionTestCase):
         strip = re.search(r"data-tier=\"tier-s\".*?</span>", html, re.S).group(0)
         self.assertEqual(strip.count("<img"), 1)
 
-    def test_it_draws_spares_and_only_titles_with_a_picture_to_ask_for(self):
+    def test_it_draws_spares_and_a_title_with_no_tmdb_id_asks_too(self):
         """Ten are shown and four more drawn, so a poster that fails and removes
         itself is replaced by the next rather than leaving the strip short
-        (style.css hides everything past the tenth). A title with no tmdb id has
-        no picture to ask for, so it must not use up one of those places — here
-        two of them come FIRST in the tier and fourteen are still drawn."""
-        no_picture = [{"media": "show", "match_source": "imdb", "match_id": f"tt000000{n}",
-                       "title": f"No picture {n}", "year": 2026} for n in (1, 2)]
+        (style.css hides everything past the tenth). A title with no tmdb id asks
+        by its key like any other — its pictures are filed under the title
+        store's key (artwork's title_posters) — so it keeps its place in the
+        tier's order; skipping it hid a picture its row and export both drew."""
+        no_tmdb = [{"media": "show", "match_source": "imdb", "match_id": f"tt000000{n}",
+                    "title": f"No tmdb {n}", "year": 2026} for n in (1, 2)]
         pictured = [show_ref(str(n)) for n in range(10, 30)]
-        asyncio.run(ranker.add_titles(self.user_id, BOARD, no_picture + pictured))
+        asyncio.run(ranker.add_titles(self.user_id, BOARD, no_tmdb + pictured))
         keys = ["show:imdb:tt0000001", "show:imdb:tt0000002"] + [key(str(n)) for n in range(10, 30)]
         asyncio.run(ranker.move_items(self.user_id, BOARD, keys, "tier-a"))
         strip = re.search(r"data-tier=\"tier-a\".*?</span>", self.strips(), re.S).group(0)
         self.assertEqual(strip.count("<img"), 14)
-        self.assertEqual(re.findall(r"key=show%3Atmdb%3A(\d+)", strip),
-                         [str(n) for n in range(10, 24)])
+        self.assertEqual(re.findall(r"key=show%3A(imdb%3Att\d+|tmdb%3A\d+)", strip),
+                         ["imdb%3Att0000001", "imdb%3Att0000002"]
+                         + [f"tmdb%3A{n}" for n in range(10, 22)])
 
     def test_each_picture_is_asked_for_the_way_its_row_asks(self):
         """By board and key — the only way the poster route answers. Asked by

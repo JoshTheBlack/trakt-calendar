@@ -242,6 +242,13 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "it already owns; and a stored title is answered to a search box as the "
         "shared search's own hit type (title_search), so a title reads the same "
         "whichever half of a search found it"),
+    (METADATA, MEDIA): Edge(
+        "a picture a service states for a title is filed in the poster registry "
+        "as the title store writes the service's description or listing "
+        "(artwork.file_sighting, in the store's own transaction) — under the "
+        "title's tmdb id, or its store key when it has none — so a service's new "
+        "address reaches every page the moment the store learns it, which is "
+        "what heals a dead picture"),
     (SOURCES, PROVIDERS): Edge(
         "a tracker preference — which linked service leads, and whose numbers "
         "are retired — may name only a service that keeps a watch history, and "
@@ -272,6 +279,10 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "builder of that object, which is what decides that Simkl is asked only "
         "for a viewer who linked it"),
     (SETTINGS, AUTH): Edge("the Settings screen is admin-only and links the app's own account"),
+    (METADATA, AUTH): Edge(
+        "the dead-picture report route registers through authz's Guard as PUBLIC — "
+        "it arrives as the image proxy's redirect, which carries no session cookie "
+        "in Firefox — so its access level is declared like every other route's"),
     (KERNEL, AUTH): Edge(
         "config.py reaches encryption_flow to refuse writing a secret while the "
         "at-rest key is in a bad state. Function-local because encryption_flow "

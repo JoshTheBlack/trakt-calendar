@@ -27,7 +27,7 @@ import logging
 from typing import Any
 
 from .. import db
-from . import identity, rows
+from . import descriptions, identity, ids as id_rules, rows
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,91 @@ async def run_once() -> int:
     settled = await register_everything()
     await db.set_meta(MARKER, "1")
     return settled
+
+
+WORDS_MARKER = "title_store_words_seeded"
+
+# THE WORDS A TRACKER OR BOARD ROW STILL CARRIES A COPY OF, by table — what was
+# drawn from the row itself until its readers moved to the store
+# (app/metadata/labels.py). Read only while the columns exist.
+_TRACKER_WORDS = ("title", "network")
+_BOARD_WORDS = ("title", "network", "year", "runtime", "season_name", "episode_count")
+
+
+async def seed_words_once() -> int:
+    """Seed the store from every held row's own copy of its title's words, once,
+    after the titles are registered (`run_once`). Returns how many rows gave
+    words (0 once done, or before registration has run)."""
+    if await db.get_meta(WORDS_MARKER) == "1" or await db.get_meta(MARKER) != "1":
+        return 0
+    seeded = await seed_held_words()
+    await db.set_meta(WORDS_MARKER, "1")
+    return seeded
+
+
+async def seed_held_words(now: int | None = None) -> int:
+    """Give the store every word a tracker or board row carries a copy of, where
+    no service states one (descriptions.seed_words). Returns how many rows gave
+    words.
+
+    THE READERS MOVED BEFORE THE COPIES WENT. A tracker's and a board's rows draw
+    their title's name, network, year and runtime — and a season row its own name
+    and episode total — from the store now, with no fallback to the copy the row
+    kept, so a title no service has described would draw nothing until one did:
+    measured on a production copy, 26 of 55 tracker rows and 72 of 81 board rows.
+    Seeding from the copies while they still exist means none draws a blank, and
+    the first view of each still has its service describe it (the seed is not a
+    description, and its words give way to the service's own).
+
+    ONLY WHILE THE COLUMNS EXIST: once a migration has dropped a table's copies
+    there is nothing to read, and this does nothing for that table.
+    """
+    ts = db.now() if now is None else now
+    pending = await db.run(_held_words)
+    for start in range(0, len(pending), BATCH):
+        batch = pending[start:start + BATCH]
+
+        def _work(conn, batch=batch):
+            for media, ids, words in batch:
+                descriptions.seed_words(conn, media, ids, now=ts, **words)
+
+        await db.transaction(_work)
+    logger.info("title store: seeded the words %d held row(s) carried", len(pending))
+    return len(pending)
+
+
+def _columns(conn: db.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _held_words(conn: db.Connection) -> list[tuple[str, dict, dict]]:
+    """(media, ids, words) for every tracker and board row carrying a copy."""
+    out: list[tuple[str, dict, dict]] = []
+    if set(_TRACKER_WORDS) <= _columns(conn, "distrakt_user_seasons"):
+        id_columns = ", ".join(_TRACKER_IDS)
+        for row in conn.execute(f"SELECT media, match_source, match_id, title, network, "
+                                f"{id_columns} FROM distrakt_user_seasons"):
+            ids = {name: row[column] for column, name in _TRACKER_IDS.items()
+                   if row[column] not in (None, "")}
+            ids.setdefault(row["match_source"],
+                           id_rules.typed(row["match_source"], row["match_id"]))
+            out.append((str(row["media"]), ids,
+                        {"title": row["title"] or "", "network": row["network"] or ""}))
+    if set(_BOARD_WORDS) <= _columns(conn, "tier_items"):
+        for row in conn.execute("SELECT media, match_source, match_id, season, tmdb, ids_json, "
+                                + ", ".join(_BOARD_WORDS) + " FROM tier_items"):
+            ids = {**_loads(row["ids_json"]),
+                   row["match_source"]: id_rules.typed(row["match_source"], row["match_id"])}
+            if row["tmdb"]:
+                ids.setdefault("tmdb", row["tmdb"])
+            out.append((str(row["media"]), ids, {
+                "title": row["title"] or "", "network": row["network"] or "",
+                "year": row["year"], "runtime": row["runtime"], "season": row["season"],
+                # A SEASON ROW'S OWN name and count; a whole show's counts are its
+                # description's (descriptions.seed_words says why).
+                "season_name": (row["season_name"] or "") if row["season"] is not None else "",
+                "episode_count": row["episode_count"] if row["season"] is not None else None}))
+    return out
 
 
 async def register_everything(now: int | None = None) -> int:

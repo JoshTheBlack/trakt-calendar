@@ -273,6 +273,31 @@ def no_background_episode_lookups(monkeypatch):
     monkeypatch.setattr(trakt_detail, "fetch_season_episodes", _nothing)
 
 
+@pytest.fixture(autouse=True)
+def no_background_title_refresh(monkeypatch):
+    """Stop a page view's title-store refresh starting in tests that never asked
+    for it.
+
+    A PAGE THAT DRAWS TITLES QUEUES THE STALE ONES AND STARTS A PASS, behind the
+    page as a task of its own (app/metadata/refresh.py's `viewed` and `start`) —
+    so every test that draws a tracker month, a board, a calendar or a details
+    panel would leave one running past its own end, asking real services about
+    whatever it found. A test about what a page queues replaces `refresh.viewed`
+    and reads what it was handed; a test about the queue drives
+    `refresh.queue_viewed` and `refresh.drain` itself."""
+    from app.metadata import refresh
+    monkeypatch.setattr(refresh, "start", lambda work: work.close())
+    # And each test starts with every service's minute unspent, no heal under
+    # way, and no picture report checked or title healed yet.
+    monkeypatch.setattr(refresh, "_asked", {})
+    monkeypatch.setattr(refresh, "_heals", {})
+    from app.metadata import pictures
+    monkeypatch.setattr(pictures, "_checked", {})
+    monkeypatch.setattr(pictures, "_healed", {})
+    from collections import deque
+    monkeypatch.setattr(pictures, "_checks", deque())
+
+
 @pytest.fixture
 def db_path(tmp_path):
     """A freshly migrated, test-only database, distinct from every other test's."""

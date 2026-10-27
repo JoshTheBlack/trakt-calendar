@@ -105,6 +105,14 @@ def rank(key: str) -> int:
         return _UNKEYED_RANK
 
 
+def tmdb_of(key: str) -> int | None:
+    """The tmdb id a key is filed by, or None for a key in another id space. A
+    title with a tmdb id is always keyed by it — a key only moves up the
+    waterfall, and tmdb is its top — so None means the title has none."""
+    own = _own_id(key)
+    return int(own[1]) if own is not None and own[0] == "tmdb" else None
+
+
 def _own_id(key: str) -> tuple[str, Any] | None:
     """(id space, typed id) a key is filed by, or None for a per-service key."""
     try:

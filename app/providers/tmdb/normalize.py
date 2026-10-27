@@ -21,7 +21,7 @@ from typing import Any
 from ... import youtube
 from .. import season as season_rules
 from ..base import (CAST_SHOWN, Media, Record, Source, Video, VideoKind, collect_ids,
-                    epoch_seconds, proxied_image)
+                    epoch_seconds)
 from . import transport
 
 logger = logging.getLogger(__name__)
@@ -305,8 +305,9 @@ def cast_from(credits: dict) -> list[dict]:
     ROLE they played across its episodes (`roles[].character`), most episodes
     first — the list that matches the cast Trakt's panel draws (measured: 19 and
     18 of Trakt's 20 for a show, 18 and 19 for a season). A film's `credits`
-    names a single `character`. The headshot is TMDB's origin address through
-    the shared image proxy, because a browser draws it.
+    names a single `character`. The headshot is TMDB's ORIGIN address — the
+    title store keeps what TMDB said, and the panel proxies it when it draws it
+    (app/providers/detail_source.py's `presented`).
     """
     out = []
     for member in (credits or {}).get("cast") or ():
@@ -318,8 +319,7 @@ def cast_from(credits: dict) -> list[dict]:
         out.append({
             "name": str(member["name"]),
             "character": str(character or ""),
-            "headshot": proxied_image(transport.image_url(member.get("profile_path"),
-                                                          _HEADSHOT_SIZE)) or None,
+            "headshot": transport.image_url(member.get("profile_path"), _HEADSHOT_SIZE) or None,
         })
         if len(out) >= CAST_SHOWN:
             break
@@ -350,13 +350,10 @@ def season_summary(season_payload: dict, number: int, today: date) -> dict:
             **season_rules.derive_season([_date(e.get("air_date")) for e in episodes], today)}
 
 
-# How an episode's day is written in the panel's list; the other services'
-# packages use the same strftime so two services' lists read alike.
-_AIR_DISPLAY = "%d %b %Y"
-
-
 def panel_episodes(season_payload: dict) -> list[dict]:
-    """The panel's episode rows for one season, in episode order."""
+    """The panel's episode rows for one season, in episode order. `first_aired`
+    is TMDB's own day, as it states it — TMDB dates an episode and never times
+    it — and "" for an episode it has not dated."""
     rows = []
     for entry in season_payload.get("episodes") or ():
         if not isinstance(entry, dict) or entry.get("episode_number") is None:
@@ -366,9 +363,13 @@ def panel_episodes(season_payload: dict) -> list[dict]:
         rows.append({
             "number": number,
             "title": str(entry.get("name") or f"Episode {number}"),
-            "air_display": aired.strftime(_AIR_DISPLAY) if aired else "",
+            "first_aired": aired.isoformat() if aired else "",
             "rating": rating(entry),
             "overview": str(entry.get("overview") or "").strip(),
+            # TMDB's own word for the episode's place in its season ('standard',
+            # 'finale', 'mid_season'), and its runtime in minutes.
+            "episode_type": str(entry.get("episode_type") or ""),
+            "runtime": entry.get("runtime") if isinstance(entry.get("runtime"), int) else None,
         })
     rows.sort(key=lambda row: row["number"])
     return rows

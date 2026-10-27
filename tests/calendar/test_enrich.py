@@ -226,14 +226,26 @@ class OwedTitlesTests(EnrichTestCase):
         await self._stored([trakt_record])
         self.assertEqual(await calendar_enrich._owed_titles(), {})
 
-    async def test_an_already_answered_title_is_still_returned(self):
-        """Filtering OUT what is already answered is `drain`'s job, not this
-        function's — it stays a pure "what does the cache name" question."""
+    async def test_a_title_whose_row_has_its_answer_is_not_owed(self):
+        """Only the UNANSWERED are owed, read through the index on `enriched`: a
+        row that has its answer is kept current by being viewed
+        (app/metadata/refresh.py), not re-read here every tick."""
+        await self._stored([_simkl_record(9001, title="Moonshadow")])
+        await calendar_enrich._upsert_success(9001, "show", {
+            "genres": ["drama"], "network": "", "country": "", "certification": "",
+            "runtime": None, "status": "", "overview": "", "ids": {},
+        }, now=1000)
+        self.assertEqual(await calendar_enrich._owed_titles(), {})
+
+    async def test_a_title_answered_in_the_table_but_not_on_its_row_is_still_owed(self):
+        """The row is what is owed: an answer sitting in simkl_titles that the row
+        never received is handed over by the drain without a lookup."""
         await calendar_enrich._upsert_success(9001, "show", {
             "genres": ["drama"], "network": "", "country": "", "certification": "",
             "runtime": None, "status": "", "overview": "", "ids": {},
         }, now=1000)
         await self._stored([_simkl_record(9001, title="Moonshadow")])
+        await db.execute("UPDATE title_metadata SET enriched = 0 WHERE source = 'simkl'")
         owed = await calendar_enrich._owed_titles()
         self.assertEqual(owed, {(9001, "show"): "Moonshadow"})
 
@@ -394,9 +406,9 @@ class DrainTests(EnrichTestCase):
     async def test_a_row_from_the_older_extraction_is_re_fetched_not_treated_as_complete(self):
         """A row written before ids/type/anime_type/trailers existed carries
         no `extract_version` key at all — the shape every one of the ~260
-        rows already in a live simkl_titles table is in. It must be treated
-        as OWED, not as already answered, so the author does not wait a full
-        30-day retention cycle for the fields that make matching cheap."""
+        rows already in a live simkl_titles table is in. For a title the drain
+        OWES (its row still unanswered), that answer must be treated as owed
+        too, not handed over as complete."""
         await self._stored([_simkl_record(1, title="X")])
         await calendar_enrich._upsert_success(1, "show", {
             # The exact shape the narrower extraction wrote: no
@@ -406,6 +418,7 @@ class DrainTests(EnrichTestCase):
             "certification": "", "runtime": None, "status": "", "overview": "",
             "ids": {"tvdb": "999"},
         }, now=1000)
+        await db.execute("UPDATE title_metadata SET enriched = 0 WHERE source = 'simkl'")
         spy = AsyncMock(return_value=_OK_FIELDS)
         with patch("app.providers.simkl.titles.fetch_title", spy):
             fetched = await calendar_enrich.drain(self.SETTINGS, now=1000)
@@ -537,7 +550,7 @@ class AnAnswerThatArrivedAfterTheRowStillReachesItTests(EnrichTestCase):
                    AsyncMock(return_value=_OK_FIELDS)):
             await calendar_enrich.drain(self.SETTINGS, now=2000)
         self.assertEqual(
-            await title_rows.unenriched("simkl", "simkl"), set())
+            await title_rows.unenriched("simkl", "simkl"), {})
 
 
 class AnAnswerAlreadyPaidForGoesInWithTheFillTests(EnrichTestCase):

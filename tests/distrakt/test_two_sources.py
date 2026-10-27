@@ -1977,7 +1977,8 @@ class WhoDescribesThisTests(unittest.IsolatedAsyncioTestCase):
              patch("app.providers.simkl.detail.fetch_title_facts",
                    AsyncMock(return_value=TitleFacts("Juliet and Juliet", "Rai 1"))) as simkl:
             got = await live.title_facts(self.settings(), rec)
-        self.assertEqual(got, TitleFacts("Juliet & Juliet", "Rai 1"))
+        # The network is Simkl's, and says so: the title store files it there.
+        self.assertEqual(got, TitleFacts("Juliet & Juliet", "Rai 1", network_from="simkl"))
         self.assertEqual(simkl.await_args.args[1], 2611545)
 
     async def test_a_stated_network_is_never_asked_about_again(self):

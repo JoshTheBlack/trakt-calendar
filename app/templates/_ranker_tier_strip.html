@@ -25,9 +25,10 @@
    strip draws STRIP_DRAWN pictures and style.css shows only the first ten
    still standing (`.ranker-strip img:nth-of-type(n+11)`) — when one
    removes itself, the next moves up into view with nothing measuring anything.
-   The spares are lazy, like every picture here. Only titles WITH a tmdb id are
-   counted, since one without has no picture to ask for and would otherwise
-   use up a place.
+   The spares are lazy, like every picture here. A title with no tmdb id is
+   counted like any other: its pictures are filed under the title store's key
+   (artwork's title_posters), and one with none filed takes itself out like
+   any other miss.
 
    EACH PICTURE IS ASKED FOR THE WAY ITS ROW ASKS: by board and key
    (routes.rankings_poster), which is the only way that route answers. The strip
@@ -39,7 +40,7 @@
 {% macro strip(category, board_uid, oob=False) -%}
 <span class="ranker-strip" aria-hidden="true" data-tier="{{ category.uid }}"
       {%- if oob %} hx-swap-oob="outerHTML:.ranker-strip[data-tier='{{ category.uid }}']"{% endif %}>
-    {%- for item in (category['items'] | selectattr('tmdb') | list)[:STRIP_DRAWN] %}
+    {%- for item in (category['items'] | list)[:STRIP_DRAWN] %}
     <img loading="lazy" width="24" height="36" alt=""
          src="/api/rankings/poster?{{ {'board': board_uid, 'key': item.key} | urlencode }}"
          data-if-missing="remove">

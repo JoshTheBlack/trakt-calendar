@@ -10,20 +10,35 @@ features, and a re-key cannot ask each of them in turn without importing all of
 them; so the tables are named here, once, and tests/metadata/test_holders.py
 fails when the schema grows a table this file has not classified — holder or not.
 
-THE RULE WHERE BOTH KEYS ARE ALREADY HELD: THE NEW KEY'S ROW WINS. Measured before
-this was written, on the development copy and on a production copy: no tracker,
-board or watchlist row anywhere would have collided. When one does, the row under
-the old key is dropped and logged in full, and a board row goes into that board's
-removal history, where its owner can see it and put it back.
+THE RULE WHERE BOTH KEYS ARE ALREADY HELD: THE MORE COMPLETE ROW SURVIVES, under
+the new key. The two rows are one viewer's record of one title, written at
+different times under two names for it, so neither is a newer truth that should
+simply overwrite the other: a tracker row under the old key may be the one with
+twelve watched episodes and a frozen month behind it, and the row under the new
+key a stub a sync filed yesterday. Which is "more complete" is a question each
+table answers in its own terms (`more_complete`, one rule per table, each
+tested); the survivor is re-keyed, its EMPTY fields are filled from the other —
+never a number, which stands as the survivor has it, and never summed — and the
+other is logged in full. A board row that loses goes into its board's removal
+history, where its owner can see it and put it back. Measured before the rule was
+first written, on the development copy and a production copy: no tracker, board
+or watchlist row anywhere would have collided, so this is for the day one does.
 
 WHAT A HOLDER LEARNS ON THE WAY. A row filed under the new key should state the
 id it is filed by, so the column for the new key's own id space is filled where a
 row has one and it is empty — never overwritten.
+
+AND WHAT A HOLDER KEEPS ALIVE. A feature's row is a reason to keep every service's
+description of the title it holds (`held_keys`): the store's retention sweep
+(app/metadata/rows.py) deletes a description only once no airing names it AND no
+feature row holds its title, so a tracker or board title never loses the words it
+is drawn with to a calendar that stopped listing it.
 """
 from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable, Mapping
 from typing import Any, NamedTuple
 
 from .. import db
@@ -116,6 +131,75 @@ NOT_HOLDERS: dict[str, str] = {
     "watchlist_targets": "which services a viewer writes to",
     "sqlite_sequence": "SQLite's own bookkeeping",
 }
+
+
+# ---------------------------------------------------------------------------
+# which holders keep a title's description alive
+# ---------------------------------------------------------------------------
+
+# A TRIPLE AS THE KEY IT SPELLS — the shared waterfall's flat form, exactly what
+# `ItemKey.__str__` writes and `title_metadata.title_key` holds.
+_FLAT_TRIPLE = "media || ':' || match_source || ':' || match_id"
+
+# THE HOLDERS WHOSE ROWS DRAW A TITLE, and so keep every service's description of
+# it from the retention sweep: one query per table, each answering the keys its
+# rows hold. A tracker row, a board row and what either remembers of a title it
+# may put back are drawn with the store's words for the title — there is no copy
+# of them anywhere else — so the words outlive the calendar's interest in it.
+_KEEPS_ALIVE: dict[str, str] = {
+    table: f"SELECT DISTINCT {_FLAT_TRIPLE} FROM {table}"
+    for table in ("distrakt_user_seasons", "distrakt_month_records",
+                  "distrakt_unsettled_rows", "distrakt_movie_watches",
+                  "distrakt_open_prompts", "distrakt_prompt_dismissals",
+                  "distrakt_show_progress", "tier_items", "tier_item_removals")
+}
+
+# Holders whose rows do NOT keep a description alive, each with the reason. With
+# `_KEEPS_ALIVE` and the deleted tier's JSON list below this classifies every
+# holder, which tests/metadata/test_holders.py checks — a holder added later is a
+# decision about retention as well as about re-keying.
+KEEPS_NOTHING_ALIVE: dict[str, str] = {
+    "titles": "the identity itself, which the sweep does not touch",
+    "title_aliases": "the identity's retired keys",
+    "title_metadata": "the descriptions the sweep is deciding about",
+    "calendar_airings": "has a rule of its own: a row an airing names is kept",
+    "title_posters": "pictures, kept by the poster registry's own retention",
+    "not_watching_shows": "a mark on a calendar card, which the card's own airing draws",
+    "calendar_view_state": "which titles a visit drew, kept only to say what is new",
+    "distrakt_slug_repairs": "a log of repairs, which draws no title",
+    "distrakt_months": "a frozen month's films carry the title they froze with",
+    "watchlist_writes": "what was written to a service's list, which draws no title",
+}
+
+# A DELETED TIER'S ROWS ARE KEYS IN A JSON LIST, a board row's key with its season
+# suffix where it has one ("show:tmdb:1:s2"), and a restore puts them back.
+_TIER_REMOVALS = "tier_category_removals"
+
+
+def _title_part(board_key: str) -> str:
+    """The title a board key names: a title key is three parts (media, id space,
+    id) and a board row's season is a fourth (app/ranker/item_keys.py)."""
+    return ":".join(str(board_key).split(":")[:3])
+
+
+def held_keys(conn: db.Connection) -> set[str]:
+    """Every title key a feature row holds that keeps its description alive —
+    see `_KEEPS_ALIVE`. Read inside the caller's transaction, so a sweep and the
+    rows it judges by are one moment."""
+    keys: set[str] = set()
+    for sql in _KEEPS_ALIVE.values():
+        keys.update(str(row[0]) for row in conn.execute(sql) if row[0])
+    for (document,) in conn.execute(
+            f"SELECT items_json FROM {_TIER_REMOVALS} WHERE json_valid(items_json)"):
+        listed = json.loads(document)
+        if isinstance(listed, list):
+            keys.update(_title_part(value) for value in listed if isinstance(value, str))
+    return keys
+
+
+def keeps_alive_tables() -> frozenset[str]:
+    """The holders `held_keys` reads, for the classification test."""
+    return frozenset({*_KEEPS_ALIVE, _TIER_REMOVALS})
 
 
 class _Triple(NamedTuple):
@@ -267,20 +351,161 @@ def _months_films(conn: db.Connection, old: str, new: str) -> int:
 _TRIPLE_WHERE = "media = ? AND match_source = ? AND match_id = ?"
 
 
+# ---------------------------------------------------------------------------
+# where both keys hold the same row: the more complete one survives
+# ---------------------------------------------------------------------------
+
+def _int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _month_record_rank(row: Mapping[str, Any]) -> tuple:
+    """A MONTH RECORD: one that RECORDED a per-service breakdown beats one that did
+    not — a breakdown is written when a month freezes, and a frozen record is the
+    only account of that month there will ever be — then more watched, then one
+    that knows its episode total, then the one added first."""
+    recorded = row["watched_by_source"] is not None or row["total_by_source"] is not None
+    return (recorded, _int(row["watched"]), _int(row["total"]) > 0, -_int(row["created_at"]))
+
+
+def _tracker_row_rank(row: Mapping[str, Any]) -> tuple:
+    """A TRACKER ROW: more watched, then one that knows its episode total, then the
+    one added first — the earlier filing is the one the viewer has been living
+    with, and its watermarks were set against it."""
+    return (_int(row["watched"]), _int(row["total"]) > 0, -_int(row["created_at"]))
+
+
+def _first_added_rank(row: Mapping[str, Any]) -> tuple:
+    """A row held back from a month says nothing but that it is held: the one
+    filed first."""
+    return (-_int(row["created_at"]),)
+
+
+def _board_row_rank(row: Mapping[str, Any]) -> tuple:
+    """A BOARD ROW: one placed in a tier beats one in the pool — the placement is
+    the work a board is for — then one the viewer rated, then the one added
+    first."""
+    return (row["category_id"] is not None, row["user_rating"] is not None,
+            -_int(row["created_at"]), -_int(row["id"]))
+
+
+def _newer_play_rank(row: Mapping[str, Any]) -> tuple:
+    """A SERVICE'S ANSWER about a play: the newer one, by when the play was — the
+    rule the watch state already applies to two rows for one film."""
+    return (str(row["watched_at"] or ""),)
+
+
+def _newer_question_rank(row: Mapping[str, Any]) -> tuple:
+    """An OPEN QUESTION about a play: the newer play's, then the newer asking."""
+    return (str(row["watched_at"] or ""), _int(row["created_at"]))
+
+
+def _newer_answer_rank(row: Mapping[str, Any]) -> tuple:
+    """A DECLINED QUESTION: the newer refusal, which is the viewer's latest word."""
+    return (_int(row["created_at"]),)
+
+
+def _no_clock_rank(_row: Mapping[str, Any]) -> tuple:
+    """A SERVICE'S PROGRESS FOR A SEASON keeps no clock — the table is rewritten
+    whole on every sync (app/distrakt/watch_history.py's `_save`) — so neither row
+    is newer, and on a tie the new key's row stands. The next sync rewrites it from
+    the service either way."""
+    return ()
+
+
+# WHICH ROW IS MORE COMPLETE, per table — one rule each, and every table a re-key
+# can find holding one row twice has one (tests/metadata/test_holders.py). A
+# larger rank is more complete; a tie keeps the new key's row.
+_RANKS: dict[str, Callable[[Mapping[str, Any]], tuple]] = {
+    "distrakt_user_seasons": _tracker_row_rank,
+    "distrakt_month_records": _month_record_rank,
+    "distrakt_unsettled_rows": _first_added_rank,
+    "distrakt_movie_watches": _newer_play_rank,
+    "distrakt_open_prompts": _newer_question_rank,
+    "distrakt_prompt_dismissals": _newer_answer_rank,
+    "distrakt_show_progress": _no_clock_rank,
+    "tier_items": _board_row_rank,
+}
+
+
+def more_complete(table: str, candidate: Mapping[str, Any], other: Mapping[str, Any]) -> bool:
+    """Whether `candidate` is the more complete of two rows `table` holds for one
+    title under two keys — strictly: a tie is not a win."""
+    rank = _RANKS[table]
+    return rank(candidate) > rank(other)
+
+
+def _empty(value: Any) -> bool:
+    """A field with nothing in it. A NUMBER IS NEVER EMPTY — a zero is a count the
+    row states, and filling it from the other row would invent one."""
+    return value is None or (isinstance(value, str) and value.strip() in ("", "{}", "[]"))
+
+
+def _loads_map(text: Any) -> dict:
+    try:
+        value = json.loads(text or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def gaps_filled(survivor: Mapping[str, Any], other: Mapping[str, Any],
+                fixed: tuple[str, ...]) -> dict[str, Any]:
+    """{column: value} that fills `survivor`'s empty fields from `other`. `fixed`
+    are the columns that say WHICH row it is (its identity, its scope, its id),
+    which are never copied. An id map is merged, the survivor's ids winning."""
+    out: dict[str, Any] = {}
+    for column in survivor.keys():
+        if column in fixed or column == "rid":
+            continue
+        mine, theirs = survivor[column], other[column]
+        if column == "ids_json":
+            merged = {**_loads_map(theirs), **_loads_map(mine)}
+            if merged != _loads_map(mine):
+                out[column] = json.dumps(merged, sort_keys=True)
+        elif _empty(mine) and not _empty(theirs):
+            out[column] = theirs
+    return out
+
+
+def _settle_clash(conn: db.Connection, spec: _Triple, old_row, new_row, new: ItemKey, *,
+                  now: int) -> None:
+    """One row both keys hold: the more complete survives (the old one is then
+    moved by the caller's re-key like any other), its gaps are filled from the
+    other, and the other goes — logged in full, and a board row into its board's
+    removal history."""
+    if more_complete(spec.table, old_row, new_row):
+        survivor, loser = old_row, new_row
+    else:
+        survivor, loser = new_row, old_row
+    fixed = ("id", "media", "match_source", "match_id", *spec.same_row)
+    fill = gaps_filled(survivor, loser, fixed)
+    _dropped(conn, spec.table, loser, new, kept_old=survivor is old_row, now=now)
+    conn.execute(f"DELETE FROM {spec.table} WHERE rowid = ?", (loser["rid"],))
+    if fill:
+        conn.execute(
+            f"UPDATE {spec.table} SET {', '.join(f'{column} = ?' for column in fill)} "
+            "WHERE rowid = ?", (*fill.values(), survivor["rid"]))
+
+
 def _move_triple(conn: db.Connection, spec: _Triple, old: ItemKey, new: ItemKey, *,
                  now: int) -> int:
     old_params = (old.media, old.match_source, old.match_id)
     if spec.same_row:
-        clash = (f"{_TRIPLE_WHERE} AND EXISTS (SELECT 1 FROM {spec.table} n "
-                 "WHERE n.media = ? AND n.match_source = ? AND n.match_id = ? "
-                 f"AND {_same(spec.table, spec.same_row)})")
-        clash_params = (*old_params, new.media, new.match_source, new.match_id)
-        dropped = conn.execute(f"SELECT * FROM {spec.table} WHERE {clash}",
-                               clash_params).fetchall()
-        for row in dropped:
-            _dropped(conn, spec.table, row, new, now=now)
-        if dropped:
-            conn.execute(f"DELETE FROM {spec.table} WHERE {clash}", clash_params)
+        twin_where = " AND ".join(f"{column} IS ?" for column in spec.same_row)
+        for old_row in conn.execute(
+                f"SELECT rowid AS rid, * FROM {spec.table} WHERE {_TRIPLE_WHERE}",
+                old_params).fetchall():
+            new_row = conn.execute(
+                f"SELECT rowid AS rid, * FROM {spec.table} WHERE {_TRIPLE_WHERE} "
+                f"AND {twin_where}",
+                (new.media, new.match_source, new.match_id,
+                 *(old_row[column] for column in spec.same_row))).fetchone()
+            if new_row is not None:
+                _settle_clash(conn, spec, old_row, new_row, new, now=now)
     own = id_rules.typed(new.match_source, new.match_id)
     sets = ["match_source = ?", "match_id = ?"]
     params: list = [new.match_source, new.match_id]
@@ -297,12 +522,17 @@ def _move_triple(conn: db.Connection, spec: _Triple, old: ItemKey, new: ItemKey,
                         (*params, *old_params)).rowcount
 
 
-def _dropped(conn: db.Connection, table: str, row, new: ItemKey, *, now: int) -> None:
-    """A row the new key already holds the same of. Logged in full — the log is
-    the only record of it left — and a board row is kept in its board's removal
-    history, through the board's own writer, so its owner can put it back."""
-    logger.warning("title store: dropped a %s row the re-keyed title %s already held: %s",
-                   table, new, json.dumps(dict(row), default=str, sort_keys=True))
+def _dropped(conn: db.Connection, table: str, row, new: ItemKey, *, kept_old: bool,
+             now: int) -> None:
+    """The less complete of two rows one title held under two keys. Logged in full
+    — the log is the only record of it left — and a board row is kept in its
+    board's removal history, through the board's own writer, so its owner can put
+    it back. `kept_old` says which survived, so the line says which way it went."""
+    record = {name: row[name] for name in row.keys() if name != "rid"}
+    logger.warning("title store: re-keying %s found a %s row under both keys; kept the "
+                   "%s key's as the more complete, dropped: %s",
+                   new, table, "old" if kept_old else "new",
+                   json.dumps(record, default=str, sort_keys=True))
     if table == "tier_items":
         # Deferred: the board imports this package, and its removal history is its
         # own to write — what a restore reads back is the board's projection of

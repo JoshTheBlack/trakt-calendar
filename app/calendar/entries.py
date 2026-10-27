@@ -582,13 +582,17 @@ async def sweep(now: int | None = None) -> int:
     no name, which is worse than either keeping the row or dropping the airing
     with it. One transaction, so that order cannot be seen half-done.
     """
-    cutoff = (db.now() if now is None else now) - RETAIN_SECONDS
+    ts = db.now() if now is None else now
+    cutoff = ts - RETAIN_SECONDS
 
     def _work(conn) -> int:
         removed = conn.execute(
             "DELETE FROM calendar_airings WHERE stored_at <= ?", (cutoff,)).rowcount
         conn.execute("DELETE FROM calendar_coverage WHERE stored_at <= ?", (cutoff,))
         title_rows.sweep_unlisted(conn, cutoff)
+        # And whatever a service's own terms say may not be kept, held or not —
+        # after the age sweep, which it overrides (TMDB's six months).
+        title_rows.sweep_past_ceilings(conn, ts)
         # The validators outlive nothing. A file whose rows are gone has nothing
         # for a 304 to confirm, so keeping its ETag would answer "unchanged" for
         # a month this app no longer holds anything about.

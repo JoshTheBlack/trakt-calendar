@@ -7,9 +7,12 @@ TWO PROMISES, and the first is what keeps the second true:
     column named like a key fails until that column is accounted for — so a
     re-key cannot silently leave a new holder behind.
   - A RE-KEY MOVES A ROW IN EVERY HOLDER, in the transaction it happens in; where
-    a holder already has the new key's row the new one wins and the old one is
-    dropped (a board's into its removal history); and a key a feature extends
-    with its own suffix keeps the suffix.
+    a holder already has the new key's row the MORE COMPLETE of the two survives
+    under the new key with its gaps filled from the other, which is dropped (a
+    board's into its removal history); and a key a feature extends with its own
+    suffix keeps the suffix.
+And every holder says whether its rows keep a title's description alive against
+the store's retention sweep.
 """
 from __future__ import annotations
 
@@ -80,6 +83,19 @@ class EveryTableIsClassifiedTests(unittest.TestCase):
         unseen = sorted(f"{h.table}.{c}" for h in holders.HOLDERS for c in h.columns
                         if c != "media" and not _KEYISH.search(c))
         self.assertEqual(unseen, [])
+
+    def test_every_holder_says_whether_it_keeps_a_description_alive(self):
+        keeps, not_kept = holders.keeps_alive_tables(), set(holders.KEEPS_NOTHING_ALIVE)
+        self.assertEqual(sorted(set(self.held) - keeps - not_kept), [], (
+            "these holders are in neither retention list in app/metadata/holders.py. "
+            "Decide: does a row here draw its title, so the title's description must "
+            "outlive the calendar's interest in it?"))
+        self.assertEqual(sorted(keeps & not_kept), [])
+        self.assertEqual(sorted((keeps | not_kept) - set(self.held)), [])
+
+    def test_every_table_a_rekey_can_find_twice_has_a_completeness_rule(self):
+        clashing = {spec.table for spec in holders._TRIPLES if spec.same_row}
+        self.assertEqual(sorted(clashing - set(holders._RANKS)), [])
 
     def test_every_column_shaped_like_a_key_is_accounted_for(self):
         unlisted = []
@@ -245,7 +261,7 @@ class ARekeyMovesEveryHolderTests(DatabaseTestCase):
         self.assertEqual((row["tmdb"], json.loads(row["ids_json"])),
                          (900, {"tvdb": 4321, "tmdb": 900}))
 
-    async def test_where_both_keys_are_held_the_new_keys_row_wins(self):
+    async def test_where_both_keys_hold_an_equal_row_the_new_keys_row_stands(self):
         await db.transaction(lambda conn: _hold(conn, self.user_id, self.board_id, OLD))
         await db.transaction(lambda conn: _hold(conn, self.user_id, self.board_id, NEW,
                                                 title="New"))
@@ -257,19 +273,65 @@ class ARekeyMovesEveryHolderTests(DatabaseTestCase):
         self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM not_watching_shows"), 1)
         self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM watchlist_writes"), 1)
 
-    async def test_a_dropped_board_row_goes_to_its_boards_removal_history(self):
-        """So its owner can see it and put it back."""
+    async def test_the_more_complete_tracker_row_survives_under_the_new_key(self):
+        """The row under the OLD key has watched more: it is the viewer's record,
+        and the new key's row was a stub a later filing made. It survives, is
+        re-keyed, keeps its own numbers and takes what it lacked from the stub."""
         await db.transaction(lambda conn: _hold(conn, self.user_id, self.board_id, OLD))
         await db.transaction(lambda conn: _hold(conn, self.user_id, self.board_id, NEW,
                                                 title="New"))
+        await db.execute("UPDATE distrakt_user_seasons SET watched = 7, total = 10, "
+                         "network = '' WHERE match_source = 'tvdb'")
+        await db.execute("UPDATE distrakt_user_seasons SET watched = 2, total = 0, "
+                         "network = 'HBO', history_from = '2026-01-01' "
+                         "WHERE match_source = 'tmdb'")
+        with self.assertLogs("app.metadata.holders", "WARNING") as logged:
+            await self.rekey()
+        rows = await db.fetch_all("SELECT * FROM distrakt_user_seasons")
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual((row["match_source"], row["match_id"]), ("tmdb", "900"))
+        self.assertEqual((row["title"], row["watched"], row["total"]), ("Old", 7, 10))
+        self.assertEqual((row["network"], row["history_from"]), ("HBO", "2026-01-01"))
+        self.assertTrue(any("kept the old key's" in line and '"watched": 2' in line
+                            for line in logged.output))
+
+    async def _two_board_rows(self) -> tuple[int, int]:
+        """A board row under each key — told apart by the viewer's rating, which
+        is the row's own (its words are the title store's) — as (old id, new id)."""
+        await db.transaction(lambda conn: _hold(conn, self.user_id, self.board_id, OLD))
+        await db.transaction(lambda conn: _hold(conn, self.user_id, self.board_id, NEW,
+                                                title="New"))
+        await db.execute("UPDATE tier_items SET user_rating = CASE match_source "
+                         "WHEN 'tvdb' THEN 3 ELSE 9 END")
+        old = await db.fetch_value("SELECT id FROM tier_items WHERE match_source = 'tvdb'")
+        new = await db.fetch_value("SELECT id FROM tier_items WHERE match_source = 'tmdb'")
+        return old, new
+
+    async def _history_ratings(self) -> list:
+        return [json.loads(r["item_json"])["user_rating"] for r in await db.fetch_all(
+            "SELECT item_json FROM tier_item_removals WHERE season IS NULL")]
+
+    async def test_a_tiered_board_row_survives_and_the_other_goes_to_its_history(self):
+        """So its owner can see the dropped one and put it back."""
+        _old, new = await self._two_board_rows()
+        category = (await db.execute(
+            "INSERT INTO tier_categories (board_id, uid, label, sort_order, created_at) "
+            "VALUES (?, 'tier-s', 'S', 0, 1)", (self.board_id,))).lastrowid
+        await db.execute("UPDATE tier_items SET category_id = ? WHERE match_source = 'tmdb'",
+                         (category,))
         with self.assertLogs("app.metadata.holders", "WARNING"):
             await self.rekey()
-        self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM tier_items"), 1)
-        history = await db.fetch_all(
-            "SELECT match_source, season, item_json FROM tier_item_removals "
-            "WHERE season IS NULL")
-        self.assertEqual([(r["match_source"], json.loads(r["item_json"])["title"])
-                          for r in history], [("tmdb", "Old")])
+        row = await db.fetch_one("SELECT id, category_id FROM tier_items")
+        self.assertEqual((row["id"], row["category_id"]), (new, category))
+        self.assertEqual(await self._history_ratings(), [3])
+
+    async def test_between_two_untiered_board_rows_the_earlier_survives(self):
+        old, _new = await self._two_board_rows()
+        with self.assertLogs("app.metadata.holders", "WARNING"):
+            await self.rekey()
+        self.assertEqual(await db.fetch_value("SELECT id FROM tier_items"), old)
+        self.assertEqual(await self._history_ratings(), [9])
 
     async def test_a_title_no_shared_id_names_moves_only_where_such_titles_are_held(self):
         await db.execute("INSERT INTO calendar_airings (source, media, source_id, endpoint, "
@@ -285,3 +347,94 @@ class ARekeyMovesEveryHolderTests(DatabaseTestCase):
                          "show:tvdb:4321")
         self.assertEqual(await db.fetch_value("SELECT item_id FROM not_watching_shows"),
                          "show:tvdb:4321")
+
+
+
+
+def _row(**values) -> dict:
+    return {"rid": 1, **values}
+
+
+class MoreCompleteTests(unittest.TestCase):
+    """One rule per table, each a pure comparison of two rows."""
+
+    def test_a_month_record_that_recorded_a_breakdown_beats_one_that_did_not(self):
+        frozen = _row(watched_by_source='{"trakt": 3}', total_by_source=None, watched=3,
+                      total=10, created_at=5)
+        open_ = _row(watched_by_source=None, total_by_source=None, watched=9, total=10,
+                     created_at=1)
+        self.assertTrue(holders.more_complete("distrakt_month_records", frozen, open_))
+        self.assertFalse(holders.more_complete("distrakt_month_records", open_, frozen))
+
+    def test_a_month_record_then_ranks_watched_then_a_known_total_then_the_earlier(self):
+        base = dict(watched_by_source=None, total_by_source=None)
+        self.assertTrue(holders.more_complete(
+            "distrakt_month_records", _row(**base, watched=4, total=0, created_at=9),
+            _row(**base, watched=3, total=10, created_at=1)))
+        self.assertTrue(holders.more_complete(
+            "distrakt_month_records", _row(**base, watched=3, total=10, created_at=9),
+            _row(**base, watched=3, total=0, created_at=1)))
+        self.assertTrue(holders.more_complete(
+            "distrakt_month_records", _row(**base, watched=3, total=10, created_at=1),
+            _row(**base, watched=3, total=10, created_at=9)))
+
+    def test_a_tracker_row_ranks_watched_then_a_known_total_then_the_earlier(self):
+        rank = lambda a, b: holders.more_complete("distrakt_user_seasons", a, b)  # noqa: E731
+        self.assertTrue(rank(_row(watched=5, total=0, created_at=9),
+                             _row(watched=4, total=8, created_at=1)))
+        self.assertTrue(rank(_row(watched=4, total=8, created_at=9),
+                             _row(watched=4, total=0, created_at=1)))
+        self.assertTrue(rank(_row(watched=4, total=8, created_at=1),
+                             _row(watched=4, total=8, created_at=9)))
+
+    def test_a_board_row_ranks_a_tier_then_a_rating_then_the_earlier(self):
+        rank = lambda a, b: holders.more_complete("tier_items", a, b)  # noqa: E731
+        self.assertTrue(rank(_row(category_id=3, user_rating=None, created_at=9, id=9),
+                             _row(category_id=None, user_rating=10, created_at=1, id=1)))
+        self.assertTrue(rank(_row(category_id=None, user_rating=7, created_at=9, id=9),
+                             _row(category_id=None, user_rating=None, created_at=1, id=1)))
+        self.assertTrue(rank(_row(category_id=None, user_rating=None, created_at=1, id=1),
+                             _row(category_id=None, user_rating=None, created_at=9, id=9)))
+
+    def test_a_held_back_row_keeps_the_first_filed(self):
+        self.assertTrue(holders.more_complete("distrakt_unsettled_rows",
+                                              _row(created_at=1), _row(created_at=2)))
+
+    def test_questions_answers_and_plays_keep_the_newer(self):
+        self.assertTrue(holders.more_complete(
+            "distrakt_open_prompts", _row(watched_at="2026-05-02", created_at=1),
+            _row(watched_at="2026-05-01", created_at=9)))
+        self.assertTrue(holders.more_complete(
+            "distrakt_prompt_dismissals", _row(created_at=9), _row(created_at=1)))
+        self.assertTrue(holders.more_complete(
+            "distrakt_movie_watches", _row(watched_at="2026-05-02"),
+            _row(watched_at="2026-05-01")))
+
+    def test_progress_has_no_clock_so_neither_row_is_more_complete(self):
+        self.assertFalse(holders.more_complete("distrakt_show_progress", _row(), _row()))
+
+    def test_a_tie_is_not_a_win(self):
+        same = _row(watched=1, total=1, created_at=1)
+        self.assertFalse(holders.more_complete("distrakt_user_seasons", same, dict(same)))
+
+
+class GapsFilledTests(unittest.TestCase):
+    def test_only_empty_fields_are_filled_and_never_a_number(self):
+        survivor = _row(title="", network="HBO", watched=0, total=0, cadence=None,
+                        missing_sources_json="[]")
+        other = _row(title="Show", network="AMC", watched=9, total=10, cadence="Mon",
+                     missing_sources_json='["simkl"]')
+        self.assertEqual(holders.gaps_filled(survivor, other, ()),
+                         {"title": "Show", "cadence": "Mon",
+                          "missing_sources_json": '["simkl"]'})
+
+    def test_an_id_map_is_merged_with_the_survivors_ids_winning(self):
+        filled = holders.gaps_filled(_row(ids_json='{"tmdb": 900, "tvdb": 1}'),
+                                     _row(ids_json='{"tvdb": 2, "imdb": "tt9"}'), ())
+        self.assertEqual(json.loads(filled["ids_json"]),
+                         {"tmdb": 900, "tvdb": 1, "imdb": "tt9"})
+
+    def test_the_columns_that_say_which_row_it_is_are_never_copied(self):
+        self.assertEqual(holders.gaps_filled(_row(season=None, board_id=None),
+                                             _row(season=2, board_id=4),
+                                             ("season", "board_id")), {})

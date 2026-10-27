@@ -18,7 +18,7 @@ from ...config import Settings
 from .. import register
 from ..base import (Capabilities, Media, Record, SearchCatalogue, SearchPage,
                     SeasonsAnswer, Source, TitleFacts, Video)
-from . import detail, normalize, search
+from . import detail, normalize, search, transport
 from .transport import TmdbError, TmdbNotFound, TmdbRateLimited
 
 __all__ = ["TmdbError", "TmdbNotFound", "TmdbRateLimited"]
@@ -35,9 +35,10 @@ class _TmdbDetailPort:
         return settings.tmdb_configured
 
     async def fetch_details(self, settings: Settings, media, source_id,
-                            season: int | None, *, cache_only: bool = False) -> dict:
+                            season: int | None, *, cache_only: bool = False,
+                            fresh: bool = False) -> dict:
         return await detail.fetch_details(settings, media, source_id, season,
-                                          cache_only=cache_only)
+                                          cache_only=cache_only, fresh=fresh)
 
     async def fetch_videos(self, settings: Settings, media, source_id, *,
                            cache_only: bool = False) -> list[Video]:
@@ -58,8 +59,9 @@ class _TmdbDetailPort:
         return await detail.fetch_title_facts(settings, source_id, media)
 
     async def fetch_seasons(self, settings: Settings, source_id, media: Media, *,
-                            cached_only: bool = False) -> SeasonsAnswer:
-        return await detail.fetch_seasons(settings, source_id, media, cached_only=cached_only)
+                            cached_only: bool = False, fresh: bool = False) -> SeasonsAnswer:
+        return await detail.fetch_seasons(settings, source_id, media, cached_only=cached_only,
+                                          fresh=fresh)
 
 
 class _TmdbSearchPort:
@@ -96,6 +98,10 @@ class _TmdbProvider:
         # TMDB keeps no watch history, so it can never back the tracker — the
         # flag and the missing sync port below are one fact stated twice.
         private_user_data=False,
+        # TMDB's API terms forbid caching anything obtained from it for longer
+        # than six months; the title store drops a TMDB row not re-obtained
+        # inside that, held or not (app/metadata/rows.py).
+        retain_seconds=transport.MAX_CACHE_SECONDS,
         # EVERY SEARCH BOX ASKS TMDB, with the instance's read token, whoever is
         # searching: its catalogue covers both media, it pages, and a search of it
         # spends nobody's own account. Another service joins a search only when a

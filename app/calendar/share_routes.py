@@ -51,6 +51,7 @@ from ..config import load_settings
 from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, Endpoint, endpoint_choices, get_endpoint
 from ..media import artwork, logos, posters, user_images
 from ..perftrace import span
+from ..metadata import panel as metadata_panel
 from ..providers import detail_source
 from ..providers.base import (Item, Media, Source, SourceUnavailable,
                               parse_item_key, parse_media)
@@ -1376,7 +1377,7 @@ async def _describe_shared_title(request: Request, share_row, settings) -> _Desc
     # SAME HOLDS FOR THE THIRD: every service's videos are pooled over `bound`
     # and nothing else, so a service asked for its list is asked about a title
     # this link shows, by the id the link's own airing carries.
-    chosen, details = await detail_source.describe_panel(settings, chosen, bound,
+    chosen, details = await metadata_panel.describe_panel(settings, chosen, bound,
                                                          media, season)
     if details is None:
         return None

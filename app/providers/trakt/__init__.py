@@ -79,9 +79,10 @@ class _TraktDetailPort:
         return settings.trakt_catalogue_configured
 
     async def fetch_details(self, settings: Settings, media, source_id,
-                            season: int | None, *, cache_only: bool = False) -> dict:
+                            season: int | None, *, cache_only: bool = False,
+                            fresh: bool = False) -> dict:
         return await detail.fetch_details(settings, str(media), source_id, season,
-                                          cache_only=cache_only)
+                                          cache_only=cache_only, fresh=fresh)
 
     async def fetch_videos(self, settings: Settings, media, source_id, *,
                            cache_only: bool = False) -> list[Video]:
@@ -131,7 +132,7 @@ class _TraktDetailPort:
         return await detail.fetch_title_facts(settings, source_id, str(media))
 
     async def fetch_seasons(self, settings: Settings, source_id, media: Media, *,
-                            cached_only: bool = False) -> SeasonsAnswer:
+                            cached_only: bool = False, fresh: bool = False) -> SeasonsAnswer:
         """app/providers/base.py's DetailPort.fetch_seasons, over the existing
         `fetch_show_seasons` — see that function's own comment for the rule its
         answer already upholds (filtering on `episode_count` rather than
@@ -147,7 +148,7 @@ class _TraktDetailPort:
         would spend a request to restate what the caller already has.
         """
         seasons = await detail.fetch_show_seasons(settings, source_id,
-                                                  cached_only=cached_only)
+                                                  cached_only=cached_only, fresh=fresh)
         return SeasonsAnswer(seasons=seasons, named_season=None, ids={}, network="")
 
 
@@ -294,6 +295,10 @@ class _TraktProvider:
         # records and /sync/ratings are all reachable, which is what lets the
         # tracker and the ranker's ratings import be backed by this source.
         private_user_data=True,
+        # No storage ceiling is applied to Trakt's answers: its rows go by this
+        # app's own retention, and never while a feature row holds the title
+        # (app/metadata/rows.py's sweep_unlisted).
+        retain_seconds=None,
     )
     # What makes that `private_user_data=True` checkable rather than a claim: the
     # tracker asks the registry for this and never for Trakt by name.

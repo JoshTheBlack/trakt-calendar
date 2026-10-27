@@ -157,7 +157,8 @@ class CastTests(unittest.TestCase):
         cast = normalize.cast_from(fixture("cast_tv_severance"))
         self.assertEqual(cast[0]["name"], "Adam Scott")
         self.assertTrue(cast[0]["character"])
-        self.assertTrue(cast[0]["headshot"].startswith("https://wsrv.nl/"))
+        # TMDB's origin address: the panel proxies it when it draws it.
+        self.assertTrue(cast[0]["headshot"].startswith("https://image.tmdb.org/"))
         self.assertEqual(set(cast[0]), {"name", "character", "headshot"})
 
     def test_a_films_cast_names_its_character(self):
@@ -199,7 +200,11 @@ class SeasonsTests(unittest.TestCase):
         rows = normalize.panel_episodes(SEASON_2)
         self.assertEqual(rows[0]["number"], 1)
         self.assertEqual(rows[0]["title"], "Hello, Ms. Cobel")
-        self.assertEqual(rows[0]["air_display"], "16 Jan 2025")
+        # TMDB's own day, as it states it — a reader's spelling of it is the
+        # panel's (app/metadata/panel.py's `presented`).
+        self.assertEqual(rows[0]["first_aired"], "2025-01-16")
+        self.assertEqual(set(rows[0]), {"number", "title", "first_aired", "rating",
+                                        "overview", "episode_type", "runtime"})
 
 
 class TheRecordTests(unittest.TestCase):

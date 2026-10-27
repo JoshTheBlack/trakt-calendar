@@ -153,6 +153,7 @@ class TestCapabilities:
     CAPS = Capabilities(
         endpoints=frozenset({"shows/new"}),
         days_before=30, days_after=90, private_user_data=False,
+        retain_seconds=None,
     )
 
     def test_answers_only_the_endpoints_it_declares(self):
@@ -169,7 +170,8 @@ class TestCapabilities:
         """Trakt declares no window; an unbounded source must not accidentally
         read as one that covers nothing."""
         caps = Capabilities(endpoints=frozenset(), days_before=None,
-                            days_after=None, private_user_data=True)
+                            days_after=None, private_user_data=True,
+                            retain_seconds=None)
         assert caps.covers(date(1999, 1, 1), today=date(2026, 7, 15))
         assert caps.covers(date(2099, 1, 1), today=date(2026, 7, 15))
 

@@ -20,7 +20,7 @@ from datetime import date
 
 from ...config import Settings
 from .. import season as season_rules
-from ..base import (Media, Record, SeasonsAnswer, TitleFacts, Video, proxied_image)
+from ..base import Media, Record, SeasonsAnswer, TitleFacts, Video, genre_label
 from . import normalize, transport
 
 logger = logging.getLogger(__name__)
@@ -41,17 +41,20 @@ SEASON_TTL_SECONDS = 60 * 60
 
 
 async def title_payload(settings: Settings, tmdb_id, media: Media | str, *,
-                        cache_only: bool = False) -> dict | None:
+                        cache_only: bool = False, fresh: bool = False) -> dict | None:
     """The raw `/tv/{id}` or `/movie/{id}` answer, or None when TMDB has no such
     title (404) or, under `cache_only`, nothing is stored. Raises TmdbError when
-    TMDB could not be asked."""
+    TMDB could not be asked. `fresh` revalidates whatever is stored — a
+    conditional GET, so an unchanged title costs TMDB no body and still counts as
+    re-obtained."""
     media = Media(media)
     if tmdb_id in (None, ""):
         return None
     try:
         payload = await transport.cached_get(
             settings, f"{_PATHS[media]}/{tmdb_id}",
-            {"append_to_response": _APPENDS[media]}, cache_only=cache_only)
+            {"append_to_response": _APPENDS[media]},
+            ttl_seconds=0 if fresh else transport.DEFAULT_TTL_SECONDS, cache_only=cache_only)
     except transport.TmdbNotFound:
         return None
     return payload if isinstance(payload, dict) else None
@@ -80,7 +83,7 @@ _SEASON_CAST_PATH = "tv/{id}/season/{season}/aggregate_credits"
 
 
 async def cast_payload(settings: Settings, tmdb_id, media: Media, season: int | None, *,
-                       cache_only: bool = False) -> dict | None:
+                       cache_only: bool = False, fresh: bool = False) -> dict | None:
     """The raw cast listing for the title, or for one season of a show; None
     when TMDB has none (404) or nothing is stored under `cache_only`.
 
@@ -99,7 +102,9 @@ async def cast_payload(settings: Settings, tmdb_id, media: Media, season: int | 
             if media is Media.SHOW and season is not None
             else _CAST_PATHS[media].format(id=tmdb_id))
     try:
-        payload = await transport.cached_get(settings, path, cache_only=cache_only)
+        payload = await transport.cached_get(
+            settings, path, ttl_seconds=0 if fresh else transport.DEFAULT_TTL_SECONDS,
+            cache_only=cache_only)
     except transport.TmdbNotFound:
         return None
     return payload if isinstance(payload, dict) else None
@@ -114,8 +119,9 @@ async def fetch_videos(settings: Settings, media, tmdb_id, *,
 
 
 async def fetch_details(settings: Settings, media, tmdb_id, season: int | None, *,
-                        cache_only: bool = False) -> dict:
-    """One title as the details panel draws it — DetailPort's one key set.
+                        cache_only: bool = False, fresh: bool = False) -> dict:
+    """One title as TMDB describes it — DetailPort's one key set, with origin
+    addresses and TMDB's own days (base.DetailPort.fetch_details says why).
 
     A SEASON'S OWN WORDS TRAVEL BESIDE THE TITLE'S, as the Trakt package's do:
     `overview` is the show's and `season_overview` the season's, from the
@@ -132,15 +138,16 @@ async def fetch_details(settings: Settings, media, tmdb_id, season: int | None, 
     media = Media(media)
     per_season = media is Media.SHOW and season is not None
     payload, season_body, cast_body = await asyncio.gather(
-        title_payload(settings, tmdb_id, media, cache_only=cache_only),
-        season_payload(settings, tmdb_id, int(season), cache_only=cache_only)
+        title_payload(settings, tmdb_id, media, cache_only=cache_only, fresh=fresh),
+        season_payload(settings, tmdb_id, int(season), cache_only=cache_only, fresh=fresh)
         if per_season else _nothing(),
         cast_payload(settings, tmdb_id, media, season if per_season else None,
-                     cache_only=cache_only))
+                     cache_only=cache_only, fresh=fresh))
     cast = normalize.cast_from(cast_body or {})
     if per_season and not cast:
         cast = normalize.cast_from(
-            await cast_payload(settings, tmdb_id, media, None, cache_only=cache_only) or {})
+            await cast_payload(settings, tmdb_id, media, None, cache_only=cache_only,
+                               fresh=fresh) or {})
     info = payload or {}
     entry = normalize.season_entry(info, season if per_season else None)
     return {
@@ -158,11 +165,9 @@ async def fetch_details(settings: Settings, media, tmdb_id, season: int | None, 
         "release_types_by_country": (normalize.release_types_by_country(info)
                                      if media is Media.MOVIE else {}),
         "ids": normalize.ids_of(info),
-        # THROUGH THE SHARED PROXY: this answer goes straight to a browser.
-        "poster": proxied_image(normalize.poster_of(info)) or "",
+        "poster": normalize.poster_of(info),
         "runtime": normalize.runtime(info, media),
-        "genres": [slug.replace("-", " ").title()
-                   for slug in normalize.genre_slugs(info.get("genres"))],
+        "genres": [genre_label(slug) for slug in normalize.genre_slugs(info.get("genres"))],
         "genre_slugs": normalize.genre_slugs(info.get("genres")),
         "rating": normalize.rating(info),
         # TMDB publishes no IMDb score.
@@ -203,13 +208,14 @@ async def fetch_season_summary(settings: Settings, tmdb_id, season: int, media,
 
 
 async def fetch_seasons(settings: Settings, tmdb_id, media, *,
-                        cached_only: bool = False) -> SeasonsAnswer:
+                        cached_only: bool = False, fresh: bool = False) -> SeasonsAnswer:
     """The season picker's answer, from `/tv/{id}`'s own `seasons` list. TMDB
     never says a title IS one season of a larger show, so `named_season` is
     None; `ids` and `network` are what this one answer surfaced."""
     if Media(media) is not Media.SHOW or not tmdb_id:
         return SeasonsAnswer(seasons=[], named_season=None, ids={}, network="")
-    info = await title_payload(settings, tmdb_id, Media.SHOW, cache_only=cached_only) or {}
+    info = await title_payload(settings, tmdb_id, Media.SHOW, cache_only=cached_only,
+                               fresh=fresh) or {}
     return SeasonsAnswer(seasons=normalize.picker_seasons(info), named_season=None,
                          ids=normalize.ids_of(info), network=normalize.network_of(info))
 

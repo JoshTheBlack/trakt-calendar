@@ -94,3 +94,67 @@ class RegisteringWhatIsStoredTests(DatabaseTestCase):
         after = [tuple(r) for r in await db.fetch_all(
             "SELECT title_key, ids_json FROM titles ORDER BY title_key")]
         self.assertEqual(before, after)
+
+
+class SeedingWhatHeldRowsCarriedTests(DatabaseTestCase):
+    """Every word a tracker or board row carries a copy of reaches the store where
+    no service states it — once, after registration, and only while the copies
+    exist — so no row draws a blank once its readers read the store."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        now = db.now()
+        self.user_id = (await db.execute(
+            "INSERT INTO users (username, created_at, updated_at) VALUES ('v', ?, ?)",
+            (now, now))).lastrowid
+        self.board_id = (await db.execute(
+            "INSERT INTO tier_boards (user_id, uid, created_at, updated_at) VALUES (?, 'b', 1, 1)",
+            (self.user_id,))).lastrowid
+        await db.execute(
+            "INSERT INTO distrakt_user_seasons (user_id, media, match_source, match_id, season, "
+            "kind, title, network, tmdb, created_at) "
+            "VALUES (?, 'show', 'tmdb', '11', 1, 'keepup', 'Tracked', 'HBO', 11, 1)",
+            (self.user_id,))
+        await db.execute(
+            "INSERT INTO tier_items (board_id, media, match_source, match_id, season, tmdb, "
+            "ids_json, title, network, year, runtime, season_name, episode_count, created_at) "
+            "VALUES (?, 'show', 'tmdb', '12', 3, 12, '{}', 'Ranked', 'FX', '2021', 50, "
+            "'The Return', 8, 1)", (self.board_id,))
+        await db.set_meta(backfill.MARKER, "1")
+
+    async def words(self, key: str) -> tuple:
+        row = await db.fetch_one(
+            "SELECT title, network, year, runtime FROM title_metadata WHERE title_key = ?", (key,))
+        return tuple(row) if row is not None else None
+
+    async def test_both_rows_give_their_words_and_a_season_its_own(self):
+        self.assertEqual(await backfill.seed_words_once(), 2)
+        self.assertEqual(await self.words("show:tmdb:11"), ("Tracked", "HBO", "", None))
+        self.assertEqual(await self.words("show:tmdb:12"), ("Ranked", "FX", "2021", 50))
+        season = await db.fetch_one("SELECT name, episode_count FROM season_metadata "
+                                    "WHERE source_id = '12' AND season = 3")
+        self.assertEqual(tuple(season), ("The Return", 8))
+        self.assertEqual(await backfill.seed_words_once(), 0, "once")
+
+    async def test_a_word_a_service_states_is_kept(self):
+        await db.execute(
+            "INSERT INTO title_metadata (source, media, source_id, title_key, title, ids_json, "
+            "fetched_at) VALUES ('trakt', 'show', 'x', 'show:tmdb:11', 'The Service''s', "
+            "'{\"trakt\": 5, \"tmdb\": 11}', 1)")
+        await backfill.seed_words_once()
+        # Word by word: the name a service states stands, and the network nobody
+        # stated is seeded.
+        rows = {r["source"]: (r["title"], r["network"]) for r in await db.fetch_all(
+            "SELECT source, title, network FROM title_metadata WHERE title_key = 'show:tmdb:11'")}
+        self.assertEqual(rows, {"trakt": ("The Service's", ""), "tmdb": ("", "HBO")})
+
+    async def test_it_waits_for_registration(self):
+        await db.set_meta(backfill.MARKER, "0")
+        self.assertEqual(await backfill.seed_words_once(), 0)
+        self.assertIsNone(await self.words("show:tmdb:11"))
+
+    async def test_a_table_whose_copies_are_gone_gives_nothing(self):
+        for column in ("title", "network"):
+            await db.execute(f"ALTER TABLE distrakt_user_seasons DROP COLUMN {column}")
+        self.assertEqual(await backfill.seed_held_words(), 1)
+        self.assertIsNone(await self.words("show:tmdb:11"))

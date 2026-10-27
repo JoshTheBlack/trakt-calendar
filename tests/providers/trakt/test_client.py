@@ -15,7 +15,6 @@ import asyncio
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import patch
-from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -637,14 +636,16 @@ class TestModalShaping:
             {"number": 1, "title": "One", "first_aired": "2026-07-15T20:00:00.000Z"},
             {"number": 2, "title": "Two"},
             {"number": 3, "title": "Three", "first_aired": "not a date"},
-        ], ZoneInfo("UTC"))
+        ])
         assert [e["number"] for e in episodes] == [1, 2, 3]
-        assert [bool(e["air_display"]) for e in episodes] == [True, False, False]
+        # The instant as Trakt states it; which day it is is the reader's zone's.
+        assert [e["first_aired"] for e in episodes] == ["2026-07-15T20:00:00.000Z", "",
+                                                        "not a date"]
 
     def test_a_missing_season_response_is_an_empty_list_not_a_crash(self):
         """cache_only can leave the episodes lookup with nothing at all, and the
         modal renders around it."""
-        assert _episodes_from(None, ZoneInfo("UTC")) == []
+        assert _episodes_from(None) == []
 
 
 class TestATokenlessCallStillGoesOut:

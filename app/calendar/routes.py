@@ -38,12 +38,14 @@ from . import (cache as calendar_cache, enrich as calendar_enrich,
                share_links, state as calendar_state, vocab)
 from .. import (auth, authz, cache, chrome, clock, db, details_panel, metadata,
                 route_params)
+from ..metadata import panel as metadata_panel, pictures as metadata_pictures
+from ..metadata import refresh as metadata_refresh
 from ..metadata import rows as title_rows
 from ..auth import AuthLevel, viewer
 from ..config import load_settings
 from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, endpoint_choices, get_endpoint
 from ..integrations import routes as integrations_routes
-from ..media import logos
+from ..media import logos, posters
 from ..perftrace import span
 from ..providers import (UnknownSearchService, detail_source, season_choices,
                         title_search)
@@ -705,6 +707,17 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
         user, settings, prefs, endpoint, tz, year, month, not_watching,
         source_selection)
     view = _view_preferences(prefs, settings)
+    # A MONTH DRAWN IS ITS TITLES VIEWED, for the descriptions somebody has
+    # already asked for: a card draws each service's own listing, which the
+    # calendar's fill keeps current, so a title nobody has opened is not
+    # described for being on a calendar — but one that has been, and whose
+    # description has passed its clock, is re-read behind the page
+    # (app/metadata/refresh.py).
+    metadata_refresh.viewed(
+        settings,
+        [metadata_refresh.Wanted(str(item.media), item.ids, item.season)
+         for group in month_view.grouped for item in group["items"]],
+        budget=metadata_refresh.MONTH_BUDGET, missing=False)
 
     # Measured at 4.7ms against 31,358 stored airings, which is why it rides the
     # page render rather than a poll: a number a reader can refresh to is worth
@@ -846,6 +859,8 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
         # WHICH NETWORKS HAVE A LOGO, asked once here rather than once per
         # card by the browser — see `_logo_networks`.
         "logo_networks": logo_networks,
+        # WHAT EACH CARD'S PICTURE IS DRAWN AS — see `_card_pictures`.
+        "card_pictures": await _card_pictures(user, settings),
         # How many cards the shell is actually turning into HTML, for the render
         # span the caller opens around it.
         "inline_cards": sum(len(group["items"]) for group in month_view.grouped
@@ -985,6 +1000,18 @@ async def _logo_networks(settings, items) -> set[str]:
     if missing:
         _warm_logos_later(settings, missing)
     return known
+
+
+async def _card_pictures(user, settings) -> metadata_pictures.CardPictures:
+    """What this viewer's cards draw for a picture: the card's own, with this
+    app's report address behind it, so one that will not load is replaced at once
+    and its title healed (app/metadata/pictures.py) — in the viewer's own order,
+    the one every surface draws pictures in (posters.order_for). Every route that
+    draws a viewer's own cards hands this to the card template; the share page
+    does not, and keeps the static fallback chain."""
+    order = posters.order_for(
+        (await source_prefs.load(user.user_id)).source_order(list(Source)))
+    return metadata_pictures.CardPictures(settings, order)
 
 
 def _library(user, settings) -> integrations_routes.LibraryView | None:
@@ -1231,6 +1258,7 @@ async def calendar_day(request: Request):
         "settings": settings, "is_admin": bool(user and user.is_admin),
         # And the same add-to-library buttons, in the state they are in.
         "library": _library(user, settings),
+        "card_pictures": await _card_pictures(user, settings),
         "date": day.isoformat(), "label": calendar_cache.day_label(day),
         # The retry asks for exactly what the placeholder did, token included —
         # which is the whole of what a retry now has to carry forward.
@@ -1768,8 +1796,8 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
         # the chosen service has no episodes of is answered by the next service
         # that does (detail_source.for_season). A whole panel also pools every
         # service's videos; a season tab draws none, so it asks for none.
-        describe = (detail_source.describe_season if episodes_only
-                    else detail_source.describe_panel)
+        describe = (metadata_panel.describe_season if episodes_only
+                    else metadata_panel.describe_panel)
         chosen, details = await describe(settings, chosen, asked, media, season)
     except SourceUnavailable:
         # The shared degradation contract rather than one service's error type:
@@ -1795,6 +1823,12 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     # maps would let the same panel spell the same service's address two ways.
     ids = {**asked, **detail_source.names_from_query(params),
            **(details.get("ids") or {})}
+    # A PANEL OPENED IS A TITLE VIEWED: every service's description of it, and
+    # of the season on screen, that is past its clock is re-read behind the
+    # reader (app/metadata/refresh.py).
+    metadata_refresh.viewed(
+        settings, [metadata_refresh.Wanted(media, ids, season)],
+        budget=metadata_refresh.PANEL_BUDGET)
     progress = await _viewer_progress(request, params.get("key"), season, ids)
     if episodes_only:
         return details_panel.season_pane(request, details, media=media,
@@ -1811,7 +1845,11 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     # when a Record becomes a card's Item, and this route bypasses render() to
     # read the row directly). This is a second place that hands a picture to a
     # browser, so it proxies here too, through the same function render() uses.
-    poster = proxied_image(shown.get("poster", "")) or ""
+    # And reported like the card's own, when it will not load
+    # (app/metadata/pictures.py).
+    poster = ((await _card_pictures(user, settings)).picture(
+        media, ids, params.get("key", ""), params.get("poster", ""), shown.get("poster", ""))
+        or proxied_image(shown.get("poster", "")) or "")
     return details_panel.panel(
         request, details, media=media, season=season,
         title=shown.get("title", ""), poster=poster,
@@ -2091,6 +2129,7 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
         "request": request, "items": items,
         "not_watching": marked, "new_ids": meta.get("new_ids") or set(),
         "can_filter": True, "badge_modes": vocab.BadgeModes(prefs),
+        "card_pictures": await _card_pictures(user, settings),
         "settings": settings, "is_admin": bool(user and user.is_admin),
         "library": _library(user, settings),
         # WHICH NETWORKS HAVE A LOGO, asked once here rather than once per

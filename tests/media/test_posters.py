@@ -813,3 +813,94 @@ class LogoAgeCeilingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# a title with no tmdb id
+# ---------------------------------------------------------------------------
+
+class TitlesWithNoTmdbIdTests(ArtworkTestCase):
+    """Pictures for a title with no tmdb id are filed under the title store's key
+    for it (artwork's title_posters), with show_posters' columns and meanings,
+    and read through the same `known` and `ranked`."""
+
+    KEY = "show:tvdb:81189"
+
+    def file(self, tmdb, source, url):
+        asyncio.run(db.transaction(lambda conn: artwork.file_sighting(
+            conn, "show", tmdb, self.KEY, source, url, 1000)))
+
+    def test_a_sighting_goes_under_the_tmdb_id_where_there_is_one(self):
+        self.file(1396, "trakt", "https://img/t.jpg")
+        self.assertEqual(asyncio.run(artwork.urls_for("show", 1396)),
+                         {"trakt": "https://img/t.jpg"})
+        self.assertEqual(self.value("SELECT COUNT(*) FROM title_posters"), 0)
+
+    def test_and_under_the_title_key_where_there_is_none(self):
+        self.file(None, "simkl", "https://img/s.jpg")
+        self.assertEqual(asyncio.run(artwork.title_urls_for("show", self.KEY)),
+                         {"simkl": "https://img/s.jpg"})
+        self.assertEqual(self.value("SELECT COUNT(*) FROM show_posters"), 0)
+
+    def test_known_reads_them_in_the_viewers_order_and_skips_a_capped_one(self):
+        self.file(None, "simkl", "https://img/s.jpg")
+        self.file(None, "trakt", "https://img/t.jpg")
+        known = asyncio.run(artwork.known((), [("show", self.KEY)]))
+        self.assertEqual(known.addresses("show", None, None, ("trakt", "simkl"),
+                                         title_key=self.KEY),
+                         ["https://img/t.jpg", "https://img/s.jpg"])
+        for _ in range(artwork.MAX_FAIL_COUNT):
+            asyncio.run(artwork.record_title_failure("show", self.KEY, "trakt"))
+        known = asyncio.run(artwork.known((), [("show", self.KEY)]))
+        self.assertEqual(known.address("show", None, None, ("trakt", "simkl"),
+                                       title_key=self.KEY), "https://img/s.jpg")
+
+    def test_the_same_dead_address_stays_capped_and_a_new_one_starts_fresh(self):
+        self.file(None, "trakt", "https://img/dead.jpg")
+        for _ in range(artwork.MAX_FAIL_COUNT):
+            asyncio.run(artwork.record_title_failure("show", self.KEY, "trakt"))
+        self.file(None, "trakt", "https://img/dead.jpg")
+        self.assertEqual(asyncio.run(artwork.title_urls_for("show", self.KEY)), {})
+        self.file(None, "trakt", "https://img/new.jpg")
+        self.assertEqual(asyncio.run(artwork.title_urls_for("show", self.KEY)),
+                         {"trakt": "https://img/new.jpg"})
+
+    def test_the_registry_sweep_takes_them_too(self):
+        self.file(None, "tmdb", "https://img/m.jpg")
+        removed = asyncio.run(artwork.sweep(now=1000 + tmdb_client.MAX_CACHE_SECONDS))
+        self.assertEqual(removed, 1)
+
+
+class KeyedTileTests(unittest.IsolatedAsyncioTestCase):
+    ORDER = ("trakt", "simkl")
+    KEY = "show:tvdb:81189"
+
+    async def asyncSetUp(self):
+        migrated_db("keyed-tiles")
+        posters.POSTER_DIR = TMP / f"posters-keyed-{id(self)}"
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    async def test_a_tile_is_written_from_the_first_working_address_and_named_safely(self):
+        await artwork.record_title_poster_urls([
+            ("show", self.KEY, "trakt", "https://img/dead.jpg"),
+            ("show", self.KEY, "simkl", "https://img/live.jpg")])
+
+        async def fetch(url):
+            return None if "dead" in url else b"tile"
+
+        with patch.object(posters, "_try_source", side_effect=fetch):
+            self.assertEqual(await posters.ensure_title_posters(
+                CONFIGURED, [("show", self.KEY)], self.ORDER), 1)
+        tile = posters.cached_title_poster("show", self.KEY, self.ORDER)
+        self.assertEqual((tile.read_bytes(), tile.name.endswith(".simkl.jpg")), (b"tile", True))
+        self.assertNotIn(":", tile.name)
+        self.assertEqual(await db.fetch_value(
+            "SELECT fail_count FROM title_posters WHERE source = 'trakt'"), 1)
+
+    async def test_nothing_recorded_is_no_tile_and_no_request(self):
+        with patch.object(posters, "_try_source", side_effect=AssertionError("asked")):
+            self.assertEqual(await posters.ensure_title_posters(
+                CONFIGURED, [("show", self.KEY)], self.ORDER), 0)
+        self.assertIsNone(posters.cached_title_poster("show", self.KEY, self.ORDER))

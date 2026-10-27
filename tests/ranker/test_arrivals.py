@@ -126,7 +126,9 @@ class SearchAndImportArrivalTests(_ArrivalTestCase):
         asyncio.run(ranker.add_titles(
             self.user_id, BOARD, [show_ref(SHOW, "Show S3", season=3, episode_count=8)]))
         season = self.row(season_key(SHOW, 3))
-        self.assertEqual((season["title"], season["episode_count"]), ("Show S3", 8))
+        # THE TITLE'S NAME IS THE TITLE STORE'S, which the whole show filed when
+        # it arrived; the season brings the one word that is its own, its count.
+        self.assertEqual((season["title"], season["episode_count"]), ("Title 7", 8))
         # Nothing arrived about the rating, so the row keeps its own.
         self.assertEqual(season["user_rating"], 9)
         # But the whole show's season count describes the whole show: a season

@@ -14,6 +14,13 @@ A SEASON'S OWN ARTWORK is `season_posters`, the same bookkeeping with the season
 in its key (migration 44 says why it is a table of its own). A season with none
 falls back to its show's, and `pick` is the one place that order is decided.
 
+A TITLE WITH NO TMDB ID — anime, and titles only Simkl lists, about one stored
+title in ten — has nowhere to go in a table keyed on one, so its pictures are
+`title_posters`, keyed on the title store's own key for it instead, with the same
+columns and the same meanings (migration 47). The title store files them as it
+learns them (`file_sighting`); everything that reads a picture reads them through
+`known` and `ranked` as it reads the others, so `pick` stays the one answer.
+
 A TITLE NOTHING HAS A PICTURE FOR IS REMEMBERED TOO, as a `MISSING` row in
 show_posters (`record_miss`): an empty address with its fail_count already at
 the cap, so every reader that skips a failing source skips it as well, and a real
@@ -25,6 +32,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 from .. import db
 from ..providers.tmdb import transport as tmdb_transport
@@ -60,12 +68,21 @@ MISSING = "missing"
 # makes naming them in SQL safe.
 _SHOW = ("show_posters", ("media", "tmdb", "source"))
 _SEASON = ("season_posters", ("media", "tmdb", "season", "source"))
+_TITLE = ("title_posters", ("media", "title_key", "source"))
+_TABLES = ("show_posters", "season_posters", "title_posters")
 
 
 def _upsert_one(conn: db.Connection, media: str, tmdb: int, source: str, url: str, ts: int,
                 season: int | None = None, fail_count: int = 0) -> None:
-    table, columns = _SHOW if season is None else _SEASON
-    key = (media, tmdb, source) if season is None else (media, tmdb, season, source)
+    if season is None:
+        _upsert(conn, _SHOW, (media, tmdb, source), url, ts, fail_count)
+    else:
+        _upsert(conn, _SEASON, (media, tmdb, season, source), url, ts, fail_count)
+
+
+def _upsert(conn: db.Connection, spec: tuple[str, tuple[str, ...]], key: tuple, url: str,
+            ts: int, fail_count: int = 0) -> None:
+    table, columns = spec
     match = " AND ".join(f"{column} = ?" for column in columns)
     row = conn.execute(f"SELECT url FROM {table} WHERE {match}", key).fetchone()
     if row is None:
@@ -84,6 +101,57 @@ def _upsert_one(conn: db.Connection, media: str, tmdb: int, source: str, url: st
             f"last_failed_at = NULL WHERE {match}",
             (url, ts, fail_count, *key),
         )
+
+
+def file_sighting(conn: db.Connection, media: str, tmdb: int | None, title_key: str,
+                  source: str, url: str, ts: int) -> None:
+    """A picture a service stated for a title, filed inside the caller's
+    transaction: under its tmdb id where the title has one, else under the title
+    store's key for it (`title_posters`). What the title store calls as it
+    writes a service's description or listing, so the registry learns a
+    service's new address the moment the store does — which is also what heals a
+    dead one (app/metadata/refresh.py)."""
+    if not media or not source or not url:
+        return
+    if tmdb:
+        _upsert(conn, _SHOW, (str(media), int(tmdb), str(source)), str(url), ts)
+    elif title_key:
+        _upsert(conn, _TITLE, (str(media), str(title_key), str(source)), str(url), ts)
+
+
+async def record_title_poster_urls(sightings) -> None:
+    """record_poster_urls for titles with no tmdb id: `sightings` is an iterable
+    of (media, title_key, source, url). Best-effort, the same way."""
+    found = [(m, k, s, u) for m, k, s, u in sightings if m and k and s and u]
+    if not found:
+        return
+    ts = db.now()
+
+    def _work(conn: db.Connection) -> None:
+        for media, key, source, url in found:
+            _upsert(conn, _TITLE, (media, key, source), url, ts)
+
+    try:
+        await db.transaction(_work)
+    except db.DatabaseError:
+        pass
+
+
+async def record_title_failure(media: str, title_key: str, source: str) -> None:
+    """record_failure, for a title with no tmdb id."""
+    await db.execute(
+        "UPDATE title_posters SET fail_count = fail_count + 1, last_failed_at = ? "
+        "WHERE media = ? AND title_key = ? AND source = ?",
+        (db.now(), media, title_key, source))
+
+
+async def title_urls_for(media: str, title_key: str) -> dict[str, str]:
+    """urls_for, for a title with no tmdb id."""
+    rows = await db.fetch_all(
+        "SELECT source, url FROM title_posters "
+        "WHERE media = ? AND title_key = ? AND fail_count < ?",
+        (media, title_key, MAX_FAIL_COUNT))
+    return {str(row["source"]): str(row["url"]) for row in rows}
 
 
 async def record_poster_url(media: str, tmdb: int, source: str, url: str) -> None:
@@ -197,6 +265,53 @@ async def record_miss(media: str, tmdb: int) -> None:
         pass
 
 
+def _row_of(media: str, tmdb: int | None, title_key: str, season: int | None,
+            source: str) -> tuple[str, tuple[str, ...], tuple]:
+    """(table, key columns, key) of the one registry row a picture was read from:
+    a season's own, a title's by tmdb id, or a title's by the store's key."""
+    if tmdb:
+        if season is not None:
+            return (*_SEASON, (media, int(tmdb), int(season), source))
+        return (*_SHOW, (media, int(tmdb), source))
+    return (*_TITLE, (media, title_key, source))
+
+
+async def address_of(media: str, tmdb: int | None, title_key: str, season: int | None,
+                     source: str) -> tuple[str, int] | None:
+    """(address, fail_count) of the registry row `source` stated for a title (or
+    its season's own artwork), or None. What a report is checked against: the
+    address the server drew is read back from here, never from the request."""
+    table, columns, key = _row_of(media, tmdb, title_key, season, source)
+    match = " AND ".join(f"{column} = ?" for column in columns)
+    row = await db.fetch_one(f"SELECT url, fail_count FROM {table} WHERE {match}", key)
+    return None if row is None else (str(row["url"]), int(row["fail_count"]))
+
+
+async def cap(media: str, tmdb: int | None, title_key: str, season: int | None,
+              source: str, url: str) -> bool:
+    """A picture CONFIRMED dead: its row goes to the cap, so nothing draws it
+    again, and stays there while a service keeps stating the same address
+    (`_upsert` keeps a re-sighted address's failures) — a new address starts
+    fresh. Only while the row still holds `url`: a row already re-pointed is not
+    the picture that died. Returns whether a row was capped."""
+    table, columns, key = _row_of(media, tmdb, title_key, season, source)
+    match = " AND ".join(f"{column} = ?" for column in columns)
+    result = await db.execute(
+        f"UPDATE {table} SET fail_count = ?, last_failed_at = ? WHERE {match} AND url = ?",
+        (MAX_FAIL_COUNT, db.now(), *key, url))
+    return result.rowcount > 0
+
+
+async def note_failure(media: str, tmdb: int | None, title_key: str, season: int | None,
+                       source: str, url: str) -> None:
+    """A picture that failed for a reason that says nothing about the picture —
+    its host erring, refusing or slow: when, and nothing else."""
+    table, columns, key = _row_of(media, tmdb, title_key, season, source)
+    match = " AND ".join(f"{column} = ?" for column in columns)
+    await db.execute(f"UPDATE {table} SET last_failed_at = ? WHERE {match} AND url = ?",
+                     (db.now(), *key, url))
+
+
 @dataclass
 class Known:
     """What the registry holds for a batch of titles, read in one go (`known`):
@@ -205,21 +320,38 @@ class Known:
     shows: dict[tuple[str, int], dict[str, str]] = field(default_factory=dict)
     seasons: dict[tuple[str, int, int], dict[str, str]] = field(default_factory=dict)
     missed: set[tuple[str, int]] = field(default_factory=set)
-    # The addresses left out for failing: what a reader merging in another copy
-    # of a service's address (the title store's own row of it) must leave out,
-    # or a picture the registry has given up on would be drawn again from the
-    # copy.
+    # A title with no tmdb id, by (media, the title store's key) — see the module
+    # docstring. It has no season artwork: only Trakt publishes any, and Trakt
+    # lists almost no title without a tmdb id (migration 47 measured five).
+    titles: dict[tuple[str, str], dict[str, str]] = field(default_factory=dict)
+    # EVERY ADDRESS AT THE CAP, whichever table it is in: what a reader merging
+    # another copy of a service's address (the title store's own row of it) must
+    # leave out, or a picture confirmed dead would be drawn again from the copy.
     capped: set[str] = field(default_factory=set)
 
-    def address(self, media: str, tmdb: int, season: int | None,
-                order: Iterable[str]) -> str:
+    def choices(self, media: str, tmdb: int | None, season: int | None,
+                order: Iterable[str], *, title_key: str = "") -> list["Choice"]:
+        """`addresses`, each with the service that stated it and whether it is
+        the season's own (`ranked_choices`)."""
+        if not tmdb:
+            return ranked_choices(self.titles.get((media, title_key), {}), {}, order, None)
+        return ranked_choices(
+            self.shows.get((media, tmdb), {}),
+            self.seasons.get((media, tmdb, season), {}) if season is not None else {},
+            order, season)
+
+    def address(self, media: str, tmdb: int | None, season: int | None,
+                order: Iterable[str], *, title_key: str = "") -> str:
         """The picture for one title (or season), in `order`: see `pick`."""
-        found = self.addresses(media, tmdb, season, order)
+        found = self.addresses(media, tmdb, season, order, title_key=title_key)
         return found[0] if found else ""
 
-    def addresses(self, media: str, tmdb: int, season: int | None,
-                  order: Iterable[str]) -> list[str]:
-        """That picture and every one behind it, in `order`: see `ranked`."""
+    def addresses(self, media: str, tmdb: int | None, season: int | None,
+                  order: Iterable[str], *, title_key: str = "") -> list[str]:
+        """That picture and every one behind it, in `order`: see `ranked`. A
+        title with no tmdb id is read by `title_key`."""
+        if not tmdb:
+            return ranked(self.titles.get((media, title_key), {}), {}, order)
         return ranked(self.shows.get((media, tmdb), {}),
                       self.seasons.get((media, tmdb, season), {}) if season is not None else {},
                       order)
@@ -251,23 +383,53 @@ def ranked(show: Mapping[str, str], season: Mapping[str, str],
     next one is what the viewer sees — the picture they would have been shown had
     the dead one never been recorded.
     """
+    return [choice.url for choice in ranked_choices(show, season, order, None)]
+
+
+class Choice(NamedTuple):
+    """One address `ranked` considers: the service that stated it, the address,
+    and the season it is the own artwork of (None: the title's)."""
+    source: str
+    url: str
+    season: int | None
+
+
+def ranked_choices(show: Mapping[str, str], season: Mapping[str, str],
+                   order: Iterable[str], season_number: int | None) -> list[Choice]:
+    """`ranked`, saying who stated each address — what a report of one of them
+    needs, to name the row it came from (app/metadata/pictures.py)."""
     order = tuple(order)
-    out: list[str] = []
-    for urls in (season, show):
+    out: list[Choice] = []
+    seen: set[str] = set()
+    for urls, which in ((season, season_number), (show, None)):
         for source in order:
             url = urls.get(source)
-            if url and url not in out:
-                out.append(url)
+            if url and url not in seen:
+                seen.add(url)
+                out.append(Choice(source, url, which))
     return out
 
 
-async def known(refs: Iterable[tuple[str, int, int | None]]) -> Known:
+async def known(refs: Iterable[tuple[str, int, int | None]],
+                keys: Iterable[tuple[str, str]] = ()) -> Known:
     """Everything the registry holds for `refs` — (media, tmdb, season or None)
-    — in two reads however many titles there are, for a page that draws a
+    — and for `keys`, titles with no tmdb id as (media, title store key), in a
+    read per table however many titles there are, for a page that draws a
     picture per row and must not read per row. Failing addresses are left out
     as `urls_for` leaves them out."""
     refs = {(str(m), int(t), s) for m, t, s in refs if m and t}
     out = Known()
+    wanted = sorted({str(k) for m, k in keys if m and k})
+    if wanted:
+        marks = ", ".join("?" for _ in wanted)
+        for row in await db.fetch_all(
+                f"SELECT media, title_key, source, url, fail_count FROM title_posters "
+                f"WHERE title_key IN ({marks})", wanted):
+            if row["fail_count"] >= MAX_FAIL_COUNT:
+                out.capped.add(str(row["url"]))
+                continue
+            out.titles.setdefault((str(row["media"]), str(row["title_key"])),
+                                  {})[str(row["source"])] = str(row["url"])
     tmdbs = sorted({t for _, t, _ in refs})
     if not tmdbs:
         return out
@@ -306,7 +468,7 @@ async def sweep(now: int | None = None) -> int:
     cutoff = ts - POSTER_URL_RETENTION_SECONDS
     tmdb_cutoff = ts - tmdb_transport.MAX_CACHE_SECONDS
     removed = 0
-    for table in ("show_posters", "season_posters"):
+    for table in _TABLES:
         result = await db.execute(
             f"DELETE FROM {table} WHERE last_seen_at <= ? "
             f"OR (source = ? AND last_seen_at <= ?)",

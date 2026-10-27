@@ -33,6 +33,7 @@ from app.calendar import cache as calendar_cache, routes as calendar_routes
 from app.calendar import state as calendar_state
 from app.calendar import vocab
 from app.endpoints import ENDPOINTS
+from app.metadata import refresh as metadata_refresh
 from app.providers.base import Capabilities
 from app.providers.trakt import TraktError
 from app.config import Settings, save_settings
@@ -72,7 +73,7 @@ class _ThirdSource:
     calendar_port = object()
     capabilities = Capabilities(
         endpoints=frozenset({"shows"}), days_before=None, days_after=None,
-        private_user_data=False)
+        private_user_data=False, retain_seconds=None)
 
     def is_configured(self, settings) -> bool:
         return True
@@ -1051,6 +1052,19 @@ class ServerRenderedViewTests(CalendarRouteTestCase):
     def _stored_baseline(self) -> dict:
         return asyncio.run(calendar_state.load_view_state(
             self.user_id, self.ENDPOINT, 2026, 7))
+
+    def test_a_month_drawn_names_its_titles_for_the_descriptions_already_asked_for(self):
+        """Every card, to the title store's refresh queue — but only a
+        description somebody already asked for is due for being on a calendar
+        (`missing=False`): a card draws each service's own listing."""
+        seen = []
+        with patch.object(metadata_refresh, "viewed",
+                          lambda settings, wanted, **kw: seen.append((list(wanted), kw))):
+            self.client.get(self.PAGE)
+        (wanted, kw), = seen
+        self.assertEqual((kw["budget"], kw["missing"]),
+                         (metadata_refresh.MONTH_BUDGET, False))
+        self.assertEqual(len(wanted), 4)
 
     def test_the_stat_tiles_carry_the_whole_months_counts(self):
         self.client.post("/api/state?year=2026&month=7&endpoint=shows",
@@ -2310,7 +2324,40 @@ class TheCoverageGapSwitchTests(unittest.TestCase):
         describer = type("Describer", (), {
             "source": "mercury", "label": "Mercury", "calendar_port": None,
             "capabilities": Capabilities(endpoints=frozenset(), days_before=None,
-                                         days_after=None, private_user_data=False)})()
+                                         days_after=None, private_user_data=False,
+                                         retain_seconds=None)})()
         _message, url = self._gap({"mercury": describer, **providers.registered()})
         self.assertNotIn("mercury", url or "")
         self.assertIn("source=trakt", url)
+
+
+class CardPicturesReportTests(CalendarRouteTestCase):
+    """A VIEWER'S OWN CARD reports a picture that will not load: its picture is
+    drawn with this app's report address as the image proxy's default
+    (app/metadata/pictures.py). A SHARE PAGE never does — it draws the same card
+    with the static fallback chain, and a stranger's view costs the owner
+    nothing."""
+
+    REPORT = "api%2Fposters%2Fmissed"
+
+    def setUp(self):
+        super().setUp()
+        save_settings(dataclasses.replace(_configured_settings(),
+                                          public_base_url="https://testserver"))
+        self.user_id = self._make_user("card_pictures_viewer")
+        self.sign_in_as(self.user_id)
+        entry = _entry("pictured", "Pictured", "2026-07-15T20:00:00Z")
+        entry["show"]["images"] = {"poster": ["media.trakt.tv/images/shows/1/p.jpg"]}
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch([entry]))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_viewers_card_reports_and_a_share_page_does_not(self):
+        html = self.client.get("/?year=2026&month=7&endpoint=shows").text
+        self.assertIn("media.trakt.tv%2Fimages%2Fshows%2F1%2Fp.jpg", html)
+        self.assertIn(self.REPORT, html)
+        from app.calendar import share_links
+        token = asyncio.run(share_links.get_or_create(self.user_id))["token"]
+        shared = self.client.get(f"/s/{token}?year=2026&month=7&endpoint=shows").text
+        self.assertIn("media.trakt.tv%2Fimages%2Fshows%2F1%2Fp.jpg", shared)
+        self.assertNotIn(self.REPORT, shared)

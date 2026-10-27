@@ -23,7 +23,9 @@ import asyncio
 from urllib.parse import parse_qs, urlencode, urlsplit
 from unittest.mock import patch
 
+from app import db
 from app.config import Settings
+from app.metadata import refresh as metadata_refresh, rows
 from app.providers.trakt import transport
 from app.ranker import core as ranker
 from tests.support import AppTestCase, DetailsPanel, ORIGIN
@@ -130,8 +132,13 @@ class ABoardTitleOpensThePanelTests(_BoardPanelTestCase):
         self.assertIn("Spies.", html)
         self.assertIn("What season 1 is about.", html)
 
-    def test_the_rows_own_count_can_widen_the_strip(self):
-        key = self.add(ids={"trakt": 7, "tmdb": 1}, season_count=5)
+    def test_a_count_another_service_states_can_widen_the_strip(self):
+        """The board row draws its season count from the title store, where a
+        service other than the one describing the panel may count more seasons;
+        that count is the surface's floor (details_panel.panel)."""
+        key = self.add(ids={"trakt": 7, "tmdb": 1})
+        asyncio.run(db.execute(f"UPDATE {rows.TITLES} SET season_count = 5 "
+                               "WHERE source = 'tmdb' AND title_key = ?", (key,)))
         panel = DetailsPanel(self.get(self.panel_url(key))[0])
         self.assertEqual(panel.season_tabs, [1, 2, 3, 4, 5])
 
@@ -304,3 +311,33 @@ class ATitleOnlyTmdbKnowsTests(_BoardPanelTestCase):
         self.assertIn('href="https://www.themoviedb.org/tv/42"', html)
         self.assertIn("tv/42", asked)
         self.assertIn("Board Lead", html)
+
+
+class ABoardTitleViewedTests(_BoardPanelTestCase):
+    """A board's panel and its rows name their titles to the title store's
+    refresh queue (app/metadata/refresh.py) — behind the page. A row's own filing
+    id rides with its ids, so a title filed by one service's id is asked of it."""
+
+    def setUp(self):
+        super().setUp()
+        self.seen = []
+        recorder = patch.object(metadata_refresh, "viewed",
+                                lambda settings, wanted, **kw: self.seen.append(
+                                    (list(wanted), kw)))
+        recorder.start()
+        self.addCleanup(recorder.stop)
+
+    def test_a_panel_names_its_title(self):
+        key = self.add(ids={"trakt": 7, "tmdb": 1})
+        self.get(self.panel_url(key))
+        (wanted, kw), = self.seen
+        self.assertEqual(kw["budget"], metadata_refresh.PANEL_BUDGET)
+        self.assertEqual([(w.media, str(w.ids.get("tmdb"))) for w in wanted], [("show", "1")])
+
+    def test_the_rows_a_board_draws_are_named(self):
+        self.add("1", ids={"tmdb": 1})
+        self.add("2", ids={"tmdb": 2})
+        self.client.get(f"/rankings?board={BOARD}")
+        (wanted, kw), = self.seen
+        self.assertEqual(kw["budget"], metadata_refresh.ROWS_BUDGET)
+        self.assertEqual(sorted(str(w.ids.get("tmdb")) for w in wanted), ["1", "2"])

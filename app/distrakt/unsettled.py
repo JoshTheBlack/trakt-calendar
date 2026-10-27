@@ -68,6 +68,7 @@ from __future__ import annotations
 import logging
 
 from .. import db
+from ..metadata import descriptions
 from ..providers.base import collect_ids
 from ..providers.trakt import TraktError
 from . import counts, lifecycle, live, store, watch_history
@@ -156,6 +157,14 @@ async def settle(user_id: int, settings) -> None:
             (user_id, month),
         )
         records = [_record(row) for row in rows]
+        # A HELD ROW'S WORDS ARE THE ONLY RECORD OF THEM, and the list it is
+        # about to join keeps none: where the title store has none for a title,
+        # these go there until its own service describes it.
+        await db.transaction(lambda conn: [
+            descriptions.seed_words(conn, record["media"], record["ids"],
+                                    title=record["title"], network=record["network"],
+                                    now=db.now())
+            for record in records])
         try:
             # allow_degrade=False: one failed lookup aborts the month rather than
             # being rendered around. A degraded lookup here is not a gap in what is

@@ -281,7 +281,7 @@ class ThePanelHeaderCarriesTheSameButtonsTests(_LibraryTestCase):
     def _panel(self) -> str:
         chosen = detail_source.Answerer(Source.TRAKT, "1", stored_only=False)
         with patch("app.providers.detail_source.choose", return_value=chosen), \
-             patch("app.providers.detail_source.describe",
+             patch("app.metadata.panel.describe",
                    AsyncMock(return_value={"title": "Held Show", "overview": "A show."})):
             return self.client.get(self.URL).text
 

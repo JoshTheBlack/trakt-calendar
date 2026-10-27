@@ -41,6 +41,9 @@ from ..auth import AuthLevel, viewer
 from ..calendar import share_links
 from ..config import load_settings
 from ..metadata import identity as title_identity
+from ..metadata import panel as metadata_panel
+from ..metadata import pictures as metadata_pictures
+from ..metadata import refresh as metadata_refresh
 from ..metadata import rows as title_rows
 from ..metadata import typed_search
 from ..endpoints import endpoint_choices
@@ -1213,6 +1216,18 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
             _, unknown = await _row_pictures(user_id, shows, movies)
             if unknown:
                 await posters.ensure_addresses(settings, unknown, await _poster_order(user_id))
+        # ROWS DRAWN ARE TITLES VIEWED: each row's description, and the season it
+        # is, that is past its clock — or that no service has given yet — is
+        # re-read behind the page (app/metadata/refresh.py). The rows draw what
+        # the store holds now.
+        metadata_refresh.viewed(
+            settings,
+            [metadata_refresh.Wanted(str(show.get("media") or Media.SHOW),
+                                     show.get("ids") or {}, show.get("season"))
+             for show in shows]
+            + [metadata_refresh.Wanted(str(Media.MOVIE), film.get("ids") or {})
+               for film in movies or []],
+            budget=metadata_refresh.ROWS_BUDGET)
 
     with span("payload.render"):
         # The first notice takes the PREMIERE records alone. It announces what
@@ -1614,23 +1629,28 @@ async def _row_pictures(user_id: int, shows: list[dict], films: list[dict] | Non
     is safe to call while drawing it.
 
     THE ADDRESS, NEVER THE IMAGE: nothing here puts a picture on disk. The row
-    draws the address through the image proxy, with the other recorded pictures
-    behind it as the proxy's fallbacks (artwork.ranked says why).
+    draws the address through the image proxy with this app's report address
+    behind it, so a picture that will not load is replaced at once by the next
+    recorded one and its title healed (app/metadata/pictures.py).
 
     THE REGISTRY'S ADDRESS FOR A SERVICE WINS over the title store's own row of
     it, which only fills a service the registry holds nothing for — and never with
-    an address the registry has given up on, or a picture known to be failing
-    would be drawn again from the copy.
+    an address the registry has capped, or a picture confirmed dead would be
+    drawn again from the copy.
     """
     rows = ([(Media.SHOW, show) for show in shows if show.get("key")]
             + [(Media.MOVIE, film) for film in films or [] if film.get("key")])
     order = await _poster_order(user_id)
+    settings = load_settings()
     stored = {media: await title_rows.posters_for(
                   [row["key"] for kind, row in rows if kind == media], media)
               for media in (Media.SHOW, Media.MOVIE)}
     refs = [(str(media), tmdb, row.get("season")) for media, row in rows
             if (tmdb := _row_tmdb(row))]
-    known = await artwork.known(refs)
+    # A title with no tmdb id: the registry's pictures of it are filed under its
+    # key (artwork's title_posters), which is the row's own key.
+    known = await artwork.known(refs, [(str(media), str(row["key"])) for media, row in rows
+                                       if not _row_tmdb(row)])
     pictures: dict[tuple[str, int | None], str] = {}
     unknown: set[tuple[str, int]] = set()
     for media, row in rows:
@@ -1640,12 +1660,16 @@ async def _row_pictures(user_id: int, shows: list[dict], films: list[dict] | Non
         own = known.seasons.get((*pair, season), {}) if tmdb and season is not None else {}
         # The picture and, behind it, every other one in the same order: an
         # address recorded here can die at its host (artwork.ranked).
+        filed = (known.shows.get(pair, {}) if tmdb
+                 else known.titles.get((str(media), str(row["key"])), {}))
         kept = {source: url for source, url in stored[media].get(row["key"], {}).items()
                 if url not in known.capped}
-        addresses = artwork.ranked({**kept, **known.shows.get(pair, {})}, own, order)
-        pictures[(str(row["key"]), season)] = (
-            (proxied_image(addresses[0], fallbacks=addresses[1:]) or "") if addresses else "")
-        if not addresses and tmdb and pair not in known.missed:
+        choices = artwork.ranked_choices({**kept, **filed}, own, order, season)
+        title = metadata_pictures.Title(str(media), tmdb, "" if tmdb else str(row["key"]),
+                                        season)
+        pictures[(str(row["key"]), season)] = metadata_pictures.drawn(
+            settings, title, choices, order)
+        if not choices and tmdb and pair not in known.missed:
             unknown.add(pair)
     return pictures, sorted(unknown)
 
@@ -2116,8 +2140,8 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
         # of is answered by the next service that does (detail_source.for_season).
         # A whole panel also pools every service's videos; a season tab draws
         # none, so it asks for none.
-        describe = (detail_source.describe_season if episodes_only
-                    else detail_source.describe_panel)
+        describe = (metadata_panel.describe_season if episodes_only
+                    else metadata_panel.describe_panel)
         chosen, details = await describe(settings, chosen, ids, Media.SHOW, season)
         source = chosen.source
         if details is None:
@@ -2156,6 +2180,10 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     # about who watched what. The ids handed over are the row's own, learned
     # ones included — the same map the outbound buttons are built from, so a
     # service with a working tick has a working button.
+    # A PANEL OPENED IS A TITLE VIEWED (app/metadata/refresh.py).
+    metadata_refresh.viewed(
+        settings, [metadata_refresh.Wanted(str(Media.SHOW), {**ids, **fresh_ids}, season)],
+        budget=metadata_refresh.PANEL_BUDGET)
     progress = await episode_progress.for_season(user_id, key, season, ids)
     if episodes_only:
         return details_panel.season_pane(request, details, media=str(Media.SHOW),
@@ -2216,7 +2244,7 @@ async def _film_details(request: Request, user_id: int, key: ItemKey, settings) 
     if chosen is None:
         return details_panel.gap(request, "Nothing here can describe this item.")
     try:
-        chosen, details = await detail_source.describe_panel(
+        chosen, details = await metadata_panel.describe_panel(
             settings, chosen, ids, Media.MOVIE, None)
     except Exception:
         # Drawn rather than answered with a status, for the reason the show
@@ -2225,6 +2253,9 @@ async def _film_details(request: Request, user_id: int, key: ItemKey, settings) 
         return details_panel.gap(request, "⚠️ Could not load details for this item.")
     if details is None:
         return details_panel.gap(request, "Nothing here can describe this item.")
+    metadata_refresh.viewed(
+        settings, [metadata_refresh.Wanted(str(Media.MOVIE), {**ids, **(details.get("ids") or {})})],
+        budget=metadata_refresh.PANEL_BUDGET)
     pictures, _ = await _row_pictures(user_id, [], [{"key": str(key), "ids": ids}])
     return details_panel.panel(
         request, details, media=str(Media.MOVIE), season=None,
