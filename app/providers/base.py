@@ -166,6 +166,30 @@ class SourceUnavailable(Exception):
         self.status = status
 
 
+class SourcePending(SourceUnavailable):
+    """A source WILL answer for this window, but its answer is still being worked
+    out behind the request — and `ready` says when it can be read.
+
+    WHAT IT IS FOR. Some answers cannot be read off one listing: TMDB publishes
+    no season-premieres calendar, so its answer is DERIVED from every show airing
+    that week, a few hundred lookups measured at tens of seconds per week cold.
+    A fill a reader is waiting on must not wait for that, so the source starts
+    the work, raises this at once, and the caller stores what everybody else
+    said. `ready` is an awaitable that finishes when the answer can be read (a
+    fetch of the same window then returns it) and raises when the work failed.
+
+    A SourceUnavailable, so a caller that does not know the difference treats the
+    source as one that could not answer, which is the safe reading. The calendar
+    cache knows it (app/calendar/cache.py): it records the source as asked and
+    not yet answered, does not call that a failure, and fills the window again
+    for that source alone once `ready` finishes.
+    """
+
+    def __init__(self, message: str, ready):
+        super().__init__(message)
+        self.ready = ready
+
+
 class Media(StrEnum):
     """The two kinds of title this app deals in.
 
@@ -870,6 +894,16 @@ class Capabilities:
     # catalogue a box searches first is a fact each package states about itself
     # and never one service standing in for another.
     searched_by_default: bool = False
+    # Whether a calendar listing this source stores SPARSE — `enriched=False`,
+    # its network, status and certification unknown — is completed by DESCRIBING
+    # the title through this source's own DetailPort: the title store's refresh
+    # queue asks it for every such row (app/metadata/refresh.py's
+    # `queue_listed`). A DECLARATION PER SOURCE, because how a sparse listing is
+    # completed differs by service and is that service's fact: a listing that
+    # arrives complete needs nothing, and one whose per-title read needs a
+    # viewer's token is completed some other way (Simkl's, by
+    # app/calendar/enrich.py's drain, which says why).
+    describes_sparse_listings: bool = False
 
     def answers(self, endpoint_key: str) -> bool:
         return endpoint_key in self.endpoints

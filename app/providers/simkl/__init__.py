@@ -280,6 +280,13 @@ class _SimklProvider:
         # app's own retention, and never while a feature row holds the title
         # (app/metadata/rows.py's sweep_unlisted).
         retain_seconds=None,
+        # SPARSE, AND COMPLETED ELSEWHERE. Simkl's calendar files carry a title,
+        # an id, a date and a picture, so every listing is stored unenriched —
+        # and completed by app/calendar/enrich.py's drain against simkl_titles,
+        # through the cached-by-id /tv/{id} family, not by describing the title
+        # through the DetailPort: that port's per-title reads need a viewer's
+        # token, which a background pass for the whole instance does not have.
+        describes_sparse_listings=False,
     )
     sync_port = _SimklSyncPort()
     # THE CALENDAR PORT, DECLARED IN THE SAME CHANGE AS THE ENDPOINT SET ABOVE

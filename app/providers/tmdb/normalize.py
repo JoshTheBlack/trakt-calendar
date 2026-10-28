@@ -69,6 +69,15 @@ def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
 
+def genres_of(payload: dict) -> list[dict]:
+    """A payload's genres as [{id, name}] — a title's own answer states them so,
+    and a discover entry states only their ids (`genre_ids`), which is all the
+    mapping below reads."""
+    if "genres" in payload:
+        return list(payload.get("genres") or ())
+    return [{"id": genre} for genre in payload.get("genre_ids") or ()]
+
+
 def genre_slugs(genres) -> list[str]:
     """TMDB's `genres` ([{id, name}]) as this app's slugs, in TMDB's order, each once."""
     out: list[str] = []
@@ -375,6 +384,22 @@ def panel_episodes(season_payload: dict) -> list[dict]:
     return rows
 
 
+def season_premieres(payload: dict, first: date, last: date) -> list[tuple[int, str]]:
+    """(season, its premiere day) for every season of `payload` (`/tv/{id}`) whose
+    premiere falls in [first, last] — the confirmation the season-premieres
+    derivation asks of each candidate (premieres.py). `seasons[].air_date` IS a
+    season's premiere: TMDB dates a season by its first episode. Specials
+    (season 0) are not a season anybody premieres."""
+    out = []
+    for entry in payload.get("seasons") or ():
+        if not isinstance(entry, dict) or not entry.get("season_number"):
+            continue
+        day = _date(entry.get("air_date"))
+        if day is not None and first <= day <= last:
+            out.append((int(entry["season_number"]), day.isoformat()))
+    return sorted(out)
+
+
 def picker_seasons(payload: dict) -> list[dict]:
     """A show's seasons as the season picker offers them —
     [{season, episode_count, first_aired, name, poster}] — from the `seasons`
@@ -435,16 +460,33 @@ def episode_url(ids: dict, season: int, number: int) -> str:
     return f"https://www.themoviedb.org/tv/{tmdb}/season/{season}/episode/{number}"
 
 
+def is_description(payload: dict) -> bool:
+    """Whether `payload` is a title's OWN answer (`/tv/{id}`, `/movie/{id}`) rather
+    than one entry of a discover listing. This package asks for a title with
+    `external_ids` appended (detail.py's `_APPENDS`), and a listing entry never
+    carries them — nor a network, a status or a rating, which is the difference
+    the record has to state."""
+    return "external_ids" in payload
+
+
 def to_record(payload: dict, media: Media, season: int | None, when: str) -> Record | None:
     """One airing of the title `payload` describes, as a calendar Record — THE
-    record builder for this source, so a record built for a search and one built
-    by a fill are the same record.
+    record builder for this source, so a record built for a search, one built by
+    a fill from a discover listing and one built from a title's own answer are
+    built by the same code.
 
     `when` is a YYYY-MM-DD day or an ISO instant. TMDB states every date as a
     DAY, so the record is `date_only`: rendered as the day TMDB published,
     never converted into the day before for a viewer west of Greenwich.
     `season` names the season this airing premieres (episode one); None is a
     film or a title placed by its own first date.
+
+    A DISCOVER ENTRY MAKES A SPARSE RECORD (`is_description`): its name, day,
+    genres, country, language, rating and picture, and no network, status,
+    runtime, certification or release schedule — so it says `enriched=False`,
+    which is what keeps the calendar's filters from judging it on fields nobody
+    has read yet (app/calendar/filter.py), and what the title store's refresh
+    queue completes it by (app/metadata/refresh.py's `queue_listed`).
     """
     day = str(when or "")[:10]
     try:
@@ -474,11 +516,12 @@ def to_record(payload: dict, media: Media, season: int | None, when: str) -> Rec
         runtime=runtime(payload, media),
         status=status_word(payload.get("status")),
         rating=rating(payload),
-        genres=genre_slugs(payload.get("genres")),
+        genres=genre_slugs(genres_of(payload)),
         certification=certification(payload, media),
         overview=str(payload.get("overview") or "").strip(),
         poster=poster_of(payload) or None,
         release_types_by_country=(release_types_by_country(payload)
                                   if media is Media.MOVIE else {}),
+        enriched=is_description(payload),
         **episode,
     )

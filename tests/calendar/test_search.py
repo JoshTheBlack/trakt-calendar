@@ -1053,8 +1053,8 @@ class CompletingASeasonNeverWritesTheShowsStartTests(AskingTheServiceACardIsMiss
 class AServiceWritesOnlyACalendarItPublishesTests(SearchTestCase):
     """calendar/search.py's `_publishes`: what is written is a service's own
     airing as its calendar feed would have stored it, so a catalogue with no
-    feed for that calendar (TMDB, today) writes nothing — following its search
-    result opens the month instead."""
+    feed for that calendar writes nothing — following its search result opens
+    the month instead."""
 
     async def test_following_a_result_from_a_catalogue_with_no_calendar_writes_nothing(self):
         describer = SimpleNamespace(
@@ -1072,8 +1072,11 @@ class AServiceWritesOnlyACalendarItPublishesTests(SearchTestCase):
         self.assertEqual(await calendar_entries.sources_airing(SHOWS, "show:tmdb:777", 1),
                          set())
 
-    def test_the_real_tmdb_publishes_no_calendar_yet(self):
+    def test_tmdb_writes_the_three_calendars_it_lists_and_no_others(self):
         tmdb = providers.get(Source.TMDB)
         for endpoint in ("shows/new", "shows/premieres", "movies"):
+            with self.subTest(endpoint=endpoint):
+                self.assertTrue(calendar_search._publishes(tmdb, endpoint))
+        for endpoint in ("shows/finales", "shows"):
             with self.subTest(endpoint=endpoint):
                 self.assertFalse(calendar_search._publishes(tmdb, endpoint))

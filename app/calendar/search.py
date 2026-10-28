@@ -602,12 +602,13 @@ def _publishes(provider, endpoint_key: str) -> bool:
 
     A SERVICE WRITES ONLY TO A CALENDAR IT PUBLISHES. What this module stores is
     a service's own airing, as its calendar feed would have stored it, so a
-    service with no feed for that calendar has nothing to write there: a
-    catalogue that describes titles without listing a calendar (TMDB, today)
-    would otherwise put rows onto one under its own name. Its search result still
-    links to the month, which fills from the services that do list it. Asked by
-    both writers here — `fill_one_gap`, which every followed result, tracker
-    arrival and card completion passes through, and `_complete_known_seasons`.
+    service with no feed for that calendar has nothing to write there: TMDB lists
+    Series, Season and Movie Premieres and no finales or every episode, and a row
+    of its own on All Episodes would be an airing its feed never gives. A
+    search result for a calendar its service does not publish still links to the
+    month, which fills from the services that do list it. Asked by both writers
+    here — `fill_one_gap`, which every followed result, tracker arrival and card
+    completion passes through, and `_complete_known_seasons`.
     """
     return provider.calendar_port is not None and provider.capabilities.answers(endpoint_key)
 

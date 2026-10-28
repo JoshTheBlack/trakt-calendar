@@ -2,26 +2,51 @@
 
 The client is reached through its own modules — `transport` for the pooled
 client and the cached GET, `normalize` for the one reading of each payload,
-`detail` for one title's answers, `search` for the catalogue search. As in the
-Trakt and Simkl packages, this file does not re-export them: a caller importing
-the module it needs says which half of TMDB it depends on.
+`detail` for one title's answers, `search` for the catalogue search, `calendar`
+for what airs in a span of days (with `discover` reading the listings it and
+`premieres`, the season-premieres derivation, are built from). As in the Trakt
+and Simkl packages, this file does not re-export them: a caller importing the
+module it needs says which half of TMDB it depends on.
 
 WHAT TMDB IS TO THIS APP TODAY: the first describer of every title it knows (it
-is first in `Source`, see base.py for why), through its DetailPort, and the
-catalogue every search box asks, through its SearchPort. Its calendar and list
-ports are None until each is built; the registry asks for a port and finds none,
-so nothing reaches for a half TMDB does not have yet.
+is first in `Source`, see base.py for why), through its DetailPort; the
+catalogue every search box asks, through its SearchPort; and a calendar source
+for Series, Season and Movie Premieres, through its CalendarPort. Its list port
+is None until it is built; the registry asks for a port and finds none, so
+nothing reaches for a half TMDB does not have yet.
 """
 from __future__ import annotations
+
+from datetime import date
 
 from ...config import Settings
 from .. import register
 from ..base import (Capabilities, Media, Record, SearchCatalogue, SearchPage,
                     SeasonsAnswer, Source, TitleFacts, Video)
-from . import detail, normalize, search, transport
+from . import calendar, detail, normalize, search, transport
 from .transport import TmdbError, TmdbNotFound, TmdbRateLimited
 
 __all__ = ["TmdbError", "TmdbNotFound", "TmdbRateLimited"]
+
+
+class _TmdbCalendarPort:
+    """TMDB's answer to "what airs in these days" (base.py's CalendarPort), over
+    calendar.py through the MODULE object, so a test double installed on
+    app.providers.tmdb.calendar is what answers."""
+
+    def calendar_configured(self, settings: Settings) -> bool:
+        # The instance's read token, which every TMDB read sends and nothing
+        # else does — the same answer as `catalogue_configured` below.
+        return settings.tmdb_configured
+
+    async def fetch_window(self, endpoint, settings: Settings, start: date, days: int,
+                           revalidate: bool = True) -> list[Record]:
+        # `revalidate` IS ACCEPTED AND FORBIDS NOTHING HERE: this source never
+        # answers "unchanged". A listing page TMDB has not changed comes back
+        # 304 and the stored page is served (transport.cached_get), so the
+        # records are always rebuilt from a body — which is also why no sibling
+        # calendar can be told "unchanged" for a span it has no rows in.
+        return await calendar.fetch_window(endpoint, settings, start, days)
 
 
 class _TmdbDetailPort:
@@ -89,10 +114,11 @@ class _TmdbProvider:
     source = Source.TMDB
     label = "TMDB"
     capabilities = Capabilities(
-        # NO CALENDAR YET: TMDB's lists are date-only discover queries and a
-        # derived premiere set, none of which this package builds yet. An empty
-        # set keeps it out of every calendar the registry fills.
-        endpoints=frozenset(),
+        # SERIES, SEASON AND MOVIE PREMIERES (calendar.py says how each is
+        # answered); finales and every episode are not TMDB's to list.
+        endpoints=calendar.ENDPOINTS,
+        # Discover answers for any day, past or future — what TMDB holds about a
+        # day is what it lists for it — so there is no window to declare.
         days_before=None,
         days_after=None,
         # TMDB keeps no watch history, so it can never back the tracker — the
@@ -107,9 +133,14 @@ class _TmdbProvider:
         # spends nobody's own account. Another service joins a search only when a
         # viewer who linked it asks (providers.for_search).
         searched_by_default=True,
+        # A DISCOVER LISTING IS SPARSE — a name, a day, genres, a country — and
+        # the title's own answer is one cached request away with the instance's
+        # token, so the title store's refresh queue completes every listing by
+        # describing it (app/metadata/refresh.py's `queue_listed`).
+        describes_sparse_listings=True,
     )
     sync_port = None
-    calendar_port = None
+    calendar_port = _TmdbCalendarPort()
     detail_port = _TmdbDetailPort()
     search_port = _TmdbSearchPort()
     watchlist_port = None

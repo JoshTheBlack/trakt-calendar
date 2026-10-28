@@ -16,6 +16,7 @@ No network — the Trakt fetch is patched.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import unittest
 import zlib
@@ -1926,3 +1927,162 @@ class PruneDisguisedFilmsTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+
+# ---------------------------------------------------------------------------
+# a source still working its answer out
+# ---------------------------------------------------------------------------
+
+def _listed(source: base.Source, n: int, day: date) -> base.Record:
+    ts = datetime(day.year, day.month, day.day, tzinfo=timezone.utc).timestamp()
+    return base.Record(source=source, media=base.Media.SHOW, id=f"{source}-{n}",
+                       ids={"tmdb": n}, detail_url="", title=f"Show {n}", air_ts=ts,
+                       date_only=True, season=1, episode_number=1, episode_label="S01E01")
+
+
+def _source(source: base.Source, fetch) -> SimpleNamespace:
+    """A calendar source for Season Premieres whose window is `fetch`."""
+    port = SimpleNamespace(calendar_configured=lambda settings: True, fetch_window=fetch)
+    return SimpleNamespace(
+        source=source, calendar_port=port,
+        capabilities=base.Capabilities(
+            endpoints=frozenset({"shows/premieres"}), days_before=None, days_after=None,
+            private_user_data=False, retain_seconds=None))
+
+
+class ASourceStillWorkingItsAnswerOutTests(CacheTestCase):
+    """A source may answer a window later (base.SourcePending): TMDB derives its
+    season premieres behind the request. The fill stores everybody else's answer
+    with that source asked and NOT YET answered; nothing about that is a failure
+    — no banner, no retry over the top of it — and once the answer is ready the
+    window is filled for that source alone, the others' rows left as they are."""
+
+    START = date(2026, 10, 26)
+    PREMIERES = get_endpoint("shows/premieres")
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.ready = None
+        self.tmdb_asked = 0
+
+        async def _trakt(endpoint, settings, start, days, revalidate=True):
+            return [_listed(base.Source.TRAKT, 1, date(2026, 10, 27))]
+
+        async def _tmdb(endpoint, settings, start, days, revalidate=True):
+            self.tmdb_asked += 1
+            if self.ready is None or not self.ready.done():
+                self.ready = self.ready or asyncio.get_running_loop().create_future()
+                raise base.SourcePending("still working", self.ready)
+            self.ready.result()
+            return [_listed(base.Source.TMDB, 1, date(2026, 10, 27)),
+                    _listed(base.Source.TMDB, 2, date(2026, 10, 29))]
+
+        in_play = [_source(base.Source.TMDB, _tmdb), _source(base.Source.TRAKT, _trakt)]
+        sources = patch("app.calendar.cache._window_sources", return_value=in_play)
+        sources.start()
+        self.addCleanup(sources.stop)
+        drain = patch("app.calendar.enrich.schedule_drain")
+        drain.start()
+        self.addCleanup(drain.stop)
+
+    async def fill(self, now=1000):
+        return await calendar_cache.ensure_window(self.PREMIERES, self.settings, self.START,
+                                                  now=now)
+
+    async def stored(self):
+        rows = await db.fetch_all(
+            "SELECT source, source_id FROM calendar_airings WHERE endpoint = ? "
+            "ORDER BY source, source_id", (self.PREMIERES.key,))
+        return [(row["source"], row["source_id"]) for row in rows]
+
+    async def coverage(self):
+        answered, asked, stored = await calendar_cache.entries.span_coverage(
+            self.PREMIERES.key, self.START)
+        return calendar_cache.WindowCoverage(answered, asked, stored)
+
+    async def follow_ups(self):
+        await asyncio.gather(*(held.follow_up for held in calendar_cache._pending.values()))
+
+    async def month(self):
+        _grouped, meta = await calendar_cache.assemble_range(
+            self.PREMIERES, self.settings, tz=ZoneInfo("UTC"), start_date=date(2026, 10, 27),
+            end_date=date(2026, 10, 31), allow_fetch=False, now=1001)
+        return meta
+
+    async def test_the_others_are_stored_and_it_is_asked_and_not_yet_answered(self):
+        coverage = await self.fill()
+        self.assertEqual(set(coverage.asked), {"tmdb", "trakt"})
+        self.assertEqual(set(coverage.sources), {"trakt"})
+        self.assertEqual(await self.stored(), [("trakt", "trakt-1")])
+        self.assertEqual(calendar_cache.pending_sources(self.PREMIERES.key, self.START), {"tmdb"})
+        self.assertEqual(calendar_cache.pending_windows(), 1)
+
+    async def test_its_answer_is_filled_on_its_own_once_ready(self):
+        await self.fill()
+        trakt_stored_at = await db.fetch_value(
+            "SELECT stored_at FROM calendar_coverage WHERE source = 'trakt'")
+        self.ready.set_result(2)
+        await self.follow_ups()
+        self.assertEqual(await self.stored(),
+                         [("tmdb", "tmdb-1"), ("tmdb", "tmdb-2"), ("trakt", "trakt-1")])
+        self.assertEqual(set((await self.coverage()).sources), {"tmdb", "trakt"})
+        self.assertEqual(await db.fetch_value(
+            "SELECT stored_at FROM calendar_coverage WHERE source = 'trakt'"), trakt_stored_at,
+            "the other service's coverage was touched")
+        self.assertEqual(calendar_cache.pending_windows(), 0)
+
+    async def test_a_window_waiting_on_it_is_not_partial(self):
+        await self.fill()
+        self.assertFalse((await self.month())["partial"])
+
+    async def test_nobody_asks_again_over_the_top_of_it(self):
+        await self.fill()
+        self.assertFalse(calendar_cache._failed_retry_due(
+            self.PREMIERES, self.START, await self.coverage(), 1000 + 10 * 60 * 60))
+
+    async def test_a_waiting_read_is_not_kept_for_the_next(self):
+        """The answer lands in seconds; the read after it must draw it, not be
+        handed this one while a rebuild runs behind it."""
+        await self.fill()
+        calendar_cache._forget_spans()
+        await calendar_cache.assemble_range(
+            self.PREMIERES, self.settings, tz=ZoneInfo("UTC"), start_date=date(2026, 10, 27),
+            end_date=date(2026, 10, 31), now=1001)
+        self.assertEqual(calendar_cache._span_memo, {})
+
+    async def test_an_answer_that_never_comes_leaves_the_window_to_the_retry(self):
+        await self.fill()
+        with self.assertLogs("app.calendar.cache", "INFO"):
+            self.ready.set_exception(base.SourceUnavailable("TMDB was down"))
+            await self.follow_ups()
+        self.assertEqual(calendar_cache.pending_windows(), 0)
+        self.assertTrue(calendar_cache._failed_retry_due(
+            self.PREMIERES, self.START, await self.coverage(), 1000 + 61))
+        self.assertTrue((await self.month())["partial"], "a source that failed is a failure")
+
+    async def test_a_share_page_never_starts_it(self):
+        await calendar_cache.ensure_window(self.PREMIERES, self.settings, self.START,
+                                           allow_fetch=False, now=1000)
+        self.assertEqual(self.tmdb_asked, 0)
+        self.assertEqual(calendar_cache.pending_windows(), 0)
+
+    async def test_what_it_remembers_goes_when_the_follow_up_ends(self):
+        await self.fill()
+        self.assertEqual(len(calendar_cache._pending), 1)
+        self.ready.set_result(2)
+        await self.follow_ups()
+        self.assertEqual(calendar_cache._pending, {})
+
+    async def test_one_noted_and_never_followed_is_dropped_on_its_clock(self):
+        """A fetch no store followed leaves an entry with no follow-up; the next
+        note drops it once the longest wait has passed."""
+        ready = asyncio.get_running_loop().create_future()
+        ready.set_result(0)
+        with patch.object(calendar_cache.time, "monotonic", return_value=5000.0):
+            calendar_cache._note_pending(self.PREMIERES, self.START, "tmdb", ready)
+        with patch.object(calendar_cache.time, "monotonic",
+                          return_value=5000.0 + calendar_cache._PENDING_WAIT_SECONDS):
+            calendar_cache._note_pending(self.PREMIERES, self.START + timedelta(days=7),
+                                         "tmdb", ready)
+        self.assertEqual([key[1] for key in calendar_cache._pending], ["2026-11-02"])

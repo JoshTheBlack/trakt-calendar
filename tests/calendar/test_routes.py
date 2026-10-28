@@ -48,6 +48,10 @@ def _configured_settings() -> Settings:
     return Settings(trakt_client_id="test-client-id", trakt_access_token="test-access-token")
 
 
+# A TMDB read token's shape (three base64url segments), with nothing secret in it.
+_TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJyb3V0ZXMifQ.c2lnbmF0dXJl"
+
+
 def _entry(slug: str, title: str, first_aired: str) -> dict:
     """A raw (pruned-shape) calendar entry, mid-month and inside the default
     country allowlist, so it survives the default read-time filter untouched."""
@@ -70,7 +74,7 @@ class _ThirdSource:
     source = "mercury"
     label = "Mercury"
     sync_port = None
-    calendar_port = object()
+    calendar_port = SimpleNamespace(calendar_configured=lambda settings: True)
     capabilities = Capabilities(
         endpoints=frozenset({"shows"}), days_before=None, days_after=None,
         private_user_data=False, retain_seconds=None)
@@ -699,6 +703,20 @@ class PartialDataBannerTests(CalendarRouteTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("error-banner", resp.text)
         self.assertNotIn("warning-banner", resp.text)
+
+    def test_weeks_a_service_is_still_working_out_are_counted_not_warned_about(self):
+        """Nothing failed — TMDB's season premieres are derived behind the page —
+        so the stats box counts the weeks beside the other work under way, and
+        the line goes when they are done."""
+        with patch("app.calendar.cache.fetch_window_records", window_fetch([])), \
+                patch("app.calendar.cache.pending_windows", return_value=3):
+            resp = self.client.get("/?year=2026&month=7")
+        self.assertIn("Weeks being worked out", resp.text)
+        self.assertIn('id="statBacklogWeeks">3<', resp.text)
+        self.assertNotIn("warning-banner", resp.text)
+        with patch("app.calendar.cache.fetch_window_records", window_fetch([])):
+            resp = self.client.get("/?year=2026&month=7")
+        self.assertNotIn("statBacklogWeeks", resp.text)
 
 
 class AnEmptyMonthSaysWhyTests(CalendarRouteTestCase):
@@ -2307,18 +2325,29 @@ class TheCoverageGapSwitchTests(unittest.TestCase):
 
     FAR = date.today().year + 3   # past Simkl's declared forward reach
 
-    def _gap(self, registry=None):
+    def _gap(self, registry=None, settings=None):
         from app.endpoints import get_endpoint
         prefs = source_prefs.SourcePrefs(user_id=1, calendar_source="simkl")
         registry = registry or providers.registered()
         with patch.object(providers, "registered", lambda: registry):
             return calendar_routes._coverage_gap(
-                prefs, self.FAR, 1, Settings(), endpoint=get_endpoint("shows/new"))
+                prefs, self.FAR, 1, settings or _configured_settings(),
+                endpoint=get_endpoint("shows/new"))
 
     def test_the_switch_names_a_service_that_reaches_the_month(self):
         message, url = self._gap()
         self.assertIn("doesn't reach", message)
         self.assertIn("source=trakt", url)
+
+    def test_a_service_whose_calendar_this_instance_cannot_read_is_never_the_switch(self):
+        """TMDB comes first in the declared order and reaches every month, but
+        with no read token filled in it has nothing on this calendar — the switch
+        would land on an empty month. With one, it is the first offered."""
+        _message, url = self._gap()
+        self.assertNotIn("tmdb", url)
+        _message, url = self._gap(settings=dataclasses.replace(
+            _configured_settings(), tmdb_api_key=_TMDB_TOKEN))
+        self.assertIn("source=tmdb", url)
 
     def test_a_service_with_no_calendar_is_never_the_switch(self):
         describer = type("Describer", (), {

@@ -408,13 +408,16 @@ def _coverage_gap(prefs: source_prefs.SourcePrefs,
     named = admitted[0].label
     message = f"{named}'s calendar doesn't reach {_calendar.month_name[month]} {year}."
     # WHERE THE SWITCH MAY SEND THE VIEWER: a service that fills calendars on this
-    # instance at all, publishes this one, and reaches this month — the three
-    # things the switch promises by being offered. This used to walk the whole
-    # registry, so a service registered for some other job (one that describes
-    # titles and publishes no calendar) would have been offered first, and the
-    # link would have landed on an empty month with nothing saying why.
+    # instance at all, whose calendar this instance can read, publishes this one,
+    # and reaches this month — the four things the switch promises by being
+    # offered. This used to walk the whole registry, so a service registered for
+    # some other job (one that describes titles and publishes no calendar) would
+    # have been offered first, and the link would have landed on an empty month
+    # with nothing saying why; a service with no credential filled in lands on
+    # the same empty month.
     alternatives = [p for p in providers.calendar_sources(settings=settings)
                     if str(p.source) not in named_sources
+                    and p.calendar_port.calendar_configured(settings)
                     and (endpoint is None or p.capabilities.answers(endpoint.key))
                     and calendar_cache.month_covered(p, year, month)]
     switch_url = None
@@ -722,8 +725,10 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
     # Measured at 4.7ms against 31,358 stored airings, which is why it rides the
     # page render rather than a poll: a number a reader can refresh to is worth
     # more than one that ticks, and it costs the page less than asking for it
-    # would.
+    # would. The weeks a service is still working out are held in process and
+    # cost nothing to count.
     backlog_titles, backlog_seasons = await calendar_enrich.backlog()
+    backlog_weeks = calendar_cache.pending_windows()
 
     _count_visible(month_view.grouped, month_view.not_watching_keys)
 
@@ -842,6 +847,7 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
         # the lines disappearing IS the signal that the drains have settled.
         "backlog_titles": backlog_titles,
         "backlog_seasons": backlog_seasons,
+        "backlog_weeks": backlog_weeks,
         # How many films this viewer's own release filter took off this month,
         # so a page it emptied can name the filter that emptied it instead of
         # showing a month that looks like it has nothing in it.

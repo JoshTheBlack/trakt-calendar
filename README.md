@@ -24,7 +24,7 @@
 
 - 📅 Browse premieres for any month, grouped by day
 - 📡 **Switchable endpoints** — new shows, season premieres, season finales, all episodes, or movies
-- 🔀 **Two sources, one calendar** — Trakt and, optionally, [Simkl](#simkl--an-optional-second-source). A title both list is one card; which services show is a tick-box in **🎚️ Filters**, and whose description wins is an order on your **Account** page. Simkl needs no credentials to fill a calendar
+- 🔀 **Several sources, one calendar** — Trakt, optionally [Simkl](#simkl--an-optional-second-source), and [TMDB](#tmdb--the-first-describer) for series, season and movie premieres. A title several list is one card; which services show is a tick-box in **🎚️ Filters**, and whose description wins is an order on your **Account** page. Simkl needs no credentials to fill a calendar
 - 🔍 **Find a title and jump to it** — search the calendar you're on as you type, or press Enter to also search TMDB (and any service you've linked) for titles your calendar hasn't loaded yet; opening one goes to where it airs
 - 🖼️ Rich poster tiles — rating, runtime, network and episode badges, plus language, country and a current-season summary
 - 🔍 **Details modal** — overview, every video both services list in one player, and each season's description, cast and episodes with your watched ones marked, plus a link out to each service
@@ -267,8 +267,26 @@ doesn't know, and a season TMDB has no episodes of goes to the next service that
 Anyone who set their own service order on their **Account** page keeps it; TMDB comes after
 the services they named.
 
-TMDB keeps no watch history, so it never backs the tracker, and it doesn't list a calendar
-of its own yet.
+TMDB keeps no watch history, so it never backs the tracker.
+
+**TMDB also lists three calendars**, beside Trakt and Simkl: **Series Premieres** (shows
+whose first episode airs that day), **Movie Premieres** (films with a limited, theatrical or
+digital release in the instance's TMDB region, on the day of their first release) and
+**Season Premieres**. TMDB publishes no season-premieres list, so the app works one out for
+each week — the shows on air that week that had nothing on air in the four weeks before,
+each checked against TMDB's own season dates. That takes a few hundred requests a week, so
+it runs in the background: the first time a week is opened, Trakt's and Simkl's cards show
+at once and TMDB's join them within a minute, and the stats box counts the **weeks being
+worked out**. Season Finales and All Episodes stay Trakt's and Simkl's.
+
+TMDB gives dates, not times. A card TMDB describes — every card, for anyone whose service
+order starts with TMDB, which is the default — sits on TMDB's day and shows a time only when
+another service's airing falls on that same day; when the services disagree, the card shows
+each one's date side by side. TMDB lists far more than the other two (about five times the
+series premieres in a typical month, many of them regional or web series): switch TMDB off
+for TV or films in 🎚️ Filters, or narrow by country, genre or network. A listing arrives
+without its network or certification and is looked up in the background, so for its first
+few minutes a TMDB-only title is shown even where those filters would hide it.
 
 **Every search box searches TMDB** when you press Enter, and all three behave alike: the
 calendar's Find a title, the tracker's Add show and Add film, and the rankings board.
@@ -287,8 +305,9 @@ on your calendar link to their day, and **Go** opens the month of the season you
 on its card when the calendar draws one. A title found on TMDB is looked up on Trakt and Simkl by its
 TMDB id when it's added, so the tracker can read your history for it. A show neither
 lists can still be added; its row is marked **untracked**, because nothing will count what
-you watch of it. A calendar season TMDB found opens the month it should be in; it doesn't add
-a card, because TMDB doesn't list a calendar yet.
+you watch of it. A calendar season TMDB found is added as TMDB's own card on a calendar TMDB
+lists (a series or season premiere, a film's release); on Finales or All Episodes it opens
+the month it should be in.
 
 Get the token at [themoviedb.org → Settings → API](https://www.themoviedb.org/settings/api):
 copy the **API Read Access Token** (the long one). The short "API Key" is refused —

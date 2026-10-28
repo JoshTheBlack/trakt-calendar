@@ -8,8 +8,8 @@ holds is that every reader comes to THE SAME answer from the same rows, because 
 reader that came to a different one would draw a card twice, or not at all, with
 nothing on the page to say why.
 
-THE FIXTURE IS YELLOWJACKETS SEASON 4 AS THE DEV INSTANCE HOLDS IT, plus the
-TMDB listing the episode will have once TMDB lists a calendar: Simkl dates S04E01
+THE FIXTURE IS YELLOWJACKETS SEASON 4 AS THE DEV INSTANCE HOLDS IT, plus a TMDB
+listing of the premiere, as TMDB's Season Premieres gives it: Simkl dates S04E01
 to Saturday 21 November 01:00 UTC (Friday 20:00 in New York), Trakt to Monday 23
 November 02:00 UTC (Sunday 21:00), TMDB to the 22nd with no time. 23 November is
 a Monday, so the two timed listings sit in different storage windows — which is
@@ -21,11 +21,11 @@ from __future__ import annotations
 
 import unittest
 from datetime import date, datetime, timezone
-from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from app import db
 from app.calendar import cache as calendar_cache
+from app.calendar import resolve as calendar_resolve
 from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Media, Record, Source
@@ -79,19 +79,16 @@ class PlacementTestCase(unittest.IsolatedAsyncioTestCase):
     """Rows stored window by window, as a fill stores them, and read back with no
     fetch allowed — so whatever a read draws came out of those rows.
 
-    TMDB IS ADMITTED AS THE INSTANCE WILL ADMIT IT once TMDB lists a calendar:
-    today the registry names no TMDB calendar, so the operator's half of
-    admission (resolve.instance_sources) would drop its listing before anything
-    could describe a card with it."""
+    EVERY SOURCE IS ADMITTED AS THE INSTANCE ADMITS IT — the operator's half of
+    admission (resolve.instance_sources) names every service that lists a
+    calendar, TMDB among them — and nothing here stands in for it."""
 
     async def asyncSetUp(self):
         migrated_db(type(self).__name__.lower())
         self.settings = Settings()
-        admits = patch("app.calendar.resolve.instance_sources",
-                       return_value=EVERY_SOURCE)
-        admits.start()
-        self.addCleanup(admits.stop)
         calendar_cache._forget_spans()
+        self.assertEqual(calendar_resolve.instance_sources(self.settings), EVERY_SOURCE,
+                         "the instance does not admit every service that lists a calendar")
 
     async def asyncTearDown(self):
         db.close_thread_connection()

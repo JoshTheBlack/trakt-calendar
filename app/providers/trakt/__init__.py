@@ -299,6 +299,10 @@ class _TraktProvider:
         # app's own retention, and never while a feature row holds the title
         # (app/metadata/rows.py's sweep_unlisted).
         retain_seconds=None,
+        # Trakt's calendar answers with `extended=full`, so a listing arrives
+        # complete — genres, network, status, certification — and is never
+        # stored sparse; there is nothing to describe it for.
+        describes_sparse_listings=False,
     )
     # What makes that `private_user_data=True` checkable rather than a claim: the
     # tracker asks the registry for this and never for Trakt by name.

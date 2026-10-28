@@ -127,7 +127,15 @@ app's one order: who describes a title (the details panel and the tracker's
 season totals, through `detail_source`), whose value a card shows for a viewer
 with no stated order, whose artwork is tried first. TMDB keeps no watch history,
 so it is never a tracker source (`providers.tracker_sources`), and a tracker
-preference may not name it (`app/sources/prefs.py`). TMDB's API terms forbid
+preference may not name it (`app/sources/prefs.py`). It IS a calendar source for
+Series, Season and Movie Premieres (`app/providers/tmdb/calendar.py`; finales
+and All Episodes are not its to list), every date a DAY, so a TMDB-first
+viewer's card sits on TMDB's day and borrows a time only from a service whose
+instant falls on it — through the same join and placement as every other
+service, with nothing TMDB-specific in either. A film is dated by its discover
+entry's own (primary) release date and trimmed to the window, which drops a
+later regional release (digital after theatrical): one day per film, measured
+equal to its first regional release for 1,037 of 1,042 films. TMDB's API terms forbid
 caching anything obtained from it for longer than six months: the ceiling is
 `app/providers/tmdb/transport.py`'s `MAX_CACHE_SECONDS`, response-cache rows are
 written with `CACHE_RETAIN_SECONDS` so the sweep's grace lands on it, and the
@@ -195,6 +203,15 @@ missing one only where the page draws its words) behind the page, within the
 trigger's budget, and a pass re-reads it past the response cache at each
 service's per-minute allowance (`refresh.PER_MINUTE` — a budget per pass was a
 budget per reload, and spent the pages' Trakt quota). A PUBLIC READ NEVER QUEUES.
+A SPARSE LISTING IS DESCRIBED BY THE SAME QUEUE, NOT BY BEING VIEWED: a service
+that declares `Capabilities.describes_sparse_listings` (TMDB — a discover entry
+names no network, status or certification) has every `enriched = 0` row queued
+on the heartbeat (`refresh.queue_listed`, at most a minute's allowance waiting),
+because a calendar month queues only rows already described; an answer that
+says nothing is recorded as a failure, so the backoff holds it and five give it
+up (`LISTED_GIVE_UP_AFTER`), and the calendar's "unenriched" count adds what is
+still owed (`refresh.listings_owed`). Simkl's sparse listings are its own drain's
+(app/calendar/enrich.py), Trakt's arrive complete.
 A HOLDER KEEPS ITS TITLE'S ROWS (`rows.sweep_unlisted` asks
 `holders.held_keys`); only a service's ceiling takes them. A RE-KEY THAT FINDS A
 ROW UNDER BOTH KEYS keeps the MORE COMPLETE one — one rank per table,
@@ -219,7 +236,20 @@ same rows (`app/calendar/cache.py` owns the envelope and the read path;
 records who was ASKED as well as who ANSWERED, which is what lets a source
 switched on later refill a window that legitimately has none of its records,
 and what keeps "partial" meaning a source that failed rather than one nobody
-asked. Two things are decided BEFORE storage rather than at read: the
+asked. ONE GAP IS NOT A FAILURE: a source still WORKING ITS ANSWER OUT
+(`base.SourcePending`, raised at once with a `ready` awaitable) is stored asked
+and not answered, remembered in process (`cache._pending`), and its share alone
+is filled once `ready` finishes (`cache.fill_source`, started only AFTER the
+window's own store, or the store would mark the answer missing again) — no
+"couldn't be loaded" banner, no failure retry over the top of it, and the stats
+box counts the weeks (`cache.pending_windows`). TMDB's Season Premieres are the
+case: TMDB publishes no such list, so `app/providers/tmdb/premieres.py` derives
+each week (shows on air less those on air in the four weeks before, each
+confirmed by `/tv/{id}`) — a few hundred requests, tens of seconds cold, and
+THEREFORE NEVER ON A REQUEST: one span at a time on a worker of its own, each
+week's aired set kept in api_cache for the four weeks after it to reuse, a stale
+derivation served while it is renewed behind the answer. A share page reads with
+`allow_fetch=False` and so never asks, queues or derives. Two things are decided BEFORE storage rather than at read: the
 instance-wide content floor and the instance-wide "include Simkl results"
 switch, both operator decisions taken once for every viewer, and both also
 applied at read so unticking is immediate over windows already stored. A

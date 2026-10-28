@@ -266,8 +266,9 @@ async def write_missing_premieres(settings, record: dict) -> int:
     caller sound: it is handed a service and THAT SERVICE'S OWN id and nothing
     else, and asks the service for the title, the date and every other field —
     so this can no more invent a calendar row than a hand-made URL can. A
-    service with no premieres calendar of its own (TMDB, today) writes nothing
-    there — fill_one_gap's own rule.
+    service with no premieres calendar of its own writes nothing there, and one
+    whose feed already lists the season writes nothing either — fill_one_gap's
+    own rules.
 
     ONLY FOR A TITLE ADDED ONE AT A TIME, BY HAND. The history backfill and the
     month rollover add in bulk, often old seasons, and writing each of their

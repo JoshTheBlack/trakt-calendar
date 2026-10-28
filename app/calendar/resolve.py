@@ -152,13 +152,17 @@ def answering_services(endpoint, settings) -> list[tuple[str, str]]:
     toolbar's, the Filters panel's and a share link's — so none of them can come
     to a different answer about what a calendar has to offer.
 
-    IT IS TWO QUESTIONS AND NEITHER OF THEM IS ASKED HERE. Whether a service is
+    IT IS THREE QUESTIONS AND NONE OF THEM IS ASKED HERE. Whether a service is
     on this INSTANCE's calendar at all belongs to `providers.calendar_sources`,
     and it is asked through `instance_sources` so that an operator switching a
     service off empties these controls by the same rule that empties the calendar
     underneath them. Whether it publishes THIS calendar is
-    `capabilities.answers`. No service is named in either check, so a third one
-    is offered the day it is registered.
+    `capabilities.answers`. Whether this instance can READ its calendar is its
+    port's `calendar_configured` — the question the fill asks before asking the
+    service anything (cache.py's `_window_sources`): a service whose credential
+    is not filled in has nothing on the calendar, and a switch for it, or a
+    "that one only", would draw an empty month. No service is named in any of
+    the three, so a fourth one is offered the day it is registered.
 
     AND WITH FEWER THAN TWO THERE IS NOTHING TO OFFER, which is returned as an
     empty list rather than as one entry. One service that can answer means every
@@ -169,7 +173,8 @@ def answering_services(endpoint, settings) -> list[tuple[str, str]]:
     services = [(str(source), provider.label)
                 for source, provider in providers.registered().items()
                 if provider.capabilities.answers(endpoint.key)
-                and (admitted is None or str(source) in admitted)]
+                and (admitted is None or str(source) in admitted)
+                and (settings is None or provider.calendar_port.calendar_configured(settings))]
     return services if len(services) >= 2 else []
 
 

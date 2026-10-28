@@ -228,6 +228,52 @@ class TheRecordTests(unittest.TestCase):
     def test_an_unreadable_day_is_no_record(self):
         self.assertIsNone(normalize.to_record(SEVERANCE, Media.SHOW, 1, "soon"))
 
+    def test_a_titles_own_answer_makes_a_described_record(self):
+        self.assertTrue(normalize.is_description(SEVERANCE))
+        self.assertTrue(normalize.to_record(SEVERANCE, Media.SHOW, 2, "2025-01-16").enriched)
+
+    def test_a_discover_entry_makes_a_sparse_record_with_what_it_states(self):
+        """A listing entry carries genre ids and no network, status, rating
+        block or external ids: the record says it is not described yet, rather
+        than presenting blanks as answers."""
+        entry = {"id": 95396, "name": "Severance", "first_air_date": "2022-02-17",
+                 "genre_ids": [18, 9648, 10765], "origin_country": ["US"],
+                 "original_language": "en", "poster_path": "/p.jpg",
+                 "vote_average": 8.4, "vote_count": 2500}
+        self.assertFalse(normalize.is_description(entry))
+        record = normalize.to_record(entry, Media.SHOW, 1, entry["first_air_date"])
+        self.assertFalse(record.enriched)
+        self.assertEqual(record.genres, ["drama", "mystery", "science-fiction", "fantasy"])
+        self.assertEqual(record.ids, {"tmdb": 95396})
+        self.assertEqual((record.network, record.status, record.certification), ("", "", ""))
+        self.assertEqual(record.rating, 8.4)
+        self.assertEqual(record.year, 2022)
+
+
+class TheSeasonPremieresTests(unittest.TestCase):
+    """Which of a show's seasons premiere in a span — the season-premieres
+    derivation's confirmation of each candidate."""
+
+    def test_a_season_whose_first_day_is_in_the_span(self):
+        payload = {"seasons": [{"season_number": 1, "air_date": "2022-02-17"},
+                               {"season_number": 2, "air_date": "2025-01-17"}]}
+        self.assertEqual(normalize.season_premieres(payload, date(2025, 1, 13),
+                                                    date(2025, 1, 19)), [(2, "2025-01-17")])
+
+    def test_specials_and_undated_seasons_are_not_premieres(self):
+        payload = {"seasons": [{"season_number": 0, "air_date": "2025-01-14"},
+                               {"season_number": 3, "air_date": None},
+                               {"season_number": 4}]}
+        self.assertEqual(normalize.season_premieres(payload, date(2025, 1, 13),
+                                                    date(2025, 1, 19)), [])
+
+    def test_both_ends_of_the_span_count(self):
+        payload = {"seasons": [{"season_number": 1, "air_date": "2025-01-13"},
+                               {"season_number": 2, "air_date": "2025-01-19"}]}
+        self.assertEqual(normalize.season_premieres(payload, date(2025, 1, 13),
+                                                    date(2025, 1, 19)),
+                         [(1, "2025-01-13"), (2, "2025-01-19")])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

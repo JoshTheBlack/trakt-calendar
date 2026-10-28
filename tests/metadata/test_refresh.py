@@ -239,6 +239,27 @@ class TheDrainTests(_RefreshTestCase):
         row = await db.fetch_one("SELECT fail_count, failed_at FROM title_metadata")
         self.assertEqual((row["fail_count"], row["failed_at"]), (1, T0 + DAY))
 
+    async def test_a_service_that_says_slow_down_keeps_its_rows_queued_unmarked(self):
+        """A 429 is not the title's failure: no backoff is recorded (five would
+        give a sparse listing up), the entry stays queued, and the rest of that
+        service's batch waits for the next pass rather than adding to the storm."""
+        for n in (1, 2, 3):
+            await _describe("tmdb", str(n), at=T0)
+            await refresh.queue_title(SETTINGS, "show", {"tmdb": n}, reason="viewed")
+        asked = []
+
+        async def _slow_down(settings, media, source_id, season, *, cache_only=False,
+                             fresh=False):
+            asked.append(source_id)
+            raise SourceUnavailable("TMDB asked us to slow down", 429)
+        self.ports["tmdb"].fetch_details = _slow_down
+        with mock.patch.dict(refresh.IN_FLIGHT, {"tmdb": 1}):
+            self.assertEqual(await refresh.drain(SETTINGS, now=T0 + DAY), 0)
+        self.assertEqual(len(asked), 1, "the batch went on asking after the 429")
+        self.assertEqual(len(await _queue()), 3)
+        self.assertEqual(await db.fetch_value(
+            "SELECT MAX(fail_count) FROM title_metadata WHERE source = 'tmdb'"), 0)
+
     async def test_a_service_this_instance_cannot_ask_keeps_its_rows_queued(self):
         await refresh.queue_title(SETTINGS, "show", {"tmdb": 5}, reason="viewed")
         del self.ports["tmdb"]
@@ -259,6 +280,82 @@ class TheDrainTests(_RefreshTestCase):
                                    return_value=refresh.time.monotonic() + 61):
                 self.assertEqual(await refresh.drain(SETTINGS, now=T0), 2)
         self.assertEqual(await _queue(), [])
+
+
+async def _listed(tmdb_id: int, *, at: int) -> None:
+    """A TMDB discover listing of a show, stored as a calendar fill stores it —
+    sparse, `enriched=False` (providers/tmdb/normalize.py's `to_record`)."""
+    from app import metadata
+    from app.providers.base import Media
+    from app.providers.tmdb import normalize
+
+    record = normalize.to_record({"id": tmdb_id, "name": f"Show {tmdb_id}",
+                                  "first_air_date": "2026-10-27"}, Media.SHOW, 1, "2026-10-27")
+    await db.transaction(lambda conn: metadata.store_records(conn, [record], now=at,
+                                                             stale_after=at + DAY))
+
+
+class ASparseListingIsDescribedTests(_RefreshTestCase):
+    """A service whose calendar listings arrive with no network, status or
+    certification, and whose own description is one request away
+    (Capabilities.describes_sparse_listings — TMDB's), has each such row queued
+    for a full description on the heartbeat, at the service's own pace."""
+
+    async def test_each_sparse_listing_is_queued_newest_first_within_the_minute(self):
+        for tmdb_id, at in ((1, T0), (2, T0 + 20), (3, T0 + 10)):
+            await _listed(tmdb_id, at=at)
+        with mock.patch.dict(refresh.PER_MINUTE, {"tmdb": 2}):
+            self.assertEqual(await refresh.queue_listed(SETTINGS, now=T0 + 30), 2)
+            self.assertEqual(await refresh.queue_listed(SETTINGS, now=T0 + 31), 0,
+                             "more were queued than a minute's allowance")
+        self.assertEqual([row[:4] + row[5:] for row in await _queue()],
+                         [("tmdb", "show", "2", refresh.TITLE, "listed"),
+                          ("tmdb", "show", "3", refresh.TITLE, "listed")])
+
+    async def test_a_service_whose_listings_arrive_complete_is_never_queued(self):
+        await _describe("trakt", "9", at=T0)
+        await db.execute("UPDATE title_metadata SET enriched = 0")
+        self.assertEqual(await refresh.queue_listed(SETTINGS, now=T0 + 30), 0)
+
+    async def test_a_described_listing_is_owed_nothing(self):
+        await _listed(5, at=T0)
+        self.assertEqual(await refresh.listings_owed(), 1)
+        await refresh.queue_listed(SETTINGS, now=T0 + 30)
+        self.assertEqual(await refresh.drain(SETTINGS, now=T0 + 40), 1)
+        self.assertEqual(await refresh.listings_owed(), 0)
+        self.assertEqual(await refresh.queue_listed(SETTINGS, now=T0 + 50), 0)
+
+    async def test_one_the_service_says_nothing_about_backs_off_and_is_given_up_on(self):
+        """An answer that says nothing is a refresh that did not happen: marked as
+        one, so the listing waits out the backoff rather than being asked about
+        every minute, and stops being owed at the ceiling."""
+        await _listed(5, at=T0)
+
+        async def _nothing(settings, media, source_id, season, *, cache_only=False, fresh=False):
+            return {}
+        self.ports["tmdb"].fetch_details = _nothing
+        now = T0 + 30
+        for attempt in range(refresh.LISTED_GIVE_UP_AFTER):
+            self.assertEqual(await refresh.queue_listed(SETTINGS, now=now), 1, attempt)
+            await refresh.drain(SETTINGS, now=now)
+            self.assertEqual(await refresh.queue_listed(SETTINGS, now=now + 60), 0,
+                             "a listing that said nothing was asked about again at once")
+            now += 2 * DAY
+        self.assertEqual(await refresh.listings_owed(), 0)
+        self.assertEqual(await refresh.queue_listed(SETTINGS, now=now), 0)
+
+    async def test_the_calendars_unenriched_count_includes_them(self):
+        from app.calendar import enrich as calendar_enrich
+
+        await _listed(5, at=T0)
+        titles, _seasons = await calendar_enrich.backlog()
+        self.assertEqual(titles, 1)
+
+    def test_every_service_states_how_its_listings_are_completed(self):
+        """A per-service fact, declared by each package: TMDB's sparse listings
+        are described; Trakt's arrive complete; Simkl's are completed by its own
+        drain."""
+        self.assertEqual(set(refresh._listing_sources()), {"tmdb"})
 
 
 class HeldRowsNearTheCeilingTests(_RefreshTestCase):

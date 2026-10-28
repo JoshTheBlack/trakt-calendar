@@ -26,6 +26,13 @@ A DEAD PICTURE JUMPS THE QUEUE (`queue_title`, reason `REASON_DEAD_PICTURE`): a
 picture a service recorded no longer loads, which says the title itself may have
 moved there — a replaced poster, a re-pointed id — so every service that knows
 the title is asked again, ahead of everything waiting.
+
+A SPARSE LISTING IS COMPLETED HERE TOO (`queue_listed`, reason `REASON_LISTED`):
+a service whose calendar listings arrive with no network, status or
+certification, and whose own description is one request away with the
+instance's credential (Capabilities.describes_sparse_listings — TMDB's
+discover listings), has each such row described in full, on the heartbeat, at
+the service's own pace. What a viewer asked for stays ahead of it.
 """
 from __future__ import annotations
 
@@ -52,6 +59,7 @@ TITLE = -1
 REASON_VIEWED = "viewed"
 REASON_DEAD_PICTURE = "dead picture"
 REASON_CEILING = "ceiling"
+REASON_LISTED = "listed"
 
 # HOW MANY ROWS ONE VIEW MAY QUEUE. A panel is one title: every service that
 # knows it, its row and the season on screen. A page of rows is a tracker month
@@ -66,8 +74,14 @@ MONTH_BUDGET = 120
 # passes ask — and every page view starts one (`viewed`), so a budget per PASS
 # was a budget per reload. A refresh shares its service's client with every page
 # a viewer is waiting on, so this is what it may take of it:
-#   TMDB answers about forty requests a second and its client keeps twenty in
-#   flight (providers/tmdb/transport.py); a refresh is two or three of them.
+#   TMDB: six hundred. A refresh is two or three requests, and TMDB's sparse
+#   calendar listings arrive by the thousand (two months of Series and Movie
+#   Premieres, ~2,300 on the development copy). MEASURED against live TMDB,
+#   draining that backlog at 600 a minute: 600 titles a pass in 7–31 s, 41–172
+#   requests a second in the bursts, NO 429 — and a page's own TMDB request
+#   waited at most 0.5 s meanwhile with six in flight (2.3 s with ten). Should
+#   TMDB ever answer 429, the transport holds requests for its Retry-After and
+#   the pass leaves the rest queued (`drain`), so this is a pace, not a bet.
 #   TRAKT's reads share one bucket — 150 up front, then three a second
 #   (providers/trakt/transport.py's GET_PACER) — and a refresh is up to five.
 #   MEASURED on a copy of the development database: at twenty a pass, a few
@@ -76,7 +90,7 @@ MONTH_BUDGET = 120
 #   leaves the bucket to the pages.
 #   SIMKL's per-title reads are its cached-by-id family, paced by its own client
 #   (providers/simkl/transport.py).
-PER_MINUTE = {"tmdb": 40, "trakt": 4, "simkl": 40}
+PER_MINUTE = {"tmdb": 600, "trakt": 4, "simkl": 40}
 
 # What each service has been asked in the last minute by this process, as the
 # monotonic moments each refresh started (`_allowance`).
@@ -90,16 +104,17 @@ def _allowance(source: str, at: float) -> int:
         started.popleft()
     return max(0, PER_MINUTE[source] - len(started))
 
-# How many of a service's refreshes run side by side. TMDB's is its client's own
-# ceiling (providers/tmdb/transport.py keeps twenty in flight, measured clear of
-# any 429), so a pass may fill it and anything asked meanwhile waits its turn in
-# the same pool rather than being refused. Trakt's client gates every call
+# How many of a service's refreshes run side by side. TMDB's six are about twelve
+# of its client's twenty requests in flight (providers/tmdb/transport.py), which
+# leaves the rest of the pool to the pages: MEASURED in the drain above, a page's
+# TMDB request waited at most 0.5 s at six against 2.3 s at ten, for no loss of
+# pace. Trakt's client gates every call
 # behind one semaphore anyway (app/calendar/enrich.py's drain_releases says why
 # firing a batch at it only queues on that gate), so it goes one at a time.
 # Both tables name every registered service — tests/metadata/test_refresh.py
 # fails on one that is missing, because a service with no pace of its own must
 # not inherit somebody else's.
-IN_FLIGHT = {"tmdb": 20, "trakt": 1, "simkl": 4}
+IN_FLIGHT = {"tmdb": 6, "trakt": 1, "simkl": 4}
 
 # A ROW THAT FAILED TO REFRESH WAITS before a view may queue it again, doubling
 # from an hour to a day — the backoff app/calendar/enrich.py keeps for its own
@@ -425,6 +440,89 @@ async def queue_ceiling(settings, *, now: int | None = None) -> int:
     return queued
 
 
+# A SPARSE LISTING NOBODY CAN DESCRIBE IS GIVEN UP ON after this many refreshes
+# that failed or said nothing — five, over about fifteen hours of the doubling
+# backoff, the ceiling the Simkl drain keeps for its own lookups
+# (app/calendar/enrich.py's `_GIVE_UP_AFTER`). A title the service lists but will
+# not describe would otherwise be asked about daily for as long as it is listed,
+# and hold the stats box's count up for all of it. Its row still draws what the
+# listing said.
+LISTED_GIVE_UP_AFTER = 5
+
+
+def _listing_sources() -> tuple[str, ...]:
+    """Every registered service whose sparse listings are completed by describing
+    them (Capabilities.describes_sparse_listings), by name."""
+    return tuple(str(source) for source, provider in providers.registered().items()
+                 if provider.capabilities.describes_sparse_listings)
+
+
+# WHAT A SERVICE'S SPARSE LISTINGS OWE, said once for the queue and the count it
+# is read back as, because the two answering differently is what makes a backlog
+# readout untrustworthy. Parameters: the service, the give-up ceiling.
+_OWED_LISTINGS = f"FROM {rows.TITLES} t WHERE t.enriched = 0 AND t.source = ? AND t.fail_count < ?"
+
+
+async def queue_listed(settings, *, now: int | None = None) -> int:
+    """Queue each sparse listing — a title row its service's calendar wrote
+    unenriched (Capabilities.describes_sparse_listings) — for a full description,
+    newest listings first, with reason `REASON_LISTED`, keeping no more of them
+    waiting per service than its minute's allowance (`PER_MINUTE`): the drain
+    takes no more than that a minute anyway, and whatever a viewer queues is not
+    held up behind a backlog queued all at once. A row still inside its backoff,
+    or given up on (`LISTED_GIVE_UP_AFTER`), is left. Returns how many were
+    queued."""
+    ts = db.now() if now is None else now
+    askable = {source for source, _port in _askable(settings)}
+    sources = [source for source in _listing_sources() if source in askable]
+    if not sources:
+        return 0
+
+    def _work(conn) -> int:
+        queued = 0
+        for source in sources:
+            room = PER_MINUTE[source] - int(conn.execute(
+                "SELECT COUNT(*) FROM metadata_refresh WHERE source = ? AND reason = ?",
+                (source, REASON_LISTED)).fetchone()[0])
+            if room <= 0:
+                continue
+            own = f"CAST(json_extract(t.ids_json, '$.{rows.ID_NAMESPACE[source]}') AS TEXT)"
+            for row in conn.execute(
+                    f"SELECT t.media, {own} AS own_id, t.fail_count, t.failed_at "
+                    f"{_OWED_LISTINGS} AND NOT EXISTS (SELECT 1 FROM metadata_refresh q "
+                    f"WHERE q.source = t.source AND q.media = t.media AND q.source_id = {own} "
+                    f"AND q.season = {TITLE}) ORDER BY t.fetched_at DESC",
+                    (source, LISTED_GIVE_UP_AFTER)):
+                if room <= 0:
+                    break
+                if not row["own_id"] or _backed_off(row, ts):
+                    continue
+                added = conn.execute(_QUEUE, (source, str(row["media"]), str(row["own_id"]),
+                                              TITLE, ts, REASON_LISTED)).rowcount
+                queued += added
+                room -= added
+        return queued
+
+    queued = await db.transaction(_work)
+    if queued:
+        logger.debug("title store: queued %d sparse listing(s) to be described", queued)
+    return queued
+
+
+async def listings_owed() -> int:
+    """How many sparse listings are still owed a description (`queue_listed`'s
+    worklist, whatever its allowance), every service's together — the calendar's
+    "unenriched" count adds it to the Simkl drain's own."""
+    sources = _listing_sources()
+    if not sources:
+        return 0
+    total = 0
+    for source in sources:
+        total += int(await db.fetch_value(f"SELECT COUNT(*) {_OWED_LISTINGS}",
+                                          (source, LISTED_GIVE_UP_AFTER)) or 0)
+    return total
+
+
 # ---------------------------------------------------------------------------
 # the drain
 # ---------------------------------------------------------------------------
@@ -442,6 +540,16 @@ async def _refresh(settings, port, entry: Entry, *, tz: ZoneInfo) -> description
                                             fresh=True)).seasons
     return await descriptions.store(entry.source, entry.media, entry.own_id, answer,
                                     asked_season=season, tz=tz, seasons=seasons)
+
+
+async def _dequeue(entry: Entry) -> None:
+    await db.execute("DELETE FROM metadata_refresh WHERE source = ? AND media = ? "
+                     "AND source_id = ? AND season = ?", entry)
+
+
+# What a service's "slow down" arrives as: an HTTP 429 on the app-wide
+# SourceUnavailable contract (base.py), which every transport raises it as.
+RATE_LIMITED = 429
 
 
 async def _record_failure(entry: Entry, now: int) -> None:
@@ -525,23 +633,50 @@ async def drain(settings, *, now: int | None = None) -> int:
 
     # What this pass did for each heal's title: (entry, what became of it).
     healed: dict[str, list[tuple[Entry, str]]] = {}
+    # The services that told this pass to slow down (`_one`).
+    slowed: set[str] = set()
 
     async def _one(source: str, entry: Entry, reason: str, gate: asyncio.Semaphore) -> bool:
         async with gate:
+            if source in slowed:
+                return False   # left queued, for the next pass
             try:
                 written = await _refresh(settings, askable[source], entry, tz=tz)
             except SourceUnavailable as exc:
+                if exc.status == RATE_LIMITED:
+                    # THE SERVICE SAID SLOW DOWN, which is not this title's
+                    # failure: no backoff is recorded against it (five would give
+                    # a sparse listing up for good), its entry stays queued, and
+                    # the rest of this service's batch waits for the next pass.
+                    # The transport has already held the request for the service's
+                    # Retry-After where it could (providers/tmdb/transport.py).
+                    if source not in slowed:
+                        logger.info("title store: %s asked us to slow down; its queued "
+                                    "rows wait for the next pass", source)
+                    slowed.add(source)
+                    return False
                 logger.log(logging.INFO if reason == REASON_DEAD_PICTURE else logging.DEBUG,
                            "title store: %s could not refresh %s %s (%s): %s",
                            source, entry.media, entry.own_id, reason, exc)
                 await _record_failure(entry, ts)
+                await _dequeue(entry)
                 if entry in _heals:
                     healed.setdefault(_heals.pop(entry)[0], []).append((entry, "failed"))
                 return False
-            finally:
-                await db.execute(
-                    "DELETE FROM metadata_refresh WHERE source = ? AND media = ? "
-                    "AND source_id = ? AND season = ?", entry)
+            except Exception:
+                # Not a service's answer at all — a fault here. The entry goes, as
+                # every answered one does, so it is not retried every pass; the
+                # pass logs it (below).
+                await _dequeue(entry)
+                raise
+            await _dequeue(entry)
+            if written is None:
+                # AN ANSWER THAT SAYS NOTHING IS A REFRESH THAT DID NOT HAPPEN,
+                # and is marked as one, so the backoff holds it back: a title the
+                # service no longer knows would otherwise be asked about again on
+                # every view — and a sparse listing on every heartbeat
+                # (`queue_listed`), whose give-up reads this count.
+                await _record_failure(entry, ts)
             _log_refreshed(entry, reason, written)
             if entry in _heals:
                 healed.setdefault(_heals.pop(entry)[0], []).append((

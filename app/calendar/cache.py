@@ -38,6 +38,10 @@ locked by live measurement against the real Trakt API:
     columns of `calendar_coverage` — and the gap between them is the only thing
     that means "incomplete": a span stored while one source was failing must not
     be served for a whole TTL as though that source had been asked and was empty.
+    One gap is not a failure: a source still WORKING ITS ANSWER OUT behind the
+    request (base.SourcePending — TMDB's derived season premieres) is asked and
+    not yet answered, and that source's share is filled on its own once the
+    answer is ready (`fill_source`).
     A source in NEITHER is not in play for that span, which is not a failure; it
     makes the span a MISS to be refilled. Coverage is a table of its own because
     "this source returned no rows" and "this source was never asked" are the same
@@ -94,7 +98,7 @@ import logging
 import time
 from datetime import date, datetime, timedelta, timezone
 from itertools import groupby
-from typing import NamedTuple
+from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
 from . import enrich as calendar_enrich
@@ -106,11 +110,11 @@ from .. import db
 from .. import providers
 from ..media import artwork
 from ..metadata import identity as title_identity
-from ..perftrace import activity, job, span
+from ..perftrace import activity, detach, job, span
 from ..endpoints import ENDPOINTS, Endpoint
 from ..providers.base import (
-    Item, Provider, Record, Source, SourceNotModified, SourceUnavailable, epoch_moment,
-    render, resolve_key)
+    Item, Provider, Record, Source, SourceNotModified, SourcePending, SourceUnavailable,
+    epoch_moment, render, resolve_key)
 
 logger = logging.getLogger(__name__)
 # Same "app.perf" logger the Trakt transport's cached_get already uses for its own
@@ -689,13 +693,32 @@ async def fetch_window_records(endpoint: Endpoint, settings, start: date, *,
     rather than a ceiling (see in_window), so consecutive windows overlap by days
     or weeks; storing what arrived would mean caching the same airings several
     times over and handing the page duplicate cards for every one of them.
+
+    A SOURCE STILL WORKING ITS ANSWER OUT (base.SourcePending) is neither: it is
+    left out of the answer, as a refusal is, and remembered as PENDING
+    (`_note_pending`), which the store that follows this turns into a fill of
+    that source's share alone once its answer is ready (`_follow_pending`).
     """
+    records, answered, unchanged, pending = await _answers(
+        _window_sources(endpoint, settings, start), endpoint, settings, start, covered=covered)
+    for source, ready in pending:
+        _note_pending(endpoint, start, source, ready)
+    return records, answered, unchanged
+
+
+async def _answers(asked_of: list[Provider], endpoint: Endpoint, settings, start: date, *,
+                   covered=()) -> tuple[list[Record], list[str], list[str], list[tuple]]:
+    """What `asked_of` say airs in this window — `fetch_window_records`' work for
+    any set of sources, so a fill of one source's share (`fill_source`) is the
+    same fill: (records, who answered, who said unchanged, [(who is still
+    working its answer out, when it will be ready)])."""
     records: list[Record] = []
     answered: list[str] = []
     unchanged: list[str] = []
+    pending: list[tuple[str, Any]] = []
     refusal: SourceUnavailable | None = None
     asked = 0
-    for provider in _window_sources(endpoint, settings, start):
+    for provider in asked_of:
         asked += 1
         try:
             # ONLY A SOURCE THAT ALREADY HAS ROWS HERE MAY ANSWER "unchanged".
@@ -719,6 +742,15 @@ async def fetch_window_records(endpoint: Endpoint, settings, start: date, *,
             logger.debug("%s reports the %s window starting %s unchanged.",
                          provider.source, endpoint.key, start)
             continue
+        except SourcePending as exc:
+            # NOT A FAILURE: the answer is on its way. The window is stored as
+            # asked of this source and not yet answered, which is the truth, and
+            # it is not counted as a refusal — a window every source of which is
+            # still working is a window to store and follow, not one to fail.
+            pending.append((str(provider.source), exc.ready))
+            logger.debug("%s is still working out the %s window starting %s.",
+                         provider.source, endpoint.key, start)
+            continue
         except SourceUnavailable as exc:
             refusal = refusal or exc
             logger.debug("%s could not answer the %s window starting %s: %s",
@@ -726,7 +758,7 @@ async def fetch_window_records(endpoint: Endpoint, settings, start: date, *,
             continue
         answered.append(str(provider.source))
         records.extend(got)
-    if asked and not answered and not unchanged:
+    if asked and not answered and not unchanged and not pending:
         raise refusal
 
     # The instance-wide content floor: an operator who excludes a genre, country,
@@ -765,7 +797,7 @@ async def fetch_window_records(endpoint: Endpoint, settings, start: date, *,
     # enrich.overlay_match_ids for why only the IDS are taken and what its
     # realistic ceiling is.
     bridged = await calendar_enrich.overlay_match_ids(trimmed)
-    return dedupe_records(bridged), answered, unchanged
+    return dedupe_records(bridged), answered, unchanged, pending
 
 
 async def read_cached_window(endpoint_key: str, start: date) -> tuple[CachedWindow, int] | None:
@@ -1044,6 +1076,10 @@ async def ensure_window(endpoint: Endpoint, settings, start: date, *,
         raise
     await store_window(endpoint.key, start, records, ttl, ts,
                        sources=answered, asked=in_play, unchanged=unchanged)
+    # AFTER THE STORE, never before it: the store records a pending source as
+    # asked and not answered, and a follow-up that stored first would have its
+    # answer marked missing again by this one.
+    _follow_pending(endpoint, settings, start)
     if unchanged and not answered:
         # EVERY SOURCE SAID "UNCHANGED", so this fetch brought no records at all
         # while the stored rows are perfectly good. The store above still ran: it
@@ -1052,19 +1088,7 @@ async def ensure_window(endpoint: Endpoint, settings, start: date, *,
         after = await entries.span_coverage(endpoint.key, start)
         if after[2] is not None:
             return WindowCoverage(after[0], after[1], int(after[2]))
-    # A FILL, NOT A READ — this line only runs when the branch above actually
-    # fetched and stored, never on a cache-hit return further up. That is
-    # what lets it ask for enrichment sooner than the next heartbeat tick
-    # without weakening "the read path never makes an outbound call": nothing
-    # here is served to a viewer yet, and the scheduled drain is fire-and-
-    # forget (see enrich.schedule_drain) so this request does not wait on it
-    # either. A pure cache-hit read never reaches this line at all.
-    calendar_enrich.schedule_drain(settings)
-    # Recorded only on a genuine fetch, not on every cache-hit read: the URL
-    # arrived here already, so this is the point a lookup is "paid for" rather
-    # than a per-view cost added to the hot render path.
-    sightings = (s for s in (_poster_sighting(r) for r in records) if s is not None)
-    await artwork.record_poster_urls(sightings)
+    await _after_fill(settings, records)
     # Who was asked and who answered, from this fill, which knows them in the
     # sources' declared order.
     # A SOURCE THAT SAID "UNCHANGED" ANSWERED, beside one that brought rows as
@@ -1074,6 +1098,174 @@ async def ensure_window(endpoint: Endpoint, settings, start: date, *,
     replied = {*answered, *unchanged}
     return WindowCoverage(tuple(name for name in in_play if name in replied),
                           tuple(in_play), ts)
+
+
+async def _after_fill(settings, records: list[Record]) -> None:
+    """What a fill that stored records does next — the same for a whole window
+    and for one source's share of it (`fill_source`).
+
+    A FILL, NOT A READ — this only runs when something was actually fetched and
+    stored, never on a cache-hit return. That is what lets it ask for enrichment
+    sooner than the next heartbeat tick without weakening "the read path never
+    makes an outbound call": nothing here is served to a viewer yet, and the
+    scheduled drain is fire-and-forget (see enrich.schedule_drain) so the
+    request does not wait on it either. And the pictures the fetch brought are
+    recorded here, where the lookup was "paid for", rather than as a per-view
+    cost on the hot render path.
+    """
+    calendar_enrich.schedule_drain(settings)
+    sightings = (s for s in (_poster_sighting(r) for r in records) if s is not None)
+    await artwork.record_poster_urls(sightings)
+
+
+# ---------------------------------------------------------------------------
+# a source still working its answer out
+# ---------------------------------------------------------------------------
+#
+# A SOURCE MAY ANSWER A WINDOW LATER (base.SourcePending): TMDB's season
+# premieres are derived from every show airing that week, tens of seconds cold,
+# behind the request. The fill stores what everybody else said, with that source
+# asked and not yet answered — which is the truth — and once its answer is ready
+# fills that source's share ALONE (`fill_source`), leaving the other services'
+# rows and coverage exactly as they are. Until then the window is not "partial":
+# nothing failed, so the read path does not say "couldn't be loaded", the
+# failure retry does not ask again over the top of it, and the stats box counts
+# the weeks still being worked out (`pending_windows`).
+#
+# IN MEMORY, AS THE WORK BEHIND IT IS. A restart forgets both, and the window
+# then reads as a source that has not answered — the retry a minute behind a
+# reader, or the schedule's, asks again and the source starts its work again.
+
+# THE LONGEST A FOLLOW-UP WAITS for a source's answer. The work is done one span
+# at a time, so a cold instance's two scheduled months queue a dozen spans of
+# tens of seconds each; half an hour clears that with room. A follow-up past it
+# gives up, and the window falls to the failure retry like any unanswered one.
+_PENDING_WAIT_SECONDS = 30 * 60
+
+
+class _Pending(NamedTuple):
+    ready: Any
+    since: float
+    follow_up: asyncio.Task | None
+
+
+# (endpoint, window start, source) -> what is awaited. An entry leaves when its
+# follow-up ends, and one whose follow-up never started — a fetch no store
+# followed — is dropped on the clock above, so this holds no more than the
+# windows being worked out.
+_pending: dict[tuple[str, str, str], _Pending] = {}
+
+
+def _note_pending(endpoint: Endpoint, start: date, source: str, ready) -> None:
+    """Remember that `source` will answer this window once `ready` finishes. A
+    window already being followed for it keeps its follow-up."""
+    moment = time.monotonic()
+    for stale in [key for key, held in _pending.items()
+                  if moment - held.since >= _PENDING_WAIT_SECONDS
+                  and (held.follow_up is None or held.follow_up.done())]:
+        del _pending[stale]
+    key = (endpoint.key, start.isoformat(), str(source))
+    held = _pending.get(key)
+    if held is not None and held.follow_up is not None and not held.follow_up.done():
+        return
+    _pending[key] = _Pending(ready, moment, None)
+
+
+def _follow_pending(endpoint: Endpoint, settings, start: date) -> None:
+    """Start the follow-up of every source this window is waiting on that has
+    none yet — called by the store, once the window's own rows are written."""
+    for key, held in list(_pending.items()):
+        if key[:2] != (endpoint.key, start.isoformat()) or held.follow_up is not None:
+            continue
+        task = asyncio.create_task(_follow_up(endpoint, settings, start, key[2], held.ready))
+        _pending[key] = held._replace(follow_up=task)
+
+
+async def _follow_up(endpoint: Endpoint, settings, start: date, source: str, ready) -> None:
+    """Wait for `source`'s answer to this window, then fill its share. Behind
+    every request — and detached from the one that started it, whose timing it
+    is no part of (perftrace.detach); a failure is logged and leaves the window
+    to the failure retry, never raised at anybody."""
+    key = (endpoint.key, start.isoformat(), source)
+    detach()
+    try:
+        try:
+            # SHIELDED, because the answer is shared: a follow-up giving up must
+            # not cancel the work another window, or the next fill, is waiting on.
+            await asyncio.wait_for(asyncio.shield(ready), _PENDING_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            logger.warning("%s's answer for the %s window starting %s took longer than "
+                           "%d minutes; left to the retry", source, endpoint.key, start,
+                           _PENDING_WAIT_SECONDS // 60)
+            return
+        except Exception as exc:  # the source logged its own failure where it happened
+            logger.info("%s could not work out the %s window starting %s (%s); left to "
+                        "the retry", source, endpoint.key, start, exc)
+            return
+        with activity("pending answer"):
+            if await fill_source(endpoint, settings, start, source):
+                logger.info("%s's answer for the %s window starting %s is stored", source,
+                            endpoint.key, start)
+    except SourceUnavailable as exc:
+        logger.info("%s's answer for the %s window starting %s could not be read (%s); "
+                    "left to the retry", source, endpoint.key, start, exc)
+    except db.DatabaseError as exc:
+        # A database too busy to take the write (another fill's transaction) is
+        # not this answer's fault, and the retry stores it as well as this would.
+        logger.warning("%s's answer for the %s window starting %s could not be stored "
+                       "(%s); left to the retry", source, endpoint.key, start, exc)
+    except Exception:  # pragma: no cover — a background task must not vanish silently
+        logger.exception("following %s's answer for the %s window starting %s failed",
+                         source, endpoint.key, start)
+    finally:
+        _pending.pop(key, None)
+
+
+async def fill_source(endpoint: Endpoint, settings, start: date, source: str, *,
+                      now: int | None = None) -> bool:
+    """Fill ONE source's share of a window — its airings replaced and its coverage
+    advanced, every other source's left exactly as it is (entries.store_span
+    deletes and records only the sources it is told answered). Returns whether
+    the source answered.
+
+    THE ORDINARY FILL, NARROWED: the same floor, trim and id overlay
+    (`_answers`), the same store, the same follow-on work (`_after_fill`). What a
+    source still working its answer out (base.SourcePending) says HERE is not
+    followed again — that would chain one fill to the next for as long as the
+    answer kept not arriving; the window stays asked and not answered, and the
+    failure retry takes it from there.
+    """
+    ts = db.now() if now is None else now
+    provider = next((p for p in _window_sources(endpoint, settings, start)
+                     if str(p.source) == str(source)), None)
+    if provider is None:
+        return False
+    has_rows = await entries.sources_with_rows(
+        endpoint.key, start, start + timedelta(days=WINDOW_DAYS))
+    records, answered, unchanged, pending = await _answers(
+        [provider], endpoint, settings, start, covered=has_rows)
+    if not answered and not unchanged:
+        if pending:
+            logger.warning("%s says its answer for the %s window starting %s is still being "
+                           "worked out, just after saying it was ready", source,
+                           endpoint.key, start)
+        return False
+    await store_window(endpoint.key, start, records, _ttl_seconds(settings, start, ts), ts,
+                       sources=answered, asked=[str(source)], unchanged=unchanged)
+    await _after_fill(settings, records)
+    return True
+
+
+def pending_sources(endpoint_key: str, start: date) -> set[str]:
+    """The sources this window is waiting on for an answer still being worked out."""
+    window = (endpoint_key, start.isoformat())
+    return {key[2] for key in _pending if key[:2] == window}
+
+
+def pending_windows() -> int:
+    """How many calendar windows are waiting on a source's answer still being
+    worked out — the stats box's "weeks being worked out", instance-wide."""
+    return len({key[:2] for key in _pending})
 
 
 # HOW SOON A WINDOW A SOURCE FAILED ON IS ASKED AGAIN, behind the reader, rather
@@ -1119,7 +1311,11 @@ def _failed_retry_due(endpoint: Endpoint, start: date, cached: WindowCoverage,
     for done in [key for key, at in _failed_retried_at.items()
                  if ts - at >= _FAILED_REFRESH_SECONDS]:
         del _failed_retried_at[done]
-    if not set(cached.asked) - set(cached.sources):
+    # A SOURCE STILL WORKING ITS ANSWER OUT HAS NOT FAILED, and its answer is
+    # already being followed: asking every source again over the top of it would
+    # spend the others' requests to learn what the follow-up is about to store.
+    if not (set(cached.asked) - set(cached.sources)
+            - pending_sources(endpoint.key, start)):
         return False
     key = (endpoint.key, start.isoformat())
     since = max(int(cached.cached_at or 0), _failed_retried_at.get(key, 0))
@@ -1651,6 +1847,7 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     as_of: int | None = None
     errored = 0
     incomplete = False
+    waiting = False
     first_error: SourceUnavailable | None = None
     for start, result in zip(windows, results):
         if isinstance(result, SourceUnavailable):
@@ -1676,8 +1873,15 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         # simply predates a source, and so reported a failure nobody had.
         # A window nobody filled (an uncached one on a public page) asked nothing
         # and therefore stays quiet, rather than reporting every source missing.
-        if set(result.asked) - set(result.sources):
+        # A SOURCE STILL WORKING ITS ANSWER OUT IS NOT A FAILURE either: the
+        # window waits on it (`_pending`) and says nothing — its answer arrives
+        # as a fill of its own, and the stats box counts the weeks it is owed.
+        missing = set(result.asked) - set(result.sources)
+        owed = missing & pending_sources(endpoint.key, start)
+        if missing - owed:
             incomplete = True
+        if owed:
+            waiting = True
 
     if errored and errored == len(windows):
         # Every window failed and none had a cached copy: there is no degraded
@@ -1767,7 +1971,11 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # briefly unreachable into five minutes of a month that stays wrong however
     # often it is reloaded — and a reload is exactly how somebody expects to
     # recover from it.
-    if partial or not allow_fetch:
+    #
+    # NOR ONE WAITING ON A SOURCE'S ANSWER, for the same reload: the answer lands
+    # in seconds, and the read after it must draw it rather than be served this
+    # one while a rebuild runs behind it.
+    if partial or waiting or not allow_fetch:
         return items, as_of, partial, filtered_out
     # WHAT IS PAST THE HARD MAX GOES FIRST, ON EVERY WRITE, and none of it would go
     # otherwise: an entry is only ever dropped when somebody reads that exact key,

@@ -1233,8 +1233,12 @@ async def backlog(*, now: int | None = None) -> tuple[int, int]:
         "  AND NOT (COALESCE(s.fail_count, 0) >= ? "
         "           AND (s.payload IS NULL OR length(s.payload) <= ?))",
         (str(Source.SIMKL), _GIVE_UP_AFTER, _EMPTY_PAYLOAD_MAX_BYTES))
-    return (int(titles or 0),
-            await entries.owed_season_count(str(Source.TRAKT), "trakt", ts))
+    # AND EVERY OTHER SERVICE'S SPARSE LISTINGS, which the title store's refresh
+    # queue completes rather than this drain (TMDB's — Capabilities.
+    # describes_sparse_listings): one number for "titles still being looked
+    # up", whichever pass is doing the looking, counted by the pass that does.
+    titles = int(titles or 0) + await metadata_refresh.listings_owed()
+    return (titles, await entries.owed_season_count(str(Source.TRAKT), "trakt", ts))
 
 
 async def run_drain(settings) -> int:
@@ -1294,8 +1298,10 @@ async def run_drain(settings) -> int:
             # (app/metadata/refresh.py). After the Simkl half for the same reason
             # the others follow it, and ahead of them because a viewer asked.
             # Held rows nearing a service's ceiling join it first, behind what
-            # viewers queued.
+            # viewers queued, and a sparse listing a fill stored (TMDB's) behind
+            # those — it is drawn already, only less fully.
             await metadata_refresh.queue_ceiling(settings)
+            await metadata_refresh.queue_listed(settings)
             await metadata_refresh.run(settings)
         except Exception:
             logger.error("Title store refresh failed.", exc_info=True)

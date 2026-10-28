@@ -298,6 +298,20 @@ def no_background_title_refresh(monkeypatch):
     monkeypatch.setattr(pictures, "_checks", deque())
 
 
+@pytest.fixture(autouse=True)
+def no_answer_still_being_worked_out(monkeypatch):
+    """Each test starts with no source's answer being worked out and no window
+    waiting on one: TMDB's season-premieres derivation and the calendar's
+    follow-ups of it live in process (app/providers/tmdb/premieres.py,
+    app/calendar/cache.py's `_pending`), and a test's loop ends with them."""
+    from app.calendar import cache as calendar_cache
+    from app.providers.tmdb import premieres
+    monkeypatch.setattr(calendar_cache, "_pending", {})
+    monkeypatch.setattr(premieres, "_waiting", {})
+    monkeypatch.setattr(premieres, "_worker", None)
+    monkeypatch.setattr(premieres, "_loop", None)
+
+
 @pytest.fixture
 def db_path(tmp_path):
     """A freshly migrated, test-only database, distinct from every other test's."""

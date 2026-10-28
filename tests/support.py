@@ -73,13 +73,15 @@ def window_fetch(entries):
     `entries` is either the raw entries every window should answer with, or a
     callable (endpoint, start) -> raw entries for a test that wants one window to
     differ from another. The answer names EVERY SOURCE THAT COULD HAVE ANSWERED
-    THIS ENDPOINT as having replied — `trakt` always, and `simkl` for the four
-    endpoints its calendar covers — because that is what a real fill against two
-    registered sources returns, and because the caller records who it ASKED
-    independently: a stub answering for fewer sources than are in play stores a
-    window that was asked-but-silent, and the read path then marks the span
-    partial. A test exercising a genuinely partial fetch (one source refused)
-    wants that, and builds its own stub instead of this one.
+    THIS ENDPOINT as having replied — `trakt` always, `simkl` for the four
+    endpoints its calendar covers, and `tmdb` for its three when the test's
+    Settings hold a TMDB read token (it is in play only then) — because that is
+    what a real fill against the registered sources returns, and because the
+    caller records who it ASKED independently: a stub answering for fewer
+    sources than are in play stores a window that was asked-but-silent, and the
+    read path then marks the span partial. A test exercising a genuinely partial
+    fetch (one source refused) wants that, and builds its own stub instead of
+    this one.
 
     Patching HERE rather than at the transport keeps the floor filter and the
     window trim out of the way, which is what a test about the read path wants;
@@ -91,11 +93,15 @@ def window_fetch(entries):
     """
     async def fetch(endpoint, settings, start, *, covered=()):
         from app.providers.simkl import _SimklProvider
+        from app.providers.tmdb import _TmdbProvider
 
         rows = entries(endpoint, start) if callable(entries) else entries
         sources = ["trakt"]
         if _SimklProvider.capabilities.answers(endpoint.key):
             sources.append("simkl")
+        if (_TmdbProvider.capabilities.answers(endpoint.key)
+                and getattr(settings, "tmdb_configured", False)):
+            sources.append("tmdb")
         # (records, answered, unchanged) — the stub never reports a source as
         # unchanged, because a test that wants that case is testing the
         # conditional GET and builds its own stub for it.

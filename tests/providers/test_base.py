@@ -224,7 +224,8 @@ class TestRegistry:
         page checks before it renders an explanation instead of a month. Simkl's
         calendar needs no credential at all, so it is listed here with NO
         Settings object in play whatsoever — calendar_sources() takes none."""
-        assert {p.source for p in providers.calendar_sources()} == {Source.TRAKT, Source.SIMKL}
+        assert {p.source for p in providers.calendar_sources()} == {
+            Source.TMDB, Source.TRAKT, Source.SIMKL}
 
     def test_a_source_with_no_calendar_port_would_be_in_neither_list(self):
         """The negative half of the rule above, pinned against whichever source
@@ -275,7 +276,7 @@ class TestRegistry:
     def test_switching_it_off_drops_unconfigured_simkl_from_the_fill(self):
         off = Settings(simkl_public_calendar_enabled=False)
         sources = {p.source for p in providers.calendar_sources(settings=off)}
-        assert sources == {Source.TRAKT}
+        assert sources == {Source.TMDB, Source.TRAKT}
 
     def test_switching_it_off_drops_a_configured_simkl_too(self):
         """The switch answers exactly one question — does Simkl contribute to

@@ -174,19 +174,28 @@ class ThePickerFactsAndRecordsTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TheProviderTests(unittest.TestCase):
-    """TMDB as the registry holds it: a describer and every box's default
-    search, never a tracker, its calendar and list ports not yet offered."""
+    """TMDB as the registry holds it: a describer, every box's default search and
+    a calendar of three premieres, never a tracker, its list port not yet
+    offered."""
 
-    def test_it_is_first_and_describes_and_searches_only(self):
+    def test_it_is_first_and_describes_searches_and_lists_premieres(self):
         from app import providers
         self.assertEqual(list(providers.registered())[0], Source.TMDB)
         provider = providers.get(Source.TMDB)
         self.assertIsNotNone(provider.detail_port)
         self.assertIsNotNone(provider.search_port)
+        self.assertIsNotNone(provider.calendar_port)
         self.assertTrue(provider.capabilities.searched_by_default)
-        self.assertEqual((provider.sync_port, provider.calendar_port,
-                          provider.watchlist_port), (None, None, None))
+        self.assertEqual(provider.capabilities.endpoints,
+                         {"shows/new", "shows/premieres", "movies"})
+        self.assertTrue(provider.capabilities.describes_sparse_listings)
+        self.assertEqual((provider.sync_port, provider.watchlist_port), (None, None))
         self.assertFalse(provider.capabilities.private_user_data)
+
+    def test_its_calendar_is_the_instance_token(self):
+        provider = tmdb_provider._TmdbProvider()
+        self.assertTrue(provider.calendar_port.calendar_configured(SETTINGS))
+        self.assertFalse(provider.calendar_port.calendar_configured(Settings()))
 
     def test_its_catalogue_is_the_instance_token_and_nobodys_account(self):
         provider = tmdb_provider._TmdbProvider()
