@@ -57,6 +57,33 @@
 </span>
 {% endmacro %}
 
+{# ONE TICK BOX, for a rule that is on or off — never "only titles missing a
+   country" — so a chip's three answers would offer one that means nothing.
+
+   `name` IS WHAT IT POSTS UNDER and `value` what a tick says: a missing-data rule
+   posts its chip field (`chip:<column>:<rule>`) as `include`, so the save and the
+   stored spec are the chips' own (app/calendar/vocab.py's TICK_FIELDS) and the
+   field's presence marker is what makes an unticked box an answer; a switch
+   posts `toggle:<column>` (or a Settings field's own name) as `1`, with a hidden
+   companion saying `0`, because nothing else says it was drawn.
+
+   THE BOX AND ITS FACE ARE SIBLINGS, as the service switches are, so the
+   stylesheet draws the tick from `:checked +`.
+
+   `fixed` IS A RULE THE OPERATOR'S FLOOR ALREADY APPLIES. Drawn ticked and
+   disabled, saying so, because a viewer can only ever tighten the floor — a box
+   that looked uncheckable would promise titles back that nothing can bring. A
+   disabled box posts nothing, which stores the viewer's own answer as off: the
+   floor goes on hiding them, and if it is lifted, the viewer's off is what they
+   chose. #}
+{% macro tick(name, value, label, id, on=false, fixed=false, form=none, companion=false) %}
+{%- set owner = (' form="' ~ form ~ '"') | safe if form else '' -%}
+{% if companion %}<input type="hidden" name="{{ name }}" value="0"{{ owner }}>{% endif %}
+<input type="checkbox" id="{{ id }}" name="{{ name }}" value="{{ value }}"{{ owner }}
+       autocomplete="off"{% if on or fixed %} checked{% endif %}{% if fixed %} disabled{% endif %}>
+<label class="fsource" for="{{ id }}"{% if fixed %} title="This instance already hides these for everyone"{% endif %}>{{ label }}</label>
+{% endmacro %}
+
 {# The legend, which is the whole of the explanation the chips need. Drawn once
    per chip section rather than once per panel: a section can be scrolled to
    without the top of the panel in view, and a colour code nobody can see is a

@@ -172,7 +172,7 @@ async def premiere_records(user_id: int, settings, year: int, month: int,
                 new_keys.add(key)
             elif key in new_keys:
                 continue  # this S01 premiere is already counted as a New Shows entry
-            if exempting and not item.enriched:
+            if exempting.lets_through(item):
                 if item.mark_key not in held:
                     held.add(item.mark_key)
                     out.undescribed.append(record["title"])

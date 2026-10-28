@@ -69,7 +69,21 @@ class TheDetailsPanelTests(unittest.IsolatedAsyncioTestCase):
                          ["tv/95396", "tv/95396/season/2",
                           "tv/95396/season/2/aggregate_credits"])
         appended = {path: params for path, params, _ in tmdb.asked}["tv/95396"]["append_to_response"]
-        self.assertEqual(appended, "external_ids,content_ratings,videos")
+        self.assertEqual(appended, "external_ids,content_ratings,videos,keywords")
+        # The two facts only TMDB states, from that same one call.
+        self.assertEqual(got["keywords"][:2], ["office", "workplace"])
+        self.assertEqual(got["show_type"], "scripted")
+
+    async def test_an_answer_asked_without_keywords_states_neither_fact(self):
+        """An answer that carries no keyword list — one cached before they were
+        asked for — says nothing about keywords or type, which is not the same
+        as "none": the store then reads the title as undescribed for both."""
+        bare = {k: v for k, v in SEVERANCE.items() if k != "keywords"}
+        _tmdb, patched = answering(tv__95396=bare)
+        with patched:
+            got = await detail.fetch_details(SETTINGS, Media.SHOW, "95396", None)
+        self.assertIsNone(got["keywords"])
+        self.assertEqual(got["show_type"], "scripted")
 
     async def test_a_whole_show_draws_the_shows_cast(self):
         _tmdb, patched = answering(tv__95396=SEVERANCE,

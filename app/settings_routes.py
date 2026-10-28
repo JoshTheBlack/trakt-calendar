@@ -46,7 +46,7 @@ from . import auth, authz, cache, config, db, route_params, secrets_box
 from .auth import encryption_flow, encryption_routes
 from .auth import routes as auth_routes, simkl as simkl_auth, trakt as trakt_auth, trakt_routes
 from .auth import AuthLevel
-from .calendar import vocab
+from .calendar import resolve as calendar_resolve, vocab
 from .config import SECRET_FIELDS, Settings, load_settings, save_settings
 from .endpoints import endpoint_choices
 from .integrations import arr, routes as integrations_routes
@@ -65,10 +65,13 @@ DEVICE_TEMPLATE = "_settings_device.html"
 TOKEN_TEMPLATE = "_settings_token.html"
 RECONNECT_TEMPLATE = "_settings_reconnect.html"
 
-# The content floor's certification rows are the Filters panel's chips, spelled
-# and read back by app/calendar/vocab.py, so a floor spec is byte-identical to a
-# spec a viewer's own filter would have written.
-FLOOR_CHIP_FIELDS = (vocab.SHOW_CERTIFICATIONS, vocab.MOVIE_CERTIFICATIONS)
+# The content floor's certification, show-type and missing-data rows are the
+# Filters panel's chips and tick boxes, spelled and read back by
+# app/calendar/vocab.py, so a floor spec is byte-identical to a spec a viewer's
+# own filter would have written. Each Settings field carries the viewer's column
+# name for exactly that reason (vocab.FLOOR_FIELDS).
+FLOOR_CHIP_FIELDS = (vocab.SHOW_CERTIFICATIONS, vocab.MOVIE_CERTIFICATIONS,
+                     vocab.TV_SHOW_TYPES, vocab.TV_MISSING, vocab.MOVIE_MISSING)
 
 ARR_KINDS = ("sonarr", "radarr")
 
@@ -258,6 +261,11 @@ async def _panel_context(request: Request) -> dict:
         "endpoints": endpoint_choices(),
         "floor_chips": {field: vocab.chips_for(field, getattr(settings, field))
                         for field in FLOOR_CHIP_FIELDS},
+        # A tick box sends nothing when unticked, so a missing-data row says it
+        # was drawn with the presence marker the Filters panel uses.
+        "floor_presence": {field: vocab.presence_name(field) for field in vocab.TICK_FIELDS},
+        # The services the no-network rule means, by their registry labels.
+        "sparse_labels": calendar_resolve.sparse_labels(),
         "arr": {kind: _arr_choices(kind, settings) for kind in ARR_KINDS},
     }
 

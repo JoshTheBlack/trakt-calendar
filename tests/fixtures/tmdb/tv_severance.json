@@ -194,5 +194,33 @@
     "published_at": "2025-06-20T16:03:05.000Z"
    }
   ]
+ },
+ "keywords": {
+  "results": [
+   {
+    "name": "office",
+    "id": 1438
+   },
+   {
+    "name": "workplace",
+    "id": 6282
+   },
+   {
+    "name": "memory",
+    "id": 10937
+   },
+   {
+    "name": "office politics",
+    "id": 11923
+   },
+   {
+    "name": "brain surgery",
+    "id": 189401
+   },
+   {
+    "name": "thriller",
+    "id": 316362
+   }
+  ]
  }
 }

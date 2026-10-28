@@ -27,10 +27,12 @@ logger = logging.getLogger(__name__)
 
 # What `/tv/{id}` and `/movie/{id}` are asked to carry beside the title itself.
 # One list per medium because the two answers differ in where a rating lives
-# (a show's `content_ratings`, a film's `release_dates`).
+# (a show's `content_ratings`, a film's `release_dates`). `keywords` is what the
+# calendar's keyword filter judges a title by (normalize.keywords) — a few
+# hundred bytes on the answer rather than a call of its own.
 _APPENDS = {
-    Media.SHOW: "external_ids,content_ratings,videos",
-    Media.MOVIE: "external_ids,release_dates,videos",
+    Media.SHOW: "external_ids,content_ratings,videos,keywords",
+    Media.MOVIE: "external_ids,release_dates,videos,keywords",
 }
 _PATHS = {Media.SHOW: "tv", Media.MOVIE: "movie"}
 
@@ -173,6 +175,8 @@ async def fetch_details(settings: Settings, media, tmdb_id, season: int | None, 
         # TMDB publishes no IMDb score.
         "imdb_rating": None,
         "certification": normalize.certification(info, media),
+        "keywords": normalize.keywords(info, media),
+        "show_type": normalize.show_type(info, media),
         "videos": normalize.videos_from(info),
         "first_aired": normalize.first_aired(info, media),
         "homepage": str(info.get("homepage") or ""),

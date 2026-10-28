@@ -179,6 +179,21 @@ class Settings:
     show_certifications: str = DEFAULT_SHOW_CERTIFICATIONS
     movie_certifications: str = DEFAULT_MOVIE_CERTIFICATIONS
     network_filter: list[str] = field(default_factory=list)
+    # THE FLOOR'S OTHER SIX DIMENSIONS, each the operator's answer for every
+    # viewer and each a viewer filter too (app/calendar/vocab.py's FLOOR_FIELDS
+    # says which medium each governs and why). Language and keywords are one
+    # floor for both media, like genres and countries; keywords are a LIST,
+    # because a TMDB keyword's own name can hold a comma. The rest carry the
+    # viewer's column names, so the Settings panel draws them with the Filters
+    # panel's own chips. Nothing is filtered by any of them until set.
+    languages: str = ""
+    keywords: list[str] = field(default_factory=list)
+    tv_show_types: str = ""
+    tv_single_service: bool = False
+    movie_single_service: bool = False
+    tv_sparse_no_network: bool = False
+    tv_missing: str = ""
+    movie_missing: str = ""
     pagination_limit: int = 300
     hide_not_watching: bool = False
     cache_ttl_minutes: int = 720  # detail/cast/episode cache lifetime
@@ -319,6 +334,13 @@ class Settings:
         nf = clean.get("network_filter")
         if isinstance(nf, str):
             clean["network_filter"] = [s.strip() for s in nf.split(",") if s.strip()]
+        # ...and the keyword floor as ONE KEYWORD A LINE: a keyword's own name can
+        # hold a comma ("san francisco, california"), so a comma cannot divide
+        # them. Lower-cased, as TMDB spells every keyword.
+        kw = clean.get("keywords")
+        if isinstance(kw, str):
+            clean["keywords"] = [" ".join(line.split()).lower()
+                                 for line in kw.splitlines() if line.strip()]
         for name, declared in _scalar_field_types().items():
             if name not in clean:
                 continue

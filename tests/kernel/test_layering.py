@@ -323,10 +323,11 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "showing marks from the old configuration, and the panel's profile and "
         "folder <select>s are drawn from what arr.py asks the service"),
     (SETTINGS, CALENDAR): Edge(
-        "the content floor's certification rows are the Filters panel's chips, "
-        "drawn and read back by calendar/vocab.py — so the instance floor and a "
-        "viewer's filter store byte-identical specs for the same presses, and the "
-        "spec format has one owner"),
+        "the content floor's certification, show-type and missing-data rows are the "
+        "Filters panel's chips, drawn and read back by calendar/vocab.py — so the "
+        "instance floor and a viewer's filter store byte-identical specs for the same "
+        "presses, and the spec format has one owner — and the no-network rule names "
+        "its services by calendar/resolve.py's one registry question"),
     (DISTRAKT, SOURCES): Edge(
         "which services back the tracker for an account is that account's stated "
         "preference, so the sync asks the preference store before it asks any "

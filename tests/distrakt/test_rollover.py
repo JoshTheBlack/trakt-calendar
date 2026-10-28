@@ -50,7 +50,10 @@ SETTINGS = SimpleNamespace(trakt_configured=True, simkl_configured=False,
                            # asks whether any filter would rule on a title
                            # nothing has described yet (exempts_undescribed).
                            genres="", countries="", show_certifications="",
-                           movie_certifications="", network_filter=[])
+                           movie_certifications="", network_filter=[],
+                           languages="", keywords=[], tv_show_types="",
+                           tv_single_service=False, movie_single_service=False,
+                           tv_sparse_no_network=False, tv_missing="", movie_missing="")
 
 
 def _detail(total, watched_hint=None, cadence="Mon", premiere="7/6", finale=None,

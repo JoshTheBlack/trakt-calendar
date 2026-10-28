@@ -506,19 +506,16 @@ async def _kept_by_filters(record, media: Media, specs, settings) -> bool:
     """Whether this viewer's filters keep a record a service has just described,
     for a title the calendar does not hold yet (`_drawn` answers one it does) —
     EVERY filter the calendar applies, through the calendar's own
-    (cache.narrow_for_viewer): the release narrowing, the instance's floor, the
-    viewer's genres, countries and certifications, and both network lists. No
-    source admission: the
-    calendar would draw another service's record of the title, and which
-    service lists it is not a filter."""
+    (cache.narrow_for_viewer): the release narrowing, the instance's floor and
+    every one of the viewer's own, handed over whole as `vocab.active_specs`
+    answers them so a dimension added there cannot be left out here. No source
+    admission: the calendar would draw another service's record of the title.
+    Judged as the one service describing it lists it — which is what the card
+    the jump writes would be, so "only one service lists it" refuses it the way
+    the calendar would hide it."""
     group = calendar_cache.group_records([record])[0]
     kept, _release, _resolved = calendar_cache.narrow_for_viewer(
-        [(group, [record])], media, genres=specs["genres"], countries=specs["countries"],
-        show_certifications=specs["show_certifications"],
-        movie_certifications=specs["movie_certifications"],
-        movie_release_countries=specs["movie_release_countries"],
-        movie_release_types=specs["movie_release_types"],
-        network_filter=specs["network_filter"], settings=settings)
+        [(group, [record])], media, settings=settings, **specs)
     return bool(kept)
 
 

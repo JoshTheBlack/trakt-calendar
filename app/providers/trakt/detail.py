@@ -327,6 +327,12 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         "imdb_rating": None,
         "release_types_by_country": {},
         "certification": (info.get("certification") or "").upper(),
+        # NOT STATED, which is a different answer from "none" (Record.keywords):
+        # Trakt's catalogue publishes neither keywords nor a show type, so a
+        # keyword or show-type filter shows a title only Trakt describes rather
+        # than judging it on an absence Trakt never claimed.
+        "keywords": None,
+        "show_type": None,
         # EVERY VIDEO TRAKT LISTS, from its own call — see `fetch_videos` for
         # why the list rather than the title's single `trailer` field.
         "videos": results.get("videos") or [],

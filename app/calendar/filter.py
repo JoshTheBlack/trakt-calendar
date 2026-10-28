@@ -34,10 +34,19 @@ release schedule, which no calendar payload carries and only the per-title
 catalogue does, so like the film prune it can act only on what enrichment has
 already found. See filter_release_groups for the rule and for why it is asked
 once per group rather than once per record.
+
+SIX MORE ARE ASKED OF A CARD WHOLE (`keep_title`), because a catalogue calendar
+lists everything anybody entered — TMDB took one October's Series Premieres
+from 180 cards to 991. Language, keywords and a show's type judge the resolved
+record like the three above; "only one service lists it", "only a sparse
+catalogue lists it and it names no network" and "it is missing a fact" judge
+the card against the services that listed it. `filter_titles` is the one place
+all of them, and the four above, are applied to a card — the operator's floor
+and a viewer's filters alike.
 """
 from __future__ import annotations
 
-from typing import Iterable, Protocol, Sequence, TypeVar
+from typing import Any, Iterable, NamedTuple, Protocol, Sequence, TypeVar
 
 
 def parse_spec(spec: str) -> tuple[set[str], set[str]]:
@@ -61,10 +70,14 @@ def parse_spec(spec: str) -> tuple[set[str], set[str]]:
     return includes, excludes
 
 
-def merge_token(spec, token: str, mode: str, *, is_list: bool = False):
+def merge_token(spec, token: str, mode: str, *, is_list: bool = False,
+                cased: bool | None = None):
     """`spec` with one token set to `mode` — "include", "exclude", or "" to drop
-    it entirely. Returns the same shape it was given: a list for networks, a
-    comma string for everything else.
+    it entirely. Returns the same shape it was given: a list for networks and
+    keywords, a comma string for everything else. `cased` says whether two
+    spellings differing only in case are different tokens — true for networks
+    (below), false for keywords (parse_keyword_spec); it defaults to `is_list`,
+    which is the networks' answer.
 
     IT LIVES BESIDE THE PARSERS BECAUSE IT WRITES WHAT THEY READ. The leading-'-'
     convention, which dimensions fold case and which must not, and the fact that
@@ -98,8 +111,10 @@ def merge_token(spec, token: str, mode: str, *, is_list: bool = False):
     def bare(part: str) -> str:
         return (part[1:] if part.startswith("-") else part).strip()
 
+    exact = is_list if cased is None else cased
+
     def same(a: str, b: str) -> bool:
-        return a == b if is_list else a.lower() == b.lower()
+        return a == b if exact else a.lower() == b.lower()
 
     kept = [p for p in parts if not same(bare(p), token)]
     if mode == "exclude":
@@ -107,6 +122,30 @@ def merge_token(spec, token: str, mode: str, *, is_list: bool = False):
     elif mode == "include":
         kept.append(token)
     return kept if is_list else ", ".join(kept)
+
+
+def parse_keyword_spec(keywords: Iterable[str] | None) -> tuple[set[str], set[str]]:
+    """Split keyword names into (includes, excludes), lower-cased.
+
+    A LIST LIKE THE NETWORKS AND FOLDED LIKE THE GENRES, and each half for its
+    own reason. A list, because a TMDB keyword's name can hold a comma ("san
+    francisco, california"), so a comma string would cut one keyword in two.
+    Folded, because TMDB spells every keyword in lower case (normalize.keywords
+    stores them so) and a viewer typing "Anime" means "anime".
+    """
+    includes: set[str] = set()
+    excludes: set[str] = set()
+    for raw in keywords or ():
+        name = " ".join(str(raw).split()).lower()
+        if not name:
+            continue
+        if name.startswith("-"):
+            bare = name[1:].strip()
+            if bare:
+                excludes.add(bare)
+        else:
+            includes.add(name)
+    return includes, excludes
 
 
 def parse_network_spec(networks: Iterable[str] | None) -> tuple[set[str], set[str]]:
@@ -489,3 +528,174 @@ def filter_records(records, genres_spec: str, countries_spec: str,
     return [r for r in records
             if keep_record(r, g_inc, g_exc, c_inc, c_exc, cert_inc, cert_exc,
                            exempt_unenriched=exempt_unenriched)]
+
+
+def keep_languages(records, languages_spec: str) -> list:
+    """The `records` whose own language survives `languages_spec`, judged on the
+    record ALONE and with no exemption — the fill's half of the language floor,
+    asked beside `filter_records` for the reason that function gives for not
+    exempting at fill. A record with no language is dropped under an include
+    spec and kept under an exclude one, exactly as a missing country is."""
+    inc, exc = parse_spec(languages_spec)
+    if not (inc or exc):
+        return list(records)
+    return [r for r in records if _keep_scalar(r.language, inc, exc)]
+
+
+def _keep_scalar(value, inc: set[str], exc: set[str]) -> bool:
+    """One scalar value against an (includes, excludes) pair, exclude first —
+    the rule country and certification follow in `keep_values`."""
+    value = str(value or "").lower()
+    if exc and value in exc:
+        return False
+    if inc and value not in inc:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# a card, judged whole
+# ---------------------------------------------------------------------------
+
+# WHAT A "MISSING DATA" RULE NAMES: each ticked rule hides a card missing EVERY
+# fact it lists. Six rules rather than three facts and a mode, because the
+# pairs are what trims a catalogue's long tail without the cost of either half:
+# measured on one October's films, "no country" alone hides 1,805 cards and "no
+# country and no poster" 292. The tokens are what a stored spec holds.
+MISSING_RULES: dict[str, tuple[str, ...]] = {
+    "country": ("country",),
+    "language": ("language",),
+    "poster": ("poster",),
+    "country+language": ("country", "language"),
+    "country+poster": ("country", "poster"),
+    "language+poster": ("language", "poster"),
+}
+
+
+def parse_missing_spec(spec: str) -> tuple[tuple[str, ...], ...]:
+    """The ticked rules a stored spec names, each as the facts it needs missing.
+    A token no rule names is dropped rather than refused, as a release type is
+    (`parse_release_type_spec`): this runs on the read path over a stored value."""
+    includes, _excludes = parse_spec(spec)
+    return tuple(MISSING_RULES[token] for token in sorted(includes) if token in MISSING_RULES)
+
+
+def _missing(record) -> set[str]:
+    """Which of the facts a missing-data rule can name `record` has none of."""
+    return {name for name, value in (("country", record.country),
+                                     ("language", record.language),
+                                     ("poster", record.poster))
+            if not str(value or "").strip()}
+
+
+class TitleRules(NamedTuple):
+    """One set of specs, parsed once for a whole read — the operator's floor, or
+    a viewer's filters for one medium (app/calendar/vocab.py's `floor_specs` and
+    `active_specs` give the keywords `parse` takes)."""
+    genres: tuple[set[str], set[str]]
+    countries: tuple[set[str], set[str]]
+    certifications: tuple[set[str], set[str]]
+    networks: tuple[set[str], set[str]]
+    languages: tuple[set[str], set[str]]
+    keywords: tuple[set[str], set[str]]
+    show_types: tuple[set[str], set[str]]
+    single_service: bool
+    sparse_no_network: bool
+    missing: tuple[tuple[str, ...], ...]
+
+    @classmethod
+    def parse(cls, *, genres: str = "", countries: str = "", certifications: str = "",
+              network_filter=None, languages: str = "", keywords=None, show_types: str = "",
+              single_service: bool = False, sparse_no_network: bool = False,
+              missing: str = "") -> "TitleRules":
+        return cls(parse_spec(genres), parse_spec(countries), parse_spec(certifications),
+                   parse_network_spec(network_filter), parse_spec(languages),
+                   parse_keyword_spec(keywords), parse_spec(show_types),
+                   bool(single_service), bool(sparse_no_network),
+                   parse_missing_spec(missing))
+
+    def narrows(self) -> bool:
+        return (any(inc or exc for inc, exc in (self.genres, self.countries,
+                                                 self.certifications, self.networks,
+                                                 self.languages, self.keywords,
+                                                 self.show_types))
+                or self.single_service or self.sparse_no_network or bool(self.missing))
+
+
+def keep_title(record, listed_by: frozenset[str], rules: TitleRules,
+               sparse_sources: frozenset[str]) -> bool:
+    """Whether one card survives `rules`. THE PREDICATE, said once for every
+    dimension a card is judged on after resolution.
+
+    `record` IS THE CARD RESOLVED OVER EVERY SERVICE THE INSTANCE ADMITS, and
+    `listed_by` names those services — never the viewer's own narrowing of them,
+    which decides only what the card is drawn from (cache.narrow_for_viewer).
+
+    THREE KINDS OF RULE, AND THEY TREAT A TITLE NOBODY HAS DESCRIBED DIFFERENTLY,
+    each for a reason the owner of this instance settled with the numbers in
+    front of them:
+      - genres, countries, certifications, networks, language and missing data
+        judge facts a description supplies, so a card nothing has described
+        (`enriched` false — a Simkl calendar row before the drain reaches it) is
+        shown unjudged, as these filters always have: hiding what has not been
+        looked up reads as "nothing matched".
+      - keywords and show type are facts only a catalogue states, so they are
+        judged only once one has (Record.keywords is not None), whoever else
+        described the card — a title TMDB lists sparse, or does not list at
+        all, is shown unjudged. "Stated, none" is judged like any empty value.
+      - "only one service lists it" and "only a sparse catalogue lists it and it
+        names no network" are about who LISTS the card, which is known the
+        moment it is listed, so neither exempts anything. The second is the one
+        rule that judges an undescribed card on a fact it may not have yet — a
+        sparse listing names no network until it is described — and that is
+        deliberate: a catalogue's undescribed long tail is what it is for, and a
+        title it describes with a network comes back within minutes.
+    """
+    if rules.single_service and len(listed_by) == 1:
+        return False
+    if (rules.sparse_no_network and listed_by and listed_by <= sparse_sources
+            and not str(record.network or "").strip()):
+        return False
+    if record.enriched:
+        g_inc, g_exc = rules.genres
+        c_inc, c_exc = rules.countries
+        cert_inc, cert_exc = rules.certifications
+        if not keep_values(record.genres, record.country, record.certification,
+                           g_inc, g_exc, c_inc, c_exc, cert_inc, cert_exc):
+            return False
+        if not keep_network(record.network, *rules.networks):
+            return False
+        if not _keep_scalar(record.language, *rules.languages):
+            return False
+        if rules.missing:
+            absent = _missing(record)
+            if any(absent.issuperset(rule) for rule in rules.missing):
+                return False
+    kw_inc, kw_exc = rules.keywords
+    if record.keywords is not None and (kw_inc or kw_exc):
+        names = {str(k).lower() for k in record.keywords}
+        if (kw_exc and names & kw_exc) or (kw_inc and not names & kw_inc):
+            return False
+    if record.show_type is not None and not _keep_scalar(record.show_type, *rules.show_types):
+        return False
+    return True
+
+
+class Judged(NamedTuple):
+    """One card as the read judges it: the record resolved over every service
+    the instance admits, and those services' names."""
+    record: Any
+    listed_by: frozenset[str]
+
+
+def filter_titles(cards: Sequence[Judged], rules: TitleRules,
+                  sparse_sources: Iterable[str] = ()) -> list[Judged]:
+    """The `cards` that survive `rules` (`keep_title`). An empty set of rules is
+    a fast pass-through. `sparse_sources` names the services whose listings
+    arrive undescribed (Capabilities.describes_sparse_listings), which the
+    no-network rule asks about."""
+    if not rules.narrows():
+        return list(cards)
+    sparse = frozenset(sparse_sources)
+    return [card for card in cards
+            if keep_title(card.record, card.listed_by, rules, sparse)]

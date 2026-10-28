@@ -20,6 +20,7 @@ from datetime import date
 from app import db
 from app.calendar import cache as calendar_cache
 from app.calendar import resolve as calendar_resolve
+from app.calendar import vocab
 from app.config import Settings
 from app.endpoints import get_endpoint
 
@@ -105,18 +106,28 @@ class KeyCoversEveryNarrowingTests(unittest.TestCase):
         self.assertNotEqual(_key(self.settings), _key(Settings(network_filter=["HBO"])))
 
     def test_every_settings_field_the_read_uses_is_in_the_key(self):
-        """THE LIST CANNOT ROT SILENTLY. `_span_memo_key` names the operator's
-        fields one by one, and nothing makes that automatic — so this is the
-        test that fails when a read starts consulting a setting the key does not
-        carry. If it fails, add the field to the key rather than to this list."""
-        used = {"genres", "countries", "show_certifications", "movie_certifications",
-                "network_filter"}
-        for field in sorted(used):
+        """THE LIST CANNOT ROT SILENTLY. The read consults the floor only through
+        `vocab.floor_specs`, which reads only `vocab.FLOOR_FIELDS`, and the key
+        carries that function's answer — so every field there must move it, and
+        test_vocab.py holds each to changing what the function answers."""
+        for field in vocab.FLOOR_FIELDS:
             with self.subTest(field=field):
-                value = ["HBO"] if field == "network_filter" else "horror"
+                default = getattr(Settings(), field)
+                value = (["HBO"] if isinstance(default, list)
+                         else True if isinstance(default, bool) else "horror")
                 self.assertNotEqual(
                     _key(Settings()), _key(Settings(**{field: value})),
                     f"{field} shapes a read but does not move the memo key")
+
+    def test_every_filter_keyword_moves_it(self):
+        """EVERY KEYWORD THE READ TAKES, from the one tuple that names them —
+        a dimension added to vocab.SPEC_KEYS is held here the day it is added."""
+        for key in vocab.SPEC_KEYS:
+            with self.subTest(key=key):
+                empty = vocab.complete_specs({})[key]
+                value = (["x"] if isinstance(empty, list)
+                         else True if isinstance(empty, bool) else "x")
+                self.assertNotEqual(_key(self.settings), _key(self.settings, **{key: value}))
 
     def test_the_instance_source_admission_is_in_the_key(self):
         """Which services this instance puts on its calendar is the operator's

@@ -3679,6 +3679,54 @@ ALTER TABLE source_prefs ADD COLUMN season_totals_order_json TEXT NOT NULL DEFAU
 """
 
 
+# ---------------------------------------------------------------------------
+# 48 — six more ways for a viewer to narrow a calendar, and the two facts a
+#      title row needs to be judged by them
+# ---------------------------------------------------------------------------
+#
+# A CATALOGUE CALENDAR LISTS EVERYTHING ANYBODY ENTERED. Measured on the
+# development copy, TMDB's Series Premieres took one October from 180 cards to
+# 991, and Movie Premieres stands at 5,157 — most of them titles one service
+# lists and nobody else does. So a viewer gets six more dimensions, each a column
+# per medium where it applies, in the shapes this table already uses: a comma
+# spec as TEXT, a list as `_json` (a TMDB keyword's name can hold a comma, "san
+# francisco, california", so keywords are a list like the network names), and a
+# switch as an INTEGER. The operator's floor for the same six lives in Settings
+# and needs no schema. app/calendar/vocab.py is what names these columns.
+MIGRATION_48 = """
+-- The title's original language (ISO 639-1), included and excluded like countries.
+ALTER TABLE user_prefs ADD COLUMN tv_languages TEXT NOT NULL DEFAULT '';
+ALTER TABLE user_prefs ADD COLUMN movie_languages TEXT NOT NULL DEFAULT '';
+-- TMDB's keywords, typed rather than offered (tens of thousands exist).
+ALTER TABLE user_prefs ADD COLUMN tv_keywords_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE user_prefs ADD COLUMN movie_keywords_json TEXT NOT NULL DEFAULT '[]';
+-- TMDB's show type (scripted, reality, documentary, talk-show, news, miniseries,
+-- video). A film has none, so there is no movie column.
+ALTER TABLE user_prefs ADD COLUMN tv_show_types TEXT NOT NULL DEFAULT '';
+-- Hide a title only one service lists.
+ALTER TABLE user_prefs ADD COLUMN tv_single_service INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE user_prefs ADD COLUMN movie_single_service INTEGER NOT NULL DEFAULT 0;
+-- Hide a show listed only by a catalogue whose listings arrive undescribed, when
+-- it names no network. A film has no network, so there is no movie column.
+ALTER TABLE user_prefs ADD COLUMN tv_sparse_no_network INTEGER NOT NULL DEFAULT 0;
+-- Hide a title missing any of the ticked facts, stored as the ticked set:
+-- country, language, poster, country+language, country+poster, language+poster.
+ALTER TABLE user_prefs ADD COLUMN tv_missing TEXT NOT NULL DEFAULT '';
+ALTER TABLE user_prefs ADD COLUMN movie_missing TEXT NOT NULL DEFAULT '';
+
+-- TMDB's `type` for a show, as a slug ('' for a film, and for a row no
+-- description has reached).
+ALTER TABLE title_metadata ADD COLUMN show_type TEXT NOT NULL DEFAULT '';
+-- WHETHER `keywords_json` AND `show_type` ARE A DESCRIPTION'S ANSWER. An empty
+-- keyword list cannot say it by itself: roughly six TMDB titles in ten have no
+-- keywords at all, and a row nothing has described holds the same '[]'. A filter
+-- shows a title it cannot judge rather than hiding it, so it has to know which
+-- of the two it is looking at. 1 once a description (or a listing built from
+-- one) stated them, none included; 0 for every other row.
+ALTER TABLE title_metadata ADD COLUMN facts_known INTEGER NOT NULL DEFAULT 0;
+"""
+
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -3727,6 +3775,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (45, MIGRATION_45),
     (46, MIGRATION_46),
     (47, MIGRATION_47),
+    (48, MIGRATION_48),
 ]
 
 

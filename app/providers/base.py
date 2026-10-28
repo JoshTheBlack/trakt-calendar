@@ -492,6 +492,19 @@ class Record:
     # must be able to tell "no release blocks" from "nobody has looked yet".
     release_types_by_country: dict[str, list[int]] = field(default_factory=dict)
 
+    # TWO FACTS ONLY A CATALOGUE STATES — TMDB's keyword names (lower-case) and,
+    # for a show, its type as a slug ("scripted", "talk-show") — read by
+    # app/calendar/filter.py's keyword and show-type rules.
+    #
+    # NONE MEANS "THIS RECORD DOES NOT SAY", and it is not the same answer as an
+    # empty value. Roughly six TMDB titles in ten have no keywords at all, so an
+    # empty list from a description is a real answer an include filter judges,
+    # while a service that never states keywords, or a listing nobody has
+    # described yet, has no answer and is shown unjudged. `enriched` cannot carry
+    # the difference: a Trakt record is enriched and says nothing about either.
+    keywords: list[str] | None = None
+    show_type: str | None = None
+
     # WHETHER genres/network/country/certification/runtime/status/overview ARE
     # REAL ANSWERS OR JUST THIS RECORD'S DEFAULTS. True for every source that
     # carries these fields on its calendar payload already (Trakt does, so it
@@ -787,6 +800,18 @@ def status_label(status: str) -> str:
     """A title's status as a details panel draws it ("returning series" ->
     "Returning Series"), from the lower-case word a service's row stores."""
     return str(status or "").replace("_", " ").title()
+
+
+# WHAT KIND OF SHOW A TITLE IS — this app's slugs and how each reads. A catalogue
+# that states a type maps its own words onto these (app/providers/tmdb/
+# normalize.py's TMDB_SHOW_TYPES), and the show-type filter offers them as chips
+# (app/calendar/vocab.py). One table, so a chip and a stored type cannot spell a
+# type two ways.
+SHOW_TYPES: dict[str, str] = {
+    "scripted": "Scripted", "miniseries": "Miniseries", "reality": "Reality",
+    "documentary": "Documentary", "talk-show": "Talk Show", "news": "News",
+    "video": "Video",
+}
 
 
 def render(record: Record, tz: ZoneInfo) -> Item:
@@ -1517,6 +1542,12 @@ class DetailPort(Protocol):
         What the panel plays is every service's lists pooled (see
         `fetch_videos` below and app/providers/detail_source.py), which is why
         the answer carries a list rather than one chosen trailer.
+
+        `keywords` and `show_type` are the two facts only some services state
+        (see Record.keywords): a list of keyword names and a show-type slug from
+        a service that states them — empty when the title has none — and None
+        from one that does not, so the store can tell "described, none" from
+        "never said" (app/metadata/descriptions.py's `facts_known`).
         """
         ...
 

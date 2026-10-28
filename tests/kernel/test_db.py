@@ -626,7 +626,9 @@ class MigrationTests(DbTestCase):
         self.assertEqual(tuple(joined), ("A Show", "Second"))
         self.assertIn("season_totals_order_json",
                       [c[1] for c in conn.execute("PRAGMA table_info(source_prefs)")])
-        self.assertEqual(conn.execute("SELECT version FROM schema_version").fetchone()[0], 47)
+        # Every later migration ran after it, the way an upgrading instance's do.
+        self.assertEqual(conn.execute("SELECT version FROM schema_version").fetchone()[0],
+                         max(version for version, _step in db.MIGRATIONS))
 
     async def test_migration_47_from_the_development_schema_renames_the_store_in_place(self):
         """The development database is at 46: the calendar's title and episode
@@ -652,6 +654,52 @@ class MigrationTests(DbTestCase):
         finally:
             conn.close()
             path.unlink(missing_ok=True)
+
+    # The columns migration 48 adds, with the value every existing row reads.
+    _AFTER_48 = {
+        "user_prefs": {"tv_languages": "", "movie_languages": "", "tv_keywords_json": "[]",
+                       "movie_keywords_json": "[]", "tv_show_types": "",
+                       "tv_single_service": 0, "movie_single_service": 0,
+                       "tv_sparse_no_network": 0, "tv_missing": "", "movie_missing": ""},
+        "title_metadata": {"show_type": "", "facts_known": 0},
+    }
+
+    def _assert_after_48(self, conn):
+        for table, columns in self._AFTER_48.items():
+            declared = {c[1]: c for c in conn.execute(f"PRAGMA table_info({table})")}
+            for column, value in columns.items():
+                with self.subTest(table=table, column=column):
+                    self.assertIn(column, declared)
+                    self.assertEqual(declared[column][3], 1, "NOT NULL")
+                    row = conn.execute(f"SELECT {column} FROM {table}").fetchone()
+                    self.assertEqual(row[0], value)
+
+    async def test_migration_48_adds_the_filter_columns_and_keeps_every_row(self):
+        """Additive only: a viewer's row and a title row come through untouched,
+        each new column reading the value that means "nothing narrowed" / "not
+        described". From the development schema before the store (46) and from
+        production's (39), so 47 and everything before it run first."""
+        for version in (46, 39):
+            with self.subTest(version=version):
+                path = TMP / f"migration-48-from-{version}.db"
+                conn = self._at_version_with_titles(path, version)
+                try:
+                    conn.execute("INSERT INTO users (username, created_at, updated_at) "
+                                 "VALUES ('viewer', 1, 1)")
+                    user_id = conn.execute("SELECT id FROM users").fetchone()[0]
+                    conn.execute("INSERT INTO user_prefs (user_id, endpoint, card_style, "
+                                 "day_packing, tv_genres) VALUES (?, 'shows/new', 'vertical', "
+                                 "'stacked', ?)", (user_id, "-anime"))
+                    db.migrate_sync(conn)
+                    self._assert_after_48(conn)
+                    self.assertEqual(conn.execute("SELECT tv_genres FROM user_prefs").fetchone()[0],
+                                     "-anime")
+                    self.assertEqual(conn.execute("SELECT network FROM title_metadata")
+                                     .fetchone()[0], "HBO")
+                    self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+                finally:
+                    conn.close()
+                    path.unlink(missing_ok=True)
 
     async def test_the_identity_indexes_find_an_id_only_by_its_stored_type(self):
         """Why the store keeps ids canonical: SQLite never finds the text '4321'

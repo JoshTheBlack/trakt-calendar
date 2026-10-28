@@ -277,7 +277,7 @@ SELECT a.source, a.media, a.source_id, a.title_key, a.air_ts, a.date_only,
        t.title, t.ids_json, t.detail_url, t.year, t.network, t.country,
        t.language, t.certification, t.status, t.overview, t.poster, t.runtime,
        t.genres_json, t.ratings_json, t.anime_type, t.release_types_json,
-       t.enriched,
+       t.enriched, t.keywords_json, t.show_type, t.facts_known,
        e.title AS episode_title, e.runtime AS episode_runtime,
        e.rating AS episode_rating,
        i.ids_json AS known_ids
@@ -316,7 +316,10 @@ def _record_from_row(row) -> Record:
     known = json.loads(row["known_ids"]) if row["known_ids"] else {}
     if known:
         ids = title_identity.with_shared(ids, known)
+    # None for a row no description has stated them on — not "none" (Record.keywords).
+    keywords, show_type = title_rows.facts_of(row)
     return Record(
+        keywords=keywords, show_type=show_type,
         source=Source(source), media=Media(str(row["media"])), id=str(row["source_id"]),
         ids=ids,
         # And everything the title store knows of it, kept apart from what this

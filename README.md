@@ -219,31 +219,47 @@ The endpoint, layout and hide-not-watching controls also live in the header. Mar
 something "not watching" applies to the **show** — every view, every month, and your share
 page — until you turn it back on.
 
-**🎚️ Filters** in the header narrows your calendar by genre, country, certification and
-network. Filters belong to your account, so two people reading the same cached month each
-see it their own way; new accounts start unfiltered. The button reads **🎚️ Filtered** while
-anything is held back. The **📺 TV** and **🎬 Movies** tabs hold separate answers — excluding
-a genre from your shows leaves your films alone:
+**🎚️ Filters** in the header narrows your calendar by genre, country, language,
+certification, network, show type and keyword, and by who lists a title. Filters belong to
+your account, so two people reading the same cached month each see it their own way; new
+accounts start unfiltered. The button reads **🎚️ Filtered** while anything is held back. The
+**📺 TV** and **🎬 Movies** tabs hold separate answers — excluding a genre from your shows
+leaves your films alone:
 
 | | 📺 TV | 🎬 Movies |
 |---|---|---|
 | Services | which services fill your show calendars | which fill your film calendar |
 | Genres | ✅ | ✅ (separate answer) |
 | Countries — where a title was *made* | ✅ | ✅ (separate answer) |
+| Languages — the language it was made in | ✅ | ✅ (separate answer) |
 | Networks | ✅ | — (a film has no network) |
 | Certifications | US TV Parental Guidelines | MPA film ratings |
+| Show types — TMDB's scripted, reality, talk show… | ✅ | — |
+| Keywords — TMDB's, typed one at a time | ✅ | ✅ (separate answer) |
+| Missing data — no country, language or poster, or two of them | ✅ | ✅ (separate answer) |
+| Hide titles only one service lists | ✅ | ✅ (separate answer) |
+| Hide shows only TMDB lists that name no network | ✅ | — |
 | Release markets and formats — where a film is being *shown* | — | ✅ |
 
 Press a chip once to keep **only** that value, again to **filter it out**, again to clear it.
 Anything the chips don't name can be typed in below them. Networks match **exactly** as the
-service spells them: `tvN` and `TVN` are two different broadcasters. At least one service has
-to stay on.
+service spells them: `tvN` and `TVN` are two different broadcasters. A keyword is typed one
+per box, because some hold a comma (`san francisco, california`); most new titles have no
+keywords at all, so filtering one out is the usual use. At least one service has to stay on.
+
+**A title nothing has described yet is shown until it is**, rather than hidden for a fact
+nobody has looked up — Simkl's calendar arrives without countries or languages, TMDB's
+without networks. Keywords and show types are TMDB's, so they wait for TMDB's own
+description, and a title TMDB doesn't list isn't judged by them. The two exceptions are
+about who lists a title, which is known at once: **only one service lists it**, and **only
+TMDB lists it with no network**, which hides a brand-new TMDB-only listing until TMDB says
+where it airs (usually within minutes).
 
 **The switch at the top turns every filter off without clearing any of them** — for "show
 me everything for a bit". Your **share links keep filtering** while it is off.
 
-You can also filter from a card: press its genre, country, network or certification and
-choose *filter out* or *only this*.
+You can also filter from a card: press its genre, country, language, network or
+certification and choose *filter out* or *only this*.
 
 > Trakt gates its own calendar filtering behind a [VIP subscription](https://trakt.tv/vip/filtering);
 > this app filters the cached response itself, so Filters work on any account.
@@ -256,6 +272,14 @@ their own Filters say. Use it to trim what nobody on the instance watches, or to
 content off a family instance (Certifications uses the US TV Parental Guidelines and MPA
 film ratings). Blank — the default — filters nothing. A change applies at once, months
 already cached included, and undoing it brings those titles straight back.
+
+The floor also carries the newer dimensions: **Languages** and **Keywords** (one floor for
+TV and films; keywords one per line), **Show types**, **missing data** per medium, **hide
+titles only one service lists** per medium, and **hide shows only TMDB lists that name no
+network**. Languages is applied before caching like the fields above; the rest judge a whole
+card — who lists it, what TMDB says of it — so they apply as each calendar is read, ahead of
+every viewer's own filters. A viewer can only narrow further: a switch or missing-data rule
+the floor already applies shows in their 🎚️ Filters ticked and fixed.
 
 ## TMDB — the first describer
 
@@ -284,9 +308,11 @@ order starts with TMDB, which is the default — sits on TMDB's day and shows a 
 another service's airing falls on that same day; when the services disagree, the card shows
 each one's date side by side. TMDB lists far more than the other two (about five times the
 series premieres in a typical month, many of them regional or web series): switch TMDB off
-for TV or films in 🎚️ Filters, or narrow by country, genre or network. A listing arrives
-without its network or certification and is looked up in the background, so for its first
-few minutes a TMDB-only title is shown even where those filters would hide it.
+for TV or films in 🎚️ Filters, or trim it with **hide titles only one service lists**, **hide
+shows only TMDB lists that name no network**, languages, show types or missing data. A
+listing arrives without its network, certification, keywords or show type and is looked up
+in the background, so for its first few minutes a TMDB-only title is shown even where those
+filters would hide it — except by the no-network rule, which hides it until it is.
 
 **Titles are matched across services in the background**, every minute. This month's and
 next month's premieres and films that only TMDB lists are looked up on Trakt by their TMDB

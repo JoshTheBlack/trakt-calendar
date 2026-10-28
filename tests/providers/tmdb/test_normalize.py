@@ -12,7 +12,7 @@ import unittest
 from datetime import date
 
 from app.calendar import vocab
-from app.providers.base import Media, Source, VideoKind
+from app.providers.base import SHOW_TYPES, Media, Source, VideoKind
 from app.providers.tmdb import normalize
 from tests.support import APP_DIR
 
@@ -248,6 +248,50 @@ class TheRecordTests(unittest.TestCase):
         self.assertEqual((record.network, record.status, record.certification), ("", "", ""))
         self.assertEqual(record.rating, 8.4)
         self.assertEqual(record.year, 2022)
+        # A listing states neither TMDB-only fact: unknown, not "none".
+        self.assertIsNone(record.keywords)
+        self.assertIsNone(record.show_type)
+
+    def test_a_titles_own_answer_states_its_keywords_and_type(self):
+        record = normalize.to_record(SEVERANCE, Media.SHOW, 2, "2025-01-16")
+        self.assertEqual(record.keywords[:3], ["office", "workplace", "memory"])
+        self.assertEqual(record.show_type, "scripted")
+        film = normalize.to_record(DUNE, Media.MOVIE, None, "2024-03-01")
+        self.assertIn("sequel", film.keywords)
+        self.assertEqual(film.show_type, "")
+
+
+class TheTitleOnlyFactsTests(unittest.TestCase):
+    """Keywords and show type: what each says, and when it says nothing."""
+
+    def test_a_show_and_a_film_list_their_keywords_under_different_names(self):
+        self.assertEqual(normalize.keywords(SEVERANCE, Media.SHOW)[0], "office")
+        self.assertEqual(normalize.keywords(DUNE, Media.MOVIE)[0], "based on novel or book")
+
+    def test_no_keyword_list_is_none_and_an_empty_one_is_none_stated(self):
+        bare = {k: v for k, v in SEVERANCE.items() if k != "keywords"}
+        self.assertIsNone(normalize.keywords(bare, Media.SHOW))
+        self.assertEqual(normalize.keywords({**SEVERANCE, "keywords": {"results": []}},
+                                            Media.SHOW), [])
+
+    def test_a_keyword_keeps_its_comma_and_is_folded(self):
+        payload = {**SEVERANCE, "keywords": {"results": [
+            {"name": "San Francisco, California"}, {"name": "san francisco, california"}]}}
+        self.assertEqual(normalize.keywords(payload, Media.SHOW), ["san francisco, california"])
+
+    def test_every_tmdb_show_type_maps_onto_the_apps_own(self):
+        """A chip and a stored type cannot spell a type two ways: every word
+        TMDB documents lands on one of base.SHOW_TYPES' slugs."""
+        for word, slug in normalize.TMDB_SHOW_TYPES.items():
+            with self.subTest(word=word):
+                self.assertIn(slug, SHOW_TYPES)
+                self.assertEqual(normalize.show_type({**SEVERANCE, "type": word}, Media.SHOW), slug)
+
+    def test_a_listing_states_no_type_and_a_film_has_none(self):
+        self.assertIsNone(normalize.show_type({"id": 1, "name": "x"}, Media.SHOW))
+        self.assertEqual(normalize.show_type(DUNE, Media.MOVIE), "")
+        self.assertEqual(normalize.show_type({**SEVERANCE, "type": "Holographic"}, Media.SHOW),
+                         "holographic")
 
 
 class TheSeasonPremieresTests(unittest.TestCase):

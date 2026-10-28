@@ -106,6 +106,7 @@ from . import entries
 from . import filter as calendar_filter
 from . import resolve as calendar_resolve
 from . import state as calendar_state
+from . import vocab
 from .. import db
 from .. import providers
 from ..media import artwork
@@ -113,8 +114,8 @@ from ..metadata import identity as title_identity
 from ..perftrace import activity, detach, job, span
 from ..endpoints import ENDPOINTS, Endpoint
 from ..providers.base import (
-    Item, Provider, Record, Source, SourceNotModified, SourcePending, SourceUnavailable,
-    epoch_moment, render, resolve_key)
+    Item, Media, Provider, Record, Source, SourceNotModified, SourcePending,
+    SourceUnavailable, epoch_moment, render, resolve_key)
 
 logger = logging.getLogger(__name__)
 # Same "app.perf" logger the Trakt transport's cached_get already uses for its own
@@ -780,6 +781,13 @@ async def _answers(asked_of: list[Provider], endpoint: Endpoint, settings, start
     # unenriched at fill, so exempting would make this a permanent no-op for
     # every Simkl title instead of a gap that closes when enrichment lands.
     kept = calendar_filter.filter_by_network(kept, settings.network_filter)
+    # AND THE LANGUAGE FLOOR, the one new dimension a listing can be judged on by
+    # itself — a scalar on the record, like its country, and judged the same
+    # way. Every other dimension the floor carries (keywords, show type, who
+    # lists a title, what it is missing) is about the whole card or about a
+    # catalogue's description, which no single listing carries at fill, so those
+    # are applied at read only (`narrow_for_viewer`).
+    kept = calendar_filter.keep_languages(kept, settings.languages)
 
     trimmed = [r for r in kept if in_window(r, start)]
     overrun = len(kept) - len(trimmed)
@@ -1382,12 +1390,11 @@ def _local_span_utc_range(tz: ZoneInfo, start_date: date, end_date: date) -> tup
     return utc_start, utc_end
 
 
-async def visible_records(groups, endpoint, *, genres="", countries="",
-                          show_certifications="", movie_certifications="",
-                          movie_release_countries="", movie_release_types="",
-                          network_filter=None, prefs=None, settings=None) -> tuple[list, int]:
+async def visible_records(groups, endpoint, *, prefs=None, settings=None,
+                          **specs) -> tuple[list, int]:
     """`groups` reduced to the records THIS viewer's calendar would draw, and
-    how many this viewer's filters removed on the way.
+    how many this viewer's filters removed on the way. `specs` are the viewer's
+    filters, `vocab.active_specs`' keywords.
 
     EXTRACTED SO THE SEARCH RUNS THE SAME PIPELINE RATHER THAN A SECOND ONE.
     A search has to answer "would this viewer's calendar actually draw this
@@ -1448,12 +1455,7 @@ async def visible_records(groups, endpoint, *, genres="", countries="",
         # enforce a rule about release formats. Counted rather than silently
         # applied, so a month this empties can say so — see meta below.
         kept, release_filtered, resolved = narrow_for_viewer(
-            parsed, endpoint.media, genres=genres, countries=countries,
-            show_certifications=show_certifications,
-            movie_certifications=movie_certifications,
-            movie_release_countries=movie_release_countries,
-            movie_release_types=movie_release_types, network_filter=network_filter,
-            prefs=prefs, settings=settings)
+            parsed, endpoint.media, prefs=prefs, settings=settings, **specs)
         sp.set(kept=len(kept))
 
     # EVERY PER-VIEWER REMOVAL, IN ONE NUMBER. The release rule and the
@@ -1466,13 +1468,12 @@ async def visible_records(groups, endpoint, *, genres="", countries="",
     return kept, release_filtered + (resolved - len(kept))
 
 
-async def placed(groups, endpoint, *, tz: ZoneInfo, network_filter=None,
+async def placed(groups, endpoint, *, tz: ZoneInfo,
                  **narrowing) -> tuple[list[Item], int]:
     """Every card `groups` make for ONE viewer, each rendered on the day it is
     PLACED on, and how many their filters removed. `narrowing` is
-    `visible_records`' keywords — the viewer's record filters, their source
-    selection (`prefs`) and the operator's `settings` — and `network_filter` the
-    viewer's network list.
+    `visible_records`' keywords — the viewer's filters (`vocab.active_specs`),
+    their source selection (`prefs`) and the operator's `settings`.
 
     THE ONE PLACEMENT FUNCTION, and every path that says where a card is drawn
     asks it: a month, a day that arrives late, a share page and its card, the
@@ -1491,22 +1492,21 @@ async def placed(groups, endpoint, *, tz: ZoneInfo, network_filter=None,
     too, and while the lists were applied only to a month they offered a title the
     viewer's network filter hides, linking to a day that could not draw it.
     """
-    kept, filtered_out = await visible_records(groups, endpoint,
-                                               network_filter=network_filter, **narrowing)
+    kept, filtered_out = await visible_records(groups, endpoint, **narrowing)
     with span("calcache.normalize", entries=len(kept)) as sp:
         items = [render(record, tz) for record in kept]
         sp.set(items=len(items))
     return items, filtered_out
 
 
-def narrow_for_viewer(parsed, media, *, genres="", countries="", show_certifications="",
-                      movie_certifications="", movie_release_countries="",
-                      movie_release_types="", network_filter=None, prefs=None,
-                      settings=None) -> tuple[list, int, int]:
+def narrow_for_viewer(parsed, media, *, prefs=None, settings=None,
+                      **specs) -> tuple[list, int, int]:
     """Every filter a calendar applies, in the order it applies them: `(the
     records this viewer's cards are drawn from, how many groups the release
     narrowing removed, how many cards reached the rest)`. `parsed` is
-    `[(group, every record of it the INSTANCE admits)]`.
+    `[(group, every record of it the INSTANCE admits)]`; `specs` are the
+    viewer's filters, `vocab.active_specs`' keywords (vocab.complete_specs
+    refuses any other).
 
     ONE IMPLEMENTATION OF "WOULD THIS VIEWER'S FILTERS HIDE IT", called by
     `visible_records` for the stored calendar and by the search's season picker
@@ -1525,8 +1525,10 @@ def narrow_for_viewer(parsed, media, *, genres="", countries="", show_certificat
     show by Simkl's account and a comedy by TMDB's, was hidden by a viewer's
     "no talk shows" filter until they narrowed the calendar to TMDB and Simkl's
     genre went with Simkl's listing. A title somebody hid stays hidden whichever
-    services they read.
+    services they read. So "only one service lists it" counts the services the
+    INSTANCE admits, never the viewer's narrowing of them.
     """
+    specs = vocab.complete_specs(specs)
     judged_pairs: list = []
     drawn_for: dict[int, Record] = {}
     for group, every in parsed:
@@ -1538,27 +1540,29 @@ def narrow_for_viewer(parsed, media, *, genres="", countries="", show_certificat
         judged_pairs.append(pair)
         drawn_for[id(pair)] = drawn
     narrowed = calendar_filter.filter_release_groups(
-        judged_pairs, media, movie_release_countries, movie_release_types)
+        judged_pairs, media, specs["movie_release_countries"], specs["movie_release_types"])
     release_filtered = len(judged_pairs) - len(narrowed)
     # THE JUDGED RECORD OF EACH SURVIVING GROUP, mapped to the card it stands
     # for. A second resolution only where this viewer reads fewer services than
     # the group holds — for a viewer who has not narrowed the calendar the card
     # IS the judged record, and nothing is resolved twice.
     drawn_by_judged: dict[int, Record] = {}
-    records = []
+    cards: list[calendar_filter.Judged] = []
     for pair in narrowed:
         group, every, draws_every = pair
         drawn = drawn_for[id(pair)]
         judged = drawn if draws_every else calendar_resolve.resolve_records(group, every, prefs)
         drawn_by_judged[id(judged)] = drawn
-        records.append(judged)
+        cards.append(calendar_filter.Judged(judged, frozenset(str(r.source) for r in every)))
     # A Simkl entry Simkl's OWN enrichment marks as a film (`anime_type ==
     # "movie"`) does not belong on a series endpoint — see
     # filter.prune_disguised_films for the measured rule and why this is
     # a read-time exclusion rather than something fetch_window_records can
     # do at fill. Same reasoning as the exemption below: it can only act
     # on what enrichment has already found, so it runs right beside it.
-    records = calendar_filter.prune_disguised_films(records, media)
+    kept_records = {id(r) for r in calendar_filter.prune_disguised_films(
+        [card.record for card in cards], media)}
+    cards = [card for card in cards if id(card.record) in kept_records]
     # THE INSTANCE FLOOR, AND IT RUNS BEFORE THIS VIEWER'S OWN SPECS.
     # It is applied at FILL as well (fetch_window_records), where it is a
     # HARD exclusion — a floored title never enters the shared rows, so no
@@ -1578,22 +1582,18 @@ def narrow_for_viewer(parsed, media, *, genres="", countries="", show_certificat
     # The operator's list with the rest of the floor, not counted as this
     # viewer's; the viewer's own with their specs, counted, so a page it emptied
     # can say so.
+    # BOTH ARE ONE FUNCTION'S WORK (filter.filter_titles), handed the floor and
+    # then the viewer's filters, so a viewer can only ever narrow what the
+    # floor left: a rule the operator set cannot be loosened by an account, and
+    # nothing about the two is judged differently. Every exemption a read gives
+    # a card nothing has described is filter.keep_title's, and never the fill's.
+    sparse = calendar_resolve.sparse_sources()
     if settings is not None:
-        records = calendar_filter.filter_records(
-            records, settings.genres, settings.countries,
-            (settings.show_certifications if media == "show"
-             else settings.movie_certifications),
-            exempt_unenriched=True)
-        records = calendar_filter.filter_by_network(
-            records, settings.network_filter, exempt_unenriched=True)
-    certifications = show_certifications if media == "show" else movie_certifications
-    # exempt_unenriched=True on BOTH READS and never at the fill — see
-    # filter.keep_record for why a read gives a record enrichment has not
-    # answered for the benefit of the doubt and the fill does not.
-    kept = calendar_filter.filter_records(records, genres, countries, certifications,
-                                          exempt_unenriched=True)
-    kept = calendar_filter.filter_by_network(kept, network_filter, exempt_unenriched=True)
-    return [drawn_by_judged[id(judged)] for judged in kept], release_filtered, len(records)
+        cards = calendar_filter.filter_titles(
+            cards, vocab.title_rules(vocab.floor_specs(settings, media), media), sparse)
+    floored = len(cards)
+    kept = calendar_filter.filter_titles(cards, vocab.title_rules(specs, media), sparse)
+    return [drawn_by_judged[id(card.record)] for card in kept], release_filtered, floored
 
 
 # ---------------------------------------------------------------------------
@@ -1697,11 +1697,10 @@ def forget_endpoint_spans(endpoint_key: str) -> None:
         _span_memo.pop(key, None)
 
 
-def _span_memo_key(endpoint, settings, *, tz, start_date, end_date, genres,
-                   countries, show_certifications, movie_certifications,
-                   movie_release_countries, movie_release_types, network_filter,
-                   prefs) -> tuple:
-    """Everything that shapes a span EXCEPT the viewer's marks.
+def _span_memo_key(endpoint, settings, *, tz, start_date, end_date, prefs,
+                   **specs) -> tuple:
+    """Everything that shapes a span EXCEPT the viewer's marks. `specs` are the
+    viewer's filters (`vocab.active_specs`' keywords).
 
     MARKS ARE THE ONE INPUT LEFT OUT, and leaving them out is the entire point:
     they are applied after this, so a mark does not change what is memoised -
@@ -1725,11 +1724,12 @@ def _span_memo_key(endpoint, settings, *, tz, start_date, end_date, genres,
     # test_cache.py's InstanceFloorAtReadTests change the floor between two reads
     # and require the second to answer differently.
     # ANYTHING ADDED TO THE READ PATH THAT `settings` DECIDES BELONGS HERE TOO.
-    # There is no way to make that automatic, so it is named in one place and
-    # test_span_memo.py holds the list against the fields a read actually uses.
-    floor = (settings.genres, settings.countries,
-             settings.show_certifications, settings.movie_certifications,
-             tuple(settings.network_filter or ()),
+    # The floor is carried as `vocab.floor_specs` answers it — both media's, so a
+    # change to either retires every span — because that function is the only
+    # way a read consults the floor (narrow_for_viewer); test_span_memo.py holds
+    # every field it reads (vocab.FLOOR_FIELDS) to moving this key.
+    floor = (_hashable(vocab.floor_specs(settings, Media.SHOW)),
+             _hashable(vocab.floor_specs(settings, Media.MOVIE)),
              tuple(sorted(calendar_resolve.instance_sources(settings) or ())))
     return (
         # WHICH DATABASE THIS CAME FROM. A memo is per PROCESS and the rows are
@@ -1737,10 +1737,17 @@ def _span_memo_key(endpoint, settings, *, tz, start_date, end_date, genres,
         # serve the first one's calendar out of the second.
         db.generation(),
         endpoint.key, str(tz), start_date.isoformat(), end_date.isoformat(),
-        genres, countries, show_certifications, movie_certifications,
-        movie_release_countries, movie_release_types,
-        tuple(network_filter or ()), floor, repr(prefs),
+        # EVERY FILTER KEYWORD, from the one tuple naming them (vocab.SPEC_KEYS),
+        # so a dimension added there is in the key without being added here.
+        _hashable(vocab.complete_specs(specs)), floor, repr(prefs),
     )
+
+
+def _hashable(specs: dict) -> tuple:
+    """A spec set as a key: every keyword in vocab.SPEC_KEYS' order, lists as
+    tuples."""
+    return tuple((key, tuple(value) if isinstance(value, list) else value)
+                 for key, value in ((key, specs[key]) for key in vocab.SPEC_KEYS))
 
 
 def _refresh_span_later(key, endpoint: Endpoint, settings, **kwargs) -> None:
@@ -1785,13 +1792,11 @@ def _refresh_span_later(key, endpoint: Endpoint, settings, **kwargs) -> None:
 
 
 async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
-                          start_date: date, end_date: date, genres: str,
-                          countries: str, show_certifications: str,
-                          movie_certifications: str, movie_release_countries: str,
-                          movie_release_types: str, network_filter,
-                          allow_fetch: bool, now, prefs, rebuild: bool = False):
+                          start_date: date, end_date: date, allow_fetch: bool, now, prefs,
+                          rebuild: bool = False, **specs):
     """One span's items in air order, with nothing about the reader's marks in
-    them: (items, as_of, partial, filtered_out).
+    them: (items, as_of, partial, filtered_out). `specs` are the viewer's
+    filters, `vocab.active_specs`' keywords.
 
     SPLIT OUT OF `assemble_range` SO THAT IT CAN BE MEMOISED, and the split is
     exactly where a viewer's marks first matter. Everything here - reading the
@@ -1809,14 +1814,9 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     the one that goes and gets new rows, and its answer is the fresh one
     everybody else's memo is then cleared for.
     """
-    key = _span_memo_key(
-        endpoint, settings, tz=tz, start_date=start_date, end_date=end_date,
-        genres=genres, countries=countries,
-        show_certifications=show_certifications,
-        movie_certifications=movie_certifications,
-        movie_release_countries=movie_release_countries,
-        movie_release_types=movie_release_types,
-        network_filter=network_filter, prefs=prefs)
+    specs = vocab.complete_specs(specs)
+    key = _span_memo_key(endpoint, settings, tz=tz, start_date=start_date,
+                         end_date=end_date, prefs=prefs, **specs)
     # WHATEVER IS HERE IS WHAT THE READER GETS, and the rebuild happens after
     # them. The first shape served only the cheap reads and left opening a month
     # as slow as ever; the second made a filling read wait whenever the rows had
@@ -1842,12 +1842,7 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
             if hit[2] != current or age >= _SPAN_SOFT_AGE:
                 _refresh_span_later(key, endpoint, settings, tz=tz,
                                     start_date=start_date, end_date=end_date,
-                                    genres=genres, countries=countries,
-                                    show_certifications=show_certifications,
-                                    movie_certifications=movie_certifications,
-                                    movie_release_countries=movie_release_countries,
-                                    movie_release_types=movie_release_types,
-                                    network_filter=network_filter, now=now, prefs=prefs)
+                                    now=now, prefs=prefs, **specs)
             with span("calcache.memo_hit", items=len(hit[3]),
                       behind=current - hit[2], age=int(age)):
                 # THE LIST IS COPIED AND THE ITEMS ARE NOT. `grouped` is built
@@ -1961,12 +1956,7 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
                          <= utc_end for listing in group["by_source"].values())]
         sp.set(groups=len(groups))
     placed_items, filtered_out = await placed(
-        groups, endpoint, tz=tz, genres=genres, countries=countries,
-        show_certifications=show_certifications,
-        movie_certifications=movie_certifications,
-        movie_release_countries=movie_release_countries,
-        movie_release_types=movie_release_types,
-        network_filter=network_filter, prefs=prefs, settings=settings)
+        groups, endpoint, tz=tz, prefs=prefs, settings=settings, **specs)
     # KEPT WHEN IT IS PLACED INSIDE THE SPAN, which is a question about the
     # CARD, not about any one listing: a card's other services may list it
     # outside the span, and a listing inside the span may belong to a card
@@ -2036,43 +2026,65 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     return items, as_of, partial, filtered_out
 
 
-def exempts_undescribed(media, settings, *, genres: str = "", countries: str = "",
-                        show_certifications: str = "", movie_certifications: str = "",
-                        network_filter=None, **_release_specs) -> bool:
-    """Whether a read under these filters lets a title nothing has described yet
-    through UNJUDGED — true exactly when one of the filters that run with
-    `exempt_unenriched` is set, the viewer's or the operator's.
+class Exempting(NamedTuple):
+    """Which of a read's exemptions are in play — `exempts_undescribed`'s answer.
 
-    THE ONE ANSWER TO "IS THIS UNDESCRIBED TITLE HERE ONLY BY EXEMPTION". The
-    calendar counts such titles to say its filters have not reached them yet,
+    `undescribed`: a filter that shows a card nothing has described unjudged is
+    set (genres, countries, certifications, networks, language, missing data).
+    `keywords` / `show_types`: a keyword or show-type filter is set, which shows
+    unjudged a card no catalogue has stated that fact for (Record.keywords)."""
+    undescribed: bool
+    keywords: bool
+    show_types: bool
+
+    def __bool__(self) -> bool:
+        return any(self)
+
+    def lets_through(self, item) -> bool:
+        """Whether `item` is on the page only because a filter set here could
+        not judge it yet."""
+        return ((self.undescribed and not item.enriched)
+                or (self.keywords and item.keywords is None)
+                or (self.show_types and item.show_type is None))
+
+
+def exempts_undescribed(media, settings, **specs) -> Exempting:
+    """Which exemptions a read under these filters gives — the viewer's
+    (`specs`, `vocab.active_specs`' keywords) or the operator's floor; falsy
+    when none does.
+
+    THE ONE ANSWER TO "IS THIS CARD HERE ONLY BY EXEMPTION" (`lets_through`).
+    The calendar counts such cards to say its filters have not reached them yet,
     and the tracker's import holds them back, because a row it writes does not
     come back off when the facts arrive. Asked in two places, the two answers
     drifted: the count ignored filters entirely and apologised to viewers who had
     none, while the import's own copy had to remember the operator's network list.
 
-    Takes the read's own keywords, so a caller passes `**vocab.active_specs(...)`
-    unchanged. The release specs are accepted and ignored: they rule on a
-    source's release schedule, which comes with the calendar rather than from
-    enrichment, so they never exempt anything.
+    The release specs never exempt anything: they rule on a source's release
+    schedule, which comes with the calendar rather than from enrichment. Nor do
+    the two rules about who LISTS a card (filter.keep_title says why).
     """
-    certifications = show_certifications if media == "show" else movie_certifications
-    if any((genres, countries, certifications, network_filter)):
-        return True
-    if settings is None:
-        return False
-    return any((settings.genres, settings.countries, settings.network_filter,
-                settings.show_certifications if media == "show"
-                else settings.movie_certifications))
+    sets = [vocab.title_rules(vocab.complete_specs(specs), media)]
+    if settings is not None:
+        sets.append(vocab.title_rules(vocab.floor_specs(settings, media), media))
+
+    def stated(pair) -> bool:
+        return bool(pair[0] or pair[1])
+
+    return Exempting(
+        undescribed=any(stated(rules.genres) or stated(rules.countries)
+                        or stated(rules.certifications) or stated(rules.networks)
+                        or stated(rules.languages) or bool(rules.missing)
+                        for rules in sets),
+        keywords=any(stated(rules.keywords) for rules in sets),
+        show_types=any(stated(rules.show_types) for rules in sets))
 
 
 async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
                          start_date: date, end_date: date,
-                         genres: str = "", countries: str = "",
-                         show_certifications: str = "", movie_certifications: str = "",
-                         movie_release_countries: str = "", movie_release_types: str = "",
-                         network_filter=None, not_watching_ids: set[str] | None = None,
+                         not_watching_ids: set[str] | None = None,
                          allow_fetch: bool = True, now: int | None = None,
-                         prefs=None,
+                         prefs=None, **specs,
                          ) -> tuple[list[dict], dict]:
     """Assemble one viewer's calendar for the local day span [start_date, end_date].
 
@@ -2118,8 +2130,10 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     passes allow_fetch=False, where a missing window returns empty rather than
     raising, so it never trips the partial path.)
 
-    `show_certifications`/`movie_certifications` are two separate specs (the two
-    vocabularies don't overlap); the one matching `endpoint.media` applies here.
+    `specs` ARE THE VIEWER'S FILTERS, `vocab.active_specs`' keywords, and any
+    other keyword is refused (vocab.complete_specs). `show_certifications`/
+    `movie_certifications` are two separate specs (the two vocabularies don't
+    overlap); the one matching `endpoint.media` applies here.
 
     `movie_release_countries`/`movie_release_types` narrow a FILMS calendar to
     the markets and formats this viewer cares about, and do nothing at all on a
@@ -2142,15 +2156,10 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     The hide/card/day-packing view preferences remain the caller's to apply:
     those are per-request view concerns, not part of the data model returned.
     """
+    specs = vocab.complete_specs(specs)
     items, as_of, partial, filtered_out = await _assembled_span(
         endpoint, settings, tz=tz, start_date=start_date, end_date=end_date,
-        genres=genres, countries=countries,
-        show_certifications=show_certifications,
-        movie_certifications=movie_certifications,
-        movie_release_countries=movie_release_countries,
-        movie_release_types=movie_release_types,
-        network_filter=network_filter, allow_fetch=allow_fetch, now=now,
-        prefs=prefs)
+        allow_fetch=allow_fetch, now=now, prefs=prefs, **specs)
 
     with span("calcache.group", items=len(items)):
 
@@ -2170,10 +2179,7 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # answer rather than expanding it a second time and possibly differently.
     nw = calendar_state.marked_keys(not_watching_ids or set(), items)
     not_watching_count = sum(1 for i in items if i.mark_key in nw)
-    exempting = exempts_undescribed(
-        endpoint.media, settings, genres=genres, countries=countries,
-        show_certifications=show_certifications,
-        movie_certifications=movie_certifications, network_filter=network_filter)
+    exempting = exempts_undescribed(endpoint.media, settings, **specs)
     meta = {
         "total": len(items),
         "watching": len(items) - not_watching_count,
@@ -2189,11 +2195,11 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         "show_ids": list(dict.fromkeys(i.mark_key for i in items)),
         "as_of": as_of,
         "partial": partial,
-        # How many of THIS read's items survived only because of the
-        # exempt_unenriched grace period — not a count of every unenriched
-        # title on the instance, only the ones this viewer's span rendered and
-        # a filter would have ruled on (see exempts_undescribed).
-        "unenriched": sum(1 for i in items if not i.enriched) if exempting else 0,
+        # How many of THIS read's items survived only because a filter could
+        # not judge them yet — not a count of every unenriched title on the
+        # instance, only the ones this viewer's span rendered and a filter would
+        # have ruled on (see exempts_undescribed).
+        "unenriched": sum(1 for i in items if exempting.lets_through(i)),
         # HOW MANY CARDS THIS VIEWER'S OWN FILTERS REMOVED from this read —
         # every dimension, not the release rule alone. A filter removes titles
         # rather than re-dating them, so somebody who narrows hard enough can
@@ -2210,11 +2216,8 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
 
 
 async def read_month(endpoint: Endpoint, settings, *, tz: ZoneInfo, year: int, month: int,
-                     genres: str = "", countries: str = "",
-                     show_certifications: str = "", movie_certifications: str = "",
-                     movie_release_countries: str = "", movie_release_types: str = "",
-                     network_filter=None, prefs=None,
-                     allow_fetch: bool = True, now: int | None = None) -> tuple[list[Item], int | None]:
+                     prefs=None, allow_fetch: bool = True, now: int | None = None,
+                     **specs) -> tuple[list[Item], int | None]:
     """One viewer's normalized, filtered, month-trimmed calendar items, as a flat
     (items, as_of) pair — the shape the calendar route, the share pages, and the
     distrakt import already unpack.
@@ -2235,11 +2238,7 @@ async def read_month(endpoint: Endpoint, settings, *, tz: ZoneInfo, year: int, m
     grouped, meta = await assemble_range(
         endpoint, settings, tz=tz,
         start_date=date(year, month, 1), end_date=date(year, month, days),
-        genres=genres, countries=countries,
-        show_certifications=show_certifications, movie_certifications=movie_certifications,
-        movie_release_countries=movie_release_countries,
-        movie_release_types=movie_release_types,
-        network_filter=network_filter, prefs=prefs, allow_fetch=allow_fetch, now=now,
+        prefs=prefs, allow_fetch=allow_fetch, now=now, **specs,
     )
     items = [item for day in grouped for item in day["items"]]
     return items, meta["as_of"]

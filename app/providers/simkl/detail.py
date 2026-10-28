@@ -545,6 +545,12 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         "imdb_rating": (round(float(fields["imdb_rating"]), 1)
                         if fields.get("imdb_rating") else None),
         "certification": str(fields.get("certification") or "").upper(),
+        # NOT STATED, which is a different answer from "none" (Record.keywords):
+        # Simkl's catalogue record carries neither keywords nor a show type — its
+        # `anime_type` is a format of its own listing, not TMDB's show type — so
+        # a keyword or show-type filter shows a title only Simkl describes.
+        "keywords": None,
+        "show_type": None,
         # EVERY VIDEO SIMKL LISTS, not the first one — the panel pools them
         # with the other service's and picks what plays (see videos_from).
         "videos": videos_from(fields.get("trailers")),

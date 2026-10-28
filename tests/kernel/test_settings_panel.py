@@ -279,6 +279,33 @@ class RoundTripThroughTheRouteTests(PanelTestCase):
         self.assertEqual(calendar_filter.parse_spec(load_settings().show_certifications),
                          calendar_filter.parse_spec("TV-14, -TV-MA"))
 
+    def test_the_newer_floors_are_drawn_and_written(self):
+        """Language and keywords as text (keywords one a line — a keyword's own
+        name can hold a comma), the per-medium rows in the Filters panel's own
+        chips and tick boxes, the switches with their companions."""
+        panel = self.panel()
+        for name in ('name="languages"', 'name="keywords"', 'name="chip:tv_show_types:talk-show"',
+                     'name="chip:tv_missing:country+poster"', 'name="field:movie_missing"',
+                     'name="tv_single_service" value="0"', 'name="tv_sparse_no_network"'):
+            with self.subTest(name=name):
+                self.assertIn(name, panel)
+        resp = self.save(**{
+            "languages": "en, -ja",
+            "keywords": "anime\nSan Francisco,  California\n\n",
+            "chip:tv_show_types:talk-show": "exclude",
+            "field:tv_missing": "", "chip:tv_missing:country+poster": "include",
+            "field:movie_missing": "",
+            "tv_single_service": ["0", "1"], "movie_single_service": "0",
+            "tv_sparse_no_network": ["0", "1"]})
+        self.assertEqual(resp.status_code, 204, resp.text)
+        saved = load_settings()
+        self.assertEqual(saved.languages, "en, -ja")
+        self.assertEqual(saved.keywords, ["anime", "san francisco, california"])
+        self.assertEqual(saved.tv_show_types, "-talk-show")
+        self.assertEqual((saved.tv_missing, saved.movie_missing), ("country+poster", ""))
+        self.assertEqual((saved.tv_single_service, saved.movie_single_service,
+                          saved.tv_sparse_no_network), (True, False, True))
+
     def test_a_successful_save_reloads_the_page_it_was_opened_from(self):
         resp = self.save(endpoint="shows/premieres")
         self.assertEqual(resp.status_code, 204)

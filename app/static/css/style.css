@@ -1182,9 +1182,19 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
     transition: border-color .12s ease, color .12s ease, background .12s ease;
 }
 .fsource::before { content: "\25CB"; margin-right: 7px; opacity: 0.55; }
-.fsources input:checked + .fsource { border-color: var(--gold); color: var(--gold-soft); background: rgba(232,181,69,0.12); }
-.fsources input:checked + .fsource::before { content: "\2713"; opacity: 1; }
-.fsources input:focus-visible + .fsource { outline: 2px solid var(--gold); outline-offset: 2px; }
+/* THE SAME BOXES FOR A FILTER'S OWN ON-OR-OFF RULES (_filter_chip.html's `tick`):
+   the missing-data rules and the two switches. Without the services' last-one-
+   stays-on rule below — every rule off is an ordinary answer here. A box the
+   operator's floor already applies is fixed on, and reads as fixed. */
+.fticks { display: flex; gap: 6px; flex-wrap: wrap; }
+.fticks input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.fticks input:disabled + .fsource { cursor: default; opacity: 0.7; }
+.fsources input:checked + .fsource,
+.fticks input:checked + .fsource { border-color: var(--gold); color: var(--gold-soft); background: rgba(232,181,69,0.12); }
+.fsources input:checked + .fsource::before,
+.fticks input:checked + .fsource::before { content: "\2713"; opacity: 1; }
+.fsources input:focus-visible + .fsource,
+.fticks input:focus-visible + .fsource { outline: 2px solid var(--gold); outline-offset: 2px; }
 /* AN EMPTY CALENDAR WITH NO EXPLANATION READS AS A BROKEN APP, so the last
    service showing does not offer to be switched off. `:not(:has(input:checked ~
    input:checked))` is "no second box in this group is ticked", which makes the

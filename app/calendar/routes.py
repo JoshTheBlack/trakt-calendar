@@ -180,6 +180,12 @@ def _filters_summary(prefs: dict) -> str:
             # "where and how a film is released" is one dimension asked in two
             # halves.
             ("film release", prefs["movie_release_countries"] or prefs["movie_release_types"]),
+            ("language", prefs["tv_languages"] or prefs["movie_languages"]),
+            ("keyword", prefs["tv_keywords"] or prefs["movie_keywords"]),
+            ("show type", prefs["tv_show_types"]),
+            ("one service only", prefs["tv_single_service"] or prefs["movie_single_service"]),
+            ("no network", prefs["tv_sparse_no_network"]),
+            ("missing data", prefs["tv_missing"] or prefs["movie_missing"]),
         ) if value
     ]
     return ", ".join(named)
@@ -318,6 +324,24 @@ def _filter_panel(prefs: dict, saved: source_prefs.SourcePrefs, settings, endpoi
             "show": vocab.count_set(prefs, vocab.TV_FIELDS),
             "movie": vocab.count_set(prefs, vocab.MOVIE_FIELDS),
         },
+        # ONE SWITCH PER TOGGLE DIMENSION, its name spelled by vocab like every
+        # other name this panel posts under.
+        "toggles": {field: {"name": vocab.toggle_name(field), "on": bool(prefs.get(field))}
+                    for field in vocab.TOGGLE_FIELDS},
+        # WHAT THE OPERATOR'S FLOOR ALREADY HIDES, for the rules a viewer can
+        # only tighten: a switch or a missing-data rule the floor has on is drawn
+        # on and fixed, saying so, rather than as a box that looks as though
+        # unticking it would bring something back. The panel's other dimensions
+        # are spec chips, which the floor narrows before them unseen.
+        "floor": {
+            **{field: bool(getattr(settings, field)) for field in vocab.TOGGLE_FIELDS},
+            **{field: calendar_filter.parse_spec(getattr(settings, field))[0]
+               for field in vocab.TICK_FIELDS},
+        },
+        # WHO "ONLY A CATALOGUE LISTS IT" MEANS, by the registry's own labels —
+        # the services whose listings arrive undescribed — so the rule's words
+        # name a service without this module naming one.
+        "sparse_labels": calendar_resolve.sparse_labels(),
         "sources": {
             "show": _source_toggles(Media.SHOW, settings, saved,
                                     (showing_sources or {}).get(Media.SHOW)),
@@ -2319,6 +2343,50 @@ def _network_list(value) -> list[str]:
     return names
 
 
+def _keyword_list(value) -> list[str]:
+    """Keywords as a de-duplicated, lower-cased list, a later answer for a
+    keyword replacing an earlier one.
+
+    NEVER SPLIT ON A COMMA, the one way this differs from `_network_list`: a
+    TMDB keyword's own name can hold one ("san francisco, california"). Lower-
+    cased because TMDB spells every keyword so and the match folds
+    (filter.parse_keyword_spec), so "Anime" and "anime" are one entry.
+    """
+    raw = [str(v) for v in value] if isinstance(value, list) else [str(value or "")]
+    kept: dict[str, str] = {}
+    for item in raw:
+        spelled = " ".join(item.split()).lower()
+        bare = spelled[1:].strip() if spelled.startswith("-") else spelled
+        if bare:
+            kept.pop(bare, None)
+            kept[bare] = f"-{bare}" if spelled.startswith("-") else bare
+    return list(kept.values())
+
+
+def _missing_spec(value) -> str:
+    """The ticked missing-data rules, in the order the panel lists them. A rule
+    is ticked or not, so an exclude is not an answer it can hold and a token no
+    rule names is dropped (filter.MISSING_RULES) — kept, either would be stored
+    and drawn as though it did something."""
+    ticked, _excludes = calendar_filter.parse_spec(str(value or ""))
+    return ", ".join(rule for rule in calendar_filter.MISSING_RULES if rule in ticked)
+
+
+def _normalized(field: str, value):
+    """`value` in the shape `field`'s column stores, through the normalizer for
+    its kind — ONE dispatch for the panel's save, its typed chips and a card's
+    badge, so the three cannot store one answer in different shapes."""
+    if field == vocab.NETWORK_FILTER:
+        return _network_list(value)
+    if field in (vocab.TV_KEYWORDS, vocab.MOVIE_KEYWORDS):
+        return _keyword_list(value)
+    if field == vocab.MOVIE_RELEASE_TYPES:
+        return _release_type_spec(value)
+    if field in vocab.TICK_FIELDS:
+        return _missing_spec(value)
+    return _filter_spec(value)
+
+
 @guard.post("/api/me/prefs", AuthLevel.CALENDAR_APPROVED)
 async def post_me_prefs(request: Request):
     """Persist a partial update to the viewer's own calendar view preferences.
@@ -2476,20 +2544,16 @@ def _source_selection_from_form(data: dict, settings,
 def _normalized_specs(data: dict) -> dict:
     """The chip answers in this payload, as the shapes the columns store.
 
-    THROUGH THE SAME NORMALIZERS EVERY OTHER WRITER USES, so a spec assembled
-    from chips is stored in the shape a badge press and the old text fields both
-    produced. `movie_release_types` is the one with a vocabulary narrow enough to
-    validate, and it is dropped here rather than at read for the reason its own
-    normalizer states.
+    THROUGH THE SAME NORMALIZERS EVERY OTHER WRITER USES (`_normalized`), so a
+    spec assembled from chips is stored in the shape a badge press and the old
+    text fields both produced. `movie_release_types` and the missing-data rules
+    have vocabularies narrow enough to validate, and an unknown token is dropped
+    here rather than at read for the reason each normalizer states.
     """
-    specs = dict(vocab.specs_from_form(data))
-    for field, value in list(specs.items()):
-        if field == vocab.NETWORK_FILTER:
-            specs[field] = _network_list(value)
-        elif field == vocab.MOVIE_RELEASE_TYPES:
-            specs[field] = _release_type_spec(value)
-        else:
-            specs[field] = _filter_spec(value)
+    specs = {field: _normalized(field, value)
+             for field, value in vocab.specs_from_form(data).items()}
+    # THE SWITCHES TOO, each mentioned only when its tab was drawn.
+    specs.update(vocab.toggles_from_form(data))
     return specs
 
 
@@ -2511,7 +2575,7 @@ def _prefs_showing(data: dict, prefs: dict, *, cleared: tuple[str, ...] = ()) ->
     """
     showing = {**prefs, **_normalized_specs(data)}
     for field in cleared:
-        showing[field] = [] if field in vocab.LIST_FIELDS else ""
+        showing[field] = vocab.empty(field)
     if "filters_on" in data:
         showing["filters_paused"] = not route_params.ticked(data["filters_on"])
     return showing
@@ -2597,9 +2661,14 @@ async def add_filter_chip(request: Request):
         return authz.error("Not a filter this panel offers")
 
     showing = _prefs_showing(data, prefs)
-    is_list = field in vocab.LIST_FIELDS
     spec = showing.get(field)
-    for raw in str(route_params.last_value(data.get("token")) or "").split(","):
+    typed = str(route_params.last_value(data.get("token")) or "")
+    # A COMMA-SEPARATED PASTE IS SEVERAL TOKENS, except for keywords: a TMDB
+    # keyword's own name can hold a comma ("san francisco, california"), so what
+    # was typed into that box is one keyword.
+    pasted = ([typed] if field in (vocab.TV_KEYWORDS, vocab.MOVIE_KEYWORDS)
+              else typed.split(","))
+    for raw in pasted:
         token = raw.strip()
         # A colon would produce a field name that reads as a different field, so
         # it is dropped rather than misfiled. Silently, because the panel comes
@@ -2607,8 +2676,10 @@ async def add_filter_chip(request: Request):
         # holds nothing anybody has lost.
         if not vocab.addable(token):
             continue
-        spec = calendar_filter.merge_token(spec, token, vocab.INCLUDE, is_list=is_list)
-    showing[field] = _network_list(spec) if is_list else _filter_spec(spec)
+        spec = calendar_filter.merge_token(spec, token, vocab.INCLUDE,
+                                           is_list=field in vocab.LIST_FIELDS,
+                                           cased=field in vocab.CASED_FIELDS)
+    showing[field] = _normalized(field, spec)
     return templates.TemplateResponse(request, "_filters_panel.html",
                                       _panel_context(request, settings, showing, saved,
                                                      _sources_showing(data)))
@@ -2789,11 +2860,12 @@ async def post_filter_badge(request: Request):
     if mode not in vocab.MODES:
         return answer("That isn't one of the three answers a badge offers.", False, 400)
 
-    is_list = field in vocab.LIST_FIELDS
-    merged = calendar_filter.merge_token(prefs.get(field), token, mode, is_list=is_list)
+    merged = calendar_filter.merge_token(prefs.get(field), token, mode,
+                                         is_list=field in vocab.LIST_FIELDS,
+                                         cased=field in vocab.CASED_FIELDS)
     # THROUGH THE SAME NORMALIZERS THE PANEL'S OWN SAVE USES, so a spec written by
     # a badge and one saved from the panel cannot come out in different shapes.
-    merged = _network_list(merged) if is_list else _filter_spec(merged)
+    merged = _normalized(field, merged)
     await auth.update_user_prefs(user.user_id, **{field: merged})
     # Mirrored into share_links exactly as post_me_prefs does -- that table's
     # owner-default columns are seeded from user_prefs and have no editor of

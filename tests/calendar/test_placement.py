@@ -255,5 +255,44 @@ class TheSearchAgreesWithTheCalendarTests(PlacementTestCase):
                 self.assertEqual([airing.day for airing in found.airings], days)
 
 
+class TheNewerFiltersAgreeOnEveryReaderTests(PlacementTestCase):
+    """Who lists a card, and what TMDB says of it, decide the same thing on the
+    month, a late day and the search — every reader asks `cache.placed` with the
+    specs `vocab.active_specs` answers, so none can apply one and not another."""
+
+    SPECS = ({"tv_single_service": True}, {"tv_keywords": ["-anime"]},
+             {"tv_sparse_no_network": True}, {"tv_show_types": "-reality"})
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        lonely = _listing(Source.TMDB, 1, 1, _at(2026, 11, 10), date_only=True)
+        lonely.id, lonely.ids, lonely.title, lonely.network = "9", {"tmdb": 9}, "Lonely", ""
+        lonely.keywords, lonely.show_type = ["anime"], "reality"
+        await self.store(yellowjackets() + [lonely])
+
+    async def drawn(self, prefs: dict, start: date, end: date) -> list[str]:
+        from app.calendar import vocab
+        grouped, _meta = await calendar_cache.assemble_range(
+            SHOWS, self.settings, tz=NEW_YORK, start_date=start, end_date=end,
+            prefs=DEFAULT, allow_fetch=False, now=2000,
+            **vocab.active_specs(prefs, Media.SHOW, honour_pause=True))
+        return [item.title for group in grouped for item in group["items"]]
+
+    async def test_the_month_a_day_and_the_search_hide_the_same_card(self):
+        from app.calendar import search as calendar_search
+        for prefs in self.SPECS:
+            with self.subTest(prefs=prefs):
+                month = await self.drawn(prefs, date(2026, 11, 1), date(2026, 11, 30))
+                day = await self.drawn(prefs, date(2026, 11, 10), date(2026, 11, 10))
+                found = await calendar_search.stored(
+                    "lonely", settings=self.settings, prefs=prefs, tz=NEW_YORK,
+                    source_selection=DEFAULT, marks=frozenset(), endpoints=[SHOWS])
+                self.assertNotIn("Lonely", month)
+                self.assertIn("Yellowjackets", month)
+                self.assertEqual(day, [])
+                self.assertEqual(found.airings, ())
+        self.assertIn("Lonely", await self.drawn({}, date(2026, 11, 10), date(2026, 11, 10)))
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

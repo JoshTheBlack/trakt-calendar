@@ -120,6 +120,64 @@ def status_word(status) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Show type and keywords — the two facts only TMDB states
+# ---------------------------------------------------------------------------
+
+# A SHOW'S `type` AS THE APP'S SLUG (base.SHOW_TYPES, which the show-type filter
+# offers as chips). Every value TMDB documents is named, so a new one is a
+# visible gap rather than a silent pass-through; one with no entry is slugged
+# from its word and logged — still filterable by typing it, as a genre with no
+# mapping is. MEASURED: TMDB writes `type` in English whatever the instance's
+# TMDB language ("Talk Show" under de-DE as under en-US), so the table needs no
+# translation.
+TMDB_SHOW_TYPES = {
+    "Scripted": "scripted", "Reality": "reality", "Documentary": "documentary",
+    "Talk Show": "talk-show", "News": "news", "Miniseries": "miniseries",
+    "Video": "video",
+}
+
+
+def show_type(payload: dict, media: Media) -> str | None:
+    """The show's type as a slug; "" for a film (a film has none) and for a show
+    TMDB gave no type; None when `payload` is not a title's own answer — a
+    discover entry states no type, so a listing has none to give."""
+    if not is_description(payload):
+        return None
+    if media is not Media.SHOW:
+        return ""
+    word = str(payload.get("type") or "").strip()
+    if not word:
+        return ""
+    if word not in TMDB_SHOW_TYPES:
+        logger.info("TMDB show type %r has no slug; slugging the word", word)
+    return TMDB_SHOW_TYPES.get(word) or _slug(word)
+
+
+def keywords(payload: dict, media: Media) -> list[str] | None:
+    """TMDB's keyword names for the title, lower-cased, in TMDB's order, each
+    once; [] when TMDB lists none; None when `payload` carries no keyword list
+    at all — a discover entry, or an answer asked without them (detail.py's
+    `_APPENDS`) — so "none" and "never asked" stay two answers (Record.keywords).
+
+    A show lists them under `keywords.results` and a film under
+    `keywords.keywords` (measured). MEASURED TOO: the names are English whatever
+    the instance's TMDB language, and some hold a comma ("san francisco,
+    california"), which is why a keyword is never split.
+    """
+    block = payload.get("keywords")
+    if not isinstance(block, dict):
+        return None
+    entries = block.get("results" if media is Media.SHOW else "keywords") or ()
+    out: list[str] = []
+    for entry in entries:
+        name = " ".join(str((entry or {}).get("name") or "").split()).lower() \
+            if isinstance(entry, dict) else ""
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Certification, country, language, runtime, rating, ids, poster
 # ---------------------------------------------------------------------------
 
@@ -483,10 +541,11 @@ def to_record(payload: dict, media: Media, season: int | None, when: str) -> Rec
 
     A DISCOVER ENTRY MAKES A SPARSE RECORD (`is_description`): its name, day,
     genres, country, language, rating and picture, and no network, status,
-    runtime, certification or release schedule — so it says `enriched=False`,
-    which is what keeps the calendar's filters from judging it on fields nobody
-    has read yet (app/calendar/filter.py), and what the title store's refresh
-    queue completes it by (app/metadata/refresh.py's `queue_listed`).
+    runtime, certification, release schedule, keywords or show type — so it says
+    `enriched=False`, which is what keeps the calendar's filters from judging it
+    on fields nobody has read yet (app/calendar/filter.py), and what the title
+    store's refresh queue completes it by (app/metadata/refresh.py's
+    `queue_listed`).
     """
     day = str(when or "")[:10]
     try:
@@ -522,6 +581,8 @@ def to_record(payload: dict, media: Media, season: int | None, when: str) -> Rec
         poster=poster_of(payload) or None,
         release_types_by_country=(release_types_by_country(payload)
                                   if media is Media.MOVIE else {}),
+        keywords=keywords(payload, media),
+        show_type=show_type(payload, media),
         enriched=is_description(payload),
         **episode,
     )

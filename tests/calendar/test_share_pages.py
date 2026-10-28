@@ -1184,3 +1184,57 @@ class ASharePageDrawsEachEpisodeOnTheOwnersDayTests(SharePageTestCase):
         self.assertEqual(self._days_drawing_it(), ["Sunday, 22 November"])
         self._owner_prefers("simkl", "trakt")
         self.assertEqual(self._days_drawing_it(), ["Friday, 20 November"])
+
+
+class ASharePageKeepsTheOwnersNewerFiltersTests(SharePageTestCase):
+    """The six newer dimensions reach a share page as every other filter does —
+    the owner's, read with `honour_pause=False`, so an owner who has paused their
+    filters for the afternoon does not publish a wider calendar."""
+
+    def setUp(self):
+        super().setUp()
+        from app.providers.base import Record
+
+        save_settings(Settings(public_base_url=ORIGIN))
+        self.user_id = self._make_user("newerowner", calendar_approved=True)
+        self.sign_in_as(self.user_id)
+        self.token = asyncio.run(share_links.get_or_create(self.user_id))["token"]
+        self.client.cookies.clear()
+        listings = [
+            # Two services list it.
+            (Source.TRAKT, "both-trakt", 1, "Listed Twice", "HBO"),
+            (Source.SIMKL, "both-simkl", 1, "Listed Twice", "HBO"),
+            # Only TMDB lists it, and names no network.
+            (Source.TMDB, "2", 2, "Lonely Listing", ""),
+        ]
+        for source, own_id, tmdb, title, network in listings:
+            record = Record(source=source, media=Media.SHOW, id=own_id,
+                            ids={"tmdb": tmdb, str(source): own_id}, detail_url="",
+                            title=title, air_ts=1794657600.0, season=1, episode_number=1,
+                            episode_label="S01E01", network=network)
+            start = calendar_cache.window_start(calendar_cache.record_utc_date(record))
+            asyncio.run(calendar_cache.store_window(
+                "shows/new", start, [record], 10**9, db.now(),
+                sources=[str(source)], asked=[str(source)]))
+        calendar_cache._forget_spans()
+
+    def _page(self) -> str:
+        resp = self.client.get(f"/s/{self.token}?year=2026&month=11&endpoint=shows/new&tz=UTC")
+        self.assertEqual(resp.status_code, 200)
+        return resp.text
+
+    def test_a_paused_owner_still_publishes_only_what_their_filters_keep(self):
+        self.assertIn("Lonely Listing", self._page())
+        asyncio.run(auth.update_user_prefs(self.user_id, tv_single_service=True,
+                                           filters_paused=True))
+        calendar_cache._forget_spans()
+        page = self._page()
+        self.assertIn("Listed Twice", page)
+        self.assertNotIn("Lonely Listing", page)
+
+    def test_the_no_network_rule_reaches_it_too(self):
+        asyncio.run(auth.update_user_prefs(self.user_id, tv_sparse_no_network=True))
+        calendar_cache._forget_spans()
+        page = self._page()
+        self.assertIn("Listed Twice", page)
+        self.assertNotIn("Lonely Listing", page)

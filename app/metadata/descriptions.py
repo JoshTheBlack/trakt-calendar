@@ -63,7 +63,7 @@ ANSWER_KEYS = frozenset({
     "language", "anime_type", "release_types_by_country", "ids", "poster", "runtime",
     "genres", "genre_slugs", "rating", "imdb_rating", "certification", "videos",
     "first_aired", "homepage", "season", "season_title", "season_count", "cast",
-    "episodes",
+    "episodes", "keywords", "show_type",
 })
 
 
@@ -388,13 +388,15 @@ def season_stale_after(days: list[date | None], now: int) -> int:
 _TITLE_COLUMNS = ("title_key", "ids_json", "year", "network", "country", "language",
                   "certification", "status", "overview", "runtime", "genres_json",
                   "ratings_json", "anime_type", "release_types_json", "first_aired",
-                  "homepage", "season_count", "videos_json")
+                  "homepage", "season_count", "videos_json", "keywords_json", "show_type",
+                  "facts_known")
 
 
 def _title_values(answer: Mapping[str, Any], source: str, key: str, ids: dict) -> dict:
     year = answer.get("year")
     runtime = answer.get("runtime")
     return {
+        **rows.facts_values(answer.get("keywords"), answer.get("show_type")),
         "title_key": key,
         "ids_json": json.dumps(ids, sort_keys=True),
         "year": str(year) if isinstance(year, int) else str(year or ""),
@@ -748,7 +750,10 @@ def read(conn: db.Connection, source: str, media: str, own_id: Any,
     title_cast = _loads_list(row["cast_json"])
     season_cast = _loads_list(of_season["cast_json"]) if of_season is not None else []
     slugs = [str(g) for g in _loads_list(row["genres_json"])]
+    keywords, show_type = rows.facts_of(row)
     return {
+        "keywords": keywords,
+        "show_type": show_type,
         "title": str(row["title"] or ""),
         "year": rows.as_year(row["year"]),
         "overview": str(row["overview"] or ""),

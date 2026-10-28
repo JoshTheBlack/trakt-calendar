@@ -284,11 +284,13 @@ that does not depend on the viewer's marks, in process, served while a rebuild
 runs behind the reader and retired when its endpoint's rows are written — so a
 span built for one viewer is served to any later request whose key matches. That
 key is `_span_memo_key`'s, and its docstring says why each part is there: every
-per-viewer narrowing by name, `repr(prefs)`, the operator's floor and
-`instance_sources`, and `db.generation()`. Anything a viewer or `settings` decides
-on the read path belongs in it, and a key missing one does not fail loudly — it
-hands one reader somebody else's month. `tests/calendar/test_span_memo.py` holds
-the list against the fields a read actually uses.
+per-viewer narrowing (built from `vocab.SPEC_KEYS`, so a dimension added there is
+in the key without anybody adding it), `repr(prefs)`, the operator's floor as
+`vocab.floor_specs` answers it for both media, `instance_sources`, and
+`db.generation()`. Anything a viewer or `settings` decides on the read path
+belongs in it, and a key missing one does not fail loudly — it hands one reader
+somebody else's month. `tests/calendar/test_span_memo.py` holds every spec key
+and every `vocab.FLOOR_FIELDS` field to moving it.
 
 **One episode is ONE card, drawn on the day the viewer's first service gives
 it.** Which listings are one card is `app/calendar/cache.py`'s: every service's
@@ -336,6 +338,26 @@ default: a viewer's own read passes True, and the share path passes False so a
 paused session never publishes a wider calendar than the owner's links promised.
 The stash stores nothing aside and restores nothing — the specs stay exactly
 where they are, so turning filters back on cannot have lost one.
+THE READ PATH TAKES THOSE KEYWORDS AS ONE SET (`vocab.SPEC_KEYS`, checked by
+`vocab.complete_specs`, which refuses a keyword it does not name), and THE
+OPERATOR'S FLOOR IS THE SAME SHAPE (`vocab.floor_specs`, the one place a
+Settings field becomes something a read applies; `vocab.FLOOR_FIELDS` lists
+every field it reads). `cache.narrow_for_viewer` hands the floor and then the
+viewer's specs to ONE function, `filter.filter_titles` (`keep_title` the
+predicate), so a viewer can only narrow what the floor left and the floor is
+never counted as their filtering. Each dimension's treatment of a card nobody
+has described is `keep_title`'s and is the instance owner's decision, not a
+default: genres, countries, certifications, networks, language and missing data
+show an undescribed card unjudged (`enriched`); keywords and show type wait for
+the catalogue that states them (`Record.keywords is None` — TMDB alone, and a
+card TMDB does not list is not judged by them); "only one service lists it" and
+"only a sparse catalogue lists it and it names no network" are about who LISTS
+the card and exempt nothing. Only the language floor is also applied at fill
+(beside the country floor); the rest need the whole card. A row's keywords and
+show type are an answer only where `title_metadata.facts_known` says a
+description stated them (`metadata/rows.py`'s `facts_values`) — an empty
+keyword list is otherwise "never asked", which an include filter must not read
+as "none".
 
 **The filters panel is markup the server built, and its field names are one
 module's format.** A chip posts `chip:<pref column>:<token>` with a value of

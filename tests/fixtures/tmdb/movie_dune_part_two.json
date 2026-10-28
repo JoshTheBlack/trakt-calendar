@@ -242,5 +242,97 @@
     "published_at": "2025-03-21T23:00:32.000Z"
    }
   ]
+ },
+ "keywords": {
+  "keywords": [
+   {
+    "id": 818,
+    "name": "based on novel or book"
+   },
+   {
+    "id": 1965,
+    "name": "sandstorm"
+   },
+   {
+    "id": 4238,
+    "name": "chosen one"
+   },
+   {
+    "id": 9663,
+    "name": "sequel"
+   },
+   {
+    "id": 11239,
+    "name": "distant future"
+   },
+   {
+    "id": 13031,
+    "name": "creature"
+   },
+   {
+    "id": 13194,
+    "name": "planet"
+   },
+   {
+    "id": 18034,
+    "name": "desert"
+   },
+   {
+    "id": 40850,
+    "name": "destiny"
+   },
+   {
+    "id": 158144,
+    "name": "giant worm"
+   },
+   {
+    "id": 161176,
+    "name": "space opera"
+   },
+   {
+    "id": 178080,
+    "name": "sand dune"
+   },
+   {
+    "id": 180671,
+    "name": "allegorical"
+   },
+   {
+    "id": 194063,
+    "name": "messiah"
+   },
+   {
+    "id": 199660,
+    "name": "fall from grace"
+   },
+   {
+    "id": 232766,
+    "name": "vengeance"
+   },
+   {
+    "id": 282218,
+    "name": "religious allegory"
+   },
+   {
+    "id": 286709,
+    "name": "giant creature"
+   },
+   {
+    "id": 288793,
+    "name": "power"
+   },
+   {
+    "id": 325763,
+    "name": "ambiguous"
+   },
+   {
+    "id": 325766,
+    "name": "antagonistic"
+   },
+   {
+    "id": 325835,
+    "name": "melodramatic"
+   }
+  ]
  }
 }

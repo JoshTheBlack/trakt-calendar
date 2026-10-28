@@ -85,15 +85,18 @@ WORDS = {
              "overview", "poster", "runtime", "genres_json", "ratings_json", "anime_type",
              "release_types_json", "keywords_json", "first_aired", "homepage",
              "season_count", "cast_json", "videos_json", "logo", "collection_json",
-             "next_episode_json"),
+             "next_episode_json", "show_type"),
     SEASONS: ("name", "overview", "episode_count", "premiere", "air_dates_json", "poster",
               "cast_json", "videos_json"),
     EPISODES: ("title", "overview", "still", "first_aired", "episode_type", "runtime",
                "rating", "votes"),
 }
 NOT_WORDS = {
+    # `facts_known` says whether two of the words are an answer (`facts_values`);
+    # it is not itself something the service said.
     TITLES: ("source", "media", "source_id", "title_key", "title_fold", "ids_json",
-             "detail_url", "enriched", "fetched_at", "stale_after", "failed_at", "fail_count"),
+             "detail_url", "enriched", "fetched_at", "stale_after", "failed_at", "fail_count",
+             "facts_known"),
     SEASONS: ("source", "media", "source_id", "season", "fetched_at", "stale_after",
               "failed_at", "fail_count"),
     EPISODES: ("source", "media", "source_id", "season", "number", "fetched_at",
@@ -181,6 +184,41 @@ def as_year(stored) -> int | str:
 
 
 # ---------------------------------------------------------------------------
+# keywords and show type: two words, and whether they are an answer
+# ---------------------------------------------------------------------------
+
+def facts_values(keywords: list[str] | None, show_type: str | None) -> dict:
+    """The three columns `keywords` and `show_type` are stored in — ONE SPELLING
+    for the two writers, a description (app/metadata/descriptions.py) and a
+    listing built from one (`write_listing`).
+
+    AN ANSWER ONLY WHEN BOTH ARE STATED (`facts_known`). None is a service that
+    does not state them, or a listing nobody has described (Record.keywords), and
+    stored as the empty defaults it would read back the same as "TMDB lists no
+    keywords for this title" — which an include filter judges, where a title
+    nobody has described is shown unjudged. TMDB's description always carries
+    both; an answer carrying one is not one this app asked for.
+    """
+    known = keywords is not None and show_type is not None
+    return {"keywords_json": json.dumps([str(k) for k in keywords or ()]),
+            "show_type": str(show_type or ""),
+            "facts_known": 1 if known else 0}
+
+
+def facts_of(row: Mapping[str, Any]) -> tuple[list[str] | None, str | None]:
+    """(keywords, show_type) as a row states them — both None unless a
+    description stated them (`facts_values`)."""
+    if not row["facts_known"]:
+        return None, None
+    try:
+        keywords = json.loads(row["keywords_json"] or "[]")
+    except ValueError:
+        keywords = []
+    return ([str(k) for k in keywords] if isinstance(keywords, list) else [],
+            str(row["show_type"] or ""))
+
+
+# ---------------------------------------------------------------------------
 # a service's listing, written
 # ---------------------------------------------------------------------------
 
@@ -188,7 +226,7 @@ def as_year(stored) -> int | str:
 _TITLE_FIELDS = ("title", "title_fold", "ids_json", "detail_url", "year", "network",
                  "country", "language", "certification", "status", "overview",
                  "poster", "runtime", "genres_json", "ratings_json", "anime_type",
-                 "release_types_json", "enriched")
+                 "release_types_json", "enriched", "keywords_json", "show_type", "facts_known")
 
 
 def _title_values(record: Record) -> tuple:
@@ -221,6 +259,7 @@ def _title_values(record: Record) -> tuple:
         str(record.anime_type or ""),
         json.dumps(record.release_types_by_country or {}),
         1 if record.enriched else 0,
+        *facts_values(record.keywords, record.show_type).values(),
     )
 
 
@@ -269,15 +308,26 @@ ON CONFLICT(source, media, source_id) DO UPDATE SET
     anime_type = CASE WHEN {TITLES}.enriched = 1 THEN {TITLES}.anime_type
                       ELSE excluded.anime_type END,
     enriched   = MAX({TITLES}.enriched, excluded.enriched),
+    -- KEYWORDS AND SHOW TYPE ONLY FROM A LISTING THAT STATES THEM — TMDB's season
+    -- premieres are built from the title's own answer and do; a discover entry,
+    -- or another service's listing, says nothing and leaves what a description
+    -- learned (facts_values).
+    keywords_json = CASE WHEN excluded.facts_known = 1 THEN excluded.keywords_json
+                         ELSE {TITLES}.keywords_json END,
+    show_type  = CASE WHEN excluded.facts_known = 1 THEN excluded.show_type
+                      ELSE {TITLES}.show_type END,
+    facts_known = MAX({TITLES}.facts_known, excluded.facts_known),
 """
 
 # What a listing rewrites of a title row: its name always, its picture when it
-# states one, and the enriched fields until a lookup has answered for them.
+# states one, the enriched fields until a lookup has answered for them, and the
+# keywords and show type when it states them.
 _LISTING_REWRITES: dict[str, str | None] = {
     "title": None, "poster": "excluded.poster = ''",
     **{name: f"{TITLES}.enriched = 1"
        for name in ("year", "network", "country", "language", "certification", "status",
-                    "overview", "runtime", "genres_json", "ratings_json", "anime_type")}}
+                    "overview", "runtime", "genres_json", "ratings_json", "anime_type")},
+    **{name: "excluded.facts_known = 0" for name in ("keywords_json", "show_type")}}
 
 
 def _upsert_title_sql() -> str:

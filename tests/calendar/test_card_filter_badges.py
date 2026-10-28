@@ -66,17 +66,17 @@ class WhichBadgesOfferToFilterTests(unittest.TestCase):
     def setUp(self):
         self.html = _html()
 
-    def test_the_four_dimensions_the_filter_actually_has_are_offered(self):
-        for dimension in ("certification", "country", "genre", "network"):
+    def test_the_five_dimensions_the_filter_actually_has_are_offered(self):
+        for dimension in ("certification", "country", "language", "genre", "network"):
             with self.subTest(dimension=dimension):
                 self.assertTrue(_tokens(self.html, dimension),
                                 f"no badge offers to filter on {dimension}")
 
-    def test_a_language_chip_offers_nothing(self):
-        """Drawn on the card, and not a dimension this app filters on. Offering
-        it would write a preference that could never do anything."""
+    def test_a_language_chip_offers_its_code(self):
+        """Language is a dimension the filter has, so the card's chip offers it
+        like the country beside it, with the code the filter matches."""
         self.assertIn("🗣️", self.html)
-        self.assertEqual(_tokens(self.html, "language"), [])
+        self.assertEqual(_tokens(self.html, "language"), ["en"])
 
     def test_a_weekday_chip_offers_nothing(self):
         self.assertIn("📆", self.html)

@@ -142,10 +142,19 @@ class TheBadgeRouteTests(AppTestCase):
         self.press(dimension="genre", token="reality", mode="")
         self.assertEqual(self.prefs()["tv_genres"], "")
 
+    def test_a_language_writes_its_mediums_own_field(self):
+        """A card's language chip filters like its country chip, into the column
+        for the card's own medium."""
+        self.press(dimension="language", token="JA", mode="exclude", media="show")
+        self.press(dimension="language", token="fr", mode="include", media="movie")
+        prefs = self.prefs()
+        self.assertEqual(prefs["tv_languages"], "-JA")
+        self.assertEqual(prefs["movie_languages"], "fr")
+
     def test_a_dimension_the_filter_does_not_have_is_refused(self):
-        """A card draws a language and a weekday; neither is something this app
-        filters on, and storing one would be a preference that could never act."""
-        for dimension in ("language", "day", "rating", ""):
+        """A card draws a weekday, which is not something this app filters on,
+        and storing one would be a preference that could never act."""
+        for dimension in ("day", "rating", ""):
             with self.subTest(dimension=dimension):
                 resp = self.press(dimension=dimension, token="en", mode="exclude")
                 self.assertEqual(resp.status_code, 400, resp.text)

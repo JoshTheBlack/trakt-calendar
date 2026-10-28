@@ -146,6 +146,22 @@ def instance_sources(settings=None) -> frozenset[str] | None:
     return frozenset(str(p.source) for p in providers.calendar_sources(settings=settings))
 
 
+def sparse_sources() -> frozenset[str]:
+    """Every registered service whose calendar listings arrive undescribed
+    (Capabilities.describes_sparse_listings) — what the no-network rule means by
+    "only a catalogue lists it" (filter.keep_title), named through the registry
+    so no service is named where the rule is applied."""
+    return frozenset(str(source) for source, provider in providers.registered().items()
+                     if provider.capabilities.describes_sparse_listings)
+
+
+def sparse_labels() -> str:
+    """Those services' own labels ("TMDB"), joined — how a control offering the
+    rule names them; "" when no registered service lists sparse."""
+    return " or ".join(provider.label for provider in providers.registered().values()
+                       if provider.capabilities.describes_sparse_listings)
+
+
 def answering_services(endpoint, settings) -> list[tuple[str, str]]:
     """(name, label) for every service that could actually fill THIS calendar on
     THIS instance, in declared order — or an empty list when there is nothing to
@@ -388,6 +404,31 @@ def _merged_genres(records: list[Record], order: list[str]) -> list[str]:
     return out
 
 
+def _title_facts(records: list[Record], order: list[str]
+                 ) -> tuple[list[str] | None, str | None]:
+    """(keywords, show_type) for the card — what the services that STATE them
+    said, and None for each when none of them does (Record.keywords).
+
+    NOT A PREFERENCE FIELD, deliberately outside SCALAR_FIELDS: one catalogue
+    states these today, so there is nothing for a viewer's order to choose
+    between, and naming them there would make them something a stored
+    preference could name. The keywords are a union, as genres are; the type is
+    the first stated one in the viewer's order, an empty one (a description that
+    gave none) still counting as stated.
+    """
+    by_name = {str(r.source): r for r in records}
+    ordered = [by_name[name] for name in order if name in by_name]
+    stating = [r for r in ordered if r.keywords is not None]
+    keywords = None
+    if stating:
+        keywords = []
+        for record in stating:
+            keywords.extend(k for k in record.keywords if k not in keywords)
+    typed = [r.show_type for r in ordered if r.show_type is not None]
+    show_type = next((t for t in typed if t), typed[0] if typed else None)
+    return keywords, show_type
+
+
 def _provenance(records: list[Record]) -> tuple[dict, dict]:
     """(field_sources, alternatives) — who filled each scalar field in, and where
     they filled it in differently, every value they gave.
@@ -451,6 +492,8 @@ def resolve_records(group, records: list[Record], prefs=None) -> Record | None:
             setattr(resolved, field_name, getattr(winner, field_name))
 
     resolved.genres = _merged_genres(records, _order(prefs, GENRES_FIELD, names))
+    resolved.keywords, resolved.show_type = _title_facts(records,
+                                                         _order(prefs, "keywords", names))
 
     coordinate = _resolve_coordinate(records, _order(prefs, COORDINATE_FIELD, names))
     for field_name in COORDINATE_FIELDS:
