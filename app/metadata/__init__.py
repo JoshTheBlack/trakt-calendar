@@ -98,10 +98,17 @@ async def ensure(media: Any, ids: Mapping[str, Any] | None, *, settings=None,
 
 
 async def ask(media: Any, ids: Mapping[str, Any] | None, *, settings,
-              filed_under: str | None = None) -> Asked:
-    """`ensure` with the services asked, saying which could not be."""
+              filed_under: str | None = None,
+              asking: Iterable[str] | None = None) -> Asked:
+    """`ensure` with the services asked, saying which could not be.
+
+    `asking` NARROWS WHO IS ASKED to the services it names — still only those
+    the title holds no id from. For a caller spending one service's allowance at
+    a time (app/calendar/completion.py): asking every service on one service's
+    pace would spend the others' with nobody counting."""
     (found,), unreachable = await _ensure(
-        [(str(media), dict(ids or {}), filed_under)], settings)
+        [(str(media), dict(ids or {}), filed_under)], settings,
+        asking=None if asking is None else frozenset(map(str, asking)))
     key = found.key if found is not None else None
     return Asked(found, frozenset(unreachable.get(key, ())))
 
@@ -116,7 +123,8 @@ async def ensure_many(titles: Iterable[tuple[Any, Mapping[str, Any] | None, str 
     return found
 
 
-async def _ensure(titles: list[tuple[str, dict, str | None]], settings
+async def _ensure(titles: list[tuple[str, dict, str | None]], settings, *,
+                  asking: frozenset[str] | None = None
                   ) -> tuple[list[Identity | None], dict[str, set[str]]]:
     if not titles:
         return [], {}
@@ -130,7 +138,7 @@ async def _ensure(titles: list[tuple[str, dict, str | None]], settings
     if settings is None:
         return found, {}
     held = {item.key: (Media(item.media), item.ids) for item in found if item is not None}
-    learned, unreachable = await _ask_services(settings, held)
+    learned, unreachable = await _ask_services(settings, held, asking=asking)
     if not learned:
         return found, unreachable
 
@@ -152,7 +160,8 @@ async def _ensure(titles: list[tuple[str, dict, str | None]], settings
     return taught, {moved.get(key, key): sources for key, sources in unreachable.items()}
 
 
-async def _ask_services(settings, titles: Mapping[str, tuple[Media, Mapping[str, Any]]]
+async def _ask_services(settings, titles: Mapping[str, tuple[Media, Mapping[str, Any]]], *,
+                        asking: frozenset[str] | None = None
                         ) -> tuple[dict[str, dict], dict[str, set[str]]]:
     """({title key: the ids learned}, {title key: services that could not be
     asked}) for `titles` — {key: (media, ids held)} — asking each service that
@@ -166,12 +175,14 @@ async def _ask_services(settings, titles: Mapping[str, tuple[Media, Mapping[str,
     so asking again within the day costs no request — and a second viewer holding
     the same title costs none either, since the answer is a fact about the title.
     An answer that does not name the asked service's own id is no answer: a
-    wrong service id is worse than a missing one.
+    wrong service id is worse than a missing one. `asking`, when given, is which
+    of those services may be asked at all (`ask` says why).
     """
     asked = [(key, source, port)
              for key, (_media, held) in titles.items()
              for source, port in providers.for_shared_id_lookup(settings)
-             if held.get(str(source)) in (None, "")]
+             if held.get(str(source)) in (None, "")
+             and (asking is None or str(source) in asking)]
     if not asked:
         return {}, {}
     answers = await asyncio.gather(

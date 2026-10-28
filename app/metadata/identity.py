@@ -409,6 +409,32 @@ def with_shared(own: Mapping[str, Any] | None, known: Mapping[str, Any]) -> dict
     return out
 
 
+async def every_id(media: Any, ids: Mapping[str, Any] | None, *, key: str = "") -> dict:
+    """`ids` with EVERY id the store knows for the title they name beneath them —
+    each service's own id as well as the shared ones — `ids` winning. `key`, a
+    title key the caller holds for it (followed through any re-key), names the
+    title where `ids` alone may not: a card's panel request carries each
+    service's own id and no tvdb or imdb.
+
+    NOT `complete`, WHICH ADDS ONLY THE SHARED IDS, and the difference is what
+    each is for. `complete` keys a listing: a service's own id is that service's
+    to state, so a reader keying one service's row must not be handed another's.
+    This is for a reader that only ADDRESSES a service — an outbound button needs
+    the service's own id to name its page — and a title whose Trakt id a lookup by
+    shared id learned has a Trakt page whether or not any surface drew Trakt's
+    description of it. MEASURED on the development copy: 83 of October's
+    TMDB-only Season Premieres held a Simkl id here that no panel offered.
+    """
+    def _work(conn):
+        found = follow(conn, str(key)) if key else resolve(conn, media, ids)
+        row = None if found is None else _row(conn, found)
+        return _ids(row) if row is not None else {}
+
+    known = await db.run(_work)
+    return {**known, **{name: value for name, value in (ids or {}).items()
+                        if value not in (None, "")}}
+
+
 async def completed(pairs: Iterable[tuple[Any, Mapping[str, Any] | None]]) -> list[dict]:
     """`complete` for many (media, ids) at once, in one read."""
     pairs = list(pairs)

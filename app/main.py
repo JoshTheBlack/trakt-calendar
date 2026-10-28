@@ -49,6 +49,7 @@ from .auth import trakt_routes
 from .calendar import cache as calendar_cache
 from .calendar import enrich as calendar_enrich
 from .calendar import entries as calendar_entries
+from .calendar import completion as calendar_completion
 from .calendar import routes as calendar_routes
 from .calendar import share_card_cache
 from .calendar import share_routes
@@ -203,6 +204,11 @@ async def _heartbeat_tick() -> None:
         # landing while a fill-triggered pass is already running folds into
         # it rather than starting a second, concurrent pass of its own.
         lambda: calendar_enrich.run_drain(settings),
+        # Last, and least urgent: a few of this month's and next month's cards
+        # asked of the service that does not list them yet, at that service's
+        # slow pace (app/calendar/completion.py). A tick runs one job at a time,
+        # so one pass at a time.
+        lambda: calendar_completion.run(settings),
     ):
         try:
             await job()

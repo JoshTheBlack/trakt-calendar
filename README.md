@@ -288,6 +288,22 @@ for TV or films in 🎚️ Filters, or narrow by country, genre or network. A li
 without its network or certification and is looked up in the background, so for its first
 few minutes a TMDB-only title is shown even where those filters would hide it.
 
+**Titles are matched across services in the background**, every minute. This month's and
+next month's premieres and films that only TMDB lists are looked up on Trakt by their TMDB
+id, and where Trakt has the title its own date joins the card; titles Trakt or Simkl list
+without a TMDB id are looked up on TMDB, and merge with TMDB's own card where it has one.
+Each answer stands for a week. Trakt allows an app 500 reads every five minutes, shared with
+the pages you're waiting on, so the lookups spend at most 50 Trakt requests a minute, and
+only while the whole app has sent fewer than 350 in the last five minutes — the pages always
+keep the other 150. A card costs about three requests, so that's around fifteen cards a
+minute, and a month's backlog takes about two hours. Simkl isn't asked in the background, because its lookup needs a person's own account;
+opening a card's details asks it then.
+
+**A card shows a button for every service that knows its title.** The services whose
+calendars the card is drawn from are in colour; one that knows the title but doesn't list
+this airing — or that your calendar leaves out — is greyed until you hover it. The details
+panel offers every service that knows the title, wherever it is opened.
+
 **Every search box searches TMDB** when you press Enter, and all three behave alike: the
 calendar's Find a title, the tracker's Add show and Add film, and the rankings board.
 Twenty results at a time, with **More from TMDB** for the next twenty. Under the results,

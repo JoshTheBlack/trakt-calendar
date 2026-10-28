@@ -38,6 +38,7 @@ from . import (cache as calendar_cache, enrich as calendar_enrich,
                share_links, state as calendar_state, vocab)
 from .. import (auth, authz, cache, chrome, clock, db, details_panel, metadata,
                 route_params)
+from ..metadata import identity as title_identity
 from ..metadata import panel as metadata_panel, pictures as metadata_pictures
 from ..metadata import refresh as metadata_refresh
 from ..metadata import rows as title_rows
@@ -1827,8 +1828,14 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     # ONE MAP FOR THE BUTTONS AND THE TICKS, which is the rule the tracker's own
     # panel states: a service with a working tick has a working button, and two
     # maps would let the same panel spell the same service's address two ways.
-    ids = {**asked, **detail_source.names_from_query(params),
-           **(details.get("ids") or {})}
+    # AND EVERY ID THE TITLE STORE KNOWS beneath it (identity.every_id), found by
+    # the card's own title key: a service a lookup by shared id found the title
+    # at has a page for it, though neither the card nor the describing service
+    # named that id. A hand-edited key spells the caller's own buttons and
+    # nobody else's, as it reads the caller's own ticks.
+    ids = await title_identity.every_id(media, {
+        **asked, **detail_source.names_from_query(params), **(details.get("ids") or {})},
+        key=str(params.get("key") or ""))
     # A PANEL OPENED IS A TITLE VIEWED: every service's description of it, and
     # of the season on screen, that is past its clock is re-read behind the
     # reader (app/metadata/refresh.py).

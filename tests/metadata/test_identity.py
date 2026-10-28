@@ -177,6 +177,29 @@ class ReadingWithoutWritingTests(DatabaseTestCase):
         self.assertEqual(key, "show:tvdb:1")
         self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM titles"), 0)
 
+    async def test_every_id_adds_the_services_own_ids_too(self):
+        """Where `complete` adds only the shared ids, `every_id` is for a reader
+        that only addresses a service — an outbound button — and adds every id
+        the store knows, the given ids winning."""
+        await settle(Media.SHOW, {"tmdb": 900, "trakt": 7, "trakt_slug": "seven",
+                                  "simkl": 55})
+        found = await identity.every_id(Media.SHOW, {"tmdb": "900", "simkl": 56})
+        self.assertEqual(found, {"tmdb": "900", "trakt": 7, "trakt_slug": "seven",
+                                 "simkl": 56})
+
+    async def test_every_id_finds_the_title_by_a_key_followed_through_its_re_key(self):
+        await settle(Media.SHOW, {"tvdb": 4321, "simkl": 55})
+        await settle(Media.SHOW, {"tvdb": 4321, "tmdb": 900, "trakt": 7},
+                     filed_under="show:tvdb:4321")
+        found = await identity.every_id(Media.SHOW, {"simkl": 55}, key="show:tvdb:4321")
+        self.assertEqual(found["trakt"], 7)
+        self.assertEqual(found["tmdb"], 900)
+
+    async def test_every_id_of_a_title_the_store_does_not_hold_is_what_was_given(self):
+        self.assertEqual(await identity.every_id(Media.SHOW, {"tmdb": 1, "slug": ""}),
+                         {"tmdb": 1})
+        self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM titles"), 0)
+
 
 class OneSpellingTests(DatabaseTestCase):
     async def test_the_per_service_key_is_the_calendars_and_the_cards(self):

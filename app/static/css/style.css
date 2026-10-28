@@ -1328,6 +1328,12 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
    fill behind white lettering leaves the name of the place you are about to go
    the least readable thing on the card. */
 .trakt-btn:hover { background: rgba(232,181,69,0.14); border-color: var(--gold); box-shadow: 0 0 14px rgba(232,181,69,0.35); transform: translateY(-2px); }
+/* A SERVICE THAT KNOWS THE TITLE BUT DOES NOT LIST THIS AIRING keeps its button,
+   greyed and dimmed: its page for the title is real, and full colour stays with
+   the services the card was drawn from. Hovering gives the colour back, so the
+   button still says plainly where a click goes. */
+.trakt-btn.unlisted img { filter: grayscale(1); opacity: 0.45; }
+.trakt-btn.unlisted:hover img { filter: none; opacity: 1; }
 /* The service NAME, on the button that goes there. Height rather than width, so
    two wordmarks of different proportions sit on one optical line. */
 .source-wordmark { height: 15px; width: auto; max-width: 100%; object-fit: contain; display: block; }

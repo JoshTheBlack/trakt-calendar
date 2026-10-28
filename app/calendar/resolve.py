@@ -51,6 +51,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from .. import providers
+from ..providers import detail_source
 from ..providers.base import Record, Source, epoch_moment
 
 # ---------------------------------------------------------------------------
@@ -473,21 +474,30 @@ def resolve_records(group, records: list[Record], prefs=None) -> Record | None:
     if isinstance(ids, dict) and ids:
         resolved.ids = dict(ids)
 
+    # WHERE EACH SERVICE'S OWN PAGE FOR THIS TITLE IS, in declared order — every
+    # service that LISTS this airing, and every one the title store knows the
+    # title at though it does not (Record.known_ids), on every card, one service
+    # or several. NOT a resolved value and not something a preference can order:
+    # the card is attributed to one service and `detail_url` travels with that
+    # attribution, but each service really does have a page and a reader who
+    # wants another one is not disagreeing with anybody. So this is collected
+    # rather than won — nothing above chooses between these, and nothing may be
+    # added here that a viewer could state a preference about, because that is
+    # what SCALAR_FIELDS is for.
+    known: dict[str, Any] = {}
+    for record in records:
+        for name, value in (record.known_ids or {}).items():
+            known.setdefault(name, value)
+    resolved.known_ids = known
+    resolved.links = detail_source.service_links(
+        resolved.media, {**known, **resolved.ids},
+        {str(r.source): r.detail_url for r in records})
+
     # Empty for a single-source group, which is every group on an instance that
     # has only ever had one source — so the provenance machinery costs nothing at
     # all for the accounts that will never see a merged card.
     if len(records) > 1:
         resolved.field_sources, resolved.alternatives = _provenance(records)
-        # WHERE EACH SERVICE'S OWN PAGE FOR THIS TITLE IS, in declared order.
-        # NOT a resolved value and not something a preference can order: the card
-        # is attributed to one service and `detail_url` travels with that
-        # attribution, but both services really do have a page and a reader who
-        # wants the other one is not disagreeing with anybody. So this is
-        # collected rather than won — nothing above chooses between these, and
-        # nothing may be added here that a viewer could state a preference about,
-        # because that is what SCALAR_FIELDS is for.
-        resolved.source_links = {str(r.source): r.detail_url
-                                 for r in records if r.detail_url}
         # WHEN EACH SERVICE SAYS IT AIRS, in declared order. The card is drawn
         # on the primary's day (`_resolve_airing`), and a reader whose services
         # disagree about the day deserves to see that they do — the card draws

@@ -2174,6 +2174,10 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
             user_id, key, learned, slug_repair.EVIDENCE_DETAIL_LOOKUP,
             str(placed.record.get("title") or ""))
         ids = {**ids, **learned}
+    # AND EVERY ID THE TITLE STORE KNOWS beneath the row's (identity.every_id),
+    # so a service a lookup by shared id found the show at gets its button and
+    # its ticks though the row never named it.
+    ids = await title_identity.every_id(Media.SHOW, ids)
     # THIS VIEWER'S OWN RECORD OF THE SEASON, read by identity rather than by
     # roster row: the same call the calendar's panel makes for a title this
     # person tracks, so the two surfaces cannot come to different conclusions

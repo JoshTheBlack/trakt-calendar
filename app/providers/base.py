@@ -369,7 +369,15 @@ def resolve_key(media: Media | str, ids: Mapping[str, Any]) -> ItemKey | None:
 # The fields on `Record` that resolution writes and storage never does. See
 # `Record.field_sources` for what they hold and `Record.to_dict` for why they are
 # the one thing excluded from a stored record by name.
-PROVENANCE_FIELDS = ("field_sources", "alternatives", "source_links", "listed_airings")
+PROVENANCE_FIELDS = ("field_sources", "alternatives", "links", "listed_airings")
+
+
+class ServiceLink(NamedTuple):
+    """One service's page for a title a card draws, and whether that service
+    LISTS the airing the card is drawn from — or only knows the title."""
+    source: str
+    url: str
+    listed: bool
 
 
 @dataclass
@@ -513,20 +521,32 @@ class Record:
     field_sources: dict[str, list[str]] = field(default_factory=dict)
     alternatives: dict[str, dict[str, Any]] = field(default_factory=dict)
 
-    # {source: detail_url} for every service that described this airing.
+    # EVERY ID THE TITLE STORE KNOWS FOR THIS TITLE — each service's own as well
+    # as the shared ones, whoever stated them (app/metadata/identity.py's row) —
+    # set by the calendar's read beside the ids this service stated. NOT MERGED
+    # INTO `ids`, and that is the point of a second field: `ids` is what this
+    # SERVICE said and what a card is keyed and grouped by, and a service's own id
+    # is that service's to state (identity.complete). This is only ever read to
+    # ADDRESS a service — a card's button for a service that knows the title
+    # though it does not list this airing (`links`).
+    known_ids: dict[str, Any] = field(default_factory=dict)
+
+    # [ServiceLink] — WHERE THIS TITLE LIVES AT EVERY SERVICE THAT KNOWS IT, in
+    # declared order, each saying whether that service LISTED this airing or only
+    # knows the title (its id is in `known_ids`).
     #
     # WHY IT IS NOT `detail_url` PLURAL AND WHY IT IS NOT A PREFERENCE. Exactly
     # one service is the card's — see app/calendar/resolve.py's SOURCE_FIELD, and
     # `detail_url` is one of the three fields that travel with it, because a page
     # on one service is not an answer another service gave. This is the other
-    # thing a merged card knows and had no way to say: that BOTH services have a
-    # page for this title. It is a set of destinations, not a value anybody won,
-    # so no preference orders it and resolution states no opinion about it — it is
-    # collected, in declared source order, and offered.
+    # thing a card knows: that every service that knows the title has a page for
+    # it. It is a set of destinations, not a value anybody won, so no preference
+    # orders it and resolution states no opinion about it — it is collected, in
+    # declared source order, and offered.
     #
     # NOT STORED, for the same reason the two maps above are not: it exists only
-    # after several records have been compared, which happens at read.
-    source_links: dict[str, str] = field(default_factory=dict)
+    # after a card's records have been put together, which happens at read.
+    links: list[ServiceLink] = field(default_factory=list)
 
     # {source: {"air_ts", "date_only"}} — WHEN EACH SERVICE THAT DESCRIBED THIS
     # AIRING SAYS IT AIRS. The card is drawn on ONE service's day — the viewer's

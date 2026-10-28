@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date
+from typing import NamedTuple
 
 from .. import db
 from .. import metadata
@@ -312,11 +313,15 @@ def _record_from_row(row) -> Record:
     season = row["season"]
     number = row["episode_number"]
     ids = json.loads(row["ids_json"] or "{}") if row["ids_json"] else {}
-    if row["known_ids"]:
-        ids = title_identity.with_shared(ids, json.loads(row["known_ids"]))
+    known = json.loads(row["known_ids"]) if row["known_ids"] else {}
+    if known:
+        ids = title_identity.with_shared(ids, known)
     return Record(
         source=Source(source), media=Media(str(row["media"])), id=str(row["source_id"]),
         ids=ids,
+        # And everything the title store knows of it, kept apart from what this
+        # service stated (Record.known_ids says why).
+        known_ids=known,
         detail_url=str(row["detail_url"] or ""), title=str(row["title"] or ""),
         air_ts=float(row["air_ts"]), date_only=bool(row["date_only"]),
         # BACK TO A NUMBER WHERE IT IS ONE. `Record.year` is `int | str`, the
@@ -618,6 +623,51 @@ async def sources_airing(endpoint_key: str, title_key: str, season: int | None) 
             "WHERE endpoint = ? AND title_key = ? AND season = ?",
             (endpoint_key, str(title_key), int(season)))
     return {str(row["source"]) for row in found}
+
+
+class ListedCard(NamedTuple):
+    """One title's season (None for a film, or a listing that names none) on one
+    calendar, as the stored airings hold it in a span: the services listing it
+    on that calendar AT ANY DATE (a service dating it outside the span still
+    lists it), its first day in the span, and every id the title store knows for
+    it."""
+    endpoint: str
+    title_key: str
+    media: str
+    season: int | None
+    sources: frozenset[str]
+    day: date
+    known_ids: dict
+
+
+async def listed_cards(endpoint_keys, first: date, last: date) -> list[ListedCard]:
+    """Every title and season with a stored airing on `endpoint_keys` dated in
+    [first, last) — the background matcher's worklist (app/calendar/completion.py).
+    One grouped read over the airings' (endpoint, date) range, with the identity
+    joined for what the store knows of each title."""
+    keys = [str(k) for k in endpoint_keys]
+    if not keys:
+        return []
+    found = await db.fetch_all(
+        "SELECT a.endpoint, a.title_key, a.media, a.season, MIN(a.air_date) AS day, "
+        "       (SELECT group_concat(DISTINCT b.source) FROM calendar_airings b "
+        "         WHERE b.title_key = a.title_key AND b.endpoint = a.endpoint "
+        "           AND b.season = a.season) AS sources, "
+        "       i.ids_json AS known_ids "
+        "FROM calendar_airings a "
+        f"LEFT JOIN {_IDENTITY} i ON i.title_key = a.title_key "
+        f"WHERE a.endpoint IN ({', '.join('?' * len(keys))}) "
+        "  AND a.air_date >= ? AND a.air_date < ? "
+        "GROUP BY a.endpoint, a.title_key, a.season",
+        (*keys, first.isoformat(), last.isoformat()))
+    return [ListedCard(
+        endpoint=str(row["endpoint"]), title_key=str(row["title_key"]),
+        media=str(row["media"]),
+        season=None if row["season"] == UNSTATED else int(row["season"]),
+        sources=frozenset(str(row["sources"]).split(",")),
+        day=date.fromisoformat(str(row["day"])),
+        known_ids=json.loads(row["known_ids"]) if row["known_ids"] else {})
+        for row in found]
 
 
 # ---------------------------------------------------------------------------

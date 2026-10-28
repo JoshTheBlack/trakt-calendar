@@ -40,6 +40,7 @@ from ..auth import AuthLevel
 from ..config import load_settings
 from ..media import artwork, posters, user_images
 from ..perftrace import span
+from ..metadata import identity as title_identity
 from ..metadata import panel as metadata_panel
 from ..metadata import pictures as metadata_pictures
 from ..metadata import refresh as metadata_refresh
@@ -805,8 +806,10 @@ async def _item_details(request: Request, *, season_only: bool) -> Response:
         title=item["label"], poster=await _panel_picture(user.user_id, item),
         # The row's ids first and the answer's beside them: which services know a
         # title is a fact about the row, and a Trakt-described answer carries no
-        # Simkl id to build that button from.
-        links=detail_source.outbound_links({**item["ids"], **(details.get("ids") or {})}, media),
+        # Simkl id to build that button from. Beneath both, every id the title
+        # store knows for it (identity.every_id).
+        links=detail_source.outbound_links(await title_identity.every_id(
+            media, {**item["ids"], **(details.get("ids") or {})}), media),
         season_count=item["season_count"] or 0,
         carry=("board", "key"))
 
@@ -842,7 +845,8 @@ async def _described_by_the_board(request: Request, user_id: int, item: dict,
     return details_panel.panel(
         request, facts, media=media, season=None,
         title=item["label"], poster=await _panel_picture(user_id, item),
-        links=detail_source.outbound_links(item["ids"], media),
+        links=detail_source.outbound_links(await title_identity.every_id(media, item["ids"]),
+                                           media),
         note=f"{lead}: {reason}.")
 
 

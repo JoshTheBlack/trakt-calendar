@@ -99,8 +99,12 @@ class ACardOnlyOneServiceDescribedTests(unittest.TestCase):
         self.assertNotIn("source-logo", self.html.split('class="card-body"')[0])
 
     def test_its_outbound_button_is_its_own_services(self):
+        """The one service it was drawn from, in colour — the TMDB id its ids
+        name is a title TMDB knows, drawn greyed beside it (ServicesThatOnlyKnow
+        TheTitleTests)."""
         self.assertIn('title="View on Trakt"', self.html)
-        self.assertEqual(self.html.count("trakt-btn"), 1)
+        self.assertEqual(self.html.count('class="trakt-btn"'), 1)
+        self.assertEqual(self.html.count('class="trakt-btn unlisted"'), 1)
 
     def test_the_button_wears_the_services_name_rather_than_its_symbol(self):
         """A button is a promise about where a click goes, and the name says
@@ -133,8 +137,10 @@ class ACardTheOtherServiceListedTests(unittest.TestCase):
         self.assertNotIn("trakt-logo-dark.svg", self.html)
 
     def test_it_offers_the_one_page_there_is(self):
-        """One service listed it, so there is one place to go."""
-        self.assertEqual(self.html.count("trakt-btn"), 1)
+        """One service listed it, so there is one place to go in colour — and
+        TMDB, whose id it names, greyed beside it."""
+        self.assertEqual(self.html.count('class="trakt-btn"'), 1)
+        self.assertEqual(self.html.count('class="trakt-btn unlisted"'), 1)
 
 
 class ADisagreementIsDrawnWhereThereIsOneTests(unittest.TestCase):
@@ -400,8 +406,63 @@ class BothServicesPagesAreOfferedTests(unittest.TestCase):
         groups = calendar_cache.group_records(
             [_record(Source.TRAKT), _record(Source.SIMKL, rating=7.9)])
         resolved = calendar_resolve.resolve(groups[0], None)
-        self.assertEqual(set(resolved.source_links), {"trakt", "simkl"})
-        self.assertNotIn("source_links", resolved.to_dict())
+        self.assertEqual([(link.source, link.listed) for link in resolved.links],
+                         [("tmdb", False), ("trakt", True), ("simkl", True)])
+        self.assertNotIn("links", resolved.to_dict())
+
+
+class ServicesThatOnlyKnowTheTitleTests(unittest.TestCase):
+    """A service the title store knows the title at (Record.known_ids) has a page
+    for it whether or not it lists this airing: its button is drawn, greyed, in
+    its declared place — the colour stays with the services the card is drawn
+    from. The owner's case: TMDB-only Season Premieres whose Trakt or Simkl id a
+    lookup by shared id had learned, and no card offered."""
+
+    def setUp(self):
+        self.tmdb_only = _record(
+            Source.TMDB, ids={"tmdb": 900}, detail_url="https://tmdb.test/show",
+            known_ids={"tmdb": 900, "trakt": 77, "trakt_slug": "one-title",
+                       "simkl": 55})
+        self.html = _card_html(self.tmdb_only)
+
+    def _button(self, label: str) -> str:
+        return re.search(r'<a class="trakt-btn[^"]*"[^>]*title="View on %s[^"]*".*?</a>'
+                         % label, self.html, re.S).group(0)
+
+    def test_every_service_that_knows_it_gets_a_button_in_declared_order(self):
+        self.assertEqual(re.findall(r'title="View on (\w+)', self.html),
+                         ["TMDB", "Trakt", "Simkl"])
+
+    def test_only_the_service_it_was_drawn_from_is_in_colour(self):
+        self.assertIn('class="trakt-btn"', self._button("TMDB"))
+        self.assertIn("https://tmdb.test/show", self._button("TMDB"))
+        for label in ("Trakt", "Simkl"):
+            with self.subTest(service=label):
+                self.assertIn('class="trakt-btn unlisted"', self._button(label))
+                self.assertIn(f"this card isn't drawn from {label}", self._button(label))
+
+    def test_a_known_page_is_built_from_the_services_own_id(self):
+        self.assertIn("https://trakt.tv/shows/one-title", self._button("Trakt"))
+        self.assertIn("https://simkl.com/tv/55", self._button("Simkl"))
+
+    def test_the_known_ids_never_become_the_cards_own(self):
+        """`ids` is what the card is keyed and grouped by, and a service's own id
+        is that service's to state (identity.complete); the store's knowledge
+        only addresses a button."""
+        groups = calendar_cache.group_records([self.tmdb_only])
+        resolved = calendar_resolve.resolve(groups[0], None)
+        self.assertNotIn("trakt", resolved.ids)
+        self.assertEqual(resolved.known_ids["trakt"], 77)
+
+    def test_a_service_the_viewer_left_out_is_greyed_too(self):
+        """The card is drawn from the services this viewer's calendar admits; a
+        listing it left out is a service it knows the title at."""
+        from app.sources import prefs as source_prefs
+
+        html = _card_html(
+            _record(Source.TRAKT), _record(Source.SIMKL, rating=7.9),
+            prefs=source_prefs.SourcePrefs(user_id=1, calendar_source="trakt"))
+        self.assertIn('class="trakt-btn unlisted" href="https://simkl.com/tv/simkl-id"', html)
 
 
 class TheCardAgreesWithTheResolutionVocabularyTests(unittest.TestCase):

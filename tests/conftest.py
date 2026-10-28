@@ -312,6 +312,15 @@ def no_answer_still_being_worked_out(monkeypatch):
     monkeypatch.setattr(premieres, "_loop", None)
 
 
+@pytest.fixture(autouse=True)
+def no_service_resting_from_matching(monkeypatch):
+    """Each test starts with every service askable by the background matcher:
+    a service it could not ask is left alone in process for a quarter hour
+    (app/calendar/completion.py's `_resting_until`)."""
+    from app.calendar import completion
+    monkeypatch.setattr(completion, "_resting_until", {})
+
+
 @pytest.fixture
 def db_path(tmp_path):
     """A freshly migrated, test-only database, distinct from every other test's."""

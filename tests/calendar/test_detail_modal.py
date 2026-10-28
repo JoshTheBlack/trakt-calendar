@@ -34,6 +34,7 @@ from unittest.mock import AsyncMock, patch
 
 from app import db
 from app.config import Settings, save_settings
+from app.metadata import identity
 from app.metadata import refresh as metadata_refresh
 from app.providers.base import Media
 from app.providers.simkl import transport as simkl_transport
@@ -376,6 +377,18 @@ class DetailModalSourceTests(AppTestCase):
             "media=show&simkl=3204421&season=1&trakt_slug=not-a-real-show").text
         self.assertIn("Simkl&#39;s words.", html)
         self.assertNotIn("trakt.tv", html)
+
+    def test_a_service_the_title_store_knows_the_title_at_gets_its_button(self):
+        """The card named only Simkl's id, and neither it nor Simkl's answer names
+        Trakt's — but a lookup by shared id had taught the store Trakt's id for
+        the title (identity.every_id), and Trakt has a page for it. Asking
+        nobody: Trakt answers nothing here."""
+        asyncio.run(db.transaction(lambda conn: identity.settle(
+            conn, Media.SHOW, {"tvdb": 4242, "simkl": 3204421, "trakt": 1234,
+                               "trakt_slug": "somebody-knows-something"}, now=1)))
+        html = self._simkl_only("media=show&simkl=3204421&season=1&key=show%3Atvdb%3A4242").text
+        self.assertIn("Simkl&#39;s words.", html)
+        self.assertIn('href="https://trakt.tv/shows/somebody-knows-something"', html)
 
     # -- the gate ----------------------------------------------------------
 

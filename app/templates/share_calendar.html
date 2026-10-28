@@ -220,9 +220,12 @@
                                same macro so the two cannot drift. The owner's
                                preferences are what resolved this month, so a
                                visitor sees the destinations the owner's own
-                               calendar offers. #}
-                            {% for name, url in (item.source_links or {item.source|string: item.detail_url}).items() %}
-                            {{ src.link(name, url) }}
+                               calendar offers, a service that only knows the title
+                               greyed as it is there. #}
+                            {% for link in item.links %}
+                            {{ src.link(link.source, link.url, link.listed) }}
+                            {% else %}
+                            {{ src.link(item.source|string, item.detail_url) }}
                             {% endfor %}
                         </div>
                     </div>

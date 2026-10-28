@@ -51,6 +51,7 @@ from ..config import load_settings
 from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, Endpoint, endpoint_choices, get_endpoint
 from ..media import artwork, logos, posters, user_images
 from ..perftrace import span
+from ..metadata import identity as title_identity
 from ..metadata import panel as metadata_panel
 from ..providers import detail_source
 from ..providers.base import (Item, Media, Source, SourceUnavailable,
@@ -1393,8 +1394,11 @@ async def _describe_shared_title(request: Request, share_row, settings) -> _Desc
         # lookup's: what a public page publishes about a title comes from what the
         # owner's calendar holds, not from what a stranger spelled. The airing also
         # carries each service's own NAME for the title, which is what lets these
-        # links be spelled the way both services ask for.
-        detail_source.outbound_links(shown_ids, media), shown)
+        # links be spelled the way both services ask for. Beneath them, every id the
+        # title store knows for that airing's title (identity.every_id) — read from
+        # this instance, never asked of anybody.
+        detail_source.outbound_links(await title_identity.every_id(media, shown_ids), media),
+        shown)
 
 
 def _the_airing_this_names(items: Sequence[Item], bound: dict[str, str]) -> Item | None:

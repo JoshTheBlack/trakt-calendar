@@ -740,7 +740,10 @@ COMPLETABLE_ENDPOINTS = frozenset({"shows/new", "shows/premieres", "movies"})
 OTHER_SERVICE_ASK_SECONDS = 7 * 24 * 60 * 60
 
 
-def _asked_key(source: str, endpoint_key: str, title_key: str, season: int | None) -> str:
+def asked_key(source: str, endpoint_key: str, title_key: str, season: int | None) -> str:
+    """Where "`source` was asked about this card this week" is remembered, in
+    the response cache — read by a panel's open and by the background matcher
+    (app/calendar/completion.py) alike, so neither asks again what the other has."""
     return f"calendar_other_service_asked:{source}:{endpoint_key}:{title_key}:{season}"
 
 
@@ -754,7 +757,10 @@ async def other_service_to_ask(settings, *, endpoint_key: str, title_key: str,
     schedule would cost thousands of lookups a day to make a few cards two-sided
     (measured on the owner's instance: 17,205 of 18,342 stored titles are one
     service's). Opening a card's panel is somebody asking about THAT title, which
-    is when one lookup is worth paying.
+    is when one lookup is worth paying. The schedule asks about ONE kind only —
+    a premiere or film only TMDB lists, this month and next, at Trakt's slow
+    pace (app/calendar/completion.py says why that one is worth it) — and both
+    remember an answer under the same `asked_key`.
 
     EVERY CONDITION IS READ FROM WHAT THIS INSTANCE HOLDS, none from the request:
     a calendar whose cards can be completed; exactly one service with a stored
@@ -775,7 +781,7 @@ async def other_service_to_ask(settings, *, endpoint_key: str, title_key: str,
         name = str(source)
         if name in drawn or name not in on_calendar:
             continue
-        if await cache.get(_asked_key(name, endpoint_key, title_key, season),
+        if await cache.get(asked_key(name, endpoint_key, title_key, season),
                            OTHER_SERVICE_ASK_SECONDS) is None:
             return name
     return ""
@@ -783,7 +789,7 @@ async def other_service_to_ask(settings, *, endpoint_key: str, title_key: str,
 
 async def complete_from_other_service(settings, *, source: str, endpoint_key: str,
                                       title_key: str, season: int | None,
-                                      now: int) -> bool:
+                                      now: int, ask_every_service: bool = True) -> bool:
     """Learn whether `source` lists the title, by shared id, and store its own
     airing of this season's premiere (or the film's release) on `endpoint_key`
     if it does. Returns whether an airing was stored.
@@ -805,7 +811,13 @@ async def complete_from_other_service(settings, *, source: str, endpoint_key: st
     AN ANSWER IS REMEMBERED FOR A WEEK, "not listed" included; a failure to ask
     is not, so a service that was down is asked again on the next open. The
     store's own lookup is also held a day by each service's port, so a second
-    panel opened on the title within the day asks nobody.
+    panel opened on the title within the day asks nobody. Remembered under the
+    key the title answers to AFTER the ask too, since an answer can re-key it.
+
+    A PANEL'S OPEN ASKS EVERY SERVICE the title has no id from, as every arrival
+    does, so one open teaches the store all it can. The background matcher asks
+    `source` alone (`ask_every_service=False`): it spends one service's
+    allowance at a time and may not spend another's uncounted.
     """
     held = await metadata.group_identity(title_key)
     asked = source in {str(s) for s, _port in providers.for_shared_id_lookup(settings)}
@@ -813,11 +825,13 @@ async def complete_from_other_service(settings, *, source: str, endpoint_key: st
         return False
     media_name, ids, title = held
     media = Media(media_name)
-    answer = await metadata.ask(media, ids, settings=settings, filed_under=title_key)
+    answer = await metadata.ask(media, ids, settings=settings, filed_under=title_key,
+                                asking=None if ask_every_service else (source,))
     if answer.identity is None or source in answer.unreachable:
         return False
-    await cache.set(_asked_key(source, endpoint_key, title_key, season), 1,
-                    retain_seconds=OTHER_SERVICE_ASK_SECONDS)
+    for key in {title_key, answer.identity.key}:
+        await cache.set(asked_key(source, endpoint_key, key, season), 1,
+                        retain_seconds=OTHER_SERVICE_ASK_SECONDS)
     source_id = answer.identity.ids.get(source)
     if not source_id:
         logger.info("calendar: %s does not list %s (%s)", source, title, title_key)

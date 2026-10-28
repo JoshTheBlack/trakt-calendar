@@ -44,13 +44,14 @@ store WHAT.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import NamedTuple
 
 # The registry through its MODULE OBJECT rather than as names bound off it, so a
 # test double installed on app.providers is the one these functions call (see
 # CLAUDE.md's rule about names bound at import time).
 from .. import providers
-from .base import Media, SeasonsAnswer, Source, SourceUnavailable
+from .base import Media, SeasonsAnswer, ServiceLink, Source, SourceUnavailable
 
 
 
@@ -122,13 +123,37 @@ def outbound_links(ids, media) -> list[Outbound]:
     table of two packages' builders, which would have given a third service no
     button and no error.
     """
-    out = []
+    return [Outbound(source, url) for source, url, _listed in _pages(media, ids, {})]
+
+
+def service_links(media, ids, listing: Mapping[str, str]) -> list[ServiceLink]:
+    """`outbound_links` for a CARD: every service in `listing` — {service: its
+    record's detail_url}, the services the card is drawn from — listed, with its
+    own record's page where it gave one, and then every other service `ids`
+    names, as a service that knows the title without listing this airing. In
+    declared order, so a service's button sits in the same place on every card.
+
+    ONE WALK OVER THE REGISTRY FOR BOTH, so a card and a details panel cannot
+    come to different answers about where a title lives at a service; the
+    panel's buttons are this with nothing listed. A listed service with no page
+    of its own record's and no id to build one from gets no button — a homepage
+    is no destination.
+    """
+    return [ServiceLink(str(source), url, listed)
+            for source, url, listed in _pages(media, ids, listing)]
+
+
+def _pages(media, ids, listing: Mapping[str, str]):
+    """(registered source, its page for the title, whether it is listed), in
+    declared order — the one walk both functions above are spelled from."""
     for source, provider in providers.registered().items():
-        if not str((ids or {}).get(str(source)) or "").strip():
-            continue
-        if url := provider.title_url(Media(media), ids or {}):
-            out.append(Outbound(source, url))
-    return out
+        name = str(source)
+        listed = name in listing
+        url = (listing.get(name) or "") if listed else ""
+        if not url and str((ids or {}).get(name) or "").strip():
+            url = provider.title_url(Media(media), ids or {})
+        if url:
+            yield source, url, listed
 
 
 class Answerer(NamedTuple):

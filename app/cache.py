@@ -137,6 +137,37 @@ async def get_stale(key: str):
         return None
 
 
+async def fresh_keys(keys, ttl_seconds: int) -> frozenset[str]:
+    """Which of `keys` hold a value stored within `ttl_seconds` — `get`'s
+    question for many keys in one read, without decoding any payload.
+
+    FOR A CALLER CHOOSING WORK BY WHAT IT REMEMBERS DOING: a background pass
+    weighing a few thousand cards a minute against "asked this week" markers
+    would otherwise make a few thousand reads to learn which few are due. A
+    locked database reads as nothing remembered, like `get`'s miss — the caller
+    then asks again what it asked before, which costs a request and loses
+    nothing."""
+    wanted = list(dict.fromkeys(str(key) for key in keys))
+    if not wanted or ttl_seconds <= 0:
+        return frozenset()
+    cutoff = db.now() - ttl_seconds
+
+    def _work(conn: db.Connection) -> frozenset[str]:
+        # A list, not a set: this module's own `set` is the cache write.
+        fresh: list[str] = []
+        for at in range(0, len(wanted), 500):
+            chunk = wanted[at:at + 500]
+            fresh.extend(row[0] for row in conn.execute(
+                f"SELECT cache_key FROM api_cache WHERE cached_at >= ? "
+                f"AND cache_key IN ({','.join('?' * len(chunk))})", (cutoff, *chunk)))
+        return frozenset(fresh)
+
+    try:
+        return await db.run(_work)
+    except db.DatabaseError:
+        return frozenset()
+
+
 async def set(key: str, value, retain_seconds: int | None = RETAIN_SECONDS) -> None:
     """Store `value` for `key`, to be reclaimed once nothing has re-fetched it for
     `retain_seconds`. Best-effort — a write failure is swallowed.

@@ -359,8 +359,8 @@ def title_url(media: Media, ids: dict) -> str:
     same page, so a title with no slug still gets a real link rather than a
     homepage. With no usable id there is genuinely nowhere item-specific to point
     and "" is the honest answer — `Record.detail_url` is already optional
-    everywhere it is read, and app/calendar/resolve.py's `source_links` skips a
-    record without one.
+    everywhere it is read, and a card's buttons (detail_source.service_links)
+    skip a record with neither a page nor an id.
     """
     simkl_id = ids.get("simkl")
     if not simkl_id:
@@ -408,8 +408,9 @@ def _detail_url(media: Media, entry_url, raw_ids: dict) -> str:
     `_detail_url`): the numeric form reaches the same page, so a title with no
     slug still gets a real link rather than a homepage. With no usable id there
     is genuinely nowhere item-specific to point, and "" is the honest answer —
-    `Record.detail_url` is already optional everywhere it is read, and
-    app/calendar/resolve.py's `source_links` skips a record without one.
+    `Record.detail_url` is already optional everywhere it is read, and a card's
+    buttons (detail_source.service_links) skip a record with neither a page nor
+    an id.
     """
     if entry_url:
         return str(entry_url)

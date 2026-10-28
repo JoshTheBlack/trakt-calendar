@@ -323,16 +323,18 @@
         {% endif %}
         <div class="links-row">
             {# ONE BUTTON PER SERVICE THAT HAS A PAGE FOR THIS TITLE, each wearing
-               that service's own name. A card several services described has
-               several real destinations and they are not competing answers — the
-               card is attributed to one of them, but the other's page exists and
-               is just as good a place to go. Offering only the winner's meant a
-               reader who wanted the other service's page had nowhere to click.
-               `source_links` is empty on a card only one service described, which
-               is every card on an instance with one source, and that card keeps
-               its single button. #}
-            {% for name, url in (item.source_links or {item.source|string: item.detail_url}).items() %}
-            {{ src.link(name, url) }}
+               that service's own name, in the registry's order. A card several
+               services described has several real destinations and they are not
+               competing answers — the card is attributed to one of them, but the
+               other's page exists and is just as good a place to go. A service
+               that KNOWS the title without listing this airing — the title store
+               holds its id — has a page too, and its button is drawn greyed
+               (`listed`), so the colour still says whose calendars the card came
+               from (resolve.resolve_records, detail_source.service_links). #}
+            {% for link in item.links %}
+            {{ src.link(link.source, link.url, link.listed) }}
+            {% else %}
+            {{ src.link(item.source|string, item.detail_url) }}
             {% endfor %}
             {#- THE ADD-TO-LIBRARY BUTTONS, for an administrator, drawn in the
                 state they are in. `library` is app/integrations/routes.py's

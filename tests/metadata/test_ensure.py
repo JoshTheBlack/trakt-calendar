@@ -84,6 +84,19 @@ class EnsureAsksEachMissingServiceOnceTests(DatabaseTestCase):
         self.assertEqual(answer.unreachable, frozenset({"trakt"}))
         self.assertEqual(answer.identity.ids, {"tmdb": 900})
 
+    async def test_asking_narrows_who_is_asked_to_the_services_it_names(self):
+        """A caller spending one service's allowance (app/calendar/completion.py)
+        asks that service alone; the others are not spent uncounted."""
+        trakt = AsyncMock(return_value={"trakt": 111})
+        simkl = AsyncMock(return_value={"simkl": 222})
+        a, b, c = _ports(trakt, simkl)
+        with a, b, c:
+            answer = await metadata.ask(Media.SHOW, {"tmdb": 900}, settings=EVERY,
+                                        asking=("trakt",))
+        self.assertEqual(answer.identity.ids, {"tmdb": 900, "trakt": 111})
+        trakt.assert_awaited_once()
+        simkl.assert_not_awaited()
+
 
 class EachPortKeepsItsOwnDayLongClockTests(DatabaseTestCase):
     async def test_a_not_listed_answer_costs_no_second_request_within_the_day(self):

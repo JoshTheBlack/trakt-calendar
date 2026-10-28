@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 from app.calendar import cache as calendar_cache, entries as calendar_entries
 from app.calendar import enrich as calendar_enrich
+from app.metadata import identity as title_identity
 from app.metadata import rows as title_rows
 from app.providers.base import Media, Record, Source
 from app.config import Settings
@@ -765,3 +766,34 @@ class AServiceListsAnEpisodeOnceTests(unittest.IsolatedAsyncioTestCase):
             now=2000, stale_after=10**9)
         self.assertEqual(await self._rows(), [(self.DAY, 1), (self.TIMED, 0)])
         self.assertEqual(len(await self._read()), 2)
+
+
+class AReadCarriesWhatTheStoreKnowsTests(unittest.IsolatedAsyncioTestCase):
+    """A listing read back carries every id the title store knows for its title
+    (Record.known_ids) — for a card's buttons — while its `ids` stay what its
+    service stated with the shared ids beneath, which is what it is keyed by."""
+
+    WEEK = date(2026, 9, 28)
+
+    async def asyncSetUp(self):
+        migrated_db("calknown")
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    async def test_a_trakt_id_a_lookup_learned_reaches_the_tmdb_listing(self):
+        listing = Record(source=Source.TMDB, media=Media.SHOW, id="258165",
+                         ids={"tmdb": 258165}, detail_url="t", title="A Premiere",
+                         air_ts=1790812800.0, date_only=True, season=2,
+                         episode_number=1, episode_label="S02E01")
+        await calendar_entries.store_span(
+            "shows/premieres", self.WEEK, self.WEEK + timedelta(days=7), [listing],
+            sources=["tmdb"], asked=["tmdb"], now=1000, stale_after=10**9)
+        await db.transaction(lambda conn: title_identity.settle(
+            conn, Media.SHOW, {"tmdb": 258165, "trakt": 99, "trakt_slug": "a-premiere"},
+            now=1001))
+        read, = await calendar_entries.read_span_whole(
+            "shows/premieres", self.WEEK, self.WEEK + timedelta(days=7))
+        self.assertEqual(read.known_ids["trakt"], 99)
+        self.assertEqual(read.known_ids["trakt_slug"], "a-premiere")
+        self.assertNotIn("trakt", read.ids)

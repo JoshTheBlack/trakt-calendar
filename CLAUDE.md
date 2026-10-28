@@ -168,7 +168,15 @@ asking nobody (a fill names hundreds of titles); `ensure` / `ensure_many` for a
 title met by its ids — a search pick, a tracker arrival, a board add, an import, a
 restore — which, handed a viewer's settings, ask each service the title has no id
 from ONCE by shared id. THAT IS THE ONE PLACE THE APP ASKS BY SHARED ID
-(`providers.for_shared_id_lookup`; each port keeps its own day-long clock). A KEY
+(`providers.for_shared_id_lookup`; each port keeps its own day-long clock). A
+caller spending ONE service's allowance narrows it to that service
+(`metadata.ask(..., asking=)`): the background completion
+(`app/calendar/completion.py`, on the heartbeat) asks Trakt about this and next
+month's premiere and film cards only TMDB lists, paced by the Trakt REQUESTS a
+pass sends (`TRAKT_READS_PER_MINUTE`, counted by `http_pool.tally`), and TMDB
+about titles with no TMDB id, each answer remembered a week under the key a
+panel's open remembers its own by (`search.asked_key`). Simkl is never asked
+there: its lookup needs a viewer's token. A KEY
 ONLY MOVES UP the waterfall, once, everywhere: when a title learns a higher id,
 `identity.settle` re-keys it, keeps the old key as an alias one hop long, and
 `holders.repoint` moves every row holding the old key in the same transaction.
@@ -177,7 +185,11 @@ only when exactly ONE title holds it — fifteen pairs of TMDB titles share a lo
 id on the development copy. A READER THAT KEYS FROM ONE SERVICE'S IDS COMPLETES
 THEM FROM THE STORE FIRST (`identity.complete`): the calendar's read, a history
 play, a library read, a search row drawn as a card — or a show one service knows
-only by its tvdb id splits from its tmdb self. ONE THING OUTRANKS THAT for the
+only by its tvdb id splits from its tmdb self. A READER THAT ONLY ADDRESSES A
+SERVICE — an outbound button — reads EVERY id the store knows, the services' own
+included (`identity.every_id`; a calendar listing's `Record.known_ids`), and those
+never enter the ids a card is keyed by: a service's own id is that service's to
+state. ONE THING OUTRANKS THAT for the
 watch tracker: a service's play or library entry lands on the tracked title
 holding THAT SERVICE'S OWN id, when exactly one does
 (`watch_history._tracked_by_own_id`), because a service re-points its shared ids
@@ -439,7 +451,10 @@ what every surface calls for a whole panel, a season tab calling
 BOUND ids, so a service asked for its list is asked about a title the link
 shows. The panel plays them in ONE iframe that every choice in its popover menu
 targets by name, so a pick replaces what was playing with no request; the one
-line of script closes the menu afterwards. The browser's half is one delegated listener in
+line of script closes the menu afterwards. ITS OUTBOUND BUTTONS AND A CARD'S ARE
+ONE WALK OVER THE REGISTRY (`detail_source.service_links`), over every id the store
+knows: a card draws in colour the services it was drawn from and greys (`.unlisted`)
+one that only knows the title; a panel draws them all. The browser's half is one delegated listener in
 `static/js/ui.js`: an element carrying `data-details-open` is an opener, and a
 control INSIDE an opener acts for itself rather than also opening the panel.
 

@@ -68,5 +68,10 @@
    for itself (static/js/ui.js's ACTS_FOR_ITSELF, which an <a> is). MEASURED in
    Firefox 155 and Chromium 153 against the real listener: with no handler here, a
    click on this button opens no panel. #}
-{% macro link(source, url) %}<a class="trakt-btn" href="{{ url }}" target="_blank"
-   rel="noopener" title="View on {{ label(source) }}">{{ wordmark(source) }}</a>{% endmacro %}
+{# `listed` false is a service that knows the title but is not one the card was
+   drawn from — it does not list this airing, or this viewer's calendar leaves
+   it out (detail_source.service_links): its button stays, greyed by
+   style.css's `.unlisted`, and its tooltip says so in words, since a colour
+   alone says nothing to somebody who cannot see it. #}
+{% macro link(source, url, listed=true) %}<a class="trakt-btn{% if not listed %} unlisted{% endif %}" href="{{ url }}" target="_blank"
+   rel="noopener" title="View on {{ label(source) }}{% if not listed %} — this card isn't drawn from {{ label(source) }}{% endif %}">{{ wordmark(source) }}</a>{% endmacro %}
