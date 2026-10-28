@@ -81,7 +81,12 @@ MEANS belongs in the Trakt and Simkl ones; TMDB's makes only public catalogue
 reads with the instance's token and so has no `private` flag at all — a read
 made with a viewer's own TMDB token must not ride its `cached_get`.
 `tests/providers/test_protocol_conformance.py` is what holds the packages to one
-shape.
+shape. EVERY TRAKT READ IS PACED IN ONE OF TWO KINDS OF BUCKET, because Trakt
+counts two quotas — 500 GETs per five minutes for the application (client id
+only) and 500 for each person (their bearer), MEASURED: it publishes 1,000, and
+refused every read for five minutes at ~495 — so `transport.APP_GET_PACER` and a
+bucket per bearer digest, each at `GET_LIMIT` (450). A Trakt request that skips
+`transport.send` skips both.
 
 **A write to a person's own list at a service is read from its BODY and
 confirmed by READING THE LIST BACK, and it never blocks the tracker.**

@@ -82,12 +82,12 @@ MONTH_BUDGET = 120
 #   waited at most 0.5 s meanwhile with six in flight (2.3 s with ten). Should
 #   TMDB ever answer 429, the transport holds requests for its Retry-After and
 #   the pass leaves the rest queued (`drain`), so this is a pace, not a bet.
-#   TRAKT's reads share one bucket — 150 up front, then three a second
-#   (providers/trakt/transport.py's GET_PACER) — and a refresh is up to five.
-#   MEASURED on a copy of the development database: at twenty a pass, a few
-#   tracker reloads spent the bucket and the viewer's own sync read waited 1.3 s
-#   behind the queue. Four a minute is twenty reads, a ninth of the pace, and
-#   leaves the bucket to the pages.
+#   TRAKT's catalogue reads share the application's bucket — 150 up front, then
+#   one a second (providers/trakt/transport.py's APP_GET_PACER) — and a refresh
+#   is up to five. MEASURED on a copy of the development database: at twenty a
+#   pass, a few tracker reloads spent the bucket and the viewer's own sync read
+#   waited 1.3 s behind the queue. Four a minute is twenty reads, a third of the
+#   pace, and leaves the bucket to the pages.
 #   SIMKL's per-title reads are its cached-by-id family, paced by its own client
 #   (providers/simkl/transport.py).
 PER_MINUTE = {"tmdb": 600, "trakt": 4, "simkl": 40}

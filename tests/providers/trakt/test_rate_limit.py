@@ -253,6 +253,19 @@ class ThePacerTests(unittest.IsolatedAsyncioTestCase):
         pacer._loop = object()  # as if the bucket had been drained on another loop
         self.assertEqual(pacer.claim(60), 0)
 
+    async def test_it_is_full_again_once_its_burst_has_refilled(self):
+        """`full` is what lets a keyed bucket be dropped: a full one is exactly
+        what a new one starts as."""
+        pacer, clock = self._pacer(), _Clock()
+        with patch.object(asyncio.get_running_loop(), "time", clock):
+            self.assertTrue(pacer.full())
+            pacer.claim(60)
+            self.assertFalse(pacer.full())
+            clock.now += 0.5 / 0.6
+            self.assertFalse(pacer.full(), "half a token back is not the burst")
+            clock.now += 1 / 0.6
+            self.assertTrue(pacer.full())
+
 
 class TheSenderIsPacedTests(unittest.IsolatedAsyncioTestCase):
     """Every Trakt read goes through `send`, so the pacer is applied there once."""
@@ -262,7 +275,7 @@ class TheSenderIsPacedTests(unittest.IsolatedAsyncioTestCase):
         sleep = RecordingSleep()
         client = FakeClient([_resp(200)] * 3)
         pacer = http_pool.Pacer("t", limit=3, period=1, burst=2)
-        with _patch_sleep(sleep), patch.object(transport, "GET_PACER", pacer):
+        with _patch_sleep(sleep), patch.object(transport, "APP_GET_PACER", pacer):
             for _ in range(3):
                 await transport.send(client, "GET", transport.API_BASE + "/x")
         self.assertEqual(len(client.requests), 3)
@@ -274,10 +287,61 @@ class TheSenderIsPacedTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient([_resp(200)])
         pacer = http_pool.Pacer("t", limit=2, period=3600, burst=1)
         pacer.claim(60)  # the one free token, spent
-        with patch.object(transport, "GET_PACER", pacer):
+        with patch.object(transport, "APP_GET_PACER", pacer):
             with self.assertRaises(TraktRateLimitError):
                 await transport.send(client, "GET", transport.API_BASE + "/x")
         self.assertEqual(client.requests, [], "a refused read still went out")
+
+
+def _bearer(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
+class EachQuotaHasItsOwnBucketTests(unittest.IsolatedAsyncioTestCase):
+    """Trakt counts a read carrying only the client id against the APPLICATION
+    and one carrying a person's bearer against THAT PERSON — 500 every five
+    minutes each — so each is paced from its own bucket, below 500."""
+
+    def setUp(self):
+        transport._person_get_pacers.clear()
+        self.addCleanup(transport._person_get_pacers.clear)
+
+    def test_each_bucket_is_paced_under_the_500_trakt_allows(self):
+        self.assertLess(transport.GET_LIMIT, 500)
+        self.assertEqual(transport.GET_PERIOD, 300)
+
+    async def test_a_read_with_no_bearer_spends_the_applications_bucket(self):
+        self.assertIs(transport._get_pacer_for({}), transport.APP_GET_PACER)
+        self.assertIs(transport._get_pacer_for(None), transport.APP_GET_PACER)
+
+    async def test_a_persons_read_is_not_held_behind_the_applications_queue(self):
+        from app import http_pool
+        drained = http_pool.Pacer("t", limit=2, period=3600, burst=1)
+        drained.claim(60)
+        sleep = RecordingSleep()
+        client = FakeClient([_resp(200)])
+        with _patch_sleep(sleep), patch.object(transport, "APP_GET_PACER", drained):
+            await transport.send(client, "GET", transport.API_BASE + "/sync/x",
+                                 headers=_bearer("someone"))
+        self.assertEqual(len(client.requests), 1)
+        self.assertEqual(sleep.durations, [])
+
+    async def test_two_people_never_share_a_bucket(self):
+        one = transport._get_pacer_for(_bearer("one"))
+        one.claim(60)
+        two = transport._get_pacer_for(_bearer("two"))
+        two.claim(60)
+        self.assertIsNot(one, two)
+        self.assertIsNot(one, transport.APP_GET_PACER)
+        self.assertIs(transport._get_pacer_for(_bearer("one")), one, "a bucket in use is kept")
+
+    async def test_a_full_bucket_is_dropped_and_no_token_is_held(self):
+        """Keyed by a token, and a token rotates: the process runs for weeks, so
+        a bucket that has refilled goes, and the key is a digest, never the token."""
+        transport._get_pacer_for(_bearer("rotated-away"))
+        transport._get_pacer_for(_bearer("current")).claim(60)
+        self.assertEqual(len(transport._person_get_pacers), 1)
+        self.assertFalse(any("current" in key for key in transport._person_get_pacers))
 
 
 class SemaphoreLoopKeyingTests(unittest.TestCase):

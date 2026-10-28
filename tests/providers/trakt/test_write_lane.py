@@ -117,7 +117,7 @@ class LaneTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sleeps.durations, [])
 
     async def test_reads_and_bearerless_writes_are_not_laned(self):
-        """A read spends the read quota, which GET_PACER paces; a token exchange
+        """A read spends a read quota, which its pacer paces; a token exchange
         carries no bearer and is nobody's write."""
         sleeps = _RecordingSleep()
         client = _Client(200, 200, 200, 200)

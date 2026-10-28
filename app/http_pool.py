@@ -312,6 +312,19 @@ class Pacer:
         self._tokens -= 1
         return wait
 
+    def full(self) -> bool:
+        """Whether the bucket holds its whole burst now — the state a new pacer
+        starts in, so one that is full can be dropped and made again later with
+        no difference anybody could observe. A bucket last used on another loop
+        counts as full, since `claim` refills it there anyway."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return True
+        if self._loop is not loop:
+            return True
+        return self._tokens + (loop.time() - self._stamp) * self.rate >= self.burst
+
 
 async def aclose_all() -> None:
     """Close every pool's client. Called once, from the app's shutdown.

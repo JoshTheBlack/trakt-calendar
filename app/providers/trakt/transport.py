@@ -166,9 +166,9 @@ _POOL_LIMIT = 8
 # Smooth the distrakt Refresh fan-out's opening burst. A large roster fires ~2
 # requests per tracked show all at once; the connection pool caps how many are
 # in flight but not how fast they leave, so hundreds can go out in the same few
-# milliseconds — well over the 1000-per-5-minute average — before any 429 comes
+# milliseconds — well over the 500-per-5-minute average — before any 429 comes
 # back to self-correct. This gate bounds how many are IN FLIGHT, sized well under
-# _POOL_LIMIT; it is not a rate, and GET_PACER below is what keeps a large job
+# _POOL_LIMIT; it is not a rate, and the pacers below are what keep a large job
 # inside the 5-minute window. The retry/backoff loop is the last resort.
 # IT LIVES ON THE POOL because it is the same kind of fact — how hard may this
 # app lean on this one service — and declaring it here keeps it beside the
@@ -179,19 +179,50 @@ _SEND_CONCURRENCY = 4
 POOL = http_pool.Pool("trakt", max_connections=_POOL_LIMIT, timeout=30,
                       concurrency=_SEND_CONCURRENCY)
 
-# AND THE RATE, WHICH THE GATE ABOVE IS NOT. Trakt publishes its read quota as
-# 1,000 GETs every five minutes (AUTHED_API_GET_LIMIT; the unauthenticated one is
-# the same number per IP). Four in flight is twenty to forty a second at ordinary
-# latencies, so a large enough job spends the whole quota in under a minute and
-# is then refused: MEASURED, a tracker load that built a month of 527 premieres
-# sent over a thousand reads in a burst and ran into 429s part-way. Paced at 900
-# — a tenth of headroom for the reads this instance makes under other people's
-# tokens and for the clock not being Trakt's — with 150 of them free up front, so
-# a page's few dozen reads never wait and a bulk job settles to 2.5 a second.
-# ONE BUCKET FOR EVERY TRAKT READ, whichever token it carries: the quota is per
-# user, but a shared bucket is the conservative reading and nothing this app
-# does needs more than one account's worth of Trakt at once.
-GET_PACER = http_pool.Pacer("trakt", limit=900, period=300, burst=150)
+# AND THE RATE, WHICH THE GATE ABOVE IS NOT. Four in flight is twenty to forty
+# a second at ordinary latencies, so a large enough job spends a five-minute quota
+# in under a minute and is then refused: MEASURED, a tracker load that built a
+# month of 527 premieres sent over a thousand reads in a burst and ran into 429s
+# part-way.
+#
+# TWO QUOTAS, NOT ONE: 500 GETs every five minutes for the APPLICATION (a read
+# carrying only this instance's client id) and 500 more for EACH SIGNED-IN
+# PERSON (a read carrying their bearer, which counts against them and not the
+# application). Trakt publishes 1,000 for each, and this transport was paced for
+# that in one bucket; MEASURED, 2026-10-28, two instances sharing one client id
+# were refused — a 300-second Retry-After on every read — about 495 reads into
+# the five minutes before. So each quota has its own bucket, each paced at 450 (a
+# tenth of headroom for the clock not being Trakt's) with 150 free up front: a
+# page's few dozen reads never wait, and a bulk job settles to one a second.
+# A PERSON'S BUCKET IS KEYED BY A DIGEST OF THEIR BEARER, like their write lane,
+# and is dropped once it is full again (`_get_pacer_for`).
+GET_LIMIT = 450
+GET_PERIOD = 300
+GET_BURST = 150
+APP_GET_PACER = http_pool.Pacer("trakt", limit=GET_LIMIT, period=GET_PERIOD,
+                                burst=GET_BURST)
+_person_get_pacers: dict[str, http_pool.Pacer] = {}
+
+
+def _get_pacer_for(headers: dict | None) -> http_pool.Pacer:
+    """The bucket a read spends from: the signed-in person's, when it carries
+    their bearer, else the application's.
+
+    A FULL BUCKET IS DROPPED, because the map is keyed by a TOKEN and a token
+    rotates: every refresh starts a person a new bucket, and the process runs for
+    weeks between restarts. A full bucket is exactly what a new one starts as, so
+    dropping it changes nothing the next read could notice."""
+    bearer = (headers or {}).get("Authorization") or ""
+    if not bearer:
+        return APP_GET_PACER
+    for idle in [key for key, pacer in _person_get_pacers.items() if pacer.full()]:
+        del _person_get_pacers[idle]
+    key = hashlib.sha256(bearer.encode()).hexdigest()
+    pacer = _person_get_pacers.get(key)
+    if pacer is None:
+        pacer = _person_get_pacers[key] = http_pool.Pacer(
+            "trakt person", limit=GET_LIMIT, period=GET_PERIOD, burst=GET_BURST)
+    return pacer
 
 # WRITES HAVE A LIMIT OF THEIR OWN, AND IT IS PER PERSON. Trakt publishes one
 # authenticated POST (and PUT, and DELETE) per second PER USER
@@ -365,11 +396,11 @@ async def _send_in_turn(client: httpx.AsyncClient, method: str, url: str, path: 
                     f"Trakt rate limit not cleared within {_SEND_MAX_ELAPSED:.0f}s for {path}.", 429)
             method_up = method.upper()
             if method_up == "GET":
-                # PACED AGAINST THE QUOTA BEFORE IT LEAVES (see GET_PACER), inside
-                # this call's own budget: a read whose turn is further off than
-                # the budget has left is refused now, as a rate limit, rather
+                # PACED AGAINST ITS QUOTA BEFORE IT LEAVES (see APP_GET_PACER),
+                # inside this call's own budget: a read whose turn is further off
+                # than the budget has left is refused now, as a rate limit, rather
                 # than holding a page behind a queue it cannot see.
-                wait = GET_PACER.claim(remaining)
+                wait = _get_pacer_for(headers).claim(remaining)
                 if wait is None:
                     logger.warning("Trakt reads are queued past the %.0fs budget — "
                                    "not sending %s", _SEND_MAX_ELAPSED, path)
