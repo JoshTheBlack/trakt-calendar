@@ -1241,6 +1241,25 @@ class GivingUpOnATitleTests(EnrichTestCase):
         self.assertEqual(fetch.await_count, 1,
                          "a given-up title was never retried after its row aged out")
 
+    async def test_a_title_nobody_has_asked_about_yet_is_counted(self):
+        """The commonest owed title of all — a fill stored it a moment ago and
+        the drain has not reached it — has no simkl_titles row, and the count
+        used to drop it (NULL compared against the ceiling is NULL, not false), so
+        a month that had just filled read as settled."""
+        await self._stored([_simkl_record(9001, title="Fresh Off The Fill")])
+        titles, _seasons = await calendar_enrich.backlog()
+        self.assertEqual(titles, 1)
+
+    async def test_another_services_unanswered_row_is_not_this_drains(self):
+        """The Simkl drain owes Simkl's rows; a bare row another service's
+        answer created is not on its worklist and must not hold its count up."""
+        await db.execute(
+            "INSERT INTO title_metadata (source, media, source_id, title_key, ids_json, "
+            "fetched_at, stale_after) VALUES ('trakt', 'show', 't-1', 'show:tmdb:1', "
+            "'{\"trakt\": 1, \"simkl\": 9001}', 1, 0)")
+        titles, _seasons = await calendar_enrich.backlog()
+        self.assertEqual(titles, 0)
+
     async def test_a_given_up_title_stops_being_counted(self):
         """A readout that cannot reach zero cannot say "settled", which is the
         one thing it was added to say."""

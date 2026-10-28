@@ -1210,18 +1210,29 @@ async def backlog(*, now: int | None = None) -> tuple[int, int]:
     six for ever, and a readout that never reaches zero cannot say "settled" —
     which is the one thing it was added to say. Giving up is logged where it
     happens, so the titles are not lost, only uncounted.
+
+    A TITLE NOBODY HAS ASKED ABOUT YET IS THE FIRST THING COUNTED, and it was
+    the one thing that was not. It has no `simkl_titles` row at all, so the
+    join's columns are NULL, and `NOT (NULL >= n AND ...)` is NULL rather than
+    true — the row dropped out of the count. A month stored a minute ago read
+    "settled" while the drain worked through every title in it; only a title
+    that had FAILED at least once was ever counted. `COALESCE` reads "never
+    asked" as no failures, which is what it is. And it counts Simkl's rows: the
+    drain's worklist is Simkl's (title_rows.unenriched), and another service's
+    unanswered row is not this drain's to owe.
     """
     ts = db.now() if now is None else now
     titles = await db.fetch_value(
         f"SELECT COUNT(*) FROM {title_rows.TITLES} t "
         "LEFT JOIN simkl_titles s "
         "  ON s.simkl_id = json_extract(t.ids_json, '$.simkl') AND s.media = t.media "
-        "WHERE t.enriched = 0 "
+        "WHERE t.enriched = 0 AND t.source = ? "
         # An empty payload is a stored failure (see _upsert_failure); a row WITH
         # a payload is an answer this title has not been given yet, and no number
         # of later failures makes that stop being owed.
-        "  AND NOT (s.fail_count >= ? AND (s.payload IS NULL OR length(s.payload) <= ?))",
-        (_GIVE_UP_AFTER, _EMPTY_PAYLOAD_MAX_BYTES))
+        "  AND NOT (COALESCE(s.fail_count, 0) >= ? "
+        "           AND (s.payload IS NULL OR length(s.payload) <= ?))",
+        (str(Source.SIMKL), _GIVE_UP_AFTER, _EMPTY_PAYLOAD_MAX_BYTES))
     return (int(titles or 0),
             await entries.owed_season_count(str(Source.TRAKT), "trakt", ts))
 
