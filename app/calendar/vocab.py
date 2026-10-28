@@ -738,11 +738,10 @@ def floor_specs(settings, media: Media) -> dict[str, object]:
     PLACE A SETTINGS FIELD IS TURNED INTO WHAT A READ APPLIES, so the floor and a
     viewer's filters are judged by the same code (filter.TitleRules), in turn.
 
-    THE NETWORK LIST IS HANDED TO A FILM READ TOO, which `active_specs` does not
-    do for a viewer: the floor has always been one list applied to whichever
-    calendar is read, so an include-only list leaves a film calendar empty, as it
-    did before this function existed. The release specs are a viewer's alone and
-    come back empty.
+    THE NETWORK LIST IS A SHOW CALENDAR'S ALONE, as it is for a viewer
+    (`active_specs`): a film has no network at all, so an include-only list
+    applied to a film calendar hid every film — "only HBO" emptied Movie
+    Premieres. The release specs are a viewer's alone and come back empty.
     """
     show = str(media) != str(Media.MOVIE)
     return {
@@ -751,7 +750,7 @@ def floor_specs(settings, media: Media) -> dict[str, object]:
         "countries": settings.countries,
         "show_certifications": settings.show_certifications,
         "movie_certifications": settings.movie_certifications,
-        "network_filter": list(settings.network_filter or []),
+        "network_filter": list(settings.network_filter or []) if show else [],
         "languages": settings.languages,
         "keywords": list(settings.keywords or []),
         "show_types": settings.tv_show_types if show else "",

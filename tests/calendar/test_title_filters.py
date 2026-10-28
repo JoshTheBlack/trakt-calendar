@@ -238,6 +238,49 @@ class TheFillsLanguageFloorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(answered, ["trakt"])
 
 
+class ANetworkFloorLeavesFilmsAloneTests(unittest.IsolatedAsyncioTestCase):
+    """A film has no network, so the operator's network list is a show
+    calendar's alone — at fill and at read — as a viewer's has always been.
+    Applied to films, an include-only list ("only HBO") stored and drew no film
+    at all."""
+
+    async def asyncSetUp(self):
+        migrated_db("networkfloorfilms")
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    def film(self):
+        return _record(Source.TRAKT, "a-film", tmdb=7, media="movie", network="")
+
+    async def test_the_fill_keeps_a_film(self):
+        film = self.film()
+
+        class Port:
+            async def fetch_window(self, endpoint, settings, start, days, *, revalidate=False):
+                return [film]
+
+        class Provider:
+            source = Source.TRAKT
+            calendar_port = Port()
+
+        records, _answered, _unchanged, _pending = await calendar_cache._answers(
+            [Provider()], MOVIES, Settings(network_filter=["HBO"]), date(2026, 10, 5))
+        self.assertEqual([r.id for r in records], ["a-film"])
+
+    async def test_the_read_keeps_a_film(self):
+        groups = calendar_cache.group_records([self.film()])
+        kept, filtered = await calendar_cache.visible_records(
+            groups, MOVIES, settings=Settings(network_filter=["HBO"]))
+        self.assertEqual([r.id for r in kept], ["a-film"])
+
+    def test_a_show_calendar_still_takes_the_floor(self):
+        self.assertEqual(vocab.floor_specs(Settings(network_filter=["HBO"]), Media.SHOW)
+                         ["network_filter"], ["HBO"])
+        self.assertEqual(vocab.floor_specs(Settings(network_filter=["HBO"]), Media.MOVIE)
+                         ["network_filter"], [])
+
+
 class ExemptionCountTests(unittest.TestCase):
     """exempts_undescribed: which cards are on a page only by exemption."""
 

@@ -780,7 +780,10 @@ async def _answers(asked_of: list[Provider], endpoint: Endpoint, settings, start
     # for the reason the three above do not set it: a Simkl record is always
     # unenriched at fill, so exempting would make this a permanent no-op for
     # every Simkl title instead of a gap that closes when enrichment lands.
-    kept = calendar_filter.filter_by_network(kept, settings.network_filter)
+    # A SHOW CALENDAR'S ALONE: a film has no network, so an include-only list
+    # judged a film calendar would store no film at all (vocab.floor_specs).
+    if endpoint.media == "show":
+        kept = calendar_filter.filter_by_network(kept, settings.network_filter)
     # AND THE LANGUAGE FLOOR, the one new dimension a listing can be judged on by
     # itself — a scalar on the record, like its country, and judged the same
     # way. Every other dimension the floor carries (keywords, show type, who
