@@ -688,6 +688,21 @@ class AMarkSticksToTheTitleNotToWhoDescribesItTests(unittest.TestCase):
         self.assertFalse(calendar_state.marked({"1670"}, item))
         self.assertTrue(calendar_state.marked({"some-show"}, item))
 
+    def test_a_mark_under_another_services_slug_holds_when_that_service_is_off(self):
+        """A card drawn from TMDB alone spells no Simkl slug of its own, and four
+        October premieres one real account had marked under Simkl's slugs came
+        back the moment its calendar was narrowed to TMDB. The title store knows
+        every service's ids whoever the viewer admits (`known_ids`), so the mark
+        holds — and still never by a bare service number."""
+        tmdb_only = _record(Source.TMDB, id="335194", ids={"tmdb": 335194})
+        tmdb_only.known_ids = {"tmdb": 335194, "simkl": 2412345,
+                               "simkl_slug": "magical-explorer"}
+        item = providers_base.render(
+            calendar_resolve.resolve(_group(tmdb_only), _prefs()), ZoneInfo("UTC"))
+        self.assertNotIn("simkl_slug", item.ids)
+        self.assertTrue(calendar_state.marked({"magical-explorer"}, item))
+        self.assertFalse(calendar_state.marked({"2412345"}, item))
+
 
 class TheImdbScoreIsResolvedAsItsOwnFieldTests(unittest.TestCase):
     """It is not a third answer to the question the ratings chip asks.

@@ -81,8 +81,16 @@ def marked(marks, item) -> bool:
     calendar grid, the day fragment, the stats card, the share page and the
     tracker's import all ask it, and a copy that asked only half the question
     would make a show hidden on one screen and visible on the next.
+
+    THE TITLE STORE'S IDS COUNT AS WELL AS THE CARD'S (`known_ids`). A card
+    carries the ids of the services its viewer admits, and a mark filed under
+    another service's slug — Simkl's, from before mark keys — named a title the
+    card no longer spelled once that service was switched off: four October
+    premieres a real account had hidden came back on its TMDB-only calendar. The
+    store holds every service's ids for the title whoever is admitted, so a mark
+    holds whichever services the viewer is reading.
     """
-    return marked_by_ids(marks, mark_key=item.mark_key, ids=item.ids,
+    return marked_by_ids(marks, mark_key=item.mark_key, ids={**item.known_ids, **item.ids},
                          display_id=item.id, media=item.media)
 
 

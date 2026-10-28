@@ -1385,9 +1385,9 @@ def _local_span_utc_range(tz: ZoneInfo, start_date: date, end_date: date) -> tup
 async def visible_records(groups, endpoint, *, genres="", countries="",
                           show_certifications="", movie_certifications="",
                           movie_release_countries="", movie_release_types="",
-                          prefs=None, settings=None) -> tuple[list, int]:
+                          network_filter=None, prefs=None, settings=None) -> tuple[list, int]:
     """`groups` reduced to the records THIS viewer's calendar would draw, and
-    how many films the release narrowing removed on the way.
+    how many this viewer's filters removed on the way.
 
     EXTRACTED SO THE SEARCH RUNS THE SAME PIPELINE RATHER THAN A SECOND ONE.
     A search has to answer "would this viewer's calendar actually draw this
@@ -1411,13 +1411,15 @@ async def visible_records(groups, endpoint, *, genres="", countries="",
         # whose other source supplies the card would never have its enrichment
         # considered, and a genre only that source knows could not win however
         # the viewer set their preference.
-        # `settings` GOES IN BESIDE `prefs` AND ANSWERS A DIFFERENT QUESTION.
-        # `prefs` is this viewer's; `settings` is the operator's — a source this
-        # instance has switched off its calendar is off for everybody, and a
-        # window filled while it was still in play is still sitting in the cache
-        # holding its records. Reading it here is what makes that switch take
-        # effect immediately instead of one TTL from now.
-        parsed = [(group, calendar_resolve.admitted_records(group, prefs, endpoint.key, settings))
+        # `settings` IS THE OPERATOR'S ADMISSION AND THE ONLY ONE APPLIED HERE —
+        # a source this instance has switched off its calendar is off for
+        # everybody, and a window filled while it was still in play is still
+        # sitting in the cache holding its records. Reading it here is what makes
+        # that switch take effect immediately instead of one TTL from now.
+        # THE VIEWER'S SOURCE CHOICE IS APPLIED IN `narrow_for_viewer`, NOT HERE:
+        # it decides which listings a card is drawn from, and the filters judge
+        # every record the instance admits — see there.
+        parsed = [(group, calendar_resolve.admitted_records(group, None, endpoint.key, settings))
                   for group in groups]
         # THE SIMKL OVERLAY IS GONE FROM HERE, AND ITS ABSENCE IS THE POINT.
         # What used to happen on this line was a batched read of `simkl_titles`
@@ -1450,7 +1452,8 @@ async def visible_records(groups, endpoint, *, genres="", countries="",
             show_certifications=show_certifications,
             movie_certifications=movie_certifications,
             movie_release_countries=movie_release_countries,
-            movie_release_types=movie_release_types, prefs=prefs, settings=settings)
+            movie_release_types=movie_release_types, network_filter=network_filter,
+            prefs=prefs, settings=settings)
         sp.set(kept=len(kept))
 
     # EVERY PER-VIEWER REMOVAL, IN ONE NUMBER. The release rule and the
@@ -1482,37 +1485,28 @@ async def placed(groups, endpoint, *, tz: ZoneInfo, network_filter=None,
     card each, each on their own service's day; and no path works a day out from
     one listing, which would put a card where some service said rather than
     where this viewer's calendar draws it.
+
+    The network lists are judged with every other filter, in `narrow_for_viewer`:
+    the search, its season picker and the card its jump lands on read through this
+    too, and while the lists were applied only to a month they offered a title the
+    viewer's network filter hides, linking to a day that could not draw it.
     """
-    kept, filtered_out = await visible_records(groups, endpoint, **narrowing)
+    kept, filtered_out = await visible_records(groups, endpoint,
+                                               network_filter=network_filter, **narrowing)
     with span("calcache.normalize", entries=len(kept)) as sp:
         items = [render(record, tz) for record in kept]
         sp.set(items=len(items))
-    # THE NETWORK LISTS COME LAST BECAUSE THEY JUDGE THE RENDERED CARD: a
-    # network only exists on what resolution chose, so the fill's floor cannot
-    # judge a merged card's and this is the one place that can. The OPERATOR's
-    # list first — the floor's fourth field, not counted as this viewer's, as the
-    # floor's other three are not — and then the viewer's own, counted with the
-    # rest so a page it emptied can say so. HERE, in the one placement function,
-    # and not in the month read alone: the search, its season picker and the card
-    # its jump lands on read through this too, and while the lists were applied
-    # only to a month they offered a title the viewer's network filter hides,
-    # linking to a day that could not draw it.
-    settings = narrowing.get("settings")
-    if settings is not None:
-        items = calendar_filter.filter_by_network(
-            items, settings.network_filter, exempt_unenriched=True)
-    before_network = len(items)
-    items = calendar_filter.filter_by_network(items, network_filter, exempt_unenriched=True)
-    return items, filtered_out + before_network - len(items)
+    return items, filtered_out
 
 
 def narrow_for_viewer(parsed, media, *, genres="", countries="", show_certifications="",
                       movie_certifications="", movie_release_countries="",
-                      movie_release_types="", prefs=None, settings=None) -> tuple[list, int, int]:
-    """Every filter a calendar applies to the records it has admitted, in the
-    order it applies them: `(kept, how many groups the release narrowing
-    removed, how many records reached the rest)`. `parsed` is
-    `[(group, its admitted records)]`.
+                      movie_release_types="", network_filter=None, prefs=None,
+                      settings=None) -> tuple[list, int, int]:
+    """Every filter a calendar applies, in the order it applies them: `(the
+    records this viewer's cards are drawn from, how many groups the release
+    narrowing removed, how many cards reached the rest)`. `parsed` is
+    `[(group, every record of it the INSTANCE admits)]`.
 
     ONE IMPLEMENTATION OF "WOULD THIS VIEWER'S FILTERS HIDE IT", called by
     `visible_records` for the stored calendar and by the search's season picker
@@ -1521,12 +1515,43 @@ def narrow_for_viewer(parsed, media, *, genres="", countries="", show_certificat
     service's record of it, but every filter does: a picker that checked genre,
     country and certification alone offered films the release narrowing hides
     (measured: Sinners, under a US-releases-only filter).
+
+    THE VIEWER'S SOURCE CHOICE DECIDES WHICH LISTINGS A CARD IS DRAWN FROM, AND
+    NEVER WHAT THEIR FILTERS JUDGE. A group none of this viewer's services lists
+    is not theirs to draw, and drops out uncounted. A group they do draw is
+    judged as every service the instance admits describes it — resolved in this
+    viewer's order, as a viewer reading every service would see it — and drawn
+    from their own services' records alone. REPORTED: Sam Pang Tonight, a talk
+    show by Simkl's account and a comedy by TMDB's, was hidden by a viewer's
+    "no talk shows" filter until they narrowed the calendar to TMDB and Simkl's
+    genre went with Simkl's listing. A title somebody hid stays hidden whichever
+    services they read.
     """
+    judged_pairs: list = []
+    drawn_for: dict[int, Record] = {}
+    for group, every in parsed:
+        own = [r for r in every if prefs is None or prefs.admits_calendar(r.source)]
+        drawn = calendar_resolve.resolve_records(group, own, prefs)
+        if drawn is None:
+            continue
+        pair = (group, every, len(own) == len(every))
+        judged_pairs.append(pair)
+        drawn_for[id(pair)] = drawn
     narrowed = calendar_filter.filter_release_groups(
-        parsed, media, movie_release_countries, movie_release_types)
-    release_filtered = len(parsed) - len(narrowed)
-    records = [r for r in (calendar_resolve.resolve_records(group, rs, prefs)
-                           for group, rs in narrowed) if r is not None]
+        judged_pairs, media, movie_release_countries, movie_release_types)
+    release_filtered = len(judged_pairs) - len(narrowed)
+    # THE JUDGED RECORD OF EACH SURVIVING GROUP, mapped to the card it stands
+    # for. A second resolution only where this viewer reads fewer services than
+    # the group holds — for a viewer who has not narrowed the calendar the card
+    # IS the judged record, and nothing is resolved twice.
+    drawn_by_judged: dict[int, Record] = {}
+    records = []
+    for pair in narrowed:
+        group, every, draws_every = pair
+        drawn = drawn_for[id(pair)]
+        judged = drawn if draws_every else calendar_resolve.resolve_records(group, every, prefs)
+        drawn_by_judged[id(judged)] = drawn
+        records.append(judged)
     # A Simkl entry Simkl's OWN enrichment marks as a film (`anime_type ==
     # "movie"`) does not belong on a series endpoint — see
     # filter.prune_disguised_films for the measured rule and why this is
@@ -1548,19 +1573,27 @@ def narrow_for_viewer(parsed, media, *, genres="", countries="", show_certificat
     # THE OPERATOR'S SPEC IS NOT MERGED INTO THE VIEWER'S. They are two
     # answers to the same question and either may be empty; applying them in
     # turn is also what keeps the count below honest.
+    # THE NETWORK LISTS JUDGE THE RESOLVED RECORD, because a network only exists
+    # on what resolution chose — the fill's floor cannot judge a merged card's.
+    # The operator's list with the rest of the floor, not counted as this
+    # viewer's; the viewer's own with their specs, counted, so a page it emptied
+    # can say so.
     if settings is not None:
         records = calendar_filter.filter_records(
             records, settings.genres, settings.countries,
             (settings.show_certifications if media == "show"
              else settings.movie_certifications),
             exempt_unenriched=True)
+        records = calendar_filter.filter_by_network(
+            records, settings.network_filter, exempt_unenriched=True)
     certifications = show_certifications if media == "show" else movie_certifications
     # exempt_unenriched=True on BOTH READS and never at the fill — see
     # filter.keep_record for why a read gives a record enrichment has not
     # answered for the benefit of the doubt and the fill does not.
     kept = calendar_filter.filter_records(records, genres, countries, certifications,
                                           exempt_unenriched=True)
-    return kept, release_filtered, len(records)
+    kept = calendar_filter.filter_by_network(kept, network_filter, exempt_unenriched=True)
+    return [drawn_by_judged[id(judged)] for judged in kept], release_filtered, len(records)
 
 
 # ---------------------------------------------------------------------------

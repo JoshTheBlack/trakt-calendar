@@ -244,7 +244,13 @@ that had not, on the same page. Per-viewer filtering — and
 per-viewer source selection — happen at READ time, so one viewer excluding a
 genre or narrowing to one service does not poison what another sees from the
 same rows (`app/calendar/cache.py` owns the envelope and the read path;
-`app/calendar/resolve.py` owns which source answers each field). The envelope
+`app/calendar/resolve.py` owns which source answers each field). A VIEWER'S SOURCE
+CHOICE DECIDES WHICH LISTINGS A CARD IS DRAWN FROM, NEVER WHAT THEIR FILTERS JUDGE:
+`cache.narrow_for_viewer` — the one implementation of every filter, the network
+lists included — judges a title as every service the INSTANCE admits describes it,
+in the viewer's order, and draws the card from the viewer's own services alone;
+otherwise narrowing to TMDB took Simkl's "talk-show" with Simkl's listing and a
+filtered title came back. The envelope
 records who was ASKED as well as who ANSWERED, which is what lets a source
 switched on later refill a window that legitimately has none of its records,
 and what keeps "partial" meaning a source that failed rather than one nobody

@@ -50,7 +50,6 @@ from zoneinfo import ZoneInfo
 from . import cache as calendar_cache
 from . import enrich as calendar_enrich
 from . import entries
-from . import filter as calendar_filter
 from . import vocab
 from .. import cache, db, metadata, providers
 from ..endpoints import get_endpoint
@@ -518,13 +517,8 @@ async def _kept_by_filters(record, media: Media, specs, settings) -> bool:
         show_certifications=specs["show_certifications"],
         movie_certifications=specs["movie_certifications"],
         movie_release_countries=specs["movie_release_countries"],
-        movie_release_types=specs["movie_release_types"], settings=settings)
-    # AND BOTH NETWORK LISTS, which judge a card rather than a record and so sit
-    # outside narrow_for_viewer — the operator's, then the viewer's, as
-    # cache.placed applies them to the calendar's own cards.
-    for networks in ((settings.network_filter if settings is not None else None),
-                     specs["network_filter"]):
-        kept = calendar_filter.filter_by_network(kept, networks, exempt_unenriched=True)
+        movie_release_types=specs["movie_release_types"],
+        network_filter=specs["network_filter"], settings=settings)
     return bool(kept)
 
 

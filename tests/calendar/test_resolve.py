@@ -427,6 +427,79 @@ class WhatTheInstanceAdmitsAtReadTests(unittest.TestCase):
                     self.read(Settings(simkl_public_calendar_enabled=False), selection), off)
 
 
+class ASourceChoiceNeverChangesWhatTheFiltersJudgeTests(unittest.IsolatedAsyncioTestCase):
+    """Narrowing the calendar to some services decides which listings a card is
+    drawn from — never what a viewer's filters judge.
+
+    REPORTED: Sam Pang Tonight is a talk show by Simkl's account and a comedy by
+    TMDB's. A viewer filtering out talk shows never saw it, until they narrowed
+    the calendar to TMDB: Simkl's genre went with Simkl's listing and the title
+    came back. Every filter now judges the title as every service the instance
+    admits describes it, in the viewer's own order.
+    """
+
+    async def asyncSetUp(self):
+        migrated_db("filterjudge")
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    def groups(self):
+        def record(source, slug, *, tmdb, title, genres, network):
+            r = _record(source, slug, tmdb=tmdb, title=title)
+            r.genres, r.network = genres, network
+            return r
+        return calendar_cache.group_records([
+            record(Source.TMDB, "286597", tmdb=286597, title="Sam Pang Tonight",
+                   genres=["comedy"], network="10"),
+            record(Source.SIMKL, "2727595", tmdb=286597, title="Sam Pang Tonight",
+                   genres=["talk-show"], network="Network 10"),
+            record(Source.TMDB, "555", tmdb=555, title="A Sitcom", genres=["comedy"],
+                   network="ABC"),
+            record(Source.SIMKL, "777", tmdb=777, title="Simkl Alone", genres=["drama"],
+                   network="SBS"),
+        ])
+
+    async def read(self, selection, *, order=(), **filters):
+        prefs = source_prefs.SourcePrefs(user_id=1, calendar_source=selection,
+                                         metadata_order=list(order))
+        kept, filtered = await calendar_cache.visible_records(
+            self.groups(), SHOWS, prefs=prefs, **filters)
+        return [(r.title, str(r.source), list(r.genres)) for r in kept], filtered
+
+    async def test_a_genre_only_another_service_states_still_hides_the_title(self):
+        for selection in ("auto", "tmdb"):
+            with self.subTest(source=selection):
+                kept, filtered = await self.read(selection, genres="-talk-show")
+                self.assertNotIn("Sam Pang Tonight", [title for title, *_ in kept])
+                self.assertEqual(filtered, 1)
+
+    async def test_a_card_is_still_drawn_from_the_viewers_own_services(self):
+        """Judged by every service, drawn from TMDB's record alone: its genres,
+        its attribution."""
+        kept, _ = await self.read("tmdb")
+        self.assertEqual(kept, [("Sam Pang Tonight", "tmdb", ["comedy"]),
+                                ("A Sitcom", "tmdb", ["comedy"])])
+
+    async def test_the_judged_card_is_resolved_in_the_viewers_order(self):
+        """A network is one service's answer, picked in the viewer's order: a
+        viewer who reads Simkl first sees Network 10 on the all-services card,
+        so hiding Network 10 hides it under TMDB alone too."""
+        for selection in ("auto", "tmdb"):
+            with self.subTest(source=selection):
+                kept, _ = await self.read(selection, order=("simkl", "tmdb"),
+                                          network_filter=["-Network 10"])
+                self.assertNotIn("Sam Pang Tonight", [title for title, *_ in kept])
+        kept, _ = await self.read("tmdb", network_filter=["-Network 10"])
+        self.assertIn("Sam Pang Tonight", [title for title, *_ in kept],
+                      "in the declared order TMDB's network is the card's")
+
+    async def test_a_title_none_of_the_viewers_services_lists_is_not_counted_as_filtered(self):
+        kept, filtered = await self.read("tmdb", genres="-drama")
+        self.assertNotIn("Simkl Alone", [title for title, *_ in kept])
+        self.assertEqual(filtered, 0, "not this viewer's to draw is not a filter removing it")
+
+
 class TwoViewersOneWindowTests(unittest.IsolatedAsyncioTestCase):
     """The invariant this fix restores, end to end: the stored window is the
     union of what every source said, and two viewers who chose differently read
