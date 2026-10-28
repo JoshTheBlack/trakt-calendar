@@ -35,10 +35,13 @@ def seerr(client: RecordingClient):
     return pooled(seer, "POOL", client)
 
 
-def page(ids: list[int], *, total: int, extra_records: int = 0) -> httpx.Response:
-    """One /api/v1/media page. `extra_records` adds records carrying no tmdbId,
-    which advance the cursor without contributing an id."""
-    results = [{"tmdbId": i} for i in ids] + [{"status": 1} for _ in range(extra_records)]
+def page(ids: list[int], *, total: int, extra_records: int = 0,
+         media_type: str = "movie") -> httpx.Response:
+    """One /api/v1/media page of `media_type` entries. `extra_records` adds
+    records carrying no tmdbId, which advance the cursor without contributing an
+    id."""
+    results = ([{"tmdbId": i, "mediaType": media_type} for i in ids]
+               + [{"status": 1} for _ in range(extra_records)])
     return response(200, content=json.dumps(
         {"results": results, "pageInfo": {"results": total}}).encode())
 
@@ -91,26 +94,26 @@ class PageParseTests(unittest.TestCase):
     """
 
     def test_it_reads_the_ids_the_count_and_the_total(self):
-        raw = json.dumps({"results": [{"tmdbId": 1}, {"tmdbId": 2}],
+        raw = json.dumps({"results": [{"tmdbId": 1, "mediaType": "movie"}, {"tmdbId": 2, "mediaType": "tv"}],
                           "pageInfo": {"results": 57}}).encode()
-        self.assertEqual(seer._page(raw), ([1, 2], 2, 57))
+        self.assertEqual(seer._page(raw), (["movie:1", "show:2"], 2, 57))
 
     def test_a_record_with_no_tmdb_id_still_counts_toward_the_cursor(self):
         # The whole reason the count is separate from len(ids). If these two ever
         # collapse into one number, the read loops forever on a library that has
         # any un-matched record in it.
-        raw = json.dumps({"results": [{"tmdbId": 1}, {"status": 3}, {"tmdbId": 2}],
+        raw = json.dumps({"results": [{"tmdbId": 1, "mediaType": "movie"}, {"status": 3}, {"tmdbId": 2, "mediaType": "tv"}],
                           "pageInfo": {"results": 3}}).encode()
         ids, count, total = seer._page(raw)
-        self.assertEqual(ids, [1, 2])
+        self.assertEqual(ids, ["movie:1", "show:2"])
         self.assertEqual(count, 3)
         self.assertEqual(total, 3)
 
     def test_a_zero_or_null_id_is_dropped_from_the_ids(self):
-        raw = json.dumps({"results": [{"tmdbId": 0}, {"tmdbId": None}, {"tmdbId": 9}],
+        raw = json.dumps({"results": [{"tmdbId": 0, "mediaType": "movie"}, {"tmdbId": None, "mediaType": "movie"}, {"tmdbId": 9, "mediaType": "movie"}],
                           "pageInfo": {"results": 3}}).encode()
         ids, count, _ = seer._page(raw)
-        self.assertEqual(ids, [9])
+        self.assertEqual(ids, ["movie:9"])
         self.assertEqual(count, 3)
 
     def test_an_empty_page_is_empty_rather_than_an_error(self):
@@ -122,8 +125,9 @@ class PageParseTests(unittest.TestCase):
 
     def test_a_null_page_info_does_not_crash(self):
         # `(data.get("pageInfo") or {})` — a real server has sent null here.
-        raw = json.dumps({"results": [{"tmdbId": 4}], "pageInfo": None}).encode()
-        self.assertEqual(seer._page(raw), ([4], 1, 0))
+        raw = json.dumps({"results": [{"tmdbId": 4, "mediaType": "tv"}],
+                          "pageInfo": None}).encode()
+        self.assertEqual(seer._page(raw), (["show:4"], 1, 0))
 
     def test_malformed_json_raises_valueerror(self):
         # library_ids catches ValueError and turns it into LibraryUnavailable, so
@@ -174,7 +178,7 @@ class LibraryPaginationTests(unittest.IsolatedAsyncioTestCase):
         client = RecordingClient([page([1, 2, 3], total=3)])
         with seerr(client):
             ids = await seer.library_ids(settings())
-        self.assertEqual(ids, [1, 2, 3])
+        self.assertEqual(ids, ["movie:1", "movie:2", "movie:3"])
         self.assertEqual(client.only.url, "http://seerr.local:5055/api/v1/media")
         self.assertEqual(client.only.params, {"take": seer.PAGE_SIZE, "skip": 0})
 
@@ -192,7 +196,7 @@ class LibraryPaginationTests(unittest.IsolatedAsyncioTestCase):
         ])
         with seerr(client):
             ids = await seer.library_ids(settings())
-        self.assertEqual(ids, [1, 2, 3, 4])
+        self.assertEqual(ids, ["movie:1", "movie:2", "movie:3", "movie:4"])
         self.assertEqual([c.params["skip"] for c in client.calls], [0, 2])
 
     async def test_records_with_no_id_still_move_the_cursor_forward(self):
@@ -206,7 +210,7 @@ class LibraryPaginationTests(unittest.IsolatedAsyncioTestCase):
         ])
         with seerr(client):
             ids = await seer.library_ids(settings())
-        self.assertEqual(ids, [1, 2])
+        self.assertEqual(ids, ["movie:1", "movie:2"])
         self.assertEqual([c.params["skip"] for c in client.calls], [0, 2])
 
     async def test_it_stops_when_a_page_comes_back_empty(self):
@@ -218,7 +222,7 @@ class LibraryPaginationTests(unittest.IsolatedAsyncioTestCase):
         ])
         with seerr(client):
             ids = await seer.library_ids(settings())
-        self.assertEqual(ids, [1, 2])
+        self.assertEqual(ids, ["movie:1", "movie:2"])
         self.assertEqual(len(client.calls), 2)
 
     async def test_an_unconfigured_service_is_a_knowable_empty(self):
@@ -226,6 +230,19 @@ class LibraryPaginationTests(unittest.IsolatedAsyncioTestCase):
         with seerr(client):
             self.assertEqual(await seer.library_ids(settings(seer_api_key="")), [])
         self.assertEqual(client.calls, [])
+
+    async def test_each_title_is_held_with_its_medium(self):
+        """TMDB numbers films and shows separately: the owner's Seerr held the
+        film My Girl 2 (TMDB 11317), and CBC's The Fifth Estate (TMDB show 11317)
+        was drawn as already on Seerr. An entry of a medium this app does not
+        have is not held."""
+        body = json.dumps({"results": [{"tmdbId": 11317, "mediaType": "movie"},
+                                       {"tmdbId": 95396, "mediaType": "tv"},
+                                       {"tmdbId": 5, "mediaType": "person"}],
+                           "pageInfo": {"results": 3}}).encode()
+        with seerr(RecordingClient([response(200, content=body)])):
+            ids = await seer.library_ids(settings())
+        self.assertEqual(ids, ["movie:11317", "show:95396"])
 
 
 class AddMediaRequestTests(unittest.IsolatedAsyncioTestCase):

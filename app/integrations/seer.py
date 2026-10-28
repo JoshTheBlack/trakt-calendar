@@ -53,8 +53,27 @@ async def check_health(settings: Settings) -> dict:
         return {"configured": True, "reachable": False}
 
 
+# Seerr's word for each medium, as this app spells it.
+_MEDIA = {"movie": "movie", "tv": "show"}
+
+
+def held_key(media: str, tmdb) -> str:
+    """What one title is held under in Seerr's library: its MEDIUM and its TMDB
+    id, never the id alone.
+
+    TMDB NUMBERS FILMS AND SHOWS SEPARATELY, so one number names a film and an
+    unrelated show. Held by the id alone, a library holding the film My Girl 2
+    (TMDB film 11317) marked CBC's The Fifth Estate (TMDB show 11317) as already
+    on Seerr — MEASURED on the owner's calendar. Seerr states each entry's
+    `mediaType`, and a request names one too (`add_media`), so the key says it.
+    """
+    return f"{media}:{tmdb}"
+
+
 def _page(raw: bytes) -> tuple[list, int, int]:
-    """SYNCHRONOUS. One page of /api/v1/media as (ids, records, library total).
+    """SYNCHRONOUS. One page of /api/v1/media as (held keys, records, library
+    total) — each entry by `held_key`, its medium from the entry's own
+    `mediaType`; an entry naming a medium this app does not have is not held.
 
     ON A WORKER THREAD, like app/integrations/arr.py's equivalent and for the same reason:
     parsing the page is CPU, and at PAGE_SIZE records a page it is enough of it to
@@ -66,7 +85,8 @@ def _page(raw: bytes) -> tuple[list, int, int]:
     """
     data = json.loads(raw)
     results = data.get("results", [])
-    ids = [m["tmdbId"] for m in results if m.get("tmdbId")]
+    ids = [held_key(_MEDIA[m["mediaType"]], m["tmdbId"]) for m in results
+           if m.get("tmdbId") and m.get("mediaType") in _MEDIA]
     return ids, len(results), (data.get("pageInfo") or {}).get("results", 0)
 
 
@@ -82,7 +102,8 @@ class LibraryUnavailable(Exception):
 
 
 async def library_ids(settings: Settings) -> list:
-    """All TMDB ids already known to Seerr (requested or available), paginated.
+    """Every title already known to Seerr (requested or available), paginated,
+    each as its `held_key`.
 
     Raises LibraryUnavailable when the answer is unknown rather than empty.
     PARTIAL IS ALSO UNKNOWN: a page failing midway used to return the ids

@@ -243,6 +243,30 @@ class EveryServiceAddsThroughTheOneRouteTests(_LibraryTestCase):
                                  json={"key": self.key, "target": target})
         self.assertEqual(seen, [("arr", "sonarr", "777"), ("seer", "show", "4242")])
 
+    def test_a_film_in_seerr_does_not_mark_the_show_sharing_its_tmdb_number(self):
+        """MEASURED on the owner's calendar: TMDB film 11317 (My Girl 2) in Seerr
+        drew CBC's The Fifth Estate (TMDB show 11317) as already requested. TMDB
+        numbers films and shows separately, so Seerr's library is held by medium
+        as well as id — and an add is recorded the same way."""
+        integrations_routes.LIBRARY_CACHE.update({"seer": ["movie:11317"], "_ts": 1e12})
+        view = integrations_routes.LibraryView(load_settings())
+        seerr = {b.kind: b for b in view.buttons("show", {"tvdb": "1", "tmdb": "11317"})}["seer"]
+        self.assertFalse(seerr.in_library)
+        film = {b.kind: b for b in view.buttons("movie", {"tmdb": "11317"})}["seer"]
+        self.assertTrue(film.in_library)
+
+    async def _requested(self, settings, media, tmdb, title):
+        return {"ok": True, "message": "Requested"}
+
+    def test_a_show_added_to_seerr_is_held_as_a_show(self):
+        with patch("app.integrations.seer.add_media", self._requested):
+            asyncio.run(integrations_routes.add_title(load_settings(), "seer", "show",
+                                                      {"tmdb": 11317}, "The Fifth Estate"))
+        self.assertIn("show:11317", integrations_routes.LIBRARY_CACHE["seer"])
+        view = integrations_routes.LibraryView(load_settings())
+        self.assertFalse({b.kind: b for b in view.buttons("movie", {"tmdb": "11317"})}
+                         ["seer"].in_library)
+
     def test_the_medium_picks_one_of_the_two_and_seerr_rides_beside_either(self):
         """Asked of the one function that decides, rather than of a rendered film
         calendar: which of Sonarr and Radarr a title gets is `LibraryView.buttons`'

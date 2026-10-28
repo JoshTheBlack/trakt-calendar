@@ -239,8 +239,17 @@ class LibraryView:
             drawn.append(LibraryButton(
                 kind, library_id,
                 reachable=bool(INTEGRATION_HEALTH[kind].get("reachable")),
-                in_library=bool(library_id) and library_id in self._held[kind]))
+                in_library=bool(library_id) and str(held_as(kind, media, library_id))
+                in self._held[kind]))
         return drawn
+
+
+def held_as(kind: str, media: str, library_id):
+    """What a title is held under in `kind`'s library — the one answer the
+    buttons read and an add records. Sonarr and Radarr each hold ONE medium, so
+    the id alone names the title there; Seerr holds both, and TMDB numbers films
+    and shows separately (seer.held_key says what that cost)."""
+    return seer.held_key(media, library_id) if kind == "seer" else library_id
 
 
 # NO ROUTE HANDS OUT EITHER CACHE. The calendar page used to poll two JSON
@@ -293,7 +302,9 @@ async def add_title(settings, target: str, media: str, ids: Mapping[str, Any], t
             lib_id = int(ids.get(LIBRARY_ID_KEYS[target]))
         except (TypeError, ValueError):
             return result
-        _seen_at[target][lib_id] = time.time()
-        if lib_id not in LIBRARY_CACHE[target]:
-            LIBRARY_CACHE[target].append(lib_id)
+        # Held as each service's own read holds it — Seerr's with its medium.
+        held = held_as(target, media, lib_id)
+        _seen_at[target][held] = time.time()
+        if held not in LIBRARY_CACHE[target]:
+            LIBRARY_CACHE[target].append(held)
     return result
