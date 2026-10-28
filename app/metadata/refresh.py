@@ -308,9 +308,24 @@ async def _queue_then_run(settings, wanted: list[Wanted], budget: int, missing: 
 
 
 # THE HEALS UNDER WAY, by entry: which title each queued row of a heal belongs
-# to, so the drain can say when a title's heal is finished — its rows may span
-# passes, a service's minute being spent. In process, as the heal is.
-_heals: dict["Entry", str] = {}
+# to, and when it was queued, so the drain can say when a title's heal is
+# finished — its rows may span passes, a service's minute being spent. In
+# process, as the heal is.
+_heals: dict["Entry", tuple[str, float]] = {}
+
+# HOW LONG A HEAL'S BOOKKEEPING IS KEPT FOR ROWS THE DRAIN HAS NOT REACHED. A
+# heal's rows sit at the front of the queue and are re-read within minutes; one
+# still queued hours later belongs to a service this instance can no longer ask
+# (its credential removed), and stays queued in the table until it can. The
+# "heal finished" line is all this map is for, and the process runs for weeks
+# between restarts, so an entry that old is dropped rather than held for them.
+_HEAL_BOOKKEEPING_SECONDS = 6 * 60 * 60
+
+
+def _forget_old_heals(moment: float) -> None:
+    for entry in [entry for entry, (_key, since) in _heals.items()
+                  if moment - since >= _HEAL_BOOKKEEPING_SECONDS]:
+        del _heals[entry]
 
 
 async def queue_title(settings, media: str, ids: Mapping[str, Any], seasons: Iterable[int] = (),
@@ -336,7 +351,9 @@ async def queue_title(settings, media: str, ids: Mapping[str, Any], seasons: Ite
 
     await db.transaction(_work)
     if title_key:
-        _heals.update(dict.fromkeys(entries, str(title_key)))
+        moment = time.monotonic()
+        _forget_old_heals(moment)
+        _heals.update(dict.fromkeys(entries, (str(title_key), moment)))
     return entries
 
 
@@ -519,7 +536,7 @@ async def drain(settings, *, now: int | None = None) -> int:
                            source, entry.media, entry.own_id, reason, exc)
                 await _record_failure(entry, ts)
                 if entry in _heals:
-                    healed.setdefault(_heals.pop(entry), []).append((entry, "failed"))
+                    healed.setdefault(_heals.pop(entry)[0], []).append((entry, "failed"))
                 return False
             finally:
                 await db.execute(
@@ -527,7 +544,7 @@ async def drain(settings, *, now: int | None = None) -> int:
                     "AND source_id = ? AND season = ?", entry)
             _log_refreshed(entry, reason, written)
             if entry in _heals:
-                healed.setdefault(_heals.pop(entry), []).append((
+                healed.setdefault(_heals.pop(entry)[0], []).append((
                     entry, shortened(written.poster) if written is not None else "nothing"))
             return True
 
@@ -546,7 +563,7 @@ async def drain(settings, *, now: int | None = None) -> int:
         logger.info("title store: refreshed %d queued row(s) — %s", refreshed,
                     ", ".join(f"{source} {len(batch)}" for source, batch in batches.items()))
     for key, done in healed.items():
-        waiting = sum(1 for other in _heals.values() if other == key)
+        waiting = sum(1 for other, _since in _heals.values() if other == key)
         logger.info(
             "title store: heal of %s %s — %s", key,
             f"continues, {waiting} row(s) still queued" if waiting else "finished",

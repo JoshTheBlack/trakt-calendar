@@ -244,6 +244,15 @@ def _lane_for(method: str, headers: dict | None) -> _Lane | None:
     if _lanes_loop is not loop:
         _lanes.clear()
         _lanes_loop = loop
+    # AN IDLE LANE IS DROPPED, because the map is keyed by a TOKEN and a token
+    # rotates: every refresh starts a person a new lane, and the process runs for
+    # weeks between restarts. A lane nobody holds whose next write may already
+    # leave asks nothing of the next write, so a fresh one in its place behaves
+    # identically.
+    moment = _time.monotonic()
+    for idle in [key for key, lane in _lanes.items()
+                 if not lane.lock.locked() and lane.ready_at <= moment]:
+        del _lanes[idle]
     return _lanes.setdefault(hashlib.sha256(bearer.encode()).hexdigest(), _Lane())
 
 

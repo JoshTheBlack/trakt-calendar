@@ -279,6 +279,24 @@ class TheHealTests(DatabaseTestCase):
         self.assertEqual(queued, [("show", {"tmdb": 500}, [2], "dead picture", "show:tmdb:500")])
         self.assertEqual(ran, [True])
 
+    async def test_what_it_remembers_shrinks_once_its_clock_has_passed(self):
+        """The process runs for weeks between restarts, so a title healed once
+        must not be held for all of them: the next heal prunes every entry older
+        than HEAL_EVERY_SECONDS — and that title may be healed again."""
+        async def _queue_title(*_args, **_kwargs):
+            return []
+
+        clock = [1000.0]
+        with mock.patch.object(refresh, "queue_title", _queue_title), \
+                mock.patch.object(pictures.time, "monotonic", lambda: clock[0]):
+            for tmdb in (501, 502, 503):
+                await pictures.heal(SETTINGS, _report()._replace(
+                    title=pictures.Title("show", tmdb, "", None)))
+            self.assertEqual(len(pictures._healed), 3)
+            clock[0] += pictures.HEAL_EVERY_SECONDS
+            await pictures.heal(SETTINGS, _report())
+        self.assertEqual(list(pictures._healed), ["show:tmdb:500"])
+
 
 class TheRouteTests(AppTestCase):
 

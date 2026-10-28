@@ -346,8 +346,14 @@ async def heal(settings, report: Report) -> list:
     `HEAL_EVERY_SECONDS`. Returns what was queued."""
     t = report.title
     moment = time.monotonic()
+    # PRUNED ON THE CLOCK IT KEEPS, as `_checked` is in `confirm`. The process
+    # runs for weeks between restarts and every healed title used to stay here
+    # for all of them; an entry older than HEAL_EVERY_SECONDS no longer holds
+    # anything back, so dropping it changes no answer.
+    for done in [key for key, at in _healed.items() if moment - at >= HEAL_EVERY_SECONDS]:
+        del _healed[done]
     last = _healed.get(t.key)
-    if last is not None and moment - last < HEAL_EVERY_SECONDS:
+    if last is not None:
         logger.info("pictures: %s was healed %d minutes ago; not again yet", t.key,
                     int((moment - last) // 60))
         return []

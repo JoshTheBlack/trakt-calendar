@@ -200,6 +200,21 @@ class ADeadPictureJumpsTheQueueTests(_RefreshTestCase):
                                             reason=refresh.REASON_DEAD_PICTURE)
         self.assertEqual([entry.season for entry in entries], [refresh.TITLE])
 
+    async def test_a_heal_nobody_can_finish_is_forgotten_on_its_clock(self):
+        """A heal's rows for a service this instance can no longer ask stay queued
+        in the table, and the drain never pops their bookkeeping. The process runs
+        for weeks, so the next heal drops what is older than the bookkeeping clock
+        rather than holding it for all of them."""
+        clock = [5000.0]
+        with mock.patch.object(refresh.time, "monotonic", lambda: clock[0]):
+            await refresh.queue_title(SETTINGS, "show", {"tmdb": 5}, [2],
+                                      reason=refresh.REASON_DEAD_PICTURE, title_key="show:tmdb:5")
+            self.assertEqual(len(refresh._heals), 2)
+            clock[0] += refresh._HEAL_BOOKKEEPING_SECONDS
+            await refresh.queue_title(SETTINGS, "movie", {"tmdb": 6},
+                                      reason=refresh.REASON_DEAD_PICTURE, title_key="movie:tmdb:6")
+        self.assertEqual([key for key, _since in refresh._heals.values()], ["movie:tmdb:6"])
+
 
 class TheDrainTests(_RefreshTestCase):
 

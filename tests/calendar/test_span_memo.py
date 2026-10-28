@@ -313,5 +313,51 @@ class ForgettingTests(unittest.TestCase):
         self.assertGreater(calendar_cache._SPAN_MEMO_MAX, 0)
 
 
+class DeadSpansGoOnTheNextWriteTests(unittest.IsolatedAsyncioTestCase):
+    """The process runs for weeks between restarts. An entry past the hard max is
+    never served, and it used to be dropped only once the memo was FULL — so on a
+    quiet instance a month nobody returned to held its Items for weeks. Every
+    write sweeps them now."""
+
+    async def asyncSetUp(self):
+        from unittest.mock import patch
+        from tests.support import migrated_db
+
+        migrated_db(type(self).__name__.lower())
+        calendar_cache._forget_spans()
+        self.addCleanup(calendar_cache._forget_spans)
+        # Nothing in play, so the stored windows below are current and the read
+        # fills nothing: it assembles what is stored and writes the memo.
+        nobody = patch("app.calendar.cache._window_sources", return_value=[])
+        nobody.start()
+        self.addCleanup(nobody.stop)
+        for start in calendar_cache.aligned_windows(date(2026, 8, 30), date(2026, 9, 3)):
+            await calendar_cache.store_window("shows", start, [], 10**6, 1000,
+                                              sources=[], asked=[])
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    async def test_a_write_drops_every_dead_entry_and_keeps_the_live_ones(self):
+        import time
+        from zoneinfo import ZoneInfo
+
+        moment = time.monotonic()
+        dead = ("dead",)
+        live = ("live",)
+        calendar_cache._span_memo[dead] = (dead, moment - calendar_cache._SPAN_MEMO_TTL - 1,
+                                           0, [], None, False, 0)
+        calendar_cache._span_memo[live] = (live, moment, 0, [], None, False, 0)
+        await calendar_cache._assembled_span(
+            get_endpoint("shows"), Settings(), tz=ZoneInfo("UTC"),
+            start_date=date(2026, 9, 1), end_date=date(2026, 9, 1), genres="", countries="",
+            show_certifications="", movie_certifications="", movie_release_countries="",
+            movie_release_types="", network_filter=None, allow_fetch=True, now=1001,
+            prefs=None)
+        self.assertNotIn(dead, calendar_cache._span_memo)
+        self.assertIn(live, calendar_cache._span_memo)
+        self.assertEqual(len(calendar_cache._span_memo), 2, "the read's own span was not kept")
+
+
 if __name__ == "__main__":
     unittest.main()

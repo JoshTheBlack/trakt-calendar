@@ -1451,6 +1451,17 @@ class AWindowASourceFailedOnIsAskedAgainSoonTests(CacheTestCase):
     async def test_a_share_page_never_asks(self):
         self.assertEqual((await self._read(5000, allow_fetch=False))[1], 0)
 
+    async def test_what_it_remembers_shrinks_once_neither_clock_reads_it(self):
+        """The process runs for weeks, so an attempt is not held for all of them:
+        one older than the schedule's clock delays nobody and is dropped by the
+        next question asked of any window."""
+        await self._read(1061)
+        self.assertIn((SHOWS.key, self.START.isoformat()), calendar_cache._failed_retried_at)
+        other = calendar_cache.WindowCoverage(("trakt",), ("trakt",), 1000)
+        calendar_cache._failed_retry_due(
+            SHOWS, date(2026, 7, 13), other, 1061 + calendar_cache._FAILED_REFRESH_SECONDS)
+        self.assertEqual(calendar_cache._failed_retried_at, {})
+
     async def test_a_window_every_source_answered_waits_its_ttl(self):
         await calendar_cache.store_window(SHOWS.key, self.START, [], 600, 1000,
                                           sources=["trakt", "simkl"], asked=["trakt", "simkl"])

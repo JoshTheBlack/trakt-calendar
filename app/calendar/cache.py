@@ -1101,6 +1101,12 @@ _FAILED_REFRESH_SECONDS = 15 * 60
 # own clock where it was — is retried once a minute rather than on every read.
 # Shared by the reader and the schedule, so neither repeats the other's attempt.
 # In memory: a restart simply makes the first read after it try again.
+#
+# PRUNED ON THE SLOWER OF THE TWO CLOCKS THAT READ IT. The process runs for weeks
+# between restarts and every window that ever failed used to stay here for all
+# of them. An attempt older than `_FAILED_REFRESH_SECONDS` delays neither clock —
+# each waits from the LATER of the window's store and the attempt, and that much
+# has passed since the attempt — so dropping it changes no answer.
 _failed_retried_at: dict[tuple[str, str], int] = {}
 
 
@@ -1110,6 +1116,9 @@ def _failed_retry_due(endpoint: Endpoint, start: date, cached: WindowCoverage,
     be asked again, `after` seconds from the later of the window's store and the
     last attempt — see `_FAILED_RETRY_SECONDS` and `_FAILED_REFRESH_SECONDS` —
     and, when it is, notes the attempt so the next one waits too."""
+    for done in [key for key, at in _failed_retried_at.items()
+                 if ts - at >= _FAILED_REFRESH_SECONDS]:
+        del _failed_retried_at[done]
     if not set(cached.asked) - set(cached.sources):
         return False
     key = (endpoint.key, start.isoformat())
@@ -1760,17 +1769,18 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # recover from it.
     if partial or not allow_fetch:
         return items, as_of, partial, filtered_out
-    if key not in _span_memo and len(_span_memo) >= _SPAN_MEMO_MAX:
-        # WHAT IS PAST THE HARD MAX GOES FIRST, and none of it would go otherwise:
-        # an entry is only ever dropped when somebody reads that exact key, so a
-        # month nobody returns to holds its Items until something evicts it.
-        # Measured on real data, one All Episodes month view is ~35MB of the 37MB
-        # five endpoints cost between them — so reclaiming the dead ones is worth
-        # more than any plausible raising of the cap.
-        dead = [k for k, v in _span_memo.items()
-                if time.monotonic() - v[1] >= _SPAN_MEMO_TTL]
-        for k in dead:
-            _span_memo.pop(k, None)
+    # WHAT IS PAST THE HARD MAX GOES FIRST, ON EVERY WRITE, and none of it would go
+    # otherwise: an entry is only ever dropped when somebody reads that exact key,
+    # so a month nobody returns to holds its Items until something evicts it.
+    # Measured on real data, one All Episodes month view is ~35MB of the 37MB five
+    # endpoints cost between them — so reclaiming the dead ones is worth more than
+    # any plausible raising of the cap. It used to wait until the memo was FULL,
+    # which on a quiet instance that runs for weeks between restarts meant dead
+    # months held for all of them; a sweep of at most `_SPAN_MEMO_MAX` entries per
+    # write is nothing beside the assembly that write just paid for.
+    for dead in [k for k, v in _span_memo.items()
+                 if time.monotonic() - v[1] >= _SPAN_MEMO_TTL]:
+        _span_memo.pop(dead, None)
     if key not in _span_memo and len(_span_memo) >= _SPAN_MEMO_MAX:
         # THE OLDEST BY WHEN IT WAS BUILT, not by when its key first appeared,
         # and the difference threw away the best entry first. The shell's
