@@ -207,6 +207,40 @@ class AMonthsEdgeTests(PlacementTestCase):
                 self.assertEqual(len(await self.november(prefs)), in_november)
 
 
+class ASearchedListingDoesNotSplitTheFeedsCardTests(PlacementTestCase):
+    """THE REPORTED FAULT, AS THE DEV INSTANCE HELD IT: East of Eden S01E01 on
+    1 October — TMDB's date, Trakt's and Simkl's feeds at 07:00 UTC, and a
+    date-only Simkl row a tracker add wrote while Simkl's feed did not list the
+    premiere yet. In date order the searched Simkl row joined TMDB's card first,
+    so Simkl's own feed listing had to start a second card: two cards, one with
+    every service and one with Simkl alone, under one title (hiding one hid
+    both). The searched row stands down for the feed (app/calendar/entries.py),
+    and the episode is one card in every order."""
+
+    async def asyncSetUp(self):
+        from app.calendar import entries as calendar_entries
+
+        await super().asyncSetUp()
+        self.searched = _listing(Source.SIMKL, 1, 1, _at(2026, 10, 1), date_only=True)
+        await calendar_entries.store_loose_airings(SHOWS.key, [self.searched], now=500,
+                                                   stale_after=10**9)
+        await self.store([_listing(Source.TMDB, 1, 1, _at(2026, 10, 1), date_only=True),
+                          _listing(Source.TRAKT, 1, 1, _at(2026, 10, 1, 7)),
+                          _listing(Source.SIMKL, 1, 1, _at(2026, 10, 1, 7))])
+
+    async def october(self, prefs):
+        return await self.cards(prefs, date(2026, 10, 1), date(2026, 10, 31))
+
+    async def test_the_episode_is_one_card_in_every_order(self):
+        for prefs in (DEFAULT, SIMKL_FIRST, TMDB_THEN_SIMKL):
+            with self.subTest(prefs=prefs.metadata_order):
+                self.assertEqual(len(await self.october(prefs)), 1)
+
+    async def test_the_default_order_draws_tmdbs_day_with_the_feeds_time(self):
+        self.assertEqual(await self.october(DEFAULT),
+                         [("S01E01", "2026-10-01", "03:00", "tmdb")])
+
+
 class TheSearchAgreesWithTheCalendarTests(PlacementTestCase):
     """The calendar search's stored half says where a title airs; it is the
     calendar's own answer, one row per card, on the viewer's day."""

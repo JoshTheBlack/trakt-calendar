@@ -244,7 +244,14 @@ joins when it is in the same calendar month as EVERY listing already in the card
 or at most a week from it across a month's edge (`may_join`, `join_listings`, a
 date-ordered scan, one listing per service per card); a show listing with no
 full coordinate still folds into an episode only on its own day (`match_keys`).
-That is viewer-independent and computed at READ — no key is stored. Which day
+That is viewer-independent and computed at READ — no key is stored. ONE LISTING
+PER SERVICE IS ALSO WHAT STORAGE PROMISES: an airing a search or a tracker add
+wrote (`from_search`) fills a gap in its service's feed and stands down the
+moment that feed lists the same episode, at whatever instant — dropped at read
+(`entries._in_fetch_order`), deleted by the fill (`store_span`), never written
+over a listed one (`store_loose_airings`). The airing key includes the instant,
+so a date-only searched row and the feed's timed one were two listings of one
+service, and the scan drew two cards. Which day
 the card is drawn on is the viewer's: the first service in their order describes
 it, DATE AND TIME INCLUDED, and a date-only one borrows a time only from an
 instant that falls on its date somewhere on earth (`app/calendar/resolve.py`'s

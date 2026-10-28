@@ -65,15 +65,56 @@ def _utc_date(air_ts: float) -> str:
 # every airing NO FEED OFFERED writes 1 — a calendar search followed, and a title
 # added to somebody's tracker (app/distrakt/arrival.py) — which is what lets the
 # fill's delete spare rows it would never put back. The name is narrower than
-# the meaning, "not from a feed"; see store_loose_airings and MIGRATION_37. Because
-# this is INSERT OR REPLACE on the airing's natural key, a feed row for the same
-# airing overwrites a searched one and returns it to 0, so the exemption ends the
-# moment the service starts listing the title itself.
+# the meaning, "not from a feed"; see store_loose_airings and MIGRATION_37.
+#
+# A SEARCHED ROW FILLS A GAP IN ITS SERVICE'S FEED, SO IT STANDS DOWN THE MOMENT
+# THE FEED LISTS THAT EPISODE — and the natural key alone could not say so. It
+# includes the INSTANT, and a service's per-title answer and its feed routinely
+# disagree on one: Simkl's lookups keep a premiere's day and its calendar files
+# give the time, so East of Eden's S01E01 was a date-only searched row at 00:00
+# UTC beside the feed's 07:00. Both stood, one service listed the episode twice,
+# and the read drew it as two cards (cache.join_listings puts one listing per
+# service in a card) — MEASURED, every such title on the dev instance once a
+# refill brought the feed's listing. So the rule is said by the EPISODE —
+# (source, media, source_id, endpoint, season, episode_number), the key less its
+# instant — in three places: a read drops a searched row whose service's feed
+# lists the episode (`_in_fetch_order`), a fill deletes the ones its records or
+# its span supersede (`store_span`), and a search writes none for an episode the
+# feed already lists (`store_loose_airings`).
 _INSERT_AIRING = """
 INSERT OR REPLACE INTO calendar_airings
     (source, media, source_id, endpoint, title_key, air_ts, air_date, date_only,
      season, episode_number, episode_label, stored_at, from_search)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+
+def _coordinate(record: Record) -> tuple[int, int]:
+    """The (season, episode_number) an airing row is keyed by, UNSTATED for
+    either half the source did not give."""
+    return (int(record.season if record.season is not None else UNSTATED),
+            int(record.episode_number if record.episode_number is not None else UNSTATED))
+
+
+# One service's searched rows of one episode on one calendar — the key less its
+# instant. Every column is in the primary key's leading half, so it is a seek.
+_SAME_EPISODE = ("source = ? AND media = ? AND source_id = ? AND endpoint = ? "
+                 "AND season = ? AND episode_number = ?")
+_DELETE_SUPERSEDED = f"DELETE FROM calendar_airings WHERE from_search = 1 AND {_SAME_EPISODE}"
+_FED_EPISODE = f"SELECT 1 FROM calendar_airings WHERE from_search = 0 AND {_SAME_EPISODE} LIMIT 1"
+
+# A span's searched rows of one source whose episode that source's feed lists,
+# at any date.
+_DELETE_SUPERSEDED_IN_SPAN = """
+DELETE FROM calendar_airings
+WHERE from_search = 1 AND endpoint = ? AND source = ? AND air_date >= ? AND air_date < ?
+  AND EXISTS (SELECT 1 FROM calendar_airings fed
+              WHERE fed.from_search = 0 AND fed.source = calendar_airings.source
+                AND fed.media = calendar_airings.media
+                AND fed.source_id = calendar_airings.source_id
+                AND fed.endpoint = calendar_airings.endpoint
+                AND fed.season = calendar_airings.season
+                AND fed.episode_number = calendar_airings.episode_number)
 """
 
 
@@ -85,12 +126,11 @@ def _airing_rows(conn: db.Connection, endpoint_key: str, records: list[Record], 
     keys = metadata.store_records(conn, records, now=now, stale_after=stale_after)
     out = []
     for record, key in zip(records, keys):
-        season = record.season if record.season is not None else UNSTATED
-        number = record.episode_number if record.episode_number is not None else UNSTATED
+        season, number = _coordinate(record)
         out.append((
             str(record.source), str(record.media), str(record.id), endpoint_key, key,
             float(record.air_ts), _utc_date(record.air_ts), 1 if record.date_only else 0,
-            int(season), int(number), str(record.episode_label or ""), now, from_search,
+            season, number, str(record.episode_label or ""), now, from_search,
         ))
     return out
 
@@ -140,9 +180,20 @@ async def store_span(endpoint_key: str, span_start: date, span_end: date,
                 "  AND source = ? AND endpoint = ? "
                 "AND air_date >= ? AND air_date < ?",
                 (name, endpoint_key, first, last))
+        # WHAT THE FEED NOW LISTS, NO SEARCH LISTS FOR IT: every searched row of an
+        # episode these records name, at any date (the comment above
+        # _INSERT_AIRING says why the key's instant cannot decide it).
+        conn.executemany(_DELETE_SUPERSEDED, sorted({
+            (str(r.source), str(r.media), str(r.id), endpoint_key, *_coordinate(r))
+            for r in inside}))
         conn.executemany(_INSERT_AIRING, _airing_rows(
             conn, endpoint_key, inside, now=now, stale_after=stale_after, from_search=0))
         replied = {*answered, *(str(s) for s in unchanged)}
+        # AND WHAT A SOURCE THAT SAID "UNCHANGED" ALREADY LISTED: its feed rows
+        # stand as they were, so a searched row in this span that one of them
+        # supersedes is taken here — the only write such a span gets.
+        conn.executemany(_DELETE_SUPERSEDED_IN_SPAN,
+                         [(endpoint_key, name, first, last) for name in sorted(replied)])
         conn.executemany(
             "INSERT INTO calendar_coverage "
             "(endpoint, span_start, source, asked, answered, stored_at, stale_after) "
@@ -157,8 +208,9 @@ async def store_span(endpoint_key: str, span_start: date, span_end: date,
 
 
 async def store_loose_airings(endpoint_key: str, records, *, now: int,
-                              stale_after: int) -> int:
-    """Store airings that no CALENDAR FEED offered, filling a gap in one.
+                              stale_after: int) -> list[Record]:
+    """Store airings that no CALENDAR FEED offered, filling a gap in one, and
+    return the ones written.
 
     WHY A SOURCE CAN BE MISSING ITS OWN TITLE. A service answers two different
     datasets about one show, and they disagree. Trakt's show record dates Half
@@ -174,30 +226,39 @@ async def store_loose_airings(endpoint_key: str, records, *, now: int,
 
     WRITTEN AS THE FEED WOULD HAVE WRITTEN IT, deliberately. Same source, same
     ids, same natural key, same title store — so a row here resolves and filters
-    and renders like every other, and a later fill of its span REPLACES it rather
-    than duplicating it. The records come back with their ids completed from the
+    and renders like every other, and a later fill listing the same episode
+    supersedes it rather than drawing it twice (the comment above
+    _INSERT_AIRING). The records come back with their ids completed from the
     title store (metadata.store_records), so a caller drawing them keys them as
     the calendar's read will.
+
+    NO GAP, NO ROW: an episode its service's feed already lists on this calendar
+    is not written at all, at whatever instant the feed gives it — the feed's
+    listing is the card, and a second listing from one service is a second card.
 
     NO COVERAGE ROW IS WRITTEN, and that is the important restraint. Coverage
     records which sources were ASKED about a window and which ANSWERED — this
     asked nobody about a window, so claiming coverage would tell the fill path a
     span had been fetched when it has not.
-
-    Returns how many airings were written.
     """
     records = list(records or ())
     if not records:
-        return 0
+        return []
 
-    def _write(conn):
+    def _write(conn) -> list[Record]:
+        gaps = [record for record in records
+                if conn.execute(_FED_EPISODE, (str(record.source), str(record.media),
+                                               str(record.id), endpoint_key,
+                                               *_coordinate(record))).fetchone() is None]
         conn.executemany(_INSERT_AIRING, _airing_rows(
-            conn, endpoint_key, records, now=now, stale_after=stale_after, from_search=1))
+            conn, endpoint_key, gaps, now=now, stale_after=stale_after, from_search=1))
+        return gaps
 
-    await db.transaction(_write)
-    logger.info("calendar search filled %d airing(s) on %s that no feed listed.",
-                len(records), endpoint_key)
-    return len(records)
+    written = await db.transaction(_write)
+    if written:
+        logger.info("calendar search filled %d airing(s) on %s that no feed listed.",
+                    len(written), endpoint_key)
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +272,7 @@ async def store_loose_airings(endpoint_key: str, records, *, now: int,
 # registered before the store knew its identity reads exactly as it always did.
 _READ_SQL = f"""
 SELECT a.source, a.media, a.source_id, a.title_key, a.air_ts, a.date_only,
-       a.season, a.episode_number, a.episode_label,
+       a.season, a.episode_number, a.episode_label, a.from_search,
        t.title, t.ids_json, t.detail_url, t.year, t.network, t.country,
        t.language, t.certification, t.status, t.overview, t.poster, t.runtime,
        t.genres_json, t.ratings_json, t.anime_type, t.release_types_json,
@@ -392,16 +453,32 @@ async def read_span_whole(endpoint_key: str, span_start: date, span_end: date
 
 
 def _in_fetch_order(found) -> list[Record]:
-    """Stored rows as Records, ordered as a fill would have produced them.
+    """Stored rows as Records, ordered as a fill would have produced them, less
+    every searched row whose service's feed lists the same episode among them.
 
     SQL has already ordered by air time; this settles the tie between two sources
     describing the same instant, which SQL cannot because the order is the
     registry's rather than any column's. A stable sort, so the query's own
     ordering survives inside each source.
+
+    A SEARCHED ROW STANDS DOWN FOR ITS FEED HERE TOO, not only when a fill
+    deletes it (store_span): a fill reaches a span only when it is due, and one
+    whose service answered "unchanged" — every frozen month — may not be filled
+    with data for weeks, nor ever by a share page. Every reader hands this an
+    episode's listings whole (read_span_whole, read_groups), so the feed's row is
+    among them wherever it falls.
     """
-    records = [_record_from_row(r) for r in found]
+    fed = {_episode_of_row(row) for row in found if not row["from_search"]}
+    records = [_record_from_row(r) for r in found
+               if not (r["from_search"] and _episode_of_row(r) in fed)]
     records.sort(key=lambda r: (r.air_ts, title_rows.SOURCE_ORDER.get(str(r.source), 99)))
     return records
+
+
+def _episode_of_row(row) -> tuple:
+    """A stored airing's episode for one service — its key less its instant (the
+    endpoint is the query's own)."""
+    return (row["source"], row["media"], row["source_id"], row["season"], row["episode_number"])
 
 
 # ---------------------------------------------------------------------------

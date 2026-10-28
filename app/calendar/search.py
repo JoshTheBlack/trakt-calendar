@@ -644,7 +644,7 @@ async def _complete_known_seasons(rows: list[Elsewhere]) -> int:
             row.endpoint_key, [row.record], now=now, stale_after=now + TITLE_STALE_SECONDS)
         if written:
             calendar_cache.forget_endpoint_spans(row.endpoint_key)
-        stored += written
+        stored += len(written)
     if stored:
         logger.info("calendar search: completed %d stored season(s) with a source's "
                     "own airing", stored)
@@ -716,10 +716,14 @@ async def fill_one_gap(settings, *, source, source_id: str, media: Media,
                                  [(season, when)])
     if not records:
         return []
-    await entries.store_loose_airings(
+    # An episode the service's own feed already lists is not written — its card
+    # is already there (entries.store_loose_airings) — so what comes back is what
+    # was, and a jump then lands on whichever card the month draws for it.
+    written = await entries.store_loose_airings(
         endpoint_key, records, now=now, stale_after=now + TITLE_STALE_SECONDS)
-    calendar_cache.forget_endpoint_spans(endpoint_key)
-    return records
+    if written:
+        calendar_cache.forget_endpoint_spans(endpoint_key)
+    return written
 
 
 # THE CALENDARS WHERE A CARD IS A SEASON'S PREMIERE OR A FILM'S RELEASE — the one

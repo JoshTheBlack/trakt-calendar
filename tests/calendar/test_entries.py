@@ -7,6 +7,7 @@ visible fault — the kind that is only ever found by looking.
 """
 from __future__ import annotations
 
+import dataclasses
 import unittest
 from datetime import date, timedelta
 
@@ -581,7 +582,7 @@ class AirningsWrittenWithoutAFeedTests(unittest.IsolatedAsyncioTestCase):
         to know about, or it would resolve, filter and render differently from
         the rows beside it."""
         written = await self._write([_record("halfman", 1, 1, AIR)])
-        self.assertEqual(written, 1)
+        self.assertEqual(len(written), 1)
         back, _asked, _answered, _at = await calendar_entries.read_span(
             SHOWS, date(2026, 7, 6), date(2026, 7, 13))
         self.assertEqual([r.title for r in back], ["Halfman"])
@@ -662,6 +663,105 @@ class AirningsWrittenWithoutAFeedTests(unittest.IsolatedAsyncioTestCase):
             await db.fetch_value("SELECT COUNT(*) FROM calendar_airings"), 0)
 
     async def test_nothing_to_write_touches_nothing(self):
-        self.assertEqual(await self._write([]), 0)
+        self.assertEqual(await self._write([]), [])
         self.assertEqual(
             await db.fetch_value("SELECT COUNT(*) FROM calendar_airings"), 0)
+
+
+class AServiceListsAnEpisodeOnceTests(unittest.IsolatedAsyncioTestCase):
+    """A searched row fills a gap in its service's FEED, so it stands down the
+    moment the feed lists that episode — whatever instant each gives it.
+
+    MEASURED, the reported fault: Simkl's per-title answer dates a premiere by
+    its day and its calendar file gives the time, so East of Eden's S01E01 was a
+    date-only searched row at 00:00 UTC (written by a tracker add) beside the
+    feed's 07:00 — the airing key includes the instant, both rows stood, and the
+    calendar drew the episode twice: one card with every service, one with
+    Simkl's feed alone. Every such title on the dev instance did it once a refill
+    brought the feed's listing."""
+
+    WEEK = date(2026, 9, 28)
+    DAY = 1790812800.0          # 2026-10-01 00:00 UTC
+    TIMED = DAY + 7 * 3600
+
+    async def asyncSetUp(self):
+        migrated_db("calonce")
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    def _simkl(self, air_ts, *, date_only):
+        return Record(source=Source.SIMKL, media=Media.SHOW, id="2080711",
+                      ids={"simkl": 2080711, "tmdb": "258165"}, detail_url="s",
+                      title="East of Eden", air_ts=air_ts, date_only=date_only, season=1,
+                      episode_number=1, episode_label="S01E01")
+
+    async def _searched(self):
+        return await calendar_entries.store_loose_airings(
+            "shows/premieres", [self._simkl(self.DAY, date_only=True)], now=1000,
+            stale_after=10**9)
+
+    async def _rows(self):
+        return [tuple(row) for row in await db.fetch_all(
+            "SELECT air_ts, from_search FROM calendar_airings ORDER BY air_ts")]
+
+    async def _read(self):
+        return await calendar_entries.read_span_whole(
+            "shows/premieres", self.WEEK, self.WEEK + timedelta(days=7))
+
+    async def test_a_read_draws_the_feeds_listing_and_not_the_searched_one(self):
+        """What is already stored, as the reported instance holds it, is right
+        at once — no fill needed, which a frozen month or a share page never
+        gets."""
+        await self._searched()
+        await db.execute(
+            "INSERT INTO calendar_airings (source, media, source_id, endpoint, title_key, "
+            "air_ts, air_date, date_only, season, episode_number, episode_label, stored_at, "
+            "from_search) VALUES ('simkl', 'show', '2080711', 'shows/premieres', "
+            "'show:tmdb:258165', ?, '2026-10-01', 0, 1, 1, 'S01E01', 2000, 0)", (self.TIMED,))
+        self.assertEqual([(r.air_ts, r.date_only) for r in await self._read()],
+                         [(self.TIMED, False)])
+
+    async def test_a_fill_listing_the_episode_takes_the_searched_row_away(self):
+        await self._searched()
+        await calendar_entries.store_span(
+            "shows/premieres", self.WEEK, self.WEEK + timedelta(days=7),
+            [self._simkl(self.TIMED, date_only=False)], sources=["simkl"], asked=["simkl"],
+            now=2000, stale_after=10**9)
+        self.assertEqual(await self._rows(), [(self.TIMED, 0)])
+
+    async def test_a_fill_that_says_unchanged_takes_it_away_too(self):
+        """A service that answered "unchanged" writes no airing, so the span's
+        searched rows its feed supersedes go in that store."""
+        await self._searched()
+        await db.execute(
+            "INSERT INTO calendar_airings (source, media, source_id, endpoint, title_key, "
+            "air_ts, air_date, date_only, season, episode_number, episode_label, stored_at, "
+            "from_search) VALUES ('simkl', 'show', '2080711', 'shows/premieres', "
+            "'show:tmdb:258165', ?, '2026-10-01', 0, 1, 1, 'S01E01', 2000, 0)", (self.TIMED,))
+        await calendar_entries.store_span(
+            "shows/premieres", self.WEEK, self.WEEK + timedelta(days=7), [], sources=[],
+            asked=["simkl"], unchanged=["simkl"], now=3000, stale_after=10**9)
+        self.assertEqual(await self._rows(), [(self.TIMED, 0)])
+
+    async def test_a_search_writes_nothing_for_an_episode_the_feed_lists(self):
+        await calendar_entries.store_span(
+            "shows/premieres", self.WEEK, self.WEEK + timedelta(days=7),
+            [self._simkl(self.TIMED, date_only=False)], sources=["simkl"], asked=["simkl"],
+            now=2000, stale_after=10**9)
+        self.assertEqual(await self._searched(), [])
+        self.assertEqual(await self._rows(), [(self.TIMED, 0)])
+
+    async def test_another_episode_of_the_title_is_still_a_gap(self):
+        """The rule is the EPISODE: a searched premiere of season 2 is untouched
+        by the feed's season 1."""
+        season_two = dataclasses.replace(self._simkl(self.DAY, date_only=True), season=2,
+                                         episode_label="S02E01")
+        await calendar_entries.store_loose_airings("shows/premieres", [season_two], now=1000,
+                                                   stale_after=10**9)
+        await calendar_entries.store_span(
+            "shows/premieres", self.WEEK, self.WEEK + timedelta(days=7),
+            [self._simkl(self.TIMED, date_only=False)], sources=["simkl"], asked=["simkl"],
+            now=2000, stale_after=10**9)
+        self.assertEqual(await self._rows(), [(self.DAY, 1), (self.TIMED, 0)])
+        self.assertEqual(len(await self._read()), 2)

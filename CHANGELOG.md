@@ -39,6 +39,7 @@ All notable changes to this project are documented here. Format loosely follows 
 - 🔗 **A custom share name saved after clearing one works.** Its `/c/` link used to answer "not found" from the start.
 - 🔓 **An administrator can unlink a Simkl account** from the admin page, and the Simkl token is revoked like Trakt's.
 - 📅 **"This calendar doesn't reach that month" offers a service that does**, never one with no calendar.
+- 📅 **A premiere found by a search or added to the tracker no longer shows twice once the service's own calendar lists it.** Filling the gap stored that service's date, and its calendar later gave the same episode a time, so both stood: one card with every service and a second with that service alone. The calendar's own listing now replaces the stored one, including for anything already stored.
 - 📥 **A show is no longer marked as already on Seerr because a film with the same TMDB number is.** TMDB numbers films and shows separately: having the film My Girl 2 in Seerr marked CBC's The Fifth Estate as requested. Seerr's library is now matched by medium as well as number.
 - ⏳ **The Unenriched count includes titles nobody has looked up yet.** It counted only titles whose lookup had already failed once, so a month that had just loaded read as settled while hundreds of titles were still waiting.
 - 🖼️ **A network logo or poster TMDB couldn't be asked about is tried again later**, instead of being remembered as having none.
