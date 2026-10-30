@@ -44,7 +44,7 @@ store WHAT.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
 # The registry through its MODULE OBJECT rather than as names bound off it, so a
@@ -170,12 +170,18 @@ class Answerer(NamedTuple):
     stored_only: bool
 
 
-def choose(settings, ids) -> Answerer | None:
+def choose(settings, ids, order: Sequence[str] | None = None) -> Answerer | None:
     """Who to ask about a title carrying `ids`, and the id to ask them by.
 
     `ids` is {namespace: value}, straight off the card. A source is asked by ITS
     OWN name in that map — `ids["trakt"]`, `ids["simkl"]` — because a service
     cannot look a title up by an id it does not issue.
+
+    `order` IS A VIEWER'S OWN, and only a question that is theirs passes one: the
+    tracker's episode totals (app/sources/prefs.py's `totals_order`). Every details
+    panel passes none and is asked in the declared order, so a panel and a card
+    keep agreeing about who describes a title; `order` reorders the candidates
+    and removes none.
 
     A SOURCE THAT CANNOT BE REACHED IS STILL WORTH ASKING OF THE LOCAL STORE,
     which is the second pass below. Every field a modal draws was cached the last
@@ -194,7 +200,7 @@ def choose(settings, ids) -> Answerer | None:
     finds nothing behind it is the other empty case, and only it can tell —
     reading the store is the only way to find out.
     """
-    known = known_ids(ids)
+    known = known_ids(ids, order)
     for source, value in known:
         if providers.get(source).detail_port.catalogue_configured(settings):
             return Answerer(source, value, stored_only=False)
@@ -203,13 +209,17 @@ def choose(settings, ids) -> Answerer | None:
     return None
 
 
-async def for_season(settings, ids, chosen: Answerer, ask, holds):
+async def for_season(settings, ids, chosen: Answerer, ask, holds,
+                     order: Sequence[str] | None = None):
     """(who answered, their answer) for ONE SEASON of a title: `chosen`'s answer,
     unless it holds nothing of that season and a later service the title names
     does.
 
     `ask(answerer)` asks one service; `holds(answer)` says whether the answer has
-    anything of the season in it (episodes, a total).
+    anything of the season in it (episodes, a total). `order` is the order the
+    later services are tried in and should be the one `chosen` was picked by: a
+    viewer who asked Trakt first for their totals and whose Trakt holds nothing
+    of a season goes on to their second choice, not to the declared one.
 
     WHY A SEASON CAN OUTRANK THE DECLARED ORDER. `choose` picks by id, and the ids
     on a title are one service's claim that two catalogues' entries are the same
@@ -232,7 +242,7 @@ async def for_season(settings, ids, chosen: Answerer, ask, holds):
     first = await ask(chosen)
     if holds(first) or chosen.stored_only:
         return chosen, first
-    for source, value in known_ids(ids):
+    for source, value in known_ids(ids, order):
         if (source == chosen.source
                 or not providers.get(source).detail_port.catalogue_configured(settings)):
             continue
@@ -246,11 +256,20 @@ async def for_season(settings, ids, chosen: Answerer, ask, holds):
     return chosen, first
 
 
-def known_ids(ids) -> list[tuple[Source, str]]:
+def known_ids(ids, order: Sequence[str] | None = None) -> list[tuple[Source, str]]:
     """(source, that source's own id) for every registered detail source `ids`
-    names, in declared order."""
-    return [(source, value) for source, _port in ports()
-            if (value := str((ids or {}).get(str(source)) or "").strip())]
+    names, in declared order — or in `order` first, where a caller states one.
+
+    A STATED ORDER ONLY MOVES SERVICES UP: a name in it that `ids` does not carry
+    is skipped, and a service it does not name keeps its declared place after the
+    ones it does, so an order written before a source existed cannot hide it.
+    """
+    found = [(source, value) for source, _port in ports()
+             if (value := str((ids or {}).get(str(source)) or "").strip())]
+    if not order:
+        return found
+    rank = {name: place for place, name in enumerate(order)}
+    return sorted(found, key=lambda pair: rank.get(str(pair[0]), len(rank)))
 
 
 async def seasons(settings, chosen: Answerer, media, *,

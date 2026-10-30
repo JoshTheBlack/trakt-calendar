@@ -773,10 +773,22 @@ body.hide-not-watching .day-block.is-skeleton[data-visible="0"] { display: none;
 .runtime-badge { top: 9px; left: 9px; color: var(--text-dim); }
 .ep-badge { bottom: 9px; left: 9px; border-color: rgba(79,163,224,0.5); color: var(--accent-blue); }
 .network-badge { bottom: 9px; right: 9px; max-width: 42%; overflow: hidden; text-overflow: ellipsis; border-color: rgba(79,163,224,0.5); color: var(--accent-blue); }
-/* When a TMDB logo loads, drop the badge chrome and show just the tile; on load
-   error (.no-logo) the img is hidden and the 📡 text fallback shows instead. */
+/* THE NETWORK LOGO IS TMDB'S OWN PICTURE THROUGH THE IMAGE PROXY, FRAMED HERE
+   (media/logos.py). Where a network has a logo the badge drops its chrome and
+   shows just the framed logo; where it has none (.no-logo) the img is absent and
+   the 📡 text fallback shows instead. The frame is what the Discord tile's plate
+   was before badges stopped being composited: a light plate for the usual dark or
+   coloured logo, a dark one for a LIGHT logo (.is-light, set from the stored
+   luminance), because a white logo on a white plate is no logo at all. The inset is
+   the tile's, scaled (14/128 of the side) so the logo breathes inside its plate. */
+.network-logo, .distrakt-logo {
+    --logo-plate: #fff; --logo-inset: 3px;
+    box-sizing: border-box; padding: var(--logo-inset); background: var(--logo-plate);
+    border-radius: 5px; object-fit: contain;
+}
+.network-logo.is-light, .distrakt-logo.is-light { --logo-plate: #2b2d31; }
 .network-badge:not(.no-logo) { padding: 0; background: none; border: none; backdrop-filter: none; }
-.network-badge .network-logo { display: block; height: 26px; width: 26px; border-radius: 6px; object-fit: contain; }
+.network-badge .network-logo { display: block; height: 26px; width: 26px; }
 .network-badge .network-fallback { display: none; }
 .network-badge.no-logo .network-logo { display: none; }
 .network-badge.no-logo .network-fallback { display: inline; }
@@ -2504,7 +2516,7 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
     flex: 0 0 auto; width: 26px; height: 26px; display: flex; align-items: center;
     justify-content: center; font-size: 0.72rem; color: var(--text-faint); overflow: hidden;
 }
-.distrakt-badge .distrakt-logo { max-width: 26px; max-height: 26px; border-radius: 5px; object-fit: contain; }
+.distrakt-badge .distrakt-logo { width: 26px; height: 26px; }
 /* The title's poster, beside the network badge rather than instead of it: the
    badge is the network (a film's is 🎬), the picture is the title. Small enough on a wide list that
    a row grows by a few pixels, not a thumbnail's height; a phone draws it larger
@@ -2676,12 +2688,12 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
    long name, and a phone's row does not draw it at all. */
 .distrakt-emoji-net { flex: 1 1 auto; min-width: 0; padding: 0 6px 0 4px; font-family: inherit; font-size: 0.74rem; color: var(--text-dim); }
 .distrakt-emoji-tools > .btn-ghost { flex: 0 0 auto; }
-/* The default emoji's own small panel, a popover under its pill in the header
-   (_distrakt_emoji_default.html). */
-.emoji-default-panel { width: 240px; padding: 10px; gap: 6px; white-space: normal; }
-.emoji-default-panel label { font-size: 0.78rem; font-weight: 600; color: var(--text-dim); }
-.emoji-default-panel input { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; }
-.emoji-default-panel .distrakt-note { margin: 0; font-size: 0.74rem; }
+/* The tracker settings dialog (_distrakt_settings.html): its controls are the
+   account page's rows, stacked, and the default emoji's field is monospace
+   because what it holds is a Discord code (":tv:") rather than prose. */
+.distrakt-settings-body { display: flex; flex-direction: column; gap: 12px; }
+.distrakt-settings-body input#emojiDefault { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; }
+.distrakt-settings-body .auth-sub { margin-top: 0; }
 /* The list switches' panel, a popover under its pill in the header
    (_distrakt_watchlists.html). Its width never exceeds a phone's, less the
    page's gutters, so the panel cannot push the page sideways. */
@@ -2772,7 +2784,7 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     /* On the facts line, so a line of text's height: the badge is sized down
        to it rather than making the second line taller than the first. */
     .distrakt-badge { width: 18px; height: 18px; }
-    .distrakt-badge .distrakt-logo { max-width: 18px; max-height: 18px; }
+    .distrakt-badge .distrakt-logo { width: 18px; height: 18px; --logo-inset: 2px; }
     /* ON A PHONE THE CODE TAKES THE NETWORK NAME'S PLACE. There is no
        width for both (a 390px row overflowed by 31px with the two side by side);
        the logo beside it already says which network it is, and editing the code

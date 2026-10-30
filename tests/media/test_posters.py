@@ -769,41 +769,9 @@ class TheAgeCeilingTests(unittest.TestCase):
 
 
 class LogoAgeCeilingTests(unittest.TestCase):
-    """The logo cache had NO sweep at all, and its tiles are TMDB-sourced.
-
-    AGE ONLY AND NO SIZE CAP, which is the deliberate asymmetry with the poster
-    cache: there are as many logos as there are networks, measured at a few
-    megabytes, so a byte budget would be a setting nobody could have a reason to
-    change.
-    """
-
-    def setUp(self):
-        logos.LOGO_DIR = TMP / f"logos-age-{id(self)}"
-        logos.LOGO_DIR.mkdir(parents=True)
-        self.now = 2_000_000_000.0
-
-    def _write(self, name: str, *, age_days: float) -> Path:
-        path = logos.LOGO_DIR / name
-        path.write_bytes(b"x" * 50)
-        when = self.now - age_days * 86400
-        os.utime(path, (when, when))
-        return path
-
-    def test_a_logo_past_the_ceiling_goes(self):
-        old = self._write("hbo.png", age_days=200)
-        fresh = self._write("netflix.png", age_days=5)
-        self.assertEqual(logos.sweep(now=self.now), 1)
-        self.assertFalse(old.exists())
-        self.assertTrue(fresh.exists())
-
-    def test_a_negative_marker_ages_out_too(self):
-        marker = self._write("obscure.none", age_days=200)
-        logos.sweep(now=self.now)
-        self.assertFalse(marker.exists())
-
-    def test_a_missing_directory_is_a_noop(self):
-        logos.LOGO_DIR = TMP / "logos-that-do-not-exist"
-        self.assertEqual(logos.sweep(now=self.now), 0)
+    """A network's logo is TMDB-sourced, so the ceiling the poster cache keeps is the
+    one it keeps. What the sweep does to the network_logos table is
+    tests/media/test_network_logos.py's; this holds the two to one number."""
 
     def test_the_ceiling_is_the_one_tmdb_states(self):
         """Read from the client that does the obtaining rather than restated, so

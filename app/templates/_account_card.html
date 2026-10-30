@@ -1,6 +1,6 @@
 {# THE ACCOUNT CARD, whole. Drawn by /me and by the one action that changes what
-   several of its sections offer — unlinking a service reaches the orders, the
-   retired list, the tracker notice and whether unlinking is still allowed. Every
+   several of its sections offer — unlinking a service reaches the order, the
+   tracker notice and whether unlinking is still allowed. Every
    other action answers only its own section, each of which is its own template
    included below. #}
 <div class="auth-card" id="accountCard">
@@ -80,11 +80,9 @@
 
   {% include '_account_identities.html' %}
 
-  {% with order_kind = 'tracker_order' %}{% include '_account_order.html' %}{% endwith %}
   {% with order_kind = 'metadata_order' %}{% include '_account_order.html' %}{% endwith %}
 
   {% include '_account_sharing.html' %}
-  {% include '_account_retired.html' %}
   {% include '_account_credentials.html' %}
 
   {# Both actions that used to sit here — open the calendar, sign out — are in

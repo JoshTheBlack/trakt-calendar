@@ -130,7 +130,14 @@ in a tracker backup, and `app/distrakt/backup.py` says why.
 `app/providers/base.py`'s `Source` declares TMDB first, and that ORDER is the
 app's one order: who describes a title (the details panel and the tracker's
 season totals, through `detail_source`), whose value a card shows for a viewer
-with no stated order, whose artwork is tried first. TMDB keeps no watch history,
+with no stated order, whose artwork is tried first. ONE VIEWER'S STATEMENT
+REORDERS A PART OF IT, never a part it was not asked about: the tracker's season
+TOTALS have an order of their own (`SourcePrefs.totals_order`, stated in the
+tracker's settings dialog, `app/distrakt/tracker_settings.py`), passed down as
+`order` to `detail_source.choose` / `for_season` and nowhere else — so it changes
+WHO IS ASKED for a total and nothing about a card, a panel or a picture, and a
+frozen month keeps the totals it recorded. A caller that passes no order is asked
+in the declared one, which is every details panel. TMDB keeps no watch history,
 so it is never a tracker source (`providers.tracker_sources`), and a tracker
 preference may not name it (`app/sources/prefs.py`). It IS a calendar source for
 Series, Season and Movie Premieres (`app/providers/tmdb/calendar.py`; finales
@@ -486,6 +493,25 @@ front of the refresh queue; transient notes when and nothing else. Deduped per
 address, bounded per minute, one heal per title per few hours, and every step
 logged at INFO by the title's key. A share page keeps the static chain, and an
 instance with no public base URL has no absolute address to report to.
+
+**A network's badge is TMDB's logo through the image proxy, and one table row is
+the whole record.** `app/media/logos.py` owns it. `network_logos` holds, per
+network NAME, the TMDB network id, the logo path, whether the logo is light
+(mean luminance of the very PNG the proxy hands the browser, which picks the
+CSS frame — `.is-light` is a dark frame, never a second picture) and the clocks;
+a page asks `logos.for_page` (signed in; it also warms what is due, behind the
+response, one warm in flight, eight at a time) or `logos.known` (a share page,
+which never asks anybody) ONCE for every badge on it — no badge costs a lookup or
+a request of its own, and a network with no row, a recorded "no logo" or a row
+past the ceiling is the 📡 with its name. A look-up that could not get an answer
+(TMDB down, the proxy down, a show TMDB does not know) is NEVER recorded as "no
+logo"; a show whose networks do not name the network is no evidence about it
+(it used to fall back to the show's first network and drew BBC Two with Channel
+4's logo), so up to `TITLES_TRIED` shows are asked. A row is TMDB's, so it is
+rewritten whole, drawn only inside `MAX_CACHE_SECONDS` and swept by it, and renewed
+monthly while it is on a page. Only the Discord emoji download composites bytes
+(`logos.download_tile`, Pillow in a worker thread, kept nowhere); the old tiles in
+`data/logos` are removed at start.
 
 **There is one details panel, and one way of opening it.** `templates/_details.html`
 draws what a title is, rendered through `app/details_panel.py` — which names the

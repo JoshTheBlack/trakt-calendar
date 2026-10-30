@@ -677,10 +677,8 @@ ACCOUNT_SECTIONS = {
     "avatar": "_account_avatar.html",
     "names": "_account_names.html",
     "identities": "_account_identities.html",
-    "tracker_order": "_account_order.html",
     "metadata_order": "_account_order.html",
     "sharing": "_account_sharing.html",
-    "retired": "_account_retired.html",
     "credentials": "_account_credentials.html",
 }
 
@@ -715,8 +713,7 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
     if "simkl" in linked and await simkl_routes.access_token_for_user(user.user_id) is None:
         needs_reconnect.add("simkl")
     account = await auth.get_user(user.user_id)
-    orders = await _account_orders(user.user_id, linked, settings)
-    tracker_prefs = orders.prefs
+    orders = await _account_orders(user.user_id, settings)
     prefs = await auth.get_user_prefs(user.user_id)
     return {
         "request": request,
@@ -755,33 +752,7 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
         "tracker_services_missing": [
             provider.label for source, provider in providers.registered().items()
             if str(source) in providers.tracker_sources() and str(source) not in linked],
-        "orders": {"tracker_order": orders.tracker, "metadata_order": orders.metadata},
-        # WHOSE STORED NUMBERS STILL COUNT — every tracker service, linked or not.
-        #
-        # DELIBERATELY NOT NARROWED TO THE LINKED ONES, and narrowing it would
-        # remove the only row that matters: the service somebody wants to retire
-        # is almost always one they have ALREADY unlinked, which is what left its
-        # numbers stranded and every row amber in the first place.
-        #
-        # NOR NARROWED TO SERVICES THAT HAVE ACTUALLY CONTRIBUTED, which would be
-        # the tighter list and cannot be built from here. Which services a viewer
-        # has stored numbers from is the tracker's fact, and auth is a LAYER every
-        # feature may depend on and which depends on none of them
-        # (tests/kernel/test_layering.py) — reaching into distrakt for a nicer
-        # switch list would invert that for cosmetics. A switch over a service
-        # that contributed nothing simply does nothing, and says so.
-        # IN DECLARED ORDER — `tracker_sources()` is a frozenset and iterating it
-        # would put the switches in whatever order the set happened to hash into,
-        # which changes between runs and disagrees with every other per-service
-        # list on this page.
-        "tracker_retirable": [
-            {"source": str(source),
-             "label": provider.label,
-             "linked": str(source) in linked,
-             "counted": tracker_prefs.counts_tracker(source)}
-            for source, provider in providers.registered().items()
-            if str(source) in providers.tracker_sources()
-        ],
+        "orders": {"metadata_order": orders.metadata},
         "trakt_login_configured": settings.trakt_login_configured,
         "simkl_login_configured": settings.simkl_login_configured,
         # Whether unlinking is offered at all. Without a password an account's
@@ -833,38 +804,34 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
 
 @dataclasses.dataclass(frozen=True)
 class _Orders:
-    """The two "which service leads" lists the page offers, as it shows them."""
+    """The "whose description is read" list the page offers, as it shows it."""
     prefs: object
-    tracker: list[dict]
     metadata: list[dict]
 
 
-async def _account_orders(user_id: int, linked: dict, settings: Settings) -> _Orders:
-    """Which linked tracker decides, and whose description of a title is read, each
-    in the order it is currently asked in.
+async def _account_orders(user_id: int, settings: Settings) -> _Orders:
+    """Whose description of a title is read, in the order it is currently asked in.
 
-    WHICH LINKED TRACKER DECIDES: only the ones this account has LINKED, because
-    the choice is between services that actually answer — a service with no
-    identity here decides nothing, and offering it would be offering a preference
-    with no effect. Empty when fewer than two are linked, which is what hides the
-    control: there is no order to state when one service answers.
+    WHICH LINKED TRACKER DECIDES, WHOSE STORED NUMBERS STILL COUNT AND WHERE A
+    SEASON'S EPISODE TOTAL IS ASKED OF ARE NOT HERE: they are about the tracker and
+    sit in the tracker's own settings dialog (app/distrakt/tracker_settings.py).
+    This page keeps what is about the account.
 
-    WHOSE DESCRIPTION IS READ: NOT narrowed to what is linked, and this is where the
-    two differ sharply. A calendar is read with the instance's own credentials or
-    with none at all, so every source this instance can fill a calendar from
+    WHOSE DESCRIPTION IS READ: every source that can describe titles for this
+    instance, linked or not. A calendar is read with the instance's own credentials
+    or with none at all, so every source this instance can fill a calendar from
     describes titles for every account — asked through the registry's own function,
     so an operator switching one off empties this control by the same rule that
-    empties the calendar.
+    empties the calendar. Empty when fewer than two can describe, which is what
+    hides the control: there is no order to state when one service answers.
 
-    BOTH ARE ORDERED THROUGH THE FUNCTION THAT ACTS ON THEM (prefs.tracker_order,
-    prefs.source_order) rather than by reading the stored lists here. A screen with
-    its own reading of a preference could disagree with the code acting on it, and
-    a viewer would have no way to tell which was lying. The same lists are what a
-    move reorders (move_account_order), so a press moves what the viewer saw.
+    ORDERED THROUGH THE FUNCTION THAT ACTS ON IT (prefs.source_order) rather than
+    by reading the stored list here. A screen with its own reading of a preference
+    could disagree with the code acting on it, and a viewer would have no way to
+    tell which was lying. The same list is what a move reorders
+    (move_account_order), so a press moves what the viewer saw.
     """
     source_prefs = await _source_prefs().load(user_id)
-    linked_trackers = [str(source) for source in providers.registered()
-                       if str(source) in providers.tracker_sources() and str(source) in linked]
     # AND EVERY SOURCE THAT DESCRIBES TITLES WITHOUT PUBLISHING A CALENDAR, when
     # this instance can ask it (TMDB): its answers are the pictures and the
     # details a viewer reads, so an order that left it out would be an order the
@@ -881,8 +848,6 @@ async def _account_orders(user_id: int, linked: dict, settings: Settings) -> _Or
 
     return _Orders(
         prefs=source_prefs,
-        tracker=entries(source_prefs.tracker_order(linked_trackers))
-        if len(linked_trackers) > 1 else [],
         metadata=entries(source_prefs.source_order(describing)) if len(describing) > 1 else [],
     )
 
@@ -896,8 +861,8 @@ async def _section(request: Request, session_id: str, section: str, **notes) -> 
 
 async def _card(request: Request, session_id: str, **notes) -> Response:
     """The whole account card, for an action that changes what several sections
-    offer — unlinking a service reaches the orders, the retired list, the tracker
-    notice and whether unlinking is still allowed at all."""
+    offer — unlinking a service reaches the order, the tracker notice and whether
+    unlinking is still allowed at all."""
     return templates.TemplateResponse(
         request, "_account_card.html", await _account_context(request, session_id, **notes))
 
@@ -940,8 +905,8 @@ async def unlink_identity(request: Request):
 
 @guard.post("/me/order/{kind}", AuthLevel.SESSION)
 async def move_account_order(kind: str, request: Request):
-    """Move one service a place up or down in one of the two "which service leads"
-    lists, and answer with that list.
+    """Move one service a place up or down in the "whose description is read" list,
+    and answer with that list.
 
     A MOVE, NOT THE WHOLE LIST FROM THE BROWSER. The page used to reorder its own
     DOM and post back what it read out of it; the server now takes the list it
@@ -954,27 +919,17 @@ async def move_account_order(kind: str, request: Request):
     about the other two. `source_prefs.save` is what refuses a name this app has
     never heard of and one named twice.
 
-    WHICH LINKED TRACKER DECIDES is not narrowed to what is linked TODAY when it is
-    stored — somebody who unlinks Trakt for a month has not stopped preferring it —
-    but the list this page offers is the linked services, and a press reorders
-    what was offered. What is linked decides who is ASKED
-    (watch_history.tracker_ports); this decides who leads among those that answer.
-
-    WHOSE DESCRIPTION IS READ is a reordering and never a filter: whether a service
-    appears on this account's calendar at all is stated in the calendar's own
-    filters panel.
+    A REORDERING AND NEVER A FILTER: whether a service appears on this account's
+    calendar at all is stated in the calendar's own filters panel. The tracker's
+    own lists are moved from the tracker's settings dialog, not here.
     """
     user = await auth.require_session(request)
     data = await authz.json_body(request)
-    field = {"tracker_order": "tracker_priority", "metadata_order": "metadata_order"}.get(kind)
-    if field is None:
-        return await _section(request, user.session_id, "tracker_order",
-                              order_message="There is no such list.", order_kind="tracker_order")
-    identities = await auth.list_identities(user.user_id)
-    linked = {row["provider"]: row["display_name"] for row in identities}
-    orders = await _account_orders(user.user_id, linked, load_settings())
-    names = [entry["source"] for entry in
-             (orders.tracker if kind == "tracker_order" else orders.metadata)]
+    if kind != "metadata_order":
+        return await _section(request, user.session_id, "metadata_order",
+                              order_message="There is no such list.", order_kind="metadata_order")
+    orders = await _account_orders(user.user_id, load_settings())
+    names = [entry["source"] for entry in orders.metadata]
     source = str(data.get("source") or "")
     step = {"up": -1, "down": 1}.get(str(data.get("direction") or ""))
     if source not in names or step is None or not 0 <= names.index(source) + step < len(names):
@@ -983,64 +938,12 @@ async def move_account_order(kind: str, request: Request):
     at = names.index(source)
     names[at], names[at + step] = names[at + step], names[at]
     try:
-        await _source_prefs().save(dataclasses.replace(orders.prefs, **{field: names}))
+        await _source_prefs().save(dataclasses.replace(orders.prefs, metadata_order=names))
     except ValueError as exc:
         return await _section(request, user.session_id, kind, order_kind=kind,
                               order_message=str(exc))
     return await _section(request, user.session_id, kind, order_kind=kind,
                           order_moved=f"{source}-{data.get('direction')}")
-
-
-@guard.post("/me/tracker-retired", AuthLevel.SESSION)
-async def set_own_retired_trackers(request: Request):
-    """State which services' stored numbers this account no longer counts.
-
-    THE EXIT FROM A STATE THAT HAD NONE. Unlinking stops a service being ASKED,
-    which already worked; it could not stop the numbers it had already
-    contributed from counting, so every row it ever touched stayed amber for ever
-    and an account that had genuinely migrated read as permanently degraded. This
-    is how somebody says "I have moved off that one".
-
-    THE WHOLE SET IS THE ANSWER, like the order beside it and for the same reason:
-    "retire this one" says nothing about the others. The list is a form of one box
-    per service, `counted:<service>`, each with a hidden "0" before it so an
-    unticked box is still MENTIONED — a service the body does not name at all is
-    refused rather than read as retired, because that is a page that did not draw
-    it, not a person who unticked it.
-
-    NOT NARROWED TO WHAT IS LINKED TODAY, also like the order: retiring a service
-    and then re-linking it is a real sequence, and dropping the name on the way in
-    would silently un-retire it. `source_prefs.save` refuses a name this app has
-    never heard of.
-
-    NOTHING IS DELETED, HERE OR ANYWHERE THIS REACHES. The numbers stay where they
-    are and the rows still show them, marked as retired — because un-retiring has
-    to be able to put them straight back, and because a number that vanished
-    without explanation is the invisibility the freshness states exist to remove.
-    A FROZEN MONTH IS NOT TOUCHED AT ALL: what a month recorded is not a live
-    claim, and a preference stated today must not re-answer an earlier month.
-    """
-    user = await auth.require_session(request)
-    data = await authz.json_body(request)
-    prefix = "counted:"
-    mentioned = {key[len(prefix):]: value for key, value in data.items() if key.startswith(prefix)}
-    trackers = [str(source) for source in providers.registered()
-                if str(source) in providers.tracker_sources()]
-    unknown = sorted(set(mentioned) - set(trackers))
-    missing = [name for name in trackers if name not in mentioned]
-    if unknown or missing:
-        return await _section(request, user.session_id, "retired", retired_message=(
-            f"Unknown service: {', '.join(unknown)}." if unknown
-            else "Every service has to be stated. Reload the page and try again."))
-    source_prefs = _source_prefs()
-    prefs = await source_prefs.load(user.user_id)
-    try:
-        await source_prefs.save(dataclasses.replace(
-            prefs, tracker_retired=[name for name in trackers
-                                    if not route_params.ticked(mentioned[name])]))
-    except ValueError as exc:
-        return await _section(request, user.session_id, "retired", retired_message=str(exc))
-    return await _section(request, user.session_id, "retired")
 
 
 @guard.post("/me/share-watch-history", AuthLevel.SESSION)

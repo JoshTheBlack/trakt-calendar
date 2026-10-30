@@ -152,10 +152,9 @@ async def _sweep_auth_rows() -> None:
     # as the poster sightings above.
     await ranker_core.sweep_removals(now)
     await anyio.to_thread.run_sync(posters.sweep, settings.poster_cache_max_bytes)
-    # And the network logos, which have no size budget of their own — there are
-    # as many as there are networks — but ARE TMDB-sourced, so the same six-month
-    # ceiling applies to them. Nothing swept them at all before this.
-    await anyio.to_thread.run_sync(logos.sweep)
+    # And the network logos: rows of a table now, TMDB-sourced, so the same
+    # six-month ceiling applies to them as to the poster registry's TMDB rows.
+    await logos.sweep(now)
     # And the rendered share cards, which age out at 90 days and are held under
     # their own byte budget behind that. Same worker-thread reason as the posters
     # above: it is a directory walk, and it is deliberately here rather than on
@@ -234,6 +233,10 @@ async def lifespan(_app: FastAPI):
     # The detail-lookup cache moved into the api_cache table; drop the old
     # data/cache/*.json directory now that the schema that replaces it is in place.
     cache.discard_legacy_dir()
+    # The network logo tiles the old pipeline wrote to disk: badges are drawn
+    # through the image proxy from the network_logos table now, and nothing reads
+    # the files.
+    logos.discard_legacy_tiles()
     # Generated once and persisted: this UUID names the INSTALLATION to Plex,
     # not any particular user, and every PIN request needs it.
     await plex_auth.ensure_client_identifier()

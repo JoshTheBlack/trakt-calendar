@@ -285,8 +285,9 @@ the floor already applies shows in their 🎚️ Filters ticked and fixed.
 
 With a TMDB token in Settings, TMDB is the first service asked about any title that
 carries a TMDB id — which is nearly every title Trakt or Simkl lists. It describes the
-title in the details panel, gives the tracker its season totals, supplies posters and
-network logos, and adds its videos to the panel's menu. Trakt and Simkl answer what TMDB
+title in the details panel, gives the tracker its season totals (in an order that tracker's
+own settings can change), supplies posters and network logos, and adds its videos to the
+panel's menu. Trakt and Simkl answer what TMDB
 doesn't know, and a season TMDB has no episodes of goes to the next service that does.
 Anyone who set their own service order on their **Account** page keeps it; TMDB comes after
 the services they named.
@@ -537,6 +538,7 @@ app/
     routes.py         The ███████ page and its API
     backfill.py       Filling in never-███████ months from █████ ███████
     █████_███████.py  The incremental per-user █████ cache the ███████ reads
+    ███████_settings.py  The settings dialog's lists, and what its controls save
     ███████_fmt.py    Which bucket a show is in, and the two ███████ posts
     prune.py          A hand-run pass over stored months (python -m)
   ranker/
@@ -552,7 +554,8 @@ app/
   media/
     posters.py        Which picture a title has, and the tiles on disk that the
                        share card and a board export composite
-    logos.py          Network logo tiles
+    logos.py          Which logo a network has (a table; badges draw it through the
+                       image proxy), and the one tile a download composites
     artwork.py        Poster URL bookkeeping (show_posters, season_posters, a
                        title known to have none); no downloads
     user_images.py    Per-user avatar and grid-header images

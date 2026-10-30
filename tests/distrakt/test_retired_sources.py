@@ -149,3 +149,36 @@ class AFrozenMonthIsNeverReAnsweredTests(unittest.TestCase):
                                       ("trakt", "simkl"))
         self.assertIn("Trakt: 4 of 12", frozen)
         self.assertNotIn("retired", frozen)
+
+
+class ARetiredServiceIsNotAMissingOneTests(unittest.TestCase):
+    """Retiring a service takes its numbers out of the count, and a row whose only
+    number now comes from the service that is still counted is NOT a disagreement.
+    The split mark (red) asks whether every service READ for the account holds the
+    season, and a retired service is still read — so retiring Trakt turned nearly
+    every row red, each looking like Trakt had said nothing the other had said."""
+
+    def _show(self, retired, watched):
+        from types import SimpleNamespace
+        rec = {"media": "show", "season": 1, "ids": {"trakt": 1, "simkl": 2}, "total": 10}
+        show = dict(rec, total=10)
+        live._apply_counts(show, rec, watched,
+                           SimpleNamespace(trakt_catalogue_configured=True,
+                                           simkl_catalogue_configured=True,
+                                           tmdb_configured=False),
+                           asked=("trakt", "simkl"), retired=frozenset(retired),
+                           described_by="trakt")
+        return show
+
+    def test_a_season_only_the_counted_service_holds_is_not_split(self):
+        show = self._show({"trakt"}, {"simkl": 4})
+        self.assertEqual((show["count_label"], show["count_split"]), ("4/10", False))
+        self.assertEqual(show["counts"], "4/10")
+
+    def test_nothing_retired_still_marks_a_season_only_one_service_holds(self):
+        show = self._show(set(), {"simkl": 4})
+        self.assertTrue(show["count_split"])
+
+    def test_a_real_disagreement_among_counted_services_is_still_split(self):
+        show = self._show({"tmdb"}, {"trakt": 3, "simkl": 4})
+        self.assertTrue(show["count_split"])

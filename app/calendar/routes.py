@@ -29,7 +29,7 @@ from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from markupsafe import Markup
 
 from . import (cache as calendar_cache, enrich as calendar_enrich,
@@ -964,73 +964,24 @@ def _month_date(value, year: int, month: int) -> date | None:
     return parsed
 
 
-# AT MOST ONE LOGO WARM-UP IN FLIGHT FOR THE WHOLE PROCESS. Every calendar
-# render can find missing tiles, and a busy instance would otherwise start a task
-# per request, all resolving the same networks against the same rate-limited API.
-# One at a time is enough: the work is idempotent and whatever this pass misses
-# the next render asks for again.
-_logo_warm_running = False
-
-
-def _warm_logos_later(settings, roster) -> None:
-    """Build the missing network tiles off the back of this request."""
-    global _logo_warm_running
-    if _logo_warm_running:
-        return
-    _logo_warm_running = True
-
-    async def _run():
-        global _logo_warm_running
-        try:
-            await logos.ensure_logos(settings, roster)
-        except Exception:
-            # Best-effort by design: a network whose tile cannot be built shows
-            # the emoji, which is exactly what it showed before. Never let it
-            # reach the request that scheduled it — that request has long since
-            # been answered.
-            logger.exception("network logo warm-up failed")
-        finally:
-            _logo_warm_running = False
-
-    asyncio.create_task(_run())
-
-
-async def _logo_networks(settings, items) -> set[str]:
-    """Which of these cards' networks this instance actually holds a tile for.
+async def _logo_networks(settings, items) -> dict[str, logos.Logo]:
+    """The badge each of these cards' networks has, {name: Logo} — a network absent
+    from the answer is drawn as the 📡 with its name.
 
     ONE QUESTION ANSWERED PER RESPONSE INSTEAD OF ONE REQUEST PER CARD. A network
-    badge is its logo where there is one and the viewer's emoji where there is
-    not, and the calendar used to settle that by pointing every badge at
-    /api/network-logo and handling the 404 in an `onerror`. Measured on a real
-    All Episodes September: 99 requests per load, every one of them a 404, all
-    competing with the day blocks and season lines for the browser's six
-    connections — to learn something the filesystem answers here for nothing.
+    badge is its logo where there is one and the fallback where there is not, and
+    the calendar used to settle that by pointing every badge at a logo route and
+    handling the 404 in an `onerror`. Measured on a real All Episodes September: 99
+    requests per load, every one of them a 404, all competing with the day blocks
+    and season lines for the browser's six connections — to learn something one
+    table read answers.
 
-    THE TRACKER ALREADY DID IT THIS WAY and `logos.tiled` was written for it; the
-    calendar simply never adopted it. This is that function, with the warm-up the
-    same page needs in front of it.
-
-    WARMED FIRST, BECAUSE OTHERWISE NOTHING WOULD EVER GENERATE ONE. The 404 was
-    not only a fallback, it was also the trigger: /api/network-logo builds a
-    missing tile on demand. Asking `tiled` without warming would mean a network
-    the calendar alone shows never getting a logo at all. `ensure_logos` is a
-    path check per already-known network and does real work only for the
-    genuinely missing, which is what makes it safe on every load.
+    THE NETWORKS NOT YET RESOLVED ARE RESOLVED BEHIND THIS RESPONSE
+    (`logos.for_page`), so a new network's logo appears on the next load rather
+    than delaying this one.
     """
     roster = {(item.network, item.ids.get("tmdb")) for item in items if item.network}
-    known = logos.tiled(network for network, _tmdb in roster)
-    # GENERATING THE MISSING ONES DOES NOT HAPPEN ON THIS REQUEST. Warming inline
-    # was the first shape and it cost the render 190ms warm and seven seconds
-    # cold, because a network nobody has resolved yet means a TMDB lookup and
-    # there can be a hundred of them on one month. The page draws the tiles that
-    # exist and asks for the rest to be built behind it, so a new network's logo
-    # appears on the next load rather than delaying this one — the same bargain
-    # the enrichment drain makes, and for the same reason.
-    missing = [(network, tmdb) for network, tmdb in roster
-               if network not in known and not logos.is_negative(network)]
-    if missing:
-        _warm_logos_later(settings, missing)
-    return known
+    return await logos.for_page(settings, roster)
 
 
 async def _card_pictures(user, settings) -> metadata_pictures.CardPictures:
@@ -1298,7 +1249,7 @@ async def calendar_day(request: Request):
         "partial": False,
         # Replaced below once this day's items are known; the error path renders
         # no cards, so an empty set is the right answer for it.
-        "logo_networks": set(),
+        "logo_networks": {},
     }
     try:
         with span("calendar.day", endpoint=endpoint.key, day=day.isoformat()) as sp:
@@ -2906,34 +2857,3 @@ async def post_me_timezone(request: Request):
     if await share_links.get(user.user_id) is not None:
         await share_links.update_owner_defaults(user.user_id, timezone=tz_name)
     return Response(status_code=204, headers={"HX-Refresh": "true"})
-
-
-# `private` rather than `public`: this response now requires a session, so a
-# shared cache in front of the app has no business holding a copy.
-_LOGO_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
-
-
-@guard.get("/api/network-logo", AuthLevel.CALENDAR_APPROVED)
-async def api_network_logo(request: Request):
-    """A processed network-logo PNG tile for a network name (calendar + distrakt).
-
-    Calendar-level, which is where these are overwhelmingly requested from. The
-    distrakt page shows them too, so a user approved for distrakt but NOT for the
-    calendar sees the emoji fallback there instead of logos — the same thing that
-    happens for any network without a logo, and not worth a second access level.
-
-    Generates it from TMDB on first request when `tmdb` is supplied and a TMDB key
-    is set; serves the disk cache thereafter. 404 -> the caller falls back to the
-    emoji/text tag."""
-    name = (request.query_params.get("name") or "").strip()
-    tmdb = request.query_params.get("tmdb")
-    if not name:
-        return Response(status_code=404)
-    path = logos.cached_tile(name)
-    if path is None and not logos.is_negative(name):
-        path = await logos.ensure_logo(load_settings(), name, tmdb)
-    if path is None or not path.exists():
-        return Response(status_code=404, headers=_LOGO_CACHE_HEADERS)
-    # ?download=1 -> attachment (for the emoji-map "download logo" button).
-    filename = f"{logos.slug(name)}.png" if request.query_params.get("download") else None
-    return FileResponse(path, media_type="image/png", filename=filename, headers=_LOGO_CACHE_HEADERS)

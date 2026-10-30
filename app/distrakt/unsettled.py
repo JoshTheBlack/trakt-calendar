@@ -170,7 +170,8 @@ async def settle(user_id: int, settings) -> None:
             # being rendered around. A degraded lookup here is not a gap in what is
             # shown, it is a wrong answer written down for ever.
             details = await live.fetch_season_details(
-                settings, records, fresh=False, allow_degrade=False)
+                settings, records, fresh=False, allow_degrade=False,
+                order=await live.totals_order(user_id))
         except TraktError as exc:
             logger.warning(
                 "Held tracker rows for %s could not be settled yet (Trakt "

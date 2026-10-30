@@ -1,6 +1,6 @@
 """One account's source preferences, read and written.
 
-Backs the `source_prefs` table. Three facts live here:
+Backs the `source_prefs` table. Four facts live here:
 
   - CALENDAR SOURCES: which services this account's calendar shows. Stated in
     the 🎚️ Filters panel beside the genre and certification narrowing, because
@@ -15,6 +15,11 @@ Backs the `source_prefs` table. Three facts live here:
     Separate from the metadata order beside them because they settle different
     arguments — that one picks whose description of a title a viewer reads,
     these pick whose COUNT the bucket rule acts on and a frozen month keeps.
+  - SEASON TOTALS ORDER: which catalogue a tracker row's EPISODE TOTAL is asked
+    of. A third argument beside the two above — description, count, total — and
+    kept apart from them for that reason (`totals_order`). The tracker's own
+    settings dialog states it and the two before it; the account page keeps the
+    metadata order.
 
 WHAT USED TO BE HERE AND IS NOT. A per-FIELD precedence map let an account name
 a different service for the overview than for the poster; a `tracker_source`
@@ -185,6 +190,9 @@ class SourcePrefs:
     # See `counts_tracker`. Empty means "count everything", which is what every
     # account had before this existed.
     tracker_retired: list = field(default_factory=list)
+    # Catalogue names, most trusted first. See `totals_order`. Empty means "no
+    # opinion" and leaves the registry's declared order standing.
+    season_totals_order: list = field(default_factory=list)
 
     def admits_calendar(self, source: Source | str) -> bool:
         """Whether this account's calendar shows `source`.
@@ -269,6 +277,41 @@ class SourcePrefs:
         preferred: list[str] = []
         for candidate in _as_order(self.metadata_order):
             if candidate in names and candidate not in preferred:
+                preferred.append(candidate)
+        return preferred + [name for name in names if name not in preferred]
+
+    def totals_order(self, sources) -> list[str]:
+        """`sources` reordered so the catalogue this account wants asked first
+        comes first — WHICH SERVICE ANSWERS HOW LONG A TRACKER ROW'S SEASON IS.
+
+        A THIRD ORDER, KEPT APART FROM THE TWO BESIDE IT, because it settles a
+        third argument. The metadata order picks whose DESCRIPTION of a title a
+        viewer reads; the tracker order picks whose WATCHED COUNT decides; this
+        picks whose EPISODE TOTAL a row is measured against. Somebody can
+        reasonably want TMDB's words on a card and Trakt's season lengths in
+        their tracker, and folding the three together would make one preference
+        silently move the other two.
+
+        IT CHANGES WHO IS ASKED AND NOTHING ELSE. A reordering and never a
+        filter, like the orders above: a season only one catalogue holds is still
+        that catalogue's, because the handover that asks the next service when
+        the first has none of a season (providers/detail_source.py's `for_season`)
+        runs down this same order. A frozen month is not touched: what a month
+        recorded is not a live claim, and a preference stated today must not
+        re-answer an earlier month.
+
+        `sources` IS THE SET THAT COULD ANSWER — a title's own ids, narrowed to
+        the catalogues this instance can ask — and a name stated here but absent
+        from it decides nothing. Anything unrecognised falls out on the way past,
+        and an account that has stated nothing gets `sources` back in the
+        caller's own order, which is the registry's declared one (TMDB, Trakt,
+        Simkl).
+        """
+        names = [str(source) for source in sources]
+        stated = self.season_totals_order if isinstance(self.season_totals_order, list) else []
+        preferred = []
+        for candidate in stated:
+            if isinstance(candidate, str) and candidate in names and candidate not in preferred:
                 preferred.append(candidate)
         return preferred + [name for name in names if name not in preferred]
 
@@ -451,7 +494,8 @@ async def load(user_id: int) -> SourcePrefs:
     """This account's preferences, or the defaults if it has stated none."""
     row = await db.fetch_one(
         "SELECT calendar_source, movie_calendar_source, metadata_order_json, "
-        "tracker_order_json, tracker_retired_json FROM source_prefs WHERE user_id = ?",
+        "tracker_order_json, tracker_retired_json, season_totals_order_json "
+        "FROM source_prefs WHERE user_id = ?",
         (user_id,),
     )
     if row is None:
@@ -466,6 +510,7 @@ async def load(user_id: int) -> SourcePrefs:
         # everything", which is the state an account that never opened the
         # screen is in and nothing that cannot be restated by opening it.
         tracker_retired=_stored_tracker_priority(row["tracker_retired_json"]),
+        season_totals_order=_stored_order(row["season_totals_order_json"]),
     )
 
 
@@ -487,21 +532,33 @@ async def save(prefs: SourcePrefs) -> SourcePrefs:
                                       trackers, ordered=True)
     tracker_retired = _service_names(prefs.tracker_retired, "tracker_retired",
                                      trackers, ordered=False)
+    # A season total is asked of a catalogue's DetailPort, so the order may name
+    # exactly the services that have one — TMDB, Trakt and Simkl today, and a
+    # registered source with no detail port is refused rather than stored as a
+    # preference nothing could act on.
+    describing = [source for source, provider in providers.registered().items()
+                  if provider.detail_port is not None]
+    season_totals_order = _service_names(prefs.season_totals_order, "season_totals_order",
+                                         describing, ordered=True)
     await db.execute(
         "INSERT INTO source_prefs (user_id, calendar_source, movie_calendar_source, "
-        "metadata_order_json, tracker_order_json, tracker_retired_json) "
-        "VALUES (?, ?, ?, ?, ?, ?) "
+        "metadata_order_json, tracker_order_json, tracker_retired_json, "
+        "season_totals_order_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(user_id) DO UPDATE SET "
         "calendar_source = excluded.calendar_source, "
         "movie_calendar_source = excluded.movie_calendar_source, "
         "metadata_order_json = excluded.metadata_order_json, "
         "tracker_order_json = excluded.tracker_order_json, "
-        "tracker_retired_json = excluded.tracker_retired_json",
+        "tracker_retired_json = excluded.tracker_retired_json, "
+        "season_totals_order_json = excluded.season_totals_order_json",
         (prefs.user_id, calendar_source, movie_calendar_source, json.dumps(metadata_order),
-         json.dumps(tracker_priority), json.dumps(tracker_retired)),
+         json.dumps(tracker_priority), json.dumps(tracker_retired),
+         json.dumps(season_totals_order)),
     )
     return replace(prefs, calendar_source=calendar_source,
                    movie_calendar_source=movie_calendar_source,
                    metadata_order=metadata_order,
                    tracker_priority=tracker_priority,
-                   tracker_retired=tracker_retired)
+                   tracker_retired=tracker_retired,
+                   season_totals_order=season_totals_order)

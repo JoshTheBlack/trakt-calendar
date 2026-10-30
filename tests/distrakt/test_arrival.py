@@ -417,7 +417,7 @@ CANON_IDS = {"tmdb": 1396, "trakt": 1396, "simkl": 42, "simkl_slug": "canon",
 CANON = {"title": "Canonical Title", "network": "Canonical Net", **SEASON}
 
 
-async def _canonical_describe(settings, records, *, strict=False):
+async def _canonical_describe(settings, records, *, strict=False, order=None):
     """`describe` as the one authority: whatever a path hands in, the
     description comes back canonical. A path that writes anything else for a
     description field has decided that field for itself."""

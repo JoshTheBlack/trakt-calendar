@@ -29,8 +29,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from . import (arrival, backfill, counts, discord_fmt, episode_progress, lifecycle, live,
-               post_memo, prefs, rollover, slug_repair, unsettled, watch_history,
-               watchlist_writes)
+               post_memo, prefs, rollover, slug_repair, tracker_settings, unsettled,
+               watch_history, watchlist_writes)
 # The data layer is reached through this package's own public surface, the same
 # names an outside caller uses, rather than through the six modules those names
 # are defined in: a route handler has no business knowing which half of the
@@ -511,10 +511,12 @@ async def distrakt(request: Request):
         # open on" selector; the same list the calendar's endpoint picker uses.
         "endpoints": endpoint_choices(),
         **chrome.page_context(user),
-        # This user's OWN default emoji, for the header pill — it renders into
-        # their Discord posts and nobody else's. A network's own code is drawn
-        # on its rows, with the month.
+        # This user's OWN default emoji, for the settings dialog's field — it
+        # renders into their Discord posts and nobody else's. A network's own code
+        # is drawn on its rows, with the month.
         "default_network_emoji": default_network_emoji,
+        # The rest of that dialog: the orders and the retired list, as stored.
+        "settings_panel": await tracker_settings.load(user.user_id, settings),
         # The range the backfill dialog opens on. Rendered rather than fetched:
         # the server decides it and used to answer a request whose only job was
         # to fill in two inputs.
@@ -728,7 +730,7 @@ async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, defau
     listed = (await distrakt_store.user_records(user_id)
               if standing is distrakt_store.MonthStanding.CURRENT else [])
     shape = lifecycle.shape_of(distrakt_store.frozen_shows(doc) if doc else [],
-                               live.stored_shows(listed, settings))
+                               live.stored_shows(listed, settings, await live.totals_order(user_id)))
     trackers = [str(source) for source in await watch_history.tracker_sources(settings, user_id)]
     shows = _rows_for(shape, standing, trackers)
     # EVERY SERVICE THE TRACKER READS IS NAMED, because this page is only drawn
@@ -842,7 +844,7 @@ async def _sync_watch_history(settings, user_id: int, records: list[dict],
             unreadable)
 
 
-def _season_lookup(settings) -> lifecycle.SeasonLookup:
+def _season_lookup(settings, order=None) -> lifecycle.SeasonLookup:
     """How a reopening asks what a season looks like NOW, as a callable the
     lifecycle can use without knowing a provider exists.
 
@@ -860,7 +862,8 @@ def _season_lookup(settings) -> lifecycle.SeasonLookup:
     rather than of Trakt off a bare `ids["trakt"]`. "How long is this season" is
     one question with one answer and one place that decides who answers it — a
     premiere correction that only ever asked Trakt simply never happened on an
-    instance reading its catalogue from somewhere else.
+    instance reading its catalogue from somewhere else. `order` is the viewer's
+    own (live.totals_order): the lookup asks the catalogues in the order they want.
     """
     async def look_up(record: dict, season: int) -> dict:
         rec = {**record, "season": season}
@@ -868,10 +871,10 @@ def _season_lookup(settings) -> lifecycle.SeasonLookup:
         # answers a zeroed season when nobody can be asked, which is right for a
         # caller that has nothing else to draw; here it would overwrite a real
         # withdrawn verdict's counts with zeros, and {} is what says "keep them".
-        if live.detail_source(rec, settings) is None:
+        if live.detail_source(rec, settings, order) is None:
             return {}
         try:
-            return await live.season_detail(settings, rec)
+            return await live.season_detail(settings, rec, order=order)
         except SourceUnavailable:
             return {}
     return look_up
@@ -1091,7 +1094,7 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
             # when there is nothing new to fold in.
             if plays:
                 questions = await lifecycle.reconcile_history(
-                    user_id, plays, month=month_key, look_up=_season_lookup(settings),
+                    user_id, plays, month=month_key, look_up=_season_lookup(settings, await live.totals_order(user_id)),
                     tz=watch_history.viewer_tz(settings))
             else:
                 questions = await lifecycle.standing_questions(
@@ -1197,15 +1200,6 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     if premieres and season_fresh:
         await distrakt_store.stamp_refreshed(user_id, month_key)
 
-    # Pre-warm the network-logo cache for everything on the page, so a show added
-    # before logos existed doesn't depend on some OTHER show requesting its
-    # network's logo first (see logos.ensure_logos). Best-effort and
-    # self-limiting: a no-op once each network's tile is on disk.
-    if ports and shows:
-        with span("payload.ensure_logos"):
-            await logos.ensure_logos(settings, [
-                (s.get("network"), (s.get("ids") or {}).get("tmdb")) for s in shows
-            ])
     if ports and (shows or movies):
         # And every row's picture, the same way — the watched films' as well as
         # the shows': a title nothing has recorded a picture for gets its one
@@ -1511,7 +1505,8 @@ def _modal_context(settings, year: int, month: int) -> dict:
     }
 
 
-def _emoji_context(emojis: dict, default_emoji: str, networks, is_admin: bool) -> dict:
+def _emoji_context(emojis: dict, default_emoji: str, network_logos: dict[str, logos.Logo],
+                   is_admin: bool) -> dict:
     """What a row's network badge and emoji code are drawn from.
 
     ONE BUILDER FOR THE MONTH AND FOR AN ANSWER THAT REDRAWS ONE NETWORK'S CELLS,
@@ -1520,18 +1515,16 @@ def _emoji_context(emojis: dict, default_emoji: str, networks, is_admin: bool) -
 
     `emoji_for` is the code the network posts as — its own, or the default — and
     `emoji_own` whether it has one (prefs.own_code: an entry equal to the default
-    is none). `logo_for` is the tile's address with the tile's own version in
-    it, so a regenerated logo is a new address the browser has not cached
-    (media/logos.versions). `net_ref` is what an answer addresses the cells by.
+    is none). `logo_for` is the network's badge — the logo's address through the
+    image proxy and whether it is light — or None where the network has none
+    (media/logos.known); a regenerated logo is a new path and so a new address the
+    browser has not cached. `net_ref` is what an answer addresses the cells by.
     """
-    versions = logos.versions(networks)
     return {
         "emoji_for": lambda network: prefs.own_code(emojis, default_emoji, network) or default_emoji,
         "emoji_own": lambda network: bool(prefs.own_code(emojis, default_emoji, network)),
         "net_ref": prefs.network_ref,
-        "logo_for": lambda network: (
-            f"/api/network-logo?name={quote(network or '')}&v={versions[network]}"
-            if network in versions else ""),
+        "logo_for": lambda network: network_logos.get(network or ""),
         "is_admin": is_admin,
     }
 
@@ -1539,7 +1532,8 @@ def _emoji_context(emojis: dict, default_emoji: str, networks, is_admin: bool) -
 def _month_context(request: Request, payload: dict, year: int, month: int,
                    emojis: dict, default_emoji: str, settings, *,
                    message: str = "", ok: bool = True,
-                   pictures: dict | None = None, is_admin: bool = False) -> dict:
+                   pictures: dict | None = None, is_admin: bool = False,
+                   network_logos: dict[str, logos.Logo] | None = None) -> dict:
     """The month fragment's whole context, out of the payload and nothing else.
 
     ONE READER OF THE PAYLOAD. Every mutating route answers through this, so what
@@ -1571,10 +1565,9 @@ def _month_context(request: Request, payload: dict, year: int, month: int,
         "message_ok": ok,
         "closed": closed,
         "month_query": f"?year={year}&month={month}",
-        # Which networks this instance holds a tile for is asked once for the
-        # whole response rather than once per row, and never of the browser.
-        **_emoji_context(emojis, default_emoji,
-                         (show.get("network") for show in shows), is_admin),
+        # Which networks have a badge is asked once for the whole response rather
+        # than once per row, and never of the browser.
+        **_emoji_context(emojis, default_emoji, network_logos or {}, is_admin),
         # A row's picture, resolved for the whole page before it is drawn
         # (_row_pictures) — "" where nothing is known yet.
         "poster_for": lambda show: (pictures or {}).get((str(show.get("key")),
@@ -1709,11 +1702,20 @@ async def _month_answer(request: Request, user_id: int, year: int, month: int,
     emojis, default_emoji = await distrakt_store.get_emoji_prefs(user_id)
     pictures, _ = await _row_pictures(user_id, payload.get("shows") or [],
                                       payload.get("movies") or [])
+    # EVERY ROW'S BADGE IS ONE READ for the whole page, and the networks nobody
+    # has resolved yet are resolved behind this response (logos.for_page), so a
+    # show added before logos existed does not depend on some OTHER show
+    # requesting its network's logo first — and a first load never waits on TMDB.
+    with span("payload.logos"):
+        network_logos = await logos.for_page(settings, [
+            (show.get("network"), (show.get("ids") or {}).get("tmdb"))
+            for show in payload.get("shows") or []])
     user = await auth.current_user(request)
     return templates.TemplateResponse(
         request, "_distrakt_month.html",
         {**_month_context(request, payload, year, month, emojis, default_emoji, settings,
-                          message=message, ok=ok, pictures=pictures, is_admin=user.is_admin),
+                          message=message, ok=ok, pictures=pictures, is_admin=user.is_admin,
+                          network_logos=network_logos),
          "overlays": overlays})
 
 
@@ -2344,17 +2346,17 @@ async def api_distrakt_emoji(request: Request):
         "network": network,
         "month_query": f"?year={year}&month={month}",
         "post1": post1, "post2": post2,
-        **_emoji_context(emojis, default_emoji, [network], user.is_admin),
+        **_emoji_context(emojis, default_emoji, await logos.known([network]), user.is_admin),
     })
     return response if kept else _and_the_month(response)
 
 
 @guard.post("/api/distrakt/emoji-default", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_emoji_default(request: Request):
-    """Save the code a network with none of its own posts as, from the header
-    pill's field. Empty means the app's own default (prefs.set_default_emoji).
+    """Save the code a network with none of its own posts as, from the settings
+    dialog's field. Empty means the app's own default (prefs.set_default_emoji).
 
-    THE PILL AND ITS FIELD COME BACK OUT OF BAND, and the month is asked to fetch
+    THE FIELD COMES BACK OUT OF BAND, and the month is asked to fetch
     itself: every network without a code of its own, on every row and in both
     posts, changes with the default, which is the whole month's markup — and a
     default changes rarely enough that the refetch is the right cost.
@@ -2367,6 +2369,63 @@ async def api_distrakt_emoji_default(request: Request):
         "request": request, "default_network_emoji": default_emoji,
         "month_query": f"?year={year}&month={month}",
     }))
+
+
+async def _settings_answer(request: Request, user_id: int, settings, section: str,
+                           message: str = "", **notes) -> Response:
+    """One section of the tracker settings dialog, drawn from what is stored now.
+
+    A SAVE ASKS THE PAGE TO FETCH ITS MONTH AGAIN (`_and_the_month`): every
+    control here changes what the rows count or are measured against, and a
+    recomputed month inside this answer would spend a season lookup per listed
+    title in a response nobody asked a month of. A REFUSAL DOES NOT — nothing
+    changed — and says why as a sentence in its section, at 200, because a
+    non-200 is never swapped.
+    """
+    response = templates.TemplateResponse(request, "_distrakt_settings_answer.html", {
+        "request": request, "section": section,
+        "panel": await tracker_settings.load(user_id, settings),
+        "order_kind": section, "order_message": message, "retired_message": message,
+        **notes,
+    })
+    return response if message else _and_the_month(response)
+
+
+@guard.post("/api/distrakt/settings/order/{kind}", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_settings_order(kind: str, request: Request):
+    """Move one service a place up or down in one of the settings dialog's two
+    lists — which linked tracker decides a season, and which catalogue a season's
+    episode total is asked of — and answer with that list.
+
+    WHICH CATALOGUE IS ASKED CHANGES WHO IS ASKED AND NOTHING ELSE: a frozen
+    month keeps the totals it recorded, and the details panel is not this order's
+    (tracker_settings.move and sources/prefs.py's `totals_order` say why).
+    """
+    user_id = await _distrakt_user_id(request)
+    data = await authz.json_body(request)
+    settings = await viewer.settings_for_user(user_id)
+    source, direction = str(data.get("source") or ""), str(data.get("direction") or "")
+    message = await tracker_settings.move(user_id, settings, kind, source, direction)
+    # A list this version does not have is answered as the first one's section,
+    # which is where its sentence is drawn.
+    section = kind if kind in tracker_settings.ORDER_FIELDS else "tracker_order"
+    return await _settings_answer(request, user_id, settings, section, message,
+                                  order_moved="" if message else f"{kind}:{source}-{direction}")
+
+
+@guard.post("/api/distrakt/settings/retired", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_settings_retired(request: Request):
+    """State which services' stored numbers this account no longer counts, from
+    the dialog's boxes (`counted:<service>`, each with a hidden "0" before it so
+    an unticked box is mentioned rather than absent)."""
+    user_id = await _distrakt_user_id(request)
+    data = await authz.json_body(request)
+    prefix = "counted:"
+    mentioned = {key[len(prefix):]: route_params.ticked(value)
+                 for key, value in data.items() if key.startswith(prefix)}
+    settings = await viewer.settings_for_user(user_id)
+    message = await tracker_settings.set_retired(user_id, mentioned)
+    return await _settings_answer(request, user_id, settings, "retired", message)
 
 
 async def _watchlists_answer(request: Request, user_id: int, settings, *,
@@ -2415,35 +2474,45 @@ async def watchlists_fragment(request: Request):
     return await _watchlists_answer(request, user_id, settings, panel_oob=False)
 
 
-async def _network_tmdb(user_id: int, month_key: str, network: str) -> int | None:
-    """A TMDB id for some title on `network` that this viewer's month shows — the
+async def _network_tmdbs(user_id: int, month_key: str, network: str) -> list[int]:
+    """The TMDB ids of titles on `network` that this viewer's month shows — the
     lookup a network's logo is found by (TMDB lists a show's networks, not a
-    network's logo by name). From what is stored, the month's records and the
-    viewer's own list, the two things the page's rows are drawn from."""
+    network's logo by name), as many as a look-up tries (logos.TITLES_TRIED). From
+    what is stored, the month's records and the viewer's own list, the two things
+    the page's rows are drawn from."""
     doc = await distrakt_store.load_month(user_id, month_key) or {}
+    found: list[int] = []
     for rec in [*(doc.get("shows") or []), *await distrakt_store.user_records(user_id)]:
         if (rec.get("network") or "") == network:
             try:
                 tmdb = int((rec.get("ids") or {}).get("tmdb") or 0)
             except (TypeError, ValueError):
                 continue
-            if tmdb > 0:
-                return tmdb
-    return None
+            if tmdb > 0 and tmdb not in found:
+                found.append(tmdb)
+    return found[:logos.TITLES_TRIED]
+
+
+_RECHECK_SAID = {
+    logos.Recheck.FOUND: ("Made {network}'s logo again.", True),
+    logos.Recheck.KEPT: ("No new logo for {network} could be made, so the old one is kept.", False),
+    logos.Recheck.MISSING: ("TMDB has no usable logo for {network}.", False),
+    logos.Recheck.UNANSWERED: ("TMDB could not be asked just now, so {network}'s logo is "
+                               "unchanged.", False),
+}
 
 
 @guard.post("/api/distrakt/network-logo", AuthLevel.ADMIN)
 async def api_distrakt_network_logo(request: Request):
-    """Make a network's logo tile again, from the ↻ under a row's emoji code.
+    """Resolve a network's logo again, from the ↻ under a row's emoji code.
 
-    ADMIN, as the calendar's regenerate is: a tile is the instance's, shared by
-    every viewer and every calendar card, and making one spends the instance's
-    TMDB key.
+    ADMIN: a network's logo is the instance's, shared by every viewer and every
+    calendar card, and resolving one spends the instance's TMDB key.
 
     THE ANSWER IS EVERY ROW'S BADGE AND CODE CELL FOR THAT NETWORK, OUT OF BAND,
-    with the new tile's version in the address both draw (_emoji_context), plus
-    a line saying what happened. A regenerate that could make nothing keeps the tile it had
-    (logos.regenerate), and says so.
+    drawn from the table as it now stands (_emoji_context), plus a line saying what
+    happened. A recheck that comes out with no logo while the network has one keeps
+    it (logos.recheck), and says so.
     """
     user = await auth.current_user(request)
     data = await authz.json_body(request)
@@ -2451,25 +2520,40 @@ async def api_distrakt_network_logo(request: Request):
     if not network or len(network) > prefs.MAX_NETWORK_LENGTH:
         return _month_refusal(request, "That isn't a network this page shows.")
     year, month = _viewed_month(request)
-    tmdb = await _network_tmdb(user.user_id, distrakt_store.month_key(year, month), network)
-    if tmdb is None:
+    tmdbs = await _network_tmdbs(user.user_id, distrakt_store.month_key(year, month), network)
+    if not tmdbs:
         return _month_refusal(request, f"Nothing on this month names a TMDB id for {network}, "
                                        "so its logo can't be looked up.")
-    had = bool(logos.versions([network]))
-    made = await logos.regenerate(load_settings(), network, tmdb)
-    if made is not None:
-        message, ok = f"Made {network}'s logo again.", True
-    elif had:
-        message, ok = f"No new logo for {network} could be made, so the old one is kept.", False
-    else:
-        message, ok = f"TMDB has no usable logo for {network}.", False
+    sentence, ok = _RECHECK_SAID[await logos.recheck(load_settings(), network, tmdbs)]
     emojis, default_emoji = await distrakt_store.get_emoji_prefs(user.user_id)
     return templates.TemplateResponse(request, "_distrakt_logo_answer.html", {
         "request": request, "network": network,
         "month_query": f"?year={year}&month={month}",
-        "message": message, "message_ok": ok,
-        **_emoji_context(emojis, default_emoji, [network], user.is_admin),
+        "message": sentence.format(network=network), "message_ok": ok,
+        **_emoji_context(emojis, default_emoji, await logos.known([network]), user.is_admin),
     })
+
+
+@guard.get("/api/distrakt/network-logo/download", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_network_logo_download(request: Request):
+    """A network's logo as the PNG a Discord emoji is made from, saved as a file —
+    the ⬇ under a row's emoji code.
+
+    THE ONE PLACE A LOGO IS COMPOSITED. A badge is the logo drawn through the
+    image proxy; Discord wants a 128px PNG with the logo on a rounded plate, which
+    the proxy cannot make, so it is made here when asked and kept nowhere
+    (logos.download_tile). The network travels as a name, a REFERENCE the server
+    resolves in its own table: no logo address from the request is ever fetched.
+    """
+    network = (request.query_params.get("network") or "").strip()
+    if not network or len(network) > prefs.MAX_NETWORK_LENGTH:
+        return Response(status_code=404)
+    png = await logos.download_tile(network)
+    if png is None:
+        return Response(status_code=404)
+    return Response(png, media_type="image/png", headers={
+        "Content-Disposition": f'attachment; filename="{logos.slug(network)}.png"',
+        "Cache-Control": "private, max-age=3600"})
 
 
 @guard.post("/api/distrakt/remove", AuthLevel.DISTRAKT_APPROVED)
@@ -3156,7 +3240,8 @@ async def api_distrakt_add(request: Request):
         # AHEAD OF EVERY WRITE, because the question below needs the season's
         # episode total and has to be answered before anything is stored; after
         # the refusals above, so a refused add spends no lookup.
-        arrived, = await arrival.describe(settings, [show])
+        arrived, = await arrival.describe(settings, [show],
+                                          order=await live.totals_order(user_id))
         show, detail = arrived.record, arrived.detail
         # FILED WHERE THE TITLE STORE SAYS THE TITLE IS, which can be a higher
         # key than the pick's own ids name — every write below addresses that.
@@ -3397,7 +3482,8 @@ async def api_distrakt_add_completed(request: Request):
             arrived, = await arrival.describe(settings, [
                 {"media": Media.SHOW, "ids": pick.ids, "title": pick.title,
                  "season": season, "network": pick.network,
-                 "added_by": distrakt_store.ADDED_BY_MANUAL}], strict=True)
+                 "added_by": distrakt_store.ADDED_BY_MANUAL}], strict=True,
+                order=await live.totals_order(user_id))
         except SourceUnavailable as exc:
             return _month_refusal(request, f"Season {season} could not be read: {exc}")
         # Through the one place that knows what a season on a month that is over
@@ -3568,7 +3654,8 @@ async def api_distrakt_abandon(request: Request):
         # drops the show there only if this was its last season on the tracker.
         # Taking it back needs nothing here: that is an arrival like any other.
         _departing(request, user_id, key, watchlist_writes.Departure.ABANDON)
-        show = await _live_form_source(settings, placed.record, season)
+        show = await _live_form_source(settings, placed.record, season,
+                                       await live.totals_order(user_id))
         rec = await lifecycle.give_up(
             user_id, show, month=acted_month,
             abandoned_form=discord_fmt.freeze_form(show))
@@ -3671,7 +3758,8 @@ async def api_distrakt_unknown_add(request: Request):
     # a history prompt is built from a play, which is deliberately thin (see
     # watch_history.EpisodePlay: a lookup per unmatched episode is the cost the
     # ask-the-viewer path exists to avoid) — no network, one service's ids.
-    arrived, = await arrival.describe(settings, [record])
+    arrived, = await arrival.describe(settings, [record],
+                                      order=await live.totals_order(user_id))
     record, detail = arrived.record, arrived.detail
     # Where the title store filed it, which a re-key the arrival caused may have
     # moved — together with the question itself (app/metadata/holders.py).
@@ -3832,7 +3920,8 @@ async def api_distrakt_verdict_readd(request: Request):
     placed = lifecycle.Placement(record, month_key)
     settings = await viewer.settings_for_user(user_id)
     await watch_history.baseline_show(settings, user_id, placed.record)
-    await lifecycle.reopen(user_id, placed, look_up=_season_lookup(settings))
+    await lifecycle.reopen(user_id, placed, look_up=_season_lookup(
+        settings, await live.totals_order(user_id)))
     # The month the VIEWER is looking at is what comes back, which need not be the
     # month the verdict sat on — the same split every other row control makes.
     year, month = _viewed_month(request)
@@ -4023,7 +4112,7 @@ async def api_distrakt_rewatch_complete(request: Request):
                                point_at=(key, season), message="Recorded as completed")
 
 
-async def _live_form_source(settings, record: dict, season: int) -> dict:
+async def _live_form_source(settings, record: dict, season: int, order=None) -> dict:
     """`record` merged with what the provider says about it right now, for the
     abandoned form that is about to be frozen.
 
@@ -4045,7 +4134,7 @@ async def _live_form_source(settings, record: dict, season: int) -> dict:
     """
     rec = {**record, "season": season}
     try:
-        detail = await live.season_detail(settings, rec)
+        detail = await live.season_detail(settings, rec, order=order)
     except SourceUnavailable:
         return dict(record)
     form = {**record, **detail, "season": season}

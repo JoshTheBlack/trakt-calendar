@@ -190,10 +190,14 @@ class UnauthenticatedTests(GatingTestCase):
 
     def test_calendar_level_is_refused(self):
         for path in ("/", "/calendar", "/api/state", "/calendar/fragments/season-line",
-                     "/calendar/fragments/details",
-                     "/api/network-logo?name=HBO"):
+                     "/calendar/fragments/details"):
             with self.subTest(path=path):
                 self.assertEqual(self.client.get(path).status_code, 401)
+
+    def test_the_network_logo_route_is_gone_from_the_calendar(self):
+        """Badges are drawn through the image proxy now; the one logo route left is
+        the tracker's emoji download, at distrakt level."""
+        self.assertEqual(self.client.get("/api/network-logo?name=HBO").status_code, 404)
 
     def test_distrakt_level_is_refused(self):
         """Tested route by route rather than as a group: a gap here exposes one
@@ -209,6 +213,8 @@ class UnauthenticatedTests(GatingTestCase):
         for path in ("/api/distrakt/refresh", "/api/distrakt/import",
                      "/api/distrakt/remove", "/api/distrakt/emoji",
                      "/api/distrakt/emoji-default", "/api/distrakt/watchlist",
+                     "/api/distrakt/settings/order/tracker_order",
+                     "/api/distrakt/settings/retired",
                      "/api/distrakt/add", "/api/distrakt/abandon",
                      "/api/distrakt/acknowledge-return",
                      "/api/distrakt/unknown-add", "/api/distrakt/unknown-resume",
@@ -350,7 +356,7 @@ class DistraktTemplateTests(GatingTestCase):
         """It renders into ONE account's Discord posts, so it is that account's.
         The map used to be app-wide, which meant any user's roster import
         registered networks into the operator's map. The page draws the default
-        in its header pill; a network's own code is drawn on its rows."""
+        in the tracker's settings dialog; a network's own code is drawn on its rows."""
         mine = self._tracker(is_admin=False)
         theirs = self._tracker(is_admin=True)
         asyncio.run(distrakt.set_emoji_prefs(mine, {}, ":mine:"))
@@ -366,7 +372,8 @@ class DistraktTemplateTests(GatingTestCase):
     def test_a_new_account_starts_on_the_apps_default(self):
         """Nothing seeds it — not settings.json, not another account."""
         self.sign_in_as(self._tracker(is_admin=False))
-        self.assertIn(f"🙂 {distrakt.DEFAULT_EMOJI}", self.client.get(self.PAGE).text)
+        self.assertIn(f'id="emojiDefault" name="code" value="{distrakt.DEFAULT_EMOJI}"',
+                      self.client.get(self.PAGE).text)
 
 
 class SettingsRedactionTests(GatingTestCase):

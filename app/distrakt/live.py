@@ -36,8 +36,31 @@ def live_key(rec: dict) -> tuple[str, int]:
     return (str(record_key(rec)), int(rec["season"]))
 
 
-def detail_source(rec: dict, settings) -> str | None:
+async def totals_order(user_id: int) -> tuple[str, ...]:
+    """The catalogues in the order this viewer wants a season's episode total
+    asked of — what `detail_source` and everything below it take as `order`.
+
+    READ ONCE BY WHOEVER KNOWS THE VIEWER and handed down, because a season's
+    total is catalogue data every other function here computes without an
+    account in hand (the freeze pass, a premiere correction, a title arriving).
+    The default for a viewer who has stated nothing is the registry's declared
+    order, so a caller that passes none keeps exactly the behaviour every row had
+    before an account could state one.
+    """
+    return totals_order_of(await source_prefs.load(user_id))
+
+
+def totals_order_of(prefs: source_prefs.SourcePrefs) -> tuple[str, ...]:
+    """`totals_order` for a caller that already holds the viewer's preferences."""
+    from ..providers import detail_source as catalogue_answerer
+    return tuple(prefs.totals_order(str(source) for source, _port in catalogue_answerer.ports()))
+
+
+def detail_source(rec: dict, settings, order=None) -> str | None:
     """Which service is asked how long a season is, or None when none can be.
+
+    `order` IS THE VIEWER'S (`totals_order`), the one thing about this question
+    that is theirs: it reorders the services the record names and removes none.
 
     DECIDED BY WHICH ID THE RECORD CARRIES, in the registry's declared order, and
     NOT by which services the account has linked. A season's episode total is
@@ -74,7 +97,7 @@ def detail_source(rec: dict, settings) -> str | None:
     # called `detail_source` too, and a module-level import would have to be
     # aliased into something neither name means.
     from ..providers import detail_source as catalogue_answerer
-    chosen = catalogue_answerer.choose(settings, rec.get("ids") or {})
+    chosen = catalogue_answerer.choose(settings, rec.get("ids") or {}, order)
     # A STORED-ONLY ANSWERER IS NOT ONE THIS CAN USE. That one means "nobody can
     # be reached, but the modal can still draw what is on disk" — and a season
     # lookup is a live call, so following it would ask an unconfigured source
@@ -313,8 +336,9 @@ def unavailable_notices(shows, *, unreadable=()) -> list[str]:
             "are only what could be read without it."]
 
 
-async def season_detail(settings, rec: dict, *, fresh: bool = False):
-    """One record's season summary, from whichever source can answer for it.
+async def season_detail(settings, rec: dict, *, fresh: bool = False, order=None):
+    """One record's season summary, from whichever source can answer for it —
+    the first the viewer's `order` names that the record has an id for.
 
     PUBLIC BECAUSE THE ADD ROUTES ASK IT TOO. "How long is this season" is one
     question with one answer, and the manual add used to ask Trakt directly —
@@ -338,7 +362,7 @@ async def season_detail(settings, rec: dict, *, fresh: bool = False):
     ids = rec.get("ids") or {}
     season = int(rec["season"])
     media = Media(rec.get("media") or Media.SHOW)
-    if detail_source(rec, settings) is None:
+    if detail_source(rec, settings, order) is None:
         return season_rules.empty_season(season)
 
     async def ask(answerer) -> dict:
@@ -355,8 +379,8 @@ async def season_detail(settings, rec: dict, *, fresh: bool = False):
     # total to that service (`_apply_counts`) and a title filed from this answer
     # takes its name from it (arrival.describe).
     answered, detail = await catalogue_answerer.for_season(
-        settings, ids, catalogue_answerer.choose(settings, ids), ask,
-        lambda summary: int((summary or {}).get("total") or 0) > 0)
+        settings, ids, catalogue_answerer.choose(settings, ids, order), ask,
+        lambda summary: int((summary or {}).get("total") or 0) > 0, order)
     return {**detail, "described_by": str(answered.source)}
 
 
@@ -440,7 +464,8 @@ async def title_facts(settings, rec: dict, *, service: str | None = None) -> Tit
 
 
 async def fetch_season_details(settings, records: list[dict], *, fresh: bool,
-                               allow_degrade: bool, sources: list | None = None) -> list:
+                               allow_degrade: bool, sources: list | None = None,
+                               order=None) -> list:
     """One season lookup per record, in parallel, in the records' own order.
 
     `allow_degrade` decides what a single failure does: captured as a result the
@@ -461,12 +486,17 @@ async def fetch_season_details(settings, records: list[dict], *, fresh: bool,
     worked it out (compute_live_shows needs it again, to say which service went
     quiet), and is computed here otherwise. One answer either way — asking twice
     is how the row's sentence and the lookup come to disagree.
+
+    `order` IS THE VIEWER'S `totals_order`, and it must be the one `sources` was
+    worked out with: the lookup follows `sources` to decide which records to ask
+    and `order` to decide whom, and two orders would ask a service the row's
+    sentence never names.
     """
     if sources is None:
-        sources = [detail_source(rec, settings) for rec in records]
+        sources = [detail_source(rec, settings, order) for rec in records]
     askable = [index for index, source in enumerate(sources) if source]
     answers = await asyncio.gather(*(
-        season_detail(settings, records[index], fresh=fresh)
+        season_detail(settings, records[index], fresh=fresh, order=order)
         for index in askable
     ), return_exceptions=allow_degrade)
     details: list = [None] * len(records)
@@ -476,12 +506,13 @@ async def fetch_season_details(settings, records: list[dict], *, fresh: bool,
 
 
 def _merge_available(rec: dict, detail: dict, watched: dict[str, int], settings,
-                     asked=(), *, missing=(), dates=None, retired=frozenset()) -> dict:
+                     asked=(), *, missing=(), dates=None, retired=frozenset(),
+                     order=None) -> dict:
     show = {**rec, "key": str(record_key(rec)), "unavailable": False,
             "unavailable_source": "", "unavailable_reason": ""}
     show.update({field: detail[field] for field in _LIVE_FIELDS})
     _apply_counts(show, rec, watched, settings, asked, dates, retired,
-                  described_by=detail.get("described_by"))
+                  described_by=detail.get("described_by"), order=order)
     # AFTER the counts, not before: the note names the services the numbers came
     # from and those are what `_apply_counts` has just decided.
     #
@@ -521,7 +552,8 @@ def _merge_available(rec: dict, detail: dict, watched: dict[str, int], settings,
 
 
 def _merge_unavailable(rec: dict, watched: dict[str, int], settings, asked=(), *,
-                       source: str | None, dates=None, retired=frozenset()) -> dict:
+                       source: str | None, dates=None, retired=frozenset(),
+                       order=None) -> dict:
     """This one title's totals are not this pass's. Render it from its stored
     record's last-known fields and flag it, rather than presenting a fabricated
     0/0 as real.
@@ -555,11 +587,11 @@ def _merge_unavailable(rec: dict, watched: dict[str, int], settings, asked=(), *
         "started_airing": bool(rec.get("started_airing")),
         "finished_airing": bool(rec.get("finished_airing")),
     })
-    _apply_counts(show, rec, watched, settings, asked, dates, retired)
+    _apply_counts(show, rec, watched, settings, asked, dates, retired, order=order)
     return show
 
 
-def stored_shows(records: list[dict], settings) -> list[dict]:
+def stored_shows(records: list[dict], settings, order=None) -> list[dict]:
     """Every record rendered from what it already holds, with NO provider call at
     all — the whole-page version of what one degraded row does.
 
@@ -578,9 +610,9 @@ def stored_shows(records: list[dict], settings) -> list[dict]:
     """
     shows = []
     for rec in records:
-        source = detail_source(rec, settings)
+        source = detail_source(rec, settings, order)
         show = _merge_unavailable(rec, {source or "": int(rec.get("watched") or 0)},
-                                  settings, (), source=source)
+                                  settings, (), source=source, order=order)
         show["bucket"] = discord_fmt.bucket_of(show, show)
         # No history was read on this pass, so nothing can say when a season was
         # finished; the stored record's own bucket is what it was last time.
@@ -642,7 +674,7 @@ def source_labels() -> dict[str, str]:
 
 def _apply_counts(show: dict, rec: dict, watched: dict[str, int], settings,
                   asked=(), dates=None, retired=frozenset(),
-                  described_by: str | None = None) -> None:
+                  described_by: str | None = None, order=None) -> None:
     """Put the watched counts on a live show, in all three forms it is read in.
 
     `watched` is the primary source's number and is what every existing reader
@@ -704,15 +736,22 @@ def _apply_counts(show: dict, rec: dict, watched: dict[str, int], settings,
     # last-known number and no service is answering for it this pass. The
     # service that ANSWERED where the season lookup says (`described_by`): a
     # season the chosen service has none of is answered by the next.
-    detail_from = described_by or detail_source(rec, settings)
+    detail_from = described_by or detail_source(rec, settings, order)
     show["total_by_source"] = {detail_from: total} if detail_from else {}
+    # THE SERVICES A SEASON IS EXPECTED FROM ARE THE ONES STILL COUNTED. `asked` is
+    # who was read, and a retired service is still read; but its number is out of
+    # `counting`, so measured against `asked` every season only the other service
+    # holds looked like one the first had said nothing of, and retiring a service
+    # turned nearly every row split (red). Its number stays in the tooltip below,
+    # which names it as retired.
+    expected = tuple(name for name in asked if name not in retired)
     show["counts"] = counts.counts_label(counting or (watched if not retired else {}),
-                                         total, source_labels(), order, asked)
+                                         total, source_labels(), order, expected)
     # AND THE ONE NUMBER THE ROW DRAWS, from the same inputs: the label above is
     # every service's number spelled out, which is right for a post and too wide
     # for a column every row shares, so the row shows the primary's, marked when
     # the services do not all say it (counts.row_count).
-    row = counts.row_count(counting or (watched if not retired else {}), total, order, asked)
+    row = counts.row_count(counting or (watched if not retired else {}), total, order, expected)
     show["count_label"], show["count_split"] = row.label, row.split
     # THE SAME NUMBERS, SAID IN FULL, for the row's tooltip. One line has room
     # for the counts and nothing else, so a service nobody asked and a service
@@ -791,14 +830,22 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
     # needs it to know which records to skip, and every row that comes back
     # short needs it to say WHICH service went quiet; resolving it twice is how
     # a row's sentence comes to name a service the lookup never asked.
-    sources = [detail_source(rec, settings) for rec in records]
+    #
+    # AND IN THE VIEWER'S OWN ORDER (`totals_order`), read here with the retired
+    # list below because both are one row of the account's preferences: this is
+    # the only place that changes who is asked for a total, and a frozen month is
+    # not one of its callers' business — it keeps what it recorded.
+    prefs = await source_prefs.load(user_id)
+    order = totals_order_of(prefs)
+    sources = [detail_source(rec, settings, order) for rec in records]
 
     if watched_lookup is None:
         with span("cls.sync+seasons", n=len(records), fresh=fresh):
             state, details = await asyncio.gather(
                 watch_history.sync_and_baseline(settings, user_id, records, force=fresh),
                 fetch_season_details(settings, records, fresh=fresh,
-                                     allow_degrade=allow_degrade, sources=sources),
+                                     allow_degrade=allow_degrade, sources=sources,
+                                     order=order),
             )
         # The floor a viewer set on a season they are re-watching is already
         # applied: sync_and_baseline takes the roster and filters the state it
@@ -821,7 +868,7 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
         with span("cls.season_gather", n=len(records), fresh=fresh):
             details = await fetch_season_details(
                 settings, records, fresh=fresh, allow_degrade=allow_degrade,
-                sources=sources)
+                sources=sources, order=order)
     asked = tuple(str(source) for source in sources_read or ())
     # Narrowed to what was actually ASKED for this account: a service nobody
     # asked did not go quiet, and naming it would put a stranger's outage on a
@@ -832,7 +879,7 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
     # the account, this function already has the account in hand, and adding an
     # argument to each of the four callers would be four chances to forget it on
     # the path that matters. See app/sources/prefs.py's `counts_tracker`.
-    retired = (await source_prefs.load(user_id)).retired_trackers()
+    retired = prefs.retired_trackers()
 
     shows = []
     matched = 0
@@ -861,12 +908,12 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
             show = _merge_unavailable(rec, watched_lookup.get(key) or fallback,
                                       settings, asked, source=source if failed else None,
                                       dates=(dates_lookup or {}).get(key),
-                                      retired=retired)
+                                      retired=retired, order=order)
         else:
             show = _merge_available(rec, detail, watched_lookup.get(key) or {},
                                     settings, asked, missing=unread,
                                     dates=(dates_lookup or {}).get(key),
-                                    retired=retired)
+                                    retired=retired, order=order)
         show["bucket"] = discord_fmt.bucket_of(show, show)
         # WHEN the season was finished, and only for a season that IS finished:
         # on a partly-watched season the same date is just "last time I watched

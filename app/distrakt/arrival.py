@@ -70,13 +70,18 @@ class Arrival(NamedTuple):
     detail: dict
 
 
-async def describe(settings, records: list[dict], *, strict: bool = False) -> list[Arrival]:
+async def describe(settings, records: list[dict], *, strict: bool = False,
+                   order=None) -> list[Arrival]:
     """`records` described, in their own order — see the module docstring.
 
     `strict` is for the one caller that must not file a guess: a season stated
     as finished on a month that is over, whose episode total is never recomputed.
     It makes a failed season lookup RAISE (SourceUnavailable) instead of
     degrading to {}.
+
+    `order` IS THE VIEWER'S OWN (live.totals_order): the catalogues a season's
+    episode total is asked of, in the order they want. The title's name and
+    network are not that question and are asked as before.
 
     ONE TITLE IS DESCRIBED ONCE however many seasons of it arrive together, so a
     backfill naming six seasons of a show asks its lookups once.
@@ -140,7 +145,7 @@ async def describe(settings, records: list[dict], *, strict: bool = False) -> li
     keyed = [rec for recs in groups.values() for rec in recs]
     details = await live.fetch_season_details(
         settings, [{**rec, "media": rec.get("media") or Media.SHOW} for rec in keyed],
-        fresh=False, allow_degrade=not strict)
+        fresh=False, allow_degrade=not strict, order=order)
     found: dict[int, dict] = {}
     for rec, detail in zip(keyed, details):
         if isinstance(detail, BaseException) or not detail:

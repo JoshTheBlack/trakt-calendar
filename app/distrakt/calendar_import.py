@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 
 from ..calendar import state as calendar_state
 from ..providers.base import Item, Media, collect_ids, resolve_key
-from . import arrival, store
+from . import arrival, live, store
 from .store import ADDED_BY_CALENDAR, load_month, normalize_show, record_key, save_month
 
 
@@ -290,7 +290,8 @@ async def import_premieres(user_id: int, month_key: str, settings,
     # WHAT A PREMIERE IS FILED AS IS arrival.describe's, not this calendar
     # record's — the same title added any other way must land identically.
     filed = []
-    for arrived in await arrival.describe(settings, records):
+    for arrived in await arrival.describe(settings, records,
+                                          order=await live.totals_order(user_id)):
         rec = arrived.record
         key = _present_key(rec)
         if key in present:
