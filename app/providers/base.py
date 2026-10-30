@@ -518,8 +518,10 @@ class Record:
     enriched: bool = True
 
     # WHO SUPPLIED WHAT, once several sources have described this airing.
-    # {field: [source, ...]} for every field any of them filled in, and
-    # {field: {source: value}} for the ones where they filled it in DIFFERENTLY.
+    # {field: [source, ...]} for every field any of them filled in, the winner
+    # first, and {field: {source: value}} for the ones where they filled it in
+    # DIFFERENTLY — a value per thing they said, a difference of spelling being
+    # none (app/calendar/resolve.py's `_distinct`), and a rating always.
     # Both are set by app/calendar/resolve.py and by nothing else, and both are
     # empty on a record only one source described — which is what keeps them free
     # for the overwhelming majority of instances, where they always will be.
@@ -579,12 +581,14 @@ class Record:
         the reader is looking at from one word.
 
         THREE CASES, ONE READING. Where the services disagreed, `alternatives`
-        holds every value they gave and the one equal to what this record carries
-        is the winner — the same comparison a card makes to decide which service's
-        mark to draw beside the field. Where they agreed, or only one of them
-        spoke, `field_sources` names who spoke and any of them is a correct answer
-        because their values are identical. Where neither map is populated — a
-        group only one source described, which is every group on a single-source
+        holds a value per thing they said and the one equal to what this record
+        carries is the winner — the same comparison a card makes to decide which
+        service's mark to draw beside the field. Where they agreed — the same
+        value, or the same said two ways ("Tokyo MX", "TOKYO MX";
+        app/calendar/resolve.py's `_distinct`) — or only one of them spoke,
+        `field_sources` names who spoke with the winner first, whose spelling is
+        the one this record carries. Where neither map is populated — a group
+        only one source described, which is every group on a single-source
         instance — that source is the answer.
         """
         stated = self.alternatives.get(field_name)
@@ -802,6 +806,24 @@ def status_label(status: str) -> str:
     return str(status or "").replace("_", " ").title()
 
 
+# THE ONE STATUS VOCABULARY — Trakt's words, lower-cased, which is what TMDB's
+# reader maps its own onto (app/providers/tmdb/normalize.py's STATUS_WORDS) and
+# what a stored row and the details panel already speak. A service with words of
+# its own says what each may mean in these (`Provider.status_means`), so two
+# services' statuses can be compared without either being read as the other.
+STATUS_WORDS = frozenset({
+    "returning series", "in production", "planned", "pilot", "ended", "canceled",
+    "released", "post production", "rumored",
+})
+
+
+def status_spoken(status: str) -> frozenset[str]:
+    """`Provider.status_means` for a service that speaks STATUS_WORDS: its word,
+    folded, and nothing else — a word outside the vocabulary means only itself."""
+    word = " ".join(str(status or "").split()).casefold()
+    return frozenset({word}) if word else frozenset()
+
+
 # WHAT KIND OF SHOW A TITLE IS — this app's slugs and how each reads. A catalogue
 # that states a type maps its own words onto these (app/providers/tmdb/
 # normalize.py's TMDB_SHOW_TYPES), and the show-type filter offers them as chips
@@ -949,6 +971,18 @@ class Capabilities:
     # viewer's token is completed some other way (Simkl's, by
     # app/calendar/enrich.py's drain, which says why).
     describes_sparse_listings: bool = False
+    # Whether what this source's own row in the title store says about a title
+    # JOINS EVERY CALENDAR CARD OF THAT TITLE IT DOES NOT LIST — as a TITLE-ONLY
+    # record, a further opinion on the card's facts (its certification, language,
+    # network, genres, keywords) that is never a listing: it gives no card a day,
+    # an episode or its attribution, and never puts a card on anybody's calendar
+    # (app/calendar/cache.py's `with_title_only` holds what one may and may not
+    # do). A DECLARATION PER SOURCE, so which catalogue describes every card is a
+    # fact a package states about itself and never one service standing in for
+    # another: a catalogue whose descriptions are its point declares it; a
+    # service whose rows are what its own calendar listed has nothing to add to
+    # a card it did not list.
+    describes_every_card: bool = False
 
     def answers(self, endpoint_key: str) -> bool:
         return endpoint_key in self.endpoints
@@ -2080,6 +2114,21 @@ class Provider(Protocol):
         correct a count where the count lives. On the provider for the reason
         `title_url` is: the panel used to know two services' addresses by name,
         and any other service's tick linked nowhere.
+        """
+        ...
+
+    def status_means(self, status: str) -> frozenset[str]:
+        """The words of the one status vocabulary (STATUS_WORDS) that this
+        service's stored `status` may mean — one for a service that speaks it
+        (`status_spoken`), several for a word too coarse to tell them apart, and
+        none for no status at all. Answered without a call.
+
+        ON THE PROVIDER, BECAUSE A SERVICE'S WORDS ARE THAT SERVICE'S FACT. A
+        card offers each service's status side by side only where they really
+        disagree (app/calendar/resolve.py's `_distinct`), and "airing" from one
+        service beside "returning series" from another is one answer said twice:
+        measured on one October's All Episodes, 1,478 of the 1,603 cards whose
+        services disagreed about a status disagreed about nothing else.
         """
         ...
 

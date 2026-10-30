@@ -46,6 +46,7 @@ rendering until every window's TTL runs out.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -113,6 +114,11 @@ GENRES_FIELD = "genres"
 FIELDS = (*SCALAR_FIELDS, GENRES_FIELD, COORDINATE_FIELD, AIRING_FIELD, SOURCE_FIELD)
 
 
+# Each service's place in the declared order — the order every record a
+# resolution compares is put in (`resolve_records`).
+_DECLARED = {str(source): rank for rank, source in enumerate(Source)}
+
+
 def source_order(group) -> list[str]:
     """The sources in `group`, in DECLARED order.
 
@@ -153,6 +159,18 @@ def sparse_sources() -> frozenset[str]:
     so no service is named where the rule is applied."""
     return frozenset(str(source) for source, provider in providers.registered().items()
                      if provider.capabilities.describes_sparse_listings)
+
+
+def describing_sources(settings=None) -> tuple[str, ...]:
+    """Every registered service whose row in the title store joins every card of
+    a title it does not list (Capabilities.describes_every_card), and that this
+    INSTANCE puts on its calendar (`instance_sources`), in declared order — the
+    services app/calendar/cache.py's `with_title_only` reads rows from. Named
+    through the registry, so the read names no service."""
+    admitted = instance_sources(settings)
+    return tuple(str(source) for source, provider in providers.registered().items()
+                 if provider.capabilities.describes_every_card
+                 and (admitted is None or str(source) in admitted))
 
 
 def sparse_labels() -> str:
@@ -429,9 +447,70 @@ def _title_facts(records: list[Record], order: list[str]
     return keywords, show_type
 
 
-def _provenance(records: list[Record]) -> tuple[dict, dict]:
+# THE FIELDS WHOSE EVERY SERVICE IS SHOWN, never folded into agreement. Two
+# services' ratings are two audiences answering, and the same number from both is
+# still two answers — a card draws each beside its service's mark, and a viewer
+# reading one of them alone could not tell whose it is.
+SIDE_BY_SIDE = frozenset({"rating"})
+
+
+def _meaning(field_name: str, source: str, value) -> frozenset:
+    """What `value`, as `source` states `field_name`, may MEAN — the spellings it
+    cannot be told apart from — so two services that said one thing two ways
+    agree (`_distinct`). One meaning for every field but a status, where a
+    service's word may be too coarse to name just one (Provider.status_means).
+
+    Text is folded: case, runs of whitespace and the no-break spaces one
+    service's catalogue writes ("Tokyo MX" and "TOKYO MX" are one network). A
+    runtime is whole minutes and a year its digits. A picture is its address,
+    exactly — a URL's path is case-sensitive, and two services' pictures are two
+    pictures however alike they look.
+    """
+    if field_name == "status":
+        return providers.get(source).status_means(str(value))
+    if field_name == "poster":
+        return frozenset({str(value)})
+    if field_name in ("runtime", "imdb_rating", "rating"):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            pass
+        else:
+            return frozenset({round(number) if field_name == "runtime" else round(number, 1)})
+    return frozenset({" ".join(str(value).split()).casefold()})
+
+
+def _distinct(field_name: str, stated: dict[str, Any], order: list[str]) -> dict[str, Any]:
+    """`stated` — {service: its value for one field}, in declared order — less
+    every value another one already says: one entry per thing the services
+    really disagree about, each under the first service in the viewer's `order`
+    that said it, still in declared order so a service's mark sits in the same
+    place on every card. One entry left means they agree.
+
+    A COARSER WORD AGREES WITH A FINER ONE IT COVERS, and steps aside for it —
+    "ended" from a service that does not tell ending from cancelling beside
+    "canceled" from one that does is one statement, said more precisely by the
+    second, which is what is shown. That is the only way a value can be covered,
+    so for every field with one meaning per value the first statement of each
+    meaning in the viewer's order — the winner's among them — is the one kept.
+    """
+    if field_name in SIDE_BY_SIDE:
+        return dict(stated)
+    meanings = {name: _meaning(field_name, name, value) for name, value in stated.items()}
+    precise = {meaning for meaning in meanings.values() if len(meaning) == 1}
+    kept: dict[frozenset, str] = {}
+    for name in order:
+        meaning = meanings[name]
+        if len(meaning) > 1 and any(finer <= meaning for finer in precise):
+            continue
+        kept.setdefault(meaning, name)
+    shown = set(kept.values())
+    return {name: value for name, value in stated.items() if name in shown}
+
+
+def _provenance(records: list[Record], prefs=None) -> tuple[dict, dict]:
     """(field_sources, alternatives) — who filled each scalar field in, and where
-    they filled it in differently, every value they gave.
+    they REALLY filled it in differently, a value per thing they disagree about.
 
     SCALARS ONLY. These exist for a card that wants to show two ratings side by
     side, or a poster with a logo that swaps it; a union field has no second
@@ -441,22 +520,36 @@ def _provenance(records: list[Record]) -> tuple[dict, dict]:
     "8.1 (Trakt) · 7.9 (Simkl)" needs both halves and should not have to
     reconstruct one of them from the record it was handed beside a map of the
     other — that is two sources of truth for one line of text.
+
+    A DIFFERENCE OF SPELLING IS AGREEMENT (`_distinct`), so a card offers a flip
+    or a pair of chips only where its services say different things. MEASURED on
+    one October's All Episodes before this rule: of 1,610 cards with any such
+    control, 1,603 disagreed about a status, 1,480 of them only in how each
+    service words one, and dozens about a title or a network only in case. Where
+    two spellings agree, `field_sources` lists the WINNER FIRST — its spelling is
+    the one on the card, and Record.shown_source names it.
     """
     field_sources: dict[str, list[str]] = {}
     alternatives: dict[str, dict[str, Any]] = {}
+    names = [str(r.source) for r in records]
     for field_name in SCALAR_FIELDS:
         stated = {str(r.source): getattr(r, field_name) for r in records
                   if _present(getattr(r, field_name))}
         if not stated:
             continue
-        field_sources[field_name] = list(stated)
-        if len(set(map(repr, stated.values()))) > 1:
-            alternatives[field_name] = stated
+        order = [name for name in _order(prefs, field_name, names) if name in stated]
+        field_sources[field_name] = order
+        distinct = _distinct(field_name, stated, order)
+        if len(distinct) > 1:
+            alternatives[field_name] = distinct
     return field_sources, alternatives
 
 
-def resolve_records(group, records: list[Record], prefs=None) -> Record | None:
-    """The one record this viewer sees for `group`, built out of `records`.
+def resolve_records(group, records: list[Record], prefs=None,
+                    describing: Sequence[Record] = ()) -> Record | None:
+    """The one record this viewer sees for `group`, built out of `records` — the
+    services that LIST it — and `describing`, the title-only records of services
+    that describe the title without listing this airing (cache.with_title_only).
 
     NONE IS A REAL ANSWER HERE, NOT ONLY A MALFORMED ONE. A group every source
     behind it is one this viewer excluded has nothing to show them, and dropping
@@ -469,6 +562,22 @@ def resolve_records(group, records: list[Record], prefs=None) -> Record | None:
     only one source carries comes from that source whatever anybody prefers, and
     a viewer cannot make a card emptier than the services made it.
 
+    A TITLE-ONLY RECORD IS AN OPINION ON THE CARD'S FACTS AND NOTHING ELSE, and
+    every choice below that names a listing is made among `records` alone:
+      - it never makes a card: with no listing there is nothing to draw, however
+        much a describing service says — a viewer who reads only that service
+        sees only what it lists;
+      - it never wins SOURCE, AIRING or COORDINATE — the card's attribution, its
+        day and time, its episode — because none of them is a fact about the
+        title, and the first record in a viewer's order would otherwise be the
+        description, moving the card to a day no service that lists it gave;
+      - it competes for every scalar field and joins the genres, keywords and
+        show type like any record, which is what it is for: a certification or
+        a language the listing services never state reaches the card, and the
+        filters judge it;
+      - its ids join the ones the card's buttons address, as a service that
+        knows the title without listing this airing (`links`).
+
     THE IDS ARE THE GROUP'S, NOT THE RECORD'S. `ids` is hoisted onto the group at
     fill because it is the MATCH RESULT — the union of every id space any source
     named this title in — and the arr/Seerr buttons, the tracker and the ranker
@@ -477,32 +586,38 @@ def resolve_records(group, records: list[Record], prefs=None) -> Record | None:
     """
     if not records:
         return None
-    names = [str(r.source) for r in records]
-    primary = _winner(records, _order(prefs, SOURCE_FIELD, names), SOURCE_FIELD,
+    # IN DECLARED ORDER, the title-only records among the listings rather than
+    # after them: a viewer who has stated no order reads the declared one
+    # (`_order`), and a describing service declared first must win a field for
+    # them as its listing would have.
+    every = sorted([*records, *describing], key=lambda r: _DECLARED[str(r.source)])
+    names = [str(r.source) for r in every]
+    listing = [str(r.source) for r in records]
+    primary = _winner(records, _order(prefs, SOURCE_FIELD, listing), SOURCE_FIELD,
                       lambda _r: True)
-    if primary is None:  # unreachable while `names` comes from `records`
+    if primary is None:  # unreachable while `listing` comes from `records`
         return None
     resolved = replace(primary, ids=dict(primary.ids or {}),
                        genres=list(primary.genres or []))
 
     for field_name in SCALAR_FIELDS:
-        winner = _winner(records, _order(prefs, field_name, names), field_name,
+        winner = _winner(every, _order(prefs, field_name, names), field_name,
                          lambda r, f=field_name: _present(getattr(r, f)))
         if winner is not None:
             setattr(resolved, field_name, getattr(winner, field_name))
 
-    resolved.genres = _merged_genres(records, _order(prefs, GENRES_FIELD, names))
-    resolved.keywords, resolved.show_type = _title_facts(records,
+    resolved.genres = _merged_genres(every, _order(prefs, GENRES_FIELD, names))
+    resolved.keywords, resolved.show_type = _title_facts(every,
                                                          _order(prefs, "keywords", names))
 
-    coordinate = _resolve_coordinate(records, _order(prefs, COORDINATE_FIELD, names))
+    coordinate = _resolve_coordinate(records, _order(prefs, COORDINATE_FIELD, listing))
     for field_name in COORDINATE_FIELDS:
         setattr(resolved, field_name,
                 getattr(coordinate, field_name) if coordinate is not None
                 else getattr(primary, field_name))
 
     resolved.air_ts, resolved.date_only = _resolve_airing(
-        records, _order(prefs, AIRING_FIELD, names))
+        records, _order(prefs, AIRING_FIELD, listing))
 
     # ENRICHED IS A PROPERTY OF THE GROUP, NOT OF THE CARD'S SOURCE. The flag
     # exists so app/calendar/filter.py can tell "empty because there is nothing to
@@ -510,8 +625,9 @@ def resolve_records(group, records: list[Record], prefs=None) -> Record | None:
     # than judging it. If ANY source behind this group has looked, the values
     # above are real answers and the group is judgeable — reading the flag off the
     # card's source alone would exempt a merged card whose genres came, fully
-    # filled in, from the other service.
-    resolved.enriched = any(r.enriched for r in records)
+    # filled in, from the other service. A described title-only record counts:
+    # its words are on the card.
+    resolved.enriched = any(r.enriched for r in every)
 
     ids = group.get("ids")
     if isinstance(ids, dict) and ids:
@@ -528,7 +644,7 @@ def resolve_records(group, records: list[Record], prefs=None) -> Record | None:
     # added here that a viewer could state a preference about, because that is
     # what SCALAR_FIELDS is for.
     known: dict[str, Any] = {}
-    for record in records:
+    for record in every:
         for name, value in (record.known_ids or {}).items():
             known.setdefault(name, value)
     resolved.known_ids = known
@@ -539,9 +655,11 @@ def resolve_records(group, records: list[Record], prefs=None) -> Record | None:
     # Empty for a single-source group, which is every group on an instance that
     # has only ever had one source — so the provenance machinery costs nothing at
     # all for the accounts that will never see a merged card.
+    if len(every) > 1:
+        resolved.field_sources, resolved.alternatives = _provenance(every, prefs)
     if len(records) > 1:
-        resolved.field_sources, resolved.alternatives = _provenance(records)
-        # WHEN EACH SERVICE SAYS IT AIRS, in declared order. The card is drawn
+        # WHEN EACH SERVICE THAT LISTS IT SAYS IT AIRS, in declared order — a
+        # title-only record states no airing. The card is drawn
         # on the primary's day (`_resolve_airing`), and a reader whose services
         # disagree about the day deserves to see that they do — the card draws
         # every service's day and time beside its mark wherever they differ for
@@ -558,7 +676,8 @@ def resolve(group, prefs=None, endpoint=None, settings=None) -> Record | None:
     nothing to do in between.
 
     The read path in app/calendar/cache.py does have something to do in between —
-    the enrichment overlay — and calls the two halves itself. Everything else
-    wants this.
+    the enrichment overlay, and the title-only records it reads from the store
+    (`with_title_only`) — and calls the two halves itself. Everything else wants
+    this, and is answered from the group's listings alone.
     """
     return resolve_records(group, admitted_records(group, prefs, endpoint, settings), prefs)

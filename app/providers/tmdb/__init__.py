@@ -22,7 +22,7 @@ from datetime import date
 from ...config import Settings
 from .. import register
 from ..base import (Capabilities, Media, Record, SearchCatalogue, SearchPage,
-                    SeasonsAnswer, Source, TitleFacts, Video)
+                    SeasonsAnswer, Source, TitleFacts, Video, status_spoken)
 from . import calendar, detail, normalize, search, transport
 from .transport import TmdbError, TmdbNotFound, TmdbRateLimited
 
@@ -138,6 +138,12 @@ class _TmdbProvider:
         # token, so the title store's refresh queue completes every listing by
         # describing it (app/metadata/refresh.py's `queue_listed`).
         describes_sparse_listings=True,
+        # A CATALOGUE'S DESCRIPTION IS ITS POINT, and TMDB's states what the
+        # calendars that list a title often do not — measured on one October's
+        # All Episodes, 10,899 of 16,997 cards had no certification and 15,038
+        # no language. So its row joins every card of a title it describes and
+        # does not list (app/calendar/cache.py's `with_title_only`).
+        describes_every_card=True,
     )
     sync_port = None
     calendar_port = _TmdbCalendarPort()
@@ -160,6 +166,11 @@ class _TmdbProvider:
 
     def episode_url(self, ids, season: int, number: int) -> str:
         return normalize.episode_url(ids, season, number)
+
+    def status_means(self, status: str) -> frozenset[str]:
+        # TMDB's own words are mapped onto the vocabulary as its answers are read
+        # (normalize.STATUS_WORDS), so a stored one is already one of its words.
+        return status_spoken(status)
 
 
 register(_TmdbProvider())

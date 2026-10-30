@@ -512,10 +512,12 @@ async def _kept_by_filters(record, media: Media, specs, settings) -> bool:
     admission: the calendar would draw another service's record of the title.
     Judged as the one service describing it lists it — which is what the card
     the jump writes would be, so "only one service lists it" refuses it the way
-    the calendar would hide it."""
+    the calendar would hide it — with what the store's describing services say
+    of the title beside it, as that card would have (cache.with_title_only)."""
     group = calendar_cache.group_records([record])[0]
+    parsed = await calendar_cache.with_title_only([(group, [record])], settings)
     kept, _release, _resolved = calendar_cache.narrow_for_viewer(
-        [(group, [record])], media, settings=settings, **specs)
+        parsed, media, settings=settings, **specs)
     return bool(kept)
 
 

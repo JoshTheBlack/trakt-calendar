@@ -22,7 +22,7 @@ from datetime import date
 
 from .. import register
 from ..base import (Capabilities, Media, Record, SearchCatalogue, SearchHit, SearchPage,
-                    SeasonsAnswer, Source, TitleFacts, Video)
+                    SeasonsAnswer, Source, TitleFacts, Video, status_spoken)
 from . import calendar, detail, sync, watchlist
 from .transport import TraktError, TraktRateLimitError
 
@@ -338,6 +338,10 @@ class _TraktProvider:
 
     def episode_url(self, ids, season: int, number: int) -> str:
         return calendar.episode_url(ids, season, number)
+
+    def status_means(self, status: str) -> frozenset[str]:
+        # Trakt's words ARE the vocabulary (base.STATUS_WORDS is spelled in them).
+        return status_spoken(status)
 
     def catalogue_is_configured(self, settings: Settings) -> bool:
         # The client id alone, same question `_TraktDetailPort.catalogue_configured`

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable
 from datetime import date
 from typing import NamedTuple
 
@@ -266,6 +267,15 @@ async def store_loose_airings(endpoint_key: str, records, *, now: int,
 # reading a span back
 # ---------------------------------------------------------------------------
 
+# WHAT A SERVICE'S TITLE ROW SAYS, as every read of one here names it — an
+# airing's (`_READ_SQL`) and a title-only record's (`_TITLE_ONLY_SQL`), so the
+# two cannot come to read one row differently (`_words`).
+_TITLE_COLUMNS = ", ".join(f"t.{column}" for column in (
+    "title", "ids_json", "detail_url", "year", "network", "country", "language",
+    "certification", "status", "overview", "poster", "runtime", "genres_json",
+    "ratings_json", "anime_type", "release_types_json", "enriched", "keywords_json",
+    "show_type", "facts_known"))
+
 # THREE LEVELS AND THE IDENTITY, THREE LEFT JOINS, ONE QUERY. The title and
 # episode joins are LEFT because a missing row at either level is ordinary rather
 # than exceptional: an episode row exists only for a stated coordinate, and Simkl
@@ -274,10 +284,7 @@ async def store_loose_airings(endpoint_key: str, records, *, now: int,
 _READ_SQL = f"""
 SELECT a.source, a.media, a.source_id, a.title_key, a.air_ts, a.date_only,
        a.season, a.episode_number, a.episode_label, a.from_search,
-       t.title, t.ids_json, t.detail_url, t.year, t.network, t.country,
-       t.language, t.certification, t.status, t.overview, t.poster, t.runtime,
-       t.genres_json, t.ratings_json, t.anime_type, t.release_types_json,
-       t.enriched, t.keywords_json, t.show_type, t.facts_known,
+       {_TITLE_COLUMNS},
        e.title AS episode_title, e.runtime AS episode_runtime,
        e.rating AS episode_rating,
        i.ids_json AS known_ids
@@ -308,36 +315,53 @@ def _record_from_row(row) -> Record:
     back then is an airing with a blank title, which renders as a thin card
     rather than vanishing.
     """
-    ratings = json.loads(row["ratings_json"] or "{}") if row["ratings_json"] else {}
-    source = str(row["source"])
     season = row["season"]
     number = row["episode_number"]
     ids = json.loads(row["ids_json"] or "{}") if row["ids_json"] else {}
     known = json.loads(row["known_ids"]) if row["known_ids"] else {}
     if known:
         ids = title_identity.with_shared(ids, known)
-    # None for a row no description has stated them on — not "none" (Record.keywords).
-    keywords, show_type = title_rows.facts_of(row)
     return Record(
-        keywords=keywords, show_type=show_type,
-        source=Source(source), media=Media(str(row["media"])), id=str(row["source_id"]),
-        ids=ids,
+        **_words(row),
+        source=Source(str(row["source"])), media=Media(str(row["media"])),
+        id=str(row["source_id"]), ids=ids,
         # And everything the title store knows of it, kept apart from what this
         # service stated (Record.known_ids says why).
         known_ids=known,
-        detail_url=str(row["detail_url"] or ""), title=str(row["title"] or ""),
         air_ts=float(row["air_ts"]), date_only=bool(row["date_only"]),
-        # BACK TO A NUMBER WHERE IT IS ONE. `Record.year` is `int | str`, the
-        # column is TEXT, and a caller comparing or sorting on it would see the
-        # type change in storage; every source hands it over as an int.
-        year=title_rows.as_year(row["year"]), network=row["network"] or "",
-        country=row["country"] or "", language=row["language"] or "",
         # THE EPISODE'S OWN RUNTIME WHERE ONE IS KNOWN, the title's otherwise.
         # A show's episodes really do differ -- a double-length finale is not the
         # show's nominal runtime. Simkl publishes no per-episode runtime at all,
         # so falling back is the ordinary path and not a failure.
         runtime=(row["episode_runtime"] if row["episode_runtime"] is not None
                  else row["runtime"]),
+        episode_label=row["episode_label"] or None,
+        episode_title=row["episode_title"] or "",
+        season=None if season == UNSTATED else season,
+        episode_number=None if number == UNSTATED else number,
+        anime_type=row["anime_type"] or "",
+        release_types_by_country=(
+            json.loads(row["release_types_json"] or "{}")
+            if row["release_types_json"] else {}),
+    )
+
+
+def _words(row) -> dict:
+    """The Record fields one service's title row states about the TITLE — read
+    once, for an airing's record (`_record_from_row`) and a title-only one
+    (`_title_only_from_row`) alike."""
+    source = str(row["source"])
+    ratings = json.loads(row["ratings_json"] or "{}") if row["ratings_json"] else {}
+    # None for a row no description has stated them on — not "none" (Record.keywords).
+    keywords, show_type = title_rows.facts_of(row)
+    return dict(
+        keywords=keywords, show_type=show_type,
+        detail_url=str(row["detail_url"] or ""), title=str(row["title"] or ""),
+        # BACK TO A NUMBER WHERE IT IS ONE. `Record.year` is `int | str`, the
+        # column is TEXT, and a caller comparing or sorting on it would see the
+        # type change in storage; every source hands it over as an int.
+        year=title_rows.as_year(row["year"]), network=row["network"] or "",
+        country=row["country"] or "", language=row["language"] or "",
         status=row["status"] or "",
         # BACK OUT OF THE MAP UNDER THIS SOURCE'S OWN NAME. `Record.rating` is
         # one number shown under one service's mark, so a row that holds three
@@ -350,14 +374,6 @@ def _record_from_row(row) -> Record:
         genres=json.loads(row["genres_json"] or "[]") if row["genres_json"] else [],
         certification=row["certification"] or "", overview=row["overview"] or "",
         poster=row["poster"] or "",
-        episode_label=row["episode_label"] or None,
-        episode_title=row["episode_title"] or "",
-        season=None if season == UNSTATED else season,
-        episode_number=None if number == UNSTATED else number,
-        anime_type=row["anime_type"] or "",
-        release_types_by_country=(
-            json.loads(row["release_types_json"] or "{}")
-            if row["release_types_json"] else {}),
         enriched=bool(row["enriched"]),
     )
 
@@ -487,6 +503,67 @@ def _episode_of_row(row) -> tuple:
     """A stored airing's episode for one service — its key less its instant (the
     endpoint is the query's own)."""
     return (row["source"], row["media"], row["source_id"], row["season"], row["episode_number"])
+
+
+# ---------------------------------------------------------------------------
+# a service's description of a title, for a card it does not list
+# ---------------------------------------------------------------------------
+
+# EVERY ROW THE NAMED SERVICES HOLD FOR THE NAMED TITLES, in one statement
+# however many a span names — the keys and the services travel as JSON arrays,
+# so a month of two and a half thousand titles is one seek per key on
+# `ix_title_metadata_key` rather than seven chunks of placeholders. A described
+# row first where a service holds two for one title.
+_TITLE_ONLY_SQL = f"""
+SELECT t.source, t.media, t.source_id, t.title_key, {_TITLE_COLUMNS}
+FROM {_TITLES} t
+WHERE t.title_key IN (SELECT value FROM json_each(:keys))
+  AND t.source IN (SELECT value FROM json_each(:sources))
+ORDER BY t.title_key, t.source, t.enriched DESC, t.source_id
+"""
+
+
+def _title_only_from_row(row) -> Record:
+    """One service's row for a title as a TITLE-ONLY record: everything it says
+    about the title, and nothing about an airing.
+
+    WHAT IT LEAVES OUT IS AS DELIBERATE AS WHAT IT CARRIES, because the read
+    joins it to a card this service does not list (cache.with_title_only):
+      - no airing — `air_ts` 0 and date-only, an instant nobody could mistake
+        for a listing's, and never read: resolution takes the card's day and
+        time from the services that list it (resolve.resolve_records);
+      - no episode coordinate and no episode words — it is the title's row;
+      - no release schedule and no anime format, which the read asks of the
+        records that list a card (filter.filter_release_groups,
+        filter.prune_disguised_films) and never of a description joined to it.
+    Its ids are the ones its own row states, and they are also what it knows the
+    title by (`known_ids`) — what lets the card's buttons address this service.
+    """
+    ids = json.loads(row["ids_json"] or "{}") if row["ids_json"] else {}
+    return Record(
+        **_words(row),
+        source=Source(str(row["source"])), media=Media(str(row["media"])),
+        id=str(row["source_id"]), ids=ids, known_ids=dict(ids),
+        air_ts=0.0, date_only=True, runtime=row["runtime"],
+    )
+
+
+async def title_only_records(sources: Iterable[str], title_keys: Iterable[str]
+                             ) -> dict[tuple[str, str, str], Record]:
+    """`{(source, media, title key): that service's title-only record}` for every
+    title among `title_keys` that one of `sources` holds a row for — one read,
+    and the store's rows only: nothing is asked of any service."""
+    keys = sorted({str(key) for key in title_keys if key})
+    names = sorted({str(source) for source in sources})
+    if not keys or not names:
+        return {}
+    found = await db.fetch_all(_TITLE_ONLY_SQL, {"keys": json.dumps(keys),
+                                                  "sources": json.dumps(names)})
+    out: dict[tuple[str, str, str], Record] = {}
+    for row in found:
+        out.setdefault((str(row["source"]), str(row["media"]), str(row["title_key"])),
+                       _title_only_from_row(row))
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -325,6 +325,39 @@ search's "where it airs", its season picker and the card its jump lands on
 listing. `tests/calendar/test_placement.py` holds the readers to one answer — a
 day against its month, two viewers on one span, a month's edge, the search.
 
+**A service that describes a title it does not list joins the card as a
+TITLE-ONLY record, which is an opinion on facts and never a listing.**
+`app/calendar/cache.py`'s `with_title_only` owns the rules, and
+`resolve.resolve_records` takes those records apart from the listings
+(`describing`), so no choice that names a listing can reach one. A service
+declaring `Capabilities.describes_every_card` (TMDB) has its title-store row
+read ONCE PER SPAN (`entries.title_only_records`, one `json_each` statement, no
+call and no write) for every card of a title it describes and does not list.
+The record competes for every scalar field in the viewer's order and joins the
+genres, keywords and show type (those two only where `facts_known`), its ids
+add the service's greyed button — and it NEVER wins attribution, the airing or
+the coordinate, so a TMDB-first viewer's card stays on the day a listing gave
+(the Yellowjackets fixture holds it); it never makes a card alone, so a viewer
+narrowed to TMDB sees only what TMDB lists; a viewer's source choice narrows it
+as it narrows a listing; it is not in `filter.Judged.listed_by`; and the
+release narrowing and the disguised-film prune never see it. It carries no
+airing, coordinate or release schedule at all (`entries._title_only_from_row`).
+`tests/calendar/test_title_only.py` holds each rule on every reader, the search
+picker's `_kept_by_filters` included.
+
+**A card's `alternatives` are what its services REALLY disagree about.**
+`resolve._distinct` decides it for every field and every service: text folded
+(case, whitespace, no-break spaces), a runtime in whole minutes, a picture by
+its exact address, and a status read through each service's
+`Provider.status_means` into the one vocabulary (`base.STATUS_WORDS`, Trakt's
+words) — a coarser word (Simkl's "ended", "tba") agrees with every word it
+covers and steps aside for the finer one. Ratings are never folded
+(`SIDE_BY_SIDE`): two services' scores are always drawn side by side. Where
+values agree, `field_sources` lists the winner first, which is what
+`Record.shown_source` names and the details panel is opened with.
+`tests/calendar/test_equivalence.py` holds it; `tests/providers/
+test_protocol_conformance.py` holds every service to an answer for its words.
+
 **A viewer's filters are per MEDIUM, and one function turns a medium into
 columns.** `app/calendar/vocab.py` owns it: `TV_FIELDS`/`MOVIE_FIELDS` say which
 `user_prefs` column belongs to which kind of title, and `active_specs` is what
@@ -349,10 +382,12 @@ never counted as their filtering. Each dimension's treatment of a card nobody
 has described is `keep_title`'s and is the instance owner's decision, not a
 default: genres, countries, certifications, networks, language and missing data
 show an undescribed card unjudged (`enriched`); keywords and show type wait for
-the catalogue that states them (`Record.keywords is None` — TMDB alone, and a
-card TMDB does not list is not judged by them); "only one service lists it" and
-"only a sparse catalogue lists it and it names no network" are about who LISTS
-the card and exempt nothing. Only the language floor is also applied at fill
+the catalogue that states them (`Record.keywords is None` — TMDB alone, whether
+it lists the card or only describes the title, below; a card TMDB has not
+described is not judged by them); "only one service lists it" and "only a sparse
+catalogue lists it and it names no network" are about who LISTS the card — a
+service that only describes it is not counted — and exempt nothing. Only the
+language floor is also applied at fill
 (beside the country floor); the rest need the whole card. A row's keywords and
 show type are an answer only where `title_metadata.facts_known` says a
 description stated them (`metadata/rows.py`'s `facts_values`) — an empty

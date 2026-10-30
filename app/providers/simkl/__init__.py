@@ -318,6 +318,9 @@ class _SimklProvider:
     def episode_url(self, ids, season: int, number: int) -> str:
         return calendar.episode_url(ids, season, number)
 
+    def status_means(self, status: str) -> frozenset[str]:
+        return titles.status_means(status)
+
     def catalogue_is_configured(self, settings: Settings) -> bool:
         # NOT THE SAME QUESTION `_SimklDetailPort.catalogue_configured` ASKS,
         # not any more. Under Simkl's v2 API, search and /redirect require a

@@ -130,6 +130,20 @@ class YellowjacketsTests(PlacementTestCase):
             ("S04E02", "2026-11-29", "21:00", "trakt"),
         ])
 
+    async def test_tmdb_describing_an_episode_it_does_not_list_moves_nothing(self):
+        """TMDB lists S04E01 alone, which files its description of the show, and
+        that description joins E02's card (cache.with_title_only). TMDB is first
+        in this viewer's order, and E02 is still Trakt's card on Trakt's day and
+        time — the description wins a field and nothing about the airing."""
+        grouped, _meta = await calendar_cache.assemble_range(
+            SHOWS, self.settings, tz=NEW_YORK, start_date=date(2026, 11, 29),
+            end_date=date(2026, 11, 29), prefs=DEFAULT, allow_fetch=False, now=2000)
+        item, = grouped[0]["items"]
+        self.assertEqual((item.episode_label, item.air_date, item.air_time, str(item.source)),
+                         ("S04E02", "2026-11-29", "21:00", "trakt"))
+        self.assertEqual(item.field_sources["network"][0], "tmdb")
+        self.assertEqual(sorted(item.listed_airings), ["simkl", "trakt"])
+
     async def test_a_simkl_first_viewer_sees_each_episode_once_on_simkls_day(self):
         self.assertEqual(await self.november(SIMKL_FIRST), [
             ("S04E01", "2026-11-20", "20:00", "simkl"),

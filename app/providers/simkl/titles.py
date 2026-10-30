@@ -52,8 +52,28 @@ from __future__ import annotations
 from typing import Any
 
 from ...config import Settings
-from ..base import Media
+from ..base import Media, status_spoken
 from . import transport
+
+# WHAT SIMKL'S STATUS WORDS MAY MEAN in the app's one vocabulary
+# (base.STATUS_WORDS). Simkl states a show's status in three words where Trakt
+# and TMDB use six, so each of Simkl's covers every word it cannot tell apart —
+# "ended" is a show that ended or was canceled, "tba" one not yet airing — and
+# agrees with any of them, as a coordinate that states less agrees with one that
+# states more. Its words are stored as Simkl gives them (`_extract`); a word
+# this table does not name means only itself.
+STATUS_MEANS: dict[str, frozenset[str]] = {
+    "airing": frozenset({"returning series"}),
+    "ended": frozenset({"ended", "canceled"}),
+    "tba": frozenset({"planned", "in production", "pilot"}),
+}
+
+
+def status_means(status: str) -> frozenset[str]:
+    """Simkl's `status`, as base.STATUS_WORDS — see STATUS_MEANS."""
+    spoken = status_spoken(status)
+    return STATUS_MEANS.get(next(iter(spoken), ""), spoken)
+
 
 # Catalog metadata barely moves — an episode gains a date, a status flips once
 # a season away — so this sits on the same day-long TTL detail.py's episode

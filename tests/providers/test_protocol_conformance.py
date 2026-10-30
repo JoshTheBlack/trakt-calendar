@@ -29,7 +29,7 @@ import unittest
 
 from app import providers
 from app.config import Settings
-from app.providers.base import (CalendarPort, DetailPort, LibraryPort, Media,
+from app.providers.base import (STATUS_WORDS, CalendarPort, DetailPort, LibraryPort, Media,
                                 PlayCountPort, Provider, SearchPort, Source, SyncPort,
                                 WatchlistPort)
 from app.providers.trakt import detail as trakt_detail
@@ -64,6 +64,10 @@ PRIVATE_CREDENTIALS = {
 # per service, so a service registered later is a decision written here.
 SEARCHABLE = {"tmdb": True, "trakt": True, "simkl": True}
 SEARCHED_BY_DEFAULT = {"tmdb": True, "trakt": False, "simkl": False}
+
+# Whether a service's row in the title store joins every calendar card of a title
+# it does not list (Capabilities.describes_every_card) — one entry per service.
+DESCRIBES_EVERY_CARD = {"tmdb": True, "trakt": False, "simkl": False}
 
 
 def catalogue_settings(*sources) -> Settings:
@@ -699,6 +703,66 @@ class EveryIdReadingNamespacesTheSlugTests(unittest.TestCase):
         for source, read, _bare, _namespaced in self.PUBLIC_ID_READINGS:
             with self.subTest(source=source):
                 self.assertEqual(read({}), {})
+
+
+class WhoDescribesEveryCardTests(unittest.TestCase):
+
+    def test_every_registered_source_has_an_entry(self):
+        self.assertEqual(set(DESCRIBES_EVERY_CARD), {str(s) for s in providers.registered()})
+
+    def test_the_declaration_is_exactly_the_table(self):
+        for source, provider in providers.registered().items():
+            with self.subTest(source=source):
+                self.assertEqual(provider.capabilities.describes_every_card,
+                                 DESCRIBES_EVERY_CARD[str(source)])
+
+    def test_a_service_that_describes_every_card_can_describe_a_title(self):
+        """Its rows are its descriptions, which its detail port writes."""
+        for source, provider in providers.registered().items():
+            if provider.capabilities.describes_every_card:
+                with self.subTest(source=source):
+                    self.assertIsNotNone(provider.detail_port)
+
+
+class EveryServiceSaysWhatItsStatusMeansTests(unittest.TestCase):
+    """Provider.status_means: each service's status word as the one vocabulary
+    (base.STATUS_WORDS), so two services' statuses can be compared without
+    either being read as the other (app/calendar/resolve.py's `_distinct`)."""
+
+    def test_a_word_of_the_vocabulary_means_words_of_it_to_every_service(self):
+        for source, provider in providers.registered().items():
+            for word in (*STATUS_WORDS, "  Returning Series "):
+                with self.subTest(source=source, word=word):
+                    meaning = provider.status_means(word)
+                    self.assertTrue(meaning)
+                    self.assertLessEqual(meaning, STATUS_WORDS)
+
+    def test_simkls_own_words_mean_words_of_the_vocabulary(self):
+        from app.providers.simkl import titles as simkl_titles
+        for word, meaning in simkl_titles.STATUS_MEANS.items():
+            with self.subTest(word=word):
+                self.assertTrue(meaning)
+                self.assertLessEqual(meaning, STATUS_WORDS)
+
+    def test_no_status_means_nothing(self):
+        for source, provider in providers.registered().items():
+            with self.subTest(source=source):
+                self.assertEqual(provider.status_means(""), frozenset())
+
+    def test_a_service_that_speaks_the_vocabulary_means_its_own_word(self):
+        for source, provider in providers.registered().items():
+            if str(source) == "simkl":
+                continue
+            for word in STATUS_WORDS:
+                with self.subTest(source=source, word=word):
+                    self.assertEqual(provider.status_means(word), frozenset({word}))
+
+    def test_simkls_coarse_words(self):
+        simkl = providers.get(Source.SIMKL)
+        self.assertEqual(simkl.status_means("airing"), {"returning series"})
+        self.assertEqual(simkl.status_means("Ended"), {"ended", "canceled"})
+        self.assertEqual(simkl.status_means("tba"), {"planned", "in production", "pilot"})
+        self.assertEqual(simkl.status_means("something new"), {"something new"})
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

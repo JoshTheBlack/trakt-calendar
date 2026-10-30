@@ -58,9 +58,13 @@
    address carries the day it was drawn on (`day`) as well.
 
    WHEN TWO SERVICES DESCRIBED THE SAME AIRING, this card is the one place that
-   shows. `item.alternatives` is {field: {service: value}} for the fields they
-   filled in DIFFERENTLY — and only those, so a field they agreed on draws
+   shows — a service that only describes the title, without listing this airing,
+   among them (app/calendar/cache.py's `with_title_only`). `item.alternatives` is
+   {field: {service: value}} for the fields they filled in DIFFERENTLY — and only
+   those, a difference of spelling or of a word's precision being no difference
+   (app/calendar/resolve.py's `_distinct`), so a field they agreed on draws
    nothing and a card only one service described carries none of this at all.
+   Ratings are the exception: two services' scores are always drawn side by side.
    Two things are done with it, and which one depends on where there is room:
 
      A SMALL LOGO, on the poster, the title and the overview, and ONLY WHERE
@@ -270,7 +274,8 @@
             {# BOTH NUMBERS, NEVER AN AVERAGE. Two services' user bases produce two
                legitimate ratings and a mean is a number nobody reported; the same
                goes for a runtime or a network the two disagree about. Four short
-               values, each shown once per service that gave one. #}
+               values, each shown once per thing the services said — a rating once
+               per service that gave one, even when two give the same number. #}
             {% for field, glyph in [('rating', '⭐'), ('network', '📡'), ('runtime', '⏱️'), ('status', '📶')] %}
             {% if field in item.alternatives %}
             <span class="chip dual" data-field="{{ field }}" title="{{ field }} — the services disagree">

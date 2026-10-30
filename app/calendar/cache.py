@@ -1393,6 +1393,73 @@ def _local_span_utc_range(tz: ZoneInfo, start_date: date, end_date: date) -> tup
     return utc_start, utc_end
 
 
+async def with_title_only(parsed, settings=None) -> list[tuple[dict, list[Record], list[Record]]]:
+    """`parsed` — `[(group, every record of it the INSTANCE admits)]` — with each
+    group's TITLE-ONLY records beside its listings: `[(group, listings,
+    title-only)]`.
+
+    WHAT ONE IS. A service that describes every card (Capabilities.
+    describes_every_card — TMDB) and does not list this airing may still have
+    said what the title is: its row in the title store, under the title's key,
+    holds the certification, language, network, genres and keywords the services
+    that list the card often do not state — measured on one October's All
+    Episodes, 10,899 of 16,997 cards had no certification and 15,038 no
+    language. That row joins the card as a record of its own, built by
+    entries.title_only_records from the store and nothing else.
+
+    WHAT IT MAY DO, each rule held where it applies and by a test of its own:
+      - it may win any SCALAR field and joins the genres, keywords and show type
+        (resolve.resolve_records), so what it states reaches the card and every
+        filter judges it;
+      - its keywords and show type are an answer only where a description stated
+        them (rows.facts_of, read by entries._words) — a row nobody has
+        described says nothing about either, and is not judged by them;
+      - it adds a button to the service's page, drawn as a service that knows
+        the title without listing this airing (detail_source.service_links).
+    WHAT IT MAY NOT:
+      - be the card's PRIMARY: it never wins attribution, the airing (date and
+        time) or the episode coordinate, which are chosen among the listings
+        alone (resolve.resolve_records) — or a viewer whose first service only
+        describes the title would see the card move to a day no listing gave;
+      - admit a card by itself: a group none of a viewer's services lists is not
+        theirs to draw however much a describing service says, so a viewer
+        narrowed to the describing service sees only what that service LISTS
+        (`narrow_for_viewer`);
+      - count as listing it: "only one service lists it" and "only a sparse
+        catalogue lists it" count the listings (filter.Judged.listed_by), and a
+        description joined to every card would make no card single-listed;
+      - reach the release narrowing or the disguised-film prune, which judge the
+        records that list a card.
+
+    ONE READ FOR THE WHOLE SPAN, of the store's rows only — nothing is asked of
+    any service and nothing is written, so a read for one viewer leaves every
+    row exactly as the next viewer finds it. A group that already holds a
+    listing from the describing service gains nothing: that listing is the same
+    row (entries._READ_SQL joins it). One record per title, shared by every card
+    of it in the span — nothing downstream writes to a record it is handed.
+    `settings` is the operator's admission (resolve.describing_sources): a
+    service this instance keeps off its calendar describes none of its cards.
+    """
+    describers = calendar_resolve.describing_sources(settings)
+    wanted: dict[int, tuple[str, str, list[str]]] = {}
+    for index, (_group, listings) in enumerate(parsed):
+        if not listings:
+            continue
+        listed = {str(r.source) for r in listings}
+        missing = [name for name in describers if name not in listed]
+        if missing:
+            wanted[index] = (str(listings[0].media), group_base(listings[0]), missing)
+    found = await entries.title_only_records(
+        describers, {key for _media, key, _missing in wanted.values()}) if wanted else {}
+    out = []
+    for index, (group, listings) in enumerate(parsed):
+        media, key, missing = wanted.get(index, ("", "", ()))
+        out.append((group, listings,
+                    [record for name in missing
+                     if (record := found.get((name, media, key))) is not None]))
+    return out
+
+
 async def visible_records(groups, endpoint, *, prefs=None, settings=None,
                           **specs) -> tuple[list, int]:
     """`groups` reduced to the records THIS viewer's calendar would draw, and
@@ -1449,6 +1516,10 @@ async def visible_records(groups, endpoint, *, prefs=None, settings=None,
         # could never drop a film Trakt also listed. Same promise as the overlay
         # above: it reads what is stored and fetches nothing.
         await calendar_enrich.overlay_releases(flat)
+        # AND WHAT A SERVICE THAT DESCRIBES EVERY CARD SAYS ABOUT A TITLE IT DOES
+        # NOT LIST HERE, read from the store once for the span and kept apart
+        # from the listings (`with_title_only` holds what it may do).
+        parsed = await with_title_only(parsed, settings)
         # THE RELEASE NARROWING RUNS HERE, BEFORE THE PICK, AND ON THE GROUP.
         # A films calendar that lists every release in every market needs a way
         # to say "the ones out here, in the formats I watch"; the per-country
@@ -1507,9 +1578,9 @@ def narrow_for_viewer(parsed, media, *, prefs=None, settings=None,
     """Every filter a calendar applies, in the order it applies them: `(the
     records this viewer's cards are drawn from, how many groups the release
     narrowing removed, how many cards reached the rest)`. `parsed` is
-    `[(group, every record of it the INSTANCE admits)]`; `specs` are the
-    viewer's filters, `vocab.active_specs`' keywords (vocab.complete_specs
-    refuses any other).
+    `[(group, every listing of it the INSTANCE admits, its title-only records)]`
+    (`with_title_only`); `specs` are the viewer's filters, `vocab.active_specs`'
+    keywords (vocab.complete_specs refuses any other).
 
     ONE IMPLEMENTATION OF "WOULD THIS VIEWER'S FILTERS HIDE IT", called by
     `visible_records` for the stored calendar and by the search's season picker
@@ -1529,17 +1600,28 @@ def narrow_for_viewer(parsed, media, *, prefs=None, settings=None,
     "no talk shows" filter until they narrowed the calendar to TMDB and Simkl's
     genre went with Simkl's listing. A title somebody hid stays hidden whichever
     services they read. So "only one service lists it" counts the services the
-    INSTANCE admits, never the viewer's narrowing of them.
+    INSTANCE admits, never the viewer's narrowing of them — and never a service
+    that only describes the card.
+
+    A TITLE-ONLY RECORD IS NARROWED BY THE SOURCE CHOICE AS A LISTING IS: a viewer
+    who left a service off their calendar draws none of its words, on a card it
+    lists or one it only describes, and is judged by them like everybody else.
+    Being narrowed to that service alone draws nothing it does not list
+    (resolve.resolve_records makes no card without a listing).
     """
     specs = vocab.complete_specs(specs)
     judged_pairs: list = []
     drawn_for: dict[int, Record] = {}
-    for group, every in parsed:
+    for group, every, describing in parsed:
         own = [r for r in every if prefs is None or prefs.admits_calendar(r.source)]
-        drawn = calendar_resolve.resolve_records(group, own, prefs)
+        own_describing = [r for r in describing
+                          if prefs is None or prefs.admits_calendar(r.source)]
+        drawn = calendar_resolve.resolve_records(group, own, prefs, own_describing)
         if drawn is None:
             continue
-        pair = (group, every, len(own) == len(every))
+        pair = (group, every,
+                len(own) == len(every) and len(own_describing) == len(describing),
+                describing)
         judged_pairs.append(pair)
         drawn_for[id(pair)] = drawn
     narrowed = calendar_filter.filter_release_groups(
@@ -1552,9 +1634,10 @@ def narrow_for_viewer(parsed, media, *, prefs=None, settings=None,
     drawn_by_judged: dict[int, Record] = {}
     cards: list[calendar_filter.Judged] = []
     for pair in narrowed:
-        group, every, draws_every = pair
+        group, every, draws_every, describing = pair
         drawn = drawn_for[id(pair)]
-        judged = drawn if draws_every else calendar_resolve.resolve_records(group, every, prefs)
+        judged = drawn if draws_every else calendar_resolve.resolve_records(
+            group, every, prefs, describing)
         drawn_by_judged[id(judged)] = drawn
         cards.append(calendar_filter.Judged(judged, frozenset(str(r.source) for r in every)))
     # A Simkl entry Simkl's OWN enrichment marks as a film (`anime_type ==
