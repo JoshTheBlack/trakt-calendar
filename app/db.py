@@ -33,12 +33,14 @@ TEXT, because they are payload rather than our clock.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import sqlite3
 import threading
 import time
+import weakref
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,12 +67,38 @@ DB_FILENAME = "app.db"
 BUSY_TIMEOUT_MS = 5000
 
 # A WRITE LOCK HELD LONGER THAN THIS IS LOGGED, naming the transaction that held
-# it (`transaction`). Every other writer waits behind it for up to
-# BUSY_TIMEOUT_MS and then fails with "database is locked", so the hold that
-# causes one is the evidence worth having — and a hold well under the timeout is
-# the early warning. A transaction's body is expected to take milliseconds: its
-# statement count does not grow with what it writes (CLAUDE.md says why).
+# it (`transaction`). Every other writer waits behind it — a transaction in this
+# process in `transaction`'s queue, any other write for up to BUSY_TIMEOUT_MS and
+# then failing with "database is locked" — so the hold is the evidence worth
+# having. A transaction's body is expected to be short: its statement count does
+# not grow with what it writes (CLAUDE.md says why).
 LOCK_HELD_WARN_SECONDS = 1.0
+
+# ONE WRITE AT A TIME, IN THE ORDER THEY ASKED — per event loop, because an
+# asyncio lock belongs to the loop it was first waited on (the suite runs a loop
+# per test; a running instance has one), and weakly, so a finished loop's queue
+# goes with it.
+#
+# SQLITE DOES NOT QUEUE WRITERS. A writer that finds the lock taken sleeps in
+# growing steps and tries again, so one that has waited a while can lose to a
+# writer that arrived a moment ago — and lose again, until BUSY_TIMEOUT_MS runs
+# out. MEASURED on the development server's first minute after a restart: the
+# title store's refresh pass waited 5 s at BEGIN IMMEDIATE while three calendar
+# stores, each holding the lock 1 to 3.3 s, took it one after another, and failed
+# with "database is locked". Every waiter also held a worker thread while it slept.
+# Queued here instead — every `transaction`, `execute` and `executemany` — a
+# write waits for the ones ahead of it on the event loop and never in SQLite's
+# busy handler for another of this process's.
+_writer_queues: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
+    weakref.WeakKeyDictionary())
+
+
+def _writer_queue() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    queue = _writer_queues.get(loop)
+    if queue is None:
+        queue = _writer_queues[loop] = asyncio.Lock()
+    return queue
 
 # Bumped by set_db_path() so a thread still holding a connection to the OLD path
 # drops it on next use rather than silently reading a stale database.
@@ -216,13 +244,18 @@ async def transaction(fn: Callable[..., T], *,
     this app — can't lose a race to a writer that slipped in between the two
     halves.
 
+    IN TURN: a transaction waits for this process's earlier ones to finish
+    (`_writer_queue` says why) before it reads or writes anything.
+
     `prepare(conn)`, WHEN GIVEN, RUNS FIRST, OUTSIDE THE TRANSACTION, on the same
     connection, and `fn(conn, prepared)` is handed what it returned: the reads
-    and the deciding a write needs, done while nobody waits on the lock. If
-    another connection committed in the meantime (`PRAGMA data_version`, which
-    moves only for another connection's commits), `prepare` runs again inside
-    the transaction — so `fn` always acts on what the database held once the
-    lock was taken. `prepare` must therefore only read.
+    and the deciding a write needs, done while nobody waits on the lock. It runs
+    in this transaction's turn, so no write `execute` or `transaction` makes
+    commits between it and the write; one made around them (a body handed to
+    `run`, another process) still can, and if one did (`PRAGMA data_version`,
+    which moves only for another connection's commits), `prepare` runs again
+    inside the transaction — so `fn` always acts on what the database held once
+    the lock was taken. `prepare` must therefore only read.
 
     A HOLD OVER `LOCK_HELD_WARN_SECONDS` IS LOGGED as a WARNING naming `fn`, from
     the lock's taking to its release, whether the body committed or not.
@@ -249,7 +282,8 @@ async def transaction(fn: Callable[..., T], *,
         _report_hold(fn, held_from)
         return result
 
-    return await anyio.to_thread.run_sync(_work)
+    async with _writer_queue():
+        return await anyio.to_thread.run_sync(_work)
 
 
 def _report_hold(fn: Callable, held_from: float) -> None:
@@ -276,21 +310,27 @@ async def fetch_value(sql: str, params: Sequence[Any] = (), default: Any = None)
 
 
 async def execute(sql: str, params: Sequence[Any] = ()) -> Result:
+    """One write statement, in its turn among this process's writes
+    (`_writer_queue`), so a run of transactions cannot keep it out until the
+    busy timeout."""
     def _work(conn: sqlite3.Connection) -> Result:
         cur = conn.execute(sql, params)
         return Result(lastrowid=cur.lastrowid, rowcount=cur.rowcount)
 
-    return await run(_work)
+    async with _writer_queue():
+        return await run(_work)
 
 
 async def executemany(sql: str, rows: Iterable[Sequence[Any]]) -> Result:
+    """`execute` for many rows, in one turn."""
     materialized = list(rows)
 
     def _work(conn: sqlite3.Connection) -> Result:
         cur = conn.executemany(sql, materialized)
         return Result(lastrowid=cur.lastrowid, rowcount=cur.rowcount)
 
-    return await run(_work)
+    async with _writer_queue():
+        return await run(_work)
 
 
 # ---------------------------------------------------------------------------

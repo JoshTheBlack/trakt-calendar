@@ -85,6 +85,14 @@ each writer to the same count for ten rows as for a hundred
 tests/calendar/test_enrich.py's `APassWritesItsBatchOnceTests`),
 and `db.transaction` logs a WARNING naming its body whenever the lock was held
 over `db.LOCK_HELD_WARN_SECONDS` (1 s), so the next long hold names itself.
+WRITES TAKE TURNS: every `db.transaction`, `db.execute` and `db.executemany`
+waits in ONE in-process queue per event loop (`db._writer_queue`) and only then
+prepares, takes the lock and writes. SQLite does not queue writers — a waiter
+sleeps and retries, and a later writer can take the lock first — so on the
+development server's first minute after a restart a refresh pass lost to three
+week stores in a row and failed at `db.BUSY_TIMEOUT_MS`. A write that goes round
+the helpers (a body handed to `db.run`) skips the queue and keeps that failure,
+so a write belongs in `transaction` or `execute`.
 
 **The session ROW is the authority on expiry, not the cookie.**
 `app/auth/cookies.py` issues it HttpOnly, SameSite=Lax, Path=/, no Domain, and

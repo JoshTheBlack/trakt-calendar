@@ -146,30 +146,27 @@ async def validate_session(
         return None
     ts = db.now() if now is None else now
 
-    def _work(conn: db.Connection) -> CurrentUser | None:
+    def _work(conn: db.Connection) -> tuple[CurrentUser | None, bool]:
         row = conn.execute(_SESSION_SELECT, (session_id,)).fetchone()
         if row is None:
-            return None
+            return None, False
         # The index lookup already matched; this repeats the comparison in
         # constant time, so the one equality check done in Python on a secret
         # isn't a byte-at-a-time one.
         if not secrets.compare_digest(str(row["session_id"]), session_id):
-            return None  # pragma: no cover — would need a collation/affinity surprise
+            return None, False  # pragma: no cover — would need a collation/affinity surprise
         if row["is_disabled"]:
-            return None
+            return None, False
         if ts >= int(row["expires_at"]) or ts >= int(row["absolute_expires_at"]):
-            return None
+            return None, False
 
         expires_at = int(row["expires_at"])
         absolute = int(row["absolute_expires_at"])
-        if touch and (ts - int(row["last_seen_at"])) >= SESSION_REFRESH_INTERVAL:
+        slides = touch and (ts - int(row["last_seen_at"])) >= SESSION_REFRESH_INTERVAL
+        if slides:
             # Clamped to the absolute cap: sliding extends the window, never the
             # ceiling.
             expires_at = min(ts + SESSION_SLIDING_SECONDS, absolute)
-            conn.execute(
-                "UPDATE sessions SET expires_at = ?, last_seen_at = ? WHERE id = ?",
-                (expires_at, ts, session_id),
-            )
         return CurrentUser(
             user_id=int(row["user_id"]),
             session_id=str(row["session_id"]),
@@ -184,9 +181,17 @@ async def validate_session(
                 name for name in str(row["linked_providers"] or "").split(",") if name),
             expires_at=expires_at,
             absolute_expires_at=absolute,
-        )
+        ), slides
 
-    return await db.run(_work)
+    user, slides = await db.run(_work)
+    if slides:
+        # THE SLIDE IS A WRITE, SO IT TAKES ITS TURN with every other write
+        # (db.execute) rather than being made from inside the read, where it
+        # waited in SQLite's busy handler and could fail a page at the busy
+        # timeout behind a run of other writes.
+        await db.execute("UPDATE sessions SET expires_at = ?, last_seen_at = ? WHERE id = ?",
+                         (user.expires_at, ts, session_id))
+    return user
 
 
 async def revoke_session(session_id: str) -> None:

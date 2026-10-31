@@ -342,9 +342,9 @@ async def _upsert_failures(failed: list[tuple[int, str]], now: int) -> dict[tupl
     """
     if not failed:
         return {}
-    rows = await db.fetch_all(_STORE_FAILURES, {
-        "rows": json.dumps([[int(simkl_id), str(media)] for simkl_id, media in failed]),
-        "empty": _compress({}), "now": now})
+    params = {"rows": json.dumps([[int(simkl_id), str(media)] for simkl_id, media in failed]),
+              "empty": _compress({}), "now": now}
+    rows = await db.transaction(lambda conn: conn.execute(_STORE_FAILURES, params).fetchall())
     return {(int(row["simkl_id"]), str(row["media"])): int(row["fail_count"]) for row in rows}
 
 

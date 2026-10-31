@@ -9,6 +9,7 @@ No network.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import threading
@@ -1442,6 +1443,35 @@ class HelperTests(DbTestCase):
 
         seen = await db.transaction(lambda conn, users: users, prepare=prepare)
         self.assertEqual((prepared, seen), ([0, 1], 1))
+
+    async def test_a_transaction_waits_its_turn_however_long_the_one_ahead_takes(self):
+        """SQLite does not queue writers: one that finds the lock taken sleeps and
+        tries again until the busy timeout, and a run of other writers can outlast
+        it. Queued in the process instead, a transaction waits for the one ahead of
+        it, and reads and writes only once that one has finished."""
+        order = []
+
+        def slow(conn):
+            order.append("slow begins")
+            time.sleep(0.3)
+            order.append("slow ends")
+
+        def quick_prepare(conn):
+            order.append("quick prepares")
+
+        def quick(conn, _prepared):
+            order.append("quick writes")
+
+        # Connections opened under the patch wait 50 ms at a taken lock, far less
+        # than the slow body holds it; moving the generation makes every worker
+        # open a new one.
+        with patch.object(db, "BUSY_TIMEOUT_MS", 50):
+            db.set_db_path(db.db_path())
+            first = asyncio.ensure_future(db.transaction(slow))
+            await asyncio.sleep(0.05)
+            await db.transaction(quick, prepare=quick_prepare)
+            await first
+        self.assertEqual(order, ["slow begins", "slow ends", "quick prepares", "quick writes"])
 
     async def test_transaction_commits(self):
         now = db.now()
