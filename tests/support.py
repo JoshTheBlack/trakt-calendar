@@ -16,6 +16,7 @@ run in the same process against the same data directory.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import json
 import os
@@ -164,6 +165,42 @@ def migrated_db(prefix: str = "test") -> Path:
     path = new_db_path(prefix)
     shutil.copyfile(template, path)
     return path
+
+
+@contextlib.contextmanager
+def statements_per_transaction():
+    """How many statements each `db.transaction` body runs while the block is
+    open, one count per transaction in the order they ran (sqlite3's trace
+    callback, which fires once per statement — once per row of an executemany).
+    Only the body is counted — what holds the write lock; a `prepare` runs before
+    it is taken.
+
+    FOR THE WRITERS WHOSE STATEMENT COUNT MUST NOT GROW WITH WHAT THEY WRITE. A
+    transaction holds the database's one write lock for as long as its statements
+    take, and each can wait a GIL switch interval while the event loop is busy;
+    a test storing ten and a hundred of something and finding the same count is
+    what holds a writer to that.
+    """
+    from unittest import mock
+
+    from app import db
+
+    counts: list[int] = []
+    real = db.transaction
+
+    async def counting(fn, *, prepare=None):
+        def body(conn, *prepared):
+            seen = [0]
+            conn.set_trace_callback(lambda _sql: seen.__setitem__(0, seen[0] + 1))
+            try:
+                return fn(conn, *prepared)
+            finally:
+                conn.set_trace_callback(None)
+                counts.append(seen[0])
+        return await real(body, prepare=prepare)
+
+    with mock.patch.object(db, "transaction", counting):
+        yield counts
 
 
 class DatabaseTestCase(unittest.IsolatedAsyncioTestCase):

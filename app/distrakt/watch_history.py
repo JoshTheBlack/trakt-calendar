@@ -403,18 +403,24 @@ def _row_ids(row) -> dict:
 
 
 def _insert_sql(table: str, own_columns: tuple[str, ...]) -> str:
-    """An INSERT for one of the two cache tables: the user, the identity, the
-    table's own columns, then the ids a call is placed with. Built from the column
-    names rather than written out so the placeholder count cannot drift from
-    them — miscounting `?` in a hand-written statement is silent until it isn't.
+    """An INSERT of every row one of the two cache tables gets, in ONE statement —
+    each row a JSON array: the user, the identity, the table's own columns, then
+    the ids a call is placed with. Built from the column names rather than
+    written out so the column count cannot drift from them.
+
+    ONE STATEMENT, NOT ONE PER ROW: a save writes a viewer's whole history (1,240
+    rows for one account on the development copy), and a write transaction holds
+    the database's one write lock while each statement can wait a GIL switch
+    interval for a busy event loop to let it go on.
     """
     # `source` is written explicitly rather than left to the column's default.
     # The default is 'trakt' and was right while one service could write; with a
     # second one it would silently file Simkl's rows as Trakt's, and nothing
     # downstream could tell.
     columns = ("user_id", *IDENTITY_COLUMNS, "source", *own_columns, *_CACHE_ID_COLUMNS)
+    picked = ", ".join(f"json_extract(value, '$[{at}]')" for at in range(len(columns)))
     return (f"INSERT INTO {table} ({', '.join(columns)}) "
-            f"VALUES ({', '.join(['?'] * len(columns))})")
+            f"SELECT {picked} FROM json_each(?) ORDER BY key")
 
 
 def _key_params(key: str) -> tuple:
@@ -525,6 +531,55 @@ async def _save(user_id: int, state: dict) -> None:
         ids = entry.get("ids") or {}
         return tuple(ids.get(id_key) for id_key in _CACHE_ID_COLUMNS.values())
 
+    progress = []
+    for key, entry in shows.items():
+        seasons = _seasons_by_source(entry)
+        # A SERVICE WITH NOTHING WATCHED STILL HAS TO LEAVE A MARK. This table
+        # holds one row per (season, service), so a service that was asked
+        # about a title and had nothing to report writes no row at all — and
+        # _load, which rebuilds the cache from these rows, then cannot tell
+        # "asked about, nothing watched" from "never asked about". It read as
+        # never-baselined on every load, so sync_and_baseline re-fetched that
+        # title from that service every time, for ever. A brand-new premiere
+        # is exactly that case, so a month of them cost a fetch each on every
+        # page load.
+        #
+        # NO_SEASONS is not a season and is never rendered as one: _load drops
+        # it after using its presence to reconstruct the entry and to name the
+        # service that answered. A negative number is safe to reserve because
+        # season 0 is real (it is where specials live) but a negative one
+        # cannot be.
+        #
+        # THE MARK NAMES THE SERVICE, one row each, because the question it
+        # answers is per service: two of them can be asked about one title and
+        # they do not have to agree about having seen none of it. A service
+        # with slots needs no mark — the slots already say it answered.
+        rows = [(season_s, source, eps)
+                for season_s, by_source in seasons.items()
+                for source, eps in by_source.items()]
+        # THE WHOLE-TITLE CLAIM GETS ITS OWN ROW, for the same reason the mark
+        # does: it is an answer with no season to hang on, and a service that
+        # made it would otherwise read back on the next load as one that was
+        # never asked.
+        whole = sorted(_watched_all_sources(entry))
+        rows += [(ALL_SEASONS, source, {}) for source in whole]
+        answered = {source for _season_s, source, _eps in rows}
+        marks = [(NO_SEASONS, source, {})
+                 for source in sorted(_baselined_sources(entry) - answered)]
+        # The fallback covers a state assembled by a caller that never went
+        # through a baseline — a restore of a backup taken before the state
+        # was per service, say — where the only service that could have
+        # written the rows is the one every stored row already carried.
+        for season_s, source, eps in (rows + marks or
+                                      [(NO_SEASONS, _LEGACY_SOURCE, {})]):
+            progress.append([
+                user_id, *_key_params(key), str(source), int(season_s),
+                json.dumps(episode_watches(eps or {})), *_ids_params(entry)])
+    films = [[user_id, *_key_params(key), str((movie or {}).get("source") or _LEGACY_SOURCE),
+              (movie or {}).get("watched_at") or "", (movie or {}).get("title") or "",
+              (movie or {}).get("year"), *_ids_params(movie or {})]
+             for key, movie in movies.items()]
+
     def _work(conn: db.Connection) -> None:
         conn.execute(
             "INSERT INTO distrakt_watch_state "
@@ -536,59 +591,11 @@ async def _save(user_id: int, state: dict) -> None:
             (user_id, cursors_json, beacons_json, play_counts_json),
         )
         conn.execute("DELETE FROM distrakt_show_progress WHERE user_id = ?", (user_id,))
-        for key, entry in shows.items():
-            seasons = _seasons_by_source(entry)
-            # A SERVICE WITH NOTHING WATCHED STILL HAS TO LEAVE A MARK. This table
-            # holds one row per (season, service), so a service that was asked
-            # about a title and had nothing to report writes no row at all — and
-            # _load, which rebuilds the cache from these rows, then cannot tell
-            # "asked about, nothing watched" from "never asked about". It read as
-            # never-baselined on every load, so sync_and_baseline re-fetched that
-            # title from that service every time, for ever. A brand-new premiere
-            # is exactly that case, so a month of them cost a fetch each on every
-            # page load.
-            #
-            # NO_SEASONS is not a season and is never rendered as one: _load drops
-            # it after using its presence to reconstruct the entry and to name the
-            # service that answered. A negative number is safe to reserve because
-            # season 0 is real (it is where specials live) but a negative one
-            # cannot be.
-            #
-            # THE MARK NAMES THE SERVICE, one row each, because the question it
-            # answers is per service: two of them can be asked about one title and
-            # they do not have to agree about having seen none of it. A service
-            # with slots needs no mark — the slots already say it answered.
-            rows = [(season_s, source, eps)
-                    for season_s, by_source in seasons.items()
-                    for source, eps in by_source.items()]
-            # THE WHOLE-TITLE CLAIM GETS ITS OWN ROW, for the same reason the mark
-            # does: it is an answer with no season to hang on, and a service that
-            # made it would otherwise read back on the next load as one that was
-            # never asked.
-            whole = sorted(_watched_all_sources(entry))
-            rows += [(ALL_SEASONS, source, {}) for source in whole]
-            answered = {source for _season_s, source, _eps in rows}
-            marks = [(NO_SEASONS, source, {})
-                     for source in sorted(_baselined_sources(entry) - answered)]
-            # The fallback covers a state assembled by a caller that never went
-            # through a baseline — a restore of a backup taken before the state
-            # was per service, say — where the only service that could have
-            # written the rows is the one every stored row already carried.
-            for season_s, source, eps in (rows + marks or
-                                          [(NO_SEASONS, _LEGACY_SOURCE, {})]):
-                conn.execute(progress_sql, (
-                    user_id, *_key_params(key), str(source), int(season_s),
-                    json.dumps(episode_watches(eps or {})), *_ids_params(entry),
-                ))
+        if progress:
+            conn.execute(progress_sql, (json.dumps(progress),))
         conn.execute("DELETE FROM distrakt_movie_watches WHERE user_id = ?", (user_id,))
-        for key, movie in movies.items():
-            conn.execute(movie_sql, (
-                user_id, *_key_params(key),
-                str((movie or {}).get("source") or _LEGACY_SOURCE),
-                (movie or {}).get("watched_at") or "",
-                (movie or {}).get("title") or "", (movie or {}).get("year"),
-                *_ids_params(movie or {}),
-            ))
+        if films:
+            conn.execute(movie_sql, (json.dumps(films),))
 
     await db.transaction(_work)
 

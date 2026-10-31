@@ -56,6 +56,29 @@ remote host, the image proxy: a blocked picture is a read that skipped
 `proxied_image`, fixed there, never by widening the header. There is no
 report-only header and no reporting endpoint.
 
+**A write transaction's statement count does not grow with what it writes.**
+`db.transaction` holds SQLite's one write lock for as long as its body runs, and
+the driver lets go of the GIL around every statement step and must win it back —
+up to a switch interval (5 ms) each time while the event loop is busy. MEASURED on
+a copy of dev: a calendar fill's store issued ~3,300 statements and held the lock
+5.3 s under one month read, and the next writer gave up at `db.BUSY_TIMEOUT_MS`.
+So a writer that writes many rows writes them SET-BASED — rows spelled as a JSON
+array before BEGIN, one `INSERT … SELECT … FROM json_each(?)` per table
+(`rows.json_rows`), a read inside answering in ONE aggregated row — and a read
+that needs no lock (finding rows by an id no index reaches, deciding what a queue
+owes) is made before the transaction. The title store's batch is
+`identity.settle_many` (three reads, one write, a re-key's own repointing;
+`settle` is a batch of one), fed by `metadata.listings` + `store_records`; a fill
+DECIDES ITS TITLES BEFORE THE LOCK — `db.transaction(fn, prepare=...)` runs the
+reads and the deciding (`metadata.plan_records` → `identity.SettlePlan`) on the
+same connection first, and again under the lock only if another connection
+committed meanwhile (`PRAGMA data_version`), so the lock is held for the writes
+alone. A payload-driven join says CROSS JOIN, and an UPDATE … FROM by rowid takes
+the competing index away (`+source`): the planner otherwise walks the table with
+the payload inside it. `tests/support.py`'s `statements_per_transaction` holds
+each writer to the same count for ten rows as for a hundred
+(tests/calendar/test_write_statements.py, tests/metadata/test_write_statements.py).
+
 **The session ROW is the authority on expiry, not the cookie.**
 `app/auth/cookies.py` issues it HttpOnly, SameSite=Lax, Path=/, no Domain, and
 Secure with the `__Host-` name unless the Secure policy says otherwise; its
@@ -175,8 +198,9 @@ about a title (`title_metadata`, `episode_metadata` — a row per service, each 
 its own expiry; `rows.py`), which title a set of ids is (`titles`,
 `title_aliases`; `identity.py`), and every column elsewhere that holds a title's
 key (`holders.py`). Every path that meets a title registers it there:
-`store_records` for a service's own listings, inside the caller's transaction and
-asking nobody (a fill names hundreds of titles); `ensure` / `ensure_many` for a
+`store_records` for a service's own listings (spelled before the caller's
+transaction by `metadata.listings`), inside it and asking nobody (a fill names
+hundreds of titles); `ensure` / `ensure_many` for a
 title met by its ids — a search pick, a tracker arrival, a board add, an import, a
 restore — which, handed a viewer's settings, ask each service the title has no id
 from ONCE by shared id. THAT IS THE ONE PLACE THE APP ASKS BY SHARED ID

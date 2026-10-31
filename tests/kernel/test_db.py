@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import unittest
 
 from app import db
@@ -1375,6 +1376,43 @@ class HelperTests(DbTestCase):
         with self.assertRaises(RuntimeError):
             await db.transaction(_boom)
         self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM users"), 0)
+
+    async def test_what_prepare_read_before_the_lock_reaches_the_body(self):
+        calls = []
+
+        def prepare(conn):
+            calls.append("prepare")
+            return conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+        def body(conn, prepared):
+            calls.append(("body", prepared, conn.in_transaction))
+            return prepared
+
+        self.assertEqual(await db.transaction(body, prepare=prepare), 0)
+        self.assertEqual(calls, ["prepare", ("body", 0, True)])
+
+    async def test_another_connections_commit_after_prepare_makes_it_prepare_again(self):
+        """`prepare` read before the lock; once another writer has committed, what
+        it read may be stale, so it is read again under the lock."""
+        now = db.now()
+        prepared = []
+
+        def other_writer():
+            db.connection().execute(
+                "INSERT INTO users (username, created_at, updated_at) VALUES ('w', ?, ?)",
+                (now, now))
+            db.close_thread_connection()
+
+        def prepare(conn):
+            prepared.append(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+            if len(prepared) == 1:  # then another connection commits, once
+                writer = threading.Thread(target=other_writer)
+                writer.start()
+                writer.join()
+            return prepared[-1]
+
+        seen = await db.transaction(lambda conn, users: users, prepare=prepare)
+        self.assertEqual((prepared, seen), ([0, 1], 1))
 
     async def test_transaction_commits(self):
         now = db.now()

@@ -283,9 +283,9 @@ def seed_words(conn: db.Connection, media: str, ids: Mapping[str, Any] | None, *
             conn.execute(f"UPDATE {rows.TITLES} SET {', '.join(sets)} WHERE rowid = ?",
                          (*params, row["rid"]))
         if has_season:
-            conn.execute(_upsert_listed_season_sql(), (
+            conn.execute(_upsert_listed_season_sql(), {"rows": json.dumps([[
                 source, str(media), str(row["source_id"]), int(season), str(season_name or ""),
-                int(episode_count or 0), "", "", now))
+                int(episode_count or 0), "", "", now, 0]])})
     return source
 
 
@@ -550,11 +550,16 @@ _SEASON_REWRITES: dict[str, str | None] = dict.fromkeys(
 # AN EPISODE'S DESCRIPTION, over whatever row a listing or the episode drain
 # left: the answer wins where it states something, and a column it does not
 # carry — the drain's vote count — is left as it was.
+#
+# EVERY EPISODE OF THE SEASON IN ONE STATEMENT (rows.json_rows), as a listing's
+# are: a write transaction holds the database's one write lock for as long as its
+# statements take, and while the event loop is busy each one can wait a GIL switch
+# interval — so a statement per episode held it longer the longer the season.
 _UPSERT_EPISODE = f"""
 INSERT INTO {rows.EPISODES}
     (source, media, source_id, season, number, title, overview, first_aired,
      episode_type, runtime, rating, fetched_at, stale_after)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+{rows.json_rows(13)}
 ON CONFLICT(source, media, source_id, season, number) DO UPDATE SET
     title = CASE WHEN excluded.title != '' THEN excluded.title ELSE {rows.EPISODES}.title END,
     overview = excluded.overview, first_aired = excluded.first_aired,
@@ -585,23 +590,30 @@ def _write_season(conn: db.Connection, source: str, media: str, source_id: str,
         json.dumps([day.isoformat() if day else None for day in days]),
         json.dumps(list(answer.get("cast") or [])),
         now, season_stale_after(days, now)))
+    written = []
     for episode, day in zip(episodes, days):
         noon = (datetime(day.year, day.month, day.day, 12, tzinfo=timezone.utc).timestamp()
                 if day else None)
-        conn.execute(_UPSERT_EPISODE + "    fetched_at = "
-                     + rows.ceiling_clock(rows.EPISODES, _EPISODE_REWRITES), (
+        written.append([
             source, media, source_id, season, int(episode["number"]),
             str(episode.get("title") or ""), str(episode.get("overview") or ""),
             str(episode.get("first_aired") or ""), str(episode.get("episode_type") or ""),
             episode.get("runtime"), episode.get("rating"), now,
-            rows.episode_stale_after(noon, now)))
+            rows.episode_stale_after(noon, now)])
+    if written:
+        conn.execute(_UPSERT_EPISODE + "    fetched_at = "
+                     + rows.ceiling_clock(rows.EPISODES, _EPISODE_REWRITES),
+                     {"rows": json.dumps(written)})
 
 
+# Every season a list names in one statement, the episodes' reason. Each row:
+# source, media, source_id, season, name, episode_count, premiere, poster,
+# fetched_at, and a `stale_after` of 0 — a list is not a description of the season.
 _UPSERT_LISTED_SEASON = f"""
 INSERT INTO {rows.SEASONS}
     (source, media, source_id, season, name, episode_count, premiere, poster,
      fetched_at, stale_after)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+{rows.json_rows(10)}
 ON CONFLICT(source, media, source_id, season) DO UPDATE SET
     name = CASE WHEN excluded.name != '' THEN excluded.name ELSE {rows.SEASONS}.name END,
     episode_count = excluded.episode_count,
@@ -630,18 +642,14 @@ def write_season_list(conn: db.Connection, source: str, media: str, own_id: Any,
     THE LIST'S COUNT REPLACES THE DESCRIPTION'S, and that is how a season that
     grew is noticed (`season_described`). Its clock (`stale_after`) is left
     alone: a list is not a description of the season."""
-    count = 0
-    for row in _title_rows(conn, str(source), str(media), own_id, ids, now):
-        for entry in seasons:
-            number = entry.get("season")
-            if number is None:
-                continue
-            conn.execute(_upsert_listed_season_sql(), (
-                str(source), str(media), str(row["source_id"]), int(number),
+    written = [[str(source), str(media), str(row["source_id"]), int(entry["season"]),
                 str(entry.get("name") or ""), int(entry.get("episode_count") or 0),
-                str(entry.get("first_aired") or ""), str(entry.get("poster") or ""), now))
-            count += 1
-    return count
+                str(entry.get("first_aired") or ""), str(entry.get("poster") or ""), now, 0]
+               for row in _title_rows(conn, str(source), str(media), own_id, ids, now)
+               for entry in seasons if entry.get("season") is not None]
+    if written:
+        conn.execute(_upsert_listed_season_sql(), {"rows": json.dumps(written)})
+    return len(written)
 
 
 # A season a list offers: numbered, and holding at least one episode — the rule

@@ -163,6 +163,12 @@ def _tmdb_record(title: str = "A show") -> Record:
                   episode_label="S01E01", episode_title="Pilot")
 
 
+async def _write_listing(record: Record, key: str, *, now: int) -> None:
+    """One listing written under `key`, as a fill writes it."""
+    spelled = rows.listing_rows([record], now=now, stale_after=now)
+    await db.transaction(lambda conn: rows.write_listings(conn, spelled, [key], now=now))
+
+
 class OneClockForEveryWordTests(DatabaseTestCase):
     """A ceiling reads ONE clock per row, so for a service with a ceiling that
     clock is the age of the oldest word the row holds: a write renews it only
@@ -204,19 +210,15 @@ class OneClockForEveryWordTests(DatabaseTestCase):
         self.assertEqual(await self._season("trakt"), NOW)
 
     async def test_a_calendar_listing_over_a_described_title_keeps_its_clock(self):
-        await db.transaction(lambda conn: rows.write_listing(
-            conn, _tmdb_record(), "show:tmdb:31", now=OLD, stale_after=OLD))
+        await _write_listing(_tmdb_record(), "show:tmdb:31", now=OLD)
         await db.execute("UPDATE title_metadata SET season_count = 2, cast_json = '[\"x\"]'")
-        await db.transaction(lambda conn: rows.write_listing(
-            conn, _tmdb_record("Renamed"), "show:tmdb:31", now=NOW, stale_after=NOW))
+        await _write_listing(_tmdb_record("Renamed"), "show:tmdb:31", now=NOW)
         row = await db.fetch_one("SELECT title, fetched_at FROM title_metadata")
         self.assertEqual((row["title"], row["fetched_at"]), ("Renamed", OLD))
 
     async def test_a_listing_alone_renews_what_it_wrote(self):
-        await db.transaction(lambda conn: rows.write_listing(
-            conn, _tmdb_record(), "show:tmdb:31", now=OLD, stale_after=OLD))
-        await db.transaction(lambda conn: rows.write_listing(
-            conn, _tmdb_record(), "show:tmdb:31", now=NOW, stale_after=NOW))
+        await _write_listing(_tmdb_record(), "show:tmdb:31", now=OLD)
+        await _write_listing(_tmdb_record(), "show:tmdb:31", now=NOW)
         self.assertEqual(await db.fetch_value("SELECT fetched_at FROM title_metadata"), NOW)
 
     def test_a_description_that_leaves_a_word_keeps_the_older_clock(self):
@@ -243,8 +245,7 @@ class TheStoreFilesThePicturesItLearnsTests(DatabaseTestCase):
         record = Record(source=Source.SIMKL, media=Media.SHOW, id="77", ids={"simkl": 77},
                         detail_url="", title="Anime", air_ts=float(NOW),
                         poster="https://simkl.in/p.jpg")
-        await db.transaction(lambda conn: rows.write_listing(
-            conn, record, "simkl:77", now=NOW, stale_after=NOW))
+        await _write_listing(record, "simkl:77", now=NOW)
         self.assertEqual([tuple(r) for r in await db.fetch_all(
             "SELECT media, title_key, source, url FROM title_posters")],
             [("show", "simkl:77", "simkl", "https://simkl.in/p.jpg")])

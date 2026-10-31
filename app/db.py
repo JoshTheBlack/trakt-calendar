@@ -197,19 +197,36 @@ async def run(fn: Callable[[sqlite3.Connection], T]) -> T:
     return await anyio.to_thread.run_sync(lambda: fn(connection()))
 
 
-async def transaction(fn: Callable[[sqlite3.Connection], T]) -> T:
+async def transaction(fn: Callable[..., T], *,
+                      prepare: Callable[[sqlite3.Connection], Any] | None = None) -> T:
     """Run `fn(conn)` inside BEGIN IMMEDIATE / COMMIT, rolling back on any error.
 
     IMMEDIATE rather than DEFERRED takes the write lock up front, so a
     read-then-write body — every "check whether this exists, then insert it" in
     this app — can't lose a race to a writer that slipped in between the two
     halves.
+
+    `prepare(conn)`, WHEN GIVEN, RUNS FIRST, OUTSIDE THE TRANSACTION, on the same
+    connection, and `fn(conn, prepared)` is handed what it returned: the reads
+    and the deciding a write needs, done while nobody waits on the lock. If
+    another connection committed in the meantime (`PRAGMA data_version`, which
+    moves only for another connection's commits), `prepare` runs again inside
+    the transaction — so `fn` always acts on what the database held once the
+    lock was taken. `prepare` must therefore only read.
     """
     def _work() -> T:
         conn = connection()
+        if prepare is not None:
+            seen = conn.execute("PRAGMA data_version").fetchone()[0]
+            prepared = prepare(conn)
         conn.execute("BEGIN IMMEDIATE")
         try:
-            result = fn(conn)
+            if prepare is None:
+                result = fn(conn)
+            else:
+                if conn.execute("PRAGMA data_version").fetchone()[0] != seen:
+                    prepared = prepare(conn)
+                result = fn(conn, prepared)
         except BaseException:
             conn.execute("ROLLBACK")
             raise

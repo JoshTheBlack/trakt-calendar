@@ -83,11 +83,28 @@ def _utc_date(air_ts: float) -> str:
 # lists the episode (`_in_fetch_order`), a fill deletes the ones its records or
 # its span supersede (`store_span`), and a search writes none for an episode the
 # feed already lists (`store_loose_airings`).
-_INSERT_AIRING = """
+#
+# EVERY STATEMENT BELOW WRITES A WHOLE FILL, and the rows travel as JSON arrays
+# spelled before the transaction opens (`_airing_rows`). A fill's write lock is
+# held for as long as its statements take, and while the event loop is busy each
+# statement can wait a GIL switch interval to win the GIL back — so a store that
+# issued a statement or eight per record held the lock 5.3 s under one month
+# read, MEASURED on a copy of a real instance, and the next writer gave up at the
+# busy timeout. A fixed number of statements holds it for milliseconds. The title
+# key each airing is filed under is known only inside the transaction, and
+# travels as a second array the rows index by position.
+_INSERT_AIRINGS = """
 INSERT OR REPLACE INTO calendar_airings
     (source, media, source_id, endpoint, title_key, air_ts, air_date, date_only,
      season, episode_number, episode_label, stored_at, from_search)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+SELECT json_extract(r.value, '$[0]'), json_extract(r.value, '$[1]'),
+       json_extract(r.value, '$[2]'), json_extract(r.value, '$[3]'),
+       json_extract(:keys, '$[' || r.key || ']'),
+       json_extract(r.value, '$[4]'), json_extract(r.value, '$[5]'),
+       json_extract(r.value, '$[6]'), json_extract(r.value, '$[7]'),
+       json_extract(r.value, '$[8]'), json_extract(r.value, '$[9]'),
+       json_extract(r.value, '$[10]'), json_extract(r.value, '$[11]')
+FROM json_each(:rows) r ORDER BY r.key
 """
 
 
@@ -98,18 +115,47 @@ def _coordinate(record: Record) -> tuple[int, int]:
             int(record.episode_number if record.episode_number is not None else UNSTATED))
 
 
-# One service's searched rows of one episode on one calendar — the key less its
-# instant. Every column is in the primary key's leading half, so it is a seek.
-_SAME_EPISODE = ("source = ? AND media = ? AND source_id = ? AND endpoint = ? "
-                 "AND season = ? AND episode_number = ?")
-_DELETE_SUPERSEDED = f"DELETE FROM calendar_airings WHERE from_search = 1 AND {_SAME_EPISODE}"
-_FED_EPISODE = f"SELECT 1 FROM calendar_airings WHERE from_search = 0 AND {_SAME_EPISODE} LIMIT 1"
+def _episode(record: Record, endpoint_key: str) -> tuple:
+    """One service's episode on one calendar — an airing's key less its instant:
+    (source, media, source_id, endpoint, season, episode_number)."""
+    return (str(record.source), str(record.media), str(record.id), endpoint_key,
+            *_coordinate(record))
 
-# A span's searched rows of one source whose episode that source's feed lists,
-# at any date.
+
+# One service's rows of the episodes in `:episodes` (each an `_episode`) — every
+# column is in the primary key's leading half, so each is a seek, and the
+# payload drives the join (CROSS JOIN fixes the order).
+_EPISODE_ROWS = """
+SELECT a.rowid FROM json_each(:episodes) j CROSS JOIN calendar_airings a
+  ON a.source = json_extract(j.value, '$[0]') AND a.media = json_extract(j.value, '$[1]')
+ AND a.source_id = json_extract(j.value, '$[2]') AND a.endpoint = json_extract(j.value, '$[3]')
+ AND a.season = json_extract(j.value, '$[4]') AND a.episode_number = json_extract(j.value, '$[5]')
+WHERE a.from_search = {from_search}
+"""
+_DELETE_SUPERSEDED = (f"DELETE FROM calendar_airings "
+                      f"WHERE rowid IN ({_EPISODE_ROWS.format(from_search=1)})")
+# The fed episodes among them, as one row (identity.py's reads say why one).
+_FED_EPISODES = f"""
+SELECT json_group_array(json_array(source, media, source_id, endpoint, season, episode_number))
+FROM calendar_airings WHERE rowid IN ({_EPISODE_ROWS.format(from_search=0)})
+"""
+
+# What the sources that answered listed in the span before, gone — `from_search
+# = 0` SPARES WHAT NO FEED EVER LISTED. This delete exists so a title a source
+# has STOPPED listing stops being drawn, and a searched row was never in that
+# source's answer to begin with. MIGRATION_37 has the measured case.
+_DELETE_FED = """
+DELETE FROM calendar_airings
+WHERE from_search = 0 AND endpoint = ? AND air_date >= ? AND air_date < ?
+  AND source IN (SELECT value FROM json_each(?))
+"""
+
+# A span's searched rows of the named sources whose episode that source's feed
+# lists, at any date.
 _DELETE_SUPERSEDED_IN_SPAN = """
 DELETE FROM calendar_airings
-WHERE from_search = 1 AND endpoint = ? AND source = ? AND air_date >= ? AND air_date < ?
+WHERE from_search = 1 AND endpoint = ? AND air_date >= ? AND air_date < ?
+  AND source IN (SELECT value FROM json_each(?))
   AND EXISTS (SELECT 1 FROM calendar_airings fed
               WHERE fed.from_search = 0 AND fed.source = calendar_airings.source
                 AND fed.media = calendar_airings.media
@@ -119,22 +165,41 @@ WHERE from_search = 1 AND endpoint = ? AND source = ? AND air_date >= ? AND air_
                 AND fed.episode_number = calendar_airings.episode_number)
 """
 
+_UPSERT_COVERAGE = """
+INSERT INTO calendar_coverage
+    (endpoint, span_start, source, asked, answered, stored_at, stale_after)
+SELECT :endpoint, :span, json_extract(value, '$[0]'), 1, json_extract(value, '$[1]'),
+       :now, :stale_after
+FROM json_each(:sources) WHERE true
+ON CONFLICT(endpoint, span_start, source) DO UPDATE SET
+    asked = 1, answered = excluded.answered,
+    stored_at = excluded.stored_at, stale_after = excluded.stale_after
+"""
 
-def _airing_rows(conn: db.Connection, endpoint_key: str, records: list[Record], *,
-                 now: int, stale_after: int, from_search: int) -> list[tuple]:
-    """The airings for `records`, each filed under its title's key — which the
-    title store decides and writes its own rows for, in the caller's
-    transaction (metadata.store_records)."""
-    keys = metadata.store_records(conn, records, now=now, stale_after=stale_after)
-    out = []
-    for record, key in zip(records, keys):
-        season, number = _coordinate(record)
-        out.append((
-            str(record.source), str(record.media), str(record.id), endpoint_key, key,
-            float(record.air_ts), _utc_date(record.air_ts), 1 if record.date_only else 0,
-            season, number, str(record.episode_label or ""), now, from_search,
-        ))
-    return out
+
+def _airing_rows(endpoint_key: str, records: list[Record], *, now: int,
+                 from_search: int) -> list[str]:
+    """Each record's airing row as `_INSERT_AIRINGS` reads it — everything but
+    the title key, which the title store decides inside the caller's transaction
+    (metadata.store_records). Pure: built before the transaction opens."""
+    return [json.dumps([
+        str(record.source), str(record.media), str(record.id), endpoint_key,
+        float(record.air_ts), _utc_date(record.air_ts), 1 if record.date_only else 0,
+        *_coordinate(record), str(record.episode_label or ""), now, from_search,
+    ]) for record in records]
+
+
+def _write_airings(conn: db.Connection, listed: metadata.Listings, rows: list[str],
+                   plan=None) -> None:
+    """`listed`'s titles through the title store and their airings (`rows`, one
+    per record, in order) filed under the keys it answers — inside the caller's
+    transaction. `plan` is the title store's decisions, made before the
+    transaction (metadata.plan_records), or None to make them here."""
+    keys = (metadata.store_records(conn, listed) if plan is None
+            else metadata.write_records(conn, listed, plan))
+    if keys:
+        conn.execute(_INSERT_AIRINGS, {"rows": "[" + ",".join(rows) + "]",
+                                       "keys": json.dumps(keys)})
 
 
 async def store_span(endpoint_key: str, span_start: date, span_end: date,
@@ -170,43 +235,41 @@ async def store_span(endpoint_key: str, span_start: date, span_end: date,
     if len(inside) != len(records):
         logger.debug("%d %s entr(ies) fell outside the span starting %s; trimmed.",
                      len(records) - len(inside), endpoint_key, first)
+    replied = sorted({*answered, *(str(s) for s in unchanged)})
+    # EVERYTHING THE STATEMENTS CARRY, SPELLED BEFORE THE LOCK IS TAKEN.
+    listed = metadata.listings(inside, now=now, stale_after=stale_after)
+    airings = _airing_rows(endpoint_key, inside, now=now, from_search=0)
+    # WHAT THE FEED NOW LISTS, NO SEARCH LISTS FOR IT: every searched row of an
+    # episode these records name, at any date (the comment above _INSERT_AIRINGS
+    # says why the key's instant cannot decide it).
+    superseded = json.dumps(sorted({_episode(r, endpoint_key) for r in inside}))
+    coverage = json.dumps([[name, 1 if name in replied else 0]
+                           for name in sorted({*map(str, asked), *replied})])
 
-    def _work(conn):
-        for name in answered:
-            conn.execute(
-                # `from_search = 0` SPARES WHAT NO FEED EVER LISTED. This delete
-                # exists so a title a source has STOPPED listing stops being
-                # drawn, and a searched row was never in that source's answer to
-                # begin with. MIGRATION_37 has the measured case.
-                "DELETE FROM calendar_airings WHERE from_search = 0 "
-                "  AND source = ? AND endpoint = ? "
-                "AND air_date >= ? AND air_date < ?",
-                (name, endpoint_key, first, last))
-        # WHAT THE FEED NOW LISTS, NO SEARCH LISTS FOR IT: every searched row of an
-        # episode these records name, at any date (the comment above
-        # _INSERT_AIRING says why the key's instant cannot decide it).
-        conn.executemany(_DELETE_SUPERSEDED, sorted({
-            (str(r.source), str(r.media), str(r.id), endpoint_key, *_coordinate(r))
-            for r in inside}))
-        conn.executemany(_INSERT_AIRING, _airing_rows(
-            conn, endpoint_key, inside, now=now, stale_after=stale_after, from_search=0))
-        replied = {*answered, *(str(s) for s in unchanged)}
+    # WHICH TITLE EACH LISTING IS, DECIDED BEFORE THE LOCK IS TAKEN: the title
+    # store's reads and the deciding they feed (metadata.plan_records), made
+    # again inside only if another writer committed in between
+    # (db.transaction's `prepare`) — so the lock is held for the writes alone.
+    def _plan(conn):
+        return metadata.plan_records(conn, listed)
+
+    def _work(conn, plan):
+        if answered:
+            conn.execute(_DELETE_FED, (endpoint_key, first, last, json.dumps(answered)))
+        if inside:
+            conn.execute(_DELETE_SUPERSEDED, {"episodes": superseded})
+            _write_airings(conn, listed, airings, plan)
         # AND WHAT A SOURCE THAT SAID "UNCHANGED" ALREADY LISTED: its feed rows
         # stand as they were, so a searched row in this span that one of them
         # supersedes is taken here — the only write such a span gets.
-        conn.executemany(_DELETE_SUPERSEDED_IN_SPAN,
-                         [(endpoint_key, name, first, last) for name in sorted(replied)])
-        conn.executemany(
-            "INSERT INTO calendar_coverage "
-            "(endpoint, span_start, source, asked, answered, stored_at, stale_after) "
-            "VALUES (?, ?, ?, 1, ?, ?, ?) "
-            "ON CONFLICT(endpoint, span_start, source) DO UPDATE SET "
-            "asked = 1, answered = excluded.answered, "
-            "stored_at = excluded.stored_at, stale_after = excluded.stale_after",
-            [(endpoint_key, first, str(name), 1 if str(name) in replied else 0,
-              now, stale_after) for name in {*asked, *replied}])
+        if replied:
+            conn.execute(_DELETE_SUPERSEDED_IN_SPAN,
+                         (endpoint_key, first, last, json.dumps(replied)))
+        conn.execute(_UPSERT_COVERAGE, {"endpoint": endpoint_key, "span": first,
+                                        "sources": coverage, "now": now,
+                                        "stale_after": stale_after})
 
-    await db.transaction(_work)
+    await db.transaction(_work, prepare=_plan)
 
 
 async def store_loose_airings(endpoint_key: str, records, *, now: int,
@@ -246,15 +309,18 @@ async def store_loose_airings(endpoint_key: str, records, *, now: int,
     records = list(records or ())
     if not records:
         return []
+    listed = metadata.listings(records, now=now, stale_after=stale_after)
+    airings = _airing_rows(endpoint_key, records, now=now, from_search=1)
+    episodes = json.dumps(sorted({_episode(r, endpoint_key) for r in records}))
 
     def _write(conn) -> list[Record]:
-        gaps = [record for record in records
-                if conn.execute(_FED_EPISODE, (str(record.source), str(record.media),
-                                               str(record.id), endpoint_key,
-                                               *_coordinate(record))).fetchone() is None]
-        conn.executemany(_INSERT_AIRING, _airing_rows(
-            conn, endpoint_key, gaps, now=now, stale_after=stale_after, from_search=1))
-        return gaps
+        (found,) = conn.execute(_FED_EPISODES, {"episodes": episodes}).fetchone()
+        fed = {tuple(episode) for episode in json.loads(found)}
+        gaps = [at for at, record in enumerate(records)
+                if _episode(record, endpoint_key) not in fed]
+        if gaps:
+            _write_airings(conn, listed.only(gaps), [airings[at] for at in gaps])
+        return [records[at] for at in gaps]
 
     written = await db.transaction(_write)
     if written:
@@ -904,31 +970,39 @@ async def store_episodes(source: str, service_id: int, media: str, season: int,
     if not source_ids:
         return 0
     by_number = {int(e["number"]): e for e in episodes if e.get("number") is not None}
+    asked = {"source": source, "media": media, "season": int(season),
+             "ids": json.dumps([str(source_id) for source_id in source_ids])}
 
     def _work(conn) -> int:
-        written = 0
-        for source_id in source_ids:
-            # Every airing of this season, so a stub a listing wrote is answered
-            # even when the lookup did not mention that episode.
-            owed = conn.execute(
-                "SELECT episode_number, MAX(air_ts) FROM calendar_airings "
-                "WHERE source = ? AND media = ? AND source_id = ? AND season = ? "
-                "GROUP BY episode_number",
-                (source, media, source_id, season)).fetchall()
-            for (number, air_ts) in owed:
-                if number is None or number < 0:
-                    continue
-                # The LAST airing, not the first: a re-airing is another chance
-                # for somebody to have corrected the record, so the correction
-                # window opens again behind it.
-                title_rows.write_episode_answer(
-                    conn, source, media, source_id, season, int(number),
-                    by_number.get(int(number)) or {}, now=now,
-                    stale_after=title_rows.episode_stale_after(air_ts, now))
-                written += 1
-        return written
+        # Every airing of this season, so a stub a listing wrote is answered even
+        # when the lookup did not mention that episode — one row back, and one
+        # statement to write them all (a season used to be a statement per
+        # episode, and the drain answers a couple of hundred seasons a pass).
+        (found,) = conn.execute(_SEASON_AIRINGS, asked).fetchone()
+        answers = [
+            # The LAST airing, not the first: a re-airing is another chance for
+            # somebody to have corrected the record, so the correction window
+            # opens again behind it.
+            title_rows.EpisodeAnswer(str(source_id), int(number),
+                                     by_number.get(int(number)) or {},
+                                     title_rows.episode_stale_after(air_ts, now))
+            for source_id, number, air_ts in json.loads(found)
+            if number is not None and number >= 0]
+        title_rows.write_episode_answers(conn, source, media, season, answers, now=now)
+        return len(answers)
 
     return await db.transaction(_work)
+
+
+# Each airing episode of one season of the named service rows, with its last
+# airing — the rows `store_episodes` answers.
+_SEASON_AIRINGS = """
+SELECT json_group_array(json_array(source_id, episode_number, aired)) FROM (
+    SELECT source_id, episode_number, MAX(air_ts) AS aired FROM calendar_airings
+    WHERE source = :source AND media = :media AND season = :season
+      AND source_id IN (SELECT value FROM json_each(:ids))
+    GROUP BY source_id, episode_number)
+"""
 
 
 # ---------------------------------------------------------------------------

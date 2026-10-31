@@ -29,7 +29,7 @@ import logging
 import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 from .. import db, providers
 from ..media import artwork
@@ -263,6 +263,25 @@ def _title_values(record: Record) -> tuple:
     )
 
 
+# EVERY LISTING OF A FILL IN ONE STATEMENT PER TABLE. Each row travels as a JSON
+# array, written before the caller's transaction (`listing_rows`); the title key
+# each is filed under is known only inside it, and travels as a second array the
+# rows index by position. ORDER BY keeps the rows in the fill's order, and an
+# upsert over a SELECT applies them one at a time in that order — two airings of
+# one title are the same two writes they were as two statements. `WHERE true` is
+# SQLite's remedy for an upsert on a SELECT, whose ON would otherwise read as a
+# join's.
+def json_rows(width: int, *, keyed_at: int | None = None) -> str:
+    """The SELECT a set-based write reads its rows from: column `i` of each
+    `:rows` element in turn, with the `:keys` element at the row's own position
+    put in at `keyed_at`."""
+    columns = [f"json_extract(r.value, '$[{i}]')" for i in range(width)]
+    if keyed_at is not None:
+        columns.insert(keyed_at, "json_extract(:keys, '$[' || r.key || ']')")
+    return (f"SELECT {', '.join(columns)} FROM json_each(:rows) r "
+            "WHERE true ORDER BY r.key")
+
+
 # A LISTING MAY NOT DEMOTE WHAT ENRICHMENT LEARNED. The calendar feed and the
 # per-title drain write the same row, and the feed knows less: Simkl's CDN files
 # carry no genres, network, country or certification at all. An unconditional
@@ -275,7 +294,7 @@ _UPSERT_TITLE = f"""
 INSERT INTO {TITLES}
     (source, media, source_id, title_key, {', '.join(_TITLE_FIELDS)},
      fetched_at, stale_after)
-VALUES ({', '.join(['?'] * (4 + len(_TITLE_FIELDS) + 2))})
+{json_rows(3 + len(_TITLE_FIELDS) + 2, keyed_at=3)}
 ON CONFLICT(source, media, source_id) DO UPDATE SET
     title_key  = excluded.title_key,
     title      = excluded.title,
@@ -361,7 +380,7 @@ def _upsert_title_sql() -> str:
 _UPSERT_EPISODE_STUB = f"""
 INSERT INTO {EPISODES}
     (source, media, source_id, season, number, title, fetched_at)
-VALUES (?, ?, ?, ?, ?, ?, 0)
+{json_rows(7)}
 ON CONFLICT(source, media, source_id, season, number) DO UPDATE SET
     -- ONCE A LOOKUP HAS ANSWERED, IT OWNS THE TITLE. Both writers reach this row:
     -- a listing, carrying whatever the calendar feed spelled, and the episode
@@ -382,40 +401,96 @@ ON CONFLICT(source, media, source_id, season, number) DO UPDATE SET
 # the work the last one had just finished.
 
 
-def write_listing(conn: db.Connection, record: Record, title_key: str, *, now: int,
-                  stale_after: int) -> None:
-    """One service's listing of a title, written: its title row under `title_key`,
-    and the stub of the episode it names. Inside the caller's transaction.
+class ListingRows(NamedTuple):
+    """A fill's listings as the rows the store writes for them, one JSON array
+    each — everything but the title key a row is filed under, which only the
+    caller's transaction knows. Built BEFORE that transaction (`listing_rows`),
+    so the write lock is held for a few statements and not for the Python that
+    spells several hundred rows."""
+    titles: list[str]
+    # The stub of the episode each listing names, None for one naming no
+    # coordinate: ONLY A STATED COORDINATE CAN KEY AN EPISODE. An entry that names
+    # no season or number is not identifying an episode this store can file
+    # anything under, and inventing a key for it would collide two different
+    # episodes of one show. Measured over 45,827 stored records: 7,387 state no
+    # coordinate and NOT ONE of them carries an episode title, so nothing is lost
+    # by having nowhere to put one.
+    episodes: list[str | None]
+    # (media, source, address) of each listing's picture, None for none.
+    pictures: list[tuple[str, str, str] | None]
 
-    ONLY A STATED COORDINATE CAN KEY AN EPISODE. An entry that names no season or
-    number is not identifying an episode this store can file anything under, and
-    inventing a key for it would collide two different episodes of one show.
-    Measured over 45,827 stored records: 7,387 state no coordinate and NOT ONE of
-    them carries an episode title, so nothing is lost by having nowhere to put one.
+    def only(self, positions: Iterable[int]) -> "ListingRows":
+        """These rows narrowed to the listings at `positions`, in that order."""
+        positions = list(positions)
+        return ListingRows([self.titles[i] for i in positions],
+                           [self.episodes[i] for i in positions],
+                           [self.pictures[i] for i in positions])
+
+
+def listing_rows(records: Iterable[Record], *, now: int, stale_after: int) -> ListingRows:
+    """What `write_listings` writes for each of `records`, spelled — pure, and
+    for the caller to call before its transaction."""
+    titles, episodes, pictures = [], [], []
+    for record in records:
+        own = [str(record.source), str(record.media), str(record.id)]
+        titles.append(json.dumps([*own, *_title_values(record), now, stale_after]))
+        episodes.append(
+            json.dumps([*own, int(record.season), int(record.episode_number),
+                        str(record.episode_title or ""), 0])
+            if record.season is not None and record.episode_number is not None else None)
+        pictures.append((str(record.media), str(record.source), str(record.poster))
+                        if record.poster else None)
+    return ListingRows(titles, episodes, pictures)
+
+
+def _array(rows: Iterable[str]) -> str:
+    """Rows already spelled as JSON, as one JSON array — joined, not re-encoded."""
+    return "[" + ",".join(rows) + "]"
+
+
+def write_listings(conn: db.Connection, rows: ListingRows, keys: list[str], *,
+                   now: int) -> None:
+    """Services' listings of their titles, written inside the caller's transaction:
+    each title row under its key in `keys` (one per row, in order), and the stub of
+    each episode named — a statement per table, however many listings there are.
     """
-    conn.execute(_upsert_title_sql(), (str(record.source), str(record.media),
-                                       str(record.id), title_key, *_title_values(record),
-                                       now, stale_after))
+    if not keys:
+        return
+    conn.execute(_upsert_title_sql(), {"rows": _array(rows.titles), "keys": json.dumps(keys)})
     # A TITLE WITH NO TMDB ID HAS ITS LISTING'S PICTURE FILED UNDER ITS KEY, as
     # the store knows it only here (app/media/artwork.py's `title_posters`). One
     # with a tmdb id is filed by the calendar's fill, which records every
     # picture a fetch brought (app/calendar/cache.py's `_poster_sighting`).
-    if record.poster and identity.tmdb_of(title_key) is None:
-        artwork.file_sighting(conn, str(record.media), None, title_key, str(record.source),
-                              str(record.poster), now)
-    if record.season is not None and record.episode_number is not None:
-        conn.execute(_UPSERT_EPISODE_STUB, (
-            str(record.source), str(record.media), str(record.id), int(record.season),
-            int(record.episode_number), str(record.episode_title or "")))
+    artwork.file_sightings(conn, [
+        (media, None, key, source, url)
+        for picture, key in zip(rows.pictures, keys)
+        if picture is not None and identity.tmdb_of(key) is None
+        for media, source, url in (picture,)], now)
+    stubs = [row for row in rows.episodes if row is not None]
+    if stubs:
+        conn.execute(_UPSERT_EPISODE_STUB, {"rows": _array(stubs)})
 
 
-def filed_key(conn: db.Connection, record: Record) -> str | None:
-    """The key a service's row for this record's title is filed under now, or None
-    when the service has no row for it yet."""
-    row = conn.execute(
-        f"SELECT title_key FROM {TITLES} WHERE source = ? AND media = ? AND source_id = ?",
-        (str(record.source), str(record.media), str(record.id))).fetchone()
-    return None if row is None else str(row[0])
+# The key each named service title is filed under now — one read for a whole fill.
+_FILED_SQL = f"""
+SELECT json_group_array(json_array(t.source, t.media, t.source_id, t.title_key))
+FROM json_each(?) j CROSS JOIN {TITLES} t
+  ON t.source = json_extract(j.value, '$[0]') AND t.media = json_extract(j.value, '$[1]')
+ AND t.source_id = json_extract(j.value, '$[2]')
+"""
+
+
+def filed_keys(conn: db.Connection, refs: Iterable[tuple[str, str, str]]
+               ) -> dict[tuple[str, str, str], str]:
+    """{(source, media, source id): the key that service's row for the title is
+    filed under now}, for each of `refs` the service has a row for. One row
+    back, however many are asked about (identity.py's reads say why)."""
+    refs = [list(ref) for ref in refs]
+    if not refs:
+        return {}
+    (found,) = conn.execute(_FILED_SQL, (json.dumps(refs),)).fetchone()
+    return {(str(source), str(media), str(source_id)): str(key)
+            for source, media, source_id, key in json.loads(found)}
 
 
 # ---------------------------------------------------------------------------
@@ -436,18 +511,52 @@ _ENRICHED_FIELDS = ("network", "country", "language", "certification", "status",
 # matched on, and a lookup overwriting it would re-identify a title under cover of
 # enriching it. Patching the learned map UNDER the stored one adds what is new and
 # keeps every value already there.
+#
+# EVERY ANSWER OF A PASS IN ONE STATEMENT, each row it is for named by rowid
+# (`:rows`, one array per row: its rowid, `_ENRICHED_COLUMNS`' values, the learned
+# ids, and the service's id the row must still state). The rowids come from
+# `_ANSWERED_ROWS`, read BEFORE the write lock is taken (`apply_enrichment_many`
+# says why), so the update re-checks the id: a row whose ids moved in between is
+# left for the next pass rather than given another title's answer.
+_ENRICHED_COLUMNS = (*_ENRICHED_FIELDS, "genres_json", "ratings_json", "anime_type",
+                     "release_types_json")
+
+
 def _update_enriched_sql() -> str:
-    """The enrichment UPDATE — `ceiling_clock` with the moment passed as `?`,
-    twice (`_enrichment_params`)."""
-    rewrites = dict.fromkeys(
-        (*_ENRICHED_FIELDS, "genres_json", "ratings_json", "anime_type", "release_types_json"))
+    """The enrichment UPDATE — `ceiling_clock` with the moment as `:now`."""
+    rewrites = dict.fromkeys(_ENRICHED_COLUMNS)
+    assigned = ", ".join(f"{name} = json_extract(j.value, '$[{at}]')"
+                         for at, name in enumerate(_ENRICHED_COLUMNS, start=1))
+    learned, stated = len(_ENRICHED_COLUMNS) + 1, len(_ENRICHED_COLUMNS) + 2
     return (
-        f"UPDATE {TITLES} SET {', '.join(f'{n} = ?' for n in _ENRICHED_FIELDS)}, "
-        "genres_json = ?, ratings_json = ?, anime_type = ?, release_types_json = ?, "
-        "ids_json = json_patch(?, ids_json), "
-        f"enriched = 1, fetched_at = {ceiling_clock(TITLES, rewrites, new='?')}, "
+        f"UPDATE {TITLES} SET {assigned}, "
+        f"ids_json = json_patch(json_extract(j.value, '$[{learned}]'), {TITLES}.ids_json), "
+        f"enriched = 1, fetched_at = {ceiling_clock(TITLES, rewrites, new=':now')}, "
         "failed_at = NULL, fail_count = 0 "
-        "WHERE source = ? AND media = ? AND json_extract(ids_json, '$.' || ?) = ?")
+        # BY ROWID, AND `+source` SAYS SO: offered the source's index, the planner
+        # walked every row of the service with the answers inside each (3.6 s for
+        # a hundred answers, MEASURED); unary plus takes the index away, leaving
+        # a rowid lookup per answer.
+        f"FROM json_each(:rows) j WHERE {TITLES}.rowid = json_extract(j.value, '$[0]') "
+        f"AND +{TITLES}.source = :source "
+        f"AND json_extract({TITLES}.ids_json, '$.' || :namespace) "
+        f"= json_extract(j.value, '$[{stated}]')")
+
+
+# Which rows each answer is for: the service's own id lives inside `ids_json`,
+# which no index reaches, so finding them reads every one of the service's rows —
+# MEASURED, ~80 ms for the 12,000 Simkl show rows on the development copy, and
+# each answer used to pay it inside the write transaction, twice (its update and
+# the read of what to settle). One read here answers a whole pass.
+_ANSWERED_ROWS = f"""
+SELECT json_group_array(json_array(t.rowid, t.media, json_extract(t.ids_json, '$.' || :namespace)))
+FROM {TITLES} t WHERE t.source = :source
+  AND json_extract(t.ids_json, '$.' || :namespace) IN (SELECT value FROM json_each(:ids))
+"""
+_ROWS_BY_ROWID = f"""
+SELECT json_group_array(json_array(rowid, media, title_key, ids_json, source_id))
+FROM {TITLES} WHERE rowid IN (SELECT value FROM json_each(?))
+"""
 
 
 def enrichment_values(fields: dict) -> dict:
@@ -455,7 +564,7 @@ def enrichment_values(fields: dict) -> dict:
 
     THERE ARE TWO PLACES A LOOKUP'S ANSWER IS WRITTEN, and before this there were
     two readings of it. calendar/enrich.py sets the fields on a RECORD, on the way
-    into a fill; `_enrichment_params` below sets them on a stored ROW, when the
+    into a fill; `_enrichment_row` below sets them on a stored ROW, when the
     drain answers for a title whose row already exists. Both had their own list
     of keys, and they drifted exactly as two copies of one fact do: this one read
     `ratings` where the payload says `rating`, so every title enriched through
@@ -493,45 +602,21 @@ def enrichment_values(fields: dict) -> dict:
     }
 
 
-def _enrichment_params(source: str, service_id: int, media: str, fields: dict,
-                       now: int) -> tuple:
+def _enrichment_row(source: str, fields: dict) -> list:
+    """One answer as `_update_enriched_sql` writes it: `_ENRICHED_COLUMNS`' values,
+    then the ids it learned."""
     value = enrichment_values(fields)
     # UNDER THE SOURCE'S OWN NAME, exactly as `_title_values` does it for a
     # record — one number shown under one service's mark, never a bare figure.
     ratings = {} if value["rating"] is None else {source: value["rating"]}
     if value["imdb_rating"] is not None:
         ratings["imdb"] = value["imdb_rating"]
-    return (*(value[name] for name in _ENRICHED_FIELDS),
+    return [*(value[name] for name in _ENRICHED_FIELDS),
             json.dumps(value["genres"]),
             json.dumps(ratings),
             value["anime_type"],
             json.dumps(value["release_types_by_country"]),
-            json.dumps(value["ids"]),
-            now, now, source, media, ID_NAMESPACE.get(source, source), service_id)
-
-
-def _enrich_and_settle(conn: db.Connection, params: tuple, *, now: int) -> None:
-    """One answer written onto its rows, and THE IDS IT LEARNED TAUGHT TO THE
-    TITLE, in the same transaction.
-
-    THIS IS WHERE A KEY USED TO GO STALE. A lookup adds ids the listing never
-    carried — a Simkl title with only an anidb id learns its tvdb, a tvdb-only one
-    its tmdb — and the row used to keep the key it was filed under while its ids
-    named another. Measured on the development copy: 1,256 stored titles in that
-    state, each one a card that could not join another service's listing of the
-    same show. Settling the row's ids against its key re-keys the title at the
-    moment it learns enough to, everywhere it is held.
-    """
-    conn.execute(_update_enriched_sql(), params)
-    source, media, namespace, service_id = params[-4:]
-    rows = conn.execute(
-        f"SELECT title_key, ids_json, source_id FROM {TITLES} "
-        "WHERE source = ? AND media = ? AND json_extract(ids_json, '$.' || ?) = ?",
-        (source, media, namespace, service_id)).fetchall()
-    for row in rows:
-        identity.settle(conn, media, json.loads(row["ids_json"] or "{}"),
-                        filed_under=str(row["title_key"]),
-                        fallback=identity.per_source_key(source, row["source_id"]), now=now)
+            json.dumps(value["ids"])]
 
 
 async def apply_enrichment(source: str, service_id: int, media: str, fields: dict,
@@ -549,29 +634,70 @@ async def apply_enrichment(source: str, service_id: int, media: str, fields: dic
     ADDRESSED BY THE SERVICE'S NUMERIC ID rather than by `source_id`, via ids_json
     — a Simkl row is filed under its slug.
     """
-    params = _enrichment_params(source, service_id, media, fields, now)
-    await db.transaction(lambda conn: _enrich_and_settle(conn, params, now=now))
+    await apply_enrichment_many(source, [(service_id, media, fields)], now)
 
 
 async def apply_enrichment_many(source: str, items, now: int) -> int:
-    """The same write for many titles, in ONE transaction.
+    """The same write for many titles, in ONE transaction of a fixed number of
+    statements, however many there are. Returns how many answers were handed in.
 
-    FOR THE REBUILD, NOT THE FETCH: titles whose answers are already stored and
-    whose rows have not been given them. That happens in bulk, and a worker-thread
-    hop per title (measured at ~2ms) would turn a few hundred local writes into
-    most of a second on the event loop.
+    FOR THE REBUILD as well as the fetch: titles whose answers are already stored
+    and whose rows have not been given them, which happens in bulk.
+
+    THE ROWS ARE FOUND BEFORE THE TRANSACTION, by one read (`_ANSWERED_ROWS`):
+    finding them reads every row the service has, and held inside the write lock
+    a rebuild of a hundred answers held it 11.7 s with nothing else running —
+    MEASURED on the development copy, where the log shows rebuilds of up to 45.
+    A row a fill writes between that read and this write is not handed its
+    answer here; it is written unenriched, and the next pass's rebuild gives it
+    the stored one — which is exactly what such a row was owed already.
+
+    AND THE IDS AN ANSWER LEARNED ARE TAUGHT TO THE TITLE in the same
+    transaction. THIS IS WHERE A KEY USED TO GO STALE. A lookup adds ids the
+    listing never carried — a Simkl title with only an anidb id learns its tvdb, a
+    tvdb-only one its tmdb — and the row used to keep the key it was filed under
+    while its ids named another. Measured on the development copy: 1,256 stored
+    titles in that state, each one a card that could not join another service's
+    listing of the same show. Settling the row's ids against its key re-keys the
+    title at the moment it learns enough to, everywhere it is held.
     """
-    rows = [_enrichment_params(source, service_id, media, fields, now)
-            for service_id, media, fields in items]
-    if not rows:
+    items = list(items)
+    # One answer per title: a pass names each once, and should one arrive twice
+    # the later is the one written, as it was when each was written in turn.
+    answers = {(str(service_id), str(media)): (service_id, _enrichment_row(source, fields))
+               for service_id, media, fields in items}
+    if not answers:
         return 0
+    namespace = ID_NAMESPACE.get(source, source)
+    found = await db.fetch_value(_ANSWERED_ROWS, {
+        "source": source, "namespace": namespace,
+        "ids": json.dumps(sorted({service_id for service_id, _row in answers.values()},
+                                 key=str))})
+    order = {key: at for at, key in enumerate(answers)}
+    targets = sorted(((int(rowid), str(media), stated)
+                      for rowid, media, stated in json.loads(found or "[]")
+                      if (str(stated), str(media)) in answers),
+                     key=lambda target: (order[(str(target[2]), target[1])], target[0]))
+    if not targets:
+        return len(items)
+    written = json.dumps([[rowid, *answers[(str(stated), media)][1], stated]
+                          for rowid, media, stated in targets])
 
-    def _work(conn) -> int:
-        for params in rows:
-            _enrich_and_settle(conn, params, now=now)
-        return len(rows)
+    def _work(conn) -> None:
+        conn.execute(_update_enriched_sql(), {"rows": written, "now": now, "source": source,
+                                              "namespace": namespace})
+        (rows,) = conn.execute(_ROWS_BY_ROWID,
+                               (json.dumps([rowid for rowid, _m, _s in targets]),)).fetchone()
+        by_rowid = {int(rowid): (media, key, ids_json, source_id)
+                    for rowid, media, key, ids_json, source_id in json.loads(rows)}
+        identity.settle_many(conn, [
+            identity.Settling(str(media), json.loads(ids_json or "{}"), str(key),
+                              identity.per_source_key(source, source_id))
+            for media, key, ids_json, source_id in
+            (by_rowid[rowid] for rowid, _m, _s in targets if rowid in by_rowid)], now=now)
 
-    return await db.transaction(_work)
+    await db.transaction(_work)
+    return len(items)
 
 
 async def unenriched(source: str, id_namespace: str,
@@ -700,7 +826,7 @@ _UPSERT_EPISODE_ANSWER = f"""
 INSERT INTO {EPISODES}
     (source, media, source_id, season, number, title, overview, still, first_aired,
      episode_type, runtime, rating, votes, fetched_at, stale_after)
-VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)
+{json_rows(15)}
 ON CONFLICT(source, media, source_id, season, number) DO UPDATE SET
     -- THE LOOKUP WINS EXCEPT WHERE IT HAS NOTHING TO SAY. A listing already stored
     -- an episode title from the calendar feed, and a season the service could not
@@ -716,18 +842,31 @@ _EPISODE_ANSWER_REWRITES: dict[str, str | None] = {
     "episode_type": None, "runtime": None, "rating": None, "votes": None}
 
 
-def write_episode_answer(conn: db.Connection, source: str, media: str, source_id: str,
-                         season: int, number: int, fields: dict, *, now: int,
-                         stale_after: int) -> None:
-    """What a service's own episode list says about one episode, written over the
-    listing's stub. Inside the caller's transaction."""
-    conn.execute(_UPSERT_EPISODE_ANSWER + "    fetched_at = "
-                 + ceiling_clock(EPISODES, _EPISODE_ANSWER_REWRITES), (
-        source, media, source_id, int(season), int(number),
-        str(fields.get("title") or ""), str(fields.get("overview") or ""),
-        str(fields.get("first_aired") or ""), str(fields.get("episode_type") or ""),
-        fields.get("runtime"), fields.get("rating"), fields.get("votes"),
-        now, stale_after))
+class EpisodeAnswer(NamedTuple):
+    """What a service's own episode list says about one episode of one of its
+    rows, and when the answer falls due again (`episode_stale_after`)."""
+    source_id: str
+    number: int
+    fields: dict
+    stale_after: int
+
+
+def write_episode_answers(conn: db.Connection, source: str, media: str, season: int,
+                          answers: Iterable[EpisodeAnswer], *, now: int) -> None:
+    """What a service's own episode list says about each of one season's episodes,
+    written over the listings' stubs — inside the caller's transaction, in one
+    statement however many episodes the season has."""
+    written = [[source, media, str(answer.source_id), int(season), int(answer.number),
+                str(answer.fields.get("title") or ""), str(answer.fields.get("overview") or ""),
+                "", str(answer.fields.get("first_aired") or ""),
+                str(answer.fields.get("episode_type") or ""), answer.fields.get("runtime"),
+                answer.fields.get("rating"), answer.fields.get("votes"), now,
+                int(answer.stale_after)]
+               for answer in answers]
+    if written:
+        conn.execute(_UPSERT_EPISODE_ANSWER + "    fetched_at = "
+                     + ceiling_clock(EPISODES, _EPISODE_ANSWER_REWRITES),
+                     {"rows": json.dumps(written)})
 
 
 # ---------------------------------------------------------------------------

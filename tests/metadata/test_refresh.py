@@ -291,8 +291,8 @@ async def _listed(tmdb_id: int, *, at: int) -> None:
 
     record = normalize.to_record({"id": tmdb_id, "name": f"Show {tmdb_id}",
                                   "first_air_date": "2026-10-27"}, Media.SHOW, 1, "2026-10-27")
-    await db.transaction(lambda conn: metadata.store_records(conn, [record], now=at,
-                                                             stale_after=at + DAY))
+    listed = metadata.listings([record], now=at, stale_after=at + DAY)
+    await db.transaction(lambda conn: metadata.store_records(conn, listed))
 
 
 class ASparseListingIsDescribedTests(_RefreshTestCase):

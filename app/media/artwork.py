@@ -30,6 +30,7 @@ would cost its one lookup again on every page that drew it.
 """
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import NamedTuple
@@ -72,35 +73,37 @@ _TITLE = ("title_posters", ("media", "title_key", "source"))
 _TABLES = ("show_posters", "season_posters", "title_posters")
 
 
-def _upsert_one(conn: db.Connection, media: str, tmdb: int, source: str, url: str, ts: int,
-                season: int | None = None, fail_count: int = 0) -> None:
-    if season is None:
-        _upsert(conn, _SHOW, (media, tmdb, source), url, ts, fail_count)
-    else:
-        _upsert(conn, _SEASON, (media, tmdb, season, source), url, ts, fail_count)
+def _upsert_sql(spec: tuple[str, tuple[str, ...]]) -> str:
+    """THE ONE RULE FOR A SIGHTING, as one statement however many rows it carries
+    (`:rows`, each its key columns then its address): a row nobody holds is added;
+    the address already held is seen again; and a new address replaces the old
+    one with a fresh failure record — upstream re-pointing artwork is normal, and
+    the new address deserves a fresh chance rather than inheriting the old one's
+    history. In SQLite's upsert a column named in SET reads the row as it WAS, so
+    each CASE compares against the address being replaced.
 
-
-def _upsert(conn: db.Connection, spec: tuple[str, tuple[str, ...]], key: tuple, url: str,
-            ts: int, fail_count: int = 0) -> None:
+    ONE STATEMENT, because a fill files a picture per listing inside a write
+    transaction, and each statement there can wait a GIL switch interval while
+    the event loop is busy (app/metadata/identity.py's reads say why).
+    """
     table, columns = spec
-    match = " AND ".join(f"{column} = ?" for column in columns)
-    row = conn.execute(f"SELECT url FROM {table} WHERE {match}", key).fetchone()
-    if row is None:
-        conn.execute(
-            f"INSERT INTO {table} ({', '.join(columns)}, url, first_seen_at, last_seen_at, "
-            f"fail_count) VALUES ({', '.join('?' for _ in columns)}, ?, ?, ?, ?)",
-            (*key, url, ts, ts, fail_count),
-        )
-    elif row["url"] == url:
-        conn.execute(f"UPDATE {table} SET last_seen_at = ? WHERE {match}", (ts, *key))
-    else:
-        # Upstream re-pointing artwork is normal; the new URL deserves a fresh
-        # chance rather than inheriting the old one's failure history.
-        conn.execute(
-            f"UPDATE {table} SET url = ?, last_seen_at = ?, fail_count = ?, "
-            f"last_failed_at = NULL WHERE {match}",
-            (url, ts, fail_count, *key),
-        )
+    names = ", ".join(columns)
+    picked = ", ".join(f"json_extract(value, '$[{i}]')" for i in range(len(columns) + 1))
+    return (f"INSERT INTO {table} ({names}, url, first_seen_at, last_seen_at, fail_count) "
+            f"SELECT {picked}, :ts, :ts, :fail FROM json_each(:rows) WHERE true ORDER BY key "
+            f"ON CONFLICT({names}) DO UPDATE SET "
+            f"fail_count = CASE WHEN {table}.url = excluded.url "
+            f"THEN {table}.fail_count ELSE excluded.fail_count END, "
+            f"last_failed_at = CASE WHEN {table}.url = excluded.url "
+            f"THEN {table}.last_failed_at ELSE NULL END, "
+            f"url = excluded.url, last_seen_at = excluded.last_seen_at")
+
+
+def _upsert(conn: db.Connection, spec: tuple[str, tuple[str, ...]], rows: list[tuple],
+            ts: int, fail_count: int = 0) -> None:
+    if rows:
+        conn.execute(_upsert_sql(spec), {"rows": json.dumps([list(row) for row in rows]),
+                                         "ts": ts, "fail": fail_count})
 
 
 def file_sighting(conn: db.Connection, media: str, tmdb: int | None, title_key: str,
@@ -111,12 +114,23 @@ def file_sighting(conn: db.Connection, media: str, tmdb: int | None, title_key: 
     writes a service's description or listing, so the registry learns a
     service's new address the moment the store does — which is also what heals a
     dead one (app/metadata/refresh.py)."""
-    if not media or not source or not url:
-        return
-    if tmdb:
-        _upsert(conn, _SHOW, (str(media), int(tmdb), str(source)), str(url), ts)
-    elif title_key:
-        _upsert(conn, _TITLE, (str(media), str(title_key), str(source)), str(url), ts)
+    file_sightings(conn, [(media, tmdb, title_key, source, url)], ts)
+
+
+def file_sightings(conn: db.Connection,
+                   sightings: Iterable[tuple[str, int | None, str, str, str]], ts: int) -> None:
+    """`file_sighting` for many (media, tmdb, title key, source, url) at once —
+    a statement per table, however many there are."""
+    shows, titles = [], []
+    for media, tmdb, title_key, source, url in sightings:
+        if not media or not source or not url:
+            continue
+        if tmdb:
+            shows.append((str(media), int(tmdb), str(source), str(url)))
+        elif title_key:
+            titles.append((str(media), str(title_key), str(source), str(url)))
+    _upsert(conn, _SHOW, shows, ts)
+    _upsert(conn, _TITLE, titles, ts)
 
 
 async def record_title_poster_urls(sightings) -> None:
@@ -128,8 +142,7 @@ async def record_title_poster_urls(sightings) -> None:
     ts = db.now()
 
     def _work(conn: db.Connection) -> None:
-        for media, key, source, url in found:
-            _upsert(conn, _TITLE, (media, key, source), url, ts)
+        _upsert(conn, _TITLE, found, ts)
 
     try:
         await db.transaction(_work)
@@ -174,8 +187,7 @@ async def record_poster_urls(sightings) -> None:
     ts = db.now()
 
     def _work(conn: db.Connection) -> None:
-        for media, tmdb, source, url in rows:
-            _upsert_one(conn, media, tmdb, source, url, ts)
+        _upsert(conn, _SHOW, rows, ts)
 
     try:
         await db.transaction(_work)
@@ -222,8 +234,7 @@ async def record_season_poster_urls(sightings) -> None:
     ts = db.now()
 
     def _work(conn: db.Connection) -> None:
-        for media, tmdb, season, source, url in rows:
-            _upsert_one(conn, media, tmdb, source, url, ts, season=season)
+        _upsert(conn, _SEASON, rows, ts)
 
     try:
         await db.transaction(_work)
@@ -257,7 +268,7 @@ async def record_miss(media: str, tmdb: int) -> None:
         return
 
     def _work(conn: db.Connection) -> None:
-        _upsert_one(conn, media, tmdb, MISSING, "", db.now(), fail_count=MAX_FAIL_COUNT)
+        _upsert(conn, _SHOW, [(media, tmdb, MISSING, "")], db.now(), fail_count=MAX_FAIL_COUNT)
 
     try:
         await db.transaction(_work)

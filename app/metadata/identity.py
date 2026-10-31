@@ -123,57 +123,285 @@ def _own_id(key: str) -> tuple[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
-# reading, inside a caller's transaction
+# what a settle reads and writes, inside a caller's transaction
 # ---------------------------------------------------------------------------
 
-def follow(conn: db.Connection, key: str) -> str:
-    """The key a title answers to now: `key` itself, or what it was re-keyed to.
-
-    ONE HOP IS ALWAYS ENOUGH. A re-key repoints every alias that named the key it
-    retires (`_absorb`), so an alias never names another alias."""
-    row = conn.execute(f"SELECT title_key FROM {ALIASES} WHERE old_key = ?", (key,)).fetchone()
-    return str(row[0]) if row else key
-
-
-def _registered(conn: db.Connection, key: str) -> str | None:
-    """The key a title registered under `key` answers to now — `key` itself, or
-    what it was re-keyed to — or None when no title was ever registered under it.
-    One query for what `follow` and `_row` would ask in turn, because a fill asks
-    it of every lower id every listing states."""
-    row = conn.execute(
-        f"SELECT title_key FROM {ALIASES} WHERE old_key = ? "
-        f"UNION ALL SELECT title_key FROM {TABLE} WHERE title_key = ? LIMIT 1",
-        (key, key)).fetchone()
-    return None if row is None else str(row[0])
+class Settling(NamedTuple):
+    """One title for `settle_many` — what `settle` takes, as a value."""
+    media: str
+    ids: Mapping[str, Any] | None
+    filed_under: str | None = None
+    fallback: str | None = None
 
 
-def _row(conn: db.Connection, key: str):
-    return conn.execute(
-        f"SELECT title_key, media, ids_json, created_at FROM {TABLE} WHERE title_key = ?",
-        (key,)).fetchone()
+class _Title(NamedTuple):
+    """One `titles` row as a batch of settles holds it."""
+    media: str
+    ids: dict
+    created_at: int
 
 
-def _ids(row) -> dict:
+# EVERY READ BELOW ANSWERS IN ONE ROW, however many keys it names: the keys travel
+# as a JSON array and the rows come back as one. The driver lets go of the GIL
+# around every row it steps through and must win it back before the next — up to
+# a switch interval (5 ms) each time while the event loop is busy — and a settle
+# runs inside a write transaction, holding the database's one write lock for all
+# of it. MEASURED on a copy of a real instance: a fill's store issued ~3,300
+# statements and held the lock 5.3 s under one month read, and the next writer
+# gave up at the busy timeout.
+_ALIASES_SQL = (f"SELECT json_group_array(json_array(old_key, title_key)) FROM {ALIASES} "
+                "WHERE old_key IN (SELECT value FROM json_each(?))")
+_ROWS_SQL = (f"SELECT json_group_array(json_array(title_key, media, ids_json, created_at)) "
+             f"FROM {TABLE} WHERE title_key IN (SELECT value FROM json_each(?))")
+# One arm per indexed id space, each spelled in its index's own expression: the
+# planner reaches an expression index only through the expression it was built
+# on, so the space cannot be a parameter. The payload drives the join (CROSS
+# JOIN fixes the order), a seek per [media, id] asked about.
+_HOLDERS_SQL = ("SELECT json_group_array(json_array(media, name, id, title_key)) FROM ("
+                + " UNION ALL ".join(
+                    f"SELECT t.media AS media, '{name}' AS name, "
+                    f"json_extract(t.ids_json, '$.{name}') AS id, t.title_key AS title_key "
+                    f"FROM json_each(:{name}) w CROSS JOIN {TABLE} t "
+                    f"ON t.media = json_extract(w.value, '$[0]') "
+                    f"AND json_extract(t.ids_json, '$.{name}') = json_extract(w.value, '$[1]')"
+                    for name in sorted(_INDEXED))
+                + ")")
+# Every title a batch decided, in one statement. `WHERE true` is SQLite's own
+# remedy for an upsert on a SELECT, whose ON would otherwise read as a join's.
+_WRITE_SQL = (f"INSERT INTO {TABLE} (title_key, media, ids_json, created_at) "
+              "SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), "
+              "json_extract(value, '$[2]'), json_extract(value, '$[3]') "
+              "FROM json_each(?) WHERE true "
+              "ON CONFLICT(title_key) DO UPDATE SET ids_json = excluded.ids_json, "
+              "created_at = MIN(created_at, excluded.created_at)")
+
+
+class _Known:
+    """What the identity tables hold for the keys a batch of settles names — read
+    up front in three statements (`prefetch`), kept current as each settle
+    decides, and written afterwards in a fixed number (`SettlePlan.apply`).
+
+    WHAT THE BATCH HAS DECIDED OUTRANKS WHAT IS STORED, because nothing it decides
+    is written while it decides: a title one listing registers is found by the next
+    listing's lower id (`holders_of`), and a key one re-key retired is followed by
+    every settle after it — exactly what settling each title in its own turn read
+    back from the tables.
+
+    A KEY NOBODY ASKED ABOUT UP FRONT IS STILL ANSWERED, read when first wanted, at
+    one statement each. The ids a stored title already holds can name a key no
+    listing stated; that is rare. What keeps a fill's statement count fixed is
+    that every key a listing states, everything those keys reach and every title
+    holding one of their lower ids are read together.
+    """
+
+    def __init__(self, conn: db.Connection):
+        self._conn = conn
+        self._aliases: dict[str, str | None] = {}
+        self._rows: dict[str, _Title | None] = {}
+        self._holders: dict[tuple[str, str, Any], set[str]] = {}
+        self._unwritten: dict[str, _Title] = {}
+        # Keys a re-key in this batch retired, and where their holders went.
+        self._moved: dict[str, str] = {}
+        # The re-keys decided, in order, for `SettlePlan.apply` to write.
+        self._retired: list[tuple[str, str]] = []
+
+    # -- reading --------------------------------------------------------------
+
+    def prefetch(self, titles: Iterable[Settling]) -> None:
+        """Read, together, everything settling `titles` will ask: every key they
+        state or are filed under, what each answers to, every title holding one
+        of their lower ids, and the rows of all of those."""
+        keys: set[str] = set()
+        probes: set[tuple[str, str, Any]] = set()
+        for title in titles:
+            media = str(title.media)
+            incoming = id_rules.canonical(title.ids)
+            keys.update(key for key in (title.filed_under, title.fallback) if key)
+            for name in MATCH_SOURCES:
+                value = incoming.get(name)
+                if value not in (None, "", 0):
+                    keys.add(f"{media}:{name}:{value}")
+                    probes.add((media, name, value))
+        self._read_aliases(keys)
+        reached = keys | {alias for key in keys if (alias := self._aliases.get(key))}
+        probes.update(probe for key in reached if (probe := _probe(key)) is not None)
+        self._read_holders(probes)
+        held = {key for probe in probes for key in self._holders.get(probe, ())}
+        self._read_rows(reached | held)
+
+    def follow(self, key: str) -> str:
+        """The key a title answers to now: `key` itself, or what it was re-keyed
+        to. ONE HOP IS ALWAYS ENOUGH — a re-key repoints every alias that named
+        the key it retires (`absorb`), so an alias never names another alias.
+
+        A key with a title row is no alias — a re-key deletes the row of the key
+        it retires — so a row already held answers without a read."""
+        if key not in self._aliases and self._rows.get(key) is not None:
+            return key
+        self._read_aliases([key])
+        return self._aliases[key] or key
+
+    def registered(self, key: str) -> str | None:
+        """What a title registered under `key` answers to now — `key` itself, or
+        what it was re-keyed to — or None when no title was ever registered under
+        it."""
+        self._read_aliases([key])
+        alias = self._aliases[key]
+        if alias:
+            return alias
+        return key if self.row(key) is not None else None
+
+    def row(self, key: str) -> _Title | None:
+        self._read_rows([key])
+        return self._rows[key]
+
+    def holders_of(self, media: str, name: str, value: Any) -> set[str]:
+        """Every title holding `name` = `value` among its ids — stored, or
+        decided by this batch and not yet written."""
+        if name not in _INDEXED:
+            return set()
+        probe = (media, name, value)
+        self._read_holders([probe])
+        found = set(self._holders[probe])
+        found.update(key for key, title in self._unwritten.items()
+                     if title.media == media and title.ids.get(name) == value)
+        return found
+
+    def moved_to(self, key: str | None) -> str | None:
+        """`key`, or where this batch's re-keys moved its holders — what a row
+        filed under it before the batch holds now."""
+        while key in self._moved:
+            key = self._moved[key]
+        return key
+
+    def _read_aliases(self, keys: Iterable[str]) -> None:
+        wanted = sorted({key for key in keys if key and key not in self._aliases})
+        if not wanted:
+            return
+        (found,) = self._conn.execute(_ALIASES_SQL, (json.dumps(wanted),)).fetchone()
+        pairs = {str(old): str(new) for old, new in json.loads(found)}
+        for key in wanted:
+            # An alias naming a key this batch retired names where it went: the
+            # re-key is written by `SettlePlan.apply`, after every read.
+            self._aliases[key] = self.moved_to(pairs.get(key))
+
+    def _read_rows(self, keys: Iterable[str]) -> None:
+        wanted = sorted({key for key in keys if key and key not in self._rows})
+        if not wanted:
+            return
+        (found,) = self._conn.execute(_ROWS_SQL, (json.dumps(wanted),)).fetchone()
+        for key, media, ids_json, created_at in json.loads(found):
+            self._rows[str(key)] = _Title(str(media), _ids_of(ids_json), int(created_at))
+        for key in wanted:
+            self._rows.setdefault(key, None)
+
+    def _read_holders(self, probes: Iterable[tuple[str, str, Any]]) -> None:
+        wanted = [probe for probe in set(probes)
+                  if probe[1] in _INDEXED and probe not in self._holders]
+        if not wanted:
+            return
+        (found,) = self._conn.execute(_HOLDERS_SQL, {
+            name: json.dumps([[media, value] for media, space, value in wanted if space == name])
+            for name in _INDEXED}).fetchone()
+        for probe in wanted:
+            self._holders[probe] = set()
+        for media, name, value, key in json.loads(found):
+            if str(key) not in self._moved:  # its row goes with the re-key that retired it
+                self._holders.setdefault((media, name, value), set()).add(str(key))
+
+    # -- writing --------------------------------------------------------------
+
+    def write(self, key: str, media: str, ids: dict, created_at: int) -> None:
+        """Decide a title's row — `_WRITE_SQL`'s upsert, applied here first and
+        written by `SettlePlan.apply`."""
+        held = self._rows.get(key)
+        title = (_Title(held.media, dict(ids), min(held.created_at, created_at)) if held
+                 else _Title(media, dict(ids), created_at))
+        self._rows[key] = self._unwritten[key] = title
+
+    def absorb(self, old: str, new: str) -> None:
+        """Decide to retire `old` in favour of `new` (`_retire` writes it, when
+        the plan is applied): every row holding it moves to `new`, every alias
+        naming it names `new`, and `old` becomes one — all of which every later
+        settle in the batch reads here first."""
+        self._retired.append((old, new))
+        for key, alias in self._aliases.items():
+            if alias == old:
+                self._aliases[key] = new
+        self._aliases[new] = None
+        self._aliases[old] = new
+        self._rows[old] = None
+        self._unwritten.pop(old, None)
+        for held in self._holders.values():
+            held.discard(old)
+        for key, target in self._moved.items():
+            if target == old:
+                self._moved[key] = new
+        self._moved[old] = new
+
+
+def _retire(conn: db.Connection, old: str, new: str, *, now: int) -> None:
+    """Write one re-key: every row holding `old` repointed to `new`, every alias
+    naming it naming `new`, and `old` itself an alias. A re-key is rare, and the
+    holders it moves live in every feature's tables."""
+    counts = holders.repoint(conn, old, new, now=now)
+    conn.execute(f"UPDATE {ALIASES} SET title_key = ? WHERE title_key = ?", (new, old))
+    conn.execute(f"DELETE FROM {ALIASES} WHERE old_key = ?", (new,))
+    conn.execute(
+        f"INSERT INTO {ALIASES} (old_key, title_key, aliased_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(old_key) DO UPDATE SET title_key = excluded.title_key, "
+        "aliased_at = excluded.aliased_at", (old, new, now))
+    conn.execute(f"DELETE FROM {TABLE} WHERE title_key = ?", (old,))
+    touched = {table: n for table, n in counts.items() if n}
+    logger.info("title store: re-keyed %s -> %s (%s)", old, new,
+                ", ".join(f"{table} {n}" for table, n in sorted(touched.items())) or "no rows")
+
+
+class SettlePlan(NamedTuple):
+    """What a batch of settles decided (`plan_settles`), not yet written: each
+    title's identity, the re-keys in the order they were decided, and the rows
+    to write. `apply` writes it, inside the caller's transaction — on the
+    connection it was planned on, which `db.transaction(prepare=...)` guarantees
+    is unchanged since, or plans again."""
+    identities: list[Identity | None]
+    retired: list[tuple[str, str]]
+    written: dict[str, _Title]
+    now: int
+
+    def apply(self, conn: db.Connection) -> None:
+        for old, new in self.retired:
+            _retire(conn, old, new, now=self.now)
+        if self.written:
+            conn.execute(_WRITE_SQL, (json.dumps([
+                [key, title.media, json.dumps(title.ids, sort_keys=True), title.created_at]
+                for key, title in self.written.items()]),))
+
+
+def _probe(key: str) -> tuple[str, str, Any] | None:
+    """(media, id space, typed id) a key is filed by — what `holders_of` is asked
+    about it — or None for a per-service key."""
     try:
-        value = json.loads(row["ids_json"] or "{}")
+        parsed = parse_item_key(key)
+    except ValueError:
+        return None
+    return (parsed.media, parsed.match_source,
+            id_rules.typed(parsed.match_source, parsed.match_id))
+
+
+def _ids_of(text) -> dict:
+    try:
+        value = json.loads(text or "{}")
     except (TypeError, ValueError):
         return {}
     return value if isinstance(value, dict) else {}
 
 
-def _holders_of(conn: db.Connection, media: str, name: str, value: Any) -> list[str]:
-    """Every title holding `name` = `value` among its ids, through that space's
-    index. The query's expression is the index's own, which is what lets the
-    planner use it."""
-    if name not in _INDEXED:
-        return []
-    rows = conn.execute(
-        f"SELECT title_key FROM {TABLE} "
-        f"WHERE media = ? AND json_extract(ids_json, '$.{name}') = ?", (media, value))
-    return [str(row[0]) for row in rows]
+def follow(conn: db.Connection, key: str) -> str:
+    """The key a title answers to now: `key` itself, or what it was re-keyed to."""
+    return _Known(conn).follow(key)
 
 
-def _sole_higher_holder(conn: db.Connection, media: str, key: str) -> str | None:
+def _sole_higher_holder(known: _Known, media: str, key: str) -> str | None:
     """The one title ranked ABOVE `key` that holds `key`'s own id, or None when
     no title does or more than one does.
 
@@ -184,16 +412,16 @@ def _sole_higher_holder(conn: db.Connection, media: str, key: str) -> str | None
     own = _own_id(key)
     if own is None:
         return None
-    above = {holder for holder in _holders_of(conn, media, *own) if rank(holder) < rank(key)}
+    above = {holder for holder in known.holders_of(media, *own) if rank(holder) < rank(key)}
     return next(iter(above)) if len(above) == 1 else None
 
 
-def _claimed_elsewhere(conn: db.Connection, media: str, name: str, value: Any,
+def _claimed_elsewhere(known: _Known, media: str, name: str, value: Any,
                        *, besides: set[str], below: int) -> bool:
     """Whether a title other than those in `besides`, ranked above `below`,
     holds this id — which makes a merge by it ambiguous."""
     return any(rank(holder) < below
-               for holder in _holders_of(conn, media, name, value) if holder not in besides)
+               for holder in known.holders_of(media, name, value) if holder not in besides)
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +444,52 @@ def settle(conn: db.Connection, media: Any, ids: Mapping[str, Any] | None, *,
 
     Returns None only for ids that name nothing and arrived with no key at all.
 
-    THE STEPS, each with its reason:
+    ONE TITLE IS A BATCH OF ONE (`settle_many`), so there is one resolution
+    whichever way a title arrives.
+    """
+    return settle_many(conn, [Settling(str(media), ids, filed_under, fallback)], now=now)[0]
+
+
+def settle_many(conn: db.Connection, titles: Iterable[Settling], *,
+                now: int) -> list[Identity | None]:
+    """`settle` for each of `titles`, in order, inside the caller's transaction —
+    each decided as if the ones before it had been settled and written in turn,
+    in a number of statements that does not grow with them (`_Known`): three
+    reads, one write, and a re-key's own repointing where a title is re-keyed.
+
+    EVERY ANSWER IS THE KEY ITS TITLE ANSWERS TO ONCE THE BATCH IS DONE. A later
+    title can re-key one an earlier title registered — a listing naming a show
+    by its tvdb id, then another naming its tmdb id too — and an answer naming the
+    retired key would file the caller's row under a key no identity holds.
+    """
+    plan = plan_settles(conn, titles, now=now)
+    plan.apply(conn)
+    return plan.identities
+
+
+def plan_settles(conn: db.Connection, titles: Iterable[Settling], *, now: int) -> SettlePlan:
+    """`settle_many`'s decisions, made and NOT written — reads only, so a caller
+    can make them before taking the write lock (db.transaction's `prepare`) and
+    write them inside it (`SettlePlan.apply`)."""
+    titles = list(titles)
+    known = _Known(conn)
+    known.prefetch(titles)
+    targets = [_settle(known, title, now=now) for title in titles]
+    identities: list[Identity | None] = []
+    for title, target in zip(titles, targets):
+        if target is None:
+            identities.append(None)
+            continue
+        key = known.follow(target)
+        row = known.row(key)
+        identities.append(Identity(key, str(title.media),
+                                   dict(row.ids) if row is not None else {}))
+    return SettlePlan(identities, list(known._retired), dict(known._unwritten), now)
+
+
+def _settle(known: _Known, title: Settling, *, now: int) -> str | None:
+    """One title's resolution against what `known` holds, decided there — the
+    key it settles under, or None. The steps, each with its reason:
       1. The waterfall over the ids picks a key, through any alias.
       2. A key in a lower id space joins the ONE title above it holding that id
          (`_sole_higher_holder`).
@@ -226,18 +499,22 @@ def settle(conn: db.Connection, media: Any, ids: Mapping[str, Any] | None, *,
       4. The merged ids may name a higher key still; if so, that is where the
          title goes.
     """
-    media = str(media)
-    incoming = id_rules.canonical(ids)
-    _adopt_filing_id(conn, incoming, filed_under)
+    media = str(title.media)
+    incoming = id_rules.canonical(title.ids)
+    # What a row filed under this key before the batch holds NOW: a re-key earlier
+    # in the batch moved it, as it moved the row.
+    filed_under = known.moved_to(title.filed_under)
+    fallback = title.fallback
+    _adopt_filing_id(known, incoming, filed_under)
     stated = key_of(media, incoming)
     followed = None
     if stated is not None:
-        followed = follow(conn, stated)
-        target = _sole_higher_holder(conn, media, followed) or followed
+        followed = known.follow(stated)
+        target = _sole_higher_holder(known, media, followed) or followed
     elif filed_under:
-        target = follow(conn, filed_under)
+        target = known.follow(filed_under)
     elif fallback:
-        target = follow(conn, fallback)
+        target = known.follow(fallback)
     else:
         return None
 
@@ -247,10 +524,10 @@ def settle(conn: db.Connection, media: Any, ids: Mapping[str, Any] | None, *,
         # A ROW HOLDS THIS KEY, so it moves whether or not the title was ever
         # registered under it: a row restored from a backup, or written before
         # its title learned a higher id.
-        current = follow(conn, filed_under)
+        current = known.follow(filed_under)
         if current != target and rank(current) > rank(target):
             moved.append(filed_under)
-            if _row(conn, current) is not None:
+            if known.row(current) is not None:
                 absorbed.append(current)
         elif current == target:
             moved.append(filed_under)   # a row still naming a retired key
@@ -259,67 +536,62 @@ def settle(conn: db.Connection, media: Any, ids: Mapping[str, Any] | None, *,
         # a listing that once named no shared id. Every other listing has one and
         # nothing holds it, and treating it as held would write an alias and walk
         # every holder for every title a fill names.
-        current = _registered(conn, fallback)
+        current = known.registered(fallback)
         if current is not None and current != target and current not in absorbed:
             moved.append(current)
             absorbed.append(current)
     if followed is not None and followed not in (target, *absorbed) \
-            and _row(conn, followed) is not None:
+            and known.row(followed) is not None:
         absorbed.append(followed)
     for name in MATCH_SOURCES:
         value = incoming.get(name)
         if value in (None, "", 0) or f"{media}:{name}:{value}" in (target, stated):
             continue
-        lower = _registered(conn, f"{media}:{name}:{value}")
+        lower = known.registered(f"{media}:{name}:{value}")
         if lower is None or lower == target or lower in absorbed or rank(lower) <= rank(target):
             continue
-        if _claimed_elsewhere(conn, media, name, value, besides={target, lower},
+        if _claimed_elsewhere(known, media, name, value, besides={target, lower},
                               below=rank(lower)):
             logger.info("title store: %s=%s is claimed by more than one title; "
                         "%s is left apart from %s", name, value, lower, target)
             continue
         absorbed.append(lower)
 
-    row = _row(conn, target)
-    merged = _ids(row) if row is not None else {}
+    row = known.row(target)
+    merged = dict(row.ids) if row is not None else {}
     _merge_into(merged, incoming, target)
     for key in absorbed:
-        found = _row(conn, key)
+        found = known.row(key)
         if found is not None:
-            _merge_into(merged, _ids(found), target)
+            _merge_into(merged, found.ids, target)
 
     # The merged ids may name a higher title than the one they were filed under.
     higher = key_of(media, merged)
     if higher is not None and higher != target:
-        higher = follow(conn, higher)
+        higher = known.follow(higher)
         if higher != target and rank(higher) < rank(target):
-            above = _row(conn, higher)
+            above = known.row(higher)
             if above is not None:
-                merged = {**merged, **_ids(above)}
+                merged = {**merged, **above.ids}
             absorbed.append(target)
             moved.append(target)
             target = higher
             row = above
 
     retired = [key for key in dict.fromkeys((*absorbed, *moved)) if key != target]
-    if row is not None and not retired and _ids(row) == merged:
+    if row is not None and not retired and row.ids == merged:
         # NOTHING NEW: the commonest case by far — a refill naming a title it
         # named yesterday — and a write per listing would be a write per airing.
-        return Identity(target, media, merged)
-    created = min([int(r["created_at"]) for r in
-                   (_row(conn, key) for key in (target, *absorbed)) if r is not None]
-                  or [now])
-    conn.execute(
-        f"INSERT INTO {TABLE} (title_key, media, ids_json, created_at) VALUES (?, ?, ?, ?) "
-        "ON CONFLICT(title_key) DO UPDATE SET ids_json = excluded.ids_json, "
-        "created_at = MIN(created_at, excluded.created_at)",
-        (target, media, json.dumps(merged, sort_keys=True), created))
+        return target
+    created = min([found.created_at for found in (known.row(key) for key in (target, *absorbed))
+                   if found is not None] or [now])
+    known.write(target, media, merged, created)
     for key in retired:
-        _absorb(conn, key, target, now=now)
-    return Identity(target, media, merged)
+        known.absorb(key, target)
+    return target
 
 
-def _adopt_filing_id(conn: db.Connection, incoming: dict, filed_under: str | None) -> None:
+def _adopt_filing_id(known: _Known, incoming: dict, filed_under: str | None) -> None:
     """Add the id a row is filed under to `incoming`, unless `incoming` states a
     shared id that title's known ids contradict — then the row is being told
     something new about itself, and the old filing is not evidence for it."""
@@ -328,10 +600,10 @@ def _adopt_filing_id(conn: db.Connection, incoming: dict, filed_under: str | Non
     own = _own_id(filed_under)
     if own is None or str(incoming.get(own[0])) == str(own[1]):
         return  # nothing to adopt: the ids already state it
-    row = _row(conn, follow(conn, filed_under))
-    known = _ids(row) if row is not None else {own[0]: own[1]}
+    row = known.row(known.follow(filed_under))
+    held_ids = row.ids if row is not None else {own[0]: own[1]}
     for name in MATCH_SOURCES:
-        stated, held = incoming.get(name), known.get(name)
+        stated, held = incoming.get(name), held_ids.get(name)
         if stated not in (None, "") and held not in (None, "") and str(stated) != str(held):
             return
     incoming.setdefault(own[0], own[1])
@@ -353,22 +625,6 @@ def _merge_into(merged: dict, other: Mapping[str, Any], key: str) -> None:
                         key, name, held, value)
 
 
-def _absorb(conn: db.Connection, old: str, new: str, *, now: int) -> None:
-    """Retire `old` in favour of `new`: every row holding it is repointed, every
-    alias naming it now names `new`, and `old` itself becomes one."""
-    counts = holders.repoint(conn, old, new, now=now)
-    conn.execute(f"UPDATE {ALIASES} SET title_key = ? WHERE title_key = ?", (new, old))
-    conn.execute(f"DELETE FROM {ALIASES} WHERE old_key = ?", (new,))
-    conn.execute(
-        f"INSERT INTO {ALIASES} (old_key, title_key, aliased_at) VALUES (?, ?, ?) "
-        "ON CONFLICT(old_key) DO UPDATE SET title_key = excluded.title_key, "
-        "aliased_at = excluded.aliased_at", (old, new, now))
-    conn.execute(f"DELETE FROM {TABLE} WHERE title_key = ?", (old,))
-    touched = {table: n for table, n in counts.items() if n}
-    logger.info("title store: re-keyed %s -> %s (%s)", old, new,
-                ", ".join(f"{table} {n}" for table, n in sorted(touched.items())) or "no rows")
-
-
 # ---------------------------------------------------------------------------
 # reading without writing
 # ---------------------------------------------------------------------------
@@ -377,11 +633,15 @@ def resolve(conn: db.Connection, media: Any, ids: Mapping[str, Any] | None) -> s
     """The key `ids` would settle under, decided and NOT written: the waterfall's
     key through any alias, joined to the one title above it holding its id. None
     when the ids name no shared id at all."""
+    return _resolve(_Known(conn), media, ids)
+
+
+def _resolve(known: _Known, media: Any, ids: Mapping[str, Any] | None) -> str | None:
     stated = key_of(str(media), id_rules.canonical(ids))
     if stated is None:
         return None
-    target = follow(conn, stated)
-    return _sole_higher_holder(conn, str(media), target) or target
+    target = known.follow(stated)
+    return _sole_higher_holder(known, str(media), target) or target
 
 
 def complete(conn: db.Connection, media: Any, ids: Mapping[str, Any] | None) -> dict:
@@ -394,9 +654,10 @@ def complete(conn: db.Connection, media: Any, ids: Mapping[str, Any] | None) -> 
     and nothing downstream has to know aliases exist. Only the shared ids are
     added: a service's own id is that service's to state.
     """
-    key = resolve(conn, media, ids)
-    row = None if key is None else _row(conn, key)
-    return with_shared(ids, _ids(row) if row is not None else {})
+    known = _Known(conn)
+    key = _resolve(known, media, ids)
+    row = None if key is None else known.row(key)
+    return with_shared(ids, row.ids if row is not None else {})
 
 
 def with_shared(own: Mapping[str, Any] | None, known: Mapping[str, Any]) -> dict:
@@ -426,13 +687,14 @@ async def every_id(media: Any, ids: Mapping[str, Any] | None, *, key: str = "") 
     TMDB-only Season Premieres held a Simkl id here that no panel offered.
     """
     def _work(conn):
-        found = follow(conn, str(key)) if key else resolve(conn, media, ids)
-        row = None if found is None else _row(conn, found)
-        return _ids(row) if row is not None else {}
+        reader = _Known(conn)
+        found = reader.follow(str(key)) if key else _resolve(reader, media, ids)
+        row = None if found is None else reader.row(found)
+        return dict(row.ids) if row is not None else {}
 
-    known = await db.run(_work)
-    return {**known, **{name: value for name, value in (ids or {}).items()
-                        if value not in (None, "")}}
+    stored = await db.run(_work)
+    return {**stored, **{name: value for name, value in (ids or {}).items()
+                         if value not in (None, "")}}
 
 
 async def completed(pairs: Iterable[tuple[Any, Mapping[str, Any] | None]]) -> list[dict]:
@@ -448,15 +710,21 @@ async def canonical_keys(keys: Iterable[str]) -> dict[str, str]:
     wanted = [str(k) for k in dict.fromkeys(keys) if k]
     if not wanted:
         return {}
-    return await db.run(lambda conn: {key: follow(conn, key) for key in wanted})
+    def _work(conn):
+        reader = _Known(conn)
+        reader._read_aliases(wanted)  # one read for every key, not one each
+        return {key: reader.follow(key) for key in wanted}
+
+    return await db.run(_work)
 
 
 async def known(title_key: str) -> Identity | None:
     """The title a key names now — followed through any re-key — or None when the
     store has no such title."""
     def _work(conn):
-        key = follow(conn, str(title_key))
-        row = _row(conn, key)
-        return None if row is None else Identity(key, str(row["media"]), _ids(row))
+        reader = _Known(conn)
+        key = reader.follow(str(title_key))
+        row = reader.row(key)
+        return None if row is None else Identity(key, row.media, dict(row.ids))
 
     return await db.run(_work)

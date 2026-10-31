@@ -253,8 +253,37 @@ def _stated_id(row, namespace: str) -> str:
     return str(ids.get(namespace) or "").strip() if isinstance(ids, dict) else ""
 
 
-_QUEUE = ("INSERT INTO metadata_refresh (source, media, source_id, season, queued_at, reason) "
-          "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(source, media, source_id, season) DO NOTHING")
+# QUEUE `:entries` — the first `:limit` of them not already waiting, in order — in
+# ONE statement. A write transaction holds the database's one write lock for as
+# long as its statements take, and while the event loop is busy each statement
+# can wait a GIL switch interval; a queue written a row at a time held it longer
+# the more it queued (a calendar month's view, a minute's allowance of a sparse
+# backlog).
+_QUEUE = """
+INSERT INTO metadata_refresh (source, media, source_id, season, queued_at, reason)
+SELECT json_extract(j.value, '$[0]'), json_extract(j.value, '$[1]'),
+       json_extract(j.value, '$[2]'), json_extract(j.value, '$[3]'), :now, :reason
+FROM json_each(:entries) j
+WHERE NOT EXISTS (SELECT 1 FROM metadata_refresh q
+                  WHERE q.source = json_extract(j.value, '$[0]')
+                    AND q.media = json_extract(j.value, '$[1]')
+                    AND q.source_id = json_extract(j.value, '$[2]')
+                    AND q.season = json_extract(j.value, '$[3]'))
+ORDER BY j.key LIMIT :limit
+ON CONFLICT(source, media, source_id, season) DO NOTHING
+"""
+
+
+def _queue(conn: db.Connection, entries: Iterable["Entry"], *, now: int, reason: str,
+           limit: int) -> int:
+    """Queue the first `limit` of `entries` not already waiting, inside the
+    caller's transaction. Returns how many were queued. Each entry once: the
+    statement judges every row against the queue as it stood before it ran."""
+    entries = list(dict.fromkeys(entries))
+    if not entries or limit <= 0:
+        return 0
+    return conn.execute(_QUEUE, {"entries": json.dumps([list(entry) for entry in entries]),
+                                 "now": now, "reason": reason, "limit": limit}).rowcount
 
 
 async def queue_viewed(settings, wanted: Iterable[Wanted], *, budget: int,
@@ -280,15 +309,8 @@ async def queue_viewed(settings, wanted: Iterable[Wanted], *, budget: int,
     if not entries:
         return 0
 
-    def _work(conn) -> int:
-        queued = 0
-        for entry in entries:
-            if queued >= budget:
-                break
-            queued += conn.execute(_QUEUE, (*entry, ts, REASON_VIEWED)).rowcount
-        return queued
-
-    queued = await db.transaction(_work)
+    queued = await db.transaction(
+        lambda conn: _queue(conn, entries, now=ts, reason=REASON_VIEWED, limit=budget))
     if queued:
         logger.debug("title store: queued %d stale row(s) for refresh", queued)
     return queued
@@ -357,14 +379,13 @@ async def queue_title(settings, media: str, ids: Mapping[str, Any], seasons: Ite
     if not entries:
         return []
 
-    def _work(conn) -> None:
-        for entry in entries:
-            conn.execute(
-                "INSERT INTO metadata_refresh (source, media, source_id, season, queued_at, "
-                "reason) VALUES (?, ?, ?, ?, 0, ?) ON CONFLICT(source, media, source_id, season) "
-                "DO UPDATE SET queued_at = 0, reason = excluded.reason", (*entry, reason))
-
-    await db.transaction(_work)
+    await db.execute(
+        "INSERT INTO metadata_refresh (source, media, source_id, season, queued_at, reason) "
+        "SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), "
+        "json_extract(value, '$[2]'), json_extract(value, '$[3]'), 0, ? "
+        "FROM json_each(?) WHERE true ON CONFLICT(source, media, source_id, season) "
+        "DO UPDATE SET queued_at = 0, reason = excluded.reason",
+        (reason, json.dumps([list(entry) for entry in entries])))
     if title_key:
         moment = time.monotonic()
         _forget_old_heals(moment)
@@ -401,7 +422,10 @@ async def queue_ceiling(settings, *, now: int | None = None) -> int:
     if not bounded:
         return 0
 
-    def _work(conn) -> int:
+    # READ, THEN WRITE, as `queue_viewed` does: which held rows near a ceiling is
+    # a read of every feature's holders and every bounded service's rows, and
+    # made inside the write it held the database's one write lock for all of it.
+    def _due(conn) -> list[Entry]:
         held = holders.held_keys(conn)
         due: list[tuple[int, Entry]] = []
         for source, retain in bounded.items():
@@ -426,14 +450,11 @@ async def queue_ceiling(settings, *, now: int | None = None) -> int:
                     season = TITLE if row["season"] is None else int(row["season"])
                     due.append((int(row["fetched_at"]),
                                 Entry(source, str(row["media"]), own_id, season)))
-        queued = 0
-        for _clock, entry in sorted(due, key=lambda pair: pair[0]):
-            if queued >= CEILING_BUDGET:
-                break
-            queued += conn.execute(_QUEUE, (*entry, ts, REASON_CEILING)).rowcount
-        return queued
+        return [entry for _clock, entry in sorted(due, key=lambda pair: pair[0])]
 
-    queued = await db.transaction(_work)
+    due = await db.run(_due)
+    queued = await db.transaction(
+        lambda conn: _queue(conn, due, now=ts, reason=REASON_CEILING, limit=CEILING_BUDGET))
     if queued:
         logger.info("title store: queued %d held row(s) nearing their service's ceiling",
                     queued)
@@ -478,29 +499,35 @@ async def queue_listed(settings, *, now: int | None = None) -> int:
     if not sources:
         return 0
 
-    def _work(conn) -> int:
-        queued = 0
+    # READ, THEN WRITE: the owed rows are a backlog of thousands, and reading them
+    # inside the write held its lock for every row read. A minute's allowance of
+    # them is all one pass can queue, so no more are kept.
+    def _owed(conn) -> dict[str, list[Entry]]:
+        owed: dict[str, list[Entry]] = {}
         for source in sources:
-            room = PER_MINUTE[source] - int(conn.execute(
-                "SELECT COUNT(*) FROM metadata_refresh WHERE source = ? AND reason = ?",
-                (source, REASON_LISTED)).fetchone()[0])
-            if room <= 0:
-                continue
             own = f"CAST(json_extract(t.ids_json, '$.{rows.ID_NAMESPACE[source]}') AS TEXT)"
+            found = owed.setdefault(source, [])
             for row in conn.execute(
                     f"SELECT t.media, {own} AS own_id, t.fail_count, t.failed_at "
                     f"{_OWED_LISTINGS} AND NOT EXISTS (SELECT 1 FROM metadata_refresh q "
                     f"WHERE q.source = t.source AND q.media = t.media AND q.source_id = {own} "
                     f"AND q.season = {TITLE}) ORDER BY t.fetched_at DESC",
                     (source, LISTED_GIVE_UP_AFTER)):
-                if room <= 0:
+                if len(found) >= PER_MINUTE[source]:
                     break
-                if not row["own_id"] or _backed_off(row, ts):
-                    continue
-                added = conn.execute(_QUEUE, (source, str(row["media"]), str(row["own_id"]),
-                                              TITLE, ts, REASON_LISTED)).rowcount
-                queued += added
-                room -= added
+                if row["own_id"] and not _backed_off(row, ts):
+                    found.append(Entry(source, str(row["media"]), str(row["own_id"]), TITLE))
+        return owed
+
+    owed = await db.run(_owed)
+
+    def _work(conn) -> int:
+        queued = 0
+        for source, entries in owed.items():
+            room = PER_MINUTE[source] - int(conn.execute(
+                "SELECT COUNT(*) FROM metadata_refresh WHERE source = ? AND reason = ?",
+                (source, REASON_LISTED)).fetchone()[0])
+            queued += _queue(conn, entries, now=ts, reason=REASON_LISTED, limit=room)
         return queued
 
     queued = await db.transaction(_work)

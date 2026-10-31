@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, patch
 from app import db
 from app.distrakt import watch_history as wh
 from app.providers.base import PlayCounts
-from tests.support import migrated_db
+from tests.support import migrated_db, statements_per_transaction
 
 # One linked service and nothing else, which is what almost every account has.
 # The tracker asks each registered source whether this request's settings carry a
@@ -350,6 +350,27 @@ class StorageRoundTripTests(WatchStateTestCase):
         await wh._save(self.user_id, state)
         back = await wh._load(self.user_id)
         self.assertEqual(back, state)
+
+    async def test_a_save_costs_the_same_statements_for_thirty_titles_as_for_three(self):
+        """A save writes a viewer's whole history inside one write transaction, so
+        a statement per row held the database's one write lock longer the longer
+        the history (1,240 rows for one account on the development copy)."""
+        def state(titles: int) -> dict:
+            return {**wh._default_state(),
+                    "shows": {SHOW(n): _show(n, {"1": {"trakt": {"1": "2026-07-01T00:00:00Z"}},
+                                                 "2": {"trakt": {"1": ""}}})
+                              for n in range(1, titles + 1)},
+                    "movies": {MOVIE(n): {"ids": {"trakt": n}, "title": "M", "year": 2026,
+                                          "watched_at": "2026-07-05T00:00:00Z",
+                                          "source": "trakt"}
+                               for n in range(1, titles + 1)}}
+
+        with statements_per_transaction() as few:
+            await wh._save(self.user_id, state(3))
+        with statements_per_transaction() as many:
+            await wh._save(self.user_id, state(30))
+        self.assertEqual(few, many)
+        self.assertEqual(await wh._load(self.user_id), state(30))
 
     async def test_the_flat_shape_restores_as_the_service_that_wrote_it(self):
         """A backup taken while one service could answer, or a state a caller
