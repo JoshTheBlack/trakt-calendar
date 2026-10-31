@@ -46,10 +46,10 @@ rendering until every window's TTL runs out.
 """
 from __future__ import annotations
 
+import copy
 from collections.abc import Sequence
-from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 from .. import providers
 from ..providers import detail_source
@@ -255,7 +255,7 @@ def admitted_order(group, prefs=None, endpoint=None, settings=None) -> list[str]
 
 
 def admitted_records(group, prefs=None, endpoint=None, settings=None) -> list[Record]:
-    """Every admitted source's record for `group`, parsed, in declared order.
+    """Every admitted source's record for `group`, in declared order.
 
     SEPARATE FROM `resolve_records` BELOW SO THAT SOMETHING CAN HAPPEN BETWEEN
     THEM, and one thing does: app/calendar/enrich.py's read-time overlay fills in
@@ -264,18 +264,19 @@ def admitted_records(group, prefs=None, endpoint=None, settings=None) -> list[Re
     other source won the card would otherwise never have its enrichment
     considered at all, and a field only that source knows could never win however
     the viewer set their preference.
-
-    A row that will not parse is skipped rather than raised over: one unreadable
-    record in a stored window is not a reason to fail a month.
     """
     by_source = group.get("by_source") or {}
-    out: list[Record] = []
-    for name in admitted_order(group, prefs, endpoint, settings):
-        try:
-            out.append(Record.from_dict(by_source[name]))
-        except (ValueError, TypeError, KeyError):
-            continue
-    return out
+    return [by_source[name] for name in admitted_order(group, prefs, endpoint, settings)]
+
+
+def instance_admitted(groups, settings=None) -> list[tuple[dict, list[Record]]]:
+    """`[(group, admitted_records(group, settings=settings))]` for every group of
+    a read — the operator's admission asked once for all of them, where asking it
+    per group walked the registry eighteen thousand times a month."""
+    instance = instance_sources(settings)
+    names = tuple(name for name in _DECLARED if instance is None or name in instance)
+    return [(group, [by_source[name] for name in names if name in by_source])
+            for group in groups for by_source in (group.get("by_source") or {},)]
 
 
 def _present(value) -> bool:
@@ -290,33 +291,40 @@ def _present(value) -> bool:
     return value is not None and value != "" and value != []
 
 
-def _order(prefs, field_name: str, names: list[str]) -> list[str]:
-    """`names` in the order this viewer wants.
+class Orders:
+    """One viewer's order over each set of services a card names — THE ORDER
+    EVERY FIELD IS RESOLVED IN, worked out once per set for a whole read.
+
+    ONE ORDER ANSWERS FOR EVERY FIELD (app/sources/prefs.py's `source_order` is
+    the whole of what a metadata preference does), and it depends on nothing but
+    the viewer's preference and which services the card names — of which a
+    calendar holds a handful of combinations. It used to be worked out per field
+    per card: MEASURED, 438,231 calls for one October's All Episodes, a third of
+    the month's resolution time. A read makes one of these (cache.narrow_for_viewer)
+    and every card asks it; it lives as long as the read and no longer.
 
     `prefs=None` — nobody is asking — is the declared order, which is also what a
     viewer who has stated no preference gets. The two are the same answer and
     deliberately share a code path: there is nothing to seed and nothing that can
     drift out of step with the declared order.
-
-    `field_name` IS STILL TAKEN AND IS DELIBERATELY NOT USED. One order now
-    answers for every field; the parameter stays because the CALLERS are per
-    field and each one names the field it is resolving, which is what makes the
-    call sites readable and what a future per-field rule would need back. It is
-    the one place in this module where an argument is accepted and ignored, and
-    this sentence is why.
     """
-    if prefs is None:
-        return names
-    return prefs.source_order(names)
+
+    def __init__(self, prefs=None):
+        self._prefs = prefs
+        self._memo: dict[tuple[str, ...], tuple[str, ...]] = {}
+
+    def __call__(self, names: tuple[str, ...]) -> tuple[str, ...]:
+        found = self._memo.get(names)
+        if found is None:
+            found = self._memo[names] = (names if self._prefs is None
+                                         else tuple(self._prefs.source_order(names)))
+        return found
 
 
-def _winner(records: list[Record], order: list[str], field_name: str,
-            present) -> Record | None:
-    """The first record in `order` that `present` says has an answer."""
-    by_name = {str(r.source): r for r in records}
-    for name in order:
-        record = by_name.get(name)
-        if record is not None and present(record):
+def _first_present(ordered: Sequence[Record], field_name: str) -> Record | None:
+    """The first of `ordered` that filled `field_name` in."""
+    for record in ordered:
+        if _present(getattr(record, field_name)):
             return record
     return None
 
@@ -338,7 +346,7 @@ def falls_on(air_ts: float, day: date) -> bool:
             < midnight + timedelta(days=1) + _DATE_ENDS_AFTER_UTC)
 
 
-def _resolve_airing(records: list[Record], order: list[str]) -> tuple[float, bool]:
+def _resolve_airing(listed: Sequence[Record]) -> tuple[float, bool]:
     """(air_ts, date_only) for the card: THE PRIMARY'S DATE AND TIME — the first
     service in the viewer's order, the one the card is attributed to.
 
@@ -362,10 +370,9 @@ def _resolve_airing(records: list[Record], order: list[str]) -> tuple[float, boo
     lost Trakt's 22:00 when Simkl's bare "2024-12-15" joined it. A time from an
     instant on another day is a different service's claim about a different
     day, and borrowing it would move the card off the primary's date; nothing
-    agrees, and the card shows the primary's date with no time.
+    agrees, and the card shows the primary's date with no time. `listed` is the
+    card's listings in the viewer's order.
     """
-    by_name = {str(r.source): r for r in records}
-    listed = [by_name[name] for name in order if name in by_name]
     primary = listed[0]
     if not primary.date_only:
         return primary.air_ts, False
@@ -382,7 +389,7 @@ def _coordinate_rank(record: Record) -> int:
     return int(_present(record.season)) + int(_present(record.episode_number))
 
 
-def _resolve_coordinate(records: list[Record], order: list[str]) -> Record | None:
+def _resolve_coordinate(listed: Sequence[Record]) -> Record | None:
     """The source whose episode coordinate the card shows, COMPLETENESS FIRST and
     the viewer's preference only breaking ties.
 
@@ -399,31 +406,27 @@ def _resolve_coordinate(records: list[Record], order: list[str]) -> Record | Non
     So the most complete coordinate wins and the preference chooses only among
     equally complete ones. A source stating none is never chosen while one
     stating some exists, which leaves a card labelled exactly as well as the best
-    of what the services between them knew.
+    of what the services between them knew. `listed` is the card's listings in
+    the viewer's order.
     """
-    ranked = [r for r in records if _coordinate_rank(r) > 0]
-    if not ranked:
+    best = max(_coordinate_rank(r) for r in listed)
+    if best == 0:
         return None
-    best = max(_coordinate_rank(r) for r in ranked)
-    return _winner([r for r in ranked if _coordinate_rank(r) == best], order,
-                   COORDINATE_FIELD, lambda _r: True)
+    return next(r for r in listed if _coordinate_rank(r) == best)
 
 
-def _merged_genres(records: list[Record], order: list[str]) -> list[str]:
+def _merged_genres(ordered: Sequence[Record]) -> list[str]:
     """Every genre any admitted source gave, de-duplicated, preferred source
     first. A union rather than a contest — see GENRES_FIELD."""
-    by_name = {str(r.source): r for r in records}
     out: list[str] = []
-    for name in order:
-        record = by_name.get(name)
-        for genre in (record.genres if record is not None else ()):
+    for record in ordered:
+        for genre in record.genres:
             if genre not in out:
                 out.append(str(genre))
     return out
 
 
-def _title_facts(records: list[Record], order: list[str]
-                 ) -> tuple[list[str] | None, str | None]:
+def _title_facts(ordered: Sequence[Record]) -> tuple[list[str] | None, str | None]:
     """(keywords, show_type) for the card — what the services that STATE them
     said, and None for each when none of them does (Record.keywords).
 
@@ -432,10 +435,9 @@ def _title_facts(records: list[Record], order: list[str]
     between, and naming them there would make them something a stored
     preference could name. The keywords are a union, as genres are; the type is
     the first stated one in the viewer's order, an empty one (a description that
-    gave none) still counting as stated.
+    gave none) still counting as stated. `ordered` is every record of the card in
+    the viewer's order.
     """
-    by_name = {str(r.source): r for r in records}
-    ordered = [by_name[name] for name in order if name in by_name]
     stating = [r for r in ordered if r.keywords is not None]
     keywords = None
     if stating:
@@ -508,7 +510,7 @@ def _distinct(field_name: str, stated: dict[str, Any], order: list[str]) -> dict
     return {name: value for name, value in stated.items() if name in shown}
 
 
-def _provenance(records: list[Record], prefs=None) -> tuple[dict, dict]:
+def _provenance(every: list[Record], order: tuple[str, ...]) -> tuple[dict, dict]:
     """(field_sources, alternatives) — who filled each scalar field in, and where
     they REALLY filled it in differently, a value per thing they disagree about.
 
@@ -528,25 +530,117 @@ def _provenance(records: list[Record], prefs=None) -> tuple[dict, dict]:
     service words one, and dozens about a title or a network only in case. Where
     two spellings agree, `field_sources` lists the WINNER FIRST — its spelling is
     the one on the card, and Record.shown_source names it.
+
+    `every` is the card's records in declared order, `order` their names in the
+    viewer's.
+
+    THE SAME VALUE FROM EVERY SERVICE IS ONE STATEMENT, WITHOUT ASKING WHAT IT
+    MEANS: identical values fold identically, so only where they differ does
+    `_distinct` decide — most fields of most merged cards, a few million meaning
+    tests a month. A status is the exception and always asks, since what one word
+    means is each service's own (Provider.status_means).
     """
     field_sources: dict[str, list[str]] = {}
     alternatives: dict[str, dict[str, Any]] = {}
-    names = [str(r.source) for r in records]
     for field_name in SCALAR_FIELDS:
-        stated = {str(r.source): getattr(r, field_name) for r in records
-                  if _present(getattr(r, field_name))}
+        stated = {str(r.source): value for r in every
+                  if _present(value := getattr(r, field_name))}
         if not stated:
             continue
-        order = [name for name in _order(prefs, field_name, names) if name in stated]
-        field_sources[field_name] = order
-        distinct = _distinct(field_name, stated, order)
+        stating = [name for name in order if name in stated]
+        field_sources[field_name] = stating
+        if len(stated) < 2 or (field_name not in SIDE_BY_SIDE and field_name != "status"
+                               and len(set(stated.values())) == 1):
+            continue
+        distinct = _distinct(field_name, stated, stating)
         if len(distinct) > 1:
             alternatives[field_name] = distinct
     return field_sources, alternatives
 
 
+class _Arranged(NamedTuple):
+    """One card's records as every rule below reads them, put in order once."""
+    every: list[Record]          # listings and title-only records, declared order
+    ordered: list[Record]        # the same, in the viewer's order
+    order: tuple[str, ...]       # their names, in the viewer's order
+    listed: list[Record]         # the listings alone, in the viewer's order
+    primary: Record              # whose card it is: the first listing in that order
+
+
+def _arrange(records: Sequence[Record], describing: Sequence[Record],
+             orders: Orders) -> _Arranged:
+    """IN DECLARED ORDER FIRST, the title-only records among the listings rather
+    than after them: a viewer who has stated no order reads the declared one, and
+    a describing service declared first must win a field for them as its listing
+    would have. One record per service — a listing and a title-only record of
+    one service never meet (cache.with_title_only)."""
+    every = sorted([*records, *describing], key=lambda r: _DECLARED[str(r.source)])
+    by_name = {str(r.source): r for r in every}
+    order = orders(tuple(by_name))
+    listing = {str(r.source) for r in records}
+    listed = [by_name[name] for name in orders(tuple(n for n in by_name if n in listing))]
+    return _Arranged(every, [by_name[name] for name in order], order, listed, listed[0])
+
+
+# What the filters judge a card by (filter.keep_title, filter.prune_disguised_films),
+# each the field resolve_records gives the card.
+_JUDGED_SCALARS = ("network", "country", "certification", "language", "poster")
+
+
+class Facts(NamedTuple):
+    """WHAT A CARD'S FILTERS JUDGE IT BY, and nothing else — the fields
+    `resolve_records` would give the card, by the same rules (`_arrange`,
+    `_first_present`, `_merged_genres`, `_title_facts`), worked out without the
+    rest of it.
+
+    FOR THE READ, WHICH JUDGES EVERY CARD AND DRAWS FEW (cache.narrow_for_viewer):
+    MEASURED, one October's All Episodes resolved 18,759 cards in full to draw
+    1,263 of them under one viewer's filters, the provenance, the buttons and the
+    airing of every card thrown away. The cards that survive are resolved in full.
+    """
+    media: Any
+    anime_type: str
+    network: str
+    country: str
+    certification: str
+    language: str
+    poster: str | None
+    genres: list[str]
+    keywords: list[str] | None
+    show_type: str | None
+    enriched: bool
+
+
+def judged_facts(records: Sequence[Record], describing: Sequence[Record] = (), *,
+                 orders: Orders) -> Facts | None:
+    """`Facts` for the card `records` (its listings) and `describing` (its
+    title-only records) make — None for no listing, as `resolve_records` gives."""
+    if not records:
+        return None
+    if len(records) == 1 and not describing:
+        # ONE LISTING AND NOTHING DESCRIBING IT — about half a month's cards — is
+        # its own answer to every rule below, whatever the viewer's order.
+        only = records[0]
+        keywords, show_type = _title_facts(records)
+        return Facts(only.media, only.anime_type, only.network, only.country,
+                     only.certification, only.language, only.poster,
+                     genres=_merged_genres(records), keywords=keywords,
+                     show_type=show_type, enriched=only.enriched)
+    card = _arrange(records, describing, orders)
+    scalars = {}
+    for field_name in _JUDGED_SCALARS:
+        winner = _first_present(card.ordered, field_name)
+        scalars[field_name] = getattr(winner if winner is not None else card.primary,
+                                      field_name)
+    keywords, show_type = _title_facts(card.ordered)
+    return Facts(card.primary.media, card.primary.anime_type, **scalars,
+                 genres=_merged_genres(card.ordered), keywords=keywords,
+                 show_type=show_type, enriched=any(r.enriched for r in card.every))
+
+
 def resolve_records(group, records: list[Record], prefs=None,
-                    describing: Sequence[Record] = ()) -> Record | None:
+                    describing: Sequence[Record] = (), *,
+                    orders: Orders | None = None) -> Record | None:
     """The one record this viewer sees for `group`, built out of `records` — the
     services that LIST it — and `describing`, the title-only records of services
     that describe the title without listing this airing (cache.with_title_only).
@@ -583,41 +677,37 @@ def resolve_records(group, records: list[Record], prefs=None,
     named this title in — and the arr/Seerr buttons, the tracker and the ranker
     all read it. Handing back the one source's own ids would quietly narrow that
     union to whichever service happened to win.
+
+    `orders` is the read's `Orders` for this viewer, so a month works each set of
+    services' order out once; a caller resolving one card may leave it out.
     """
     if not records:
         return None
-    # IN DECLARED ORDER, the title-only records among the listings rather than
-    # after them: a viewer who has stated no order reads the declared one
-    # (`_order`), and a describing service declared first must win a field for
-    # them as its listing would have.
-    every = sorted([*records, *describing], key=lambda r: _DECLARED[str(r.source)])
-    names = [str(r.source) for r in every]
-    listing = [str(r.source) for r in records]
-    primary = _winner(records, _order(prefs, SOURCE_FIELD, listing), SOURCE_FIELD,
-                      lambda _r: True)
-    if primary is None:  # unreachable while `listing` comes from `records`
-        return None
-    resolved = replace(primary, ids=dict(primary.ids or {}),
-                       genres=list(primary.genres or []))
+    card = _arrange(records, describing, orders if orders is not None else Orders(prefs))
+    primary = card.primary
+    # A COPY OF THE PRIMARY, every field the card is then given set on it — its
+    # own containers left shared with the record, as `dataclasses.replace` would
+    # leave them, because nothing writes into a record it is handed; `ids` and
+    # `genres` are replaced below.
+    resolved = copy.copy(primary)
+    resolved.ids = dict(primary.ids or {})
 
     for field_name in SCALAR_FIELDS:
-        winner = _winner(every, _order(prefs, field_name, names), field_name,
-                         lambda r, f=field_name: _present(getattr(r, f)))
+        winner = _first_present(card.ordered, field_name)
         if winner is not None:
             setattr(resolved, field_name, getattr(winner, field_name))
 
-    resolved.genres = _merged_genres(every, _order(prefs, GENRES_FIELD, names))
-    resolved.keywords, resolved.show_type = _title_facts(every,
-                                                         _order(prefs, "keywords", names))
+    resolved.genres = _merged_genres(card.ordered)
+    resolved.keywords, resolved.show_type = _title_facts(card.ordered)
 
-    coordinate = _resolve_coordinate(records, _order(prefs, COORDINATE_FIELD, listing))
+    coordinate = _resolve_coordinate(card.listed)
     for field_name in COORDINATE_FIELDS:
         setattr(resolved, field_name,
                 getattr(coordinate, field_name) if coordinate is not None
                 else getattr(primary, field_name))
 
-    resolved.air_ts, resolved.date_only = _resolve_airing(
-        records, _order(prefs, AIRING_FIELD, listing))
+    resolved.air_ts, resolved.date_only = _resolve_airing(card.listed)
+    every = card.every
 
     # ENRICHED IS A PROPERTY OF THE GROUP, NOT OF THE CARD'S SOURCE. The flag
     # exists so app/calendar/filter.py can tell "empty because there is nothing to
@@ -656,7 +746,7 @@ def resolve_records(group, records: list[Record], prefs=None,
     # has only ever had one source — so the provenance machinery costs nothing at
     # all for the accounts that will never see a merged card.
     if len(every) > 1:
-        resolved.field_sources, resolved.alternatives = _provenance(every, prefs)
+        resolved.field_sources, resolved.alternatives = _provenance(every, card.order)
     if len(records) > 1:
         # WHEN EACH SERVICE THAT LISTS IT SAYS IT AIRS, in declared order — a
         # title-only record states no airing. The card is drawn

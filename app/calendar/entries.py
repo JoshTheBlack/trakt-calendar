@@ -366,8 +366,16 @@ ORDER BY a.air_ts, a.title_key
 """
 
 
-def _record_from_row(row) -> Record:
+def _record_from_row(row, titles: dict | None = None) -> Record:
     """One stored airing, back as the Record the read path already knows.
+
+    `titles` remembers what each service's title row says — its words and ids,
+    decoded from JSON — for the rows of one read, so a title airing a dozen times
+    is decoded once (`_in_fetch_order`), and its airings SHARE those lists and
+    maps: nothing writes into a record's containers (resolution builds its own,
+    cache.group_records says so), and a month's worth of copies was tens of
+    thousands of objects for the garbage collector to walk again and again while
+    the month was built.
 
     ITS IDS ARE THE SERVICE'S OWN WITH THE TITLE'S SHARED IDS BENEATH THEM. The
     read groups listings by the ids they carry (cache.group_base), so a listing
@@ -383,12 +391,21 @@ def _record_from_row(row) -> Record:
     """
     season = row["season"]
     number = row["episode_number"]
-    ids = json.loads(row["ids_json"] or "{}") if row["ids_json"] else {}
-    known = json.loads(row["known_ids"]) if row["known_ids"] else {}
-    if known:
-        ids = title_identity.with_shared(ids, known)
+    title = (row["source"], row["media"], row["source_id"], row["title_key"])
+    held = None if titles is None else titles.get(title)
+    if held is None:
+        ids = json.loads(row["ids_json"] or "{}") if row["ids_json"] else {}
+        known = json.loads(row["known_ids"]) if row["known_ids"] else {}
+        if known:
+            ids = title_identity.with_shared(ids, known)
+        releases = (json.loads(row["release_types_json"] or "{}")
+                    if row["release_types_json"] else {})
+        held = (_words(row), ids, known, releases)
+        if titles is not None:
+            titles[title] = held
+    words, ids, known, releases = held
     return Record(
-        **_words(row),
+        **words,
         source=Source(str(row["source"])), media=Media(str(row["media"])),
         id=str(row["source_id"]), ids=ids,
         # And everything the title store knows of it, kept apart from what this
@@ -406,9 +423,7 @@ def _record_from_row(row) -> Record:
         season=None if season == UNSTATED else season,
         episode_number=None if number == UNSTATED else number,
         anime_type=row["anime_type"] or "",
-        release_types_by_country=(
-            json.loads(row["release_types_json"] or "{}")
-            if row["release_types_json"] else {}),
+        release_types_by_country=releases,
     )
 
 
@@ -536,10 +551,17 @@ async def read_span_whole(endpoint_key: str, span_start: date, span_end: date
     caller's question (`span_coverage`), asked once per span before this.
     """
     first, last = span_start.isoformat(), span_end.isoformat()
-    inside = await db.fetch_all(_READ_SQL, (endpoint_key, first, last))
-    outside = await db.fetch_all(_OTHER_LISTINGS_SQL,
-                                 {"endpoint": endpoint_key, "first": first, "last": last})
-    return _in_fetch_order([*inside, *outside])
+
+    # THE RECORDS ARE BUILT ON THE WORKER THAT READ THE ROWS, not on the event
+    # loop: tens of thousands of them for a busy month, and the loop serves every
+    # other request while they are built.
+    def _read(conn) -> list[Record]:
+        inside = conn.execute(_READ_SQL, (endpoint_key, first, last)).fetchall()
+        outside = conn.execute(_OTHER_LISTINGS_SQL, {"endpoint": endpoint_key, "first": first,
+                                                     "last": last}).fetchall()
+        return _in_fetch_order([*inside, *outside])
+
+    return await db.run(_read)
 
 
 def _in_fetch_order(found) -> list[Record]:
@@ -559,7 +581,8 @@ def _in_fetch_order(found) -> list[Record]:
     among them wherever it falls.
     """
     fed = {_episode_of_row(row) for row in found if not row["from_search"]}
-    records = [_record_from_row(r) for r in found
+    titles: dict = {}
+    records = [_record_from_row(r, titles) for r in found
                if not (r["from_search"] and _episode_of_row(r) in fed)]
     records.sort(key=lambda r: (r.air_ts, title_rows.SOURCE_ORDER.get(str(r.source), 99)))
     return records

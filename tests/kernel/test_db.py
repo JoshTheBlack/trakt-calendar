@@ -12,7 +12,9 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 import unittest
+from unittest.mock import patch
 
 from app import db
 from tests.support import APP_DIR, TMP, new_db_path
@@ -1376,6 +1378,33 @@ class HelperTests(DbTestCase):
         with self.assertRaises(RuntimeError):
             await db.transaction(_boom)
         self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM users"), 0)
+
+    async def test_a_long_hold_of_the_write_lock_is_logged_naming_the_holder(self):
+        """Every other writer waits behind a held lock and gives up at the busy
+        timeout, so the hold that causes "database is locked" names itself."""
+        def slow_body(conn):
+            time.sleep(0.05)
+
+        def quick_body(conn):
+            pass
+
+        with patch.object(db, "LOCK_HELD_WARN_SECONDS", 0.01), \
+                self.assertLogs("app.db", level="WARNING") as logged:
+            await db.transaction(quick_body)
+            await db.transaction(slow_body)
+        self.assertEqual(len(logged.records), 1)
+        self.assertIn("slow_body", logged.output[0])
+
+    async def test_a_body_that_fails_after_a_long_hold_is_logged_too(self):
+        def failing_body(conn):
+            time.sleep(0.05)
+            raise RuntimeError("nope")
+
+        with patch.object(db, "LOCK_HELD_WARN_SECONDS", 0.01), \
+                self.assertLogs("app.db", level="WARNING") as logged, \
+                self.assertRaises(RuntimeError):
+            await db.transaction(failing_body)
+        self.assertIn("failing_body", logged.output[0])
 
     async def test_what_prepare_read_before_the_lock_reaches_the_body(self):
         calls = []

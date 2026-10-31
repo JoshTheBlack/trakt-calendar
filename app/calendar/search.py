@@ -462,7 +462,7 @@ async def _drawn(endpoint_key: str, title_key: str, season: int | None, media: M
     groups = calendar_cache.group_records(records)
     named = {(str(r.source), str(r.id), float(r.air_ts)) for r in written}
     holding = [group for group in groups
-               if any((name, str(stored.get("id")), float(stored.get("air_ts") or 0)) in named
+               if any((name, str(stored.id), float(stored.air_ts)) in named
                       for name, stored in group["by_source"].items())]
     endpoint = get_endpoint(endpoint_key)
     items, _narrowed = await calendar_cache.placed(

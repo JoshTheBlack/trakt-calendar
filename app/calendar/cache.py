@@ -94,12 +94,15 @@ from __future__ import annotations
 
 import asyncio
 import calendar as _calendar
+import functools
 import logging
 import time
 from datetime import date, datetime, timedelta, timezone
 from itertools import groupby
 from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
+
+import anyio.to_thread
 
 from . import enrich as calendar_enrich
 from . import entries
@@ -284,14 +287,15 @@ def episode_coords(record: Record) -> tuple[int, int] | None:
     return None
 
 
-def episode_of(record: Record) -> tuple | None:
+def episode_of(record: Record, base: str | None = None) -> tuple | None:
     """WHICH EPISODE a record lists, as something two services can agree on: the
     title's base and (season, episode) for a show stating both, the base alone
     for a film — a film is one title on the film calendar, and its release is
     the one airing it has — and None for a show record that states no full
     coordinate, which can only be joined to an episode by its day (`match_keys`).
+    `base` is the record's `group_base`, for a caller that has worked it out.
     """
-    base = group_base(record)
+    base = group_base(record) if base is None else base
     if str(record.media) == "movie":
         return (base,)
     coordinate = episode_coords(record)
@@ -367,13 +371,19 @@ def join_listings(listings: list[Record]) -> list[list[Record]]:
     an episode whole (entries.read_span_whole, entries.read_groups), which is
     what makes them draw the same cards on the same days by construction.
     """
+    return _units(listings, {id(record): record_utc_date(record) for record in listings})
+
+
+def _units(listings: list[Record], day_of: dict[int, date]) -> list[list[Record]]:
+    """`join_listings` with each listing's UTC day already worked out (`day_of`,
+    by the listing's id) — the matcher works out every record's once."""
     units: list[list[Record]] = []
     for record in sorted(listings, key=_listing_order):
-        day = record_utc_date(record)
+        day = day_of[id(record)]
         current = units[-1] if units else None
         if (current is not None
                 and all(str(held.source) != str(record.source) for held in current)
-                and all(may_join(record_utc_date(held), day) for held in current)):
+                and all(may_join(day_of[id(held)], day) for held in current)):
             current.append(record)
         else:
             units.append([record])
@@ -439,10 +449,20 @@ def match_keys(records: list[Record]) -> list[str]:
     "same title, same day, one card" destroys them. They are untouched here
     precisely because both sides name a different episode.
     """
+    return _matched(records)[0]
+
+
+def _matched(records: list[Record]) -> tuple[list[str], list[str]]:
+    """`match_keys`, with each record's `group_base` beside its key — the title
+    each card is of, which the matcher works out on the way."""
     keys: list[str] = [""] * len(records)
+    # EACH RECORD'S TITLE AND DAY, WORKED OUT ONCE: both are asked of a record
+    # three or four times below, and a month holds tens of thousands of them.
+    bases = [group_base(record) for record in records]
+    day_of = {id(record): record_utc_date(record) for record in records}
     episodes: dict[tuple, list[int]] = {}
-    for index, record in enumerate(records):
-        episode = episode_of(record)
+    for index, (record, base) in enumerate(zip(records, bases)):
+        episode = episode_of(record, base)
         if episode is not None:
             episodes.setdefault(episode, []).append(index)
 
@@ -453,18 +473,18 @@ def match_keys(records: list[Record]) -> list[str]:
     for episode, members in episodes.items():
         base = episode[0]
         stem = base if len(episode) == 1 else f"{base}|{episode[1][0]}|{episode[1][1]}"
-        for number, listings in enumerate(join_listings([records[i] for i in members]), 1):
+        for number, listings in enumerate(_units([records[i] for i in members], day_of), 1):
             unit = {"key": stem if number == 1 else f"{stem}#{number}",
                     "coordinate": episode[1] if len(episode) > 1 else None,
                     "sources": {str(r.source) for r in listings}}
             for record in listings:
                 keys[position[id(record)]] = unit["key"]
-                on_day.setdefault((base, record_utc_date(record)), {})[unit["key"]] = unit
+                on_day.setdefault((base, day_of[id(record)]), {})[unit["key"]] = unit
 
     for index, record in enumerate(records):
         if keys[index]:
             continue
-        base, day = group_base(record), record_utc_date(record)
+        base, day = bases[index], day_of[id(record)]
         candidates = [unit for unit in on_day.get((base, day), {}).values()
                       if unit["coordinate"] is not None
                       and (record.episode_number is None
@@ -476,7 +496,7 @@ def match_keys(records: list[Record]) -> list[str]:
             keys[index] = candidates[0]["key"]
         else:
             keys[index] = f"{base}@{day.isoformat()}"
-    return keys
+    return keys, bases
 
 
 def group_records(records: list[Record]) -> list[dict]:
@@ -494,6 +514,12 @@ def group_records(records: list[Record]) -> list[dict]:
     in date order and then the declared order means the earlier listing's
     spelling of an id is the one kept.
 
+    EACH SOURCE'S RECORD IS HELD AS ITSELF, not as `Record.to_dict()`: the group
+    is a read's own structure and never stored, and turning every record into a
+    dict here and back into a Record at resolution cost a month a second and a
+    half for nothing (MEASURED, profiled). Nothing writes into a record a group
+    holds.
+
     A KEY COLLIDING WITH ITSELF FOR ONE SOURCE is a repeated airing of a record
     that names no episode — the same title listed twice on one day — and gets a
     distinct key rather than overwriting, because the calendar has always drawn
@@ -509,7 +535,8 @@ def group_records(records: list[Record]) -> list[dict]:
     """
     index: dict[str, dict] = {}
     out: list[dict] = []
-    for record, base in zip(records, match_keys(records)):
+    keys, titles = _matched(records)
+    for record, base, title in zip(records, keys, titles):
         name = str(record.source)
         key, bump = base, 1
         while key in index and name in index[key]["by_source"]:
@@ -517,10 +544,13 @@ def group_records(records: list[Record]) -> list[dict]:
             key = f"{base}#{bump}"
         group = index.get(key)
         if group is None:
-            group = {"key": key, "ids": {}, "by_source": {}}
+            # `base` is the TITLE the card is of — `group_base` of its records,
+            # every one the same title by the matcher's rule — kept so that what
+            # reads a group by its title need not work it out again.
+            group = {"key": key, "base": title, "ids": {}, "by_source": {}}
             index[key] = group
             out.append(group)
-        group["by_source"][name] = record.to_dict()
+        group["by_source"][name] = record
         for namespace, value in (record.ids or {}).items():
             if value not in (None, ""):
                 group["ids"].setdefault(namespace, value)
@@ -1442,13 +1472,13 @@ async def with_title_only(parsed, settings=None) -> list[tuple[dict, list[Record
     """
     describers = calendar_resolve.describing_sources(settings)
     wanted: dict[int, tuple[str, str, list[str]]] = {}
-    for index, (_group, listings) in enumerate(parsed):
+    for index, (group, listings) in enumerate(parsed):
         if not listings:
             continue
         listed = {str(r.source) for r in listings}
         missing = [name for name in describers if name not in listed]
         if missing:
-            wanted[index] = (str(listings[0].media), group_base(listings[0]), missing)
+            wanted[index] = (str(listings[0].media), group["base"], missing)
     found = await entries.title_only_records(
         describers, {key for _media, key, _missing in wanted.values()}) if wanted else {}
     out = []
@@ -1496,8 +1526,7 @@ async def visible_records(groups, endpoint, *, prefs=None, settings=None,
         # THE VIEWER'S SOURCE CHOICE IS APPLIED IN `narrow_for_viewer`, NOT HERE:
         # it decides which listings a card is drawn from, and the filters judge
         # every record the instance admits — see there.
-        parsed = [(group, calendar_resolve.admitted_records(group, None, endpoint.key, settings))
-                  for group in groups]
+        parsed = calendar_resolve.instance_admitted(groups, settings)
         # THE SIMKL OVERLAY IS GONE FROM HERE, AND ITS ABSENCE IS THE POINT.
         # What used to happen on this line was a batched read of `simkl_titles`
         # to paint genres, network, country and certification onto this read's
@@ -1528,8 +1557,12 @@ async def visible_records(groups, endpoint, *, prefs=None, settings=None,
         # and asking per record would strip a service off a merged card to
         # enforce a rule about release formats. Counted rather than silently
         # applied, so a month this empties can say so — see meta below.
-        kept, release_filtered, resolved = narrow_for_viewer(
-            parsed, endpoint.media, prefs=prefs, settings=settings, **specs)
+        # ON A WORKER THREAD, as the grouping is (`_assembled_span` says why):
+        # judging every card and resolving the drawn ones is the month's
+        # largest share of pure CPU, and it reads nothing but what it is handed.
+        kept, release_filtered, resolved = await anyio.to_thread.run_sync(
+            functools.partial(narrow_for_viewer, parsed, endpoint.media, prefs=prefs,
+                              settings=settings, **specs))
         sp.set(kept=len(kept))
 
     # EVERY PER-VIEWER REMOVAL, IN ONE NUMBER. The release rule and the
@@ -1608,38 +1641,40 @@ def narrow_for_viewer(parsed, media, *, prefs=None, settings=None,
     lists or one it only describes, and is judged by them like everybody else.
     Being narrowed to that service alone draws nothing it does not list
     (resolve.resolve_records makes no card without a listing).
+
+    EVERY CARD IS JUDGED, AND ONLY THE CARDS THAT SURVIVE ARE DRAWN. A card is
+    judged on its `resolve.Facts` — the few fields a filter reads, by the rules
+    that resolve them — and resolved in full, provenance, buttons, airing and
+    all, only once it has survived every filter: MEASURED, one viewer's October
+    All Episodes resolved 18,759 cards in full to draw 1,263.
     """
     specs = vocab.complete_specs(specs)
-    judged_pairs: list = []
-    drawn_for: dict[int, Record] = {}
+    orders = calendar_resolve.Orders(prefs)
+    # Which services this viewer reads, None for every one — the ordinary case,
+    # where a card's own listings are all of them.
+    reads = (None if prefs is None
+             else frozenset(str(source) for source in Source if prefs.admits_calendar(source)))
+    if reads is not None and len(reads) == len(Source):
+        reads = None
+    # (group, every listing, its title-only records, the viewer's own of each)
+    pairs: list = []
     for group, every, describing in parsed:
-        own = [r for r in every if prefs is None or prefs.admits_calendar(r.source)]
-        own_describing = [r for r in describing
-                          if prefs is None or prefs.admits_calendar(r.source)]
-        drawn = calendar_resolve.resolve_records(group, own, prefs, own_describing)
-        if drawn is None:
+        own = every if reads is None else [r for r in every if str(r.source) in reads]
+        if not own:
             continue
-        pair = (group, every,
-                len(own) == len(every) and len(own_describing) == len(describing),
-                describing)
-        judged_pairs.append(pair)
-        drawn_for[id(pair)] = drawn
+        own_describing = (describing if reads is None
+                          else [r for r in describing if str(r.source) in reads])
+        pairs.append((group, every, describing, own, own_describing))
     narrowed = calendar_filter.filter_release_groups(
-        judged_pairs, media, specs["movie_release_countries"], specs["movie_release_types"])
-    release_filtered = len(judged_pairs) - len(narrowed)
-    # THE JUDGED RECORD OF EACH SURVIVING GROUP, mapped to the card it stands
-    # for. A second resolution only where this viewer reads fewer services than
-    # the group holds — for a viewer who has not narrowed the calendar the card
-    # IS the judged record, and nothing is resolved twice.
-    drawn_by_judged: dict[int, Record] = {}
+        pairs, media, specs["movie_release_countries"], specs["movie_release_types"])
+    release_filtered = len(pairs) - len(narrowed)
+    pair_of: dict[int, tuple] = {}
     cards: list[calendar_filter.Judged] = []
     for pair in narrowed:
-        group, every, draws_every, describing = pair
-        drawn = drawn_for[id(pair)]
-        judged = drawn if draws_every else calendar_resolve.resolve_records(
-            group, every, prefs, describing)
-        drawn_by_judged[id(judged)] = drawn
-        cards.append(calendar_filter.Judged(judged, frozenset(str(r.source) for r in every)))
+        _group, every, describing, _own, _own_describing = pair
+        facts = calendar_resolve.judged_facts(every, describing, orders=orders)
+        pair_of[id(facts)] = pair
+        cards.append(calendar_filter.Judged(facts, frozenset(str(r.source) for r in every)))
     # A Simkl entry Simkl's OWN enrichment marks as a film (`anime_type ==
     # "movie"`) does not belong on a series endpoint — see
     # filter.prune_disguised_films for the measured rule and why this is
@@ -1679,7 +1714,12 @@ def narrow_for_viewer(parsed, media, *, prefs=None, settings=None,
             cards, vocab.title_rules(vocab.floor_specs(settings, media), media), sparse)
     floored = len(cards)
     kept = calendar_filter.filter_titles(cards, vocab.title_rules(specs, media), sparse)
-    return [drawn_by_judged[id(card.record)] for card in kept], release_filtered, floored
+    drawn = []
+    for card in kept:
+        group, _every, _describing, own, own_describing = pair_of[id(card.record)]
+        drawn.append(calendar_resolve.resolve_records(group, own, prefs, own_describing,
+                                                      orders=orders))
+    return drawn, release_filtered, floored
 
 
 # ---------------------------------------------------------------------------
@@ -1877,6 +1917,33 @@ def _refresh_span_later(key, endpoint: Endpoint, settings, **kwargs) -> None:
     asyncio.create_task(_run())
 
 
+def _span_groups(records: list[Record], first: date, last: date, covered: set[date],
+                 utc_start: date, utc_end: date) -> list[dict]:
+    """The cards a span's airings make (`group_records`) that could be drawn
+    inside it. Pure, for a worker thread (`_assembled_span`).
+
+    A WINDOW NOTHING HAS FILLED CONTRIBUTES NO AIRINGS of its own — what sits in
+    one is only what a search or a tracker wrote there, and a read that may not
+    fill serves it as the empty span it is — while every other stored listing of
+    an episode the span holds stays, at whatever date, because it can decide
+    where a card inside the span is drawn.
+
+    ONLY A CARD THAT COULD BE DRAWN INSIDE THE SPAN IS RESOLVED. A card is drawn
+    at one of its own listings' instants (its describing service's, or the time
+    it borrowed), and a zone moves an instant by less than a day — so a card none
+    of whose listings falls inside the span padded a day each side cannot land in
+    it. The windows a span reads hold up to a week either side of it, which for
+    one day was every card of the week resolved and thrown away: measured, a day
+    read resolved ~2,500 groups to draw ~350.
+    """
+    held = [record for record in records
+            if not first <= (day := record_utc_date(record)) < last
+            or window_start(day) in covered]
+    return [group for group in group_records(held)
+            if any(utc_start <= record_utc_date(listing) <= utc_end
+                   for listing in group["by_source"].values())]
+
+
 async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
                           start_date: date, end_date: date, allow_fetch: bool, now, prefs,
                           rebuild: bool = False, **specs):
@@ -2016,30 +2083,20 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # span it is. The second awaited phase.
     first, last = windows[0], windows[-1] + timedelta(days=WINDOW_DAYS)
     with span("calcache.read", windows=len(windows)) as sp:
-        records = [record for record in await entries.read_span_whole(endpoint.key, first, last)
-                   if not first <= record_utc_date(record) < last
-                   or window_start(record_utc_date(record)) in covered]
+        records = await entries.read_span_whole(endpoint.key, first, last)
         sp.set(records=len(records))
 
-    # THE PHASES BELOW ARE PURE CPU ON THE EVENT LOOP, and they are timed
-    # separately because they scale with different things and are fixed in
-    # different places. The grouping is a sort plus a walk; the filter is
-    # per-viewer work over resolved records; the render is per-entry object
-    # building and timezone arithmetic, and is the one that grows with a busy
-    # month.
+    # THE PHASES BELOW ARE PURE CPU, and they are timed separately because they
+    # scale with different things and are fixed in different places. The
+    # grouping is a sort plus a walk; the filter is per-viewer work over the
+    # cards' facts and the drawn cards' resolution; the render is per-entry
+    # object building and timezone arithmetic. The first two RUN ON A WORKER
+    # THREAD, so the event loop serves every other request while a month is
+    # built (`_span_groups`, `visible_records`) — the GIL is shared, so this
+    # costs the month nothing and gives the loop its turns.
     with span("calcache.group", records=len(records)) as sp:
-        groups = group_records(records)
-        # ONLY A CARD THAT COULD BE DRAWN INSIDE THE SPAN IS RESOLVED. A card is
-        # drawn at one of its own listings' instants (its describing service's,
-        # or the time it borrowed), and a zone moves an instant by less than a
-        # day — so a card none of whose listings falls inside the span padded a
-        # day each side cannot land in it. The windows a span reads hold up to a
-        # week either side of it, which for one day was every card of the week
-        # resolved and thrown away: measured, a day read resolved ~2,500 groups
-        # to draw ~350.
-        groups = [group for group in groups
-                  if any(utc_start <= epoch_moment(float(listing.get("air_ts") or 0)).date()
-                         <= utc_end for listing in group["by_source"].values())]
+        groups = await anyio.to_thread.run_sync(
+            _span_groups, records, first, last, covered, utc_start, utc_end)
         sp.set(groups=len(groups))
     placed_items, filtered_out = await placed(
         groups, endpoint, tz=tz, prefs=prefs, settings=settings, **specs)

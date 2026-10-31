@@ -64,6 +64,14 @@ DB_FILENAME = "app.db"
 
 BUSY_TIMEOUT_MS = 5000
 
+# A WRITE LOCK HELD LONGER THAN THIS IS LOGGED, naming the transaction that held
+# it (`transaction`). Every other writer waits behind it for up to
+# BUSY_TIMEOUT_MS and then fails with "database is locked", so the hold that
+# causes one is the evidence worth having — and a hold well under the timeout is
+# the early warning. A transaction's body is expected to take milliseconds: its
+# statement count does not grow with what it writes (CLAUDE.md says why).
+LOCK_HELD_WARN_SECONDS = 1.0
+
 # Bumped by set_db_path() so a thread still holding a connection to the OLD path
 # drops it on next use rather than silently reading a stale database.
 _generation = 0
@@ -213,6 +221,9 @@ async def transaction(fn: Callable[..., T], *,
     moves only for another connection's commits), `prepare` runs again inside
     the transaction — so `fn` always acts on what the database held once the
     lock was taken. `prepare` must therefore only read.
+
+    A HOLD OVER `LOCK_HELD_WARN_SECONDS` IS LOGGED as a WARNING naming `fn`, from
+    the lock's taking to its release, whether the body committed or not.
     """
     def _work() -> T:
         conn = connection()
@@ -220,6 +231,7 @@ async def transaction(fn: Callable[..., T], *,
             seen = conn.execute("PRAGMA data_version").fetchone()[0]
             prepared = prepare(conn)
         conn.execute("BEGIN IMMEDIATE")
+        held_from = time.perf_counter()
         try:
             if prepare is None:
                 result = fn(conn)
@@ -229,11 +241,22 @@ async def transaction(fn: Callable[..., T], *,
                 result = fn(conn, prepared)
         except BaseException:
             conn.execute("ROLLBACK")
+            _report_hold(fn, held_from)
             raise
         conn.execute("COMMIT")
+        _report_hold(fn, held_from)
         return result
 
     return await anyio.to_thread.run_sync(_work)
+
+
+def _report_hold(fn: Callable, held_from: float) -> None:
+    held = time.perf_counter() - held_from
+    if held > LOCK_HELD_WARN_SECONDS:
+        logger.warning("database write lock held %.2fs by %s.%s; every other writer waited "
+                       "behind it (giving up after %d ms)", held,
+                       getattr(fn, "__module__", "?"), getattr(fn, "__qualname__", repr(fn)),
+                       BUSY_TIMEOUT_MS)
 
 
 async def fetch_one(sql: str, params: Sequence[Any] = ()) -> sqlite3.Row | None:

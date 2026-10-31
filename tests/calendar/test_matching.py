@@ -384,8 +384,9 @@ class TheMatchIsMadeAtReadTests(unittest.IsolatedAsyncioTestCase):
 
         # A rule that calls them one airing changes the answer with NOTHING
         # refetched and nothing rewritten — the stored rows are the same rows.
-        with patch.object(calendar_cache, "match_keys",
-                          lambda recs: ["one"] * len(recs)):
+        with patch.object(calendar_cache, "_matched",
+                          lambda recs: (["one"] * len(recs),
+                                        [calendar_cache.group_base(r) for r in recs])):
             window, _ = await calendar_cache.read_cached_window(
                 "shows", calendar_cache.window_start(day))
         self.assertEqual(len(window.groups), 1)

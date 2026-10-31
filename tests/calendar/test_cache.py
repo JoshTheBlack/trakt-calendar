@@ -759,7 +759,7 @@ class InstanceFloorTests(CacheTestCase):
         self.assertNotIn("excluded-anime", ids)
 
         window, _ = await calendar_cache.read_cached_window(SHOWS.key, date(2026, 7, 6))
-        cached_slugs = {g["by_source"]["trakt"]["id"] for g in window.groups}
+        cached_slugs = {g["by_source"]["trakt"].id for g in window.groups}
         self.assertEqual(cached_slugs, {"kept-drama"})
 
 
@@ -839,7 +839,7 @@ class InstanceFloorAtReadTests(CacheTestCase):
         ids, _meta = await self._read(self.settings_with())
         self.assertEqual(ids, ["anime-one", "drama-one"])
         window, _ = await calendar_cache.read_cached_window(SHOWS.key, self.WINDOW)
-        self.assertEqual({g["by_source"]["trakt"]["id"] for g in window.groups},
+        self.assertEqual({g["by_source"]["trakt"].id for g in window.groups},
                          {"anime-one", "drama-one"})
 
     async def test_the_floor_is_not_counted_as_this_viewer_s_own_filtering(self):
@@ -1046,12 +1046,12 @@ class ReadPathTests(CacheTestCase):
         with patch("app.calendar.cache.fetch_window_records", fetch):
             window, _ = await calendar_cache.load_window(
                 SHOWS, self.settings, date(2026, 7, 6), now=1000)
-            self.assertEqual(window.groups[0]["by_source"]["trakt"]["id"], "first")
+            self.assertEqual(window.groups[0]["by_source"]["trakt"].id, "first")
 
             # Within TTL: served from storage, no fetch at all.
             window, _ = await calendar_cache.load_window(
                 SHOWS, self.settings, date(2026, 7, 6), now=1000 + 9 * 60)
-            self.assertEqual(window.groups[0]["by_source"]["trakt"]["id"], "first")
+            self.assertEqual(window.groups[0]["by_source"]["trakt"].id, "first")
             self.assertEqual(fetch.call_count, 1)
 
             # Past TTL: STILL served from storage, and a refill is scheduled
@@ -1059,7 +1059,7 @@ class ReadPathTests(CacheTestCase):
             with patch("app.calendar.cache.schedule_refill") as refill:
                 window, _ = await calendar_cache.load_window(
                     SHOWS, self.settings, date(2026, 7, 6), now=1000 + 11 * 60)
-            self.assertEqual(window.groups[0]["by_source"]["trakt"]["id"], "first")
+            self.assertEqual(window.groups[0]["by_source"]["trakt"].id, "first")
             self.assertEqual(fetch.call_count, 1, "the read blocked on a fetch")
             refill.assert_called_once()
 
@@ -1069,7 +1069,7 @@ class ReadPathTests(CacheTestCase):
         window, _ = await calendar_cache.load_window(
             SHOWS, self.settings, date(2026, 7, 6), now=1000 + 12 * 60,
             allow_fetch=False)
-        self.assertEqual(window.groups[0]["by_source"]["trakt"]["id"], "second")
+        self.assertEqual(window.groups[0]["by_source"]["trakt"].id, "second")
 
     async def test_a_source_never_asked_still_blocks_rather_than_serving_a_gap(self):
         """THE ONE CASE THAT MUST STILL WAIT. A span filled before a source was
@@ -1091,7 +1091,7 @@ class ReadPathTests(CacheTestCase):
             window, _ = await calendar_cache.load_window(
                 SHOWS, self.settings, date(2026, 7, 6), now=1000)
         fetch.assert_awaited()
-        self.assertEqual(window.groups[0]["by_source"]["trakt"]["id"], "both")
+        self.assertEqual(window.groups[0]["by_source"]["trakt"].id, "both")
 
     async def test_a_first_fill_serves_what_a_search_already_wrote_there(self):
         """A month opened for the first time is drawn by the read that fills it.
@@ -1110,7 +1110,7 @@ class ReadPathTests(CacheTestCase):
         with patch("app.calendar.cache.fetch_window_records", fetch):
             window, _ = await calendar_cache.load_window(
                 SHOWS, self.settings, date(2026, 7, 6), now=1000)
-        titles = sorted(record["title"] for group in window.groups
+        titles = sorted(record.title for group in window.groups
                         for record in group["by_source"].values())
         self.assertEqual(titles, ["Dexter", "fetched"])
 
@@ -1134,7 +1134,7 @@ class ReadPathTests(CacheTestCase):
         with patch("app.calendar.cache.fetch_window_records", never):
             window, cached_at = await calendar_cache.load_window(
                 SHOWS, self.settings, date(2026, 7, 6), allow_fetch=False, now=10 ** 9)
-        self.assertEqual(window.groups[0]["by_source"]["trakt"]["id"], "cached")
+        self.assertEqual(window.groups[0]["by_source"]["trakt"].id, "cached")
         self.assertEqual(cached_at, 1000)
 
     async def test_a_span_nothing_has_stored_reads_as_a_miss_and_refills(self):
@@ -1154,7 +1154,7 @@ class ReadPathTests(CacheTestCase):
                    window_fetch([_entry("fresh", "2026-07-06T12:00:00Z")])):
             window, _ = await calendar_cache.load_window(
                 SHOWS, self.settings, date(2026, 7, 6), now=1001)
-        self.assertEqual(window.groups[0]["by_source"]["trakt"]["id"], "fresh")
+        self.assertEqual(window.groups[0]["by_source"]["trakt"].id, "fresh")
 
     async def _read_boundary(self, tz_name, year, month):
         """read_month for a single item airing 2026-03-01T02:00Z, in tz_name."""

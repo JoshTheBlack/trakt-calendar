@@ -15,6 +15,7 @@ No network, and no database except where a class says otherwise.
 """
 from __future__ import annotations
 
+import dataclasses
 import unittest
 from datetime import date
 from urllib.parse import quote
@@ -72,7 +73,7 @@ def _forced_group(*records: Record) -> dict:
     """
     group = {"key": "forced", "ids": {}, "by_source": {}}
     for record in records:
-        group["by_source"][str(record.source)] = record.to_dict()
+        group["by_source"][str(record.source)] = record
         for namespace, value in (record.ids or {}).items():
             group["ids"].setdefault(namespace, value)
     return group
@@ -161,10 +162,11 @@ class ThePreferredSourceLeadsEveryFieldTests(unittest.TestCase):
     def test_neither_answer_mutates_the_group_or_the_other(self):
         """`resolve` builds a new record; a reader that mutated the stored group
         would hand the next viewer the previous viewer's answer."""
-        before = {name: dict(payload)
-                  for name, payload in self.group["by_source"].items()}
+        before = {name: dataclasses.asdict(record)
+                  for name, record in self.group["by_source"].items()}
         calendar_resolve.resolve(self.group, _prefs("simkl"))
-        self.assertEqual(self.group["by_source"], before)
+        self.assertEqual({name: dataclasses.asdict(record)
+                          for name, record in self.group["by_source"].items()}, before)
         self.assertEqual(calendar_resolve.resolve(self.group).title, "Trakt Title")
 
 

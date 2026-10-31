@@ -278,12 +278,11 @@ class ResolvingOneSourceTests(unittest.TestCase):
         group["ids"]["mal"] = 4242
         self.assertEqual(calendar_resolve.resolve(group).ids["mal"], 4242)
 
-    def test_a_group_holding_nothing_readable_resolves_to_nothing(self):
-        """Skipped, not raised over: one unreadable row in a stored window is not
-        a reason to fail a month."""
+    def test_a_group_holding_no_record_resolves_to_nothing(self):
+        """A group holds each source's Record itself (cache.group_records), built
+        from a stored row, so an unreadable record cannot reach one; what is left
+        is a group with nothing in it, which draws nothing."""
         self.assertIsNone(calendar_resolve.resolve({"key": "x", "ids": {}, "by_source": {}}))
-        self.assertIsNone(calendar_resolve.resolve(
-            {"key": "x", "ids": {}, "by_source": {"trakt": {"title": "no air time"}}}))
 
 
 def _record(source, slug, *, tmdb=None, title=None, air_ts=1784145600.0):

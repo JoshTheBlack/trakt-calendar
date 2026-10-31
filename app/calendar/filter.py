@@ -627,7 +627,8 @@ def keep_title(record, listed_by: frozenset[str], rules: TitleRules,
     """Whether one card survives `rules`. THE PREDICATE, said once for every
     dimension a card is judged on after resolution.
 
-    `record` IS THE CARD RESOLVED OVER EVERY SERVICE THE INSTANCE ADMITS, and
+    `record` IS THE CARD RESOLVED OVER EVERY SERVICE THE INSTANCE ADMITS — the
+    facts of it a rule reads (resolve.Facts), or the whole resolved record — and
     `listed_by` names those of them that LIST it — never the viewer's own
     narrowing of them, which decides only what the card is drawn from
     (cache.narrow_for_viewer), and never a service that only describes it
@@ -684,10 +685,11 @@ def keep_title(record, listed_by: frozenset[str], rules: TitleRules,
 
 
 class Judged(NamedTuple):
-    """One card as the read judges it: the record resolved over every service
-    the instance admits, and the names of those that LIST it — a service that
-    only describes the card (cache.with_title_only) speaks to its facts and is
-    not among them."""
+    """One card as the read judges it: its facts resolved over every service the
+    instance admits (resolve.Facts — what `keep_title` and the disguised-film
+    prune read), and the names of those that LIST it — a service that only
+    describes the card (cache.with_title_only) speaks to its facts and is not
+    among them."""
     record: Any
     listed_by: frozenset[str]
 

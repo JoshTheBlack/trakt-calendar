@@ -77,7 +77,9 @@ alone. A payload-driven join says CROSS JOIN, and an UPDATE … FROM by rowid ta
 the competing index away (`+source`): the planner otherwise walks the table with
 the payload inside it. `tests/support.py`'s `statements_per_transaction` holds
 each writer to the same count for ten rows as for a hundred
-(tests/calendar/test_write_statements.py, tests/metadata/test_write_statements.py).
+(tests/calendar/test_write_statements.py, tests/metadata/test_write_statements.py),
+and `db.transaction` logs a WARNING naming its body whenever the lock was held
+over `db.LOCK_HELD_WARN_SECONDS` (1 s), so the next long hold names itself.
 
 **The session ROW is the authority on expiry, not the cookie.**
 `app/auth/cookies.py` issues it HttpOnly, SameSite=Lax, Path=/, no Domain, and
@@ -322,6 +324,17 @@ in the key without anybody adding it), `repr(prefs)`, the operator's floor as
 belongs in it, and a key missing one does not fail loudly — it hands one reader
 somebody else's month. `tests/calendar/test_span_memo.py` holds every spec key
 and every `vocab.FLOOR_FIELDS` field to moving it.
+A READ JUDGES EVERY CARD AND RESOLVES ONLY THE CARDS IT DRAWS.
+`cache.narrow_for_viewer` judges each card on its `resolve.Facts` — the fields a
+filter reads, by the same rules `resolve_records` resolves them with
+(`_arrange`, `_first_present`, `_merged_genres`, `_title_facts`) — and resolves
+in full (provenance, buttons, airing) only the survivors, one `resolve.Orders`
+per read answering every card's service order; a group holds each source's
+`Record` itself, never a dict copy. The grouping (`_span_groups`) and the
+narrowing run on a worker thread, so the loop serves other requests while a
+month is built. MEASURED on a copy of dev, user 1's October All Episodes: the
+loop's CPU per read 7.2 s → 0.5 s, the read 8.3 s → 2.9 s, with no card's field
+moving across three service orders, every calendar, October and November.
 
 **One episode is ONE card, drawn on the day the viewer's first service gives
 it.** Which listings are one card is `app/calendar/cache.py`'s: every service's
