@@ -701,8 +701,15 @@ def _apply_counts(show: dict, rec: dict, watched: dict[str, int], settings,
     from a number it left behind after its link lapsed: it was never asked, no
     refresh would ever move its number, and it still outranked the service the
     viewer actually reads.
+
+    `order` IS A DIFFERENT ORDER, and keeps its own name for that reason: it is
+    the viewer's season-TOTALS order (`totals_order`), and decides only who is
+    asked for the total when no service answered this pass (`described_by` is
+    None — a degraded row, `stored_shows`). The watched counts are picked in
+    `counted_in`. One name for both hands the tracker's order to `detail_source`,
+    filing a degraded row's total under a service the viewer did not put first.
     """
-    order = tuple(str(source) for source in asked) or source_order()
+    counted_in = tuple(str(source) for source in asked) or source_order()
     total = int(show.get("total") or 0)
     # RESOLVED ONCE, HERE, BEFORE ANY OF THE THREE FORMS IS WRITTEN. A service can
     # report a title finished without itemizing it, and that answer travels as a
@@ -725,9 +732,9 @@ def _apply_counts(show: dict, rec: dict, watched: dict[str, int], settings,
     # `per_source or watched` so a caller holding one bare number instead of a
     # per-source map still gets it back, exactly as before.
     show["watched"] = counts.primary_count(counting or (watched if not retired else {}),
-                                           order, total)
+                                           counted_in, total)
     show["watched_by_source"] = dict(per_source)
-    show["retired_sources"] = [name for name in order if name in retired] or [
+    show["retired_sources"] = [name for name in counted_in if name in retired] or [
         name for name in per_source if name in retired]
     # The catalogue half, per source too, so a month frozen today can still say
     # which service's episode count it was measured against. One entry: a
@@ -746,12 +753,13 @@ def _apply_counts(show: dict, rec: dict, watched: dict[str, int], settings,
     # which names it as retired.
     expected = tuple(name for name in asked if name not in retired)
     show["counts"] = counts.counts_label(counting or (watched if not retired else {}),
-                                         total, source_labels(), order, expected)
+                                         total, source_labels(), counted_in, expected)
     # AND THE ONE NUMBER THE ROW DRAWS, from the same inputs: the label above is
     # every service's number spelled out, which is right for a post and too wide
     # for a column every row shares, so the row shows the primary's, marked when
     # the services do not all say it (counts.row_count).
-    row = counts.row_count(counting or (watched if not retired else {}), total, order, expected)
+    row = counts.row_count(counting or (watched if not retired else {}), total, counted_in,
+                           expected)
     show["count_label"], show["count_split"] = row.label, row.split
     # THE SAME NUMBERS, SAID IN FULL, for the row's tooltip. One line has room
     # for the counts and nothing else, so a service nobody asked and a service
@@ -759,7 +767,7 @@ def _apply_counts(show: dict, rec: dict, watched: dict[str, int], settings,
     # that is spelled out. Composed here beside the label so the two can never
     # name the services differently or disagree about what a number means.
     show["counts_detail"] = counts.counts_detail(
-        per_source or watched, total, source_labels(), order, asked, dates,
+        per_source or watched, total, source_labels(), counted_in, asked, dates,
         linked=asked, retired=retired)
 
 

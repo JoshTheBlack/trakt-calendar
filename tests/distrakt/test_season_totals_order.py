@@ -119,6 +119,33 @@ class TheOrderChangesWhoIsAskedTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(asked), {"trakt"})
 
 
+class ARowNobodyAnsweredKeepsTheViewersOrderTests(DatabaseTestCase):
+    """A row whose season no service answered this pass still says whose total it
+    is drawing — and that is the viewer's TOTALS order, never the order its
+    watched counts are picked in (the services read for the account, most trusted
+    first). The two orders were one name inside the counting step, so a degraded
+    row filed its total under the tracker's first service."""
+
+    REC = dict(REC, total=10, watched=3)
+
+    async def test_a_degraded_row_files_its_total_under_the_first_service_in_the_totals_order(self):
+        """Nothing stated is the declared order, TMDB first — while the account's
+        trackers are Trakt then Simkl, which must not decide it."""
+        failed = AsyncMock(return_value=[providers.base.SourceUnavailable("down")])
+        with patch("app.distrakt.live.fetch_season_details", failed):
+            shows = await live.compute_live_shows(
+                1, [dict(self.REC)], ALL, watched_lookup={}, allow_degrade=True,
+                sources_read=("trakt", "simkl"))
+        self.assertTrue(shows[0]["unavailable"])
+        self.assertEqual(shows[0]["total_by_source"], {"tmdb": 10})
+
+    def test_the_stored_page_files_every_total_under_the_order_it_was_handed(self):
+        """The rate-limited page reads no history at all, so the watched counts'
+        order is the declared one; the totals order is Simkl first."""
+        shows = live.stored_shows([dict(self.REC)], ALL, order=("simkl", "trakt", "tmdb"))
+        self.assertEqual(shows[0]["total_by_source"], {"simkl": 10})
+
+
 class TheOrderIsStoredPerViewerTests(DatabaseTestCase):
 
     async def _viewer(self, name: str) -> int:
