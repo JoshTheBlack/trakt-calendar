@@ -78,10 +78,11 @@ while it waits its turn.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import zlib
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import cache as calendar_cache
 from . import entries
@@ -257,8 +258,34 @@ async def _read_rows(keys) -> dict[tuple[int, str], dict]:
     return await db.run(_work)
 
 
-async def _upsert_success(simkl_id: int, media: str, fields: dict, now: int) -> None:
-    """Record what a lookup found, in BOTH places, and they are not duplicates.
+# HOW MANY ANSWERS ONE STATEMENT CARRIES. An answer's payload is compressed
+# bytes, which a JSON array cannot hold — and SQLite's `unhex()`, which would let
+# one, arrived in 3.41, after the 3.40 an older python:3.12-slim image ships — so
+# answers travel as one multi-row VALUES list with the bytes bound as
+# parameters. Four parameters an answer, and SQLite allows 32,766 since 3.32
+# (999 before), so 240 sits under either: a full drain batch is two statements.
+_ANSWERS_PER_STATEMENT = 240
+
+_STORE_ANSWERS = (
+    "INSERT INTO simkl_titles (simkl_id, media, payload, fetched_at, failed_at, fail_count) "
+    "VALUES {rows} "
+    "ON CONFLICT(simkl_id, media) DO UPDATE SET "
+    "payload = excluded.payload, fetched_at = excluded.fetched_at, "
+    "failed_at = NULL, fail_count = 0")
+
+# `WHERE true` because an upsert over a SELECT is otherwise ambiguous to SQLite's
+# parser (the ON is read as a join constraint).
+_STORE_FAILURES = (
+    "INSERT INTO simkl_titles (simkl_id, media, payload, fetched_at, failed_at, fail_count) "
+    "SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), :empty, :now, :now, 1 "
+    "FROM json_each(:rows) WHERE true "
+    "ON CONFLICT(simkl_id, media) DO UPDATE SET "
+    "failed_at = excluded.failed_at, fail_count = simkl_titles.fail_count + 1 "
+    "RETURNING simkl_id, media, fail_count")
+
+
+async def _upsert_successes(answers: list[tuple[int, str, dict]], now: int) -> None:
+    """Record what lookups found, in BOTH places, and they are not duplicates.
 
     `simkl_titles` keeps the RAW ANSWER — the whole payload, under the extraction
     version that produced it, with the failure backoff beside it. It is what
@@ -277,22 +304,30 @@ async def _upsert_success(simkl_id: int, media: str, fields: dict, now: int) -> 
     The second write is a projection of the first and can be rebuilt from it, so
     this is one fact stored once and materialized once, not two truths to keep
     in step.
+
+    ONE WRITE FOR THE WHOLE BATCH, however many answered — `_record` says why.
     """
-    blob = _compress(fields)
-    await db.execute(
-        "INSERT INTO simkl_titles (simkl_id, media, payload, fetched_at, failed_at, fail_count) "
-        "VALUES (?, ?, ?, ?, NULL, 0) "
-        "ON CONFLICT(simkl_id, media) DO UPDATE SET "
-        "payload = excluded.payload, fetched_at = excluded.fetched_at, "
-        "failed_at = NULL, fail_count = 0",
-        (simkl_id, media, blob, now),
-    )
-    await title_rows.apply_enrichment(str(Source.SIMKL), simkl_id, media, fields, now)
+    if not answers:
+        return
+    params = [[simkl_id, media, _compress(fields), now] for simkl_id, media, fields in answers]
+
+    def _work(conn) -> None:
+        for chunk in itertools.batched(params, _ANSWERS_PER_STATEMENT):
+            conn.execute(_STORE_ANSWERS.format(rows=", ".join(["(?, ?, ?, ?, NULL, 0)"] * len(chunk))),
+                         [value for row in chunk for value in row])
+
+    await db.transaction(_work)
+    await title_rows.apply_enrichment_many(str(Source.SIMKL), answers, now)
 
 
-async def _upsert_failure(simkl_id: int, media: str, now: int) -> int:
-    """Record an attempt that found nothing usable, and answer how many times
-    this title has now failed in a row.
+async def _upsert_success(simkl_id: int, media: str, fields: dict, now: int) -> None:
+    """One answer recorded: `_upsert_successes` for a batch of one."""
+    await _upsert_successes([(simkl_id, media, fields)], now)
+
+
+async def _upsert_failures(failed: list[tuple[int, str]], now: int) -> dict[tuple[int, str], int]:
+    """Record attempts that found nothing usable, and answer how many times
+    each title has now failed in a row.
 
     The payload written on the FIRST attempt is the empty answer (there is
     nothing else to store yet); a later failure of a title that once succeeded
@@ -305,16 +340,18 @@ async def _upsert_failure(simkl_id: int, media: str, now: int) -> int:
     out of the table on the clock it was first written on, and so be asked about
     again from scratch rather than never again.
     """
-    blob = _compress({})
-    row = await db.fetch_one(
-        "INSERT INTO simkl_titles (simkl_id, media, payload, fetched_at, failed_at, fail_count) "
-        "VALUES (?, ?, ?, ?, ?, 1) "
-        "ON CONFLICT(simkl_id, media) DO UPDATE SET "
-        "failed_at = excluded.failed_at, fail_count = simkl_titles.fail_count + 1 "
-        "RETURNING fail_count",
-        (simkl_id, media, blob, now, now),
-    )
-    return int(row["fail_count"]) if row else 1
+    if not failed:
+        return {}
+    rows = await db.fetch_all(_STORE_FAILURES, {
+        "rows": json.dumps([[int(simkl_id), str(media)] for simkl_id, media in failed]),
+        "empty": _compress({}), "now": now})
+    return {(int(row["simkl_id"]), str(row["media"])): int(row["fail_count"]) for row in rows}
+
+
+async def _upsert_failure(simkl_id: int, media: str, now: int) -> int:
+    """One failure recorded: `_upsert_failures` for a batch of one."""
+    counts = await _upsert_failures([(simkl_id, media)], now)
+    return counts.get((int(simkl_id), str(media)), 1)
 
 
 # CONSECUTIVE FAILURES BEFORE THE DRAIN STOPS ASKING ABOUT A TITLE. Simkl's
@@ -453,9 +490,9 @@ async def enrich_now(settings, records: list[Record], *, now: int) -> list[Recor
     lookup, and handing them a card with no genres and no certification — which
     every filter then declines to act on — is worse than the moment it costs.
 
-    IT IS THE DRAIN'S OWN MACHINERY, not a second copy. `_fetch_one` asks Simkl
-    and writes the answer into `simkl_titles`; `apply_stored_enrichment` reads
-    that back onto the records. So a title learned this way is learned for the
+    IT IS THE DRAIN'S OWN MACHINERY, not a second copy. `_look_up` asks Simkl,
+    `_record` writes the answers into `simkl_titles`, and
+    `apply_stored_enrichment` reads that back onto the records. So a title learned this way is learned for the
     WHOLE INSTANCE — every other window naming it is enriched too, and the drain
     finds one less thing owed rather than the same work queued twice.
 
@@ -472,14 +509,20 @@ async def enrich_now(settings, records: list[Record], *, now: int) -> list[Recor
     """
     owed = {(int(r.ids["simkl"]), str(r.media)) for r in records
             if r.source is Source.SIMKL and not r.enriched and r.ids.get("simkl")}
+    looked = []
+    # Deliberately broad, both: see this function's own last paragraph. Whatever
+    # went wrong, the caller still has a drawable record.
     for simkl_id, media in owed:
         try:
-            await _fetch_one(settings, simkl_id, media, now)
-        # Deliberately broad: see this function's own last paragraph. Whatever
-        # went wrong, the caller still has a drawable record.
+            looked.append(await _look_up(settings, simkl_id, media))
         except Exception:
             logger.warning("immediate enrichment failed for simkl id %s (%s)",
                            simkl_id, media, exc_info=True)
+    try:
+        await _record(looked, now)
+    except Exception:
+        logger.warning("immediate enrichment of %d title(s) could not be stored",
+                       len(looked), exc_info=True)
     return await apply_stored_enrichment(records)
 
 
@@ -632,22 +675,61 @@ async def _owed_titles() -> dict[tuple[int, str], str]:
     return await title_rows.unenriched(str(Source.SIMKL), "simkl", _media_values())
 
 
-async def _fetch_one(settings, simkl_id: int, media: str, now: int) -> bool:
+class _Looked(NamedTuple):
+    """What one lookup came back with, before anything is written.
+
+    `fields` is the answer, or None when there was none. `counts` says whether
+    a missing answer is a fact about this title: an instance-wide refusal is
+    not, and is recorded nowhere (`_look_up` says why)."""
+    simkl_id: int
+    media: str
+    fields: dict | None
+    counts: bool = True
+
+
+async def _look_up(settings, simkl_id: int, media: str) -> _Looked:
     fields = await simkl_titles.fetch_title(settings, simkl_id, Media(media))
-    if fields is None:
-        # AN INSTANCE-WIDE REFUSAL IS NOT A FACT ABOUT THIS TITLE, and recording
-        # it as one is how a single 412 poisoned an entire table. `fetch_title`
-        # answers None for every failure it meets — that is deliberate, since a
-        # missing title and an unreachable service are indistinguishable from a
-        # status code there — but the breaker knows which of those just happened,
-        # and a blocked call never reached Simkl to have an opinion about this id.
-        # Written down because the shape was observed: a fresh deployment ended
-        # up with 372 of its 388 rows marked failed, every one of them a title
-        # Simkl would have answered for, each carrying a backoff it had not
-        # earned.
-        if simkl_transport.blocked_seconds_remaining() > 0:
-            return False
-        failures = await _upsert_failure(simkl_id, media, now)
+    if fields is not None:
+        return _Looked(simkl_id, media, fields)
+    # AN INSTANCE-WIDE REFUSAL IS NOT A FACT ABOUT THIS TITLE, and recording it
+    # as one is how a single 412 poisoned an entire table. `fetch_title` answers
+    # None for every failure it meets — that is deliberate, since a missing
+    # title and an unreachable service are indistinguishable from a status code
+    # there — but the breaker knows which of those just happened, and a blocked
+    # call never reached Simkl to have an opinion about this id. Asked HERE, the
+    # moment the call came back, rather than when the batch is written, because
+    # that is when the breaker's answer is about this call. Written down because
+    # the shape was observed: a fresh deployment ended up with 372 of its 388
+    # rows marked failed, every one of them a title Simkl would have answered
+    # for, each carrying a backoff it had not earned.
+    return _Looked(simkl_id, media, None,
+                   counts=simkl_transport.blocked_seconds_remaining() <= 0)
+
+
+async def _record(looked: list[_Looked], now: int) -> None:
+    """Write what a set of lookups came back with: the answers in one go, the
+    failures in another, each a fixed number of statements however many there
+    are.
+
+    A LOOKUP NEVER WRITES ITS OWN ANSWER, and that is the measured reason this
+    exists. Each answer used to be written as it arrived — the raw answer, then
+    its projection onto the title row, which first finds the row by reading
+    every row Simkl has in the store (app/metadata/rows.py's `_ANSWERED_ROWS`).
+    With a pass's batch in flight at once that was hundreds of full reads and
+    twice as many write transactions, each on a worker thread: MEASURED on a
+    harness copy of dev with a backlog of Simkl films, every one of the forty
+    worker threads busy and a month's page answering in 29.7 s, its own phases
+    accounting for 11 of them. Written once a batch, the same backlog drained
+    faster, with at most seven workers busy and the page in 5.7 s. One write
+    per batch is one read of the store and two transactions.
+    """
+    answers = [(found.simkl_id, found.media, found.fields)
+               for found in looked if found.fields is not None]
+    failed = [(found.simkl_id, found.media)
+              for found in looked if found.fields is None and found.counts]
+    await _upsert_successes(answers, now)
+    counts = await _upsert_failures(failed, now)
+    for (simkl_id, media), failures in counts.items():
         # THE COUNT, WHILE IT IS STILL COUNTING. A drain that reports "fetched 0
         # of 10" every tick says nothing about whether it is getting anywhere,
         # and the ceiling that ends it is invisible until it is reached — which
@@ -667,9 +749,6 @@ async def _fetch_one(settings, simkl_id: int, media: str, now: int) -> bool:
             logger.info("Simkl enrichment: giving up on simkl id %s (%s) after %d "
                         "failed lookups; it will be asked about again when its "
                         "stored row ages out.", simkl_id, media, failures)
-        return False
-    await _upsert_success(simkl_id, media, fields, now)
-    return True
 
 
 @perftrace.job("title enrichment")
@@ -691,6 +770,12 @@ async def drain(settings, *, now: int | None = None) -> int:
     RUNS THROUGH CATALOG_POOL, WHICH ALLOWS PARALLEL REQUESTS — see
     app/providers/simkl/transport.py — so the batch is fetched concurrently
     rather than one title at a time.
+
+    AND WRITTEN ONCE, WHEN THE BATCH HAS COME BACK (`_record` has the
+    measurement). So a pass's answers reach the cards together, about forty
+    seconds after it starts at CATALOG_MIN_INTERVAL's pace for a full batch,
+    and a pass a restart interrupts has written nothing: its titles are still
+    owed, and the next pass asks them again.
 
     AND IT ASKS WHETHER IT MAY CALL AT ALL FIRST, exactly as `drain_releases`
     does below. Simkl's calendar needs no credential, so an instance can have a
@@ -803,12 +888,15 @@ async def drain(settings, *, now: int | None = None) -> int:
     if not batch:
         return 0
     results = await asyncio.gather(
-        *(_fetch_one(settings, simkl_id, media, ts) for simkl_id, media, _title in batch),
+        *(_look_up(settings, simkl_id, media) for simkl_id, media, _title in batch),
         return_exceptions=True,
     )
+    # A lookup that raised is left for the next pass, as one whose own write
+    # raised always was; the rest are written together (`_record` says why).
+    await _record([result for result in results if isinstance(result, _Looked)], ts)
     fetched = 0
     for (simkl_id, media, title), result in zip(batch, results):
-        if result is True:
+        if isinstance(result, _Looked) and result.fields is not None:
             fetched += 1
             # DEBUG, not INFO: the summary line below is the operator-facing
             # one (the same reasoning calendar/cache.py's pre-warm line

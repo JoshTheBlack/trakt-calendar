@@ -75,9 +75,14 @@ same connection first, and again under the lock only if another connection
 committed meanwhile (`PRAGMA data_version`), so the lock is held for the writes
 alone. A payload-driven join says CROSS JOIN, and an UPDATE … FROM by rowid takes
 the competing index away (`+source`): the planner otherwise walks the table with
-the payload inside it. `tests/support.py`'s `statements_per_transaction` holds
+the payload inside it. THE SAME GOES FOR A LOOP OF TRANSACTIONS: work fanned out
+at once that writes as each piece lands takes a worker thread per write, and the
+Simkl drain's 300 lookups doing that took all forty and left a month's page
+waiting 29.7 s — so a pass looks up first and writes its batch once
+(`calendar/enrich.py`'s `_record`). `tests/support.py`'s `statements_per_transaction` holds
 each writer to the same count for ten rows as for a hundred
-(tests/calendar/test_write_statements.py, tests/metadata/test_write_statements.py),
+(tests/calendar/test_write_statements.py, tests/metadata/test_write_statements.py,
+tests/calendar/test_enrich.py's `APassWritesItsBatchOnceTests`),
 and `db.transaction` logs a WARNING naming its body whenever the lock was held
 over `db.LOCK_HELD_WARN_SECONDS` (1 s), so the next long hold names itself.
 

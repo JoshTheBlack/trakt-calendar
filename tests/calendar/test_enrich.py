@@ -28,7 +28,7 @@ from app.endpoints import get_endpoint
 from app.providers.base import Media, Record, Source
 from app.providers.simkl import titles as simkl_titles
 from app.providers.simkl import transport as simkl_transport
-from tests.support import migrated_db
+from tests.support import migrated_db, statements_per_transaction
 
 SHOWS = get_endpoint("shows")
 MOVIES = get_endpoint("movies")
@@ -472,6 +472,52 @@ class DrainTests(EnrichTestCase):
             with self.assertLogs("app.calendar.enrich", level="DEBUG") as captured:
                 await calendar_enrich.drain(self.SETTINGS)
         self.assertTrue(any("Moonshadow" in line for line in captured.output))
+
+
+class APassWritesItsBatchOnceTests(EnrichTestCase):
+    """A pass's lookups are in flight together, and each used to write its own
+    answer as it arrived — a read of every Simkl row in the store and two write
+    transactions apiece, each on a worker thread. A backlog of films took every
+    worker the app has and a month's page waited on them. So a pass of thirty
+    titles must cost the database exactly what a pass of three does."""
+    SETTINGS = DrainTests.SETTINGS
+
+    async def _pass(self, ids) -> tuple[int, list[int]]:
+        """Odd ids answer and even ids fail, so a pass writes both kinds."""
+        async def answer_odd(settings, simkl_id, media):
+            return dict(_OK_FIELDS, network="AMC") if simkl_id % 2 else None
+
+        calls: list[int] = []
+        real_run = db.run
+
+        async def counting_run(fn):
+            calls.append(1)
+            return await real_run(fn)
+
+        await self._stored([_simkl_record(n, title=f"T{n}") for n in ids])
+        with patch("app.providers.simkl.titles.fetch_title", side_effect=answer_odd), \
+                patch.object(db, "run", counting_run), statements_per_transaction() as counted:
+            await calendar_enrich.drain(self.SETTINGS)
+        return len(calls), counted
+
+    async def test_thirty_titles_cost_what_three_do(self):
+        """The second pass asks only the thirty new titles: the first pass's are
+        answered, or failed a moment ago and inside their backoff."""
+        self.assertEqual(await self._pass(range(1, 4)), await self._pass(range(101, 131)))
+        self.assertEqual(await db.fetch_value(
+            "SELECT COUNT(*) FROM title_metadata WHERE enriched = 1 AND network = 'AMC'"), 2 + 15)
+        self.assertEqual(await db.fetch_value(
+            "SELECT COUNT(*) FROM simkl_titles WHERE fail_count = 1"), 1 + 15)
+
+    async def test_a_batch_larger_than_one_statement_carries_is_written_whole(self):
+        await self._stored([_simkl_record(n, title=f"T{n}") for n in range(1, 6)])
+        with patch.object(calendar_enrich, "_ANSWERS_PER_STATEMENT", 2):
+            await calendar_enrich._upsert_successes(
+                [(n, "show", dict(_OK_FIELDS, network="AMC")) for n in range(1, 6)], 1000)
+        self.assertEqual(await db.fetch_value(
+            "SELECT COUNT(*) FROM simkl_titles WHERE fail_count = 0"), 5)
+        self.assertEqual(await db.fetch_value(
+            "SELECT COUNT(*) FROM title_metadata WHERE enriched = 1"), 5)
 
 
 class AnAnswerThatArrivedAfterTheRowStillReachesItTests(EnrichTestCase):
