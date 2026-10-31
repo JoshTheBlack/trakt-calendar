@@ -68,6 +68,6 @@ async def settings_for_user(user_id: int):
         simkl_routes.access_token_for_user(user_id),
     )
     return dataclasses.replace(
-        load_settings(), trakt_access_token=trakt_token or "", trakt_refresh_token="",
+        await load_settings(), trakt_access_token=trakt_token or "", trakt_refresh_token="",
         simkl_access_token=simkl_token or "",
     )

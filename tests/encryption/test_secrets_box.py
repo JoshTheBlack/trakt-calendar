@@ -29,7 +29,8 @@ import unittest
 from cryptography.fernet import Fernet
 
 from app import config, db, secrets_box
-from app.config import RECOVERY_FIELDS, SECRET_FIELDS, Settings, load_settings, save_settings
+from app.config import RECOVERY_FIELDS, SECRET_FIELDS, Settings
+from tests.support import load_settings, save_settings
 from tests.support import new_db_path
 
 KEY = Fernet.generate_key().decode()

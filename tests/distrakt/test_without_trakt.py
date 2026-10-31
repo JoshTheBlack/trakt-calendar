@@ -29,7 +29,8 @@ from html import unescape
 from unittest.mock import AsyncMock, patch
 
 from app import cache, db, distrakt as distrakt_store
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from app.distrakt import live, routes as distrakt_routes
 from app.providers import title_search
 from app.providers.base import Media, PlayCounts, TitleFacts

@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import unittest
 from html import unescape
 from pathlib import Path
@@ -167,6 +168,45 @@ def migrated_db(prefix: str = "test") -> Path:
     return path
 
 
+# ---------------------------------------------------------------------------
+# settings, from a synchronous test
+# ---------------------------------------------------------------------------
+
+_settings_loop: asyncio.AbstractEventLoop | None = None
+_settings_loop_lock = threading.Lock()
+
+
+def run_coroutine(coroutine):
+    """Run `coroutine` to completion from synchronous code — a test method, a
+    setUp, a fixture — whether or not an event loop is running on this thread:
+    on one loop of its own, in a daemon thread, for the whole process."""
+    global _settings_loop
+    with _settings_loop_lock:
+        if _settings_loop is None:
+            loop = asyncio.new_event_loop()
+            threading.Thread(target=loop.run_forever, name="tests-settings",
+                             daemon=True).start()
+            _settings_loop = loop
+    return asyncio.run_coroutine_threadsafe(coroutine, _settings_loop).result()
+
+
+def load_settings(open_secrets: bool = True, *, apply_env_override: bool = True):
+    """`app.config.load_settings`, for a test that is not itself a coroutine. The
+    app reads its settings through db.run, so the read is a coroutine; the suite
+    asked for them synchronously in over two hundred places, and this is the one
+    door they all go through."""
+    from app import config
+    return run_coroutine(
+        config.load_settings(open_secrets, apply_env_override=apply_env_override))
+
+
+def save_settings(settings, *, clear_unset_secrets: bool = False) -> None:
+    """`app.config.save_settings`, for a test that is not itself a coroutine."""
+    from app import config
+    run_coroutine(config.save_settings(settings,
+                                               clear_unset_secrets=clear_unset_secrets))
+
+
 @contextlib.contextmanager
 def statements_per_transaction():
     """How many statements each `db.transaction` body runs while the block is
@@ -243,7 +283,6 @@ class AppTestCase(unittest.TestCase):
         return Settings(simkl_public_calendar_enabled=False)
 
     def setUp(self):
-        from app.config import save_settings
         from app.main import app
 
         self.db_path = migrated_db(type(self).__name__.lower())

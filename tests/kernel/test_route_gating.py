@@ -25,7 +25,8 @@ from fastapi import Request
 
 from app import assets, auth, authz, config, db, distrakt
 from app.auth import AuthLevel
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import load_settings, save_settings
 from app.main import BASE_DIR, app
 from tests.support import AppTestCase, ORIGIN
 
@@ -446,25 +447,25 @@ class SettingsRedactionTests(GatingTestCase):
         cannot read them back, so a save that omits them must not wipe them."""
         resp = self.client.post("/settings", json={"endpoint": "shows/premieres"})
         self.assertEqual(resp.status_code, 204, resp.text)
-        settings = config.load_settings()
+        settings = load_settings()
         self.assertEqual(settings.endpoint, "shows/premieres")
         self.assertEqual(settings.tmdb_api_key, SECRET_VALUES["tmdb_api_key"])
 
     def test_a_blank_credential_keeps_the_stored_one(self):
         self.client.post("/settings", json={"tmdb_api_key": "   "})
-        self.assertEqual(config.load_settings().tmdb_api_key, SECRET_VALUES["tmdb_api_key"])
+        self.assertEqual(load_settings().tmdb_api_key, SECRET_VALUES["tmdb_api_key"])
 
     def test_a_new_credential_replaces_the_stored_one(self):
         fresh = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJuZXcifQ.bmV3LXNpZ25hdHVyZQ"
         self.client.post("/settings", json={"tmdb_api_key": fresh})
-        self.assertEqual(config.load_settings().tmdb_api_key, fresh)
+        self.assertEqual(load_settings().tmdb_api_key, fresh)
 
     def test_a_ticked_clear_box_clears_a_credential(self):
         """Clearing has to be possible and has to be deliberate — otherwise the
         only way to disable an integration would be to hand-edit the file."""
         self.client.post("/settings", json={"clear:sonarr_api_key": "1"})
-        self.assertEqual(config.load_settings().sonarr_api_key, "")
-        self.assertEqual(config.load_settings().tmdb_api_key, SECRET_VALUES["tmdb_api_key"])
+        self.assertEqual(load_settings().sonarr_api_key, "")
+        self.assertEqual(load_settings().tmdb_api_key, SECRET_VALUES["tmdb_api_key"])
 
     def test_the_save_response_is_redacted_too(self):
         body = self.client.post("/settings", json={"pagination_limit": "not a number"}).text
@@ -490,7 +491,7 @@ class RequestShapeTests(GatingTestCase):
             with self.subTest(path=path):
                 resp = self.client.post(path, data={"trakt_access_token": "stolen"})
                 self.assertEqual(resp.status_code, 415)
-        self.assertEqual(config.load_settings().trakt_access_token, "")
+        self.assertEqual(load_settings().trakt_access_token, "")
 
     def test_a_body_with_no_content_type_is_refused(self):
         resp = self.client.post("/settings", content=b"{}")
@@ -501,7 +502,7 @@ class RequestShapeTests(GatingTestCase):
                                 headers={"Origin": "https://evil.example"})
         self.assertEqual(resp.status_code, 403)
         self.assertEqual(resp.json()["reason"], "cross_origin")
-        self.assertEqual(config.load_settings().endpoint, Settings().endpoint)
+        self.assertEqual(load_settings().endpoint, Settings().endpoint)
 
     def test_the_configured_base_url_wins_over_the_host_header(self):
         """Once an instance knows its own address, the check stops depending on a

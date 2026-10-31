@@ -16,7 +16,8 @@ import asyncio
 from unittest.mock import patch
 
 from app.auth import viewer
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from tests.support import AppTestCase
 
 

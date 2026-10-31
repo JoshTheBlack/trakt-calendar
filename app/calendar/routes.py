@@ -646,7 +646,7 @@ async def home(request: Request):
     a Discord post from when this one route served both the picker and the
     calendar. Forward it rather than asking someone to choose the month they
     already named."""
-    settings = load_settings()
+    settings = await load_settings()
     # Already resolved and cached by the dependency that let this request in.
     user = await auth.current_user(request)
     prefs = await auth.get_user_prefs(user.user_id)
@@ -906,7 +906,7 @@ async def calendar_page(request: Request):
     announced as a placeholder that fetches itself from /calendar/day when the
     viewer reaches it, so the browser has a usable page long before a whole month
     of cards exists, and a day nobody scrolls to is never built at all."""
-    settings = load_settings()
+    settings = await load_settings()
     user = await auth.current_user(request)
     prefs = await auth.get_user_prefs(user.user_id)
     month = await _month_context(request, user, settings, prefs)
@@ -1202,7 +1202,7 @@ async def calendar_day(request: Request):
     account making the request and marks the cards from it. A token naming nothing
     — expired, or invented — marks nothing, which is what a late day did before
     the answer was carried at all."""
-    settings = load_settings()
+    settings = await load_settings()
     user = await auth.current_user(request)
     prefs = await auth.get_user_prefs(user.user_id)
     today = clock.today()
@@ -1468,7 +1468,7 @@ async def add_to_library(request: Request):
     IT ANSWERS MARKUP, not JSON: the buttons redrawn and a toast, both out of band
     — see `_library_answer`."""
     data = await authz.json_body(request)
-    settings = load_settings()
+    settings = await load_settings()
     target = str(data.get("target") or "")
     if target not in integrations_routes.LIBRARY_ID_KEYS:
         return _library_answer(request, message="Unknown service.", ok=False)
@@ -1520,7 +1520,7 @@ async def add_all_fragment(request: Request):
     Cancelling could not be markup alone: the confirmation replaced the button, so
     putting the button back means drawing it, and the one place it is drawn is
     this partial."""
-    settings = load_settings()
+    settings = await load_settings()
     prefs = await auth.get_user_prefs((await auth.current_user(request)).user_id)
     return _add_all_answer(request, _requested_endpoint(request, prefs, settings))
 
@@ -1552,7 +1552,7 @@ async def add_month_to_library(request: Request):
     NEITHER STEP COMMITS THE IS-NEW BASELINE: that is the page load's decision
     alone (`assemble_month`), and a button press is not a visit."""
     data = await authz.json_body(request)
-    settings = load_settings()
+    settings = await load_settings()
     user = await auth.current_user(request)
     prefs = await auth.get_user_prefs(user.user_id)
     today = clock.today()
@@ -1669,7 +1669,7 @@ async def season_line_fragment(request: Request):
     from .. import providers  # deferred: see _coverage_gap, same reason
     from ..providers import season as season_rules
 
-    settings = load_settings()
+    settings = await load_settings()
     params = request.query_params
     season = route_params.season(params.get("season"))
     asked = detail_source.ids_from_query(params)
@@ -1763,7 +1763,7 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     """
     user = await auth.current_user(request)
     params = request.query_params
-    settings = load_settings()
+    settings = await load_settings()
     media = params.get("media", "show")
     season = route_params.season(params.get("season"))
     asked = detail_source.ids_from_query(params)
@@ -2043,7 +2043,7 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
     whatever month is on screen, and a page whose month does not draw the title
     has nothing to redraw.
     """
-    settings = load_settings()
+    settings = await load_settings()
     prefs = await auth.get_user_prefs(user.user_id)
     tz = _resolve_viewer_tz(user, settings)
     not_watching = await calendar_state.not_watching_ids(user.user_id)
@@ -2416,7 +2416,7 @@ async def _view_answer(request: Request, user, endpoint, year: int, month: int,
     stored is by definition what drew it, and letting a preference toggle spend a
     sequence of paced upstream calls would be the wrong thing to do with a press.
     """
-    settings = load_settings()
+    settings = await load_settings()
     prefs = await auth.get_user_prefs(user.user_id)
     view = _view_preferences(prefs, settings)
     context = {
@@ -2573,7 +2573,7 @@ async def filters_panel_fragment(request: Request):
     """
     user = await auth.current_user(request)
     prefs = await auth.get_user_prefs(user.user_id)
-    settings = load_settings()
+    settings = await load_settings()
     # THE SAVED PREFERENCE, not the `?source=` override the toolbar may be
     # showing: the panel offers to make permanent what this account actually
     # stated rather than what it happens to be looking at right now.
@@ -2604,7 +2604,7 @@ async def add_filter_chip(request: Request):
     """
     user = await auth.current_user(request)
     prefs = await auth.get_user_prefs(user.user_id)
-    settings = load_settings()
+    settings = await load_settings()
     saved = await source_prefs.load(user.user_id)
     data = await authz.json_body(request)
     field = str(route_params.last_value(data.get("field")) or "")
@@ -2655,7 +2655,7 @@ async def clear_filters(request: Request):
     """
     user = await auth.current_user(request)
     prefs = await auth.get_user_prefs(user.user_id)
-    settings = load_settings()
+    settings = await load_settings()
     saved = await source_prefs.load(user.user_id)
     data = await authz.json_body(request)
     medium = str(route_params.last_value(data.get("medium")) or "")
@@ -2709,7 +2709,7 @@ async def post_filters(request: Request):
     """
     user = await auth.current_user(request)
     data = await authz.json_body(request)
-    settings = load_settings()
+    settings = await load_settings()
 
     # SERVICES FIRST, BECAUSE THIS IS THE HALF THAT CAN REFUSE. Refusing before
     # anything is written leaves the panel exactly as the viewer left it rather

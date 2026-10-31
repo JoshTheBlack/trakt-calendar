@@ -19,6 +19,8 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import anyio.to_thread
+
 from . import route_params, secrets_box
 from .perftrace import span
 
@@ -640,7 +642,7 @@ def public_base_url_override() -> str:
     return candidate
 
 
-def warn_if_public_base_url_overridden() -> None:
+async def warn_if_public_base_url_overridden() -> None:
     """Say loudly, once at startup, that the environment is winning over a
     DIFFERENT stored base URL.
 
@@ -657,7 +659,7 @@ def warn_if_public_base_url_overridden() -> None:
     override = public_base_url_override()
     if not override:
         return
-    stored = load_settings(open_secrets=False, apply_env_override=False).public_base_url
+    stored = (await load_settings(open_secrets=False, apply_env_override=False)).public_base_url
     if stored == override:
         return
     logger.warning(
@@ -940,7 +942,7 @@ def _read_settings_file() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _read_db_config() -> tuple[dict, dict]:
+def _read_db_config(conn) -> tuple[dict, dict]:
     """The non-secret globals and the secrets held in the DB, as two dicts.
 
     Returns ({}, {}) if the config tables are not present yet, so a call before the
@@ -950,7 +952,6 @@ def _read_db_config() -> tuple[dict, dict]:
     """
     from . import db  # local import: db imports this module, so the cycle is broken here
     try:
-        conn = db.connection()
         row = conn.execute("SELECT value FROM app_settings WHERE name = 'app'").fetchone()
         secret_rows = conn.execute("SELECT name, value FROM app_secrets").fetchall()
     except db.DatabaseError:
@@ -980,7 +981,7 @@ def _write_settings_file(data: dict) -> None:
     os.replace(tmp, SETTINGS_FILE)
 
 
-def load_settings(open_secrets: bool = True, *, apply_env_override: bool = True) -> Settings:
+async def load_settings(open_secrets: bool = True, *, apply_env_override: bool = True) -> Settings:
     """Assemble one Settings object from its three homes: the two recovery fields
     from settings.json, the non-secret globals from app_settings, and the secrets
     from app_secrets. Everything downstream still sees a fully-populated Settings;
@@ -997,19 +998,51 @@ def load_settings(open_secrets: bool = True, *, apply_env_override: bool = True)
     PUBLIC_BASE_URL environment variable. Only the startup warning asks for that —
     it is the one caller that needs the value the override is displacing, so that
     the line it logs can name both. Every other caller wants what is in force.
+
+    ON A WORKER THREAD, THROUGH db.run, like every other read in the app: reading
+    settings.json, the two queries and decrypting every stored secret used to run
+    on whichever thread asked — almost always the event loop — and a writer
+    holding the database's lock stalled every request behind a settings read for
+    up to the busy timeout. UNCACHED, so a saved setting takes effect on the very
+    next request, at one thread hop per call.
     """
-    # TIMED BECAUSE THIS IS SYNCHRONOUS WORK ON WHATEVER THREAD ASKED, and almost
-    # every caller is a route handler, which means the event loop. It reads
-    # settings.json off disk, runs two SQLite queries on this thread's connection,
-    # and decrypts every stored secret — none of it awaited, all of it blocking
-    # every other request in flight for as long as it takes. That is affordable
-    # only while it stays sub-millisecond; on a slow or contended filesystem it
-    # stops being, and this span is how that shows up instead of being blamed on
-    # whichever route happened to be holding it.
+    from . import db  # local import: db imports this module, so the cycle is broken here
     with span("config.load_settings", secrets=open_secrets):
-        ensure_data_dir()
-        file_data = _read_settings_file()
-        globals_doc, stored_secrets = _read_db_config()
+        settings, reduce = await db.run(
+            lambda conn: _assemble_settings(conn, open_secrets, apply_env_override))
+    if reduce:
+        # A hand-edited settings.json holding more than the recovery fields is
+        # folded into the database and the file shrunk back — by a save of its
+        # own, so the database copy is committed before the file is shrunk and a
+        # rolled-back write can never strand a value already gone from the file.
+        #
+        # THIS SAVE MUST NEVER CLEAR A SECRET, which is why it relies on
+        # save_settings' default. `settings` here can legitimately carry blank
+        # credentials that are not blank in storage: every open_secrets=False
+        # caller (the request-shape guard, sign-in, the session lookup) loads
+        # exactly that way, and one of them runs on essentially every request.
+        # Letting this write treat "blank" as "delete" meant a hand-edited
+        # settings.json — the documented recovery path — wiped every stored
+        # credential the moment anybody used the app.
+        await save_settings(settings)
+
+    # Last, so the override is never what the file reduction above persists: it
+    # wins over the stored value in memory and leaves no trace of its own in the
+    # database, which is what makes removing the variable enough to undo it.
+    if apply_env_override and (override := public_base_url_override()):
+        settings.public_base_url = override
+
+    return settings
+
+
+def _assemble_settings(conn, open_secrets: bool,
+                       apply_env_override: bool) -> tuple[Settings, bool]:
+    """`load_settings`' reading and merging, on the worker thread holding `conn`:
+    (the settings, whether settings.json holds keys the database owns and should
+    be shrunk — never while a sealed secret could not be read, `degraded` below)."""
+    ensure_data_dir()
+    file_data = _read_settings_file()
+    globals_doc, stored_secrets = _read_db_config(conn)
     if not open_secrets:
         stored_secrets = {}
 
@@ -1021,7 +1054,7 @@ def load_settings(open_secrets: bool = True, *, apply_env_override: bool = True)
             trakt_client_id=os.environ.get("TRAKT_CLIENT_ID", ""),
             trakt_access_token=os.environ.get("TRAKT_ACCESS_TOKEN", ""),
             public_base_url=public_base_url_override() if apply_env_override else "",
-        )
+        ), False
 
     # Decrypt the stored secrets here so every downstream reader (trakt.py, arr.py,
     # seer.py, the token refresh in main.py) sees plaintext through the ordinary
@@ -1055,39 +1088,14 @@ def load_settings(open_secrets: bool = True, *, apply_env_override: bool = True)
     for name in OPERATOR_SECRETS_NOT_LOADED:
         merged.pop(name, None)
     settings = Settings.from_dict(merged)
-
+    # Skipped entirely while `degraded`, because re-saving would seal the
+    # blanked-out secrets and destroy the values the restored key could still
+    # recover.
     file_has_db_owned_keys = any(key not in RECOVERY_FIELDS for key in file_data)
-    if file_has_db_owned_keys and not degraded:
-        from . import db
-        # Only reduce the file when we own the write path (not inside a caller's
-        # transaction), so the DB copy is committed before the file is shrunk — a
-        # rolled-back transaction must never strand a value that has already been
-        # removed from the file. If we are inside one, skip it; the next plain
-        # load reduces the file safely. Skipped entirely while `degraded`, because
-        # re-saving would seal the blanked-out secrets and destroy the values the
-        # restored key could still recover.
-        #
-        # THIS SAVE MUST NEVER CLEAR A SECRET, which is why it relies on
-        # save_settings' default. `settings` here can legitimately carry blank
-        # credentials that are not blank in storage: every open_secrets=False
-        # caller (the request-shape guard, sign-in, the session lookup) loads
-        # exactly that way, and one of them runs on essentially every request.
-        # Letting this write treat "blank" as "delete" meant a hand-edited
-        # settings.json — the documented recovery path — wiped every stored
-        # credential the moment anybody used the app.
-        if not db.connection().in_transaction:
-            save_settings(settings)
-
-    # Last, so the override is never what the file reduction above persists: it
-    # wins over the stored value in memory and leaves no trace of its own in the
-    # database, which is what makes removing the variable enough to undo it.
-    if apply_env_override and (override := public_base_url_override()):
-        settings.public_base_url = override
-
-    return settings
+    return settings, file_has_db_owned_keys and not degraded
 
 
-def save_settings(settings: Settings, *, clear_unset_secrets: bool = False) -> None:
+async def save_settings(settings: Settings, *, clear_unset_secrets: bool = False) -> None:
     """Persist to the three homes: the globals JSON to app_settings, each set
     secret to app_secrets, and the two recovery fields to settings.json. The
     Settings dataclass API is unchanged; only the destinations moved.
@@ -1104,9 +1112,29 @@ def save_settings(settings: Settings, *, clear_unset_secrets: bool = False) -> N
     config.apply_update has already turned "omitted" into keep and an explicit
     null into clear. Deleting a row that is not there is a no-op, so an
     intentional clear still leaves nothing behind.
+
+    THROUGH db.transaction, ON A WORKER THREAD, like every other write: it used to
+    take the write lock on whichever thread asked — the event loop — so while
+    another writer held the lock every request waited behind it, and the save
+    then raised. `write_settings` is the database half, for a caller composing a
+    save into a transaction of its own.
     """
-    ensure_data_dir()
-    from . import db
+    from . import db  # local import: db imports this module, so the cycle is broken here
+
+    recovery = await db.transaction(
+        lambda conn: write_settings(conn, settings, clear_unset_secrets=clear_unset_secrets))
+    # File last, and only once the DB write is durable: the DB is the source of
+    # truth for globals and secrets, so a crash between the two must leave the DB
+    # correct and merely the tiny recovery file stale — never a secret stranded in
+    # a rolled-back table.
+    await anyio.to_thread.run_sync(_write_settings_file, recovery)
+
+
+def write_settings(conn, settings: Settings, *, clear_unset_secrets: bool = False) -> dict:
+    """`save_settings`' database half — the globals and the secrets — inside the
+    caller's transaction (`save_settings` says what `clear_unset_secrets` means).
+    Returns the recovery fields, for settings.json: the caller writes the file
+    once its transaction has committed, since only it knows that it will."""
     from .auth import encryption_flow  # local: encryption_flow -> config would cycle
 
     data = settings.to_dict()
@@ -1123,48 +1151,27 @@ def save_settings(settings: Settings, *, clear_unset_secrets: bool = False) -> N
     # guard for every other save path.
     write_secrets = not encryption_flow.secret_writes_blocked()
 
-    def _persist(conn) -> None:
-        conn.execute(
-            "INSERT INTO app_settings (name, value) VALUES ('app', ?) "
-            "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
-            (json.dumps(globals_doc),),
-        )
-        if not write_secrets:
-            return
-        for name, value in secrets.items():
-            if value:
-                # Sealed before it lands in the row when a key is configured, and
-                # stored verbatim when not — the plaintext value is what decides
-                # store-vs-delete, so a cleared credential still leaves no row.
-                conn.execute(
-                    "INSERT INTO app_secrets (name, value) VALUES (?, ?) "
-                    "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
-                    (name, secrets_box.seal(value)),
-                )
-            elif clear_unset_secrets:
-                # An unset secret is absence of a row, so `secrets_set` and storage
-                # agree and a cleared credential leaves nothing behind.
-                conn.execute("DELETE FROM app_secrets WHERE name = ?", (name,))
-            # Otherwise the stored row stands: see the docstring — a blank field
-            # on this object is not evidence that anybody asked for it to go.
-
-    conn = db.connection()
-    owns = not conn.in_transaction
-    if owns:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            _persist(conn)
-        except BaseException:
-            conn.execute("ROLLBACK")
-            raise
-        conn.execute("COMMIT")
-    else:
-        _persist(conn)
-
-    # File last, and only once the DB write is durable: the DB is the source of
-    # truth for globals and secrets, so a crash between the two must leave the DB
-    # correct and merely the tiny recovery file stale — never a secret stranded in
-    # a rolled-back table. When participating in a caller's transaction we cannot
-    # know it will commit, so the caller owns the file write in that case.
-    if owns:
-        _write_settings_file(recovery)
+    conn.execute(
+        "INSERT INTO app_settings (name, value) VALUES ('app', ?) "
+        "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+        (json.dumps(globals_doc),),
+    )
+    if not write_secrets:
+        return recovery
+    for name, value in secrets.items():
+        if value:
+            # Sealed before it lands in the row when a key is configured, and
+            # stored verbatim when not — the plaintext value is what decides
+            # store-vs-delete, so a cleared credential still leaves no row.
+            conn.execute(
+                "INSERT INTO app_secrets (name, value) VALUES (?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+                (name, secrets_box.seal(value)),
+            )
+        elif clear_unset_secrets:
+            # An unset secret is absence of a row, so `secrets_set` and storage
+            # agree and a cleared credential leaves nothing behind.
+            conn.execute("DELETE FROM app_secrets WHERE name = ?", (name,))
+        # Otherwise the stored row stands: see the docstring — a blank field
+        # on this object is not evidence that anybody asked for it to go.
+    return recovery

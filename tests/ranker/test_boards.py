@@ -917,7 +917,7 @@ class WarmRouteTests(RankerTestCase):
         """Trakt's catalogue credential on this instance, so a title's one
         picture lookup has a service it may ask."""
         import dataclasses
-        from app.config import load_settings, save_settings
+        from tests.support import load_settings, save_settings
         save_settings(dataclasses.replace(load_settings(), trakt_client_id="cid"))
 
     def test_nobody_asked_is_not_a_miss(self):

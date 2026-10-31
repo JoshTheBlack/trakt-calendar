@@ -18,7 +18,8 @@ from unittest.mock import patch
 
 from app import auth, cache, chrome, db
 from app.main import app
-from app.config import Settings, load_settings, save_settings
+from app.config import Settings
+from tests.support import load_settings, save_settings
 from tests.support import AppTestCase, ORIGIN
 
 

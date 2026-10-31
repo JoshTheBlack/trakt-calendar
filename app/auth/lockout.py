@@ -171,7 +171,7 @@ async def handshake_start_limited(request: Request, settings: Settings | None = 
     budget by alternating between them. Volume-only, like the registration and
     share-page limiters: there is no notion of a "failed" start.
     """
-    cfg = settings or load_settings()
+    cfg = settings or await load_settings()
     ip = cookies.client_ip(request, cfg)
     limited = await rate_limited(
         "handshake_ip", ip,

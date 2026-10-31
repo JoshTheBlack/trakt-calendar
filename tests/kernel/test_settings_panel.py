@@ -35,7 +35,8 @@ from cryptography.fernet import Fernet
 
 from app import assets, config, db, secrets_box
 from app.auth import encryption_flow
-from app.config import Settings, load_settings, save_settings
+from app.config import Settings
+from tests.support import load_settings, save_settings
 from tests.support import AppTestCase, ORIGIN
 
 PANEL = "/settings/fragments/panel"

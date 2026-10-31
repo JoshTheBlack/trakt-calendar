@@ -23,7 +23,8 @@ from app.distrakt import backfill, watch_history
 from app.providers import title_search
 from app.calendar import state as calendar_state
 from app.providers.base import ItemKey, Media, PlayCounts
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from app.main import app
 from tests.support import ORIGIN, migrated_db, tracker_month
 

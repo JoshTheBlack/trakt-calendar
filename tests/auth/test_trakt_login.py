@@ -25,7 +25,8 @@ import httpx
 
 from app import auth, db
 from app.auth import routes as auth_routes, trakt as trakt_auth, trakt_routes
-from app.config import Settings, load_settings, public_base_url_error, save_settings
+from app.config import Settings, public_base_url_error
+from tests.support import load_settings, save_settings
 from app.main import app
 from tests.auth._redirect_login import SharedRedirectSignInTests, SharedRedirectUnlinkTests
 from tests.support import AppTestCase, ORIGIN

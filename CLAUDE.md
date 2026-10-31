@@ -962,5 +962,8 @@ Run targeted files while iterating.
 at-rest key path it covers end to end genuinely spans two: the kernel's
 `app/secrets_box.py` and auth's encryption modules.
 `tests/conftest.py` owns the data directory and an autouse guard that fails any
-test reaching the network; `tests/support.py` owns the database, the client and
-the base classes. A new test file should need no setup of its own.
+test reaching the network; `tests/support.py` owns the database, the client, the
+base classes and the synchronous `load_settings` / `save_settings` a test calls
+(the app's are coroutines over `db.run` / `db.transaction`, and nothing outside
+app/db.py takes a connection itself — DriverIsolationTests). A new test file
+should need no setup of its own.

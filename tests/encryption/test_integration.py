@@ -31,7 +31,8 @@ from cryptography.fernet import Fernet
 from app import auth, db, main, secrets_box
 from app.auth import encryption_flow, secrets_backfill, trakt_routes
 from app.providers.trakt import sync as trakt_sync
-from app.config import Settings, load_settings, save_settings
+from app.config import Settings
+from tests.support import load_settings, save_settings
 from tests.support import migrated_db
 
 KEY = Fernet.generate_key().decode()

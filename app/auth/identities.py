@@ -217,7 +217,7 @@ async def login_with_provider_identity(
     is one transaction, and the invite is re-read inside it because the quota
     check before it ran without the write lock held.
     """
-    cfg = settings or load_settings()
+    cfg = settings or await load_settings()
     ts = db.now()
 
     existing = await find_identity(identity.provider, identity.provider_user_id)

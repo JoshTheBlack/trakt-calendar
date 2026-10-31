@@ -1482,6 +1482,19 @@ class DriverIsolationTests(unittest.TestCase):
         )
         self.assertEqual(offenders, [], f"modules importing sqlite3 directly: {offenders}")
 
+    def test_only_the_db_module_takes_a_connection_itself(self):
+        """The same rule, one step on: `db.connection()` is this thread's
+        connection, so calling it from a route runs the query on the event loop —
+        which config.py did for every settings read and save until both went
+        through db.run and db.transaction. A body handed to one of those is given
+        its connection; nothing else asks for one."""
+        pattern = re.compile(r"\bdb\.connection\(")
+        offenders = sorted(
+            str(path.relative_to(APP_DIR)) for path in APP_DIR.rglob("*.py")
+            if path.name != "db.py" and pattern.search(path.read_text(encoding="utf-8"))
+        )
+        self.assertEqual(offenders, [], f"modules taking a connection directly: {offenders}")
+
 
 if __name__ == "__main__":
     unittest.main()

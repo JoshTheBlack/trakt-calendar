@@ -45,7 +45,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from app import auth, db
 from app.auth import routes as auth_routes
-from app.config import save_settings
+from tests.support import save_settings
 from tests.support import ORIGIN
 
 

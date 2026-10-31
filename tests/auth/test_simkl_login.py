@@ -34,7 +34,8 @@ import httpx
 from app import auth, db
 from app.auth import routes as auth_routes, simkl as simkl_auth, trakt_routes
 from app.auth import simkl_routes
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from tests.auth._redirect_login import (SharedRedirectSignInTests,
                                         SharedRedirectUnlinkTests, fill_attempts)
 from tests.support import AppTestCase, ORIGIN

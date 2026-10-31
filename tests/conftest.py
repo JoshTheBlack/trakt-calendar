@@ -338,7 +338,8 @@ def db_path(tmp_path):
 @pytest.fixture
 def settings(db_path):
     """A saved Settings row pointing at ORIGIN, the base URL `client` uses."""
-    from app.config import Settings, save_settings
+    from app.config import Settings
+    from tests.support import save_settings
 
     s = Settings(public_base_url=ORIGIN)
     save_settings(s)

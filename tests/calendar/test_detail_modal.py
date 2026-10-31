@@ -33,7 +33,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app import db
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from app.metadata import identity
 from app.metadata import refresh as metadata_refresh
 from app.providers.base import Media
@@ -218,7 +219,7 @@ class DetailModalSourceTests(AppTestCase):
         what this adds is a pair of answers with real data in them, where a source
         can leave out a key it has nothing to say for."""
         from app import providers
-        from app.config import load_settings
+        from tests.support import load_settings
         from app.providers.base import Source
 
         trakt_client = _TraktClient({"shows/203330": TRAKT_SHOW,

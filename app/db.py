@@ -160,8 +160,10 @@ def _new_connection(path: Path) -> sqlite3.Connection:
 def connection() -> sqlite3.Connection:
     """This thread's connection, opened on first use.
 
-    SYNCHRONOUS and blocking — only call it from inside a worker function handed
-    to run() or transaction().
+    SYNCHRONOUS and blocking — and for this module alone: a body handed to run()
+    or transaction() is given its connection, and tests/kernel/test_db.py's
+    DriverIsolationTests fails on a call to this anywhere else, because one from
+    a route runs its query on the event loop.
     """
     with _path_lock:
         path, generation = _db_path, _generation

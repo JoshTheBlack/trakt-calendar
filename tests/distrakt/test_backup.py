@@ -27,7 +27,8 @@ from app import auth, clock, db, distrakt
 from app.providers.base import ItemKey
 from app.distrakt import backup
 from app.distrakt import watch_history as wh
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from app.main import app
 from tests.distrakt.test_store import month_back
 from tests.support import ORIGIN, migrated_db, new_db_path, restore_backup

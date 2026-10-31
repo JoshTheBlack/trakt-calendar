@@ -16,7 +16,8 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app import auth, db
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from app.main import app
 from tests.support import ORIGIN, migrated_db, window_fetch
 

@@ -33,7 +33,7 @@ from cryptography.fernet import Fernet
 from app import cache, db, secrets_box, settings_routes
 from app.auth import encryption_flow
 from app.auth import trakt as trakt_auth
-from app.config import load_settings, save_settings
+from tests.support import load_settings, save_settings
 from tests.support import AppTestCase, ORIGIN
 
 CODE = {"device_code": "DEVICE-CODE-VALUE", "user_code": "ABCD-1234",

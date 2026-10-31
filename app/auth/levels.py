@@ -56,7 +56,7 @@ async def current_user(request: Request) -> CurrentUser | None:
     # this skips decrypting the stored secrets. That keeps sign-in and the admin
     # dependency working even when a stored secret is sealed under a key the current
     # one cannot open — the state whose only fix is the admin recovery screen.
-    settings = load_settings(open_secrets=False)
+    settings = await load_settings(open_secrets=False)
     user = await sessions.validate_session(cookies.read_session_cookie(request, settings))
     request.state.auth_user = user
     return user

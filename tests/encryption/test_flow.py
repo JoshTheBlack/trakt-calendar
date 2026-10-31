@@ -19,7 +19,8 @@ from cryptography.fernet import Fernet
 
 from app import config, db, secrets_box
 from app.auth import encryption_flow
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from tests.support import migrated_db
 
 KEY = Fernet.generate_key().decode()

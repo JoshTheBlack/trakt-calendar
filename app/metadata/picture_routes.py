@@ -41,7 +41,7 @@ async def picture_missed(request: Request):
         logger.info("pictures: report refused — not an image's request (Sec-Fetch-Dest %r)",
                     request.headers.get("sec-fetch-dest") or "")
         return Response(status_code=400, headers=_NO_STORE)
-    settings = load_settings()
+    settings = await load_settings()
     location, report = await pictures.answer(settings, request.query_params.get("t") or "")
     if report is not None:
         refresh.start(pictures.confirm(settings, report))

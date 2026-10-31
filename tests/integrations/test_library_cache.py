@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app.integrations import arr, routes as ir, seer
 
@@ -63,7 +63,7 @@ class SingleFlightTests(LibraryCacheBase):
             await asyncio.sleep(0.05)
             return [1, 2]
 
-        with patch.object(ir, "load_settings", return_value=_Settings()), \
+        with patch.object(ir, "load_settings", AsyncMock(return_value=_Settings())), \
              patch.object(arr, "library_ids", side_effect=_slow), \
              patch.object(seer, "library_ids", side_effect=_seer(_slow)):
             # Ten simultaneous callers, all seeing a lapsed TTL.
@@ -83,7 +83,7 @@ class SingleFlightTests(LibraryCacheBase):
             return []
 
         ir.LIBRARY_CACHE["sonarr"] = [7]
-        with patch.object(ir, "load_settings", return_value=_Settings()), \
+        with patch.object(ir, "load_settings", AsyncMock(return_value=_Settings())), \
              patch.object(arr, "library_ids", side_effect=_hang), \
              patch.object(seer, "library_ids", side_effect=_seer(_hang)):
             snap = ir.library_snapshot()
@@ -98,7 +98,7 @@ class FailureIsNotEmptyTests(LibraryCacheBase):
         async def _ok(kind, _settings):
             return [11, 22]
 
-        with patch.object(ir, "load_settings", return_value=_Settings()), \
+        with patch.object(ir, "load_settings", AsyncMock(return_value=_Settings())), \
              patch.object(arr, "library_ids", side_effect=_ok), \
              patch.object(seer, "library_ids", side_effect=_seer(_ok)):
             await ir._read_all(1000.0)
@@ -107,7 +107,7 @@ class FailureIsNotEmptyTests(LibraryCacheBase):
         async def _down(_kind, _settings):
             raise arr.LibraryUnavailable("connection refused")
 
-        with patch.object(ir, "load_settings", return_value=_Settings()), \
+        with patch.object(ir, "load_settings", AsyncMock(return_value=_Settings())), \
              patch.object(arr, "library_ids", side_effect=_down), \
              patch.object(seer, "library_ids", side_effect=_seer(_down)):
             await ir._read_all(1100.0)
@@ -118,7 +118,7 @@ class FailureIsNotEmptyTests(LibraryCacheBase):
         async def _ok(kind, _settings):
             return [11]
 
-        with patch.object(ir, "load_settings", return_value=_Settings()), \
+        with patch.object(ir, "load_settings", AsyncMock(return_value=_Settings())), \
              patch.object(arr, "library_ids", side_effect=_ok), \
              patch.object(seer, "library_ids", side_effect=_seer(_ok)):
             await ir._read_all(1000.0)
@@ -130,7 +130,7 @@ class FailureIsNotEmptyTests(LibraryCacheBase):
         # Far enough ahead that the memory of 11 has aged out; an id that is
         # genuinely gone should not be remembered forever.
         later = 1000.0 + ir.LIBRARY_MEMORY_SECONDS + 1
-        with patch.object(ir, "load_settings", return_value=_Settings()), \
+        with patch.object(ir, "load_settings", AsyncMock(return_value=_Settings())), \
              patch.object(arr, "library_ids", side_effect=_empty), \
              patch.object(seer, "library_ids", side_effect=_seer(_empty)):
             await ir._read_all(later)
@@ -142,7 +142,7 @@ class FailureIsNotEmptyTests(LibraryCacheBase):
         async def _ok(kind, _settings):
             return [5]
 
-        with patch.object(ir, "load_settings", return_value=_Settings()), \
+        with patch.object(ir, "load_settings", AsyncMock(return_value=_Settings())), \
              patch.object(arr, "library_ids", side_effect=_ok), \
              patch.object(seer, "library_ids", side_effect=_seer(_ok)):
             await ir._read_all(1000.0)
@@ -151,7 +151,7 @@ class FailureIsNotEmptyTests(LibraryCacheBase):
             raise arr.LibraryUnavailable("still down")
 
         past_window = 1000.0 + ir.LIBRARY_MEMORY_SECONDS + 1
-        with patch.object(ir, "load_settings", return_value=_Settings()), \
+        with patch.object(ir, "load_settings", AsyncMock(return_value=_Settings())), \
              patch.object(arr, "library_ids", side_effect=_down), \
              patch.object(seer, "library_ids", side_effect=_seer(_down)):
             await ir._read_all(past_window)

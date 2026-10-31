@@ -40,8 +40,8 @@ from fastapi.testclient import TestClient
 
 from app import auth, authz, db, distrakt
 from app.calendar import share_links
-from app.config import (TRUSTED_PROXY_IPS_DEFAULT, Settings, load_settings,
-                        save_settings)
+from app.config import TRUSTED_PROXY_IPS_DEFAULT, Settings
+from tests.support import load_settings, save_settings
 from app.media import user_images
 from app.main import app
 from tests.support import AppTestCase, DetailsPanel

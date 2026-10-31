@@ -433,7 +433,7 @@ def _install_request_shape_guard(app: FastAPI) -> None:
         # never a credential, so secrets are left sealed. That keeps this guard from
         # raising on a mutating request while a secret is sealed under a wrong key —
         # the recovery-screen POST has to get through here to fix exactly that.
-        settings = load_settings(open_secrets=False)
+        settings = await load_settings(open_secrets=False)
         if reason := cross_origin_reason(request, settings):
             return _deny(403, "cross_origin", reason)
         return await call_next(request)

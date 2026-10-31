@@ -130,7 +130,7 @@ async def _sweep_auth_rows() -> None:
     await auth.sweep_login_attempts(now)
     # Age out expired cache windows and hold the shared blob table under its
     # size cap, evicting least-recently-stored first.
-    settings = load_settings()
+    settings = await load_settings()
     await cache.sweep(now, settings.api_cache_max_bytes)
     # Same idea, one table over: a Simkl enrichment row past its retention
     # window is not urgent to keep — the next read that resolves to that
@@ -185,7 +185,7 @@ async def _heartbeat_tick() -> None:
     # all synchronously on the loop — because a setting somebody just saved has
     # to take effect at once. That argument is about REQUESTS; one pass of
     # background work is a single moment and has no reason to ask twice.
-    settings = load_settings()
+    settings = await load_settings()
     for job in (
         integrations_routes.refresh_integration_health,
         settings_routes.maybe_refresh_trakt_token,
@@ -246,7 +246,7 @@ async def lifespan(_app: FastAPI):
     # Also loud and once, and for the same reason: PUBLIC_BASE_URL beats the saved
     # base URL, so an operator who left it set would otherwise see a value save in
     # Settings and never take effect. Silent unless the two actually differ.
-    config.warn_if_public_base_url_overridden()
+    await config.warn_if_public_base_url_overridden()
     # And loudest of the three: an instance running on a faked date must say so
     # every single time it boots, because nothing else about it looks unusual.
     clock.warn_if_overridden()

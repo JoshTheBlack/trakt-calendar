@@ -92,7 +92,7 @@ async def _apply_new_trakt_token(settings: Settings, token: dict) -> Settings:
     settings.trakt_access_token = token["access_token"]
     settings.trakt_refresh_token = token.get("refresh_token", "")
     settings.trakt_token_expires_at = int(token.get("created_at", time.time())) + int(token.get("expires_in", 0))
-    save_settings(settings)
+    await save_settings(settings)
     return settings
 
 
@@ -103,7 +103,7 @@ async def maybe_refresh_trakt_token() -> None:
     token is actually due), so the token renews itself in the background
     without the user having to notice or intervene.
     """
-    settings = load_settings()
+    settings = await load_settings()
     if not (settings.trakt_client_id and settings.trakt_client_secret and settings.trakt_refresh_token):
         return
     if not settings.trakt_token_expires_at or time.time() < settings.trakt_token_expires_at:
@@ -127,7 +127,7 @@ async def maybe_refresh_trakt_token() -> None:
     # adopted it — or the copy not written keeps a refresh token Trakt retired.
     await trakt_routes.store_rotated_tokens(settings.trakt_refresh_token, token,
                                               identity_id=None)
-    logger.info("Trakt token auto-refreshed (next expiry %s)", load_settings().trakt_token_expires_at)
+    logger.info("Trakt token auto-refreshed (next expiry %s)", (await load_settings()).trakt_token_expires_at)
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +240,7 @@ async def _trakt_context(settings: Settings, admin, *, linked: bool = False,
 
 
 async def _panel_context(request: Request) -> dict:
-    settings = load_settings()
+    settings = await load_settings()
     admin = await auth.current_user(request)
     return {
         "request": request,
@@ -335,7 +335,7 @@ async def save_settings_form(request: Request):
     the page behind the panel, which is what reloading after a save was always for.
     """
     data = await authz.json_body(request)
-    current = load_settings()
+    current = await load_settings()
     try:
         settings = config.apply_form(current, {**data, **vocab.specs_from_form(data)})
     except config.SettingsFormError as exc:
@@ -350,7 +350,7 @@ async def save_settings_form(request: Request):
     # value, a ticked clear empties it — so a blank secret on this object is a
     # decision rather than a gap, which is what save_settings otherwise
     # (correctly) refuses to assume.
-    save_settings(settings, clear_unset_secrets=True)
+    await save_settings(settings, clear_unset_secrets=True)
     # Re-check Sonarr/Radarr/Seerr immediately so buttons reflect the new config
     # right away, and invalidate the library cache so the next fetch re-pulls with
     # the new credentials rather than serving the stale cache until it expires.
@@ -376,7 +376,7 @@ async def arr_options(request: Request):
     kind = route_params.last_value(data.get("kind"))
     if kind not in ARR_KINDS:
         return _notice(request, "Unknown service.")
-    settings = load_settings()
+    settings = await load_settings()
     saved_url, saved_key = arr.credentials(kind, settings)
     url = str(route_params.last_value(data.get(f"{kind}_url")) or "").strip() or saved_url
     key = str(route_params.last_value(data.get(f"{kind}_api_key")) or "").strip() or saved_key
@@ -511,7 +511,7 @@ async def _device(request: Request, admin, *, pairing: Pairing | None = None,
     AN AUTHORIZATION CHANGES THREE OTHER PARTS OF THE TAB, and they ride the same
     answer out of band: the token line, the access token's field (now stored) and
     the reconnect notice, which a successful link takes down."""
-    settings = load_settings()
+    settings = await load_settings()
     return templates.TemplateResponse(request, DEVICE_TEMPLATE, {
         "request": request,
         "pairing": pairing,
@@ -533,7 +533,7 @@ async def device_start(request: Request):
     appears to work and stores nothing."""
     data = await authz.json_body(request)
     admin = await auth.current_user(request)
-    settings = load_settings()
+    settings = await load_settings()
     client_id = str(route_params.last_value(data.get("trakt_client_id")) or "").strip() \
         or settings.trakt_client_id
     typed_secret = str(route_params.last_value(data.get("trakt_client_secret")) or "").strip()
@@ -564,7 +564,7 @@ async def device_poll(request: Request):
     if pairing is None:
         return await _device(request, admin, message=(
             "That code is no longer waiting — start again if you still need to authorize."))
-    settings = load_settings()
+    settings = await load_settings()
     client_secret = pairing.client_secret or settings.trakt_client_secret
     try:
         token = await trakt_auth.poll_device_token(pairing.client_id, client_secret, pairing.device_code)
@@ -625,7 +625,7 @@ async def trakt_adopt(request: Request):
     reason drawn where the notice is.
     """
     admin = await auth.current_user(request)
-    linked, link_error = await trakt_routes.adopt_app_token(admin.user_id, load_settings())
+    linked, link_error = await trakt_routes.adopt_app_token(admin.user_id, await load_settings())
     return templates.TemplateResponse(request, RECONNECT_TEMPLATE, {
         "request": request,
         "reconnect_shown": not linked,
@@ -637,7 +637,7 @@ async def trakt_adopt(request: Request):
 async def trakt_refresh(request: Request):
     """The manual "refresh now" button — uses whatever is already saved (the
     device-auth flow is what actually seeds client_secret/refresh_token)."""
-    settings = load_settings()
+    settings = await load_settings()
     if not (settings.trakt_client_id and settings.trakt_client_secret and settings.trakt_refresh_token):
         return _token(request, settings,
                       "Not authorized yet — use “Authorize with Trakt” first.", ok=False)
@@ -651,7 +651,7 @@ async def trakt_refresh(request: Request):
                       "with Trakt” to get a fresh token.", ok=False)
     await trakt_routes.store_rotated_tokens(settings.trakt_refresh_token, token,
                                               identity_id=None)
-    return _token(request, load_settings(), "Trakt token refreshed.", ok=True)
+    return _token(request, await load_settings(), "Trakt token refreshed.", ok=True)
 
 
 def _token(request: Request, settings: Settings, message: str, *, ok: bool):

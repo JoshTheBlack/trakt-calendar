@@ -31,7 +31,8 @@ import httpx
 
 from app import auth, db
 from app.auth import plex as plex_auth, plex_routes, routes as auth_routes
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from tests.support import AppTestCase
 
 # The Plex account a patched poll resolves to unless a test says otherwise. An

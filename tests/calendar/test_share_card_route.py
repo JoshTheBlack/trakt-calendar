@@ -1016,7 +1016,7 @@ class ALinkThatNamesItsOwnSourcesTests(ShareCardTestCase):
         for everybody, so there is nothing left to narrow to and the link
         renders on the owner's preference — which on this instance is now one
         service, and it is the one still in play."""
-        from app.config import save_settings
+        from tests.support import save_settings
 
         save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="cid",
                                trakt_access_token="tok",

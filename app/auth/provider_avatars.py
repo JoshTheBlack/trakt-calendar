@@ -190,7 +190,7 @@ async def current_url(user_id: int, provider: str) -> str | None:
         token = secrets_box.open_(row["access_token"])
         if not token:
             return None
-        settings = load_settings()
+        settings = await load_settings()
         try:
             account = await _ACCOUNT_LOOKUPS[provider](settings, token)
         except Exception as exc:  # noqa: BLE001 — every lookup failure is "no picture"

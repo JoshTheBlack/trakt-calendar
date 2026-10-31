@@ -26,7 +26,8 @@ from markupsafe import escape
 from app import auth, config, db
 from app.sources import prefs as source_prefs
 from app.auth import routes as auth_routes
-from app.config import Settings, load_settings, save_settings
+from app.config import Settings
+from tests.support import load_settings, save_settings
 from app.main import app
 from tests.support import migrated_db
 

@@ -463,7 +463,7 @@ async def _rankings_response(request: Request, user, wanted: str | None, *,
         # rows when the board is small enough to draw them open.
         tiered_rows = ([item for category in board["categories"] for item in category["items"]]
                        if tiered <= EAGER_ROW_LIMIT else [])
-        _rows_viewed([*first, *tiered_rows])
+        await _rows_viewed([*first, *tiered_rows])
         context.update(await _removals_context(user.user_id, board["uid"]))
         if open_for and not open_tier:
             context["open_tier"] = _tier_of(board, context["removals"], open_for)
@@ -474,14 +474,14 @@ async def _rankings_response(request: Request, user, wanted: str | None, *,
     return templates.TemplateResponse(request, "ranker.html", context)
 
 
-def _rows_viewed(items) -> None:
+async def _rows_viewed(items) -> None:
     """ROWS DRAWN ARE TITLES VIEWED: each row's title, and the season a season
     row is, past its clock — or that no service has described yet — is re-read
     behind the page (app/metadata/refresh.py). The rows draw what the store holds
     now. The row's own filing id rides with its ids, so a title filed by one
     service's id is asked of that service too."""
     metadata_refresh.viewed(
-        load_settings(),
+        await load_settings(),
         [metadata_refresh.Wanted(item["media"],
                                  {**(item.get("ids") or {}),
                                   item["match_source"]: item["match_id"]},
@@ -530,7 +530,7 @@ async def pool_page_fragment(request: Request):
         return _fragment_failure(request, str(exc), _pool_url(board_uid, after),
                                  "ranker-pool-sentinel")
     context = _pool_context(board_uid, items, remaining)
-    _rows_viewed(items)
+    await _rows_viewed(items)
     return templates.TemplateResponse(
         request, "_ranker_pool_page.html", {"request": request, **context},
     )
@@ -550,7 +550,7 @@ async def category_rows_fragment(request: Request):
     found = [c for c in board["categories"] if c["uid"] == category_uid]
     if not found:
         return _fragment_failure(request, "No such tier.", retry, "ranker-rows")
-    _rows_viewed(found[0]["items"])
+    await _rows_viewed(found[0]["items"])
     return templates.TemplateResponse(
         request, "_ranker_category_rows.html",
         {"request": request, "items": found[0]["items"], "board_uid": board["uid"]},
@@ -673,7 +673,7 @@ async def seasons_fragment(request: Request):
         return HTMLResponse("")
     parsed = ranker.parse_key(item["key"])
     listed, note = [], ""
-    settings = load_settings()
+    settings = await load_settings()
     chosen = detail_source.choose(settings, item["ids"])
     if chosen is None:
         note = "No service here can list this show's seasons."
@@ -773,7 +773,7 @@ async def _item_details(request: Request, *, season_only: bool) -> Response:
         season = route_params.season(params.get("season"))
         if season is None:
             season = item["season"] if item["season"] is not None else _OPENING_SEASON
-    settings = load_settings()
+    settings = await load_settings()
     chosen = detail_source.choose(settings, item["ids"])
     if chosen is None:
         return await _described_by_the_board(request, user.user_id, item, season_only,
@@ -861,7 +861,7 @@ async def _panel_picture(user_id: int, item: dict) -> str:
     describing service's own poster" — draws a real one.
     """
     title, choices, order = await _row_choices(user_id, item, look_up=False)
-    return metadata_pictures.drawn(load_settings(), title, choices, order)
+    return metadata_pictures.drawn(await load_settings(), title, choices, order)
 
 
 def _fragment_failure(request: Request, message: str, retry_url: str, target: str):
@@ -1257,7 +1257,7 @@ async def set_board_item_season(board_uid: str, request: Request):
         # row's counts and name follow its new season with no second request.
         item = await ranker.fetch_item(user.user_id, board_uid, data.get("key"))
         if item["media"] == Media.SHOW:
-            await _stored_season_list(load_settings(), item["ids"], item["tmdb"])
+            await _stored_season_list(await load_settings(), item["ids"], item["tmdb"])
         row_key = await ranker.set_item_season(user.user_id, board_uid, data.get("key"),
                                                data.get("season"))
         season = ranker.parse_key(row_key).season
@@ -1422,7 +1422,7 @@ async def rankings_poster(request: Request):
     # THE LOCATION CARRIES THE REPORT ADDRESS (app/metadata/pictures.py): a
     # picture that will not load sends the browser on to the next recorded one
     # and heals the title, with no script.
-    return RedirectResponse(metadata_pictures.drawn(load_settings(), title, choices, order),
+    return RedirectResponse(metadata_pictures.drawn(await load_settings(), title, choices, order),
                             status_code=302, headers=_POSTER_CACHE_HEADERS)
 
 
@@ -1449,13 +1449,13 @@ async def _row_choices(user_id: int, item: Mapping[str, Any], *, look_up: bool
     if season is not None and not known.seasons.get((media, tmdb, season)):
         # Nothing filed for the season yet: the list its row was made from may be
         # stored, and carries the season's own artwork.
-        await _stored_season_list(load_settings(), item.get("ids") or {}, tmdb)
+        await _stored_season_list(await load_settings(), item.get("ids") or {}, tmdb)
         known = await artwork.known([(media, tmdb, season)])
     choices = known.choices(media, tmdb, season, order)
     if choices or not look_up:
         return title, choices, order
     # The title's one lookup records what it finds, so the registry answers again.
-    if await posters.find_address(load_settings(), media, tmdb, order, season):
+    if await posters.find_address(await load_settings(), media, tmdb, order, season):
         known = await artwork.known([(media, tmdb, season)])
     return title, known.choices(media, tmdb, season, order), order
 
@@ -1989,7 +1989,7 @@ async def import_finished_titles(board_uid: str, request: Request):
     try:
         arrived = await ranker.add_titles(
             user.user_id, board_uid,
-            await _with_season_facts(load_settings(), ranker_sources.items_from_refs(refs)),
+            await _with_season_facts(await load_settings(), ranker_sources.items_from_refs(refs)),
             added_from="tracker",
         )
         notice, ok = f"Found {len(refs)}, added {arrived.added}{_converted(arrived.converted)}.", True
@@ -2027,7 +2027,7 @@ async def seed_from_ratings(board_uid: str, request: Request):
         rated = await source.fetch_ratings(user.user_id)
     except ranker_sources.SourceUnavailable as exc:
         return _seed_answer(request, board_uid, message=str(exc), ok=False)
-    entries = await _with_season_facts(load_settings(), [
+    entries = await _with_season_facts(await load_settings(), [
         item for rating in rated
         if (item := rating.title.as_item(user_rating=rating.rating)) is not None
     ])
@@ -2299,7 +2299,7 @@ async def _warm_tiles(ranked: list[ranker_export.RankedTitle], order: tuple[str,
     keys = [(entry.media, entry.title_key) for entry in ranked if not entry.tmdb]
     if not refs and not keys:
         return False
-    settings = load_settings()
+    settings = await load_settings()
     with span("ranker.export_tiles", refs=len(refs), keys=len(keys), budget=budget):
         with anyio.move_on_after(budget):
             await posters.ensure_posters(settings, refs, order)

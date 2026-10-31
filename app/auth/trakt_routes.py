@@ -102,7 +102,7 @@ _LINK_NOTICES = {
 }
 
 
-def _notice(request: Request, title: str, message: str, *, status: int = 400,
+async def _notice(request: Request, title: str, message: str, *, status: int = 400,
             back: str = "/login", back_label: str = "Back to sign in"):
     """A dead-end page for a navigation that cannot continue.
 
@@ -120,18 +120,18 @@ def _notice(request: Request, title: str, message: str, *, status: int = 400,
         "back": back,
         "back_label": back_label,
     }, status_code=status)
-    auth.clear_handshake_cookie(response, load_settings(), request)
+    auth.clear_handshake_cookie(response, await load_settings(), request)
     return response
 
 
-def _handshake_refused(request: Request):
-    return _notice(request, "Sign-in link not valid", auth.HANDSHAKE_REJECTED, status=400)
+async def _handshake_refused(request: Request):
+    return await _notice(request, "Sign-in link not valid", auth.HANDSHAKE_REJECTED, status=400)
 
 
-def _refusal_notice(request: Request, refusal: provider_login.Refusal, pages: dict):
+async def _refusal_notice(request: Request, refusal: provider_login.Refusal, pages: dict):
     """Render a shared refusal as this medium's dead-end page."""
     title, back = pages[refusal.kind]
-    return _notice(request, title, refusal.message, status=refusal.status, **back)
+    return await _notice(request, title, refusal.message, status=refusal.status, **back)
 
 
 async def _begin(
@@ -147,11 +147,11 @@ async def _begin(
     unauthenticated caller cannot mint handshake rows in a loop — or get a second
     budget by alternating between the two providers.
     """
-    settings = load_settings()
+    settings = await load_settings()
     if await auth.handshake_start_limited(request, settings):
-        return _notice(request, "Too many attempts", TOO_MANY_STARTS, status=429)
+        return await _notice(request, "Too many attempts", TOO_MANY_STARTS, status=429)
     if not settings.trakt_login_configured:
-        return _notice(request, "Not available", NOT_CONFIGURED, status=503)
+        return await _notice(request, "Not available", NOT_CONFIGURED, status=503)
     state = await auth.create_handshake(
         provider=PROVIDER, purpose=purpose, session_id=session_id,
         invite_token=invite_token or None,
@@ -198,18 +198,18 @@ async def trakt_callback(request: Request):
     authorization code is exchanged, so a replayed or forged callback costs one
     database lookup and never reaches Trakt at all.
     """
-    settings = load_settings()
+    settings = await load_settings()
     state = request.query_params.get("state")
 
     if request.query_params.get("error"):
         # The user pressed "deny" on Trakt's screen, or Trakt refused. Nothing
         # was authorized, so there is nothing to undo.
-        return _notice(request, "Sign-in cancelled",
+        return await _notice(request, "Sign-in cancelled",
                        "You didn't authorize this app on Trakt. Nothing has changed.",
                        status=400)
 
     if not auth.handshake_cookie_matches(request, settings, state):
-        return _handshake_refused(request)
+        return await _handshake_refused(request)
 
     current = await auth.current_user(request)
     try:
@@ -218,13 +218,13 @@ async def trakt_callback(request: Request):
             session_id=current.session_id if current else None,
         )
     except auth.HandshakeError:
-        return _handshake_refused(request)
+        return await _handshake_refused(request)
 
     code = (request.query_params.get("code") or "").strip()
     if not code:
-        return _handshake_refused(request)
+        return await _handshake_refused(request)
     if not settings.trakt_login_configured:  # pragma: no cover — cleared mid-flow
-        return _notice(request, "Not available", NOT_CONFIGURED, status=503)
+        return await _notice(request, "Not available", NOT_CONFIGURED, status=503)
 
     try:
         token = await trakt_auth.exchange_code(
@@ -238,7 +238,7 @@ async def trakt_callback(request: Request):
         # Deliberately vague to the visitor and specific in the log: the
         # exception text can carry the request URL, and that carries the code.
         logger.warning("Trakt authorization exchange failed: %s", type(exc).__name__)
-        return _notice(request, "Sign-in failed", UPSTREAM_FAILED, status=502)
+        return await _notice(request, "Sign-in failed", UPSTREAM_FAILED, status=502)
 
     identity = auth.ProviderIdentity(
         provider=PROVIDER,
@@ -280,7 +280,7 @@ async def _finish_link(request: Request, settings: Settings,
         already_linked=ALREADY_LINKED, key_unhealthy=KEY_UNHEALTHY,
     )
     if isinstance(outcome, provider_login.Refusal):
-        return _refusal_notice(request, outcome, _LINK_NOTICES)
+        return await _refusal_notice(request, outcome, _LINK_NOTICES)
     await _clear_reconnect_notice(current.is_admin)
     response = RedirectResponse(outcome.redirect_target, status_code=303)
     auth.clear_handshake_cookie(response, settings, request)
@@ -295,7 +295,7 @@ async def _finish_login(request: Request, settings: Settings,
         already_linked=ALREADY_LINKED,
     )
     if isinstance(outcome, provider_login.Refusal):
-        return _refusal_notice(request, outcome, _LOGIN_NOTICES)
+        return await _refusal_notice(request, outcome, _LOGIN_NOTICES)
     if not outcome.registered:
         # A returning user, which is what the reconnect notice was asking for
         # when an admin is the one returning. A registration cannot be: the
@@ -436,7 +436,7 @@ async def revoke_token_value(token: str | None, settings: Settings | None = None
     instance using the token, and rolling an unlink back because a third party
     was unreachable would leave the user stuck with a link they asked to remove.
     """
-    cfg = settings or load_settings()
+    cfg = settings or await load_settings()
     if not token:
         return None
     if not (cfg.trakt_client_id and cfg.trakt_client_secret):
@@ -515,11 +515,11 @@ async def store_rotated_tokens(old_refresh_token: str, token: dict, *,
     """
     if identity_id is not None:
         await _store_on_identity(identity_id, token)
-        settings = load_settings()
+        settings = await load_settings()
         if old_refresh_token and settings.trakt_refresh_token == old_refresh_token:
-            _store_in_settings(settings, token)
+            await _store_in_settings(settings, token)
     else:
-        _store_in_settings(load_settings(), token)
+        await _store_in_settings(await load_settings(), token)
     for row in await _identities_holding(old_refresh_token, besides=identity_id):
         await _store_on_identity(int(row["id"]), token)
 
@@ -531,11 +531,11 @@ async def _store_on_identity(identity_id: int, token: dict) -> None:
         token_expires_at=_expires_at(token))
 
 
-def _store_in_settings(settings: Settings, token: dict) -> None:
+async def _store_in_settings(settings: Settings, token: dict) -> None:
     settings.trakt_access_token = token["access_token"]
     settings.trakt_refresh_token = token.get("refresh_token") or ""
     settings.trakt_token_expires_at = _expires_at(token) or 0
-    save_settings(settings)
+    await save_settings(settings)
 
 
 async def holders_note(refresh_token: str, *, app_wide: bool) -> str:
@@ -575,7 +575,7 @@ async def access_token_for_user(user_id: int, settings: Settings | None = None) 
     token already stored, which is either still valid or about to be replaced by
     the request that won.
     """
-    cfg = settings or load_settings()
+    cfg = settings or await load_settings()
     row = await db.fetch_one(
         "SELECT * FROM linked_identities WHERE user_id = ? AND provider = ?",
         (user_id, PROVIDER),

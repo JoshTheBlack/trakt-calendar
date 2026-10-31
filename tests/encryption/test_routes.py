@@ -22,7 +22,8 @@ from fastapi.testclient import TestClient
 
 from app import auth, config, db, secrets_box
 from app.auth import encryption_flow
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from app.auth.encryption_routes import RECOVERY_PATH, RESET_CONFIRM_PHRASE
 from app.main import app
 from tests.support import migrated_db

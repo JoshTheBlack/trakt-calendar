@@ -22,7 +22,8 @@ from unittest.mock import AsyncMock, patch
 
 from datetime import date
 
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from app.providers import title_search as catalogue_search
 from app.providers.base import (Media, SearchHit, SearchPage, SeasonsAnswer, Source,
                                 proxied_image, resolve_key)

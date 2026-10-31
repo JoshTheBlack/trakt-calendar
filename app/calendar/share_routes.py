@@ -457,7 +457,7 @@ async def _render(request: Request, share_row) -> Response:
     if target := _expanded_from_code(request):
         return RedirectResponse(target, status_code=302)
 
-    settings = load_settings()
+    settings = await load_settings()
     owner_id = int(share_row["user_id"])
     owner_prefs = await auth.get_user_prefs(owner_id)
 
@@ -1150,7 +1150,7 @@ async def _share_rate_limited(request: Request, settings) -> bool:
 
 @guard.get("/s/{token}", AuthLevel.PUBLIC)
 async def share_by_token(request: Request, token: str):
-    settings = load_settings()
+    settings = await load_settings()
     if await _share_rate_limited(request, settings):
         return _too_many_requests()
     return await _render(request, await share_links.resolve_by_token(token))
@@ -1201,7 +1201,7 @@ async def share_card_image(request: Request, token: str):
     fetch it, and a 405 there is a preview that never appears. Nothing here reads
     a body, so the same handler answers both.
     """
-    settings = load_settings()
+    settings = await load_settings()
     if await _share_rate_limited(request, settings):
         # THE ONE UNHAPPY PATH THAT IS NOT THE BANNER. Redirecting a throttled
         # request to a static file is a redirect the throttle was trying to avoid
@@ -1228,7 +1228,7 @@ async def share_card_image(request: Request, token: str):
 
 @guard.get("/u/{username}", AuthLevel.PUBLIC)
 async def share_by_username(request: Request, username: str):
-    settings = load_settings()
+    settings = await load_settings()
     if await _share_rate_limited(request, settings):
         return _too_many_requests()
     return await _render(request, await share_links.resolve_by_username(username))
@@ -1236,7 +1236,7 @@ async def share_by_username(request: Request, username: str):
 
 @guard.get("/c/{slug}", AuthLevel.PUBLIC)
 async def share_by_slug(request: Request, slug: str):
-    settings = load_settings()
+    settings = await load_settings()
     if await _share_rate_limited(request, settings):
         return _too_many_requests()
     return await _render(request, await share_links.resolve_by_slug(slug))
@@ -1451,7 +1451,7 @@ async def _details(request: Request, share_row) -> Response:
     owner's calendar contains is exactly what that one message prevents). So the
     panel is drawn with `picker=False` and shows the season the card is for.
     """
-    settings = load_settings()
+    settings = await load_settings()
     params = _effective_params(request)
     if await _share_rate_limited(request, settings):
         return _too_many_requests()
@@ -1645,7 +1645,7 @@ async def _share_context(user, settings, **extra) -> dict:
 
 
 async def _share_answer(request: Request, template: str, user, **extra):
-    context = await _share_context(user, load_settings(), **extra)
+    context = await _share_context(user, await load_settings(), **extra)
     return templates.TemplateResponse(request, template, {"request": request, **context})
 
 
@@ -1705,7 +1705,7 @@ async def share_view(request: Request):
     — and the ticks are redrawn exactly when it did."""
     user = await auth.current_user(request)
     data = await authz.json_body(request)
-    settings = load_settings()
+    settings = await load_settings()
     before = share_links.link_view(await share_links.get_or_create(user.user_id)) or {}
     named = ENDPOINTS.get(str(route_params.last_value(data.get("endpoint")) or ""))
     offered = [choice["value"] for choice in share_source_choices(named, settings)] if named else []

@@ -21,7 +21,8 @@ from unittest.mock import AsyncMock, patch
 
 from app import assets, db
 from app.calendar import vocab
-from app.config import Settings, load_settings, save_settings
+from app.config import Settings
+from tests.support import load_settings, save_settings
 from app.integrations import routes as integrations_routes
 from app.providers import detail_source
 from app.providers.base import Source

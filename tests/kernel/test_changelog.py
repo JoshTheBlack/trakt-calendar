@@ -15,7 +15,8 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app import auth, changelog, db
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from app.main import app
 from tests.support import ORIGIN, ROOT, migrated_db
 

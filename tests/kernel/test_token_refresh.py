@@ -16,7 +16,8 @@ import httpx
 
 from app import db, settings_routes
 from app.auth import trakt as trakt_auth
-from app.config import Settings, load_settings, save_settings
+from app.config import Settings
+from tests.support import load_settings, save_settings
 from tests.support import migrated_db
 
 

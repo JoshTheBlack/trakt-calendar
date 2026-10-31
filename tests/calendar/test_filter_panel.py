@@ -727,7 +727,7 @@ class TheNewerDimensionsOnThePanelTests(CalendarRouteTestCase):
         """A viewer can only tighten the floor, so a box that looked uncheckable
         would promise titles back that nothing can bring."""
         from tests.calendar.test_routes import _configured_settings
-        from app.config import save_settings
+        from tests.support import save_settings
         import dataclasses
         save_settings(dataclasses.replace(_configured_settings(), tv_single_service=True,
                                           movie_missing="country"))

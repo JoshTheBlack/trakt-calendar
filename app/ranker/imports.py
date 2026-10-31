@@ -243,7 +243,7 @@ async def _finished_movies(user_id: int, year: int | None) -> list[TitleRef]:
 
     # The instance credential: a movie summary is public catalogue data, and the
     # per-user token this import runs under says nothing extra about it.
-    settings = load_settings()
+    settings = await load_settings()
     # Fanned out rather than walked one at a time — a hundred sequential lookups
     # would be a minute-long request the first time an account imports. Bounded
     # so an import is a burst the provider can absorb rather than a flood that

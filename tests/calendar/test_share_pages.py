@@ -28,7 +28,8 @@ from app.calendar import (cache as calendar_cache, share_card, share_code,
                           share_links, share_routes)
 from app.providers.base import Item, Media, Source
 from app.providers.trakt import transport as trakt_transport
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from app.media import posters
 from tests.support import AppTestCase, DetailsPanel, ORIGIN, calendar_records
 

@@ -122,7 +122,7 @@ def _source_prefs():
 async def onboarding_page(request: Request):
     if await auth.any_users_exist():
         return RedirectResponse("/login", status_code=303)
-    settings = load_settings()
+    settings = await load_settings()
     return templates.TemplateResponse(request, "auth_onboarding.html", {
         "request": request,
         "has_trakt_token": bool(settings.trakt_access_token.strip()),
@@ -152,7 +152,7 @@ async def onboarding_create(request: Request):
     if await auth.any_users_exist():
         return refused(request, ALREADY_SET_UP)
 
-    settings = load_settings()
+    settings = await load_settings()
     # Both of these happen before the transaction opens: neither 200ms of Argon2
     # nor a call out to Trakt may sit inside a held write lock.
     password_hash = await auth.hash_password(password)
@@ -202,7 +202,7 @@ async def onboarding_create(request: Request):
 
     # BEFORE the session below, so the very first cookie this instance issues
     # already carries the right policy.
-    settings = _adopt_cookie_policy(settings, request)
+    settings = await _adopt_cookie_policy(settings, request)
     await auth.mark_logged_in(user_id)
     session_id = await auth.create_session(
         user_id,
@@ -230,7 +230,7 @@ class _InvalidInvite(Exception):
     """Raised inside the registration transaction to roll it back."""
 
 
-def _adopt_cookie_policy(settings, request: Request):
+async def _adopt_cookie_policy(settings, request: Request):
     """Pin the session-cookie Secure policy to what this browser actually used,
     and persist it. Returns the settings to issue the first cookie with.
 
@@ -251,7 +251,7 @@ def _adopt_cookie_policy(settings, request: Request):
     if detected == (settings.cookie_secure or "").strip().lower():
         return settings
     settings.cookie_secure = detected
-    save_settings(settings)
+    await save_settings(settings)
     logger.info(
         "Setup: session cookies set to %r — this browser reached the instance over %s. "
         "Change `cookie_secure` in data/settings.json if that is wrong.",
@@ -327,7 +327,7 @@ async def register_page(request: Request):
     and missing/unusable. Reachable only once an instance has been set up — an
     invite implies an admin already exists to have issued it, so this route is
     not part of the first-run path the way /login and /onboarding are."""
-    settings = load_settings()
+    settings = await load_settings()
     token = (request.query_params.get("invite") or "").strip()
     if not settings.allow_open_registration:
         invite = await auth.find_invite_by_token(token) if token else None
@@ -364,7 +364,7 @@ async def register(request: Request):
     invite tokens are secret, so every cause of a bad one looks identical from
     here.
     """
-    settings = load_settings()
+    settings = await load_settings()
     ip = auth.client_ip(request, settings)
     data = await authz.json_body(request)
     username = str(data.get("username") or "").strip()
@@ -449,7 +449,7 @@ async def register(request: Request):
 # sign in / sign out
 # ---------------------------------------------------------------------------
 
-def _settings_even_if_sealed() -> tuple[Settings, bool]:
+async def _settings_even_if_sealed() -> tuple[Settings, bool]:
     """Settings for a page that has to render while the at-rest key may be wrong,
     and whether it is. `open_secrets=False` on the second attempt, so the fields
     that come from app_secrets read as unset rather than raising.
@@ -468,18 +468,18 @@ def _settings_even_if_sealed() -> tuple[Settings, bool]:
     secrets could be opened.
     """
     try:
-        return load_settings(), False
+        return await load_settings(), False
     except secrets_box.SealedButWrongKey:
         # Deliberately not logged: the gate already reports this state at startup
         # and the page is about to say so in the one place a person will see it.
-        return load_settings(open_secrets=False), True
+        return await load_settings(open_secrets=False), True
 
 
 @guard.get("/login", AuthLevel.PUBLIC)
 async def login_page(request: Request):
     if not await auth.any_users_exist():
         return RedirectResponse("/onboarding", status_code=303)
-    settings, key_mismatch = _settings_even_if_sealed()
+    settings, key_mismatch = await _settings_even_if_sealed()
     response = templates.TemplateResponse(request, "auth_login.html", {
         "request": request,
         # Sign in with Trakt cannot work while a secret is sealed under the wrong
@@ -517,7 +517,7 @@ async def login_cookie_check(request: Request):
     reading the protocol in the browser). Reachable while the at-rest key is wrong,
     like /login itself: an administrator locked out of recovery by a cookie the
     browser refuses is exactly who needs this sentence."""
-    settings = load_settings(open_secrets=False)
+    settings = await load_settings(open_secrets=False)
     return templates.TemplateResponse(request, "_cookie_warning.html", {
         "request": request,
         "dropped": auth.session_cookie_would_be_dropped(request, settings),
@@ -552,7 +552,7 @@ async def login(request: Request):
     # Sign-in reads only the cookie policy and the proxy list, never a credential,
     # so it loads without decrypting secrets — an admin must be able to sign in and
     # reach recovery even while a stored secret is sealed under the wrong key.
-    settings = load_settings(open_secrets=False)
+    settings = await load_settings(open_secrets=False)
     ip = auth.client_ip(request, settings)
     username_key = username.lower()
 
@@ -634,7 +634,7 @@ async def logout(request: Request):
     # Signing someone out is a state change, so it is held to the same JSON-only
     # rule as every other mutating endpoint. The body itself is ignored.
     await authz.json_body(request)
-    settings = load_settings(open_secrets=False)
+    settings = await load_settings(open_secrets=False)
     session_id = auth.read_session_cookie(request, settings)
     if session_id:
         await auth.revoke_session(session_id)
@@ -694,7 +694,7 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
         # replaces it, and the caller passes the new one. Anything else reaching
         # here is a session revoked mid-request, which is a sign-in problem.
         raise auth.AuthError(401, "login_required", "Sign in to continue.")
-    settings = load_settings()
+    settings = await load_settings()
     identities = await auth.list_identities(user.user_id)
     linked = {row["provider"]: row["display_name"] for row in identities}
     # WHICH LINKED SERVICES NEED RECONNECTING, drawn fresh each time this page
@@ -928,7 +928,7 @@ async def move_account_order(kind: str, request: Request):
     if kind != "metadata_order":
         return await _section(request, user.session_id, "metadata_order",
                               order_message="There is no such list.", order_kind="metadata_order")
-    orders = await _account_orders(user.user_id, load_settings())
+    orders = await _account_orders(user.user_id, await load_settings())
     names = [entry["source"] for entry in orders.metadata]
     source = str(data.get("source") or "")
     step = {"up": -1, "down": 1}.get(str(data.get("direction") or ""))
@@ -1054,7 +1054,7 @@ async def set_own_password(request: Request):
     that new session, the only one left.
     """
     user = await auth.require_session(request)
-    settings = load_settings()
+    settings = await load_settings()
     ip = auth.client_ip(request, settings)
     # The current-password check is a guess-checking oracle, so it is throttled on
     # the same shared per-address counter a sign-in is — at the same tolerant

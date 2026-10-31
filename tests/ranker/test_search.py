@@ -32,7 +32,8 @@ from app import db, providers
 from app.auth import prefs as auth_prefs, simkl_routes, viewer
 from app.calendar import entries
 from app.metadata import typed_search
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from app.providers import title_search
 from app.providers.base import ItemKey, Media, Record, Source, proxied_image
 from app.providers.simkl import search as simkl_search

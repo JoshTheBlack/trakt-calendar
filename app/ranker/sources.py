@@ -284,7 +284,7 @@ async def user_trakt_settings(user_id: int) -> Settings | None:
     if not token:
         return None
     return dataclasses.replace(
-        load_settings(), trakt_access_token=token, trakt_refresh_token="",
+        await load_settings(), trakt_access_token=token, trakt_refresh_token="",
     )
 
 

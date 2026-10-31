@@ -38,7 +38,7 @@ INTEGRATION_HEALTH: dict[str, dict] = {
 
 
 async def refresh_integration_health() -> None:
-    settings = load_settings()
+    settings = await load_settings()
     for kind in ("sonarr", "radarr"):
         INTEGRATION_HEALTH[kind] = await arr.check_health(kind, settings)
     INTEGRATION_HEALTH["seer"] = await seer.check_health(settings)
@@ -103,7 +103,7 @@ async def _read_all(now: float) -> None:
     # get stamped with a request id that finished before the first one started,
     # and its breakdown grows entries after it was already logged.
     perftrace.detach()
-    settings = load_settings()
+    settings = await load_settings()
     reads = (
         ("sonarr", lambda: arr.library_ids("sonarr", settings)),
         ("radarr", lambda: arr.library_ids("radarr", settings)),

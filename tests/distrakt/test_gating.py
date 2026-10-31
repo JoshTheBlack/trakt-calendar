@@ -33,7 +33,8 @@ from app import auth, cache, db
 from app.distrakt import routes as distrakt_routes
 from app.auth import viewer as auth_viewer
 from app.calendar import share_code, share_links
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from app.main import app
 from tests.support import AppTestCase, ORIGIN, tracker_month
 

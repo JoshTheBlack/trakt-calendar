@@ -1634,7 +1634,7 @@ async def _row_pictures(user_id: int, shows: list[dict], films: list[dict] | Non
     rows = ([(Media.SHOW, show) for show in shows if show.get("key")]
             + [(Media.MOVIE, film) for film in films or [] if film.get("key")])
     order = await _poster_order(user_id)
-    settings = load_settings()
+    settings = await load_settings()
     stored = {media: await title_rows.posters_for(
                   [row["key"] for kind, row in rows if kind == media], media)
               for media in (Media.SHOW, Media.MOVIE)}
@@ -1905,7 +1905,7 @@ async def api_distrakt_import(request: Request):
     # fill a calendar" refused the button to somebody signed in with Simkl alone
     # over a token the import never uses. calendar_import.premiere_records reads
     # under the same instance settings, for the same reason.
-    if not load_settings().calendar_source_configured:
+    if not (await load_settings()).calendar_source_configured:
         return _month_refusal(request, "No calendar is configured, so there is nothing to import.")
     data = await authz.json_body(request)
     # WHICH TITLES, BY REFERENCE: one `pick:<key>|<season>` field per ticked row
@@ -1927,7 +1927,7 @@ async def api_distrakt_import(request: Request):
     if not chosen:
         return _month_refusal(request, "Tick at least one title to import.")
     # The instance's settings, for the reason the gate above gives.
-    added = await distrakt_store.import_premieres(user_id, month_key, load_settings(), chosen)
+    added = await distrakt_store.import_premieres(user_id, month_key, await load_settings(), chosen)
     return await _month_answer(
         request, user_id, year, month, settings,
         message=f"Imported {added} premiere{'' if added == 1 else 's'} from the calendar")
@@ -1957,7 +1957,7 @@ async def import_fragment(request: Request):
     context = {"request": request, "month_query": f"?year={year}&month={month}",
                "rows": [], "undescribed": [], "note": "",
                "ticked": request.query_params.get("ticked") != "none"}
-    settings = load_settings()
+    settings = await load_settings()
     if not settings.calendar_source_configured:
         context["note"] = "No calendar is configured, so there is nothing to import."
     elif await distrakt_store.is_backfill_blocked(user_id, month_key, clock.today()):
@@ -2524,7 +2524,7 @@ async def api_distrakt_network_logo(request: Request):
     if not tmdbs:
         return _month_refusal(request, f"Nothing on this month names a TMDB id for {network}, "
                                        "so its logo can't be looked up.")
-    sentence, ok = _RECHECK_SAID[await logos.recheck(load_settings(), network, tmdbs)]
+    sentence, ok = _RECHECK_SAID[await logos.recheck(await load_settings(), network, tmdbs)]
     emojis, default_emoji = await distrakt_store.get_emoji_prefs(user.user_id)
     return templates.TemplateResponse(request, "_distrakt_logo_answer.html", {
         "request": request, "network": network,
@@ -4227,7 +4227,7 @@ async def _share_link_payload(user_id: int) -> dict:
     """What the announcement post's link controls need: the resolved URL plus
     which of the three forms are actually publishable right now, so the selector
     can offer only the ones that would produce a working link."""
-    settings = load_settings()
+    settings = await load_settings()
     row = await share_links.get_or_create(user_id)
     user = await auth.get_user(user_id)
     username = user["username"] if user else None

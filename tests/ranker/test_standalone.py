@@ -40,7 +40,8 @@ from fastapi.testclient import TestClient
 from app import auth, db
 from app.auth import trakt_routes
 from app.providers.trakt import detail as trakt_detail, sync as trakt_sync
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from app.main import app
 from app.media import posters
 from app.ranker import core as ranker

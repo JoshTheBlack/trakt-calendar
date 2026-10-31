@@ -30,7 +30,8 @@ from unittest.mock import AsyncMock, patch
 
 from app import db
 from app.calendar import entries
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from app.distrakt import watch_history
 from app import distrakt as distrakt_store
 from app.providers.tmdb import search as tmdb_search
