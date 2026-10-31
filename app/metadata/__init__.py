@@ -57,6 +57,13 @@ def store_records(conn: db.Connection, records: Iterable[Record], *, now: int,
 
     ONE RESOLUTION PER SERVICE TITLE, however many airings of it arrive, which is
     most of what a fill is.
+
+    AND EVERY KEY IS THE ONE ITS TITLE ANSWERS TO WHEN THE FILL IS DONE. A later
+    record of the same fill can re-key a title an earlier one registered — Simkl's
+    listing names a show by its tvdb id, Trakt's names its tmdb id too — and the
+    key the first resolution returned is then retired. A row written under it, or
+    an airing the caller files under it, has no identity to join and draws as a
+    card of its own until the window is next filled.
     """
     keys: list[str] = []
     settled: dict[tuple[str, str, str], identity.Identity | None] = {}
@@ -68,12 +75,13 @@ def store_records(conn: db.Connection, records: Iterable[Record], *, now: int,
                 filed_under=rows.filed_key(conn, record),
                 fallback=identity.per_source_key(record.source, record.id), now=now)
         found = settled[ref]
-        key = found.key if found is not None else identity.per_source_key(record.source, record.id)
+        key = (identity.follow(conn, found.key) if found is not None
+               else identity.per_source_key(record.source, record.id))
         rows.write_listing(conn, record, key, now=now, stale_after=stale_after)
         if found is not None:
             record.ids = identity.with_shared(record.ids, found.ids)
         keys.append(key)
-    return keys
+    return [identity.follow(conn, key) for key in keys]
 
 
 class Asked(NamedTuple):

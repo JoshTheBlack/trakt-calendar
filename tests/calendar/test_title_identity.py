@@ -66,6 +66,27 @@ class TwoServicesOneEpisodeTests(DatabaseTestCase):
             "SELECT ids_json FROM title_metadata WHERE source = 'simkl'")
         self.assertNotIn("tmdb", stored)
 
+    async def test_a_title_re_keyed_by_a_later_listing_of_the_same_fill_moves_every_listing(self):
+        """Simkl's tvdb-only listing registers the title under its tvdb id; Trakt's,
+        later in the SAME fill, states the tmdb id and re-keys it. Every listing
+        of the title — those before the re-key and those after — is filed under
+        the key the title answers to once the fill is done, never the one it
+        retired: an airing under a retired key has no identity to join and draws
+        as a card of its own."""
+        await store(listing(Source.SIMKL, {"simkl": 55, "tvdb": 4321}),
+                    listing(Source.TRAKT, {"trakt": 7, "tmdb": 900, "tvdb": 4321}),
+                    listing(Source.SIMKL, {"simkl": 55, "tvdb": 4321}, episode=2,
+                            air_ts=DAY + 86400))
+        airings = {r["title_key"] for r in await db.fetch_all(
+            "SELECT title_key FROM calendar_airings")}
+        described = {r["title_key"] for r in await db.fetch_all(
+            "SELECT title_key FROM title_metadata")}
+        self.assertEqual((airings, described), ({"show:tmdb:900"}, {"show:tmdb:900"}))
+        records, *_ = await entries.read_span("shows", *WEEK)
+        self.assertEqual({group["key"].split("|")[0][:13]
+                          for group in calendar_cache.group_records(records)},
+                         {"show:tmdb:900"})
+
     async def test_two_tmdb_titles_sharing_a_tvdb_id_stay_two_cards(self):
         await store(listing(Source.TRAKT, {"trakt": 7, "tmdb": 900, "tvdb": 4321}),
                     listing(Source.SIMKL, {"simkl": 55, "tmdb": 901, "tvdb": 4321}))
