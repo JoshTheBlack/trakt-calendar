@@ -142,12 +142,17 @@
                     </div>
                     {% endif %}
 
-                    {% call ff.field('tv_genres', 'Genres', 'Another genre, then Enter…') %}
+                    {% call ff.field('tv_genres', 'Genres', 'Another genre, then Enter…',
+                                     also='tv_show_types', also_label='Show type') %}
                         Press a chip once to keep <em>only</em> that genre, again to filter it out,
                         again to stop filtering on it. A show is kept if it carries any genre you
                         asked for and none you excluded. This happens here rather than at Trakt, so
                         it works on any account — the Settings screen still carries a VIP caveat,
                         and it is about the fields Trakt is asked for directly.
+                        <br><br><strong>Show type</strong> is what kind of show it is, as TMDB says —
+                        scripted, reality, a talk show — one per show, where genres are every
+                        service's tags together. It is the one way to keep only scripted shows. A
+                        show TMDB has not described is shown until it is.
                     {% endcall %}
                     {% call ff.field('tv_countries', 'Countries', 'Another country code, then Enter…') %}
                         Where a show was <em>made</em>. Two-letter ISO codes; the box takes any of
@@ -169,10 +174,6 @@
                         TV ratings only — films have their own on the Movies tab, because TV
                         Parental Guidelines and MPA ratings are separate vocabularies.
                         <code>NR</code> covers anything the service gave no rating.
-                    {% endcall %}
-                    {% call ff.field('tv_show_types', 'Show types') %}
-                        What kind of show it is, as TMDB says — scripted, reality, a talk show.
-                        A show TMDB has not described is shown until it is.
                     {% endcall %}
                     {% call ff.field('tv_keywords', 'Keywords', 'A keyword, then Enter…') %}
                         TMDB's keywords, such as <code>anime</code> or <code>based on manga</code>

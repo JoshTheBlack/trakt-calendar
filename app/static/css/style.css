@@ -1112,6 +1112,10 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 .ffield-head { display: flex; align-items: center; gap: 8px; }
 .ffield-label { font-size: 0.74rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-dim); font-weight: 700; }
 .ffield-count { font-size: 0.72rem; color: var(--gold-soft); }
+/* A dimension drawn inside another's field (show types inside genres): set off
+   by a quieter label of its own, on the field's own rhythm. */
+.fsubfield { display: flex; flex-direction: column; gap: 8px; padding-top: 4px; }
+.fsubfield-label { font-size: 0.68rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-faint); font-weight: 700; }
 
 /* WHERE THE PROSE WENT. Every paragraph this panel used to shout is behind one
    of these, so the reasoning is a press away and never in the way. A details

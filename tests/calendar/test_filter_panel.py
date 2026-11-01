@@ -176,6 +176,20 @@ class ThePanelIsRenderedTests(CalendarRouteTestCase):
         self.assertEqual(len(checked), 1)
         self.assertIn('value="exclude"', checked[0])
 
+    def test_show_types_are_drawn_inside_genres_and_saved_as_their_own(self):
+        """Show type reads as part of genres and is drawn inside that field, with
+        its own label; it stays its own dimension, so a save writes it alone."""
+        panel = self.panel()
+        genres = panel[panel.index('data-field="tv_genres"'):]
+        genres = genres[:genres.index('data-field="tv_countries"')]
+        self.assertIn('class="fsubfield" data-field="tv_show_types"', genres)
+        self.assertIn(vocab.field_name(vocab.TV_SHOW_TYPES, "talk-show"), genres)
+        self.assertEqual(panel.count('data-field="tv_show_types"'), 1)
+        self.save(**{vocab.field_name(vocab.TV_SHOW_TYPES, "talk-show"): "exclude"})
+        prefs = asyncio.run(auth.get_user_prefs(self.user_id))
+        self.assertEqual(prefs["tv_show_types"], "-talk-show")
+        self.assertEqual(prefs["tv_genres"], "")
+
     def test_a_token_the_vocabulary_does_not_name_is_drawn_too(self):
         """Whatever a card badge added has to appear in the panel, or the badge
         writes an answer the one screen that lists them cannot show."""

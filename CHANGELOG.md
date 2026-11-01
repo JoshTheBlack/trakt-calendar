@@ -22,7 +22,7 @@ All notable changes to this project are documented here. Format loosely follows 
 - 🎚️ **Six new ways to narrow a calendar, in 🎚️ Filters and as an instance-wide floor in Settings.** Each is set separately for TV and films where it applies:
   - **Languages** — the language a title was made in, kept or filtered out like countries. A card's 🗣️ language chip now offers to filter on it too.
   - **Keywords** — TMDB's keywords, typed one at a time (`anime`, `based on manga`). Most new titles have none, so filtering one out is the usual use.
-  - **Show types** — TMDB's scripted, reality, documentary, talk show, news, miniseries and video.
+  - **Show types**, under Genres — TMDB's scripted, reality, documentary, talk show, news, miniseries and video, one per show; the way to keep only scripted shows.
   - **Hide titles only one service lists** — most of what TMDB adds; on one October's films it leaves about one card in eight.
   - **Hide shows only TMDB lists that name no network** — TMDB's long tail of listings with no broadcaster.
   - **Missing data** — hide a title with no country, no language or no poster, or missing two of them together.
