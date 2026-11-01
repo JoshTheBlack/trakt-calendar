@@ -496,6 +496,21 @@ class WhatTheWholeShowCountsTests(_ControlTestCase):
         self.file(LISTED[:2], described=4)
         self.assertEqual(self.facts(), (4, None))
 
+    def test_a_boards_read_finds_season_rows_by_their_title(self):
+        """Every season row the board's read reaches, it reaches by its title's
+        own (source, media, source_id) — never by service alone. Left to choose,
+        the planner walked every season row of the listing service for each
+        whole-show row: MEASURED on a copy of dev, a 340-row board read in 42 s
+        with TMDB's 17,700 season rows, and in 0.02 s driven from the title."""
+        sql = f"EXPLAIN QUERY PLAN {ranker._ITEMS} WHERE i.board_id = ?"
+        plan = asyncio.run(db.run(lambda conn: [
+            str(row["detail"]) for row in conn.execute(sql, (0,)).fetchall()]))
+        reaches = [line for line in plan if line.startswith(("SEARCH s ", "SCAN s"))]
+        self.assertTrue(reaches)
+        for line in reaches:
+            with self.subTest(line=line):
+                self.assertIn("source_id=", line)
+
 
 if __name__ == "__main__":
     unittest.main()

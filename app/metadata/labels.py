@@ -118,8 +118,14 @@ def board_columns(alias: str) -> str:
         "    AND s.media = t.media AND s.source_id = t.source_id "
         "    AND s.season > 0 AND s.episode_count > 0) "
         f"ORDER BY {_RANK} LIMIT 1)")
+    # CROSS JOIN, because the title's rows must be the outer loop. Left to choose,
+    # the planner read `s.source = <listing service>` as the better way in and
+    # walked EVERY season row of that service for each board row, finding each
+    # one's title by its key — MEASURED on a copy of dev, a 340-row board read in
+    # 42 s with TMDB's 17,700 season rows, and in 20 s a day earlier with half as
+    # many. Driven from the title's own rows it is a handful of lookups a row.
     whole_show_episodes = (
-        f"(SELECT SUM(s.episode_count) FROM {rows.TITLES} t JOIN {rows.SEASONS} s "
+        f"(SELECT SUM(s.episode_count) FROM {rows.TITLES} t CROSS JOIN {rows.SEASONS} s "
         "ON s.source = t.source AND s.media = t.media AND s.source_id = t.source_id "
         f"WHERE t.title_key = {key} AND s.season > 0 AND s.episode_count > 0 "
         f"AND t.source = {listing_service})")
