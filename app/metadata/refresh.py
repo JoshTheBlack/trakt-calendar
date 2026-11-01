@@ -554,8 +554,8 @@ async def listings_owed() -> int:
 # the drain
 # ---------------------------------------------------------------------------
 
-async def _refresh(settings, port, entry: Entry, *, tz: ZoneInfo) -> descriptions.Written | None:
-    """Ask one service again about one queued row and file the answer. A show's
+async def _look_up(settings, port, entry: Entry) -> descriptions.Answer:
+    """Ask one service again about one queued row, writing nothing. A show's
     title row brings its season list with it, which is what a board's season
     rows and the season picker read."""
     season = None if entry.season == TITLE else entry.season
@@ -565,13 +565,7 @@ async def _refresh(settings, port, entry: Entry, *, tz: ZoneInfo) -> description
     if season is None and entry.media == str(Media.SHOW):
         seasons = (await port.fetch_seasons(settings, entry.own_id, Media.SHOW,
                                             fresh=True)).seasons
-    return await descriptions.store(entry.source, entry.media, entry.own_id, answer,
-                                    asked_season=season, tz=tz, seasons=seasons)
-
-
-async def _dequeue(entry: Entry) -> None:
-    await db.execute("DELETE FROM metadata_refresh WHERE source = ? AND media = ? "
-                     "AND source_id = ? AND season = ?", entry)
+    return descriptions.Answer(entry.source, entry.media, entry.own_id, answer, season, seasons)
 
 
 # What a service's "slow down" arrives as: an HTTP 429 on the app-wide
@@ -579,21 +573,64 @@ async def _dequeue(entry: Entry) -> None:
 RATE_LIMITED = 429
 
 
-async def _record_failure(entry: Entry, now: int) -> None:
-    """A refresh that could not be made: the rows it was for say so, so a view
-    leaves them alone for a while (`_backed_off`)."""
-    def _work(conn) -> None:
-        for row in descriptions.service_rows(conn, entry.source, entry.media, entry.own_id):
-            if entry.season == TITLE:
-                conn.execute(f"UPDATE {rows.TITLES} SET failed_at = ?, fail_count = "
-                             "fail_count + 1 WHERE rowid = ?", (now, row["rid"]))
-            else:
-                conn.execute(f"UPDATE {rows.SEASONS} SET failed_at = ?, fail_count = "
-                             "fail_count + 1 WHERE source = ? AND media = ? AND source_id = ? "
-                             "AND season = ?", (now, entry.source, entry.media,
-                                                row["source_id"], entry.season))
+# A PASS'S ENTRIES LEAVE THE QUEUE IN ONE STATEMENT, and the rows of those that
+# failed are marked in two more, each named once per entry that failed — so two
+# failures of one row count twice, as a transaction each counted them. Rows are
+# found before the lock (`_failed_rows`). The entries drive the delete through
+# the queue's own key (CROSS JOIN fixes that order): correlated the other way
+# round, the planner walked every queued row and the pass's entries inside each.
+_DEQUEUE = """
+DELETE FROM metadata_refresh WHERE rowid IN (
+    SELECT q.rowid FROM json_each(?) j CROSS JOIN metadata_refresh q
+    ON q.source = json_extract(j.value, '$[0]') AND q.media = json_extract(j.value, '$[1]')
+   AND q.source_id = json_extract(j.value, '$[2]') AND q.season = json_extract(j.value, '$[3]'))
+"""
+_FAIL_TITLES = f"""
+UPDATE {rows.TITLES} SET failed_at = :now, fail_count = fail_count + f.times
+FROM (SELECT value AS rid, COUNT(*) AS times FROM json_each(:rows) GROUP BY value) f
+WHERE {rows.TITLES}.rowid = f.rid
+"""
+_FAIL_SEASONS = f"""
+UPDATE {rows.SEASONS} SET failed_at = :now, fail_count = fail_count + f.times
+FROM (SELECT json_extract(value, '$[0]') AS source, json_extract(value, '$[1]') AS media,
+             json_extract(value, '$[2]') AS source_id, json_extract(value, '$[3]') AS season,
+             COUNT(*) AS times
+      FROM json_each(:rows) GROUP BY 1, 2, 3, 4) f
+WHERE {rows.SEASONS}.source = f.source AND {rows.SEASONS}.media = f.media
+  AND {rows.SEASONS}.source_id = f.source_id AND {rows.SEASONS}.season = f.season
+"""
 
-    await db.transaction(_work)
+
+def _failed_rows(conn: db.Connection, failed: list[Entry]) -> tuple[str, str]:
+    """(title rowids, season rows) a pass's failures are marked on, as JSON
+    arrays: each entry's service rows (descriptions.service_rows), the title's own
+    for a title's entry and the season's for a season's."""
+    found = descriptions.services_rows(
+        conn, [(entry.source, entry.media, entry.own_id, None) for entry in failed])
+    titles = [row["rid"] for entry, held in zip(failed, found) if entry.season == TITLE
+              for row in held]
+    seasons = [[entry.source, entry.media, str(row["source_id"]), entry.season]
+               for entry, held in zip(failed, found) if entry.season != TITLE for row in held]
+    return json.dumps(titles), json.dumps(seasons)
+
+
+async def _settle_entries(done: list[Entry], failed: list[Entry], now: int) -> None:
+    """Take a pass's entries off the queue, and mark the rows of those that
+    failed, so a view leaves them alone for a while (`_backed_off`) — one turn of
+    the writer queue for the whole pass."""
+    if not done:
+        return
+
+    def _work(conn, marked: tuple[str, str]) -> None:
+        titles, seasons = marked
+        conn.execute(_DEQUEUE, (json.dumps([list(entry) for entry in done]),))
+        if titles != "[]":
+            conn.execute(_FAIL_TITLES, {"now": now, "rows": titles})
+        if seasons != "[]":
+            conn.execute(_FAIL_SEASONS, {"now": now, "rows": seasons})
+
+    await db.transaction(_work, prepare=lambda conn: _failed_rows(conn, failed)
+                         if failed else ("[]", "[]"))
 
 
 def shortened(address: str) -> str:
@@ -624,13 +661,26 @@ def _log_refreshed(entry: Entry, reason: str, written: descriptions.Written | No
 
 async def drain(settings, *, now: int | None = None) -> int:
     """One pass over the queue: what is waiting, the front first, as many of
-    each service's rows as its minute allows (`PER_MINUTE`), each asked again and
-    filed. Returns how many rows were refreshed.
+    each service's rows as its minute allows (`PER_MINUTE`), each asked again —
+    and every answer filed together once the pass has asked them all. Returns
+    how many rows were refreshed.
 
     A SERVICE THIS INSTANCE CANNOT ASK leaves its rows queued — a credential
     filled in later finds them waiting. One that fails leaves its rows marked
-    (`_record_failure`) and drops the entry; the next view asks again once the
+    (`_settle_entries`) and drops the entry; the next view asks again once the
     backoff has passed.
+
+    ASKED FIRST, THEN WRITTEN ONCE. Each answer used to be filed as it arrived and
+    its entry dropped after it — two or three write transactions a title, each a
+    turn in the one queue every write in the process waits in (app/db.py's
+    `_writer_queue`), a viewer's own included. MEASURED on a copy of the
+    development database, draining a backlog of TMDB titles at its six hundred a
+    minute: 3,700 turns in 65 s of passes, 57 a second, and a filter save went
+    from 0.36 s between passes to 0.52 s during one. Now a pass's answers are one
+    transaction of a fixed number of statements (descriptions.store_many) and its
+    dequeues and failures another, so they reach the store together once the
+    pass has asked them all — and a pass a restart interrupts has written
+    nothing: its rows are still queued, and the next pass asks them again.
     """
     ts = db.now() if now is None else now
     askable = dict(_askable(settings))
@@ -655,20 +705,22 @@ async def drain(settings, *, now: int | None = None) -> int:
         return 0
     for source, batch in batches.items():
         _asked[source].extend([moment] * len(batch))
-    tz = ZoneInfo(settings.timezone)
-    refreshed = 0
 
-    # What this pass did for each heal's title: (entry, what became of it).
-    healed: dict[str, list[tuple[Entry, str]]] = {}
+    # What became of each entry the pass asked about, in the order the answers
+    # came back: an answer to file, a refresh that could not be made, or a fault.
+    # An entry in none of them was left queued.
+    answered: list[tuple[Entry, str, descriptions.Answer]] = []
+    failed: list[tuple[Entry, str]] = []
+    faulted: list[tuple[Entry, Exception]] = []
     # The services that told this pass to slow down (`_one`).
     slowed: set[str] = set()
 
-    async def _one(source: str, entry: Entry, reason: str, gate: asyncio.Semaphore) -> bool:
+    async def _one(source: str, entry: Entry, reason: str, gate: asyncio.Semaphore) -> None:
         async with gate:
             if source in slowed:
-                return False   # left queued, for the next pass
+                return   # left queued, for the next pass
             try:
-                written = await _refresh(settings, askable[source], entry, tz=tz)
+                found = await _look_up(settings, askable[source], entry)
             except SourceUnavailable as exc:
                 if exc.status == RATE_LIMITED:
                     # THE SERVICE SAID SLOW DOWN, which is not this title's
@@ -681,46 +733,69 @@ async def drain(settings, *, now: int | None = None) -> int:
                         logger.info("title store: %s asked us to slow down; its queued "
                                     "rows wait for the next pass", source)
                     slowed.add(source)
-                    return False
+                    return
                 logger.log(logging.INFO if reason == REASON_DEAD_PICTURE else logging.DEBUG,
                            "title store: %s could not refresh %s %s (%s): %s",
                            source, entry.media, entry.own_id, reason, exc)
-                await _record_failure(entry, ts)
-                await _dequeue(entry)
-                if entry in _heals:
-                    healed.setdefault(_heals.pop(entry)[0], []).append((entry, "failed"))
-                return False
-            except Exception:
-                # Not a service's answer at all — a fault here. The entry goes, as
-                # every answered one does, so it is not retried every pass; the
-                # pass logs it (below).
-                await _dequeue(entry)
-                raise
-            await _dequeue(entry)
-            if written is None:
-                # AN ANSWER THAT SAYS NOTHING IS A REFRESH THAT DID NOT HAPPEN,
-                # and is marked as one, so the backoff holds it back: a title the
-                # service no longer knows would otherwise be asked about again on
-                # every view — and a sparse listing on every heartbeat
-                # (`queue_listed`), whose give-up reads this count.
-                await _record_failure(entry, ts)
-            _log_refreshed(entry, reason, written)
-            if entry in _heals:
-                healed.setdefault(_heals.pop(entry)[0], []).append((
-                    entry, shortened(written.poster) if written is not None else "nothing"))
-            return True
+                failed.append((entry, reason))
+                return
+            # Not a service's answer at all — a fault here. The entry goes, as every
+            # answered one does, so it is not retried every pass; the pass logs it.
+            except Exception as exc:
+                faulted.append((entry, exc))
+                return
+            answered.append((entry, reason, found))
 
     for source, batch in batches.items():
         gate = asyncio.Semaphore(IN_FLIGHT[source])
-        results = await asyncio.gather(*(_one(source, entry, reason, gate)
-                                         for entry, reason in batch),
-                                       return_exceptions=True)
-        for (entry, _reason), result in zip(batch, results):
-            if isinstance(result, BaseException):
-                logger.warning("title store: refreshing %s %s %s failed", entry.source,
-                               entry.media, entry.own_id, exc_info=result)
-            elif result:
-                refreshed += 1
+        await asyncio.gather(*(_one(source, entry, reason, gate) for entry, reason in batch))
+
+    filed: list[descriptions.Written | None | Exception] = []
+    unfiled: list[Entry] = []
+    if answered:
+        try:
+            filed = await descriptions.store_many([found for _e, _r, found in answered],
+                                                  tz=ZoneInfo(settings.timezone))
+        # THE PASS'S WRITE FAILED AS A WHOLE, and each answer in it with it: their
+        # entries go, as a fault's does, so a broken write is not retried every
+        # pass, and a view queues each again while it is still due.
+        except Exception:
+            logger.warning("title store: a refresh pass could not file its %d answer(s)",
+                           len(answered), exc_info=True)
+            unfiled = [entry for entry, _reason, _found in answered]
+            answered = []
+
+    # What this pass did for each heal's title: (entry, what became of it).
+    healed: dict[str, list[tuple[Entry, str]]] = {}
+    refreshed = 0
+    said_nothing: list[Entry] = []
+    for (entry, reason, _found), written in zip(answered, filed):
+        if isinstance(written, Exception):
+            faulted.append((entry, written))
+            continue
+        if written is None:
+            # AN ANSWER THAT SAYS NOTHING IS A REFRESH THAT DID NOT HAPPEN, and is
+            # marked as one, so the backoff holds it back: a title the service no
+            # longer knows would otherwise be asked about again on every view — and
+            # a sparse listing on every heartbeat (`queue_listed`), whose give-up
+            # reads this count.
+            said_nothing.append(entry)
+        _log_refreshed(entry, reason, written)
+        if entry in _heals:
+            healed.setdefault(_heals.pop(entry)[0], []).append((
+                entry, shortened(written.poster) if written is not None else "nothing"))
+        refreshed += 1
+    for entry, _reason in failed:
+        if entry in _heals:
+            healed.setdefault(_heals.pop(entry)[0], []).append((entry, "failed"))
+    for entry, exc in faulted:
+        logger.warning("title store: refreshing %s %s %s failed", entry.source,
+                       entry.media, entry.own_id, exc_info=exc)
+    await _settle_entries(
+        [entry for entry, _r, _f in answered] + [entry for entry, _r in failed]
+        + [entry for entry, _exc in faulted] + unfiled,
+        [entry for entry, _r in failed] + said_nothing, ts)
+
     if refreshed:
         logger.info("title store: refreshed %d queued row(s) — %s", refreshed,
                     ", ".join(f"{source} {len(batch)}" for source, batch in batches.items()))

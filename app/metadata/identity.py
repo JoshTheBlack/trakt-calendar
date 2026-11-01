@@ -472,19 +472,71 @@ def plan_settles(conn: db.Connection, titles: Iterable[Settling], *, now: int) -
     can make them before taking the write lock (db.transaction's `prepare`) and
     write them inside it (`SettlePlan.apply`)."""
     titles = list(titles)
-    known = _Known(conn)
-    known.prefetch(titles)
-    targets = [_settle(known, title, now=now) for title in titles]
-    identities: list[Identity | None] = []
-    for title, target in zip(titles, targets):
-        if target is None:
-            identities.append(None)
-            continue
-        key = known.follow(target)
-        row = known.row(key)
-        identities.append(Identity(key, str(title.media),
-                                   dict(row.ids) if row is not None else {}))
-    return SettlePlan(identities, list(known._retired), dict(known._unwritten), now)
+    planner = Planner(conn, now=now)
+    planner.prefetch(titles)
+    for title in titles:
+        planner.settle(title)
+    return planner.plan()
+
+
+class Planner:
+    """`plan_settles` one title at a time, with `resolve` answered between them as
+    the tables would answer it had each title so far been settled and written.
+
+    FOR A WRITER WHOSE NEXT TITLE DEPENDS ON THE LAST ONE'S SETTLE: which rows a
+    service holds for a title is read by the key its ids resolve to, and an earlier
+    title in the same batch can register a title or re-key one that changes that
+    answer (app/metadata/descriptions.py's `plan`). Reads only, like
+    `plan_settles`; `plan` is what `SettlePlan.apply` writes."""
+
+    def __init__(self, conn: db.Connection, *, now: int):
+        self._known = _Known(conn)
+        self._now = now
+        self._settled: list[tuple[Settling, str | None]] = []
+
+    def prefetch(self, titles: Iterable[Settling]) -> None:
+        """Read, together, what settling or resolving `titles` will ask — as many
+        times as a caller learns of more; what is already known is not read
+        again (`_Known.prefetch`)."""
+        self._known.prefetch(list(titles))
+
+    def resolve(self, media: Any, ids: Mapping[str, Any] | None) -> str | None:
+        """`resolve`, against what the tables hold and every title this batch has
+        settled so far."""
+        return _resolve(self._known, media, ids)
+
+    def moved_to(self, key: str | None) -> str | None:
+        """Where the re-keys settled so far moved a key's holders: `key` itself
+        unless one retired it."""
+        return self._known.moved_to(key)
+
+    @property
+    def rekeyed(self) -> bool:
+        """Whether any title settled so far re-keyed one."""
+        return bool(self._known._retired)
+
+    def settle(self, title: Settling) -> str | None:
+        """Decide one title, after every one before it: the key it settles under
+        as the tables would answer now, or None. The n-th title settled is the
+        n-th of `plan`'s identities, which names the key it ends under."""
+        target = _settle(self._known, title, now=self._now)
+        self._settled.append((title, target))
+        return target
+
+    def plan(self) -> SettlePlan:
+        """Everything settled, each identity the key its title answers to once
+        the batch is done (`settle_many` says why)."""
+        identities: list[Identity | None] = []
+        for title, target in self._settled:
+            if target is None:
+                identities.append(None)
+                continue
+            key = self._known.follow(target)
+            row = self._known.row(key)
+            identities.append(Identity(key, str(title.media),
+                                       dict(row.ids) if row is not None else {}))
+        return SettlePlan(identities, list(self._known._retired), dict(self._known._unwritten),
+                          self._now)
 
 
 def _settle(known: _Known, title: Settling, *, now: int) -> str | None:

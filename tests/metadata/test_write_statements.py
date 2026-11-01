@@ -9,14 +9,17 @@ size and requires the same count.
 """
 from __future__ import annotations
 
+import json
 from datetime import date
+from types import SimpleNamespace
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 from app import db
 from app.calendar import entries
 from app.metadata import descriptions, refresh
 from app.metadata import rows as title_rows
-from app.providers.base import Media, Record, Source
+from app.providers.base import Media, Record, SeasonsAnswer, Source, SourceUnavailable
 from tests.metadata.test_panel import _answer
 from tests.support import DatabaseTestCase, statements_per_transaction
 
@@ -93,6 +96,112 @@ class AnEnrichmentPassesStatementsDoNotGrowWithItsAnswersTests(DatabaseTestCase)
         finally:
             title_rows.db.fetch_value = real
         self.assertEqual(await db.fetch_value("SELECT enriched FROM title_metadata"), 0)
+
+
+class _Port:
+    """TMDB's detail port as a refresh pass meets it: every third title cannot be
+    asked, and every show answers its season list and the season named."""
+
+    def catalogue_configured(self, settings):
+        return True
+
+    async def fetch_details(self, settings, media, source_id, season, *, cache_only=False,
+                            fresh=False):
+        if int(source_id) % 3 == 0:
+            raise SourceUnavailable("down")
+        return {**_answer("tmdb", str(source_id), season),
+                "episodes": [] if season is None else [
+                    {"number": n, "title": f"E{n}", "first_aired": f"2026-07-0{n}",
+                     "rating": None, "overview": "", "episode_type": "", "runtime": None}
+                    for n in (1, 2)]}
+
+    async def fetch_seasons(self, settings, source_id, media, *, cached_only=False, fresh=False):
+        return SeasonsAnswer(seasons=[{"season": 1, "episode_count": 2},
+                                      {"season": 2, "episode_count": 6}],
+                             named_season=None, ids={}, network="")
+
+
+class ARefreshPassesStatementsDoNotGrowWithItsAnswersTests(DatabaseTestCase):
+    """A pass asks every row it takes, then files every answer in one transaction
+    and takes its entries off the queue — marking the rows of those that failed —
+    in one more (refresh.drain)."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        for patch in (mock.patch.object(refresh, "_askable", lambda settings: [("tmdb", _Port())]),
+                      mock.patch.object(refresh, "_asked", {})):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    async def _pass(self, ids: range) -> list[int]:
+        for n in ids:
+            # Described already, so a failure has rows to mark.
+            await descriptions.store("tmdb", "show", str(n), _answer("tmdb", str(n), 1),
+                                     asked_season=1, tz=ZoneInfo("UTC"))
+        await db.execute(
+            "INSERT INTO metadata_refresh (source, media, source_id, season, queued_at, reason) "
+            "SELECT 'tmdb', 'show', json_extract(value, '$[0]'), json_extract(value, '$[1]'), "
+            "1, 'viewed' FROM json_each(?)",
+            (json.dumps([[str(n), season] for n in ids for season in (refresh.TITLE, 1)]),))
+        with statements_per_transaction() as counted:
+            refreshed = await refresh.drain(SimpleNamespace(timezone="UTC"), now=2)
+        self.assertEqual(refreshed, 2 * sum(1 for n in ids if n % 3))
+        self.assertEqual(len(counted), 2, "one write for the answers, one for the entries")
+        return counted
+
+    async def test_a_pass_of_thirty_costs_what_a_pass_of_three_does(self):
+        self.assertEqual(await self._pass(range(1, 4)), await self._pass(range(4, 34)))
+        self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM metadata_refresh"), 0)
+        self.assertEqual(await db.fetch_value(
+            "SELECT COUNT(*) FROM title_metadata WHERE fail_count = 1"), 11)
+        self.assertEqual(await db.fetch_value(
+            "SELECT COUNT(*) FROM season_metadata WHERE season = 1 AND fail_count = 1"), 11)
+        self.assertEqual(await db.fetch_value(
+            "SELECT COUNT(*) FROM season_metadata WHERE season = 2"), 22)
+
+
+class APassThatCannotFileAnAnswerTests(DatabaseTestCase):
+    """Filed together, one answer's fault must cost the pass nothing else, and a
+    write that fails whole must not leave its entries to be asked every minute."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        port = _Port()
+        real = port.fetch_details
+
+        async def one_broken(settings, media, source_id, season, *, cache_only=False,
+                             fresh=False):
+            answer = await real(settings, media, source_id, season, fresh=fresh)
+            if str(source_id) == "2":
+                answer["episodes"] = [{"number": "two"}]
+            return answer
+
+        port.fetch_details = one_broken
+        for patch in (mock.patch.object(refresh, "_askable", lambda settings: [("tmdb", port)]),
+                      mock.patch.object(refresh, "_asked", {})):
+            patch.start()
+            self.addCleanup(patch.stop)
+        await db.execute(
+            "INSERT INTO metadata_refresh (source, media, source_id, season, queued_at, reason) "
+            "VALUES ('tmdb', 'show', '1', 1, 1, 'viewed'), ('tmdb', 'show', '2', 1, 1, 'viewed'), "
+            "('tmdb', 'show', '4', 1, 1, 'viewed')")
+
+    async def test_an_answer_that_cannot_be_read_drops_only_its_entry(self):
+        with self.assertLogs(refresh.logger, "WARNING"):
+            self.assertEqual(await refresh.drain(SimpleNamespace(timezone="UTC"), now=2), 2)
+        self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM metadata_refresh"), 0)
+        self.assertEqual(sorted(row["source_id"] for row in await db.fetch_all(
+            "SELECT source_id FROM title_metadata")), ["1", "4"])
+
+    async def test_a_write_that_fails_whole_drops_the_passs_entries(self):
+        async def locked(answers, *, tz):
+            raise db.DatabaseError("database is locked")
+
+        with mock.patch.object(descriptions, "store_many", locked), \
+                self.assertLogs(refresh.logger, "WARNING"):
+            self.assertEqual(await refresh.drain(SimpleNamespace(timezone="UTC"), now=2), 0)
+        self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM metadata_refresh"), 0)
+        self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM title_metadata"), 0)
 
 
 class AQueuesStatementsDoNotGrowWithWhatItQueuesTests(DatabaseTestCase):

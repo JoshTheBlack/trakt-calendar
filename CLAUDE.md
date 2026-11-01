@@ -79,7 +79,11 @@ the payload inside it. THE SAME GOES FOR A LOOP OF TRANSACTIONS: work fanned out
 at once that writes as each piece lands takes a worker thread per write, and the
 Simkl drain's 300 lookups doing that took all forty and left a month's page
 waiting 29.7 s — so a pass looks up first and writes its batch once
-(`calendar/enrich.py`'s `_record`). `tests/support.py`'s `statements_per_transaction` holds
+(`calendar/enrich.py`'s `_record`; the title store's refresh pass,
+`metadata/refresh.py`'s `drain`, files every answer through
+`descriptions.store_many` — `plan` decides each answer as if the ones before it had
+been written, `apply` writes them in a fixed count — and takes its entries off the
+queue in one more). `tests/support.py`'s `statements_per_transaction` holds
 each writer to the same count for ten rows as for a hundred
 (tests/calendar/test_write_statements.py, tests/metadata/test_write_statements.py,
 tests/calendar/test_enrich.py's `APassWritesItsBatchOnceTests`),

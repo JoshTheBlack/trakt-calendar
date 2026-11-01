@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import date, datetime, timezone
 from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
@@ -56,8 +56,8 @@ logger = logging.getLogger(__name__)
 TITLE_REFRESH_SECONDS = 3 * 24 * 60 * 60
 
 # THE ANSWER'S KEY SET, which a stored answer must share with a fresh one —
-# base.DetailPort's, held there by the conformance test and here by this
-# module's own (tests/metadata/test_descriptions.py).
+# base.DetailPort's, held there by the conformance test and here by
+# tests/metadata/test_panel.py.
 ANSWER_KEYS = frozenset({
     "title", "year", "overview", "season_overview", "status", "network", "country",
     "language", "anime_type", "release_types_by_country", "ids", "poster", "runtime",
@@ -84,7 +84,7 @@ def _states_own_id(row, source: str, own_id: Any) -> bool:
 
 
 def service_rows(conn: db.Connection, source: str, media: str, own_id: Any,
-                 ids: Mapping[str, Any] | None = None) -> list:
+                 ids: Mapping[str, Any] | None = None) -> list[dict]:
     """Every row `source` holds for the title it knows as `own_id`, usually one —
     a slug-filed listing and a number-filed description of one title are two.
 
@@ -94,20 +94,193 @@ def service_rows(conn: db.Connection, source: str, media: str, own_id: Any,
     key holds no row of this service, is found by the id inside each of the
     service's own rows — a scan of one service's rows, kept for the paths that
     know a service's id and nothing else (a queued refresh).
+
+    ONE TITLE IS A BATCH OF ONE (`services_rows`). Each row is a dict of every
+    column, and `rid` its rowid.
     """
-    source, media = str(source), str(media)
-    key = identity.resolve(conn, media, {**dict(ids or {}), _namespace(source): own_id})
-    if key is not None:
-        found = [row for row in conn.execute(
-            f"SELECT rowid AS rid, * FROM {rows.TITLES} "
-            "WHERE title_key = ? AND source = ? AND media = ?", (key, source, media))
-            if _states_own_id(row, source, own_id)]
-        if found:
-            return found
-    return conn.execute(
-        f"SELECT rowid AS rid, * FROM {rows.TITLES} WHERE source = ? AND media = ? "
-        "AND (source_id = ? OR CAST(json_extract(ids_json, '$.' || ?) AS TEXT) = ?)",
-        (source, media, str(own_id), _namespace(source), str(own_id))).fetchall()
+    return services_rows(conn, [(source, media, own_id, ids)])[0]
+
+
+def services_rows(conn: db.Connection,
+                  wanted: Iterable[tuple[str, str, Any, Mapping[str, Any] | None]]
+                  ) -> list[list[dict]]:
+    """`service_rows` for each (source, media, own id, ids) of `wanted`, in a
+    number of reads that does not grow with them — what a refresh pass's
+    failures are marked on, read before its write takes the lock."""
+    wanted = [(str(source), str(media), own_id, ids) for source, media, own_id, ids in wanted]
+    held = _Rows(conn, identity.Planner(conn, now=db.now()))
+    held.prefetch([(source, media, own_id, ids) for source, media, own_id, ids in wanted])
+    return [held.found(source, media, own_id, ids) for source, media, own_id, ids in wanted]
+
+
+# EVERY COLUMN OF A TITLE ROW, in the order a batch's reads spell it: rows.WORDS
+# and rows.NOT_WORDS name each once (tests/metadata/test_retention.py holds them
+# to the schema), so a row read here is the whole row.
+_ROW_COLUMNS = (*rows.NOT_WORDS[rows.TITLES], *rows.WORDS[rows.TITLES])
+_ROW = "json_array(t.rowid, " + ", ".join(f"t.{column}" for column in _ROW_COLUMNS) + ")"
+
+# EACH READ ANSWERS IN ONE ROW, however many titles it names (identity.py's reads
+# say why: the driver gives up the GIL around every row it steps through, and a
+# read made inside a write transaction holds the lock for all of it).
+#   Every service's rows under the keys named, through the index on title_key.
+_UNDER_KEYS = (f"SELECT json_group_array({_ROW}) FROM {rows.TITLES} t "
+               "WHERE t.title_key IN (SELECT value FROM json_each(?))")
+
+
+def _stating_sql(sources: Iterable[str]) -> str:
+    """Every row of each of `sources` that states one of the own ids named for
+    it (`:<source>`, a JSON array of text) — by its source id, or the id its id
+    map states for the service, which no index reaches: a scan of that service's
+    rows, an arm per service. Service names come from the registry and their
+    namespaces from rows.ID_NAMESPACE, never from input."""
+    arms = [f"SELECT {_ROW} AS r FROM {rows.TITLES} t WHERE t.source = '{source}' "
+            f"AND (t.source_id IN (SELECT value FROM json_each(:{source})) "
+            f"OR CAST(json_extract(t.ids_json, '$.{_namespace(source)}') AS TEXT) "
+            f"IN (SELECT value FROM json_each(:{source})))"
+            for source in sources]
+    return f"SELECT json_group_array(json(r)) FROM ({' UNION ALL '.join(arms)})"
+
+
+class _Rows:
+    """The title rows a batch of answers is about: what the store holds, read in
+    a few statements, and each answer's writes applied here as the answer is
+    planned (`plan`) — so every answer finds exactly the rows, and reads exactly
+    the words, it would have found had each answer before it been written in a
+    transaction of its own.
+
+    WHAT IS READ UP FRONT (`prefetch`) is `service_rows`' two reads for every
+    title at once: the rows under each title's key, and — for a title whose key
+    holds none, or whose ids name no key — every row stating its own id. Read
+    again only when an answer needs what was not read: a key no answer resolved
+    to at first, or, once a re-key in the batch has moved rows between keys,
+    every row stating each title's own id (`found` says why).
+    """
+
+    def __init__(self, conn: db.Connection, planner: identity.Planner):
+        self._conn = conn
+        self._planner = planner
+        # (source, media, source id): the row as the batch has left it.
+        self._rows: dict[tuple[str, str, str], dict] = {}
+        # (source, media, own id): the rows stating it, and what each row states.
+        self._stating: dict[tuple[str, str, str], set[tuple[str, str, str]]] = {}
+        self._states: dict[tuple[str, str, str], set[str]] = {}
+        self._keys_read: set[str] = set()
+        self._whole: set[tuple[str, str, str]] = set()
+        self._titles: set[tuple[str, str, str]] = set()
+        self._after_rekey = False
+
+    # -- reading --------------------------------------------------------------
+
+    def prefetch(self, wanted: Iterable[tuple[str, str, Any, Mapping[str, Any] | None]]) -> None:
+        """Read what finding each (source, media, own id, ids) of `wanted` takes:
+        their identities (identity.Planner.prefetch), the rows under the keys
+        they resolve to, and every row stating the own id of each title those
+        keys do not find — six statements however many there are."""
+        wanted = [(str(source), str(media), str(own_id), _with_own(source, own_id, ids))
+                  for source, media, own_id, ids in wanted]
+        self._titles.update((source, media, own_id) for source, media, own_id, _ids in wanted)
+        self._planner.prefetch(identity.Settling(media, ids) for _s, media, _o, ids in wanted)
+        keys = [self._planner.resolve(media, ids) for _s, media, _o, ids in wanted]
+        self._read_keys(key for key in keys if key is not None)
+        self._read_whole([(source, media, own_id)
+                          for (source, media, own_id, _ids), key in zip(wanted, keys)
+                          if key is None or not self._under(source, media, own_id, key)])
+
+    def _read_keys(self, keys: Iterable[str]) -> None:
+        wanted = sorted({key for key in keys if key not in self._keys_read})
+        if not wanted:
+            return
+        (found,) = self._conn.execute(_UNDER_KEYS, (json.dumps(wanted),)).fetchone()
+        for values in json.loads(found):
+            self._hold(dict(zip(("rid", *_ROW_COLUMNS), values)))
+        self._keys_read.update(wanted)
+
+    def _read_whole(self, titles: Iterable[tuple[str, str, str]]) -> None:
+        wanted = {title for title in titles if title not in self._whole}
+        if not wanted:
+            return
+        by_source: dict[str, set[str]] = {}
+        for source, _media, own_id in wanted:
+            by_source.setdefault(source, set()).add(own_id)
+        sources = sorted(by_source)
+        (found,) = self._conn.execute(_stating_sql(sources), {
+            source: json.dumps(sorted(by_source[source])) for source in sources}).fetchone()
+        for values in json.loads(found):
+            self._hold(dict(zip(("rid", *_ROW_COLUMNS), values)))
+        self._whole.update(wanted)
+
+    def _hold(self, row: dict) -> None:
+        """A row read from the store — unless the batch already holds it, and so
+        knows better what it says now."""
+        unique = (str(row["source"]), str(row["media"]), str(row["source_id"]))
+        if unique not in self._rows:
+            self._rows[unique] = row
+            self._index(unique)
+
+    def _index(self, unique: tuple[str, str, str]) -> None:
+        """Note which own ids a row states (`_states_own_id`'s rule), anew."""
+        source, media, source_id = unique
+        stated = _loads(self._rows[unique]["ids_json"]).get(_namespace(source))
+        states = {source_id, *(() if stated is None else (str(stated),))}
+        for own_id in self._states.get(unique, set()) - states:
+            self._stating[(source, media, own_id)].discard(unique)
+        for own_id in states:
+            self._stating.setdefault((source, media, own_id), set()).add(unique)
+        self._states[unique] = states
+
+    def _under(self, source: str, media: str, own_id: str, key: str) -> list[dict]:
+        """The rows stating `own_id` filed under `key` now."""
+        return [self._rows[unique] for unique in self._stating.get((source, media, own_id), ())
+                if self._planner.moved_to(self._rows[unique]["title_key"]) == key]
+
+    def found(self, source: str, media: str, own_id: Any,
+              ids: Mapping[str, Any] | None) -> list[dict]:
+        """`service_rows`' answer as the batch stands: the rows of `source` under
+        the key `ids` resolve to now that state `own_id`, in the order its query
+        reads them (the key's index, by rowid); else every row stating it (the
+        service's own index, by source id)."""
+        source, media, own_id = str(source), str(media), str(own_id)
+        if self._planner.rekeyed and not self._after_rekey:
+            # A RE-KEY MOVES ROWS BETWEEN KEYS, so the rows read under a key are
+            # no longer all the rows under it: a row filed under the key retired
+            # is under the new one now. Every row stating each title's own id is
+            # read, once, and the keys are then read off the rows themselves.
+            self._after_rekey = True
+            self._read_whole(self._titles)
+        key = self._planner.resolve(media, _with_own(source, own_id, ids))
+        if key is not None:
+            self._read_keys([key])
+            first = self._under(source, media, own_id, key)
+            if first:
+                return sorted(first, key=_rowid_order)
+        self._read_whole([(source, media, own_id)])
+        return sorted((self._rows[unique] for unique in
+                       self._stating.get((source, media, own_id), ())),
+                      key=lambda row: str(row["source_id"]))
+
+    # -- writing --------------------------------------------------------------
+
+    def changed(self, row: dict) -> None:
+        """`row` was rewritten by the answer being planned."""
+        self._index((str(row["source"]), str(row["media"]), str(row["source_id"])))
+
+    def create(self, row: dict) -> dict:
+        """A row the answer being planned adds — after every stored row in any
+        order a later answer reads, as the rowid SQLite gives it would be."""
+        unique = (str(row["source"]), str(row["media"]), str(row["source_id"]))
+        self._rows[unique] = {**dict.fromkeys(_ROW_COLUMNS), **row, "rid": None}
+        self._index(unique)
+        return self._rows[unique]
+
+
+def _with_own(source: str, own_id: Any, ids: Mapping[str, Any] | None) -> dict:
+    """`ids` with the service's own id for the title — what `service_rows`
+    resolves the title's key from."""
+    return {**dict(ids or {}), _namespace(source): own_id}
+
+
+def _rowid_order(row: dict) -> tuple[bool, int]:
+    return row["rid"] is None, int(row["rid"] or 0)
 
 
 def described_row(found: list):
@@ -385,19 +558,22 @@ def season_stale_after(days: list[date | None], now: int) -> int:
     return rows.episode_stale_after(noon, now)
 
 
-_TITLE_COLUMNS = ("title_key", "ids_json", "year", "network", "country", "language",
-                  "certification", "status", "overview", "runtime", "genres_json",
-                  "ratings_json", "anime_type", "release_types_json", "first_aired",
-                  "homepage", "season_count", "videos_json", "keywords_json", "show_type",
-                  "facts_known")
+# The words a description states for every title row it writes, in one spelling
+# (`_title_values`), and with them what filing an answer sets on the row — the
+# columns `_UPSERT_DESCRIBED` writes, `title_key` beside them.
+_DESCRIBED = ("ids_json", "year", "network", "country", "language", "certification",
+              "status", "overview", "runtime", "genres_json", "ratings_json", "anime_type",
+              "release_types_json", "first_aired", "homepage", "season_count", "videos_json",
+              "keywords_json", "show_type", "facts_known")
+_WRITTEN = (*_DESCRIBED, "title", "title_fold", "poster", "cast_json", "enriched",
+            "fetched_at", "stale_after", "failed_at", "fail_count")
 
 
-def _title_values(answer: Mapping[str, Any], source: str, key: str, ids: dict) -> dict:
+def _title_values(answer: Mapping[str, Any], source: str, ids: dict) -> dict:
     year = answer.get("year")
     runtime = answer.get("runtime")
     return {
         **rows.facts_values(answer.get("keywords"), answer.get("show_type")),
-        "title_key": key,
         "ids_json": json.dumps(ids, sort_keys=True),
         "year": str(year) if isinstance(year, int) else str(year or ""),
         "network": str(answer.get("network") or ""),
@@ -444,6 +620,18 @@ class Written(NamedTuple):
                 if str(self.previous_ids.get(name) or "") != str(self.ids.get(name) or "")}
 
 
+class Answer(NamedTuple):
+    """One service's details answer to file (`write_many`): the service, the
+    title by the id that service is asked by, the answer, the season it was asked
+    about (None for the title alone), and a season list read beside it."""
+    source: str
+    media: str
+    own_id: Any
+    answer: Mapping[str, Any]
+    asked_season: int | None = None
+    seasons: list[Mapping[str, Any]] | None = None
+
+
 def write(conn: db.Connection, source: str, media: str, own_id: Any,
           answer: Mapping[str, Any], *, asked_season: int | None, tz: ZoneInfo,
           now: int) -> Written | None:
@@ -459,85 +647,280 @@ def write(conn: db.Connection, source: str, media: str, own_id: Any,
 
     A NAME OR A PICTURE THE ANSWER DOES NOT STATE IS NOT ERASED: a listing may
     have given the row one the per-title answer leaves out.
+
+    ONE ANSWER IS A BATCH OF ONE (`write_many`).
     """
-    source, media = str(source), str(media)
-    if not answered(answer, source):
-        return None
+    (filed,) = write_many(conn, [Answer(str(source), str(media), own_id, answer, asked_season)],
+                          tz=tz, now=now)
+    if isinstance(filed, Exception):
+        raise filed
+    return filed
+
+
+def write_many(conn: db.Connection, answers: Iterable[Answer], *, tz: ZoneInfo,
+               now: int) -> list[Written | None | Exception]:
+    """`write` for each of `answers`, inside the caller's transaction, and a
+    season list beside each that carries one — in a number of statements that
+    does not grow with them (`apply`). One entry per answer, in order: what
+    filing it changed, None for an answer that says nothing, or — as
+    asyncio.gather's `return_exceptions` hands one back — the exception reading
+    that answer raised, which costs the batch nothing else."""
+    return apply(conn, plan(conn, answers, tz=tz, now=now))
+
+
+class _Spelled(NamedTuple):
+    """What filing one answer writes that the store's rows do not decide."""
+    ids: dict
+    values: dict
+    title: str
+    poster: str
+    # The title's own cast, None for an answer about a season, which states that
+    # season's.
+    cast: str | None
+    # The season the answer is about: its row's columns after the title's, and
+    # each of its episodes'.
+    season: tuple[list, list[list]] | None
+    # Each season the list beside it names, its columns after the title's.
+    listed: list[list]
+
+
+def _spell(item: Answer, *, tz: ZoneInfo, now: int) -> _Spelled:
+    answer, source = item.answer, item.source
     ids = id_rules.canonical(answer.get("ids") or {})
-    ids[_namespace(source)] = id_rules.typed(_namespace(source), own_id)
-    found = service_rows(conn, source, media, own_id, ids)
-    before = found[0] if found else None
-    settled = identity.settle(
-        conn, media, ids, filed_under=str(found[0]["title_key"]) if found else None,
-        fallback=identity.per_source_key(source, own_id), now=now)
-    key = settled.key if settled is not None else identity.per_source_key(source, own_id)
-    values = _title_values(answer, source, key, ids)
-    title = str(answer.get("title") or "")
-    poster = str(answer.get("poster") or "")
-    # THE TITLE'S OWN CAST, only from an answer about the title: an answer about
-    # a season states that season's.
-    cast = (json.dumps(list(answer.get("cast") or []))
-            if asked_season is None else None)
-    if found:
-        assignments = [f"{column} = ?" for column in values]
-        params: list = list(values.values())
-        if title:
-            assignments += ["title = ?", "title_fold = ?"]
-            params += [title, rows.fold_title(title)]
-        if poster:
-            assignments.append("poster = ?")
-            params.append(poster)
-        if cast is not None:
-            assignments.append("cast_json = ?")
-            params.append(cast)
-        assignments.append("enriched = 1, stale_after = ?, failed_at = NULL, fail_count = 0, "
-                           "fetched_at = ?")
-        params.append(now + TITLE_REFRESH_SECONDS)
-        # What this answer rewrote, for the clock (rows.kept_clock): a name or a
-        # picture it did not state, and the title's cast from an answer about a
-        # season, are older words left in place.
-        rewritten = {*values, *(("title",) if title else ()), *(("poster",) if poster else ()),
-                     *(("cast_json",) if cast is not None else ())}
-        for row in found:
-            conn.execute(f"UPDATE {rows.TITLES} SET {', '.join(assignments)} "
-                         "WHERE rowid = ?",
-                         (*params, rows.kept_clock(source, rows.TITLES, row, rewritten, now),
-                          row["rid"]))
-        source_ids = [str(row["source_id"]) for row in found]
-    else:
-        columns = ["source", "media", "source_id", *values, "title", "title_fold",
-                   "poster", "cast_json", "enriched", "fetched_at", "stale_after"]
-        conn.execute(
-            f"INSERT INTO {rows.TITLES} ({', '.join(columns)}) "
-            f"VALUES ({', '.join('?' * len(columns))})",
-            (source, media, str(own_id), *values.values(), title, rows.fold_title(title),
-             poster, cast or "[]", 1, now, now + TITLE_REFRESH_SECONDS))
-        source_ids = [str(own_id)]
-    # THE PICTURE IS A SIGHTING TOO, filed in the poster registry as the store
-    # writes it — under the title's tmdb id, else its key — so a service's new
-    # address reaches every page that draws a picture the moment it is learned,
-    # and a refresh that brings the same dead address leaves it capped
-    # (app/media/artwork.py's `file_sighting`).
-    if poster:
-        artwork.file_sighting(conn, media, identity.tmdb_of(key), key, source, poster, now)
+    ids[_namespace(source)] = id_rules.typed(_namespace(source), item.own_id)
     # THE SEASON THE SERVICE ANSWERED, which a service may decide for a caller
     # that named none: Simkl answers an anime's only season (its fetch_details).
     season = answer.get("season")
-    if media == str(Media.SHOW) and season not in (None, ""):
-        for source_id in source_ids:
-            _write_season(conn, source, media, source_id, int(season), answer, tz=tz, now=now)
-    return Written(
-        key=key, previous_key=str(before["title_key"]) if before is not None else None,
-        poster=poster or (str(before["poster"] or "") if before is not None else ""),
-        previous_poster=str(before["poster"] or "") if before is not None else "",
-        ids=ids, previous_ids=_loads(before["ids_json"]) if before is not None else {})
+    return _Spelled(
+        ids=ids, values=_title_values(answer, source, ids),
+        title=str(answer.get("title") or ""), poster=str(answer.get("poster") or ""),
+        cast=(json.dumps(list(answer.get("cast") or [])) if item.asked_season is None
+              else None),
+        season=(_season_tails(int(season), answer, tz=tz, now=now)
+                if item.media == str(Media.SHOW) and season not in (None, "") else None),
+        listed=_listed_tails(item.seasons or [], now))
 
 
+class _Filed(NamedTuple):
+    """`Written`, but for the key the title ends under, which is known once the
+    batch's identities are (`apply`)."""
+    settled: int
+    fallback: str
+    previous_key: str | None
+    poster: str
+    previous_poster: str
+    ids: dict
+    previous_ids: dict
+
+
+class Planned(NamedTuple):
+    """A batch of answers as `apply` writes it, decided by `plan`."""
+    settles: identity.SettlePlan
+    # Every title row the batch writes, once each, as its last answer left it —
+    # spelled for `_UPSERT_DESCRIBED` without the key it is filed under, which
+    # `keyed` names: (the settle that decides it, the key if that names none).
+    titles: str
+    keyed: list[tuple[int, str]]
+    # (settle, its fallback key, media, service, address) for each picture stated.
+    sightings: list[tuple[int, str, str, str, str]]
+    seasons: str
+    episodes: str
+    listed: str
+    filed: list[_Filed | None | Exception]
+    now: int
+
+
+def plan(conn: db.Connection, answers: Iterable[Answer], *, tz: ZoneInfo,
+         now: int) -> Planned:
+    """Decide what filing `answers` writes — reads only, for db.transaction's
+    `prepare`, so the write lock is held for `apply`'s statements and not for
+    the reading and deciding.
+
+    EACH ANSWER EXACTLY AS IF THE ONES BEFORE IT HAD BEEN WRITTEN, each in its own
+    transaction: its rows are found (`service_rows`' rule) among the rows as the
+    batch has left them, its title settled after every settle before it
+    (identity.Planner), and each row's clock kept from the row as the answer
+    finds it (rows.kept_clock) — so a show's title row and one of its seasons,
+    answered in one pass, are the same two writes they were as two transactions.
+
+    THE ANSWERS CARRYING A SEASON LIST COME LAST. A season's row is written by two
+    statements — a description of the season (`_UPSERT_SEASON`) and a list naming
+    it (`_UPSERT_LISTED_SEASON`) — and `apply` runs every description before
+    every list. Taken in that order, that is the order one transaction per answer
+    would have written them in: the order the answers arrive in is the service's,
+    and any order is one they could have arrived in.
+
+    AN ANSWER THIS CANNOT READ is that answer's failure (`write_many`), found
+    before it touches anything another answer reads.
+    """
+    answers = [item._replace(source=str(item.source), media=str(item.media))
+               for item in answers]
+    filed: list[_Filed | None | Exception] = [None] * len(answers)
+    spelled: dict[int, _Spelled] = {}
+    for at, item in enumerate(answers):
+        if not answered(item.answer, item.source):
+            continue
+        try:
+            spelled[at] = _spell(item, tz=tz, now=now)
+        # Reading one answer is pure and touches nothing: what it raises is that
+        # answer's, and the rest of the batch is filed without it.
+        except Exception as exc:
+            filed[at] = exc
+
+    planner = identity.Planner(conn, now=now)
+    held = _Rows(conn, planner)
+    held.prefetch([(item.source, item.media, item.own_id, spelled[at].ids)
+                   for at, item in enumerate(answers) if at in spelled]
+                  + [(item.source, item.media, item.own_id, None)
+                     for at, item in enumerate(answers) if at in spelled and item.seasons])
+    # And what each settle will ask about the rows found, read together.
+    planner.prefetch(identity.Settling(
+        item.media, spelled[at].ids,
+        filed_under=next((str(row["title_key"]) for row in held.found(
+            item.source, item.media, item.own_id, spelled[at].ids)), None),
+        fallback=identity.per_source_key(item.source, item.own_id))
+        for at, item in enumerate(answers) if at in spelled)
+
+    touched: dict[tuple[str, str, str], dict] = {}
+    keyed: dict[tuple[str, str, str], tuple[int, str]] = {}
+    sightings: list[tuple[int, str, str, str, str]] = []
+    seasons: list[list] = []
+    episodes: list[list] = []
+    listed: list[list] = []
+    settled = 0
+    for at in sorted(spelled, key=lambda at: bool(answers[at].seasons)):
+        item, words = answers[at], spelled[at]
+        found = held.found(item.source, item.media, item.own_id, words.ids)
+        before = dict(found[0]) if found else None
+        # The key the row holds as this answer finds it — before its own settle,
+        # which may re-key it.
+        previous_key = planner.moved_to(str(before["title_key"])) if before else None
+        fallback = identity.per_source_key(item.source, item.own_id)
+        key = planner.settle(identity.Settling(
+            item.media, words.ids, filed_under=str(before["title_key"]) if before else None,
+            fallback=fallback)) or fallback
+        changes = {**words.values, "title_key": key, "enriched": 1,
+                   "stale_after": now + TITLE_REFRESH_SECONDS, "failed_at": None,
+                   "fail_count": 0}
+        if words.title:
+            changes.update(title=words.title, title_fold=rows.fold_title(words.title))
+        if words.poster:
+            changes["poster"] = words.poster
+        if words.cast is not None:
+            changes["cast_json"] = words.cast
+        # What this answer rewrote, for the clock (rows.kept_clock): a name or a
+        # picture it did not state, and the title's cast from an answer about a
+        # season, are older words left in place.
+        rewritten = set(changes)
+        if not found:
+            found = [held.create({"source": item.source, "media": item.media,
+                                  "source_id": str(item.own_id), "title": "", "title_fold": "",
+                                  "poster": "", "cast_json": "[]", **changes,
+                                  "fetched_at": now})]
+        else:
+            for row in found:
+                row.update(changes,
+                           fetched_at=rows.kept_clock(item.source, rows.TITLES, row, rewritten,
+                                                      now))
+                held.changed(row)
+        for row in found:
+            unique = (str(row["source"]), str(row["media"]), str(row["source_id"]))
+            touched[unique] = row
+            keyed[unique] = (settled, fallback)
+        # THE PICTURE IS A SIGHTING TOO, filed in the poster registry as the store
+        # writes it — under the title's tmdb id, else its key — so a service's new
+        # address reaches every page that draws a picture the moment it is
+        # learned, and a refresh that brings the same dead address leaves it
+        # capped (app/media/artwork.py's `file_sighting`).
+        if words.poster:
+            sightings.append((settled, fallback, item.media, item.source, words.poster))
+        if words.season is not None:
+            season_tail, episode_tails = words.season
+            for row in found:
+                own = [item.source, item.media, str(row["source_id"])]
+                seasons.append([*own, *season_tail])
+                episodes.extend([*own, *tail] for tail in episode_tails)
+        if item.seasons and words.listed:
+            listed.extend([item.source, item.media, str(row["source_id"]), *tail]
+                          for row in held.found(item.source, item.media, item.own_id, None)
+                          for tail in words.listed)
+        filed[at] = _Filed(
+            settled, fallback,
+            previous_key=previous_key,
+            poster=words.poster or (str(before["poster"] or "") if before else ""),
+            previous_poster=str(before["poster"] or "") if before else "",
+            ids=words.ids, previous_ids=_loads(before["ids_json"]) if before else {})
+        settled += 1
+
+    return Planned(
+        settles=planner.plan(),
+        titles=json.dumps([[row["source"], row["media"], row["source_id"],
+                            *(row[column] for column in _WRITTEN)] for row in touched.values()]),
+        keyed=list(keyed.values()), sightings=sightings, seasons=json.dumps(seasons),
+        episodes=json.dumps(episodes), listed=json.dumps(listed), filed=filed, now=now)
+
+
+def apply(conn: db.Connection, planned: Planned) -> list[Written | None | Exception]:
+    """Write what `plan` decided, inside the caller's transaction — on the
+    connection it was planned on, which db.transaction's `prepare` guarantees
+    holds what it did then. A FIXED NUMBER OF STATEMENTS however many answers:
+    the identities (identity.SettlePlan, and a re-key's own repointing where one
+    re-keys a title), the title rows, the pictures, the seasons, their episodes
+    and the season lists, one statement each. A write transaction holds the
+    database's one write lock for as long as its statements take, and while the
+    event loop is busy each can wait a GIL switch interval.
+
+    EVERY ROW IS FILED UNDER THE KEY ITS TITLE ANSWERS TO ONCE THE BATCH IS DONE
+    (identity.settle_many says why), and its picture with it — the order a
+    calendar fill writes in (app/metadata/__init__.py's `write_records`)."""
+    planned.settles.apply(conn)
+    keys = [found.key if found is not None else None for found in planned.settles.identities]
+
+    def final(settled: int, fallback: str) -> str:
+        return keys[settled] or fallback
+
+    if planned.keyed:
+        conn.execute(_UPSERT_DESCRIBED, {
+            "rows": planned.titles,
+            "keys": json.dumps([final(settled, fallback) for settled, fallback in planned.keyed])})
+    artwork.file_sightings(conn, [
+        (media, identity.tmdb_of(key), key, source, url)
+        for settled, fallback, media, source, url in planned.sightings
+        for key in (final(settled, fallback),)], planned.now)
+    for sql, written in ((_upsert_season_sql(), planned.seasons),
+                         (_upsert_episode_sql(), planned.episodes),
+                         (_upsert_listed_season_sql(), planned.listed)):
+        if written != "[]":
+            conn.execute(sql, {"rows": written})
+    return [Written(final(found.settled, found.fallback), found.previous_key, found.poster,
+                    found.previous_poster, found.ids, found.previous_ids)
+            if isinstance(found, _Filed) else found
+            for found in planned.filed]
+
+
+# EVERY TITLE ROW A BATCH DESCRIBES IN ONE STATEMENT, each once, as its last
+# answer left it (`_Rows`): a row the store holds is rewritten from what was read
+# of it and what each answer changed — what a statement per answer did one answer
+# at a time — and a row it does not hold is added, the schema's defaults filling
+# what a description does not state. The key each is filed under travels beside
+# the rows (rows.json_rows' `keyed_at`), known only once the batch's identities
+# are written.
+_UPSERT_DESCRIBED = f"""
+INSERT INTO {rows.TITLES} (source, media, source_id, title_key, {', '.join(_WRITTEN)})
+{rows.json_rows(3 + len(_WRITTEN), keyed_at=3)}
+ON CONFLICT(source, media, source_id) DO UPDATE SET
+    title_key = excluded.title_key,
+    {', '.join(f'{column} = excluded.{column}' for column in _WRITTEN)}
+"""
+
+# A SEASON'S DESCRIPTION, every season of a batch in one statement, applied in
+# the batch's order (rows.json_rows). Each row: source, media, source_id, then
+# `_season_tails`' season columns.
 _UPSERT_SEASON = f"""
 INSERT INTO {rows.SEASONS}
     (source, media, source_id, season, name, overview, episode_count, premiere,
      air_dates_json, cast_json, fetched_at, stale_after, failed_at, fail_count)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0)
+{rows.json_rows(14)}
 ON CONFLICT(source, media, source_id, season) DO UPDATE SET
     name = excluded.name, overview = excluded.overview,
     episode_count = excluded.episode_count, premiere = excluded.premiere,
@@ -547,11 +930,17 @@ ON CONFLICT(source, media, source_id, season) DO UPDATE SET
 _SEASON_REWRITES: dict[str, str | None] = dict.fromkeys(
     ("name", "overview", "episode_count", "premiere", "air_dates_json", "cast_json"))
 
+
+def _upsert_season_sql() -> str:
+    return _UPSERT_SEASON + "    fetched_at = " + rows.ceiling_clock(rows.SEASONS,
+                                                                     _SEASON_REWRITES)
+
+
 # AN EPISODE'S DESCRIPTION, over whatever row a listing or the episode drain
 # left: the answer wins where it states something, and a column it does not
 # carry — the drain's vote count — is left as it was.
 #
-# EVERY EPISODE OF THE SEASON IN ONE STATEMENT (rows.json_rows), as a listing's
+# EVERY EPISODE OF A BATCH IN ONE STATEMENT (rows.json_rows), as a listing's
 # are: a write transaction holds the database's one write lock for as long as its
 # statements take, and while the event loop is busy each one can wait a GIL switch
 # interval — so a statement per episode held it longer the longer the season.
@@ -574,36 +963,36 @@ _EPISODE_REWRITES: dict[str, str | None] = {
     "rating": None}
 
 
-def _write_season(conn: db.Connection, source: str, media: str, source_id: str,
-                  season: int, answer: Mapping[str, Any], *, tz: ZoneInfo, now: int) -> None:
+def _upsert_episode_sql() -> str:
+    return _UPSERT_EPISODE + "    fetched_at = " + rows.ceiling_clock(rows.EPISODES,
+                                                                      _EPISODE_REWRITES)
+
+
+def _season_tails(season: int, answer: Mapping[str, Any], *, tz: ZoneInfo,
+                  now: int) -> tuple[list, list[list]]:
+    """The season an answer describes, as `_UPSERT_SEASON` writes it after the
+    title's own columns, and each of its episodes as `_UPSERT_EPISODE` does."""
     episodes = sorted((e for e in answer.get("episodes") or [] if e.get("number") is not None),
                       key=lambda e: int(e["number"]))
     days = [local_day(e.get("first_aired"), tz) for e in episodes]
     dated = [e for e in episodes if local_day(e.get("first_aired"), tz) is not None]
     premiere = min(dated, key=lambda e: local_day(e.get("first_aired"), tz),
                    default=None)
-    conn.execute(_UPSERT_SEASON + "    fetched_at = "
-                 + rows.ceiling_clock(rows.SEASONS, _SEASON_REWRITES), (
-        source, media, source_id, season, str(answer.get("season_title") or ""),
-        str(answer.get("season_overview") or ""), len(episodes),
-        str(premiere.get("first_aired") or "") if premiere else "",
+    described = [
+        season, str(answer.get("season_title") or ""), str(answer.get("season_overview") or ""),
+        len(episodes), str(premiere.get("first_aired") or "") if premiere else "",
         json.dumps([day.isoformat() if day else None for day in days]),
-        json.dumps(list(answer.get("cast") or [])),
-        now, season_stale_after(days, now)))
-    written = []
+        json.dumps(list(answer.get("cast") or [])), now, season_stale_after(days, now), None, 0]
+    each = []
     for episode, day in zip(episodes, days):
         noon = (datetime(day.year, day.month, day.day, 12, tzinfo=timezone.utc).timestamp()
                 if day else None)
-        written.append([
-            source, media, source_id, season, int(episode["number"]),
-            str(episode.get("title") or ""), str(episode.get("overview") or ""),
-            str(episode.get("first_aired") or ""), str(episode.get("episode_type") or ""),
-            episode.get("runtime"), episode.get("rating"), now,
-            rows.episode_stale_after(noon, now)])
-    if written:
-        conn.execute(_UPSERT_EPISODE + "    fetched_at = "
-                     + rows.ceiling_clock(rows.EPISODES, _EPISODE_REWRITES),
-                     {"rows": json.dumps(written)})
+        each.append([
+            season, int(episode["number"]), str(episode.get("title") or ""),
+            str(episode.get("overview") or ""), str(episode.get("first_aired") or ""),
+            str(episode.get("episode_type") or ""), episode.get("runtime"), episode.get("rating"),
+            now, rows.episode_stale_after(noon, now)])
+    return described, each
 
 
 # Every season a list names in one statement, the episodes' reason. Each row:
@@ -642,14 +1031,22 @@ def write_season_list(conn: db.Connection, source: str, media: str, own_id: Any,
     THE LIST'S COUNT REPLACES THE DESCRIPTION'S, and that is how a season that
     grew is noticed (`season_described`). Its clock (`stale_after`) is left
     alone: a list is not a description of the season."""
-    written = [[str(source), str(media), str(row["source_id"]), int(entry["season"]),
-                str(entry.get("name") or ""), int(entry.get("episode_count") or 0),
-                str(entry.get("first_aired") or ""), str(entry.get("poster") or ""), now, 0]
+    tails = _listed_tails(seasons, now)
+    written = [[str(source), str(media), str(row["source_id"]), *tail]
                for row in _title_rows(conn, str(source), str(media), own_id, ids, now)
-               for entry in seasons if entry.get("season") is not None]
+               for tail in tails]
     if written:
         conn.execute(_upsert_listed_season_sql(), {"rows": json.dumps(written)})
     return len(written)
+
+
+def _listed_tails(seasons: list[Mapping[str, Any]], now: int) -> list[list]:
+    """Each season a list names, as `_UPSERT_LISTED_SEASON` writes it after the
+    title's own columns."""
+    return [[int(entry["season"]), str(entry.get("name") or ""),
+             int(entry.get("episode_count") or 0), str(entry.get("first_aired") or ""),
+             str(entry.get("poster") or ""), now, 0]
+            for entry in seasons if entry.get("season") is not None]
 
 
 # A season a list offers: numbered, and holding at least one episode — the rule
@@ -816,17 +1213,25 @@ async def store(source: str, media: str, own_id: Any, answer: Mapping[str, Any],
                 asked_season: int | None, tz: ZoneInfo,
                 seasons: list[Mapping[str, Any]] | None = None) -> Written | None:
     """`write`, and a season list beside it where one was read, in one
-    transaction."""
+    transaction — a batch of one (`store_many`)."""
+    (filed,) = await store_many([Answer(str(source), str(media), own_id, answer, asked_season,
+                                        seasons)], tz=tz)
+    if isinstance(filed, Exception):
+        raise filed
+    return filed
+
+
+async def store_many(answers: Iterable[Answer], *, tz: ZoneInfo
+                     ) -> list[Written | None | Exception]:
+    """`write_many` in one transaction of its own, every read and decision made
+    before it takes the write lock (`plan`, as db.transaction's `prepare`) — a
+    refresh pass's answers in one turn of the writer queue, rather than a
+    transaction per answer."""
+    answers = list(answers)
+    if not answers:
+        return []
     now = db.now()
-
-    def _work(conn) -> Written | None:
-        written = write(conn, source, media, own_id, answer, asked_season=asked_season,
-                        tz=tz, now=now)
-        if written is not None and seasons:
-            write_season_list(conn, source, media, own_id, seasons, now=now)
-        return written
-
-    return await db.transaction(_work)
+    return await db.transaction(apply, prepare=lambda conn: plan(conn, answers, tz=tz, now=now))
 
 
 async def stored(source: str, media: str, own_id: Any, season: int | None, *,
