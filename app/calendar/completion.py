@@ -24,6 +24,12 @@ SERVICE'S PACE:
     are the bulk — 1,158 of 1,442 TMDB-only cards over three months — and the
     arrival rate falls to a couple of hundred a week once a month is matched.
 
+AND A THIRD, WHICH ASKS NOTHING HERE: a title with a TMDB id and no TMDB
+description, on any calendar, is queued for one (metadata/refresh.py's
+`queue_cards`) and described by the title store's refresh pass at TMDB's
+allowance — a description is the title-only record a card is filtered by, and
+an answer to /find above is one more such title.
+
 WHY NOT EVERY ONE-SERVICE CARD, WHICH IS WHAT A PANEL OPEN WOULD ASK: most of
 them are one service's alone (calendar/search.py's `other_service_to_ask`
 measures it), and Simkl lists thousands of films nobody else does — 5,744
@@ -67,6 +73,7 @@ from typing import NamedTuple
 
 from .. import cache, clock, db, http_pool, metadata, providers
 from ..metadata import identity as title_identity
+from ..metadata import refresh as metadata_refresh
 from ..providers.base import Media, Source
 from . import entries
 from . import search as calendar_search
@@ -141,6 +148,9 @@ async def run(settings, *, today: date | None = None) -> int:
     Returns how many titles and cards were asked about."""
     today = clock.today() if today is None else today
     first, last = span(today)
+    # Every calendar's titles, not only the premieres and films asked about below:
+    # a description is wanted wherever a card is drawn.
+    await metadata_refresh.queue_cards(settings, first, last, today=today)
     cards = await entries.listed_cards(calendar_search.COMPLETABLE_ENDPOINTS, first, last)
     if not cards:
         return 0

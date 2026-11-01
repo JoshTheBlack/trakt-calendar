@@ -278,7 +278,17 @@ because a calendar month queues only rows already described; an answer that
 says nothing is recorded as a failure, so the backoff holds it and five give it
 up (`LISTED_GIVE_UP_AFTER`), and the calendar's "unenriched" count adds what is
 still owed (`refresh.listings_owed`). Simkl's sparse listings are its own drain's
-(app/calendar/enrich.py), Trakt's arrive complete.
+(app/calendar/enrich.py), Trakt's arrive complete. SO IS A CALENDAR TITLE NOBODY
+ASKED A DESCRIBING SERVICE ABOUT: a service declaring
+`Capabilities.describes_every_card` (TMDB) is queued a description of every title
+on this and next month's calendars it has an id for and no row of
+(`refresh.queue_cards`, from calendar/completion.py on the heartbeat, sharing that
+one minute with the sparse listings — `_background_room`), because its row is
+the title-only record a card is filtered by. A refresh that fails for a title
+the service has no row of leaves a BARE row carrying the failure
+(`descriptions.plan_failures`) where the service's own id names the title —
+TMDB's — so it becomes an owed row like any sparse listing, backed off and given
+up at five; a service whose own id names no title (Trakt, Simkl) records nothing.
 A HOLDER KEEPS ITS TITLE'S ROWS (`rows.sweep_unlisted` asks
 `holders.held_keys`); only a service's ceiling takes them. A RE-KEY THAT FINDS A
 ROW UNDER BOTH KEYS keeps the MORE COMPLETE one — one rank per table,

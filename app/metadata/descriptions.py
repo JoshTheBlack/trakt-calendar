@@ -995,6 +995,114 @@ def _season_tails(season: int, answer: Mapping[str, Any], *, tz: ZoneInfo,
     return described, each
 
 
+# ---------------------------------------------------------------------------
+# a refresh that could not be made
+# ---------------------------------------------------------------------------
+
+class Failures(NamedTuple):
+    """What marking a batch of failed refreshes writes (`plan_failures`)."""
+    settles: identity.SettlePlan
+    # Title rowids, and season rows (source, media, source id, season), each named
+    # once per failure that marks it.
+    titles: str
+    seasons: str
+    # The bare rows that carry a failure for a title with none (`plan_failures`),
+    # without the key each is filed under, which `keyed` names.
+    bare: str
+    keyed: list[tuple[int, str]]
+    now: int
+
+
+def plan_failures(conn: db.Connection,
+                  failed: Iterable[tuple[str, str, Any, int | None]], *, now: int) -> Failures:
+    """Decide how each (source, media, own id, season — None for the title)
+    refresh that could not be made is recorded — reads only, for db.transaction's
+    `prepare`.
+
+    ON THE ROWS IT WAS FOR (`service_rows`): the title's own for the title, the
+    season's for a season, so a view leaves them alone for a while
+    (app/metadata/refresh.py's backoff), each failure counted.
+
+    AND WHERE THE SERVICE HAS NO ROW FOR THE TITLE, A BARE ONE CARRIES IT — filed
+    under the title's key, described by nothing, as `_title_rows` makes one —
+    when the service's own id names the title on its own: TMDB's, a shared id the
+    waterfall keys by. Without it a title the service does not know was asked
+    about again every time anything queued it, since a failure recorded nowhere
+    is no backoff at all; with it, it is a row owed a description and nothing
+    else, and the backoff and give-up every owed row has apply
+    (refresh.queue_listed). A service whose own id names no title (Trakt's slug,
+    Simkl's number) would have its row filed under a key of its own, apart from
+    the title, so it is left unmarked as before.
+    """
+    failed = [(str(source), str(media), str(own_id), season)
+              for source, media, own_id, season in failed]
+    planner = identity.Planner(conn, now=now)
+    held = _Rows(conn, planner)
+    held.prefetch([(source, media, own_id, None) for source, media, own_id, _s in failed])
+    titles: list[int] = []
+    seasons: list[list] = []
+    bare: dict[tuple[str, str, str], list] = {}
+    keyed: list[tuple[int, str]] = []
+    for source, media, own_id, season in failed:
+        found = held.found(source, media, own_id, None)
+        if season is not None:
+            seasons.extend([source, media, str(row["source_id"]), int(season)] for row in found)
+        elif found:
+            titles.extend(int(row["rid"]) for row in found)
+        elif (source, media, own_id) in bare:
+            bare[(source, media, own_id)][-1] += 1
+        elif planner.resolve(media, _with_own(source, own_id, None)) is not None:
+            stated = {_namespace(source): id_rules.typed(_namespace(source), own_id)}
+            fallback = identity.per_source_key(source, own_id)
+            planner.settle(identity.Settling(media, stated, fallback=fallback))
+            keyed.append((len(keyed), fallback))
+            bare[(source, media, own_id)] = [source, media, own_id,
+                                             json.dumps(stated, sort_keys=True), now, 0, now, 1]
+    return Failures(planner.plan(), json.dumps(titles), json.dumps(seasons),
+                    json.dumps(list(bare.values())), keyed, now)
+
+
+# A BATCH'S FAILURES IN THREE STATEMENTS, each failure counted once per row it
+# marks, as a transaction each counted them.
+_FAIL_TITLES = f"""
+UPDATE {rows.TITLES} SET failed_at = :now, fail_count = fail_count + f.times
+FROM (SELECT value AS rid, COUNT(*) AS times FROM json_each(:rows) GROUP BY value) f
+WHERE {rows.TITLES}.rowid = f.rid
+"""
+_FAIL_SEASONS = f"""
+UPDATE {rows.SEASONS} SET failed_at = :now, fail_count = fail_count + f.times
+FROM (SELECT json_extract(value, '$[0]') AS source, json_extract(value, '$[1]') AS media,
+             json_extract(value, '$[2]') AS source_id, json_extract(value, '$[3]') AS season,
+             COUNT(*) AS times
+      FROM json_each(:rows) GROUP BY 1, 2, 3, 4) f
+WHERE {rows.SEASONS}.source = f.source AND {rows.SEASONS}.media = f.media
+  AND {rows.SEASONS}.source_id = f.source_id AND {rows.SEASONS}.season = f.season
+"""
+# Each row: source, media, source_id, ids_json, fetched_at, stale_after, failed_at,
+# fail_count — the key filed under travelling beside them (rows.json_rows).
+_BARE_FAILED = f"""
+INSERT INTO {rows.TITLES} (source, media, source_id, title_key, ids_json, fetched_at,
+                           stale_after, failed_at, fail_count)
+{rows.json_rows(8, keyed_at=3)}
+ON CONFLICT(source, media, source_id) DO NOTHING
+"""
+
+
+def mark_failures(conn: db.Connection, planned: Failures) -> None:
+    """Write what `plan_failures` decided, inside the caller's transaction."""
+    planned.settles.apply(conn)
+    if planned.titles != "[]":
+        conn.execute(_FAIL_TITLES, {"now": planned.now, "rows": planned.titles})
+    if planned.seasons != "[]":
+        conn.execute(_FAIL_SEASONS, {"now": planned.now, "rows": planned.seasons})
+    if planned.keyed:
+        keys = [found.key if found is not None else None
+                for found in planned.settles.identities]
+        conn.execute(_BARE_FAILED, {
+            "rows": planned.bare,
+            "keys": json.dumps([keys[at] or fallback for at, fallback in planned.keyed])})
+
+
 # Every season a list names in one statement, the episodes' reason. Each row:
 # source, media, source_id, season, name, episode_count, premiere, poster,
 # fetched_at, and a `stale_after` of 0 — a list is not a description of the season.

@@ -16,6 +16,7 @@ THE PROMISES:
 from __future__ import annotations
 
 import json
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import mock
 from zoneinfo import ZoneInfo
@@ -356,6 +357,108 @@ class ASparseListingIsDescribedTests(_RefreshTestCase):
         are described; Trakt's arrive complete; Simkl's are completed by its own
         drain."""
         self.assertEqual(set(refresh._listing_sources()), {"tmdb"})
+
+
+async def _aired(source: str, own_id: int, tmdb_id: int, day: date, *,
+                 endpoint: str = "shows") -> None:
+    """One airing of a show another service lists, its tmdb id stated."""
+    from app.calendar import entries
+    from app.providers.base import Media, Record, Source
+
+    week = day - timedelta(days=day.weekday())
+    record = Record(source=Source(source), media=Media.SHOW, id=str(own_id),
+                    ids={source: own_id, "tmdb": tmdb_id}, detail_url="",
+                    title=f"Show {tmdb_id}", air_ts=datetime(
+                        day.year, day.month, day.day, 12, tzinfo=timezone.utc).timestamp(),
+                    season=1, episode_number=1)
+    await entries.store_span(endpoint, week, week + timedelta(days=7), [record],
+                             sources=[source], asked=[source], now=T0, stale_after=T0 + DAY)
+
+
+OCT, NOV = date(2026, 10, 1), date(2026, 12, 1)
+TODAY = date(2026, 10, 15)
+
+
+class ACalendarTitleIsDescribedTests(_RefreshTestCase):
+    """A service whose description joins every card of a title it knows
+    (Capabilities.describes_every_card — TMDB's) is asked for one about each
+    title on the calendars the heartbeat keeps current that it has an id for and
+    no row of, nearest today first, sharing the heartbeat's minute with the
+    sparse listings; a title it will not describe is given up on as they are."""
+
+    async def _queue_cards(self, at: int = T0 + 30) -> int:
+        return await refresh.queue_cards(SETTINGS, OCT, NOV, today=TODAY, now=at)
+
+    async def test_each_title_with_a_tmdb_id_and_no_tmdb_row_is_queued_nearest_first(self):
+        await _aired("simkl", 1, 101, date(2026, 11, 20))
+        await _aired("trakt", 2, 102, date(2026, 10, 16))
+        await _aired("simkl", 3, 103, date(2026, 10, 2))
+        self.assertEqual(await self._queue_cards(), 3)
+        self.assertEqual([row[2] for row in await db.fetch_all(
+            "SELECT source, media, source_id FROM metadata_refresh ORDER BY rowid")],
+            ["102", "103", "101"])
+        self.assertEqual({tuple(row) for row in await db.fetch_all(
+            "SELECT source, season, reason FROM metadata_refresh")},
+            {("tmdb", refresh.TITLE, refresh.REASON_CARD)})
+
+    async def test_a_title_tmdb_has_a_row_of_or_outside_the_span_is_not(self):
+        await _aired("simkl", 1, 101, date(2026, 10, 20))
+        await _describe("tmdb", "101", at=T0)
+        await _aired("simkl", 2, 102, date(2026, 12, 3))
+        self.assertEqual(await self._queue_cards(), 0)
+
+    async def test_the_heartbeat_keeps_one_minute_waiting_listings_and_cards_together(self):
+        for n in (1, 2, 3):
+            await _listed(n, at=T0)
+            await _aired("simkl", 10 + n, 100 + n, date(2026, 10, 16))
+        with mock.patch.dict(refresh.PER_MINUTE, {"tmdb": 4}):
+            self.assertEqual(await refresh.queue_listed(SETTINGS, now=T0 + 30), 3)
+            self.assertEqual(await self._queue_cards(), 1)
+            self.assertEqual(await self._queue_cards(), 0)
+
+    async def test_a_title_tmdb_will_not_describe_backs_off_and_is_given_up_on(self):
+        """Its failure leaves a bare row carrying it, which is a row owed a
+        description like any sparse listing: no longer queued as a card, retried
+        on the backoff, given up at the ceiling."""
+        await _aired("simkl", 1, 101, date(2026, 10, 16))
+
+        async def _nothing(settings, media, source_id, season, *, cache_only=False, fresh=False):
+            return {}
+        self.ports["tmdb"].fetch_details = _nothing
+        self.assertEqual(await self._queue_cards(), 1)
+        await refresh.drain(SETTINGS, now=T0 + 30)
+        row = await db.fetch_one(
+            "SELECT title_key, season_count, fail_count, failed_at FROM title_metadata "
+            "WHERE source = 'tmdb'")
+        self.assertEqual(tuple(row), ("show:tmdb:101", None, 1, T0 + 30))
+        self.assertEqual(await self._queue_cards(T0 + 60), 0)
+        now = T0 + 2 * DAY
+        for _attempt in range(refresh.LISTED_GIVE_UP_AFTER - 1):
+            self.assertEqual(await refresh.queue_listed(SETTINGS, now=now), 1)
+            await refresh.drain(SETTINGS, now=now)
+            now += 2 * DAY
+        self.assertEqual(await refresh.listings_owed(), 0)
+        self.assertEqual(await refresh.queue_listed(SETTINGS, now=now), 0)
+
+    async def test_an_answer_files_the_description_the_card_is_joined_by(self):
+        await _aired("simkl", 1, 101, date(2026, 10, 16))
+        await self._queue_cards()
+        self.assertEqual(await refresh.drain(SETTINGS, now=T0 + 30), 1)
+        self.assertEqual(await db.fetch_value(
+            "SELECT title_key FROM title_metadata WHERE source = 'tmdb' "
+            "AND season_count IS NOT NULL"), "show:tmdb:101")
+
+    async def test_a_service_whose_own_id_names_no_title_leaves_no_bare_row(self):
+        """Trakt's id is not a key the waterfall files a title by: a row for it
+        would sit apart from the title, so its failure stays unrecorded."""
+        self.ports["trakt"] = _Port("trakt", fails=True)
+        await refresh.queue_title(SETTINGS, "show", {"trakt": 9}, reason="viewed")
+        await refresh.drain(SETTINGS, now=T0)
+        self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM title_metadata"), 0)
+        self.assertEqual(await _queue(), [])
+
+    def test_every_service_states_whether_it_describes_every_card(self):
+        self.assertEqual(set(refresh._card_sources()), {"tmdb"})
 
 
 class HeldRowsNearTheCeilingTests(_RefreshTestCase):

@@ -33,6 +33,12 @@ certification, and whose own description is one request away with the
 instance's credential (Capabilities.describes_sparse_listings — TMDB's
 discover listings), has each such row described in full, on the heartbeat, at
 the service's own pace. What a viewer asked for stays ahead of it.
+
+A CALENDAR TITLE IS DESCRIBED BY EVERY SERVICE WHOSE DESCRIPTION JOINS ITS
+CARDS (`queue_cards`, reason `REASON_CARD`): a service declaring
+Capabilities.describes_every_card (TMDB) is asked about each title on the
+calendars the heartbeat keeps current that it has an id for and no row of,
+within the same minute the sparse listings share (`_background_room`).
 """
 from __future__ import annotations
 
@@ -42,11 +48,12 @@ import logging
 import time
 from collections import deque
 from collections.abc import Coroutine, Iterable, Mapping
+from datetime import date
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from .. import db, providers
+from .. import db, endpoints, providers
 from ..providers import detail_source
 from ..providers.base import Media, SourceUnavailable
 from . import descriptions, holders, identity, rows
@@ -60,6 +67,7 @@ REASON_VIEWED = "viewed"
 REASON_DEAD_PICTURE = "dead picture"
 REASON_CEILING = "ceiling"
 REASON_LISTED = "listed"
+REASON_CARD = "card"
 
 # HOW MANY ROWS ONE VIEW MAY QUEUE. A panel is one title: every service that
 # knows it, its row and the season on screen. A page of rows is a tracker month
@@ -522,17 +530,118 @@ async def queue_listed(settings, *, now: int | None = None) -> int:
     owed = await db.run(_owed)
 
     def _work(conn) -> int:
-        queued = 0
-        for source, entries in owed.items():
-            room = PER_MINUTE[source] - int(conn.execute(
-                "SELECT COUNT(*) FROM metadata_refresh WHERE source = ? AND reason = ?",
-                (source, REASON_LISTED)).fetchone()[0])
-            queued += _queue(conn, entries, now=ts, reason=REASON_LISTED, limit=room)
-        return queued
+        return sum(_queue(conn, entries, now=ts, reason=REASON_LISTED,
+                          limit=_background_room(conn, source))
+                   for source, entries in owed.items())
 
     queued = await db.transaction(_work)
     if queued:
         logger.debug("title store: queued %d sparse listing(s) to be described", queued)
+    return queued
+
+
+# WHAT THE HEARTBEAT QUEUES ON ITS OWN, rather than for a viewer: sparse listings
+# (`queue_listed`) and the calendar's titles a service has no description of yet
+# (`queue_cards`). TOGETHER they keep no more than a service's minute
+# (`PER_MINUTE`) waiting, so whatever a viewer queues is never more than a
+# minute's drain behind them; a minute each would put it two minutes behind. The
+# sparse listings, queued first each tick, are the ones a card draws with no
+# words at all.
+_BACKGROUND_REASONS = (REASON_LISTED, REASON_CARD)
+
+
+def _background_room(conn: db.Connection, source: str) -> int:
+    """How many more of `source`'s rows the heartbeat may queue now."""
+    waiting = conn.execute(
+        "SELECT COUNT(*) FROM metadata_refresh WHERE source = ? AND reason IN "
+        f"({', '.join('?' * len(_BACKGROUND_REASONS))})",
+        (source, *_BACKGROUND_REASONS)).fetchone()[0]
+    return PER_MINUTE[source] - int(waiting)
+
+
+def _card_sources() -> tuple[str, ...]:
+    """Every registered service whose description joins every calendar card of a
+    title it knows (Capabilities.describes_every_card), by name."""
+    return tuple(str(source) for source, provider in providers.registered().items()
+                 if provider.capabilities.describes_every_card)
+
+
+def _cards_owed_sql(source: str) -> str:
+    """The titles a calendar airing in [:first, :last) names that `source` has an
+    id for and no row of, nearest :today first, at most :limit — the titles each
+    on its own row, (media, own id), none already queued.
+
+    THE AIRINGS ARE NARROWED TO THE SPAN FIRST AND THEN TO TITLES, and only then
+    is each title checked: MEASURED on the development copy, 11,290 titles from
+    37,942 airings in two months, 130 ms — checking each airing in turn, or
+    grouping every airing stored, took 360-480 ms. Naming the endpoints is what
+    lets the planner reach the (endpoint, air_date) index; the service and its
+    namespace are the registry's, never input."""
+    own = f"CAST(json_extract(i.ids_json, '$.{rows.ID_NAMESPACE[source]}') AS TEXT)"
+    endpoints_named = ", ".join(f"'{key}'" for key in sorted(endpoints.ENDPOINTS))
+    return (
+        f"SELECT d.media, {own} AS own_id FROM ("
+        "  SELECT a.title_key, a.media, "
+        "         MIN(ABS(julianday(a.air_date) - julianday(:today))) AS distance "
+        f"  FROM calendar_airings a WHERE a.endpoint IN ({endpoints_named}) "
+        "    AND a.air_date >= :first AND a.air_date < :last GROUP BY a.title_key) d "
+        f"JOIN {identity.TABLE} i ON i.title_key = d.title_key "
+        f"WHERE {own} IS NOT NULL "
+        f"  AND NOT EXISTS (SELECT 1 FROM {rows.TITLES} t "
+        f"                  WHERE t.title_key = d.title_key AND t.source = '{source}') "
+        "  AND NOT EXISTS (SELECT 1 FROM metadata_refresh q "
+        f"                  WHERE q.source = '{source}' AND q.media = d.media "
+        f"                    AND q.source_id = {own} AND q.season = {TITLE}) "
+        "ORDER BY d.distance LIMIT :limit")
+
+
+async def queue_cards(settings, first: date, last: date, *, today: date,
+                      now: int | None = None) -> int:
+    """Queue a description of each title a calendar airing dated in [first, last)
+    names, from every service whose description joins every card of a title it
+    knows (Capabilities.describes_every_card — TMDB's), where the title has that
+    service's id and the store no row of it — nearest `today` first, with reason
+    `REASON_CARD`, inside what the heartbeat may keep waiting
+    (`_background_room`). Returns how many were queued.
+
+    WHY: such a service's row is what joins a card as its title-only record
+    (app/calendar/cache.py's `with_title_only`) — the certification, language,
+    keywords and show type a card nobody else describes is filtered by — and a
+    row exists only where something asked: its own listings, a panel opened, a
+    tracker or a board row. MEASURED on the development copy, 7,157 titles on
+    this and next month's calendars had a TMDB id and no TMDB row, 5,828 of them
+    films. At TMDB's allowance of six hundred titles a minute (two or three
+    requests each) that backlog clears in about twelve minutes after a deploy,
+    and then each new title as it arrives.
+
+    A TITLE THE SERVICE WILL NOT DESCRIBE is not asked forever: its failure leaves
+    a bare row (descriptions.plan_failures), which this no longer queues, and
+    which `queue_listed` retries on the backoff until LISTED_GIVE_UP_AFTER."""
+    ts = db.now() if now is None else now
+    askable = {source for source, _port in _askable(settings)}
+    sources = [source for source in _card_sources() if source in askable]
+    if not sources:
+        return 0
+
+    # READ, THEN WRITE, as `queue_listed` does: the titles owed are read from every
+    # airing in two months, and a minute's allowance of them is all a tick queues.
+    def _owed(conn) -> dict[str, list[Entry]]:
+        return {source: [Entry(source, str(row["media"]), str(row["own_id"]), TITLE)
+                         for row in conn.execute(_cards_owed_sql(source), {
+                             "first": first.isoformat(), "last": last.isoformat(),
+                             "today": today.isoformat(), "limit": PER_MINUTE[source]})]
+                for source in sources}
+
+    owed = await db.run(_owed)
+
+    def _work(conn) -> int:
+        return sum(_queue(conn, entries, now=ts, reason=REASON_CARD,
+                          limit=_background_room(conn, source))
+                   for source, entries in owed.items())
+
+    queued = await db.transaction(_work)
+    if queued:
+        logger.info("title store: queued %d calendar title(s) for a description", queued)
     return queued
 
 
@@ -573,64 +682,33 @@ async def _look_up(settings, port, entry: Entry) -> descriptions.Answer:
 RATE_LIMITED = 429
 
 
-# A PASS'S ENTRIES LEAVE THE QUEUE IN ONE STATEMENT, and the rows of those that
-# failed are marked in two more, each named once per entry that failed — so two
-# failures of one row count twice, as a transaction each counted them. Rows are
-# found before the lock (`_failed_rows`). The entries drive the delete through
-# the queue's own key (CROSS JOIN fixes that order): correlated the other way
-# round, the planner walked every queued row and the pass's entries inside each.
+# A PASS'S ENTRIES LEAVE THE QUEUE IN ONE STATEMENT, driven through the queue's
+# own key (CROSS JOIN fixes that order): correlated the other way round, the
+# planner walked every queued row and the pass's entries inside each.
 _DEQUEUE = """
 DELETE FROM metadata_refresh WHERE rowid IN (
     SELECT q.rowid FROM json_each(?) j CROSS JOIN metadata_refresh q
     ON q.source = json_extract(j.value, '$[0]') AND q.media = json_extract(j.value, '$[1]')
    AND q.source_id = json_extract(j.value, '$[2]') AND q.season = json_extract(j.value, '$[3]'))
 """
-_FAIL_TITLES = f"""
-UPDATE {rows.TITLES} SET failed_at = :now, fail_count = fail_count + f.times
-FROM (SELECT value AS rid, COUNT(*) AS times FROM json_each(:rows) GROUP BY value) f
-WHERE {rows.TITLES}.rowid = f.rid
-"""
-_FAIL_SEASONS = f"""
-UPDATE {rows.SEASONS} SET failed_at = :now, fail_count = fail_count + f.times
-FROM (SELECT json_extract(value, '$[0]') AS source, json_extract(value, '$[1]') AS media,
-             json_extract(value, '$[2]') AS source_id, json_extract(value, '$[3]') AS season,
-             COUNT(*) AS times
-      FROM json_each(:rows) GROUP BY 1, 2, 3, 4) f
-WHERE {rows.SEASONS}.source = f.source AND {rows.SEASONS}.media = f.media
-  AND {rows.SEASONS}.source_id = f.source_id AND {rows.SEASONS}.season = f.season
-"""
-
-
-def _failed_rows(conn: db.Connection, failed: list[Entry]) -> tuple[str, str]:
-    """(title rowids, season rows) a pass's failures are marked on, as JSON
-    arrays: each entry's service rows (descriptions.service_rows), the title's own
-    for a title's entry and the season's for a season's."""
-    found = descriptions.services_rows(
-        conn, [(entry.source, entry.media, entry.own_id, None) for entry in failed])
-    titles = [row["rid"] for entry, held in zip(failed, found) if entry.season == TITLE
-              for row in held]
-    seasons = [[entry.source, entry.media, str(row["source_id"]), entry.season]
-               for entry, held in zip(failed, found) if entry.season != TITLE for row in held]
-    return json.dumps(titles), json.dumps(seasons)
 
 
 async def _settle_entries(done: list[Entry], failed: list[Entry], now: int) -> None:
-    """Take a pass's entries off the queue, and mark the rows of those that
-    failed, so a view leaves them alone for a while (`_backed_off`) — one turn of
-    the writer queue for the whole pass."""
+    """Take a pass's entries off the queue, and record each that failed on the
+    rows it was for (descriptions.plan_failures), so a view leaves them alone for
+    a while (`_backed_off`) — one turn of the writer queue for the whole pass, its
+    rows found before the lock is taken."""
     if not done:
         return
 
-    def _work(conn, marked: tuple[str, str]) -> None:
-        titles, seasons = marked
+    def _work(conn, marked: descriptions.Failures) -> None:
         conn.execute(_DEQUEUE, (json.dumps([list(entry) for entry in done]),))
-        if titles != "[]":
-            conn.execute(_FAIL_TITLES, {"now": now, "rows": titles})
-        if seasons != "[]":
-            conn.execute(_FAIL_SEASONS, {"now": now, "rows": seasons})
+        descriptions.mark_failures(conn, marked)
 
-    await db.transaction(_work, prepare=lambda conn: _failed_rows(conn, failed)
-                         if failed else ("[]", "[]"))
+    await db.transaction(_work, prepare=lambda conn: descriptions.plan_failures(
+        conn, [(entry.source, entry.media, entry.own_id,
+                None if entry.season == TITLE else entry.season) for entry in failed],
+        now=now))
 
 
 def shortened(address: str) -> str:
