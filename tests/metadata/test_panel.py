@@ -52,10 +52,14 @@ class _DetailPort:
     """One service's detail port: a description carrying its own videos, and
     the same list on its own — or a failure, where the test says so."""
 
-    def __init__(self, source, videos, *, configured=True, episodes=True, fails=False):
+    def __init__(self, source, videos, *, configured=True, episodes=True, fails=False,
+                 seasons=()):
         self.source, self.videos = source, videos
         self.configured, self.episodes, self.fails = configured, episodes, fails
+        self.seasons = list(seasons)
         self.asked = []
+        # Season lists asked for, apart from `asked`: what the panel's strip reads.
+        self.listed = []
 
     def catalogue_configured(self, settings):
         return self.configured
@@ -72,6 +76,14 @@ class _DetailPort:
         if self.fails:
             raise SourceUnavailable("down")
         return list(self.videos)
+
+    async def fetch_seasons(self, settings, source_id, media, *, cached_only=False, fresh=False):
+        from app.providers.base import SeasonsAnswer, SourceUnavailable
+        self.listed.append((source_id, cached_only))
+        if self.fails:
+            raise SourceUnavailable("down")
+        return SeasonsAnswer(seasons=[{"season": n, "episode_count": 8} for n in self.seasons],
+                             named_season=None, ids={}, network="")
 
 
 class _Registry:
@@ -94,6 +106,47 @@ class _Registry:
     def __exit__(self, *exc):
         for patch in self._patches:
             patch.stop()
+
+
+class APanelsSeasonStripIsWhatItsServicesListTests(DatabaseTestCase):
+    """describe_panel's `seasons`: every season a service the ids name lists —
+    never a count up to the season open, which for a show Simkl numbers by year
+    was 2,026 tabs."""
+
+    async def panel(self, ids, *, trakt=(), simkl=(), simkl_fails=False, with_seasons=True,
+                    media="show"):
+        ports = {Source.TRAKT: _DetailPort("trakt", [], seasons=trakt),
+                 Source.SIMKL: _DetailPort("simkl", [], seasons=simkl, fails=simkl_fails)}
+        chosen = detail_source.Answerer(Source.TRAKT, ids.get("trakt", ""), stored_only=False)
+        with _Registry(ports):
+            _who, details = await panel.describe_panel(
+                Settings(), chosen, ids, media, 2026 if media == "show" else None,
+                with_seasons=with_seasons)
+        return details, ports
+
+    async def test_the_strip_is_every_season_any_service_lists(self):
+        """Season 5 only Simkl lists, 2026 the one the answer describes."""
+        details, _ports = await self.panel({"trakt": "1", "simkl": "2"},
+                                           trakt=[1, 2], simkl=[1, 5])
+        self.assertEqual([entry["season"] for entry in details["seasons"]], [1, 2, 5, 2026])
+
+    async def test_a_service_that_cannot_list_them_adds_nothing(self):
+        details, _ports = await self.panel({"trakt": "1", "simkl": "2"}, trakt=[1, 2],
+                                           simkl=[1, 5], simkl_fails=True)
+        self.assertEqual([entry["season"] for entry in details["seasons"]], [1, 2, 2026])
+
+    async def test_a_surface_drawing_no_strip_asks_for_no_list(self):
+        """The answer keeps its own list — here the one season it describes — and
+        no service is asked for another."""
+        details, ports = await self.panel({"trakt": "1", "simkl": "2"}, trakt=[1],
+                                          with_seasons=False)
+        self.assertEqual([entry["season"] for entry in details["seasons"]], [2026])
+        self.assertEqual(ports[Source.TRAKT].listed + ports[Source.SIMKL].listed, [])
+
+    async def test_a_film_has_no_strip_to_list(self):
+        details, ports = await self.panel({"trakt": "1"}, media="movie")
+        self.assertEqual(details.get("seasons", []), [], "no other service's list was read")
+        self.assertEqual(ports[Source.TRAKT].listed, [])
 
 
 class APanelPoolsEveryServicesVideosTests(DatabaseTestCase):

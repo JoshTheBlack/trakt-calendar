@@ -810,7 +810,6 @@ async def _item_details(request: Request, *, season_only: bool) -> Response:
         # store knows for it (identity.every_id).
         links=detail_source.outbound_links(await title_identity.every_id(
             media, {**item["ids"], **(details.get("ids") or {})}), media),
-        season_count=item["season_count"] or 0,
         carry=("board", "key"))
 
 

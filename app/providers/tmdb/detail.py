@@ -183,6 +183,7 @@ async def fetch_details(settings: Settings, media, tmdb_id, season: int | None, 
         "season": season,
         "season_title": normalize.season_name(entry),
         "season_count": len(normalize.picker_seasons(info)),
+        "seasons": normalize.picker_seasons(info),
         "cast": cast,
         "episodes": normalize.panel_episodes(season_body or {}),
     }

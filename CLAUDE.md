@@ -597,7 +597,13 @@ describer had cached. Because one renderer draws every
 answer, `DetailPort`'s answer has ONE KEY SET whoever gives it, and
 `tests/providers/test_protocol_conformance.py`'s
 `EveryDetailPortAnswersTheSameKeysTests` asserts it — a Protocol checks methods,
-not return shapes. VIDEOS ARE THE ONE FIELD POOLED ACROSS SERVICES, and the
+not return shapes. THE SEASON STRIP IS WHAT THE SERVICES LIST, NEVER A COUNT:
+each answer states its season list (`seasons`, base.SeasonsAnswer's shape, kept
+with the description — `descriptions.write_many` files it, `read` gives it back),
+and `describe_panel` widens it with every other service's list the store or its
+response cache holds, asking nobody; `details_panel.panel` draws those and the
+season open. Counting up to the season open drew 2,026 tabs for a show Simkl
+numbers by year. VIDEOS ARE THE ONE FIELD WHOSE VALUES ARE POOLED, and the
 exception is deliberate: a missing or wrong default video is recoverable only
 when the alternatives are on screen and say who listed them, and one field from
 one service showed nothing for a title whose only video was a teaser. Each

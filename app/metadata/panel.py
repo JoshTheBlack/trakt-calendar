@@ -251,10 +251,25 @@ async def describe_season(settings, chosen: detail_source.Answerer, ids, media,
 
 
 async def describe_panel(settings, chosen: detail_source.Answerer, ids, media,
-                         season: int | None, *, cache_only: bool = False):
+                         season: int | None, *, cache_only: bool = False,
+                         with_seasons: bool = True):
     """`describe_season`, with `videos` replaced by EVERY service's videos
     pooled (app/providers/videos.py says why that one field is pooled when
-    nothing else is). What every surface calls to draw a WHOLE panel.
+    nothing else is), and — for a show, unless `with_seasons` is False —
+    `seasons` widened to every season some service the ids name lists.
+    What every surface calls to draw a WHOLE panel.
+
+    THE STRIP IS WHAT THE SERVICES LIST (details_panel.panel draws `seasons`
+    and the season open): the answering service's own list, stated in its
+    answer, and every other service's the store or its response cache holds
+    (`_cached_seasons`) — because a season tab is answered by
+    whichever of them holds the season (detail_source.for_season), so each listed
+    season is one a tab can draw and nothing else is. It used to be counted, a
+    tab for every number up to the larger of a service's season count and the
+    season open, and Simkl numbers a daily or talk show's seasons by year: a card
+    of season 2026 drew 2,026 tabs, every phantom one a lookup that stored an
+    empty season when pressed. A surface that draws no strip (a share page)
+    passes `with_seasons=False` and reads no other service's list.
 
     `ids` IS WHAT THE CALLER MAY ASK ABOUT, and it is the same map the description
     is asked with — which is what keeps the share page's promise: it passes the
@@ -270,15 +285,20 @@ async def describe_panel(settings, chosen: detail_source.Answerer, ids, media,
     A SERVICE THAT FAILS contributes nothing and never fails the panel — the
     videos are an addition to a description, not a reason to lose one.
     """
-    others = [(source, value) for source, value in detail_source.known_ids(ids)
-              if source != chosen.source]
-    described, *lists = await asyncio.gather(
+    every = detail_source.known_ids(ids)
+    others = [(source, value) for source, value in every if source != chosen.source]
+    listing = every if with_seasons and str(media) == str(Media.SHOW) else []
+    described, *gathered = await asyncio.gather(
         _describe_season(settings, chosen, ids, media, season, cache_only=cache_only),
         *(_videos(settings, source, value, media, ids=ids, cache_only=cache_only)
-          for source, value in others))
+          for source, value in others),
+        *(_cached_seasons(settings, source, value, media, ids=ids)
+          for source, value in listing))
     answerer, details = described
     if details is None:
         return answerer, None
+    lists, numbers = gathered[:len(others)], gathered[len(others):]
+    seasons = {"seasons": _widened(details.get("seasons"), numbers)} if listing else {}
     by_source = {source: listed for (source, _id), listed in zip(others, lists)}
     by_source[answerer.source] = list(details.get("videos") or [])
     if chosen.source not in by_source:
@@ -287,7 +307,41 @@ async def describe_panel(settings, chosen: detail_source.Answerer, ids, media,
     order = [source for source, _port in detail_source.ports()]
     pooled = videos.pool([by_source[source] for source in order if source in by_source],
                          str(answerer.source))
-    return answerer, presented({**details, "videos": pooled}, settings)
+    return answerer, presented({**details, "videos": pooled, **seasons}, settings)
+
+
+def _widened(own, others) -> list[dict]:
+    """The answering service's season list with every season another service
+    lists added — its own entry for a season both list."""
+    by_number = {int(entry["season"]): entry for entry in own or ()
+                 if entry.get("season") is not None}
+    for listed in others:
+        for entry in listed:
+            if entry.get("season") is not None:
+                by_number.setdefault(int(entry["season"]), entry)
+    return [by_number[number] for number in sorted(by_number)]
+
+
+async def _cached_seasons(settings, source: Source, source_id: str, media, *,
+                          ids) -> list[dict]:
+    """The season list one service has for a title (`season_list`); [] where it
+    could not answer.
+
+    NEVER A REQUEST: the store's copy, else what the service's response cache
+    holds. Describing the title has just warmed what a describing service's list
+    reads (TMDB's from the same /tv answer, Trakt's from the season list its
+    description reads), while asking every service live cost a request each on
+    every panel opened — two for Simkl, whose list reads a record its
+    description does not. A list nobody has read yet offers no tabs until it
+    is, rather than a guessed one."""
+    answerer = detail_source.Answerer(source, source_id, stored_only=True)
+    try:
+        listed = await season_list(settings, answerer, media, ids=ids, cached_only=True)
+    except SourceUnavailable:
+        logger.warning("%s could not list the seasons of %s; the strip offers the others",
+                       source, source_id)
+        return []
+    return list(listed)
 
 
 async def _videos(settings, source: Source, source_id: str, media, *, ids,

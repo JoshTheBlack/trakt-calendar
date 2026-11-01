@@ -25,7 +25,7 @@ from unittest.mock import patch
 
 from app import db
 from app.config import Settings
-from app.metadata import refresh as metadata_refresh, rows
+from app.metadata import descriptions, refresh as metadata_refresh, rows
 from app.providers.trakt import transport
 from app.ranker import core as ranker
 from tests.support import AppTestCase, DetailsPanel, ORIGIN
@@ -132,13 +132,17 @@ class ABoardTitleOpensThePanelTests(_BoardPanelTestCase):
         self.assertIn("Spies.", html)
         self.assertIn("What season 1 is about.", html)
 
-    def test_a_count_another_service_states_can_widen_the_strip(self):
-        """The board row draws its season count from the title store, where a
-        service other than the one describing the panel may count more seasons;
-        that count is the surface's floor (details_panel.panel)."""
+    def test_the_seasons_another_service_lists_widen_the_strip(self):
+        """The strip is every season a service the title names LISTS
+        (metadata/panel.py's describe_panel) — here TMDB's stored list of five,
+        beside the three of the service describing the panel. A count alone
+        widens nothing: a season's number is not how many came before it."""
         key = self.add(ids={"trakt": 7, "tmdb": 1})
         asyncio.run(db.execute(f"UPDATE {rows.TITLES} SET season_count = 5 "
                                "WHERE source = 'tmdb' AND title_key = ?", (key,)))
+        asyncio.run(db.transaction(lambda conn: descriptions.write_season_list(
+            conn, "tmdb", "show", "1", [{"season": n, "episode_count": 10} for n in range(1, 6)],
+            now=db.now(), ids={"tmdb": 1})))
         panel = DetailsPanel(self.get(self.panel_url(key))[0])
         self.assertEqual(panel.season_tabs, [1, 2, 3, 4, 5])
 

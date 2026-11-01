@@ -351,9 +351,11 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         # so a caller can render this whenever it is non-empty without having to
         # know the difference.
         "season_title": _season_name(this_season),
-        # HOW MANY SEASONS THIS TITLE HAS, for the panel's season picker. Counted
-        # from the same one call the season's own words come from. 0 for a film.
-        "season_count": _usable_season_count(seasons),
+        # WHICH SEASONS THIS TITLE HAS, and how many — the season list, in the
+        # picker's shape (`picker_seasons`), from the same one call the season's
+        # own words come from. Empty for a film.
+        "season_count": len(picker_seasons(seasons)),
+        "seasons": picker_seasons(seasons),
         "cast": cast,
         "episodes": _episodes_from(results.get("episodes") or []),
     }
@@ -382,18 +384,26 @@ def _season_name(season: dict) -> str:
     return title
 
 
-def _usable_season_count(seasons) -> int:
-    """How many seasons a picker should offer.
+def picker_seasons(results) -> list[dict]:
+    """`/shows/{id}/seasons?extended=full` as the picker offers it —
+    [{season, episode_count, first_aired, name, poster}] in order — for the
+    seasons Trakt has populated with episodes: SPECIALS ARE NOT A SEASON somebody
+    pages back through, and a season with no episodes is one Trakt is holding a
+    place for. `fetch_show_seasons` says why each field is what it is."""
+    from . import calendar as trakt_calendar
 
-    SPECIALS ARE NOT A SEASON somebody pages back through, and a season with no
-    episodes is one Trakt is holding a place for — both are excluded, which is
-    the same filter `fetch_show_seasons` applies for the same reason.
-    """
-    if not isinstance(seasons, list):
-        return 0
-    return sum(1 for entry in seasons
-               if isinstance(entry, dict) and (entry.get("number") or 0) > 0
-               and (entry.get("episode_count") or 0) > 0)
+    out = []
+    for entry in results if isinstance(results, list) else []:
+        num = entry.get("number") if isinstance(entry, dict) else None
+        episode_count = (entry.get("episode_count") or 0) if isinstance(entry, dict) else 0
+        if num is None or num == 0 or episode_count <= 0:
+            continue
+        out.append({"season": int(num), "episode_count": int(episode_count),
+                    "first_aired": str(entry.get("first_aired") or ""),
+                    "name": _season_name(entry),
+                    "poster": trakt_calendar.poster(entry) or ""})
+    out.sort(key=lambda s: s["season"])
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -585,19 +595,7 @@ async def fetch_show_seasons(settings: Settings, trakt_id, *,
         # search the instance no longer holds.
         cache_only=cached_only, fresh=fresh,
     )
-    from . import calendar as trakt_calendar
-
-    out = []
-    for entry in results if isinstance(results, list) else []:
-        num = entry.get("number")
-        episode_count = entry.get("episode_count") or 0
-        if num is None or num == 0 or episode_count <= 0:
-            continue
-        out.append({"season": int(num), "episode_count": int(episode_count),
-                    "first_aired": str(entry.get("first_aired") or ""),
-                    "name": _season_name(entry),
-                    "poster": trakt_calendar.poster(entry) or ""})
-    out.sort(key=lambda s: s["season"])
+    out = picker_seasons(results)
     logger.info("fetch_show_seasons(%s) -> %d usable season(s)", trakt_id, len(out))
     return out
 

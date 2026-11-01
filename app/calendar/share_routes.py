@@ -1378,8 +1378,10 @@ async def _describe_shared_title(request: Request, share_row, settings) -> _Desc
     # SAME HOLDS FOR THE THIRD: every service's videos are pooled over `bound`
     # and nothing else, so a service asked for its list is asked about a title
     # this link shows, by the id the link's own airing carries.
+    # A PUBLIC PAGE DRAWS NO SEASON STRIP (`_details` says why), so no service is
+    # asked for a season list it would not draw.
     chosen, details = await metadata_panel.describe_panel(settings, chosen, bound,
-                                                         media, season)
+                                                         media, season, with_seasons=False)
     if details is None:
         return None
     # THE BOUND IDS AND WHAT THE ANSWER ADDED, never the raw request: an outbound

@@ -2205,10 +2205,11 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
                                # with a working tick has a working button.
                                links=detail_source.outbound_links(ids, Media.SHOW),
                                progress=progress,
-                               # THE ROW'S SEASON IS THE COUNT: a row for season 4
-                               # is a row for a show with three earlier ones, and
-                               # nothing has to be looked up to know it.
-                               season_count=row_season,
+                               # NO COUNT FROM THE ROW: its season is a tab of its
+                               # own (details_panel.panel) and the earlier ones are
+                               # the describing service's count — a season's number
+                               # is not how many came before it (Simkl numbers a
+                               # daily show's seasons by year).
                                # THE ROW, AND THE ROW'S SEASON, AND NOTHING ELSE.
                                # Everything this route looks up follows from the
                                # key, so a tab needs nothing more — and a

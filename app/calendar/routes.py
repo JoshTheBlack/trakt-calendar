@@ -1845,11 +1845,11 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
         links=detail_source.outbound_links(ids, media),
         progress=progress,
         actions=await _library_actions(request, settings, media, params),
-        # THE CARD'S OWN SEASON IS THE COUNT, because a card for season 4 is a
-        # card for a title with three earlier ones behind it. Nothing has to be
-        # looked up to know that, which is what lets the picker be offered here at
-        # all — and a card naming no season gets no strip rather than a guess.
-        season_count=season or 0,
+        # NO COUNT FROM THE CARD: its season is a tab of its own
+        # (details_panel.panel), and the earlier ones are the describing
+        # service's count. A season's number is not how many came before it —
+        # Simkl numbers a daily show's seasons by year, and a card of season
+        # 2026 counted to 2,026 tabs.
         # WHAT A TAB CARRIES, NAMED. The id parameters come from `details_url`'s
         # own walk over `Source`, so a third service registers once rather than
         # being added here too; `key` rides beside them because the ticks are

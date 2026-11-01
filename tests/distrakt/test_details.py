@@ -70,6 +70,8 @@ SHOW = {"title": "The Agency", "year": 2026, "overview": "Spies.",
 PEOPLE = {"cast": [{"person": {"name": "Michael"}, "character": "Martian"}]}
 EPISODES = [{"number": n, "title": f"Ep {n}", "first_aired": "2026-08-01T20:00:00.000Z"}
             for n in range(1, 11)]
+# The service's season list, which is where a panel's count of seasons comes from.
+SEASONS = [{"number": n, "episode_count": 10, "aired_episodes": 10} for n in range(1, 5)]
 
 KEY = "show:tmdb:1"
 
@@ -119,7 +121,7 @@ class _DetailsRouteTestCase(AppTestCase):
 
     def _details(self, season: int = 2, month: str = ""):
         client = _CatalogueClient({
-            "shows/7": SHOW, "shows/7/people": PEOPLE,
+            "shows/7": SHOW, "shows/7/people": PEOPLE, "shows/7/seasons": SEASONS,
             f"shows/7/seasons/{season}": EPISODES,
         })
         viewed = ""
@@ -651,7 +653,7 @@ class SeasonTabsOnARosterRowTests(_DetailsRouteTestCase):
 
     def _open(self, season: int = 4) -> DetailsPanel:
         client = _CatalogueClient({
-            "shows/7": SHOW, "shows/7/people": PEOPLE,
+            "shows/7": SHOW, "shows/7/people": PEOPLE, "shows/7/seasons": SEASONS,
             f"shows/7/seasons/{season}": EPISODES,
         })
         with patch.object(transport, "shared_client", return_value=client):
@@ -668,7 +670,9 @@ class SeasonTabsOnARosterRowTests(_DetailsRouteTestCase):
         self.assertEqual(resp.status_code, 200, resp.text)
         return DetailsPanel(resp.text)
 
-    def test_the_rows_season_is_how_many_tabs_there_are(self):
+    def test_the_services_season_count_is_how_many_tabs_there_are(self):
+        """The row's season is a tab of its own, never a count: a season's number
+        is not how many came before it."""
         panel = self._open()
         self.assertEqual(panel.season_tabs, [1, 2, 3, 4])
         self.assertEqual(panel.open_tab, 4)

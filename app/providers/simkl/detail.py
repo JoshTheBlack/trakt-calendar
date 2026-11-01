@@ -577,11 +577,12 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         # Nor a season's own description — same documentation, same absence. The
         # panel draws the title's words above and nothing extra below.
         "season_overview": "",
-        # THE COUNT IS ANSWERABLE, THOUGH, and from something already fetched:
-        # every episode carries its season number, so the episode list says how
-        # many seasons there are without a second call. Specials are excluded the
-        # same way the Trakt package excludes them — `seasons_known` drops them.
+        # THE SEASONS ARE ANSWERABLE, THOUGH, and from something already fetched:
+        # every episode carries its season number, so the episode list says which
+        # seasons there are without a second call. Specials are excluded the same
+        # way the Trakt package excludes them — `seasons_known` drops them.
         "season_count": len(seasons_known(episodes)),
+        "seasons": _season_counts(episodes),
         "cast": [],
         # NO SEASON MEANS NO EPISODE SECTION, rather than every season run
         # together. A list nobody can label is worse than none: the reader has no

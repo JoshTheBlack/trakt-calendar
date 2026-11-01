@@ -62,8 +62,8 @@ ANSWER_KEYS = frozenset({
     "title", "year", "overview", "season_overview", "status", "network", "country",
     "language", "anime_type", "release_types_by_country", "ids", "poster", "runtime",
     "genres", "genre_slugs", "rating", "imdb_rating", "certification", "videos",
-    "first_aired", "homepage", "season", "season_title", "season_count", "cast",
-    "episodes", "keywords", "show_type",
+    "first_aired", "homepage", "season", "season_title", "season_count", "seasons",
+    "cast", "episodes", "keywords", "show_type",
 })
 
 
@@ -698,7 +698,11 @@ def _spell(item: Answer, *, tz: ZoneInfo, now: int) -> _Spelled:
               else None),
         season=(_season_tails(int(season), answer, tz=tz, now=now)
                 if item.media == str(Media.SHOW) and season not in (None, "") else None),
-        listed=_listed_tails(item.seasons or [], now))
+        # A SEASON LIST READ BESIDE THE ANSWER, else the one the answer states
+        # itself (DetailPort's `seasons`): a description keeps its list, so a
+        # stored answer offers the seasons a fresh one does.
+        listed=_listed_tails(item.seasons if item.seasons is not None
+                             else list(answer.get("seasons") or []), now))
 
 
 class _Filed(NamedTuple):
@@ -788,7 +792,7 @@ def plan(conn: db.Connection, answers: Iterable[Answer], *, tz: ZoneInfo,
     episodes: list[list] = []
     listed: list[list] = []
     settled = 0
-    for at in sorted(spelled, key=lambda at: bool(answers[at].seasons)):
+    for at in sorted(spelled, key=lambda at: bool(spelled[at].listed)):
         item, words = answers[at], spelled[at]
         found = held.found(item.source, item.media, item.own_id, words.ids)
         before = dict(found[0]) if found else None
@@ -840,7 +844,7 @@ def plan(conn: db.Connection, answers: Iterable[Answer], *, tz: ZoneInfo,
                 own = [item.source, item.media, str(row["source_id"])]
                 seasons.append([*own, *season_tail])
                 episodes.extend([*own, *tail] for tail in episode_tails)
-        if item.seasons and words.listed:
+        if words.listed:
             listed.extend([item.source, item.media, str(row["source_id"]), *tail]
                           for row in held.found(item.source, item.media, item.own_id, None)
                           for tail in words.listed)
@@ -1292,6 +1296,16 @@ def read(conn: db.Connection, source: str, media: str, own_id: Any,
         "season": season,
         "season_title": str(of_season["name"] or "") if of_season is not None else "",
         "season_count": int(row["season_count"] or 0),
+        # THE SEASON LIST, in base.SeasonsAnswer's shape: every season this
+        # service's rows hold episodes of — the list its own answers stated, kept
+        # with them (`write_many`) — and never a season the store cannot vouch for.
+        "seasons": [{"season": int(r["season"]), "episode_count": int(r["episode_count"]),
+                     "first_aired": str(r["premiere"] or ""), "name": str(r["name"] or ""),
+                     "poster": str(r["poster"] or "")}
+                    for r in conn.execute(
+                        f"SELECT season, episode_count, premiere, name, poster FROM {rows.SEASONS} "
+                        f"WHERE source = ? AND media = ? AND source_id = ? AND {_LISTED} "
+                        "ORDER BY season", (row["source"], row["media"], row["source_id"]))],
         "cast": season_cast or title_cast,
         "episodes": _episodes(conn, row, int(season)) if of_season is not None else [],
     }
