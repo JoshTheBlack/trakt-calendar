@@ -926,6 +926,54 @@ def _air_choices(listed: Mapping[str, Mapping[str, Any]], tz: ZoneInfo) -> list[
 
 
 @dataclass(frozen=True)
+class StoreColumns:
+    """The columns a service's GROUP holds in each of the title store's three
+    tables — one row per title, per season and per episode, every service's
+    facts side by side, each column spelled `{source}_{name}` (app/db.py's
+    MIGRATION_49 built them).
+
+    A SERVICE HAS ONLY THE COLUMNS IT CAN STATE, and says which here, so the
+    store never names a column for a service that never fills it and never reads
+    one service's empty column as that service's answer. Each package's own
+    declaration is the one place that fact is written: Simkl's catalogue states
+    no cast and no homepage, Trakt's no anime format, only TMDB's keywords — and
+    a service that starts stating a field is one ALTER TABLE and this.
+
+    What every group holds whoever supplies it (which row it is, and its clocks)
+    is spelled once below (`TITLE_KEEPING`, `SEASON_KEEPING`, `EPISODE_LISTING`,
+    `EPISODE_KEEPING`); everything else a package lists word by word.
+    tests/providers/test_protocol_conformance.py holds every registered service
+    to a set for every table, and tests/kernel/test_title_store_migration.py
+    holds the tables to exactly what is declared.
+    """
+    titles: frozenset[str] = frozenset()
+    seasons: frozenset[str] = frozenset()
+    episodes: frozenset[str] = frozenset()
+
+
+# WHAT EVERY SERVICE'S GROUP OF A TITLE ROW HOLDS that is not something the
+# service said: its own id for the title (NULL where the service has no group —
+# the group's presence, with `fetched_at`), the ids it stated, the address of
+# its page, the title folded for search, whether a description has answered
+# for it, and its clocks — `fetched_at` the age of its OLDEST word, which a
+# service's storage ceiling is read from.
+TITLE_KEEPING = frozenset({"id", "ids_json", "detail_url", "title_fold", "enriched",
+                           "fetched_at", "stale_after", "failed_at", "fail_count"})
+# A season's: its clocks (`fetched_at` NULL where the service has no group).
+SEASON_KEEPING = frozenset({"fetched_at", "stale_after", "failed_at", "fail_count"})
+# AN EPISODE'S LISTING, for a service that publishes a calendar: the instant it
+# lists the episode at, a bitmask of the calendars that instant is on (each
+# Endpoint's `bit`) and of those it reached through a search rather than the
+# feed, the label it spelled, when it was last stored, and every further
+# instant the same service lists the episode at, each with masks of its own.
+EPISODE_LISTING = frozenset({"air_ts", "date_only", "calendars", "searched", "label",
+                             "listed_at", "repeats_json"})
+# An episode description's clocks (`fetched_at` 0 for a listing's stub nothing
+# has described, NULL where the service has no description).
+EPISODE_KEEPING = frozenset({"fetched_at", "stale_after"})
+
+
+@dataclass(frozen=True)
 class Capabilities:
     """What a source can be asked for, so a route can check instead of guessing.
 
@@ -983,6 +1031,11 @@ class Capabilities:
     # service whose rows are what its own calendar listed has nothing to add to
     # a card it did not list.
     describes_every_card: bool = False
+    # WHICH COLUMNS THIS SOURCE'S GROUP HAS in the title store's tables
+    # (`StoreColumns`). Empty by default so a test double needs none; every
+    # REGISTERED source declares a set for every table, which the conformance
+    # test holds it to.
+    store_columns: StoreColumns = StoreColumns()
 
     def answers(self, endpoint_key: str) -> bool:
         return endpoint_key in self.endpoints

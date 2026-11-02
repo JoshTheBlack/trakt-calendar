@@ -21,8 +21,9 @@ from datetime import date
 
 from ...config import Settings
 from .. import register
-from ..base import (Capabilities, Media, Record, SearchCatalogue, SearchPage,
-                    SeasonsAnswer, Source, TitleFacts, Video, status_spoken)
+from ..base import (EPISODE_KEEPING, EPISODE_LISTING, SEASON_KEEPING, TITLE_KEEPING,
+                    Capabilities, Media, Record, SearchCatalogue, SearchPage, SeasonsAnswer,
+                    Source, StoreColumns, TitleFacts, Video, status_spoken)
 from . import calendar, detail, normalize, search, transport
 from .transport import TmdbError, TmdbNotFound, TmdbRateLimited
 
@@ -144,6 +145,28 @@ class _TmdbProvider:
         # no language. So its row joins every card of a title it describes and
         # does not list (app/calendar/cache.py's `with_title_only`).
         describes_every_card=True,
+        # WHAT TMDB STATES, read off normalize.py and detail.py: everything a
+        # title's description carries, and alone among the services its
+        # keywords and show type (`facts_known` says a description stated
+        # them), the title's logo, a film's collection, the next scheduled
+        # episode and its popularity score. A season's own name, words, poster,
+        # cast and trailers. An episode's words, type, runtime and rating, never
+        # a vote count (the rating already sits behind RATING_VOTE_FLOOR). NO
+        # LISTING `entry`: TMDB's own id for a title is what keys it, so a
+        # listing can never come from some other TMDB id for the same title.
+        store_columns=StoreColumns(
+            titles=TITLE_KEEPING | {
+                "title", "year", "network", "country", "language", "certification",
+                "status", "overview", "poster", "runtime", "genres_json", "ratings_json",
+                "first_aired", "season_count", "videos_json", "release_types_json",
+                "cast_json", "homepage", "keywords_json", "show_type", "facts_known",
+                "logo", "collection_json", "next_episode_json", "popularity"},
+            seasons=SEASON_KEEPING | {
+                "episode_count", "premiere", "air_dates_json", "name", "overview",
+                "poster", "cast_json", "videos_json"},
+            episodes=EPISODE_LISTING | EPISODE_KEEPING | {
+                "title", "overview", "first_aired", "episode_type", "runtime", "rating"},
+        ),
     )
     sync_port = None
     calendar_port = _TmdbCalendarPort()

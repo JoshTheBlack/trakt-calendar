@@ -3809,6 +3809,605 @@ ALTER TABLE title_metadata ADD COLUMN facts_known INTEGER NOT NULL DEFAULT 0;
 """
 
 
+# ---------------------------------------------------------------------------
+# 49 — one row per title, per season and per episode, every service's facts
+#      side by side; the tables they replace retired whole
+# ---------------------------------------------------------------------------
+#
+# A CARD WAS COMBINED ON EVERY PAGE. Each service's word about a title, a season
+# and an episode was its own row, each listing of an episode its own airing, and
+# every read put a month back together in Python: which listings are one
+# episode, whose facts a filter judges, whose a card draws. So one row per
+# title (`titles`), per season (`seasons`) and per episode (`episodes`), each
+# holding every service's facts side by side in a column group per service —
+# `{source}_{column}` — with that group's own clocks; a service writes only its
+# own group. What depends on who is looking (whose value wins, which local day an
+# instant is, a viewer's filters) is still decided at read and never stored.
+#
+# A SERVICE HAS ONLY THE COLUMNS IT CAN STATE, which each provider package
+# declares (app/providers/base.py's `StoreColumns`) and
+# tests/kernel/test_title_store_migration.py holds these tables to.
+#
+# WHICH LISTINGS ARE ONE EPISODE IS NOW THE ROW'S KEY, decided as a listing is
+# written instead of at every read: (title, 'S{s}E{e}') for a numbered episode,
+# (title, 'film') for a film, and for a listing that names no full episode the
+# rule the read used (`_m49_fold` says it). Two services dating one episode far
+# apart are one row — each viewer sees it on their own first service's day — and
+# one service listing an episode twice keeps both instants on the one row.
+#
+# A FROZEN COPY. The column lists, the calendar bits, which entry a service's
+# group is copied from and the episode rule are written out here, never imported:
+# this converts what the code of the release before it stored, and must go on
+# converting it the same way however that code is changed later.
+#
+# NOTHING IS DELETED. The four tables this replaces — title_metadata,
+# season_metadata, episode_metadata, calendar_airings — are left whole, and the
+# old identity table is renamed aside to `titles_v47`, so that a later release
+# can check a production copy against them before it drops them. A retired table
+# is never swept, so its TMDB rows are inside TMDB's six-month ceiling only for
+# as long as that drop follows within it: the oldest on the development copy was
+# obtained 2026-10-27, and production's hold none. The
+# one thing removed is the renamed table's three id indexes — an index holds no
+# data — so the new `titles` keeps their names.
+#
+# MEASURED on copies before it was written (development at 48; production at 46,
+# brought to 48): converting takes 11 s and 4 s, and grows the file by 90 MB and
+# 28 MB. Listing for listing, no card the read drew split across two rows; the
+# only rows that join cards the read drew apart are episodes two services date
+# further apart than a month (157 rows on development, 53 on production) and
+# episodes one service lists twice (153 and 141; 24 and 18 both at once).
+#
+# ORDINARY ROWID TABLES, not WITHOUT ROWID. A wide row is far larger than the
+# twentieth of a page SQLite's guidance names for WITHOUT ROWID — a title row
+# runs to kilobytes — and MEASURED on the converted development copy rowid won
+# every read and write that mattered: a month's listings joined to their titles
+# 0.65 s against 1.15 s, a local day 22 ms against 40 ms, 2,000 titles by key
+# 49 ms against 86 ms, a month's set-based write 10 ms against 26 ms, and 52 MB
+# less file. Only `service_ids`, whose rows are a few dozen bytes, is WITHOUT
+# ROWID, like `title_aliases`.
+
+# THE SERVICES, in the registry's declared order: the order each table lays its
+# groups out in, and the order listings at one instant are taken in.
+_M49_SOURCES = ("tmdb", "trakt", "simkl")
+
+# EACH CALENDAR'S BIT in a `calendars` mask, which says what calendars a
+# service lists an instant on — app/endpoints.py's `Endpoint.bit`, which these
+# rows will be read by for as long as they exist.
+_M49_CALENDAR_BITS = {"shows/new": 1, "shows/premieres": 2, "shows/finales": 4, "shows": 8,
+                      "movies": 16}
+
+# A column's declaration, and what a row with no group of that service holds.
+_M49_KINDS: dict[str, tuple[str, Any]] = {
+    "text": ("TEXT NOT NULL DEFAULT ''", ""),
+    "list": ("TEXT NOT NULL DEFAULT '[]'", "[]"),
+    "map": ("TEXT NOT NULL DEFAULT '{}'", "{}"),
+    "zero": ("INTEGER NOT NULL DEFAULT 0", 0),
+    "int": ("INTEGER", None),
+    "real": ("REAL", None),
+    "maybe": ("TEXT", None),
+}
+
+# A TITLE'S GROUP, as every service has it. `id` is the service's own id for the
+# title — NULL where it has no group — and `fetched_at` the age of the group's
+# OLDEST word (NULL with no group).
+_M49_TITLE_EVERY = (
+    ("id", "maybe"), ("ids_json", "map"), ("detail_url", "text"), ("title", "text"),
+    ("title_fold", "text"), ("year", "text"), ("network", "text"), ("country", "text"),
+    ("language", "text"), ("certification", "text"), ("status", "text"), ("overview", "text"),
+    ("poster", "text"), ("runtime", "int"), ("genres_json", "list"), ("ratings_json", "map"),
+    ("first_aired", "text"), ("season_count", "int"), ("videos_json", "list"),
+    ("release_types_json", "map"), ("enriched", "zero"), ("fetched_at", "int"),
+    ("stale_after", "zero"), ("failed_at", "int"), ("fail_count", "zero"))
+_M49_TITLE_CAST = (("cast_json", "list"), ("homepage", "text"))
+_M49_TITLE_COLUMNS = {
+    "tmdb": _M49_TITLE_EVERY + _M49_TITLE_CAST + (
+        ("keywords_json", "list"), ("show_type", "text"), ("facts_known", "zero"),
+        ("logo", "text"), ("collection_json", "map"), ("next_episode_json", "map"),
+        ("popularity", "real")),
+    "trakt": _M49_TITLE_EVERY + _M49_TITLE_CAST,
+    "simkl": _M49_TITLE_EVERY + (("anime_type", "text"),),
+}
+
+_M49_SEASON_EVERY = (
+    ("episode_count", "int"), ("premiere", "text"), ("air_dates_json", "list"),
+    ("fetched_at", "int"), ("stale_after", "zero"), ("failed_at", "int"), ("fail_count", "zero"))
+_M49_SEASON_NAMED = (("name", "text"), ("overview", "text"), ("poster", "text"),
+                     ("cast_json", "list"))
+_M49_SEASON_COLUMNS = {
+    "tmdb": _M49_SEASON_EVERY + _M49_SEASON_NAMED + (("videos_json", "list"),),
+    "trakt": _M49_SEASON_EVERY + _M49_SEASON_NAMED,
+    # `id` and `named`: which of Simkl's own entries IS this season, where Simkl
+    # files a later season as a title of its own. Nothing stored says which
+    # season such an entry is — its episodes carry no season number — so they
+    # start empty and are filled from Simkl's own season list when it is read.
+    "simkl": _M49_SEASON_EVERY + (("id", "maybe"), ("named", "zero")),
+}
+
+# AN EPISODE'S LISTING: its first instant, a mask of the calendars that instant
+# is on and of those a search put it on, its label, when it was last stored, and
+# every further instant this service lists it at, each with masks of its own.
+_M49_EPISODE_LISTING = (
+    ("air_ts", "real"), ("date_only", "zero"), ("calendars", "zero"), ("searched", "zero"),
+    ("label", "text"), ("listed_at", "int"), ("repeats_json", "list"))
+_M49_EPISODE_ENTRY = (("entry", "maybe"),)
+_M49_EPISODE_DESCRIBED = (("title", "text"), ("overview", "text"), ("first_aired", "text"),
+                          ("fetched_at", "int"), ("stale_after", "zero"))
+_M49_EPISODE_RATED = (("episode_type", "text"), ("runtime", "int"), ("rating", "real"))
+_M49_EPISODE_COLUMNS = {
+    "tmdb": _M49_EPISODE_LISTING + _M49_EPISODE_DESCRIBED + _M49_EPISODE_RATED,
+    "trakt": (_M49_EPISODE_LISTING + _M49_EPISODE_ENTRY + _M49_EPISODE_DESCRIBED
+              + _M49_EPISODE_RATED + (("votes", "int"),)),
+    "simkl": _M49_EPISODE_LISTING + _M49_EPISODE_ENTRY + _M49_EPISODE_DESCRIBED,
+}
+_M49_LISTING_NAMES = frozenset(name for name, _kind in _M49_EPISODE_LISTING + _M49_EPISODE_ENTRY)
+
+# What a title row SAID, for telling the more complete of two entries apart —
+# app/metadata/rows.py's WORDS for title_metadata as it stood.
+_M49_TITLE_WORDS = (
+    "title", "year", "network", "country", "language", "certification", "status", "overview",
+    "poster", "runtime", "genres_json", "ratings_json", "anime_type", "release_types_json",
+    "keywords_json", "first_aired", "homepage", "season_count", "cast_json", "videos_json",
+    "logo", "collection_json", "next_episode_json", "show_type")
+
+# The calendar's mark for a coordinate a listing did not state.
+_M49_UNSTATED = -1
+
+# When the conversion ran: what tells a later check of these tables which of
+# their rows it wrote and which have been written since.
+TITLE_STORE_CONVERTED_AT = "title_store_converted_at"
+
+
+def _m49_table(name: str, identity: Sequence[str], groups: dict, key: str) -> str:
+    """A table's declaration: its own columns, then each service's group."""
+    columns = [*identity, *(f"{source}_{column} {_M49_KINDS[kind][0]}"
+                            for source in _M49_SOURCES for column, kind in groups[source])]
+    return f"CREATE TABLE {name} (\n    " + ",\n    ".join(columns) + f",\n    PRIMARY KEY ({key})\n)"
+
+
+def _m49_rows(conn: sqlite3.Connection, sql: str) -> list[sqlite3.Row]:
+    """Rows by column name whatever the connection's own row factory is."""
+    cursor = conn.cursor()
+    cursor.row_factory = sqlite3.Row
+    return cursor.execute(sql).fetchall()
+
+
+def _m49_held(value: Any) -> bool:
+    return value is not None and value not in ("", "[]", "{}")
+
+
+def _m49_own_id(source: str, source_id: Any, ids_json: Any) -> str:
+    """A service's own id for a title, in ONE spelling: the id its ids state for
+    that service — a number as plain decimal text — or, where they state none,
+    the id the row is filed under.
+
+    WHY NOT THE FILED ID: Trakt files most titles under a slug and renames slugs
+    — one film was filed as 'hot-spot-2026' and again as 'tttrrr66-2026', one
+    show as '199020' and 'the-traitors' — while its number never moves. Every
+    service's row on the copies measured stated its own id, so two spellings of
+    one entry are one entry here."""
+    try:
+        ids = json.loads(ids_json or "{}")
+    except ValueError:
+        ids = {}
+    own = ids.get(source) if isinstance(ids, dict) else None
+    if isinstance(own, bool) or own in (None, ""):
+        return str(source_id)
+    if isinstance(own, (int, float)) or (isinstance(own, str) and own.strip().isdigit()):
+        return str(int(own))
+    return str(own)
+
+
+def _m49_id_order(own: str) -> tuple:
+    """Lowest first, a number by its value."""
+    return (len(own), own) if own.isdigit() else (float("inf"), own)
+
+
+def _m49_primaries(rows: list[sqlite3.Row], listed: dict) -> dict[tuple[str, str], tuple[str, Any]]:
+    """{(source, title key): (the own id its group is, the row it is copied
+    from)} — which of a service's entries for one title is the title's.
+
+    A SERVICE CAN HOLD SEVERAL ENTRIES FOR ONE TITLE: Simkl files a later season
+    of an anime as a title of its own ("Sasaki and Peeps Season 2" under the
+    show's tmdb id), and now and then maps two shows to one id (Wheel of Fortune
+    UK and Australia). One group per service per title, so one is chosen: THE
+    ENTRY WITH THE MOST LISTINGS — for a per-season entry, the season airing now,
+    whose words the calendar already draws — then the more complete one (a
+    description answered, then more words, then the newer), then the lowest id.
+    Every other entry is a `service_ids` row, which is what still finds the title
+    by it. Its words stay in title_metadata.
+
+    WITHIN THE CHOSEN ENTRY, the row whose words are copied is chosen the same
+    way: one entry spelled two ways (`_m49_own_id`) is two rows."""
+    def rank(row) -> tuple:
+        return (listed.get((row["source"], row["media"], row["source_id"]), 0),
+                int(row["enriched"] or 0),
+                sum(_m49_held(row[word]) for word in _M49_TITLE_WORDS),
+                int(row["fetched_at"] or 0))
+
+    grouped: dict[tuple[str, str], dict[str, list]] = {}
+    for row in rows:
+        own = _m49_own_id(row["source"], row["source_id"], row["ids_json"])
+        grouped.setdefault((row["source"], row["title_key"]), {}).setdefault(own, []).append(row)
+    out = {}
+    for slot, entries in grouped.items():
+        def entry_rank(own: str, entries=entries) -> tuple:
+            best = max(rank(row) for row in entries[own])
+            listings = sum(rank(row)[0] for row in entries[own])
+            return (-listings, *(-part for part in best[1:]), _m49_id_order(own))
+
+        own = min(entries, key=entry_rank)
+        row = min(entries[own], key=lambda r: (*(-part for part in rank(r)),
+                                               _m49_id_order(str(r["source_id"]))))
+        out[slot] = (own, row)
+    return out
+
+
+def _m49_fold(listings: list[sqlite3.Row], key_of: dict) -> tuple[dict, int]:
+    """({airing rowid: (title key, unit, season, number)}, how many listings that
+    name no full episode joined one) — WHICH EPISODE ROW EACH LISTING IS, the
+    rule the calendar's read applied (app/calendar/cache.py's match_keys) made at
+    write, so that every card it drew is still one row.
+
+      - A FILM is its title's 'film' row.
+      - A LISTING THAT NAMES ITS EPISODE (season and number) is that episode's
+        row, 'S{season}E{number}', whatever its date and whoever lists it.
+      - A LISTING THAT DOES NOT — Simkl's anime listings state an episode number
+        and no season, and a later season Simkl files as a title of its own
+        numbers its episodes from 1, onwards, or absolutely, never by the show's
+        seasons (MEASURED: 3,632 listings on the development copy, 2,230 on
+        production, every one Simkl's) — joins a numbered episode of the same
+        title only when that is safe, on each calendar it is on: another
+        listing of that episode is on the same calendar on the same UTC day and
+        agrees with whichever half the listing did state, EXACTLY ONE episode
+        qualifies — counted before anything narrows, so a day listing season 4
+        and season 5 of one show never quietly takes the wrong one — and its own
+        service has no listing of that episode there yet (folding a service's
+        listing into its own would collapse it rather than reconcile two
+        services). Otherwise it is a row of its own: its title, its day and what
+        it stated, 'D{YYYY-MM-DD}E{number}'. THE NUMBER IS PART OF THE KEY:
+        a show listed as episodes 1 and 2 on one day is two rows, as it was two
+        cards (92 such days on the development copy, 54 on production).
+
+    In time order, then the declared order, so a listing's turn depends only on
+    what was listed before it."""
+    units: dict[int, tuple] = {}
+    on_day: dict[tuple, set] = {}
+    listed_by: dict[tuple, set] = {}
+    loose = []
+    for row in listings:
+        key = key_of[row["rid"]]
+        season, number = row["season"], row["episode_number"]
+        if row["media"] == "movie":
+            units[row["rid"]] = (key, "film", None, None)
+        elif season != _M49_UNSTATED and number != _M49_UNSTATED:
+            units[row["rid"]] = (key, f"S{season}E{number}", season, number)
+            on_day.setdefault((key, row["endpoint"], row["air_date"]), set()).add((season, number))
+            listed_by.setdefault((key, row["endpoint"], (season, number)), set()).add(row["source"])
+        else:
+            loose.append(row)
+    order = {source: at for at, source in enumerate(_M49_SOURCES)}
+    loose.sort(key=lambda r: (r["air_ts"], order.get(r["source"], len(order)), key_of[r["rid"]],
+                              str(r["source_id"]), r["episode_number"], r["season"], r["rid"]))
+    folded = 0
+    for row in loose:
+        key = key_of[row["rid"]]
+        season = None if row["season"] == _M49_UNSTATED else row["season"]
+        number = None if row["episode_number"] == _M49_UNSTATED else row["episode_number"]
+        agreeing = {episode for episode in on_day.get((key, row["endpoint"], row["air_date"]), ())
+                    if (number is None or episode[1] == number)
+                    and (season is None or episode[0] == season)}
+        if len(agreeing) == 1:
+            (episode,) = agreeing
+            services = listed_by[(key, row["endpoint"], episode)]
+            if row["source"] not in services:
+                services.add(row["source"])
+                units[row["rid"]] = (key, f"S{episode[0]}E{episode[1]}", *episode)
+                folded += 1
+                continue
+        unit = ("D" + row["air_date"] + (f"S{season}" if season is not None else "")
+                + (f"E{number}" if number is not None else ""))
+        units[row["rid"]] = (key, unit, season, number)
+    return units, folded
+
+
+def MIGRATION_49(conn: sqlite3.Connection, now: int | None = None) -> None:
+    """One row per title, per season and per episode, every service's facts side
+    by side, copied from the per-service tables, which are retired whole — see
+    the comment above for why each part is the way it is.
+
+    NOT IN MIGRATIONS YET: run before the code that reads these tables, it would
+    build a copy the old code goes on not writing. It is applied in the same
+    change that moves every reader and writer onto them."""
+    now = int(time.time()) if now is None else now
+
+    # THE OLD IDENTITY TABLE, RENAMED ASIDE AND KEPT WHOLE. Its id indexes go —
+    # an index holds no data — so the new table keeps their names.
+    conn.execute("ALTER TABLE titles RENAME TO titles_v47")
+    for space in ("tvdb", "imdb", "mal"):
+        conn.execute(f"DROP INDEX ix_titles_{space}")
+    conn.execute(_m49_table("titles", (
+        "title_key TEXT NOT NULL", "media TEXT NOT NULL", "ids_json TEXT NOT NULL DEFAULT '{}'",
+        "created_at INTEGER NOT NULL", "last_viewed_at INTEGER", "refreshed_at INTEGER"),
+        _M49_TITLE_COLUMNS, "title_key"))
+    # EVERY OWN ID A SERVICE HAS FOR A TITLE, each spelling it filed the title
+    # under as well as the one spelling `_m49_own_id` reads, so a listing, a
+    # queued refresh or a play finds its title by whatever id the service gives.
+    # `is_primary` marks the entry the title's group is (`titles.{source}_id`).
+    conn.execute("""
+        CREATE TABLE service_ids (
+            source     TEXT    NOT NULL,
+            media      TEXT    NOT NULL,
+            service_id TEXT    NOT NULL,
+            title_key  TEXT    NOT NULL,
+            is_primary INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (source, media, service_id)
+        ) WITHOUT ROWID""")
+    conn.execute(_m49_table("seasons", ("title_key TEXT NOT NULL", "season INTEGER NOT NULL"),
+                            _M49_SEASON_COLUMNS, "title_key, season"))
+    # `unit` is the row's episode — 'S{s}E{e}', 'film', or a listing no episode
+    # could take, 'D{day}' and what it stated. `season` and `number` are what is
+    # known of the coordinate: both for a numbered episode, the stated half of a
+    # 'D' row, neither for a film.
+    conn.execute(_m49_table("episodes", (
+        "title_key TEXT NOT NULL", "unit TEXT NOT NULL", "media TEXT NOT NULL",
+        "season INTEGER", "number INTEGER"), _M49_EPISODE_COLUMNS, "title_key, unit"))
+
+    # ---- each service's entries, and which one each title's group is
+    titles = _m49_rows(conn, "SELECT * FROM title_metadata")
+    listed = {(source, media, source_id): count for source, media, source_id, count in
+              conn.execute("SELECT source, media, source_id, COUNT(*) FROM calendar_airings "
+                           "GROUP BY source, media, source_id")}
+    primaries = _m49_primaries(titles, listed)
+    entry_of = {(row["source"], row["media"], row["source_id"]):
+                (row["title_key"], _m49_own_id(row["source"], row["source_id"], row["ids_json"]))
+                for row in titles}
+
+    # ---- listings, each under its service's title row's key
+    airings = _m49_rows(conn, "SELECT rowid AS rid, * FROM calendar_airings")
+    # A SEARCHED ROW STANDS DOWN FOR ITS FEED: a search wrote it to fill a gap in
+    # its service's feed, and the read dropped it once the feed listed the same
+    # episode on that calendar (app/calendar/entries.py's `_in_fetch_order`).
+    fed = {(a["source"], a["media"], a["source_id"], a["endpoint"], a["season"],
+            a["episode_number"]) for a in airings if not a["from_search"]}
+    kept = [a for a in airings if not (a["from_search"] and (
+        a["source"], a["media"], a["source_id"], a["endpoint"], a["season"],
+        a["episode_number"]) in fed)]
+    # UNDER ITS SERVICE'S TITLE ROW'S KEY, not the airing's own: a title row is
+    # re-keyed when its listing learns a better id, while airings of that title
+    # stored earlier can keep the old key — and the read drew them by the row's
+    # ids (cache.group_base). MEASURED, development: 568 of 574 such airings were
+    # drawn on the title row's card. An airing with no title row keeps its own.
+    key_of = {a["rid"]: entry_of.get((a["source"], a["media"], a["source_id"]),
+                                     (a["title_key"], None))[0] for a in kept}
+    units, folded = _m49_fold(kept, key_of)
+
+    # ---- the identity rows: every title the old identity table or a service's
+    # row names. One the old table did not hold starts with no ids, as the old
+    # table did on an instance that had not registered its titles yet — the
+    # start-up registration (app/metadata/backfill.py) settles each.
+    old = {row["title_key"]: row for row in _m49_rows(conn, "SELECT * FROM titles_v47")}
+    media_of = {row["title_key"]: row["media"] for row in titles}
+    for a in kept:
+        media_of.setdefault(key_of[a["rid"]], a["media"])
+    columns = ["title_key", "media", "ids_json", "created_at", "last_viewed_at", "refreshed_at",
+               *(f"{source}_{column}" for source in _M49_SOURCES
+                 for column, _kind in _M49_TITLE_COLUMNS[source])]
+    values = []
+    for key in sorted(set(old) | set(media_of)):
+        known = old.get(key)
+        row = ([key, known["media"], known["ids_json"], known["created_at"],
+                known["last_viewed_at"], known["refreshed_at"]] if known is not None
+               else [key, media_of[key], "{}", now, None, None])
+        for source in _M49_SOURCES:
+            own, copied = primaries.get((source, key), (None, None))
+            for column, kind in _M49_TITLE_COLUMNS[source]:
+                if copied is None:
+                    row.append(_M49_KINDS[kind][1])
+                elif column == "id":
+                    row.append(own)
+                elif column in copied.keys():
+                    row.append(copied[column])
+                else:
+                    row.append(_M49_KINDS[kind][1])
+        values.append(row)
+    conn.executemany(f"INSERT INTO titles ({', '.join(columns)}) "
+                     f"VALUES ({', '.join('?' * len(columns))})", values)
+    title_count = len(values)
+
+    # ---- every own id, the primary entry's spellings first so they win a clash
+    ids: dict[tuple[str, str, str], tuple[str, int]] = {}
+    clashes = 0
+    for row in sorted(titles, key=lambda r: primaries[(r["source"], r["title_key"])][0]
+                      != entry_of[(r["source"], r["media"], r["source_id"])][1]):
+        key, own = entry_of[(row["source"], row["media"], row["source_id"])]
+        primary = int(own == primaries[(row["source"], key)][0])
+        for spelled in dict.fromkeys((str(row["source_id"]), own)):
+            held = ids.setdefault((row["source"], row["media"], spelled), (key, primary))
+            clashes += held[0] != key
+    for a in kept:
+        ids.setdefault((a["source"], a["media"], str(a["source_id"])), (key_of[a["rid"]], 0))
+    if clashes:
+        logger.warning("Migration 49: %d service id(s) named two titles; the first kept", clashes)
+    conn.executemany("INSERT INTO service_ids (source, media, service_id, title_key, is_primary) "
+                     "VALUES (?, ?, ?, ?, ?)", [(*slot, *held) for slot, held in ids.items()])
+
+    def primary_first(source: str, media: str, source_id: str, fetched_at) -> tuple | None:
+        """How a row of one service ranks for one title's slot — its entry the
+        title's group first, then the newer — or None for a row whose title no
+        service row names."""
+        found = entry_of.get((source, media, source_id))
+        if found is None:
+            return None
+        key, own = found
+        return (key, own == primaries[(source, key)][0], int(fetched_at or 0), str(source_id))
+
+    # ---- seasons: each service's season rows, its group's entry winning a clash
+    seasons: dict[tuple, dict[str, tuple]] = {}
+    orphans = 0
+    for row in _m49_rows(conn, "SELECT * FROM season_metadata"):
+        rank = primary_first(row["source"], row["media"], row["source_id"], row["fetched_at"])
+        if rank is None:
+            orphans += 1
+            continue
+        held = seasons.setdefault((rank[0], row["season"]), {}).get(row["source"])
+        if held is None or rank[1:] > held[0]:
+            seasons[(rank[0], row["season"])][row["source"]] = (rank[1:], row)
+    columns = ["title_key", "season", *(f"{source}_{column}" for source in _M49_SOURCES
+                                        for column, _kind in _M49_SEASON_COLUMNS[source])]
+    values = []
+    for (key, season), by_source in sorted(seasons.items()):
+        row = [key, season]
+        for source in _M49_SOURCES:
+            copied = by_source.get(source, (None, None))[1]
+            for column, kind in _M49_SEASON_COLUMNS[source]:
+                row.append(copied[column] if copied is not None and column in copied.keys()
+                           else _M49_KINDS[kind][1])
+        values.append(row)
+    conn.executemany(f"INSERT INTO seasons ({', '.join(columns)}) "
+                     f"VALUES ({', '.join('?' * len(columns))})", values)
+    season_count = len(values)
+
+    # ---- episodes: each service's instants of each row, and its description
+    instants: dict[tuple, dict[float, dict]] = {}
+    shape: dict[tuple[str, str], tuple] = {}
+    bit_order = {endpoint: at for at, endpoint in enumerate(_M49_CALENDAR_BITS)}
+    for a in sorted(kept, key=lambda a: (bit_order.get(a["endpoint"], len(bit_order)), a["rid"])):
+        if a["endpoint"] not in _M49_CALENDAR_BITS:
+            raise ValueError(f"Migration 49: an airing on an unknown calendar {a['endpoint']!r}")
+        key, unit, season, number = units[a["rid"]]
+        shape.setdefault((key, unit), (a["media"], season, number))
+        found = entry_of.get((a["source"], a["media"], a["source_id"]))
+        own = found[1] if found is not None else str(a["source_id"])
+        instant = instants.setdefault((key, unit, a["source"]), {}).setdefault(a["air_ts"], {
+            "at": a["air_ts"], "date_only": int(a["date_only"]), "calendars": 0, "searched": 0,
+            "label": "", "listed_at": 0, "entries": set()})
+        bit = _M49_CALENDAR_BITS[a["endpoint"]]
+        instant["calendars"] |= bit
+        if a["from_search"]:
+            instant["searched"] |= bit
+        instant["label"] = instant["label"] or str(a["episode_label"] or "")
+        # The NEWEST store of the instant across its calendars: what was last
+        # confirmed about it, which the retention sweep reads.
+        instant["listed_at"] = max(instant["listed_at"], int(a["stored_at"]))
+        instant["entries"].add(own)
+    described: dict[tuple, tuple] = {}
+    for row in _m49_rows(conn, "SELECT * FROM episode_metadata"):
+        rank = primary_first(row["source"], row["media"], row["source_id"], row["fetched_at"])
+        if rank is None:
+            orphans += 1
+            continue
+        slot = (rank[0], f"S{row['season']}E{row['number']}", row["source"])
+        if slot not in described or rank[1:] > described[slot][0]:
+            described[slot] = (rank[1:], row)
+        shape.setdefault(slot[:2], (row["media"], row["season"], row["number"]))
+    if orphans:
+        logger.warning("Migration 49: %d season or episode row(s) belong to no title row; "
+                       "left in season_metadata / episode_metadata only", orphans)
+
+    def listing(source: str, key: str, held: dict[float, dict]) -> dict[str, Any]:
+        """One service's listing columns of one row: its earliest instant, and
+        every later one in `repeats_json`. `entry` names the entry an instant was
+        listed under where it is not the title's group."""
+        primary = primaries.get((source, key), (None,))[0]
+        out = []
+        for instant in sorted(held.values(), key=lambda i: i["at"]):
+            entry = (None if primary in instant["entries"]
+                     else min(instant["entries"], key=_m49_id_order))
+            out.append({"at": instant["at"], "date_only": instant["date_only"],
+                        "calendars": instant["calendars"], "searched": instant["searched"],
+                        "label": instant["label"], "listed_at": instant["listed_at"],
+                        "entry": entry})
+        first, repeats = out[0], out[1:]
+        has_entry = any(name == "entry" for name, _kind in _M49_EPISODE_COLUMNS[source])
+        if not has_entry:
+            for instant in out:
+                instant.pop("entry")
+        return {"air_ts": first["at"], "date_only": first["date_only"],
+                "calendars": first["calendars"], "searched": first["searched"],
+                "label": first["label"], "listed_at": first["listed_at"],
+                "repeats_json": json.dumps(repeats) if repeats else "[]",
+                "entry": first.get("entry")}
+
+    columns = ["title_key", "unit", "media", "season", "number",
+               *(f"{source}_{column}" for source in _M49_SOURCES
+                 for column, _kind in _M49_EPISODE_COLUMNS[source])]
+    values = []
+    for (key, unit), (media, season, number) in sorted(shape.items()):
+        row = [key, unit, media, season, number]
+        for source in _M49_SOURCES:
+            held = instants.get((key, unit, source))
+            listed_here = listing(source, key, held) if held else None
+            copied = described.get((key, unit, source), (None, None))[1]
+            for column, kind in _M49_EPISODE_COLUMNS[source]:
+                if column in _M49_LISTING_NAMES:
+                    row.append(listed_here[column] if listed_here is not None
+                               else _M49_KINDS[kind][1])
+                elif copied is not None and column in copied.keys():
+                    row.append(copied[column])
+                else:
+                    row.append(_M49_KINDS[kind][1])
+        values.append(row)
+    conn.executemany(f"INSERT INTO episodes ({', '.join(columns)}) "
+                     f"VALUES ({', '.join('?' * len(columns))})", values)
+    episode_count = len(values)
+
+    # ---- the indexes. A TITLE IS FOUND by a lower shared id as before; each
+    # group by its folded title (search), by what its drains owe and by its age
+    # (the ceiling sweep). An episode row by each service's instants on a
+    # calendar (a span's rows), by the rows holding repeats (an instant a span
+    # must also find), and per season (a tracker total).
+    for space in ("tvdb", "imdb", "mal"):
+        conn.execute(f"CREATE INDEX ix_titles_{space} ON titles(media, "
+                     f"json_extract(ids_json, '$.{space}'))")
+    conn.execute("CREATE INDEX ix_service_ids_title ON service_ids(title_key)")
+    conn.execute("CREATE INDEX ix_episodes_season ON episodes(title_key, season)")
+    for source in _M49_SOURCES:
+        conn.execute(f"CREATE INDEX ix_titles_{source}_fold ON titles({source}_title_fold)")
+        conn.execute(f"CREATE INDEX ix_titles_{source}_due ON "
+                     f"titles({source}_enriched, {source}_stale_after)")
+        conn.execute(f"CREATE INDEX ix_titles_{source}_fetched ON titles({source}_fetched_at)")
+        conn.execute(f"CREATE INDEX ix_seasons_{source}_due ON seasons({source}_stale_after)")
+        conn.execute(f"CREATE INDEX ix_seasons_{source}_fetched ON seasons({source}_fetched_at)")
+        conn.execute(f"CREATE INDEX ix_episodes_{source}_air ON episodes({source}_air_ts) "
+                     f"WHERE {source}_calendars != 0")
+        conn.execute(f"CREATE INDEX ix_episodes_{source}_repeats ON episodes(title_key) "
+                     f"WHERE {source}_repeats_json != '[]'")
+        conn.execute(f"CREATE INDEX ix_episodes_{source}_due ON episodes({source}_stale_after)")
+        conn.execute(f"CREATE INDEX ix_episodes_{source}_fetched ON "
+                     f"episodes({source}_fetched_at)")
+
+    # ---- the rest that adds, unused until its feature lands
+    _run_script(conn, """
+-- THE SHOWS A SHARED MONTH'S PREVIEW PICTURE FEATURES, chosen by the owner of the
+-- link, in the order chosen (`position`). Keyed by the title store's key, so a
+-- re-key moves a highlight with its title.
+CREATE TABLE share_highlights (
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    year       INTEGER NOT NULL,
+    month      INTEGER NOT NULL,
+    title_key  TEXT    NOT NULL,
+    position   INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, year, month, title_key)
+);
+CREATE INDEX ix_share_highlights_title ON share_highlights(title_key);
+
+-- A SECOND CREDENTIAL a linked service can issue beside its access token —
+-- TMDB's v3 session, which its write API takes where the v4 token does not —
+-- sealed exactly as access_token is (enc:v1: while encryption is on), and like
+-- it never logged, cached, or put in an address. NULL until a link needs one.
+ALTER TABLE linked_identities ADD COLUMN session_token TEXT;
+""")
+    conn.execute("INSERT INTO app_meta (key, value) VALUES (?, ?) "
+                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                 (TITLE_STORE_CONVERTED_AT, str(now)))
+    logger.info("Migration 49: %d titles, %d seasons, %d episode rows and %d service ids; "
+                "%d of %d listings kept (%d searched ones their feed lists stood down), "
+                "%d listings naming no full episode joined one", title_count, season_count,
+                episode_count, len(ids), len(kept), len(airings), len(airings) - len(kept),
+                folded)
+
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),

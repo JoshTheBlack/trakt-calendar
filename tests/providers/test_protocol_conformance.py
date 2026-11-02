@@ -29,9 +29,10 @@ import unittest
 
 from app import providers
 from app.config import Settings
-from app.providers.base import (STATUS_WORDS, CalendarPort, DetailPort, LibraryPort, Media,
-                                PlayCountPort, Provider, SearchPort, Source, SyncPort,
-                                WatchlistPort)
+from app.providers.base import (EPISODE_KEEPING, EPISODE_LISTING, SEASON_KEEPING,
+                                STATUS_WORDS, TITLE_KEEPING, CalendarPort, DetailPort,
+                                LibraryPort, Media, PlayCountPort, Provider, SearchPort, Source,
+                                SyncPort, WatchlistPort)
 from app.providers.trakt import detail as trakt_detail
 from tests.support import DatabaseTestCase
 
@@ -722,6 +723,34 @@ class WhoDescribesEveryCardTests(unittest.TestCase):
             if provider.capabilities.describes_every_card:
                 with self.subTest(source=source):
                     self.assertIsNotNone(provider.detail_port)
+
+
+class EveryServiceDeclaresItsStoreColumnsTests(unittest.TestCase):
+    """Capabilities.store_columns: which columns each service's group has in the
+    title store's tables. tests/kernel/test_title_store_migration.py holds the
+    tables to exactly these sets; this holds every service to having one."""
+
+    def test_every_registered_source_declares_a_set_for_every_table(self):
+        for source, provider in providers.registered().items():
+            declared = provider.capabilities.store_columns
+            for table in ("titles", "seasons", "episodes"):
+                with self.subTest(source=source, table=table):
+                    self.assertTrue(getattr(declared, table))
+
+    def test_every_group_holds_what_the_store_keeps_for_it(self):
+        for source, provider in providers.registered().items():
+            declared = provider.capabilities.store_columns
+            with self.subTest(source=source):
+                self.assertLessEqual(TITLE_KEEPING, declared.titles)
+                self.assertLessEqual(SEASON_KEEPING, declared.seasons)
+                self.assertLessEqual(EPISODE_KEEPING, declared.episodes)
+
+    def test_a_service_lists_episodes_exactly_when_it_publishes_a_calendar(self):
+        for source, provider in providers.registered().items():
+            declared = provider.capabilities.store_columns
+            with self.subTest(source=source):
+                self.assertEqual(EPISODE_LISTING <= declared.episodes,
+                                 provider.calendar_port is not None)
 
 
 class EveryServiceSaysWhatItsStatusMeansTests(unittest.TestCase):

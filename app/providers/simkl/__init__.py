@@ -17,8 +17,9 @@ from datetime import date
 from ...config import Settings
 from ...endpoints import Endpoint
 from .. import register
-from ..base import (Capabilities, Media, Record, SearchCatalogue, SearchPage, SeasonsAnswer,
-                    Source, TitleFacts, Video)
+from ..base import (EPISODE_KEEPING, EPISODE_LISTING, SEASON_KEEPING, TITLE_KEEPING,
+                    Capabilities, Media, Record, SearchCatalogue, SearchPage, SeasonsAnswer,
+                    Source, StoreColumns, TitleFacts, Video)
 from . import by_id, calendar, detail, search, sync, titles, watchlist
 from .transport import SimklBlockedError, SimklError, SimklRateLimitError
 
@@ -287,6 +288,29 @@ class _SimklProvider:
         # through the DetailPort: that port's per-title reads need a viewer's
         # token, which a background pass for the whole instance does not have.
         describes_sparse_listings=False,
+        # WHAT SIMKL STATES, read off titles.py and detail.py: a title's
+        # description with its anime format (`anime_type`, its own — not TMDB's
+        # show type) and release schedule, its season count and videos, and
+        # IMDb's score beside its own in the ratings map. NO CAST, NO HOMEPAGE,
+        # NO KEYWORDS OR SHOW TYPE: detail.py records why, against Simkl's own
+        # documentation. A season is only what its episode list says (count,
+        # premiere, dates) — no name, words, poster or cast anywhere in Simkl's
+        # API — plus, where one of Simkl's entries IS that season (Simkl files
+        # some later seasons as titles of their own), that entry's `id` and
+        # whether it `named` exactly that season. An episode's title, words and
+        # date, and nothing else. A listing's `entry`: one title can be listed
+        # under several of Simkl's own ids.
+        store_columns=StoreColumns(
+            titles=TITLE_KEEPING | {
+                "title", "year", "network", "country", "language", "certification",
+                "status", "overview", "poster", "runtime", "genres_json", "ratings_json",
+                "first_aired", "season_count", "videos_json", "release_types_json",
+                "anime_type"},
+            seasons=SEASON_KEEPING | {
+                "episode_count", "premiere", "air_dates_json", "id", "named"},
+            episodes=EPISODE_LISTING | EPISODE_KEEPING | {
+                "entry", "title", "overview", "first_aired"},
+        ),
     )
     sync_port = _SimklSyncPort()
     # THE CALENDAR PORT, DECLARED IN THE SAME CHANGE AS THE ENDPOINT SET ABOVE

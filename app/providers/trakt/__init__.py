@@ -21,8 +21,9 @@ from ...endpoints import ENDPOINTS
 from datetime import date
 
 from .. import register
-from ..base import (Capabilities, Media, Record, SearchCatalogue, SearchHit, SearchPage,
-                    SeasonsAnswer, Source, TitleFacts, Video, status_spoken)
+from ..base import (EPISODE_KEEPING, EPISODE_LISTING, SEASON_KEEPING, TITLE_KEEPING,
+                    Capabilities, Media, Record, SearchCatalogue, SearchHit, SearchPage,
+                    SeasonsAnswer, Source, StoreColumns, TitleFacts, Video, status_spoken)
 from . import calendar, detail, sync, watchlist
 from .transport import TraktError, TraktRateLimitError
 
@@ -303,6 +304,29 @@ class _TraktProvider:
         # complete — genres, network, status, certification — and is never
         # stored sparse; there is nothing to describe it for.
         describes_sparse_listings=False,
+        # WHAT TRAKT STATES, read off calendar.py and detail.py: a title's
+        # description with its cast and homepage, and a film's release schedule —
+        # not in a description (detail.py), but through Trakt's own releases
+        # read, which app/calendar/enrich.py keeps in `trakt_releases`. NO ANIME
+        # FORMAT, NO KEYWORDS, NO SHOW TYPE:
+        # detail.py records why none is reachable. A season's name, words,
+        # poster and cast; an episode's words, type, runtime, rating and votes —
+        # the only service that counts votes. A listing's `entry`: Trakt files a
+        # title under its slug, and a title renamed on Trakt is listed under
+        # its new one.
+        store_columns=StoreColumns(
+            titles=TITLE_KEEPING | {
+                "title", "year", "network", "country", "language", "certification",
+                "status", "overview", "poster", "runtime", "genres_json", "ratings_json",
+                "first_aired", "season_count", "videos_json", "release_types_json",
+                "cast_json", "homepage"},
+            seasons=SEASON_KEEPING | {
+                "episode_count", "premiere", "air_dates_json", "name", "overview",
+                "poster", "cast_json"},
+            episodes=EPISODE_LISTING | EPISODE_KEEPING | {
+                "entry", "title", "overview", "first_aired", "episode_type", "runtime",
+                "rating", "votes"},
+        ),
     )
     # What makes that `private_user_data=True` checkable rather than a claim: the
     # tracker asks the registry for this and never for Trakt by name.
