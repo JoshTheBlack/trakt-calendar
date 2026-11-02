@@ -1323,11 +1323,20 @@ async def calendar_search_seasons(request: Request):
     non-200 is never swapped, and the slot would stay as it was."""
     user = await auth.current_user(request)
     settings = await viewer.settings_for_user(user.user_id)
-    hit, media = await _searched_title(request.query_params, settings)
-    context = {"request": request, "options": [], "note": "", "title": "",
-               "media": str(media), "endpoint": request.query_params.get("endpoint") or "",
-               "ref": {name: request.query_params[name] for name in
-                       ("q", "media", "i", "also", "pages") if request.query_params.get(name)}}
+    return await _season_picker(request, user, settings, request.query_params)
+
+
+async def _season_picker(request: Request, user, settings, params, *,
+                         note: str = "") -> Response:
+    """One result's season picker, drawn from `params` — the result's reference
+    and the calendar, as the row's GET names them and the jump's body carries
+    them — with `note` under it."""
+    hit, media = await _searched_title(params, settings)
+    context = {"request": request, "options": [], "note": note, "title": "",
+               "media": str(media),
+               "endpoint": route_params.last_value(params.get("endpoint")) or "",
+               "ref": {name: route_params.last_value(params.get(name)) for name in
+                       ("q", "media", "i", "also", "pages") if params.get(name)}}
     if hit is None:
         context["note"] = "That search has expired — search for it again."
     else:
@@ -1385,6 +1394,12 @@ async def jump_to_a_searched_title(request: Request):
     A WRITE THAT COULD NOT HAPPEN STILL NAVIGATES. The month is worth opening
     either way; a result the store no longer holds opens the calendar the reader
     was on.
+
+    A CARD THE READER'S FILTERS HIDE DOES NOT. Who lists a season's card is known
+    only once it is written and its week filled, and a card one service lists
+    is hidden from a reader who hides those (calendar/search.py's `jump`) — so
+    the answer is the picker again, in place, at 200, the season now refused
+    with the reason and a sentence saying why nothing opened.
     """
     user = await auth.current_user(request)
     settings = await viewer.settings_for_user(user.user_id)
@@ -1405,14 +1420,19 @@ async def jump_to_a_searched_title(request: Request):
     try:
         # LANDED WHERE THIS VIEWER'S CALENDAR DRAWS IT, so the jump reads the
         # card under their own filters and sources (calendar/search.py's `jump`).
-        destination = await calendar_search.jump(
+        landing = await calendar_search.jump(
             settings, hit, media, seasons, tz=_resolve_viewer_tz(user, settings),
             now=db.now(), prefs=await auth.get_user_prefs(user.user_id),
             source_selection=await _viewer_source_selection(request, user))
     except SourceUnavailable as exc:
         logger.info("calendar jump: %s could not be described (%s)", hit.title, exc)
-        destination = ""
-    return Response(status_code=204, headers={"HX-Redirect": destination or fallback})
+        landing = calendar_search.Landing("")
+    if landing.hidden:
+        what = "that film" if media is Media.MOVIE else "that season"
+        return await _season_picker(
+            request, user, settings, data,
+            note=f"Your filters hide {what} on this calendar, so there is no card to go to.")
+    return Response(status_code=204, headers={"HX-Redirect": landing.url or fallback})
 
 
 def _library_answer(request: Request, *, marks=(), message: str = "",

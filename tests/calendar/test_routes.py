@@ -1764,8 +1764,11 @@ class FollowingASearchResultWritesOneAiringTests(CalendarRouteTestCase):
         super().setUp()
         self.sign_in_as(self._make_user("jumper2"))
 
-    def _go(self, body=None, *, hit="found", destination="/calendar?year=2026&month=4"):
+    def _go(self, body=None, *, hit="found", destination="/calendar?year=2026&month=4",
+            hidden=False):
+        from app.calendar import search as calendar_search
         from app.providers import title_search
+        from app.providers.season_choices import SeasonOption
 
         self.named = []
         self.jumped = []
@@ -1776,10 +1779,16 @@ class FollowingASearchResultWritesOneAiringTests(CalendarRouteTestCase):
 
         async def _jump(settings, found, media, seasons, *, tz, now, **_viewer):
             self.jumped.append((media, seasons))
-            return destination
+            return calendar_search.Landing(destination, hidden=hidden)
+
+        async def _picker(settings, found, media, *, prefs, tz, source_selection=None):
+            # The picker as it stands once the jump has written the season: held,
+            # and refused by this reader's filters.
+            return calendar_search.Picker([SeasonOption(1, blocked="your filters hide it")], [])
 
         with patch.object(title_search, "resolve_hit", _resolve), \
-             patch("app.calendar.search.jump", _jump):
+             patch("app.calendar.search.jump", _jump), \
+             patch("app.calendar.search.picker", _picker):
             return self.client.post("/calendar/jump", json=body or self.JUMP,
                                     follow_redirects=False)
 
@@ -1831,6 +1840,22 @@ class FollowingASearchResultWritesOneAiringTests(CalendarRouteTestCase):
         self.assertEqual(resp.status_code, 204)
         self.assertEqual(self.jumped, [])
 
+    def test_a_card_the_readers_filters_hide_is_said_in_place_and_opens_nothing(self):
+        """Yellowjackets' second season: written, its week filled, listed by TMDB
+        alone, and hidden from a reader who hides what one service lists. The
+        month it would open draws nothing to land on, so the picker comes back
+        into its own slot with the season refused and a sentence saying why."""
+        resp = self._go(hidden=True)
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("hx-redirect", resp.headers)
+        self.assertIn("Your filters hide that season on this calendar", resp.text)
+        self.assertIn("your filters hide it", resp.text)
+        self.assertNotIn('name="season:1"', resp.text)
+        # The same reference, so the redrawn picker can be pressed again.
+        for field in ('name="q" value="half man"', 'name="i" value="0"',
+                      'name="endpoint" value="shows"'):
+            self.assertIn(field, resp.text)
+
 
 class ASearchResultsSeasonPickerTests(CalendarRouteTestCase):
     """`/calendar/fragments/search-seasons` — the app's one season checklist for
@@ -1866,10 +1891,12 @@ class ASearchResultsSeasonPickerTests(CalendarRouteTestCase):
             SeasonOption(3, blocked="your filters hide it"),
             SeasonOption(4, href="/calendar?year=2026&month=11#jump-target")])
         # A json-enc POST, because following it writes; the answer is the
-        # navigation, so nothing is swapped.
+        # navigation, or — a card the reader's filters hide — this picker again,
+        # into its own slot.
         self.assertIn('hx-post="/calendar/jump"', html)
         self.assertIn('hx-json-enc=""', html)
-        self.assertIn('hx-swap="none"', html)
+        self.assertIn('hx-target="closest .search-pick"', html)
+        self.assertIn('hx-swap="innerHTML"', html)
         self.assertNotIn('action="/calendar/jump', html)
         for field in ('name="q" value="half man"', 'name="i" value="0"',
                       'name="media" value="show"', 'name="endpoint" value="shows"'):

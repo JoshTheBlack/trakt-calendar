@@ -44,6 +44,7 @@ import dataclasses
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from typing import NamedTuple
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -534,8 +535,16 @@ def _jump_writer(hit, endpoint_key: str):
     return None
 
 
+class Landing(NamedTuple):
+    """Where a jump sends the reader (`url`, "" for nowhere in particular), or
+    that it sends them nowhere because the card is there and this viewer's
+    filters hide it (`hidden`)."""
+    url: str
+    hidden: bool = False
+
+
 async def jump(settings, hit, media: Media, seasons: list, *, tz: ZoneInfo,
-               now: int, prefs=None, source_selection=None) -> str:
+               now: int, prefs=None, source_selection=None) -> Landing:
     """Write the airings the picker's ticked seasons name (a film: its release),
     and answer where to land — the first ticked one's card, on the day this
     viewer's calendar draws it. The title is the one the reference named, re-read
@@ -552,6 +561,17 @@ async def jump(settings, hit, media: Media, seasons: list, *, tz: ZoneInfo,
     service gives — which can be another day, or another month, than the one
     just written. `prefs` (the viewer's filters) and `source_selection` are what
     that answer is read under.
+
+    A CARD THE VIEWER'S FILTERS HIDE IS NOT A PLACE TO GO. The picker judges a
+    season the calendar does not hold yet by what it can know before anything
+    is written: the title's facts. Who LISTS the card is not known until the
+    write and the week's own fill — "only one service lists it" hid Yellowjackets'
+    second season, which TMDB's premieres list and Trakt's skip, so the jump
+    landed on a month with nothing to find. So the week the airing is filed in is
+    made current FIRST (`cache.ensure_window`, the fill the month's own load would
+    make a moment later, which also stands a searched airing down for its
+    service's feed), then the card is judged as that month would draw it, and a
+    hidden one answers `hidden` for the picker to say so in place.
     """
     rows = await _describe(settings, hit, media, tz)
     # The EARLIEST ticked season leads, as the picker draws them top to bottom;
@@ -560,7 +580,7 @@ async def jump(settings, hit, media: Media, seasons: list, *, tz: ZoneInfo,
                      or (media is Media.MOVIE and row is rows[0])),
                     key=lambda row: (row.item.season is not None, row.item.season or 0))
     if not wanted:
-        return ""
+        return Landing("")
     written: list[list] = []
     for row in wanted:
         writer = _jump_writer(hit, row.endpoint_key)
@@ -574,6 +594,14 @@ async def jump(settings, hit, media: Media, seasons: list, *, tz: ZoneInfo,
             endpoint_key=row.endpoint_key, now=now,
             exact_season=media is not Media.MOVIE))
     first = wanted[0]
+    # THE WEEK IT IS FILED IN, MADE CURRENT before it is judged (see above).
+    filed = calendar_cache.record_utc_date(written[0][0] if written[0] else first.item)
+    try:
+        await calendar_cache.ensure_window(get_endpoint(first.endpoint_key), settings,
+                                           calendar_cache.window_start(filed), now=now)
+    except SourceUnavailable as exc:
+        # Judged on what is stored, as the month would draw it if its fill failed.
+        logger.info("calendar jump: the week of %s could not be filled (%s)", filed, exc)
     # THE CARD IS NAMED WHETHER OR NOT ANYTHING WAS WRITTEN: the month may draw
     # the title from a service that lists it there, under the same identity this
     # description keys (the tmdb > tvdb > imdb > mal waterfall), and naming a
@@ -582,11 +610,13 @@ async def jump(settings, hit, media: Media, seasons: list, *, tz: ZoneInfo,
                          prefs=prefs or {}, source_selection=source_selection,
                          settings=settings, tz=tz, written=written[0])
     if drawn:
-        return landing_url(first.endpoint_key, drawn[0])
-    # NOTHING DRAWN — no service lists it here, or this viewer's filters hide
-    # it: the month the description puts it in, as a search result's promise is
-    # "go to where this should be".
-    return landing_url(first.endpoint_key, first.item)
+        return Landing(landing_url(first.endpoint_key, drawn[0]))
+    if drawn is not None:
+        # HELD, AND HIDDEN FROM THIS VIEWER: nowhere to land.
+        return Landing("", hidden=True)
+    # NOTHING HELD — no service lists it here: the month the description puts it
+    # in, as a search result's promise is "go to where this should be".
+    return Landing(landing_url(first.endpoint_key, first.item))
 
 
 def _publishes(provider, endpoint_key: str) -> bool:

@@ -939,7 +939,13 @@ by the record it holds, through `visible_records` itself with the viewer's sourc
 choice (`calendar/search.py`'s `_drawn`), never by the describing service's
 answer: the two can disagree on a filter (a stored record with no country under
 a country filter), and a link judged by the description opens a day that draws
-nothing. The jump names the card it lands on whether or not it wrote one.
+nothing. The jump names the card it lands on whether or not it wrote one. WHO
+LISTS A SEASON'S CARD IS KNOWN ONLY ONCE IT IS WRITTEN, so the jump makes the week
+it is filed in current first (`cache.ensure_window`, the fill the month's own load
+would make) and judges the card as that month draws it; one the viewer's filters
+hide — "only one service lists it" — is answered with the picker again, in its
+own slot, the season refused and a sentence saying why, never a month with
+nothing to land on (the jump form's `hx-target`; a navigation is a 204).
 
 **WHO A SEARCH ASKS IS THE REGISTRY'S, AND THE PAGE NAMES IT BY REFERENCE.**
 `providers.for_search` owns it: the catalogue `searched_by_default` (TMDB — a

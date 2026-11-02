@@ -870,17 +870,26 @@ class TheJumpWritesWhatWasTickedTests(SearchTestCase):
     _hit = TheCatalogueHalfIsADifferentPromiseTests._hit
     _port = TheCatalogueHalfIsADifferentPromiseTests._port
 
-    async def _jump(self, seasons, *, provider=None, hit=None):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # The hit's leader writes: Simkl, which this instance's calendar admits.
+        self.settings = Settings(simkl_public_calendar_enabled=True)
+
+    async def _jump(self, seasons, *, provider=None, hit=None, prefs=None):
         provider = provider or publishing(detail_port=self._port(
             {"first_aired": "2020-01-01T00:00:00Z"},
             seasons=[{"season": 1, "first_aired": "2020-01-01"},
                      {"season": 2, "first_aired": "2021-03-04"}]))
-        with patch("app.providers.get", return_value=provider):
+        # The week's own fill is the cache's, tested there; here, who it is for.
+        self.filled = AsyncMock()
+        with patch("app.providers.get", return_value=provider), \
+             patch.object(calendar_cache, "ensure_window", self.filled):
             return await calendar_search.jump(self.settings, hit or self._hit(), Media.SHOW,
-                                              seasons, tz=self.tz, now=db.now())
+                                              seasons, tz=self.tz, now=db.now(),
+                                              prefs=prefs or dict(NO_FILTERS))
 
     async def test_it_writes_each_ticked_season_and_lands_on_the_first(self):
-        where = await self._jump([2, 1])
+        where = (await self._jump([2, 1])).url
         self.assertTrue(where.startswith("/calendar?year=2020&month=1"), where)
         # The card and its DAY: a card past the days the page draws inline does
         # not exist when the browser looks for #jump-target, so a mark alone
@@ -898,14 +907,31 @@ class TheJumpWritesWhatWasTickedTests(SearchTestCase):
             {"first_aired": "2020-01-01T00:00:00Z"},
             seasons=[{"season": 1, "first_aired": "2020-01-01"}]),
             calendar_port=None, capabilities=SimpleNamespace(answers=lambda _key: False))
-        where = await self._jump([1], provider=silent)
+        where = (await self._jump([1], provider=silent)).url
         self.assertEqual(where, "/calendar?year=2020&month=1&endpoint=shows%2Fpremieres"
                                 "&highlight=show%3Atmdb%3A777&day=2020-01-01#jump-target")
         self.assertEqual(await calendar_entries.sources_airing(
             "shows/premieres", "show:tmdb:777", 1), set())
 
     async def test_nothing_ticked_lands_nowhere(self):
-        self.assertEqual(await self._jump([]), "")
+        self.assertEqual(await self._jump([]), calendar_search.Landing(""))
+
+    async def test_the_week_it_is_filed_in_is_filled_before_it_is_judged(self):
+        """Who lists the card decides "only one service lists it", and a feed's
+        listing of the season arrives with its week's fill — the fill the
+        month's own load would make a moment later."""
+        await self._jump([1])
+        (endpoint, _settings, start), _kwargs = self.filled.call_args
+        self.assertEqual((endpoint.key, start), (SHOWS, date(2019, 12, 30)))
+
+    async def test_a_card_the_viewers_filters_hide_is_nowhere_to_land(self):
+        """Written, and listed by one service alone, for a viewer who hides
+        those: the month would draw nothing to land on (Yellowjackets' second
+        season, which TMDB's premieres list and Trakt's skip)."""
+        landing = await self._jump([1], prefs={**NO_FILTERS, "tv_single_service": True})
+        self.assertEqual(landing, calendar_search.Landing("", hidden=True))
+        self.assertEqual(await calendar_entries.sources_airing(
+            SHOWS, "show:tmdb:777", 1), {"simkl"})
 
 
 class AskingTheServiceACardIsMissingTests(SearchTestCase):

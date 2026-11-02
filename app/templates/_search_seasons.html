@@ -9,13 +9,15 @@
     shared calendar. The route answers with `HX-Redirect` to the card, a
     navigation of the whole window, so the address bar ends on the calendar, Back
     returns here and the browser itself scrolls to the card's `#jump-target` (see
-    the route for why not `HX-Location`). Not boosted, and swapping nothing: the
-    answer is the navigation.
+    the route for why not `HX-Location`). Not boosted. A navigation swaps
+    nothing (204); the one answer that is not one — the card is there and the
+    reader's filters hide it — is this picker again, drawn into its own slot.
 
     Context: `options`, `ref`, `endpoint`, `title`, `media`, `note`. -#}
 {%- if options %}
 {{ seasons.checklist(options, {"hx-boost": "false", "hx-post": "/calendar/jump",
-                               "hx-json-enc": "", "hx-swap": "none"},
+                               "hx-json-enc": "", "hx-target": "closest .search-pick",
+                               "hx-swap": "innerHTML"},
                      ref=ref, hidden={"endpoint": endpoint}, one_press=true,
                      heading=('Seasons of ' if media == 'show' else '') ~ title) }}
 {%- endif %}
