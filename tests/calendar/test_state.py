@@ -9,12 +9,11 @@ No network.
 """
 from __future__ import annotations
 
-import json
 import unittest
 
 from app import db
 from app.calendar import state as calendar_state
-from tests.support import migrated_db
+from tests.support import migrated_db, put_title
 
 async def _make_user(username="viewer") -> int:
     now = db.now()
@@ -76,13 +75,10 @@ class UnmarkingClearsLegacySpellingsTests(StateTestCase):
     """
 
     async def _store_title(self, title_key: str, ids: dict) -> None:
-        """One title_metadata row, which is where the spellings are read from."""
-        await db.execute(
-            "INSERT INTO title_metadata (source, media, source_id, title_key, "
-            "title, title_fold, ids_json, fetched_at) VALUES (?,?,?,?,?,?,?,?)",
-            ("simkl", "show", ids.get("simkl") or "1", title_key, "T", "t",
-             json.dumps(ids), db.now()),
-        )
+        """One service's group of a title, which is where the spellings are
+        read from."""
+        await db.transaction(lambda conn: put_title(
+            conn, "simkl", "show", ids.get("simkl") or "1", title_key, ids=ids, title="T"))
 
     async def test_a_mark_under_a_slug_is_cleared_by_the_mark_key(self):
         key = "show:tmdb:321122"

@@ -28,7 +28,7 @@ from app.providers import detail_source
 from app.providers.base import Source
 
 from tests.calendar.test_routes import CalendarRouteTestCase, _entry
-from tests.support import window_fetch
+from tests.support import put_title, window_fetch
 
 # What one redrawn button says, spelled once because both adds answer with it and
 # because the selector's shape is load-bearing: htmx splits an out-of-band value
@@ -359,11 +359,10 @@ class ThePanelDrawsWhatTheCardIsShowingTests(ThePanelHeaderCarriesTheSameButtons
         self.key = "show:tvdb:555"
         for source, overview, title in (("trakt", "Trakt words.", "Trakt Name"),
                                         ("simkl", "Simkl words.", "Simkl Name")):
-            asyncio.run(db.execute(
-                "INSERT INTO title_metadata (source, media, source_id, title_key, title,"
-                " title_fold, overview, poster, fetched_at) VALUES (?,?,?,?,?,?,?,?,0)",
-                (source, "show", source + "-1", self.key, title, title.lower(),
-                 overview, "/" + source + ".jpg")))
+            asyncio.run(db.transaction(lambda conn, source=source, overview=overview,
+                                       title=title: put_title(
+                conn, source, "show", source + "-1", self.key, title=title,
+                overview=overview, poster="/" + source + ".jpg", fetched_at=0)))
 
     def _panel_for(self, **params) -> str:
         # Built from scratch rather than appended to the parent's address: a

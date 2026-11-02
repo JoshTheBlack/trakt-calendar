@@ -15,6 +15,7 @@ from app import db
 from app.calendar import entries
 from app.providers.base import Media, Record, Source
 from tests.support import DatabaseTestCase, statements_per_transaction
+from tests.support import listings as stored_listings
 
 DAY = 1783540800.0  # 2026-07-08 20:00Z
 WEEK = (date(2026, 7, 6), date(2026, 7, 13))
@@ -56,7 +57,7 @@ class AFillsStatementsDoNotGrowWithItsRecordsTests(DatabaseTestCase):
             await store(listings(400, offset=1000))
         self.assertEqual(few, many)
         self.assertLessEqual(many[0], 16)
-        self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM calendar_airings"), 400 + 1)
+        self.assertEqual(len(await stored_listings("shows")), 400 + 1)
 
     async def test_a_refill_of_titles_already_held_costs_the_same_whatever_its_size(self):
         """The commonest store — a refill naming titles it named yesterday — and

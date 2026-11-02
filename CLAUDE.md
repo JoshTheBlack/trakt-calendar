@@ -68,12 +68,21 @@ array before BEGIN, one `INSERT … SELECT … FROM json_each(?)` per table
 that needs no lock (finding rows by an id no index reaches, deciding what a queue
 owes) is made before the transaction. The title store's batch is
 `identity.settle_many` (three reads, one write, a re-key's own repointing;
-`settle` is a batch of one), fed by `metadata.listings` + `store_records`; a fill
-DECIDES ITS TITLES BEFORE THE LOCK — `db.transaction(fn, prepare=...)` runs the
-reads and the deciding (`metadata.plan_records` → `identity.SettlePlan`) on the
-same connection first, and again under the lock only if another connection
+`settle` is a batch of one), fed by `metadata.listings`, `plan_records` and
+`write_records`; a fill DECIDES ITS TITLES AND ITS EPISODE ROWS BEFORE THE LOCK —
+`db.transaction(fn, prepare=...)` runs the reads and the deciding
+(`metadata.plan_records` → `identity.SettlePlan`, then `episodes.plan_fill`) on
+the same connection first, and again under the lock only if another connection
 committed meanwhile (`PRAGMA data_version`), so the lock is held for the writes
-alone. A payload-driven join says CROSS JOIN, and an UPDATE … FROM by rowid takes
+alone. A batch that re-keys a title or moves an entry plans the episode rows of
+the titles it reshapes inside, once the merge is written — those titles' share
+of the span, read in one aggregated row — and every other title's before
+(`episodes.plan_fill`'s `titles` / `excluding`); the merge itself is rare,
+written row by row (`app/metadata/merge.py`), and outside the fixed count as a
+re-key's repointing always was. Filing the whole span inside held the lock
+2.98 s under a month's read where the store before held it 1.21 s; this holds it
+1.31 s (MEASURED, a week of All Episodes re-keying five titles, on a copy of
+dev). A payload-driven join says CROSS JOIN, and an UPDATE … FROM by rowid takes
 the competing index away (`+source`): the planner otherwise walks the table with
 the payload inside it. THE SAME GOES FOR A LOOP OF TRANSACTIONS: work fanned out
 at once that writes as each piece lands takes a worker thread per write, and the
@@ -194,15 +203,16 @@ caching anything obtained from it for longer than six months: the ceiling is
 `app/providers/tmdb/transport.py`'s `MAX_CACHE_SECONDS`, response-cache rows are
 written with `CACHE_RETAIN_SECONDS` so the sweep's grace lands on it, and the
 poster registry's TMDB rows (`app/media/artwork.py`), the poster tiles and the
-network logos all read that constant; the title store's rows declare it through
+network logos all read that constant; the title store's groups declare it through
 the registry (`Capabilities.retain_seconds`) and `rows.sweep_past_ceilings`
-deletes by it, held or not. A CEILING IS ABOUT EVERY WORD AND A ROW HAS ONE
-CLOCK, so for such a service a store row's `fetched_at` is its OLDEST word's: a
-write renews it only when it rewrites everything the row holds
-(`rows.ceiling_clock` for an upsert, `rows.kept_clock` for a write made from
-Python; `rows.WORDS` names the words, and tests/metadata/test_retention.py fails
-on a column of the three tables that neither it nor `rows.NOT_WORDS` names), and
-the heartbeat re-reads a held row before its ceiling (`refresh.queue_ceiling`).
+CLEARS the service's group by it — the row and every other service's group stay
+— held or not. A CEILING IS ABOUT EVERY WORD AND A GROUP HAS ONE CLOCK, so for
+such a service a group's `fetched_at` is its OLDEST word's: a write renews it only
+when it rewrites everything the group holds (`rows.ceiling_clock` for an upsert,
+`rows.kept_clock` for a write made from Python; `groups.WORDS` names the words,
+and tests/metadata/test_retention.py fails on a column of the three tables that
+neither it, `groups.NOT_WORDS` nor `groups.IDENTITY` names), and the heartbeat
+re-reads a held group before its ceiling (`refresh.queue_ceiling`).
 The credential is the v4 read token,
 sent only in the Authorization header (`config.tmdb_token_error` refuses the
 short key, `tmdb_configured` reads a stored one as unset). NO SERVICE IS
@@ -213,13 +223,26 @@ registered Source has an entry — and an unknown name is an error, never quietl
 read as one of the others.
 
 **ONE TITLE STORE, AND ONE WAY IN.** `app/metadata/` owns what every service says
-about a title (`title_metadata`, `episode_metadata` — a row per service, each with
-its own expiry; `rows.py`), which title a set of ids is (`titles`,
+about a title — ONE ROW PER TITLE, PER SEASON AND PER EPISODE (`titles`,
+`seasons`, `episodes`, named once in `tables.py`), every service's facts side by
+side in a COLUMN GROUP of its own (`{source}_{column}`: the columns its package
+declares, `Capabilities.store_columns`, spelled through `groups.py`), each group
+with its own expiry — which of a service's own ids names which title
+(`service_ids`), which title a set of ids is (`titles`' identity columns,
 `title_aliases`; `identity.py`), and every column elsewhere that holds a title's
-key (`holders.py`). Every path that meets a title registers it there:
-`store_records` for a service's own listings (spelled before the caller's
-transaction by `metadata.listings`), inside it and asking nobody (a fill names
-hundreds of titles); `ensure` / `ensure_many` for a
+key (`holders.py`). A SERVICE HAS ONE GROUP PER TITLE, AND IT IS ONE ENTRY'S: a
+service can hold several entries for one title (Simkl files a later season as a
+title of its own); the group is the first to arrive — or, arriving together, the
+one with the most listings, then the more complete, then the lowest id
+(`rows._entry_rank`) — and it stays. Every other entry is a non-primary
+`service_ids` row that still finds the title, and its words are kept nowhere, on
+the title or on its seasons and episodes, because it numbers its own. A
+service's own id has ONE SPELLING (`rows.own_id`: the id its ids state, a number
+as decimal text), and every spelling a listing used finds it. Every path that
+meets a title registers it there: `plan_records` then `write_records` for a
+service's own listings (spelled before the caller's transaction by
+`metadata.listings`, decided before its lock, written inside it), asking nobody
+(a fill names hundreds of titles); `ensure` / `ensure_many` for a
 title met by its ids — a search pick, a tracker arrival, a board add, an import, a
 restore — which, handed a viewer's settings, ask each service the title has no id
 from ONCE by shared id. THAT IS THE ONE PLACE THE APP ASKS BY SHARED ID
@@ -249,10 +272,15 @@ watch tracker: a service's play or library entry lands on the tracked title
 holding THAT SERVICE'S OWN id, when exactly one does
 (`watch_history._tracked_by_own_id`), because a service re-points its shared ids
 and never its own — Simkl moved The Great British Bake Off between TMDB's two
-titles, and its episodes stopped reaching the season the tracker held. `tests/metadata/test_holders.py`
-fails when the schema grows a table neither holder list classifies, and SQL
-naming the store's tables lives in `app/metadata/` or names them through its
-constants (`rows.TITLES`, `rows.EPISODES`, `identity.TABLE`).
+titles, and its episodes stopped reaching the season the tracker held. THE STORE
+FOLLOWS THE SAME OWN ID: a listing or an answer that names an entry under another
+title than the one it is filed under, with no re-key behind it, moves the entry
+— its group where it was the title's, its seasons' and episodes' words, its
+listings, its ids — and the title it lands on keeps a group of its own
+(`merge.entry`). `tests/metadata/test_holders.py`
+fails when the schema grows a table neither holder list classifies (a table the
+store retired is `tables.RETIRED`'s), and SQL naming the store's tables lives in
+`app/metadata/` or names them through `tables.py`'s constants.
 READERS READ THE STORE, AND A FEATURE'S ROW KEEPS NO WORDS OF ITS OWN. A tracker
 row's and a board row's name, network, year and counts are columns their own
 SELECT adds (`app/metadata/labels.py`): each word from the first service in the
@@ -260,8 +288,8 @@ declared order that states it, the service HOLDING THE ROW'S SEASON naming it,
 and a whole show's counts only from a description that vouches for its season
 list. Nothing falls back to a copy — a frozen month's record is a snapshot, not a
 copy, and keeps its words. A details panel answers from the store first
-(`app/metadata/panel.py`), a tracker total and a board season row from
-`season_metadata`. Words a feature's record carries SEED the store only where no
+(`app/metadata/panel.py`), a tracker total and a board season row from the
+season's row. Words a feature's record carries SEED the store only where no
 service states them (`descriptions.seed_words`), and give way to the service's.
 EVERY SERVICE'S ROWS — TMDB'S TOO — STAY CURRENT BY BEING VIEWED: a details panel,
 a tracker's or board's rows and a calendar month name what they drew to
@@ -272,35 +300,47 @@ service's per-minute allowance (`refresh.PER_MINUTE` — a budget per pass was a
 budget per reload, and spent the pages' Trakt quota). A PUBLIC READ NEVER QUEUES.
 A SPARSE LISTING IS DESCRIBED BY THE SAME QUEUE, NOT BY BEING VIEWED: a service
 that declares `Capabilities.describes_sparse_listings` (TMDB — a discover entry
-names no network, status or certification) has every `enriched = 0` row queued
+names no network, status or certification) has every `enriched = 0` group queued
 on the heartbeat (`refresh.queue_listed`, at most a minute's allowance waiting),
-because a calendar month queues only rows already described; an answer that
+because a calendar month queues only groups already described; an answer that
 says nothing is recorded as a failure, so the backoff holds it and five give it
 up (`LISTED_GIVE_UP_AFTER`), and the calendar's "unenriched" count adds what is
 still owed (`refresh.listings_owed`). Simkl's sparse listings are its own drain's
 (app/calendar/enrich.py), Trakt's arrive complete. SO IS A CALENDAR TITLE NOBODY
 ASKED A DESCRIBING SERVICE ABOUT: a service declaring
 `Capabilities.describes_every_card` (TMDB) is queued a description of every title
-on this and next month's calendars it has an id for and no row of
+on this and next month's calendars it has an id for and no group of
 (`refresh.queue_cards`, from calendar/completion.py on the heartbeat, sharing that
-one minute with the sparse listings — `_background_room`), because its row is
+one minute with the sparse listings — `_background_room`), because its group is
 the title-only record a card is filtered by. A refresh that fails for a title
-the service has no row of leaves a BARE row carrying the failure
+the service has no group of leaves a BARE group carrying the failure
 (`descriptions.plan_failures`) where the service's own id names the title —
-TMDB's — so it becomes an owed row like any sparse listing, backed off and given
+TMDB's — so it becomes an owed group like any sparse listing, backed off and given
 up at five; a service whose own id names no title (Trakt, Simkl) records nothing.
-A HOLDER KEEPS ITS TITLE'S ROWS (`rows.sweep_unlisted` asks
-`holders.held_keys`); only a service's ceiling takes them. A RE-KEY THAT FINDS A
-ROW UNDER BOTH KEYS keeps the MORE COMPLETE one — one rank per table,
+A HOLDER KEEPS ITS TITLE'S GROUPS (`rows.sweep_unlisted` asks
+`holders.held_keys`); only a service's ceiling clears them. A RE-KEY THAT FINDS A
+FEATURE'S ROW UNDER BOTH KEYS keeps the MORE COMPLETE one — one rank per table,
 `holders.more_complete` — re-keyed, its gaps filled from the other, the other
-logged in full and a board row sent to its board's removal history.
+logged in full and a board row sent to its board's removal history. The store's
+own rows MERGE (`merge.titles`): each service's group decided on its own — where
+both titles have one they are two entries, ranked as above, the loser's words
+logged — and no listing is lost: two services' listings of one episode are one
+row, one service's two a listing and its repeat, and a listing naming no full
+episode is re-decided against the merged title. THE CONVERSION AND THE WRITERS
+ARE ONE RULE: migration 49 built this shape from the per-service tables, which it
+kept whole and nothing reads (`tables.RETIRED`, dropped in a later release once a
+production copy has been checked against them), and
+tests/metadata/test_conversion_agreement.py holds its frozen fold and the live
+writers to the same rows on the same input.
 
 **The calendar cache stores the UNFILTERED window once per (endpoint, 7 days),
 holding EVERY source's records as ROWS.** There is no stored window object: a
 versioned compressed envelope with a `PAYLOAD_VERSION` used to live here, and it
-went with the blob — `app/calendar/entries.py` now writes each source's airings
-into `calendar_airings`, handing the records to the title store, which writes
-the title and episode rows (`title_metadata`, `episode_metadata`) in the same
+went with the blob — `app/calendar/entries.py` now hands each source's records to
+the title store, which writes the title's group and files each listing as an
+INSTANT on its episode's row (`episodes`: a service's first instant in its own
+columns, the rest in `repeats_json`, each with a bit per calendar it is on and
+per calendar a search put it on; app/metadata/episodes.py) in the same
 transaction — so a shape change is a migration rather than a version byte. The reasoning that version
 carried still binds, and `app/calendar/cache.py` keeps it: a month spans five or
 six windows, so nothing may leave the stored calendar half-converted or one
@@ -364,30 +404,38 @@ loop's CPU per read 7.2 s → 0.5 s, the read 8.3 s → 2.9 s, with no card's fi
 moving across three service orders, every calendar, October and November.
 
 **One episode is ONE card, drawn on the day the viewer's first service gives
-it.** Which listings are one card is `app/calendar/cache.py`'s: every service's
-listing of one episode — `(title_key, season, episode)`, a film's title alone —
-joins when it is in the same calendar month as EVERY listing already in the card,
-or at most a week from it across a month's edge (`may_join`, `join_listings`, a
-date-ordered scan, one listing per service per card); a show listing with no
-full coordinate still folds into an episode only on its own day (`match_keys`).
-That is viewer-independent and computed at READ — no key is stored. ONE LISTING
-PER SERVICE IS ALSO WHAT STORAGE PROMISES: an airing a search or a tracker add
-wrote (`from_search`) fills a gap in its service's feed and stands down the
+it.** Which listings are one card is decided twice, both times the same for every
+viewer. WHICH EPISODE ROW A LISTING IS, AT WRITE (`app/metadata/episodes.py`): a
+listing naming its episode is that episode's row (`S{s}E{e}`), a film its
+title's `film` row, whoever lists it and however far apart; a show listing with
+no full coordinate joins a numbered episode only when, on its own calendar and
+UTC day, exactly ONE episode agrees with what it did state and its own service
+has no listing of that episode there yet — otherwise it is a row of its own
+(`D{day}…`) — and the halves it left out are kept (`unstated`), so the fold is
+RE-DECIDED BOTH WAYS whenever that day's listings change (`Book.refold`). HOW A
+ROW SPLITS INTO CARDS, AT READ (`cache.cards_of`): a listing joins a card when it
+is in the same calendar month as EVERY listing already in the card, or at most a
+week from it across a month's edge (`may_join`, a date-ordered scan, one listing
+per service per card), and then cards sharing no service are one card, each
+joining the nearest earlier one — two services' dates for one episode, however
+far apart, are one episode; only a service listing it twice draws it twice.
+ONE LISTING PER SERVICE
+IS ALSO WHAT STORAGE PROMISES: an instant a search or a tracker add wrote (its
+calendar's `searched` bit) fills a gap in its service's feed and stands down the
 moment that feed lists the same episode, at whatever instant — dropped at read
-(`entries._in_fetch_order`), deleted by the fill (`store_span`), never written
-over a listed one (`store_loose_airings`). The airing key includes the instant,
-so a date-only searched row and the feed's timed one were two listings of one
-service, and the scan drew two cards. Which day
+(`entries._records`), taken off by the fill (`episodes.plan_fill`), never
+written beside a listed one (`store_loose_airings`). A date-only searched
+instant and the feed's timed one were otherwise two listings of one service, and
+the scan drew two cards. Which day
 the card is drawn on is the viewer's: the first service in their order describes
 it, DATE AND TIME INCLUDED, and a date-only one borrows a time only from an
 instant that falls on its date somewhere on earth (`app/calendar/resolve.py`'s
 `_resolve_airing`, `falls_on`); the others' days are kept (`Record.listed_airings`)
 and the card draws them where they differ (`Item.air_choices`). Because the scan's
 units depend on every listing of an episode, A READ NEVER GROUPS PART OF ONE: a
-span makes its windows current coverage-only (`ensure_window`) and reads its
-airings once, with every other stored listing of each episode they name at any
-date (`entries.read_span_whole` — the per-title query shape is the measured one;
-a plain join picked a 39-second plan), and the search reads a title whole
+span makes its windows current coverage-only (`ensure_window`) and reads each
+episode row with a listing in it once, whole — every service's listings at any
+date (`entries.read_span_whole`) — and the search reads a title whole
 (`entries.read_groups`). And there is ONE PLACEMENT FUNCTION, `cache.placed`
 (resolution, render, both network lists): the month, a late day, a share page and
 its card, the tracker's calendar import (all through `assemble_range`), the
@@ -401,8 +449,8 @@ TITLE-ONLY record, which is an opinion on facts and never a listing.**
 `app/calendar/cache.py`'s `with_title_only` owns the rules, and
 `resolve.resolve_records` takes those records apart from the listings
 (`describing`), so no choice that names a listing can reach one. A service
-declaring `Capabilities.describes_every_card` (TMDB) has its title-store row
-read ONCE PER SPAN (`entries.title_only_records`, one `json_each` statement, no
+declaring `Capabilities.describes_every_card` (TMDB) has its group of the title's
+row read ONCE PER SPAN (`entries.title_only_records`, one `json_each` statement, no
 call and no write) for every card of a title it describes and does not list.
 The record competes for every scalar field in the viewer's order and joins the
 genres, keywords and show type (those two only where `facts_known`), its ids
@@ -459,8 +507,8 @@ described is not judged by them); "only one service lists it" and "only a sparse
 catalogue lists it and it names no network" are about who LISTS the card — a
 service that only describes it is not counted — and exempt nothing. Only the
 language floor is also applied at fill
-(beside the country floor); the rest need the whole card. A row's keywords and
-show type are an answer only where `title_metadata.facts_known` says a
+(beside the country floor); the rest need the whole card. A group's keywords and
+show type are an answer only where its `facts_known` says a
 description stated them (`metadata/rows.py`'s `facts_values`) — an empty
 keyword list is otherwise "never asked", which an include filter must not read
 as "none".

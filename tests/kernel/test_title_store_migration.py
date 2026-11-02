@@ -73,10 +73,8 @@ def _airing(conn, source: str, source_id: str, key: str, endpoint: str, day: str
 
 
 def _through(version: int) -> list:
-    """The migrations up to `version`, the conversion as 49 whether or not the
-    app's list carries it yet."""
-    return [m for m in [*(m for m in db.MIGRATIONS if m[0] <= 48), (49, db.MIGRATION_49)]
-            if m[0] <= version]
+    """The migrations up to `version`."""
+    return [m for m in db.MIGRATIONS if m[0] <= version]
 
 
 def _convert(conn, now: int = NOW) -> None:
@@ -131,6 +129,12 @@ def _seed(conn) -> None:
     conn.execute("INSERT INTO season_metadata (source, media, source_id, season, name, "
                  "episode_count, premiere, poster, fetched_at) "
                  "VALUES ('tmdb', 'show', '100', 2, 'Season Two', 10, '2026-10-07', '/s2.jpg', 100)")
+    # Simkl's second entry describing its own season 1 — another numbering than
+    # the title's, so its words stay in the retired tables.
+    conn.execute("INSERT INTO season_metadata (source, media, source_id, season, name, "
+                 "fetched_at) VALUES ('simkl', 'show', '1001', 1, 'Its Season One', 100)")
+    conn.execute("INSERT INTO episode_metadata (source, media, source_id, season, number, title, "
+                 "fetched_at) VALUES ('simkl', 'show', '1001', 1, 1, 'Its Pilot', 100)")
 
     # K2: an ambiguous day, and a listing whose own service already lists the one
     # episode it could be.
@@ -241,6 +245,14 @@ class TheEpisodeRuleTests(_Converted):
         row = self.episode(K1, "S2E1")
         self.assertEqual((row["simkl_air_ts"], row["simkl_calendars"]),
                          (at("2026-10-07", 21), ENDPOINTS["shows"].bit))
+
+    def test_a_listing_keeps_which_half_of_its_episode_it_left_out(self):
+        """Simkl's listing stated a number and no season; the fold decided the
+        season, and the row remembers it was decided rather than stated."""
+        row = self.episode(K1, "S2E1")
+        self.assertEqual((row["simkl_unstated"], row["trakt_unstated"], row["tmdb_unstated"]),
+                         (1, 0, 0))
+        self.assertEqual(self.episode(K1, "D2026-10-14E3")["simkl_unstated"], 1)
 
     def test_two_episodes_on_one_day_nobody_numbers_are_two_rows(self):
         self.assertIn("D2026-10-14E2", self.units(K1))
@@ -356,6 +368,13 @@ class DescriptionsTests(_Converted):
                           row["tmdb_fetched_at"]), ("Season Two", 10, "/s2.jpg", 100))
         self.assertIsNone(row["simkl_id"])
         self.assertEqual(row["simkl_named"], 0)
+
+    def test_only_the_titles_own_entry_describes_its_seasons_and_episodes(self):
+        """Simkl's other entry for K1 numbers its own seasons from 1: its season 1
+        is not K1's season 1, so neither its season nor its episode is copied."""
+        self.assertIsNone(self.conn.execute(
+            "SELECT 1 FROM seasons WHERE title_key = ? AND season = 1", (K1,)).fetchone())
+        self.assertNotIn("S1E1", self.units(K1))
 
 
 class NothingIsDeletedTests(_Converted):

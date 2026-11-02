@@ -242,7 +242,7 @@ def fold_one_title(hits: Sequence[SearchHit], key: ItemKey | None, *,
 
     FOR A CALLER THAT HAS DECIDED IDENTITY ITSELF, which is why it takes `key`
     rather than resolving one: the title store groups its rows by the identity
-    it filed them under (`title_metadata.title_key`), and asking the
+    it filed them under (`titles.title_key`), and asking the
     waterfall again of ids enrichment has since added to could split one stored
     title in two. What this shares with `merge_search_hits` is how a row's
     FIELDS are chosen, so a title reads the same whichever half of a search

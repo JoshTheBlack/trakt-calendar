@@ -5,9 +5,10 @@ source said" and "what a person sees", and they have different scopes, which is
 why they happen in different places:
 
   MATCHING    is this record and that record the same card? User-independent:
-              one episode is one card whichever services list it
-              (app/calendar/cache.py's `match_keys` and `join_listings`, run at
-              read over the stored rows).
+              one episode is one card whichever services list it — the title
+              store's episode row, decided as each listing is written
+              (app/metadata/episodes.py) and read back by app/calendar/cache.py's
+              `group_records`.
   RESOLUTION  which source's value does THIS VIEWER see for this field — and so
               on which DAY is the card drawn? Per account by definition, so it
               runs at READ, over already-cached data, and changing a preference
@@ -351,8 +352,9 @@ def _resolve_airing(listed: Sequence[Record]) -> tuple[float, bool]:
     service in the viewer's order, the one the card is attributed to.
 
     WHEN IT AIRS IS THE PRIMARY'S TO SAY, because it decides WHERE THE CARD IS
-    DRAWN. One episode is one card however many services list it (cache.py's
-    `may_join`), and services disagree about days by more than a timezone:
+    DRAWN. One episode is one card however many services list it and however far
+    apart they date it (cache.py's `group_records`), and services disagree about
+    days by more than a timezone:
     Yellowjackets S04E01 is a Friday evening on Simkl and a Sunday evening on
     Trakt. Taking the day from one service and the description from another
     would draw a card nobody's service stands behind; taking it from the

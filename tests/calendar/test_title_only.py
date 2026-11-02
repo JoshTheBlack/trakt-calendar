@@ -12,6 +12,7 @@ No network.
 """
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import date, datetime, timezone
 from unittest import mock
@@ -27,7 +28,7 @@ from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Media, Record, ServiceLink, Source
 from app.sources import prefs as source_prefs
-from tests.support import migrated_db
+from tests.support import migrated_db, put_title
 
 SHOWS = get_endpoint("shows")
 PREMIERES = get_endpoint("shows/premieres")
@@ -266,14 +267,17 @@ class AFilmTests(TitleOnlyTestCase):
     async def asyncSetUp(self):
         await super().asyncSetUp()
         film = dict(media=Media.MOVIE, season=None, episode_number=None, episode_label=None)
-        # TMDB dated it in June — another month, so not this card's listing.
         await self.store(MOVIES, [
-            tmdb_premiere(**film, ids={"tmdb": 99}, id="99", air_ts=_at(2026, 6, 5), show_type="",
-                          certification="R", network="", detail_url="https://www.themoviedb.org/movie/99",
-                          release_types_by_country={"BR": [3]}),
             simkl_episode(**film, ids={"simkl": 5, "tmdb": "99"}, id="5",
                           air_ts=_at(2026, 10, 16), date_only=True),
         ])
+        # TMDB DESCRIBES THE FILM AND DOES NOT LIST IT: a listing of it, at any
+        # date, would be this card's (one film, one card), so its words reach the
+        # card as a description alone.
+        await db.run(lambda conn: put_title(
+            conn, "tmdb", "movie", 99, "movie:tmdb:99", title="The Show", certification="R",
+            enriched=1, release_types_json=json.dumps({"BR": [3]}),
+            detail_url="https://www.themoviedb.org/movie/99"))
 
     async def test_a_simkl_only_film_shows_tmdbs_certification(self):
         item = await self.card(endpoint=MOVIES)

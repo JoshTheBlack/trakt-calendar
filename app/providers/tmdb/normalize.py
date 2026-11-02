@@ -518,6 +518,11 @@ def episode_url(ids: dict, season: int, number: int) -> str:
     return f"https://www.themoviedb.org/tv/{tmdb}/season/{season}/episode/{number}"
 
 
+def listing_id(ids: dict) -> str:
+    """The id a TMDB listing of a title is filed under: its tmdb id."""
+    return str(ids.get("tmdb") or "")
+
+
 def is_description(payload: dict) -> bool:
     """Whether `payload` is a title's OWN answer (`/tv/{id}`, `/movie/{id}`) rather
     than one entry of a discover listing. This package asks for a title with
@@ -562,7 +567,7 @@ def to_record(payload: dict, media: Media, season: int | None, when: str) -> Rec
     return Record(
         source=Source.TMDB,
         media=media,
-        id=str(ids["tmdb"]),
+        id=listing_id(ids),
         ids=ids,
         detail_url=title_url(media, ids),
         title=title_of(payload, media) or "Untitled",

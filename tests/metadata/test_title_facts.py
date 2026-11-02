@@ -14,11 +14,10 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
-from app import db
 from app.calendar import entries
 from app.metadata import descriptions
 from app.providers.base import Record, Source
-from tests.support import DatabaseTestCase
+from tests.support import DatabaseTestCase, title_groups
 
 UTC = ZoneInfo("UTC")
 AIR_TS = datetime(2026, 10, 7, 12, tzinfo=timezone.utc).timestamp()
@@ -66,7 +65,7 @@ class ADescriptionTests(DatabaseTestCase):
                                  asked_season=None, tz=UTC)
         got = await descriptions.stored("trakt", "show", 7, None)
         self.assertEqual((got["keywords"], got["show_type"]), (None, None))
-        self.assertEqual(await db.fetch_value("SELECT facts_known FROM title_metadata"), 0)
+        self.assertEqual((await title_groups("trakt"))[0]["facts_known"], 0)
 
 
 class AListingTests(DatabaseTestCase):

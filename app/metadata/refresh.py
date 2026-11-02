@@ -53,10 +53,10 @@ from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from .. import db, endpoints, providers
+from .. import db, providers
 from ..providers import detail_source
 from ..providers.base import Media, SourceUnavailable
-from . import descriptions, holders, identity, rows
+from . import descriptions, episodes, groups, holders, identity, rows, tables
 
 logger = logging.getLogger(__name__)
 
@@ -193,14 +193,13 @@ def _due(conn: db.Connection, settings, wanted: Iterable[Wanted], *, now: int,
     if not asked:
         return []
     held: dict[tuple[str, str], list] = {}
-    keys = list(asked)
-    for start in range(0, len(keys), _CHUNK):
-        chunk = keys[start:start + _CHUNK]
-        for row in conn.execute(
-                f"SELECT rowid AS rid, source, media, source_id, title_key, ids_json, "
-                f"season_count, stale_after, failed_at, fail_count FROM {rows.TITLES} "
-                f"WHERE title_key IN ({', '.join('?' * len(chunk))})", chunk):
-            held.setdefault((str(row["title_key"]), str(row["source"])), []).append(row)
+    keys = json.dumps(list(asked))
+    for row in conn.execute(
+            rows.title_groups_sql(("ids_json", "season_count", "stale_after", "failed_at",
+                                   "fail_count"),
+                                  where="t.title_key IN (SELECT value FROM json_each(?))"),
+            (keys,) * len(groups.sources())):
+        held.setdefault((str(row["title_key"]), str(row["source"])), []).append(row)
     out: list[tuple[int, Entry]] = []
     # (described row, service, its own id, the seasons the page drew)
     seasons_of: list[tuple[Any, str, str, set[int]]] = []
@@ -222,23 +221,24 @@ def _due(conn: db.Connection, settings, wanted: Iterable[Wanted], *, now: int,
                 out.append((int(row["stale_after"] or 0), Entry(source, media, own_id, TITLE)))
             if seasons:
                 seasons_of.append((row, source, own_id, seasons))
-    stored: dict[tuple[str, str, str, int], Any] = {}
-    by_title: dict[tuple[str, str], list[str]] = {}
+    stored: dict[tuple[str, str, int], Any] = {}
+    by_source: dict[str, list[str]] = {}
     for row, source, _own_id, _seasons in seasons_of:
-        by_title.setdefault((source, str(row["media"])), []).append(str(row["source_id"]))
-    for (source, media), source_ids in by_title.items():
-        for start in range(0, len(source_ids), _CHUNK):
-            chunk = source_ids[start:start + _CHUNK]
-            for season in conn.execute(
-                    f"SELECT source_id, season, episode_count, air_dates_json, stale_after, "
-                    f"failed_at, fail_count FROM {rows.SEASONS} WHERE source = ? "
-                    f"AND media = ? AND source_id IN ({', '.join('?' * len(chunk))})",
-                    (source, media, *chunk)):
-                stored[(source, media, str(season["source_id"]), int(season["season"]))] = season
+        by_source.setdefault(source, []).append(str(row["title_key"]))
+    for source, title_keys in by_source.items():
+        for season in conn.execute(
+                f"SELECT title_key, season, "
+                + groups.select(tables.SEASONS, source, ("episode_count", "air_dates_json",
+                                                         "stale_after", "failed_at",
+                                                         "fail_count"))
+                + f" FROM {tables.SEASONS} WHERE title_key IN (SELECT value FROM json_each(?)) "
+                f"AND {groups.present(tables.SEASONS, source)}",
+                (json.dumps(sorted(set(title_keys))),)):
+            stored[(source, str(season["title_key"]), int(season["season"]))] = season
     for row, source, own_id, seasons in seasons_of:
         media = str(row["media"])
         for season in sorted(seasons):
-            of_season = stored.get((source, media, str(row["source_id"]), season))
+            of_season = stored.get((source, str(row["title_key"]), season))
             if not descriptions.season_described(of_season):
                 if missing and not _backed_off(of_season, now):
                     out.append((0, Entry(source, media, own_id, season)))
@@ -246,10 +246,6 @@ def _due(conn: db.Connection, settings, wanted: Iterable[Wanted], *, now: int,
                 out.append((int(of_season["stale_after"] or 0),
                             Entry(source, media, own_id, season)))
     return out
-
-
-# Keys or ids per IN list, under SQLite's bound-parameter ceiling.
-_CHUNK = 400
 
 
 def _stated_id(row, namespace: str) -> str:
@@ -412,10 +408,14 @@ async def queue_title(settings, media: str, ids: Mapping[str, Any], seasons: Ite
 CEILING_MARGIN_SECONDS = 14 * 24 * 60 * 60
 CEILING_BUDGET = 40
 
-# A season row that holds a DESCRIPTION — a season list alone is re-read with
-# its title's row, which renews a row holding nothing else (rows.ceiling_clock).
-_DESCRIBED_SEASON = ("(s.overview != '' OR s.cast_json NOT IN ('', '[]') "
-                     "OR s.air_dates_json NOT IN ('', '[]'))")
+def _described_season(source: str) -> str:
+    """SQL over a season row aliased `s`: `source`'s group holds a DESCRIPTION
+    — a season list alone is re-read with its title's group, which renews a
+    group holding nothing else (rows.ceiling_clock)."""
+    def column(name: str) -> str:
+        return groups.column(tables.SEASONS, source, name, "s")
+    return (f"({column('overview')} != '' OR {column('cast_json')} NOT IN ('', '[]') "
+            f"OR {column('air_dates_json')} NOT IN ('', '[]'))")
 
 
 async def queue_ceiling(settings, *, now: int | None = None) -> int:
@@ -439,18 +439,18 @@ async def queue_ceiling(settings, *, now: int | None = None) -> int:
         for source, retain in bounded.items():
             namespace = rows.ID_NAMESPACE[source]
             threshold = ts - int(retain) + CEILING_MARGIN_SECONDS
-            own = f"CAST(json_extract(t.ids_json, '$.{namespace}') AS TEXT) AS own_id"
+            own = f"CAST(json_extract(t.{source}_ids_json, '$.{namespace}') AS TEXT) AS own_id"
+            described = _described_season(source)
             for row in conn.execute(
-                    f"SELECT t.title_key, t.media, {own}, t.fetched_at, NULL AS season "
-                    f"FROM {rows.TITLES} t WHERE t.source = ? AND t.fetched_at > 0 "
-                    "AND t.fetched_at <= ? "
+                    f"SELECT t.title_key, t.media, {own}, t.{source}_fetched_at AS fetched_at, "
+                    f"NULL AS season FROM {tables.TITLES} t WHERE t.{source}_fetched_at > 0 "
+                    f"AND t.{source}_fetched_at <= ? "
                     "UNION ALL "
-                    f"SELECT t.title_key, t.media, {own}, s.fetched_at, s.season "
-                    f"FROM {rows.SEASONS} s JOIN {rows.TITLES} t ON t.source = s.source "
-                    "AND t.media = s.media AND t.source_id = s.source_id "
-                    f"WHERE s.source = ? AND s.season > 0 AND {_DESCRIBED_SEASON} "
-                    "AND s.fetched_at > 0 AND s.fetched_at <= ?",
-                    (source, threshold, source, threshold)):
+                    f"SELECT t.title_key, t.media, {own}, s.{source}_fetched_at, s.season "
+                    f"FROM {tables.SEASONS} s JOIN {tables.TITLES} t ON t.title_key = s.title_key "
+                    f"WHERE t.{source}_id IS NOT NULL AND s.season > 0 AND {described} "
+                    f"AND s.{source}_fetched_at > 0 AND s.{source}_fetched_at <= ?",
+                    (threshold, threshold)):
                 if str(row["title_key"]) not in held:
                     continue
                 own_id = str(row["own_id"] or "").strip()
@@ -488,8 +488,10 @@ def _listing_sources() -> tuple[str, ...]:
 
 # WHAT A SERVICE'S SPARSE LISTINGS OWE, said once for the queue and the count it
 # is read back as, because the two answering differently is what makes a backlog
-# readout untrustworthy. Parameters: the service, the give-up ceiling.
-_OWED_LISTINGS = f"FROM {rows.TITLES} t WHERE t.enriched = 0 AND t.source = ? AND t.fail_count < ?"
+# readout untrustworthy. Parameter: the give-up ceiling.
+def _owed_listings(source: str) -> str:
+    return (f"FROM {tables.TITLES} t WHERE t.{source}_id IS NOT NULL "
+            f"AND t.{source}_enriched = 0 AND t.{source}_fail_count < ?")
 
 
 async def queue_listed(settings, *, now: int | None = None) -> int:
@@ -513,14 +515,16 @@ async def queue_listed(settings, *, now: int | None = None) -> int:
     def _owed(conn) -> dict[str, list[Entry]]:
         owed: dict[str, list[Entry]] = {}
         for source in sources:
-            own = f"CAST(json_extract(t.ids_json, '$.{rows.ID_NAMESPACE[source]}') AS TEXT)"
+            own = (f"CAST(json_extract(t.{source}_ids_json, '$.{rows.ID_NAMESPACE[source]}') "
+                   "AS TEXT)")
             found = owed.setdefault(source, [])
             for row in conn.execute(
-                    f"SELECT t.media, {own} AS own_id, t.fail_count, t.failed_at "
-                    f"{_OWED_LISTINGS} AND NOT EXISTS (SELECT 1 FROM metadata_refresh q "
-                    f"WHERE q.source = t.source AND q.media = t.media AND q.source_id = {own} "
-                    f"AND q.season = {TITLE}) ORDER BY t.fetched_at DESC",
-                    (source, LISTED_GIVE_UP_AFTER)):
+                    f"SELECT t.media, {own} AS own_id, t.{source}_fail_count AS fail_count, "
+                    f"t.{source}_failed_at AS failed_at "
+                    f"{_owed_listings(source)} AND NOT EXISTS (SELECT 1 FROM metadata_refresh q "
+                    f"WHERE q.source = '{source}' AND q.media = t.media AND q.source_id = {own} "
+                    f"AND q.season = {TITLE}) ORDER BY t.{source}_fetched_at DESC",
+                    (LISTED_GIVE_UP_AFTER,)):
                 if len(found) >= PER_MINUTE[source]:
                     break
                 if row["own_id"] and not _backed_off(row, ts):
@@ -567,28 +571,32 @@ def _card_sources() -> tuple[str, ...]:
 
 
 def _cards_owed_sql(source: str) -> str:
-    """The titles a calendar airing in [:first, :last) names that `source` has an
-    id for and no row of, nearest :today first, at most :limit — the titles each
-    on its own row, (media, own id), none already queued.
+    """The titles a calendar listing dated in [:lo, :hi) names that `source` has
+    an id for and no group of, nearest :today first, at most :limit — the titles
+    each on its own row, (media, own id), none already queued.
 
-    THE AIRINGS ARE NARROWED TO THE SPAN FIRST AND THEN TO TITLES, and only then
+    THE LISTINGS ARE NARROWED TO THE SPAN FIRST AND THEN TO TITLES, and only then
     is each title checked: MEASURED on the development copy, 11,290 titles from
-    37,942 airings in two months, 130 ms — checking each airing in turn, or
-    grouping every airing stored, took 360-480 ms. Naming the endpoints is what
-    lets the planner reach the (endpoint, air_date) index; the service and its
-    namespace are the registry's, never input."""
+    37,942 listings in two months, 130 ms — checking each listing in turn, or
+    grouping every listing stored, took 360-480 ms. Each service's air-time index
+    is what reaches a span's listings; the service and its namespace are the
+    registry's, never input."""
     own = f"CAST(json_extract(i.ids_json, '$.{rows.ID_NAMESPACE[source]}') AS TEXT)"
-    endpoints_named = ", ".join(f"'{key}'" for key in sorted(endpoints.ENDPOINTS))
+    listed = " UNION ALL ".join(
+        f"SELECT title_key, media, {name}_air_ts AS at FROM {tables.EPISODES} "
+        f"WHERE {name}_calendars != 0 AND {name}_air_ts >= :lo AND {name}_air_ts < :hi "
+        f"UNION ALL SELECT e.title_key, e.media, json_extract(r.value, '$.at') "
+        f"FROM {tables.EPISODES} e, json_each(e.{name}_repeats_json) r "
+        f"WHERE e.{name}_repeats_json != '[]' AND json_extract(r.value, '$.at') >= :lo "
+        f"AND json_extract(r.value, '$.at') < :hi"
+        for name in groups.sources() if groups.has(tables.EPISODES, name, "air_ts"))
     return (
         f"SELECT d.media, {own} AS own_id FROM ("
-        "  SELECT a.title_key, a.media, "
-        "         MIN(ABS(julianday(a.air_date) - julianday(:today))) AS distance "
-        f"  FROM calendar_airings a WHERE a.endpoint IN ({endpoints_named}) "
-        "    AND a.air_date >= :first AND a.air_date < :last GROUP BY a.title_key) d "
-        f"JOIN {identity.TABLE} i ON i.title_key = d.title_key "
-        f"WHERE {own} IS NOT NULL "
-        f"  AND NOT EXISTS (SELECT 1 FROM {rows.TITLES} t "
-        f"                  WHERE t.title_key = d.title_key AND t.source = '{source}') "
+        "  SELECT l.title_key, l.media, "
+        "         MIN(ABS(julianday(date(l.at, 'unixepoch')) - julianday(:today))) AS distance "
+        f"  FROM ({listed}) l GROUP BY l.title_key) d "
+        f"JOIN {tables.TITLES} i ON i.title_key = d.title_key "
+        f"WHERE {own} IS NOT NULL AND {groups.absent(tables.TITLES, source, 'i')} "
         "  AND NOT EXISTS (SELECT 1 FROM metadata_refresh q "
         f"                  WHERE q.source = '{source}' AND q.media = d.media "
         f"                    AND q.source_id = {own} AND q.season = {TITLE}) "
@@ -628,7 +636,7 @@ async def queue_cards(settings, first: date, last: date, *, today: date,
     def _owed(conn) -> dict[str, list[Entry]]:
         return {source: [Entry(source, str(row["media"]), str(row["own_id"]), TITLE)
                          for row in conn.execute(_cards_owed_sql(source), {
-                             "first": first.isoformat(), "last": last.isoformat(),
+                             "lo": episodes.epoch(first), "hi": episodes.epoch(last),
                              "today": today.isoformat(), "limit": PER_MINUTE[source]})]
                 for source in sources}
 
@@ -654,8 +662,8 @@ async def listings_owed() -> int:
         return 0
     total = 0
     for source in sources:
-        total += int(await db.fetch_value(f"SELECT COUNT(*) {_OWED_LISTINGS}",
-                                          (source, LISTED_GIVE_UP_AFTER)) or 0)
+        total += int(await db.fetch_value(f"SELECT COUNT(*) {_owed_listings(source)}",
+                                          (LISTED_GIVE_UP_AFTER,)) or 0)
     return total
 
 

@@ -190,6 +190,9 @@ class _TmdbProvider:
     def episode_url(self, ids, season: int, number: int) -> str:
         return normalize.episode_url(ids, season, number)
 
+    def listing_id(self, ids) -> str:
+        return normalize.listing_id(ids)
+
     def status_means(self, status: str) -> frozenset[str]:
         # TMDB's own words are mapped onto the vocabulary as its answers are read
         # (normalize.STATUS_WORDS), so a stored one is already one of its words.

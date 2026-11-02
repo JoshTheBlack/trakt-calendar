@@ -16,7 +16,7 @@ from app import db
 from app.calendar import cache as calendar_cache, entries
 from app.metadata import rows as title_rows
 from app.providers.base import Media, Record, Source
-from tests.support import DatabaseTestCase
+from tests.support import DatabaseTestCase, listings, title_groups
 
 DAY = 1783540800.0  # 2026-07-08 20:00Z
 WEEK = (date(2026, 7, 6), date(2026, 7, 13))
@@ -51,8 +51,7 @@ class TwoServicesOneEpisodeTests(DatabaseTestCase):
     async def test_the_same_whichever_service_arrived_first(self):
         await store(listing(Source.SIMKL, {"simkl": 55, "tvdb": 4321}))
         await store(listing(Source.TRAKT, {"trakt": 7, "tmdb": 900, "tvdb": 4321}))
-        keys = {r["title_key"] for r in await db.fetch_all(
-            "SELECT title_key FROM calendar_airings")}
+        keys = {listed["title_key"] for listed in await listings()}
         self.assertEqual(keys, {"show:tmdb:900"})
         records, *_ = await entries.read_span("shows", *WEEK)
         self.assertEqual(len(calendar_cache.group_records(records)), 1)
@@ -62,8 +61,7 @@ class TwoServicesOneEpisodeTests(DatabaseTestCase):
         what Simkl said."""
         await store(listing(Source.TRAKT, {"trakt": 7, "tmdb": 900, "tvdb": 4321}),
                     listing(Source.SIMKL, {"simkl": 55, "tvdb": 4321}))
-        stored = await db.fetch_value(
-            "SELECT ids_json FROM title_metadata WHERE source = 'simkl'")
+        stored = (await title_groups("simkl"))[0]["ids_json"]
         self.assertNotIn("tmdb", stored)
 
     async def test_a_title_re_keyed_by_a_later_listing_of_the_same_fill_moves_every_listing(self):
@@ -77,10 +75,8 @@ class TwoServicesOneEpisodeTests(DatabaseTestCase):
                     listing(Source.TRAKT, {"trakt": 7, "tmdb": 900, "tvdb": 4321}),
                     listing(Source.SIMKL, {"simkl": 55, "tvdb": 4321}, episode=2,
                             air_ts=DAY + 86400))
-        airings = {r["title_key"] for r in await db.fetch_all(
-            "SELECT title_key FROM calendar_airings")}
-        described = {r["title_key"] for r in await db.fetch_all(
-            "SELECT title_key FROM title_metadata")}
+        airings = {listed["title_key"] for listed in await listings()}
+        described = {group["title_key"] for group in await title_groups()}
         self.assertEqual((airings, described), ({"show:tmdb:900"}, {"show:tmdb:900"}))
         records, *_ = await entries.read_span("shows", *WEEK)
         self.assertEqual({group["key"].split("|")[0][:13]
@@ -92,6 +88,42 @@ class TwoServicesOneEpisodeTests(DatabaseTestCase):
                     listing(Source.SIMKL, {"simkl": 55, "tmdb": 901, "tvdb": 4321}))
         records, *_ = await entries.read_span("shows", *WEEK)
         self.assertEqual(len(calendar_cache.group_records(records)), 2)
+
+
+class AFillThatReKeysTests(DatabaseTestCase):
+    """A fill that re-keys a title files that title's rows INSIDE the write lock,
+    once the merge is written, and every other title's before it
+    (entries.store_span). Both halves must come out as one fill would have:
+    each title's listings the answer's, and what each service stopped listing
+    gone."""
+
+    async def test_the_merged_title_and_every_other_title_are_both_filed(self):
+        # Before: Trakt lists a title under its tvdb key at one instant, and
+        # another title it will stop listing.
+        await store(listing(Source.TRAKT, {"trakt": 7, "tvdb": 4321}),
+                    listing(Source.TRAKT, {"trakt": 8, "tmdb": 800}, episode=5))
+        self.assertEqual({listed["title_key"] for listed in await listings()},
+                         {"show:tvdb:4321", "show:tmdb:800"})
+        # The refill: the first title now states its tmdb id (a re-key) at
+        # another instant, the second is gone, and a third arrives.
+        await store(listing(Source.TRAKT, {"trakt": 7, "tmdb": 900, "tvdb": 4321},
+                            air_ts=DAY + 3600),
+                    listing(Source.TRAKT, {"trakt": 9, "tmdb": 901}, episode=2))
+        found = sorted((listed["title_key"], listed["unit"], listed["air_ts"])
+                       for listed in await listings())
+        self.assertEqual(found, [("show:tmdb:900", "S1E1", DAY + 3600),
+                                 ("show:tmdb:901", "S1E2", DAY)])
+
+    async def test_the_merged_title_keeps_what_another_service_lists(self):
+        await store(listing(Source.SIMKL, {"simkl": 55, "tvdb": 4321}))
+        await store(listing(Source.TRAKT, {"trakt": 7, "tvdb": 4321}))
+        # Trakt's refill teaches the tmdb id: Simkl's listing, which this fill
+        # did not answer for, moves with the title and stays one card with it.
+        await store(listing(Source.TRAKT, {"trakt": 7, "tmdb": 900, "tvdb": 4321}))
+        found = sorted((listed["source"], listed["title_key"]) for listed in await listings())
+        self.assertEqual(found, [("simkl", "show:tmdb:900"), ("trakt", "show:tmdb:900")])
+        records, *_ = await entries.read_span("shows", *WEEK)
+        self.assertEqual(len(calendar_cache.group_records(records)), 1)
 
 
 class AReadHoldsTheWholeEpisodeTests(DatabaseTestCase):
@@ -112,11 +144,10 @@ class AReadHoldsTheWholeEpisodeTests(DatabaseTestCase):
 class EnrichmentThatTeachesAHigherIdTests(DatabaseTestCase):
     async def test_the_title_and_its_listings_are_re_keyed_when_the_answer_lands(self):
         await store(listing(Source.SIMKL, {"simkl": 55}, source_id="55"))
-        self.assertEqual(await db.fetch_value("SELECT title_key FROM calendar_airings"),
-                         "simkl:55")
+        self.assertEqual([listed["title_key"] for listed in await listings()], ["simkl:55"])
         await title_rows.apply_enrichment("simkl", 55, "show",
                                           {"ids": {"tvdb": 4321}, "network": "HBO"}, db.now())
-        self.assertEqual(await db.fetch_value("SELECT title_key FROM calendar_airings"),
-                         "show:tvdb:4321")
-        self.assertEqual(await db.fetch_value("SELECT title_key FROM title_metadata"),
-                         "show:tvdb:4321")
+        self.assertEqual([listed["title_key"] for listed in await listings()],
+                         ["show:tvdb:4321"])
+        self.assertEqual([group["title_key"] for group in await title_groups()],
+                         ["show:tvdb:4321"])

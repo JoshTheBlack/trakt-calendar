@@ -2955,8 +2955,7 @@ async def api_distrakt_add_movie(request: Request):
         await _amend_closed_month_films(user_id, filed, add=added)
 
     # A film has no season, and -1 is what the roster's own schema uses for
-    # "this record is not about one" (see db.py's calendar_airings and
-    # store._SEASON_WHERE).
+    # "this record is not about one" (see store._SEASON_WHERE).
     return await _month_answer(
         request, user_id, year, month, settings,
         point_at=(film_key, -1),

@@ -450,7 +450,7 @@ def _simkl_ids(raw: dict) -> dict:
     # nothing else can be asked; that would mean verifying each one against Trakt
     # before storing it, which is a lookup rather than a free read. Whoever wants
     # that should add it as a verified lookup, not by widening this map.
-    # BOTH SPELLINGS OF SIMKL'S OWN ID, as `_record_id` below reads them. A
+    # BOTH SPELLINGS OF SIMKL'S OWN ID, as `listing_id` below reads them. A
     # calendar file writes `simkl_id`; the per-title lookup a search builds its
     # record from writes `simkl`. Reading only the first stored every searched
     # card with no Simkl id — measured, nine rows on one instance — and a card
@@ -466,7 +466,7 @@ def _simkl_ids(raw: dict) -> dict:
     })
 
 
-def _record_id(ids_raw: dict) -> str:
+def listing_id(ids_raw: dict) -> str:
     """The stable identity of one Simkl title.
 
     THE SIMKL ID, NOT THE SLUG, AND THE SLUG IS NOT UNIQUE. This preferred the
@@ -531,7 +531,7 @@ def to_show_record(entry: dict) -> Record | None:
     return Record(
         source=Source.SIMKL,
         media=Media.SHOW,
-        id=_record_id(ids_raw),
+        id=listing_id(ids_raw),
         ids=_simkl_ids(ids_raw),
         detail_url=_detail_url(Media.SHOW, entry.get("url"), ids_raw),
         title=entry.get("title") or "Untitled",
@@ -576,7 +576,7 @@ def to_movie_record(entry: dict) -> Record | None:
     return Record(
         source=Source.SIMKL,
         media=Media.MOVIE,
-        id=_record_id(ids_raw),
+        id=listing_id(ids_raw),
         ids=_simkl_ids(ids_raw),
         detail_url=_detail_url(Media.MOVIE, entry.get("url"), ids_raw),
         title=entry.get("title") or "Untitled",
@@ -626,7 +626,7 @@ def to_anime_film_record(entry: dict) -> Record | None:
     return Record(
         source=Source.SIMKL,
         media=Media.MOVIE,
-        id=_record_id(ids_raw),
+        id=listing_id(ids_raw),
         ids=_simkl_ids(ids_raw),
         detail_url=_detail_url(Media.MOVIE, entry.get("url"), ids_raw),
         title=entry.get("title") or "Untitled",

@@ -570,6 +570,14 @@ class Record:
     # Not stored, for the reason the maps above are not.
     listed_airings: dict[str, dict[str, Any]] = field(default_factory=dict)
 
+    # WHICH STORED EPISODE THIS LISTING IS FILED ON — "{title key}|{unit}", the
+    # title store's episode row (app/metadata/episodes.py) — set by the
+    # calendar's read and by nothing else. Listings sharing it are one episode,
+    # and so one card (app/calendar/cache.py's `group_records`); a record with
+    # none (one a service has just described, never stored) is a card of its
+    # own. Not stored, and never compared across reads.
+    card: str = ""
+
     def shown_source(self, field_name: str) -> str:
         """Which service's stored value this record is carrying for `field_name`.
 
@@ -964,10 +972,13 @@ SEASON_KEEPING = frozenset({"fetched_at", "stale_after", "failed_at", "fail_coun
 # AN EPISODE'S LISTING, for a service that publishes a calendar: the instant it
 # lists the episode at, a bitmask of the calendars that instant is on (each
 # Endpoint's `bit`) and of those it reached through a search rather than the
-# feed, the label it spelled, when it was last stored, and every further
-# instant the same service lists the episode at, each with masks of its own.
-EPISODE_LISTING = frozenset({"air_ts", "date_only", "calendars", "searched", "label",
-                             "listed_at", "repeats_json"})
+# feed, which half of the episode's coordinate the listing did NOT state (a
+# listing naming an episode number and no season joins a numbered episode
+# another service lists that day, and has to be able to leave it again), the
+# label it spelled, when it was last stored, and every further instant the same
+# service lists the episode at, each with masks of its own.
+EPISODE_LISTING = frozenset({"air_ts", "date_only", "calendars", "searched", "unstated",
+                             "label", "listed_at", "repeats_json"})
 # An episode description's clocks (`fetched_at` 0 for a listing's stub nothing
 # has described, NULL where the service has no description).
 EPISODE_KEEPING = frozenset({"fetched_at", "stale_after"})
@@ -2167,6 +2178,20 @@ class Provider(Protocol):
         correct a count where the count lives. On the provider for the reason
         `title_url` is: the panel used to know two services' addresses by name,
         and any other service's tick linked nowhere.
+        """
+        ...
+
+    def listing_id(self, ids: Mapping[str, Any]) -> str:
+        """The id this service files its listing of a title under — a calendar
+        `Record.id` of its — from the title's id map, or "" without an id of
+        its own. Answered without a call.
+
+        ON THE PROVIDER, BECAUSE WHICH SPELLING A SERVICE'S LISTING CARRIES IS
+        THAT SERVICE'S FACT: Trakt's calendar files a title under its slug where
+        it names one, Simkl's and TMDB's under the number. The title store keeps
+        one group per service per title and gives each listing back from it
+        (app/calendar/entries.py), so the id a listing was filed under is asked
+        of the service that filed it, by the same rule its calendar used.
         """
         ...
 

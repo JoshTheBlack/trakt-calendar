@@ -22,11 +22,13 @@ from urllib.parse import quote
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from app.calendar import cache as calendar_cache, resolve as calendar_resolve
+from app.calendar import resolve as calendar_resolve
 from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Record, Source, render
 from app.templating import TEMPLATES_DIR, templates
+
+from tests.support import stored_groups
 
 UTC = ZoneInfo("UTC")
 AIR_TS = 1784145600.0
@@ -56,7 +58,7 @@ def _record(source, **overrides) -> Record:
 def _card_html(*records: Record, prefs=None) -> str:
     """One rendered card for the group `records` form, resolved and rendered the
     way the calendar's own read path does it."""
-    groups = calendar_cache.group_records(list(records))
+    groups = stored_groups(list(records))
     assert len(groups) == 1, "these records do not match; the matcher would draw two cards"
     resolved = calendar_resolve.resolve(groups[0], prefs)
     item = render(resolved, UTC)
@@ -403,7 +405,7 @@ class BothServicesPagesAreOfferedTests(unittest.TestCase):
         """These are the same kind of fact as the provenance maps: they only
         exist once several records have been compared, which happens at read over
         a window filled without knowing who would read it."""
-        groups = calendar_cache.group_records(
+        groups = stored_groups(
             [_record(Source.TRAKT), _record(Source.SIMKL, rating=7.9)])
         resolved = calendar_resolve.resolve(groups[0], None)
         self.assertEqual([(link.source, link.listed) for link in resolved.links],
@@ -449,7 +451,7 @@ class ServicesThatOnlyKnowTheTitleTests(unittest.TestCase):
         """`ids` is what the card is keyed and grouped by, and a service's own id
         is that service's to state (identity.complete); the store's knowledge
         only addresses a button."""
-        groups = calendar_cache.group_records([self.tmdb_only])
+        groups = stored_groups([self.tmdb_only])
         resolved = calendar_resolve.resolve(groups[0], None)
         self.assertNotIn("trakt", resolved.ids)
         self.assertEqual(resolved.known_ids["trakt"], 77)

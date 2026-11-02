@@ -260,7 +260,7 @@ class DetailModalSourceTests(AppTestCase):
         self.assertNotIn("<iframe", html)
         # The title store kept that answer; the second half is a different
         # answer about the same title, so the store starts empty again.
-        for table in ("title_metadata", "season_metadata", "episode_metadata"):
+        for table in ("titles", "service_ids", "seasons", "episodes"):
             asyncio.run(db.execute(f"DELETE FROM {table}"))
         real = {**SIMKL_TITLE,
                 "trailers": [{"name": "Trailer", "youtube": "dQw4w9WgXcQ"}]}

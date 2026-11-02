@@ -3924,11 +3924,13 @@ _M49_SEASON_COLUMNS = {
 }
 
 # AN EPISODE'S LISTING: its first instant, a mask of the calendars that instant
-# is on and of those a search put it on, its label, when it was last stored, and
-# every further instant this service lists it at, each with masks of its own.
+# is on and of those a search put it on, which half of the coordinate the
+# listing did not state (`_M49_UNSTATED_SEASON` / `_NUMBER`), its label, when it
+# was last stored, and every further instant this service lists it at, each
+# with masks of its own.
 _M49_EPISODE_LISTING = (
     ("air_ts", "real"), ("date_only", "zero"), ("calendars", "zero"), ("searched", "zero"),
-    ("label", "text"), ("listed_at", "int"), ("repeats_json", "list"))
+    ("unstated", "zero"), ("label", "text"), ("listed_at", "int"), ("repeats_json", "list"))
 _M49_EPISODE_ENTRY = (("entry", "maybe"),)
 _M49_EPISODE_DESCRIBED = (("title", "text"), ("overview", "text"), ("first_aired", "text"),
                           ("fetched_at", "int"), ("stale_after", "zero"))
@@ -3951,6 +3953,13 @@ _M49_TITLE_WORDS = (
 
 # The calendar's mark for a coordinate a listing did not state.
 _M49_UNSTATED = -1
+# AN INSTANT'S `unstated` BITS: the halves of the episode's coordinate its
+# listing left out. The row it sits on can name more than the listing did — a
+# listing that states an episode number and no season joins the numbered episode
+# another service lists that day — and what the listing said is what decides
+# whether it may go on doing so, and what it says when it is read back.
+_M49_UNSTATED_SEASON = 1
+_M49_UNSTATED_NUMBER = 2
 
 # When the conversion ran: what tells a later check of these tables which of
 # their rows it wrote and which have been written since.
@@ -4042,11 +4051,18 @@ def _m49_primaries(rows: list[sqlite3.Row], listed: dict) -> dict[tuple[str, str
     return out
 
 
+def _m49_unstated(season: int, number: int) -> int:
+    """The `unstated` bits of a show listing stating `season` and `number`."""
+    return ((_M49_UNSTATED_SEASON if season == _M49_UNSTATED else 0)
+            | (_M49_UNSTATED_NUMBER if number == _M49_UNSTATED else 0))
+
+
 def _m49_fold(listings: list[sqlite3.Row], key_of: dict) -> tuple[dict, int]:
-    """({airing rowid: (title key, unit, season, number)}, how many listings that
-    name no full episode joined one) — WHICH EPISODE ROW EACH LISTING IS, the
-    rule the calendar's read applied (app/calendar/cache.py's match_keys) made at
-    write, so that every card it drew is still one row.
+    """({airing rowid: (title key, unit, season, number, unstated)}, how many
+    listings that name no full episode joined one) — WHICH EPISODE ROW EACH
+    LISTING IS, the rule the calendar's read applied (app/calendar/cache.py's
+    match_keys) made at write, so that every card it drew is still one row, and
+    which half of the coordinate the listing itself left out.
 
       - A FILM is its title's 'film' row.
       - A LISTING THAT NAMES ITS EPISODE (season and number) is that episode's
@@ -4078,9 +4094,9 @@ def _m49_fold(listings: list[sqlite3.Row], key_of: dict) -> tuple[dict, int]:
         key = key_of[row["rid"]]
         season, number = row["season"], row["episode_number"]
         if row["media"] == "movie":
-            units[row["rid"]] = (key, "film", None, None)
+            units[row["rid"]] = (key, "film", None, None, 0)
         elif season != _M49_UNSTATED and number != _M49_UNSTATED:
-            units[row["rid"]] = (key, f"S{season}E{number}", season, number)
+            units[row["rid"]] = (key, f"S{season}E{number}", season, number, 0)
             on_day.setdefault((key, row["endpoint"], row["air_date"]), set()).add((season, number))
             listed_by.setdefault((key, row["endpoint"], (season, number)), set()).add(row["source"])
         else:
@@ -4093,6 +4109,7 @@ def _m49_fold(listings: list[sqlite3.Row], key_of: dict) -> tuple[dict, int]:
         key = key_of[row["rid"]]
         season = None if row["season"] == _M49_UNSTATED else row["season"]
         number = None if row["episode_number"] == _M49_UNSTATED else row["episode_number"]
+        unstated = _m49_unstated(row["season"], row["episode_number"])
         agreeing = {episode for episode in on_day.get((key, row["endpoint"], row["air_date"]), ())
                     if (number is None or episode[1] == number)
                     and (season is None or episode[0] == season)}
@@ -4101,23 +4118,19 @@ def _m49_fold(listings: list[sqlite3.Row], key_of: dict) -> tuple[dict, int]:
             services = listed_by[(key, row["endpoint"], episode)]
             if row["source"] not in services:
                 services.add(row["source"])
-                units[row["rid"]] = (key, f"S{episode[0]}E{episode[1]}", *episode)
+                units[row["rid"]] = (key, f"S{episode[0]}E{episode[1]}", *episode, unstated)
                 folded += 1
                 continue
         unit = ("D" + row["air_date"] + (f"S{season}" if season is not None else "")
                 + (f"E{number}" if number is not None else ""))
-        units[row["rid"]] = (key, unit, season, number)
+        units[row["rid"]] = (key, unit, season, number, unstated)
     return units, folded
 
 
 def MIGRATION_49(conn: sqlite3.Connection, now: int | None = None) -> None:
     """One row per title, per season and per episode, every service's facts side
     by side, copied from the per-service tables, which are retired whole — see
-    the comment above for why each part is the way it is.
-
-    NOT IN MIGRATIONS YET: run before the code that reads these tables, it would
-    build a copy the old code goes on not writing. It is applied in the same
-    change that moves every reader and writer onto them."""
+    the comment above for why each part is the way it is."""
     now = int(time.time()) if now is None else now
 
     # THE OLD IDENTITY TABLE, RENAMED ASIDE AND KEPT WHOLE. Its id indexes go —
@@ -4231,15 +4244,31 @@ def MIGRATION_49(conn: sqlite3.Connection, now: int | None = None) -> None:
     conn.executemany("INSERT INTO service_ids (source, media, service_id, title_key, is_primary) "
                      "VALUES (?, ?, ?, ?, ?)", [(*slot, *held) for slot, held in ids.items()])
 
+    # A SEASON OR EPISODE SLOT HOLDS ONLY THE WORDS OF THE ENTRY THE TITLE'S GROUP
+    # IS. Another entry of the same service numbers its own seasons and episodes
+    # — Simkl files a later season as a title of its own and counts it from 1,
+    # and now and then maps two shows to one id — so its words on this title's
+    # slots would describe some other show's episode under this one's number.
+    # MEASURED on the development copy: every such row was a listing's stub (the
+    # episode's name as a calendar feed spelled it), 37 of them, 15 on slots the
+    # title's own entry did not name. They stay in the retired tables.
+    others = 0
+
     def primary_first(source: str, media: str, source_id: str, fetched_at) -> tuple | None:
-        """How a row of one service ranks for one title's slot — its entry the
-        title's group first, then the newer — or None for a row whose title no
-        service row names."""
+        """How a row of the title's own entry ranks for one of its slots — the
+        newer first, then by the id it is filed under — or None for a row of
+        another entry, or one whose title no service row names (`others`
+        and `orphans` count them)."""
+        nonlocal others, orphans
         found = entry_of.get((source, media, source_id))
         if found is None:
+            orphans += 1
             return None
         key, own = found
-        return (key, own == primaries[(source, key)][0], int(fetched_at or 0), str(source_id))
+        if own != primaries[(source, key)][0]:
+            others += 1
+            return None
+        return (key, int(fetched_at or 0), str(source_id))
 
     # ---- seasons: each service's season rows, its group's entry winning a clash
     seasons: dict[tuple, dict[str, tuple]] = {}
@@ -4247,7 +4276,6 @@ def MIGRATION_49(conn: sqlite3.Connection, now: int | None = None) -> None:
     for row in _m49_rows(conn, "SELECT * FROM season_metadata"):
         rank = primary_first(row["source"], row["media"], row["source_id"], row["fetched_at"])
         if rank is None:
-            orphans += 1
             continue
         held = seasons.setdefault((rank[0], row["season"]), {}).get(row["source"])
         if held is None or rank[1:] > held[0]:
@@ -4268,19 +4296,24 @@ def MIGRATION_49(conn: sqlite3.Connection, now: int | None = None) -> None:
     season_count = len(values)
 
     # ---- episodes: each service's instants of each row, and its description
-    instants: dict[tuple, dict[float, dict]] = {}
+    instants: dict[tuple, dict[tuple, dict]] = {}
     shape: dict[tuple[str, str], tuple] = {}
     bit_order = {endpoint: at for at, endpoint in enumerate(_M49_CALENDAR_BITS)}
     for a in sorted(kept, key=lambda a: (bit_order.get(a["endpoint"], len(bit_order)), a["rid"])):
         if a["endpoint"] not in _M49_CALENDAR_BITS:
             raise ValueError(f"Migration 49: an airing on an unknown calendar {a['endpoint']!r}")
-        key, unit, season, number = units[a["rid"]]
+        key, unit, season, number, unstated = units[a["rid"]]
         shape.setdefault((key, unit), (a["media"], season, number))
         found = entry_of.get((a["source"], a["media"], a["source_id"]))
         own = found[1] if found is not None else str(a["source_id"])
-        instant = instants.setdefault((key, unit, a["source"]), {}).setdefault(a["air_ts"], {
-            "at": a["air_ts"], "date_only": int(a["date_only"]), "calendars": 0, "searched": 0,
-            "label": "", "listed_at": 0, "entries": set()})
+        # One instant per moment AND per what its listing stated: a service can
+        # list one episode at one moment on two calendars, once by its number
+        # alone and once in full, and the two leave the row differently.
+        instant = instants.setdefault((key, unit, a["source"]), {}).setdefault(
+            (a["air_ts"], unstated), {
+                "at": a["air_ts"], "date_only": int(a["date_only"]), "calendars": 0,
+                "searched": 0, "unstated": unstated, "label": "", "listed_at": 0,
+                "entries": set()})
         bit = _M49_CALENDAR_BITS[a["endpoint"]]
         instant["calendars"] |= bit
         if a["from_search"]:
@@ -4294,7 +4327,6 @@ def MIGRATION_49(conn: sqlite3.Connection, now: int | None = None) -> None:
     for row in _m49_rows(conn, "SELECT * FROM episode_metadata"):
         rank = primary_first(row["source"], row["media"], row["source_id"], row["fetched_at"])
         if rank is None:
-            orphans += 1
             continue
         slot = (rank[0], f"S{row['season']}E{row['number']}", row["source"])
         if slot not in described or rank[1:] > described[slot][0]:
@@ -4303,28 +4335,36 @@ def MIGRATION_49(conn: sqlite3.Connection, now: int | None = None) -> None:
     if orphans:
         logger.warning("Migration 49: %d season or episode row(s) belong to no title row; "
                        "left in season_metadata / episode_metadata only", orphans)
+    if others:
+        logger.info("Migration 49: %d season or episode row(s) of a service's second entry "
+                    "for a title left in season_metadata / episode_metadata only", others)
 
-    def listing(source: str, key: str, held: dict[float, dict]) -> dict[str, Any]:
+    def listing(source: str, key: str, held: dict[tuple, dict]) -> dict[str, Any]:
         """One service's listing columns of one row: its earliest instant, and
         every later one in `repeats_json`. `entry` names the entry an instant was
-        listed under where it is not the title's group."""
+        listed under where it is not the title's group; a repeat states its
+        `unstated` bits only where it left something out."""
         primary = primaries.get((source, key), (None,))[0]
         out = []
-        for instant in sorted(held.values(), key=lambda i: i["at"]):
+        for instant in sorted(held.values(), key=lambda i: (i["at"], i["unstated"])):
             entry = (None if primary in instant["entries"]
                      else min(instant["entries"], key=_m49_id_order))
             out.append({"at": instant["at"], "date_only": instant["date_only"],
                         "calendars": instant["calendars"], "searched": instant["searched"],
-                        "label": instant["label"], "listed_at": instant["listed_at"],
-                        "entry": entry})
+                        "unstated": instant["unstated"], "label": instant["label"],
+                        "listed_at": instant["listed_at"], "entry": entry})
         first, repeats = out[0], out[1:]
         has_entry = any(name == "entry" for name, _kind in _M49_EPISODE_COLUMNS[source])
-        if not has_entry:
-            for instant in out:
+        for instant in out:
+            if not has_entry:
                 instant.pop("entry")
+        for instant in repeats:
+            if not instant["unstated"]:
+                instant.pop("unstated")
         return {"air_ts": first["at"], "date_only": first["date_only"],
                 "calendars": first["calendars"], "searched": first["searched"],
-                "label": first["label"], "listed_at": first["listed_at"],
+                "unstated": first["unstated"], "label": first["label"],
+                "listed_at": first["listed_at"],
                 "repeats_json": json.dumps(repeats) if repeats else "[]",
                 "entry": first.get("entry")}
 
@@ -4457,6 +4497,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (46, MIGRATION_46),
     (47, MIGRATION_47),
     (48, MIGRATION_48),
+    (49, MIGRATION_49),
 ]
 
 

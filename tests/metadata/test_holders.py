@@ -22,9 +22,10 @@ import sqlite3
 import unittest
 
 from app import db
-from app.metadata import holders, identity
+from app.metadata import holders, identity, tables
 from app.providers.base import ItemKey, Media
-from tests.support import DatabaseTestCase, migrated_db
+from tests.support import (DatabaseTestCase, listings, migrated_db, put_listing, put_season,
+                           put_title)
 
 # Column names that hold, or are shaped to hold, a title's key. A column matching
 # this on a table either holder list names must be accounted for below.
@@ -59,8 +60,11 @@ class EveryTableIsClassifiedTests(unittest.TestCase):
         cls.held = {h.table: h for h in holders.HOLDERS}
 
     def test_every_table_is_a_holder_or_says_why_it_is_not(self):
+        """A retired table is read by nothing and says why it is kept in
+        app/metadata/tables.py, which is its classification."""
         unclassified = sorted(t for t in self.schema
-                              if t not in self.held and t not in holders.NOT_HOLDERS)
+                              if t not in self.held and t not in holders.NOT_HOLDERS
+                              and t not in tables.RETIRED)
         self.assertEqual(unclassified, [], (
             "these tables are in neither app/metadata/holders.py list. Decide: does "
             "a row here hold a title's key (then a re-key must move it) or not?"))
@@ -100,6 +104,8 @@ class EveryTableIsClassifiedTests(unittest.TestCase):
     def test_every_column_shaped_like_a_key_is_accounted_for(self):
         unlisted = []
         for table, columns in self.schema.items():
+            if table in tables.RETIRED:
+                continue
             declared = set(self.held[table].columns) if table in self.held else set()
             for column in columns:
                 if (_KEYISH.search(column) and column not in declared
@@ -121,11 +127,12 @@ def _hold(conn, user_id: int, board_id: int, key: ItemKey, *, title: str = "Old"
     keys' rows sit side by side."""
     flat, triple = str(key), (key.media, key.match_source, key.match_id)
     month = 6 if key == OLD else 5
-    conn.execute("INSERT INTO title_metadata (source, media, source_id, title_key, title, "
-                 "fetched_at) VALUES ('simkl', 'show', ?, ?, ?, 1)", (key.match_id, flat, title))
-    conn.execute("INSERT INTO calendar_airings (source, media, source_id, endpoint, title_key, "
-                 "air_ts, air_date, stored_at) VALUES ('simkl', 'show', ?, 'shows', ?, "
-                 "1783540800, '2026-07-08', 1)", (key.match_id, flat))
+    put_title(conn, "simkl", "show", key.match_id, flat, title=title, fetched_at=1)
+    put_season(conn, "simkl", flat, 1, name=title)
+    put_listing(conn, "simkl", "show", key.match_id, "shows", flat, 1783540800,
+                season=1, number=1, stored_at=1)
+    conn.execute("INSERT INTO share_highlights (user_id, year, month, title_key, position, "
+                 "created_at) VALUES (?, 2026, ?, ?, 0, 1)", (user_id, month, flat))
     conn.execute("INSERT INTO title_posters (media, title_key, source, url, first_seen_at, "
                  "last_seen_at) VALUES ('show', ?, 'simkl', 'https://p.test/x.jpg', 1, 1)",
                  (flat,))
@@ -175,7 +182,8 @@ def _hold(conn, user_id: int, board_id: int, key: ItemKey, *, title: str = "Old"
 # What `_hold` fills, which must be every holder a re-key moves — the identity's
 # own two tables are settle's and are checked by its tests.
 _FIXTURE_TABLES = {
-    "title_metadata", "calendar_airings", "title_posters", "not_watching_shows",
+    "seasons", "episodes", "service_ids", "share_highlights", "title_posters",
+    "not_watching_shows",
     "calendar_view_state", "distrakt_user_seasons", "distrakt_month_records",
     "distrakt_unsettled_rows", "distrakt_movie_watches", "distrakt_open_prompts",
     "distrakt_prompt_dismissals", "distrakt_show_progress", "distrakt_slug_repairs",
@@ -187,7 +195,7 @@ _FIXTURE_TABLES = {
 def _count(conn, table: str, key: ItemKey) -> int:
     """How many rows of `table` hold `key`."""
     flat = str(key)
-    if table in ("title_metadata", "calendar_airings", "title_posters"):
+    if table in ("seasons", "episodes", "service_ids", "share_highlights", "title_posters"):
         return conn.execute(f"SELECT COUNT(*) FROM {table} WHERE title_key = ?", (flat,)).fetchone()[0]
     if table == "not_watching_shows":
         return conn.execute("SELECT COUNT(*) FROM not_watching_shows WHERE item_id = ?",
@@ -334,17 +342,17 @@ class ARekeyMovesEveryHolderTests(DatabaseTestCase):
         self.assertEqual(await self._history_ratings(), [9])
 
     async def test_a_title_no_shared_id_names_moves_only_where_such_titles_are_held(self):
-        await db.execute("INSERT INTO calendar_airings (source, media, source_id, endpoint, "
-                         "title_key, air_ts, air_date, stored_at) VALUES ('simkl', 'show', "
-                         "'55', 'shows', 'simkl:55', 1783540800, '2026-07-08', 1)")
+        await db.transaction(lambda conn: put_listing(
+            conn, "simkl", "show", "55", "shows", "simkl:55", 1783540800,
+            season=1, number=1, stored_at=1))
         await db.execute("INSERT INTO not_watching_shows (user_id, item_id, created_at) "
                          "VALUES (?, 'simkl:55', 1)", (self.user_id,))
         await db.transaction(lambda conn: identity.settle(
             conn, Media.SHOW, {"simkl": 55}, fallback="simkl:55", now=10))
         await db.transaction(lambda conn: identity.settle(
             conn, Media.SHOW, {"simkl": 55, "tvdb": 4321}, filed_under="simkl:55", now=20))
-        self.assertEqual(await db.fetch_value("SELECT title_key FROM calendar_airings"),
-                         "show:tvdb:4321")
+        self.assertEqual([listed["title_key"] for listed in await listings()],
+                         ["show:tvdb:4321"])
         self.assertEqual(await db.fetch_value("SELECT item_id FROM not_watching_shows"),
                          "show:tvdb:4321")
 

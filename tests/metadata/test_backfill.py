@@ -12,18 +12,16 @@ import json
 
 from app import db
 from app.metadata import backfill
-from tests.support import DatabaseTestCase
+from tests.support import DatabaseTestCase, listings, put_listing, put_title, season_groups, title_groups
 
 
 async def _title_row(source, source_id, key, ids, title="A Show"):
-    await db.execute(
-        "INSERT INTO title_metadata (source, media, source_id, title_key, title, ids_json, "
-        "fetched_at) VALUES (?, 'show', ?, ?, ?, ?, 1)",
-        (source, source_id, key, title, json.dumps(ids)))
-    await db.execute(
-        "INSERT INTO calendar_airings (source, media, source_id, endpoint, title_key, air_ts, "
-        "air_date, season, episode_number, stored_at) VALUES (?, 'show', ?, 'shows', ?, "
-        "1783540800, '2026-07-08', 1, 1, 1)", (source, source_id, key))
+    def _write(conn):
+        put_title(conn, source, "show", source_id, key, ids=ids, title=title, fetched_at=1)
+        put_listing(conn, source, "show", source_id, "shows", key, 1783540800,
+                    season=1, number=1, stored_at=1)
+
+    await db.transaction(_write)
 
 
 class RegisteringWhatIsStoredTests(DatabaseTestCase):
@@ -41,10 +39,11 @@ class RegisteringWhatIsStoredTests(DatabaseTestCase):
         await db.execute("INSERT INTO not_watching_shows (user_id, item_id, created_at) "
                          "VALUES (?, 'simkl:55', 1)", (self.user_id,))
         self.assertEqual(await backfill.register_everything(), 1)
-        for sql in ("SELECT title_key FROM title_metadata",
-                    "SELECT title_key FROM calendar_airings",
-                    "SELECT item_id FROM not_watching_shows"):
-            self.assertEqual(await db.fetch_value(sql), "show:tvdb:4321", sql)
+        self.assertEqual([g["title_key"] for g in await title_groups()], ["show:tvdb:4321"])
+        self.assertEqual([listed["title_key"] for listed in await listings()],
+                         ["show:tvdb:4321"])
+        self.assertEqual(await db.fetch_value("SELECT item_id FROM not_watching_shows"),
+                         "show:tvdb:4321")
         self.assertEqual(await db.fetch_value(
             "SELECT title_key FROM title_aliases WHERE old_key = 'simkl:55'"), "show:tvdb:4321")
 
@@ -55,7 +54,7 @@ class RegisteringWhatIsStoredTests(DatabaseTestCase):
                          {"trakt": 7, "tmdb": 900, "tvdb": 4321})
         await backfill.register_everything()
         self.assertEqual(
-            {r["title_key"] for r in await db.fetch_all("SELECT title_key FROM calendar_airings")},
+            {listed["title_key"] for listed in await listings()},
             {"show:tmdb:900"})
         ids = json.loads(await db.fetch_value(
             "SELECT ids_json FROM titles WHERE title_key = 'show:tmdb:900'"))
@@ -123,29 +122,28 @@ class SeedingWhatHeldRowsCarriedTests(DatabaseTestCase):
         await db.set_meta(backfill.MARKER, "1")
 
     async def words(self, key: str) -> tuple:
-        row = await db.fetch_one(
-            "SELECT title, network, year, runtime FROM title_metadata WHERE title_key = ?", (key,))
-        return tuple(row) if row is not None else None
+        found = [g for g in await title_groups() if g["title_key"] == key]
+        return ((found[0]["title"], found[0]["network"], found[0]["year"], found[0]["runtime"])
+                if found else None)
 
     async def test_both_rows_give_their_words_and_a_season_its_own(self):
         self.assertEqual(await backfill.seed_words_once(), 2)
         self.assertEqual(await self.words("show:tmdb:11"), ("Tracked", "HBO", "", None))
         self.assertEqual(await self.words("show:tmdb:12"), ("Ranked", "FX", "2021", 50))
-        season = await db.fetch_one("SELECT name, episode_count FROM season_metadata "
-                                    "WHERE source_id = '12' AND season = 3")
-        self.assertEqual(tuple(season), ("The Return", 8))
+        (season,) = [g for g in await season_groups()
+                     if g["title_key"] == "show:tmdb:12" and g["season"] == 3]
+        self.assertEqual((season["name"], season["episode_count"]), ("The Return", 8))
         self.assertEqual(await backfill.seed_words_once(), 0, "once")
 
     async def test_a_word_a_service_states_is_kept(self):
-        await db.execute(
-            "INSERT INTO title_metadata (source, media, source_id, title_key, title, ids_json, "
-            "fetched_at) VALUES ('trakt', 'show', 'x', 'show:tmdb:11', 'The Service''s', "
-            "'{\"trakt\": 5, \"tmdb\": 11}', 1)")
+        await db.transaction(lambda conn: put_title(
+            conn, "trakt", "show", "x", "show:tmdb:11", ids={"trakt": 5, "tmdb": 11},
+            title="The Service's", fetched_at=1))
         await backfill.seed_words_once()
         # Word by word: the name a service states stands, and the network nobody
         # stated is seeded.
-        rows = {r["source"]: (r["title"], r["network"]) for r in await db.fetch_all(
-            "SELECT source, title, network FROM title_metadata WHERE title_key = 'show:tmdb:11'")}
+        rows = {g["source"]: (g["title"], g["network"]) for g in await title_groups()
+                if g["title_key"] == "show:tmdb:11"}
         self.assertEqual(rows, {"trakt": ("The Service's", ""), "tmdb": ("", "HBO")})
 
     async def test_it_waits_for_registration(self):

@@ -1,13 +1,13 @@
 """What a service said about one title, KEPT: its details answer written into the
-store's rows, and read back as the same answer.
+store's groups, and read back as the same answer.
 
 WHY THE ANSWER IS STORED RATHER THAN ASKED FOR EACH TIME. Every surface that
 draws a title — a details panel, a tracker row, a board row, an export — used to
 ask a service live (through a response cache with an hours-long life) or keep a
 copy of its own, and the copies are how one title came to be described five
-ways. The store is one row per (service, title), per (service, season) and per
-(service, episode); a surface reads them, and a stale one is re-read behind the
-reader (app/metadata/refresh.py).
+ways. The store is one row per title, per season and per episode, each holding
+a group of columns per service (app/metadata/groups.py); a surface reads them,
+and a stale one is re-read behind the reader (app/metadata/refresh.py).
 
 THE ANSWER IS EACH SERVICE'S OWN, UNCHANGED. A service package reads its own
 payloads (app/providers/<service>/detail.py's `fetch_details`, whose key set
@@ -16,18 +16,21 @@ this module only files that answer and gives it back. So what a service means by
 a field — Simkl's anime seasons, Trakt's season names, TMDB's days — stays in the
 service's package, and a stored answer and a fresh one are the same answer.
 
-WHAT MARKS A ROW AS DESCRIBED, since a calendar listing writes the same rows and
-knows less. A title row is described once `season_count` is set — a film's is 0
-— which nothing but this module writes (a listing never knows it). A season row
-is described when its `air_dates_json` holds one entry per episode its
-`episode_count` names: a season list (`write_season_list`) states the count and
-not the dates, so a season that has grown since it was described reads as not
-described and is asked again, which is the right answer to a new episode.
+WHAT MARKS A GROUP AS DESCRIBED, since a calendar listing writes the same groups
+and knows less. A title's group is described once `season_count` is set — a
+film's is 0 — which nothing but this module writes (a listing never knows it). A
+season's group is described when its `air_dates_json` holds one entry per
+episode its `episode_count` names: a season list (`write_season_list`) states
+the count and not the dates, so a season that has grown since it was described
+reads as not described and is asked again, which is the right answer to a new
+episode.
 
-ADDRESSED BY THE SERVICE'S OWN ID, which is not always a row's `source_id`: a
-Trakt listing files its row under the title's slug, a Simkl or TMDB one under
-the number. A service's row for a title is the row whose `ids_json` states that
-service's own id for it (app/metadata/rows.py's ID_NAMESPACE).
+ADDRESSED BY THE SERVICE'S OWN ID. A service's group of a title is the group
+whose entry (app/metadata/rows.py's `own_id`, every spelling of it in
+`service_ids`) is the id the service is asked by. AN ANSWER ABOUT ANOTHER OF THE
+SERVICE'S ENTRIES FOR A TITLE — a second id it holds for the title, whose group
+is the first's — is not filed: a group, its seasons and its episodes are one
+entry's words, and another entry numbers its own (rows.py says why).
 """
 from __future__ import annotations
 
@@ -42,7 +45,7 @@ from .. import db
 from ..media import artwork
 from ..providers import season as season_rules
 from ..providers.base import Media, Video, VideoKind, genre_label, status_label
-from . import identity, rows
+from . import groups, identity, rows, tables
 from . import ids as id_rules
 
 logger = logging.getLogger(__name__)
@@ -68,35 +71,28 @@ ANSWER_KEYS = frozenset({
 
 
 # ---------------------------------------------------------------------------
-# finding a service's rows
+# finding a service's group
 # ---------------------------------------------------------------------------
 
 def _namespace(source: str) -> str:
     return rows.ID_NAMESPACE[str(source)]
 
 
-def _states_own_id(row, source: str, own_id: Any) -> bool:
-    """Whether a row of `source` is the row for the title `source` knows as
-    `own_id`: its id map states it, or (a row a description created) its
-    `source_id` is it."""
-    stated = _loads(row["ids_json"]).get(_namespace(source))
-    return str(stated) == str(own_id) or str(row["source_id"]) == str(own_id)
-
-
 def service_rows(conn: db.Connection, source: str, media: str, own_id: Any,
                  ids: Mapping[str, Any] | None = None) -> list[dict]:
-    """Every row `source` holds for the title it knows as `own_id`, usually one —
-    a slug-filed listing and a number-filed description of one title are two.
+    """`source`'s group of the title it knows as `own_id` — a list of at most
+    one, empty where it has none.
 
     BY THE TITLE'S KEY FIRST, which is indexed: `ids` (whatever the caller knows
-    of the title) resolve to it, and the service's rows under it are read and
+    of the title) resolve to it, and the service's group under it is read and
     checked for the service's own id. A title the ids do not resolve, or whose
-    key holds no row of this service, is found by the id inside each of the
-    service's own rows — a scan of one service's rows, kept for the paths that
-    know a service's id and nothing else (a queued refresh).
+    key holds no group of this entry, is found by the entry's own id
+    (`service_ids`) — the path for a caller that knows a service's id and
+    nothing else (a queued refresh).
 
-    ONE TITLE IS A BATCH OF ONE (`services_rows`). Each row is a dict of every
-    column, and `rid` its rowid.
+    ONE TITLE IS A BATCH OF ONE (`services_rows`). Each group is a dict of its
+    columns under their own names, with `source`, `media`, `source_id` (its own
+    id) and `title_key`.
     """
     return services_rows(conn, [(source, media, own_id, ids)])[0]
 
@@ -113,55 +109,68 @@ def services_rows(conn: db.Connection,
     return [held.found(source, media, own_id, ids) for source, media, own_id, ids in wanted]
 
 
-# EVERY COLUMN OF A TITLE ROW, in the order a batch's reads spell it: rows.WORDS
-# and rows.NOT_WORDS name each once (tests/metadata/test_retention.py holds them
-# to the schema), so a row read here is the whole row.
-_ROW_COLUMNS = (*rows.NOT_WORDS[rows.TITLES], *rows.WORDS[rows.TITLES])
-_ROW = "json_array(t.rowid, " + ", ".join(f"t.{column}" for column in _ROW_COLUMNS) + ")"
+# EVERY COLUMN OF A TITLE'S GROUP, in the order a batch's reads spell it: the
+# words and what files and keeps them (groups.WORDS / NOT_WORDS, which
+# tests/metadata/test_retention.py holds to the schema), so a group read here is
+# the whole group.
+_ROW_COLUMNS = (*groups.NOT_WORDS[tables.TITLES], *groups.WORDS[tables.TITLES])
+_ROW_KEYS = ("source", "media", "source_id", "title_key", *_ROW_COLUMNS)
+
+
+def _row_json(source: str) -> str:
+    """A title's group of `source` as one JSON array, in `_ROW_KEYS`' order."""
+    return (f"json_array('{source}', t.media, t.{source}_id, t.title_key, "
+            + ", ".join(groups.column(tables.TITLES, source, name, "t")
+                        for name in _ROW_COLUMNS) + ")")
+
 
 # EACH READ ANSWERS IN ONE ROW, however many titles it names (identity.py's reads
 # say why: the driver gives up the GIL around every row it steps through, and a
 # read made inside a write transaction holds the lock for all of it).
-#   Every service's rows under the keys named, through the index on title_key.
-_UNDER_KEYS = (f"SELECT json_group_array({_ROW}) FROM {rows.TITLES} t "
-               "WHERE t.title_key IN (SELECT value FROM json_each(?))")
+#   Every service's group under the keys named, through the key's own index.
+def _under_keys_sql() -> str:
+    arms = [f"SELECT {_row_json(source)} AS r FROM {tables.TITLES} t "
+            f"WHERE t.title_key IN (SELECT value FROM json_each(?)) "
+            f"AND {groups.present(tables.TITLES, source, 't')}"
+            for source in groups.sources()]
+    return f"SELECT json_group_array(json(r)) FROM ({' UNION ALL '.join(arms)})"
 
 
 def _stating_sql(sources: Iterable[str]) -> str:
-    """Every row of each of `sources` that states one of the own ids named for
-    it (`:<source>`, a JSON array of text) — by its source id, or the id its id
-    map states for the service, which no index reaches: a scan of that service's
-    rows, an arm per service. Service names come from the registry and their
-    namespaces from rows.ID_NAMESPACE, never from input."""
-    arms = [f"SELECT {_ROW} AS r FROM {rows.TITLES} t WHERE t.source = '{source}' "
-            f"AND (t.source_id IN (SELECT value FROM json_each(:{source})) "
-            f"OR CAST(json_extract(t.ids_json, '$.{_namespace(source)}') AS TEXT) "
-            f"IN (SELECT value FROM json_each(:{source})))"
+    """Every group of each of `sources` whose entry is one of the own ids named
+    for it (`:<source>`, a JSON array of text) — through `service_ids`, which
+    holds every spelling of an entry, an arm per service. Service names come
+    from the registry, never from input."""
+    arms = [f"SELECT {_row_json(source)} AS r FROM {tables.SERVICE_IDS} i "
+            f"JOIN {tables.TITLES} t ON t.title_key = i.title_key "
+            f"WHERE i.source = '{source}' AND i.is_primary = 1 "
+            f"AND i.service_id IN (SELECT value FROM json_each(:{source})) "
+            f"AND {groups.present(tables.TITLES, source, 't')}"
             for source in sources]
     return f"SELECT json_group_array(json(r)) FROM ({' UNION ALL '.join(arms)})"
 
 
 class _Rows:
-    """The title rows a batch of answers is about: what the store holds, read in
-    a few statements, and each answer's writes applied here as the answer is
-    planned (`plan`) — so every answer finds exactly the rows, and reads exactly
-    the words, it would have found had each answer before it been written in a
-    transaction of its own.
+    """The title groups a batch of answers is about: what the store holds, read
+    in a few statements, and each answer's writes applied here as the answer is
+    planned (`plan`) — so every answer finds exactly the groups, and reads
+    exactly the words, it would have found had each answer before it been
+    written in a transaction of its own.
 
     WHAT IS READ UP FRONT (`prefetch`) is `service_rows`' two reads for every
-    title at once: the rows under each title's key, and — for a title whose key
-    holds none, or whose ids name no key — every row stating its own id. Read
-    again only when an answer needs what was not read: a key no answer resolved
-    to at first, or, once a re-key in the batch has moved rows between keys,
-    every row stating each title's own id (`found` says why).
+    title at once: the groups under each title's key, and — for a title whose
+    key holds none of its entry, or whose ids name no key — every group of each
+    entry named. Read again only when an answer needs what was not read: a key
+    no answer resolved to at first, or, once a re-key in the batch has moved
+    groups between keys, every named entry's group (`found` says why).
     """
 
     def __init__(self, conn: db.Connection, planner: identity.Planner):
         self._conn = conn
         self._planner = planner
-        # (source, media, source id): the row as the batch has left it.
+        # (source, media, own id): the group as the batch has left it.
         self._rows: dict[tuple[str, str, str], dict] = {}
-        # (source, media, own id): the rows stating it, and what each row states.
+        # (source, media, own id): the groups stating it, and what each states.
         self._stating: dict[tuple[str, str, str], set[tuple[str, str, str]]] = {}
         self._states: dict[tuple[str, str, str], set[str]] = {}
         self._keys_read: set[str] = set()
@@ -173,9 +182,9 @@ class _Rows:
 
     def prefetch(self, wanted: Iterable[tuple[str, str, Any, Mapping[str, Any] | None]]) -> None:
         """Read what finding each (source, media, own id, ids) of `wanted` takes:
-        their identities (identity.Planner.prefetch), the rows under the keys
-        they resolve to, and every row stating the own id of each title those
-        keys do not find — six statements however many there are."""
+        their identities (identity.Planner.prefetch), the groups under the keys
+        they resolve to, and every named entry's group those keys do not hold —
+        a few statements however many there are."""
         wanted = [(str(source), str(media), str(own_id), _with_own(source, own_id, ids))
                   for source, media, own_id, ids in wanted]
         self._titles.update((source, media, own_id) for source, media, own_id, _ids in wanted)
@@ -190,9 +199,10 @@ class _Rows:
         wanted = sorted({key for key in keys if key not in self._keys_read})
         if not wanted:
             return
-        (found,) = self._conn.execute(_UNDER_KEYS, (json.dumps(wanted),)).fetchone()
+        (found,) = self._conn.execute(
+            _under_keys_sql(), (json.dumps(wanted),) * len(groups.sources())).fetchone()
         for values in json.loads(found):
-            self._hold(dict(zip(("rid", *_ROW_COLUMNS), values)))
+            self._hold(dict(zip(_ROW_KEYS, values)))
         self._keys_read.update(wanted)
 
     def _read_whole(self, titles: Iterable[tuple[str, str, str]]) -> None:
@@ -206,19 +216,21 @@ class _Rows:
         (found,) = self._conn.execute(_stating_sql(sources), {
             source: json.dumps(sorted(by_source[source])) for source in sources}).fetchone()
         for values in json.loads(found):
-            self._hold(dict(zip(("rid", *_ROW_COLUMNS), values)))
+            self._hold(dict(zip(_ROW_KEYS, values)))
         self._whole.update(wanted)
 
     def _hold(self, row: dict) -> None:
-        """A row read from the store — unless the batch already holds it, and so
-        knows better what it says now."""
-        unique = (str(row["source"]), str(row["media"]), str(row["source_id"]))
+        """A group read from the store — unless the batch already holds it, and
+        so knows better what it says now."""
+        row["source_id"] = str(row["source_id"])
+        unique = (str(row["source"]), str(row["media"]), row["source_id"])
         if unique not in self._rows:
             self._rows[unique] = row
             self._index(unique)
 
     def _index(self, unique: tuple[str, str, str]) -> None:
-        """Note which own ids a row states (`_states_own_id`'s rule), anew."""
+        """Note which own ids a group states — its entry and the id its id map
+        states for the service — anew."""
         source, media, source_id = unique
         stated = _loads(self._rows[unique]["ids_json"]).get(_namespace(source))
         states = {source_id, *(() if stated is None else (str(stated),))}
@@ -229,22 +241,30 @@ class _Rows:
         self._states[unique] = states
 
     def _under(self, source: str, media: str, own_id: str, key: str) -> list[dict]:
-        """The rows stating `own_id` filed under `key` now."""
+        """The groups stating `own_id` filed under `key` now."""
         return [self._rows[unique] for unique in self._stating.get((source, media, own_id), ())
                 if self._planner.moved_to(self._rows[unique]["title_key"]) == key]
 
+    def occupant(self, source: str, key: str) -> str | None:
+        """The entry `source`'s group under `key` is now — None where it has
+        none."""
+        self._read_keys([key])
+        for (held_source, _media, own), row in self._rows.items():
+            if held_source == source and self._planner.moved_to(row["title_key"]) == key:
+                return own
+        return None
+
     def found(self, source: str, media: str, own_id: Any,
               ids: Mapping[str, Any] | None) -> list[dict]:
-        """`service_rows`' answer as the batch stands: the rows of `source` under
-        the key `ids` resolve to now that state `own_id`, in the order its query
-        reads them (the key's index, by rowid); else every row stating it (the
-        service's own index, by source id)."""
+        """`service_rows`' answer as the batch stands: the group of `source`
+        under the key `ids` resolve to now that states `own_id`; else the group
+        whose entry `own_id` is, wherever it is filed."""
         source, media, own_id = str(source), str(media), str(own_id)
         if self._planner.rekeyed and not self._after_rekey:
-            # A RE-KEY MOVES ROWS BETWEEN KEYS, so the rows read under a key are
-            # no longer all the rows under it: a row filed under the key retired
-            # is under the new one now. Every row stating each title's own id is
-            # read, once, and the keys are then read off the rows themselves.
+            # A RE-KEY MOVES GROUPS BETWEEN KEYS, so the groups read under a key
+            # are no longer all the groups under it: a group filed under the key
+            # retired is under the new one now. Every named entry's group is
+            # read, once, and the keys are then read off the groups themselves.
             self._after_rekey = True
             self._read_whole(self._titles)
         key = self._planner.resolve(media, _with_own(source, own_id, ids))
@@ -252,7 +272,7 @@ class _Rows:
             self._read_keys([key])
             first = self._under(source, media, own_id, key)
             if first:
-                return sorted(first, key=_rowid_order)
+                return first
         self._read_whole([(source, media, own_id)])
         return sorted((self._rows[unique] for unique in
                        self._stating.get((source, media, own_id), ())),
@@ -265,10 +285,9 @@ class _Rows:
         self._index((str(row["source"]), str(row["media"]), str(row["source_id"])))
 
     def create(self, row: dict) -> dict:
-        """A row the answer being planned adds — after every stored row in any
-        order a later answer reads, as the rowid SQLite gives it would be."""
+        """A group the answer being planned adds."""
         unique = (str(row["source"]), str(row["media"]), str(row["source_id"]))
-        self._rows[unique] = {**dict.fromkeys(_ROW_COLUMNS), **row, "rid": None}
+        self._rows[unique] = {**{name: groups.EMPTY[name] for name in _ROW_COLUMNS}, **row}
         self._index(unique)
         return self._rows[unique]
 
@@ -279,31 +298,29 @@ def _with_own(source: str, own_id: Any, ids: Mapping[str, Any] | None) -> dict:
     return {**dict(ids or {}), _namespace(source): own_id}
 
 
-def _rowid_order(row: dict) -> tuple[bool, int]:
-    return row["rid"] is None, int(row["rid"] or 0)
-
-
 def described_row(found: list):
-    """The described row among a service's rows for one title, or None."""
+    """The described group among a service's groups for one title, or None."""
     return next((row for row in found if row["season_count"] is not None), None)
 
 
 def season_described(row) -> bool:
-    """Whether a season row knows the season's SHAPE — one date (or none) per
-    episode its count names — rather than only what a season list said of it.
-    A tracker row's total and dates read nothing more; a panel's season tab also
-    needs the episodes themselves (`read`)."""
+    """Whether a season's group knows the season's SHAPE — one date (or none)
+    per episode its count names — rather than only what a season list said of
+    it. A tracker row's total and dates read nothing more; a panel's season tab
+    also needs the episodes themselves (`read`)."""
     return row is not None and len(_loads_list(row["air_dates_json"])) == (
         row["episode_count"] if row["episode_count"] is not None else -1)
 
 
 def _title_rows(conn: db.Connection, source: str, media: str, own_id: Any,
                 ids: Mapping[str, Any] | None, now: int) -> list:
-    """A service's rows for a title, with a bare one made where it has none yet —
-    a season and a service's words for a title belong to that service's title
-    row. The bare row is filed under the title's key (identity.settle) and is
-    NOT described (`season_count` unset), so the next surface that draws the
-    title has it described in full (app/metadata/refresh.py)."""
+    """A service's group of a title, with a bare one made where it has none yet —
+    a season and a service's words for a title belong to that service's group.
+    The bare group is filed under the title's key (identity.settle) and is NOT
+    described (`season_count` unset), so the next surface that draws the title
+    has it described in full (app/metadata/refresh.py). A title whose group of
+    the service is another entry's gets none: [] (the module docstring says
+    why)."""
     found = service_rows(conn, source, media, own_id, ids)
     if found:
         return found
@@ -312,28 +329,70 @@ def _title_rows(conn: db.Connection, source: str, media: str, own_id: Any,
     settled = identity.settle(conn, media, stated,
                               fallback=identity.per_source_key(source, own_id), now=now)
     key = settled.key if settled is not None else identity.per_source_key(source, own_id)
-    conn.execute(
-        f"INSERT INTO {rows.TITLES} (source, media, source_id, title_key, ids_json, "
-        "fetched_at, stale_after) VALUES (?, ?, ?, ?, ?, ?, 0) "
-        "ON CONFLICT(source, media, source_id) DO NOTHING",
-        (str(source), str(media), str(own_id), key, json.dumps(stated, sort_keys=True), now))
+    own = rows.own_id(source, own_id, stated)
+    conn.execute(_bare_sql(source), {"rows": json.dumps([[
+        str(media), own, json.dumps(stated, sort_keys=True), now, 0, None, 0]]),
+        "keys": json.dumps([key]), "now": now})
+    rows.file_ids(conn, [[str(source), str(media), str(own_id), own, key]])
     return service_rows(conn, source, media, own_id, ids)
 
 
-_UPSERT_SEASON_SHAPE = f"""
-INSERT INTO {rows.SEASONS}
-    (source, media, source_id, season, episode_count, premiere, air_dates_json,
-     fetched_at, stale_after)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(source, media, source_id, season) DO UPDATE SET
-    episode_count = excluded.episode_count,
-    premiere = CASE WHEN excluded.premiere != '' THEN excluded.premiere
-                    ELSE {rows.SEASONS}.premiere END,
-    air_dates_json = excluded.air_dates_json,
-    stale_after = excluded.stale_after, failed_at = NULL, fail_count = 0,
-"""
+# A BARE GROUP, where the title has none of the service's: the entry, the ids it
+# stated and its clocks, the schema's empties for every word. Each row: media,
+# own id, ids, fetched_at, stale_after, failed_at, fail_count — the key it is
+# filed under beside them.
+def _bare_sql(source: str) -> str:
+    names = ("id", "ids_json", "fetched_at", "stale_after", "failed_at", "fail_count")
+    selected = ["json_extract(:keys, '$[' || r.key || ']')", "json_extract(r.value, '$[0]')",
+                ":now", *(f"json_extract(r.value, '$[{at}]')" for at in range(1, 1 + len(names)))]
+    return (f"INSERT INTO {tables.TITLES} (title_key, media, created_at, "
+            + ", ".join(f"{source}_{name}" for name in names) + ")\n"
+            f"SELECT {', '.join(selected)} FROM json_each(:rows) r WHERE true ORDER BY r.key\n"
+            "ON CONFLICT(title_key) DO UPDATE SET "
+            + ", ".join(f"{source}_{name} = CASE WHEN {tables.TITLES}.{source}_id IS NULL "
+                        f"THEN excluded.{source}_{name} ELSE {tables.TITLES}.{source}_{name} END"
+                        for name in reversed(names)))
+
+
+def _season_columns(source: str, names: Iterable[str]) -> list[str]:
+    return [name for name in names if groups.has(tables.SEASONS, source, name)]
+
+
+def _season_upsert_sql(source: str, writes: Mapping[str, str],
+                       rewrites: Mapping[str, str | None]) -> str:
+    """An upsert of `source`'s group of each season a batch names: its title key
+    and season, then `writes`' columns its group has, then `fetched_at` — each
+    written by its rule, the clock by `rows.ceiling_clock`."""
+    names = _season_columns(source, writes)
+    sets = [f"{source}_{name} = {groups.spelled(writes[name], tables.SEASONS, source)}"
+            for name in names]
+    sets.append(f"{source}_fetched_at = " + groups.spelled(
+        rows.ceiling_clock(tables.SEASONS, source,
+                           {name: rule for name, rule in rewrites.items() if name in names}),
+        tables.SEASONS, source))
+    columns = ("title_key", "season", *(f"{source}_{name}" for name in names),
+               f"{source}_fetched_at")
+    return (f"INSERT INTO {tables.SEASONS} ({', '.join(columns)})\n"
+            f"{rows.json_rows(len(columns))}\n"
+            "ON CONFLICT(title_key, season) DO UPDATE SET " + ", ".join(sets))
+
+
+def _season_row(source: str, writes: Mapping[str, str], key: str, season: int,
+                values: Mapping[str, Any], fetched_at: int) -> list:
+    """One season as `_season_upsert_sql(source, writes, ...)` reads it."""
+    return [key, int(season), *(values[name] for name in _season_columns(source, writes)),
+            fetched_at]
+
+
+# A SEASON'S SHAPE (`write_season_summary`): how many episodes and their days.
+_SHAPE_WRITES = {
+    "episode_count": "given.episode_count",
+    "premiere": "CASE WHEN given.premiere != '' THEN given.premiere ELSE held.premiere END",
+    "air_dates_json": "given.air_dates_json", "stale_after": "given.stale_after",
+    "failed_at": "NULL", "fail_count": "0",
+}
 _SHAPE_REWRITES: dict[str, str | None] = {
-    "episode_count": None, "premiere": "excluded.premiere = ''", "air_dates_json": None}
+    "episode_count": None, "premiere": "given.premiere = ''", "air_dates_json": None}
 
 
 # What a season summary says that its shape must give back.
@@ -366,8 +425,8 @@ def write_season_summary(conn: db.Connection, source: str, media: str, own_id: A
                          now: int) -> None:
     """File the SHAPE of one season — a service's season summary
     (app/providers/season.py's: how many episodes, the days they air) — onto its
-    season row, inside the caller's transaction. Its name, description and cast
-    are left as they were: a summary does not state them, and a panel's own
+    season's group, inside the caller's transaction. Its name, description and
+    cast are left as they were: a summary does not state them, and a panel's own
     description of the season is what does.
 
     THE SUMMARY STATES ITS KNOWN DAYS AND ITS TOTAL, and that is enough to keep
@@ -379,18 +438,28 @@ def write_season_summary(conn: db.Connection, source: str, media: str, own_id: A
     shape = summary_shape(summary)
     known = [day for day in shape if day]
     days = [date.fromisoformat(day) if day else None for day in shape]
-    total = len(shape)
-    for row in _title_rows(conn, source, media, own_id, ids, now):
-        conn.execute(_UPSERT_SEASON_SHAPE + "    fetched_at = "
-                     + rows.ceiling_clock(rows.SEASONS, _SHAPE_REWRITES), (
-            str(source), str(media), str(row["source_id"]), int(summary["season"]), total,
-            known[0] if known else "", json.dumps(shape), now, season_stale_after(days, now)))
+    values = {"episode_count": len(shape), "premiere": known[0] if known else "",
+              "air_dates_json": json.dumps(shape), "stale_after": season_stale_after(days, now),
+              "failed_at": None, "fail_count": 0}
+    written = [_season_row(source, _SHAPE_WRITES, row["title_key"], int(summary["season"]),
+                           values, now)
+               for row in _title_rows(conn, source, media, own_id, ids, now)]
+    if written:
+        conn.execute(_season_upsert_sql(source, _SHAPE_WRITES, _SHAPE_REWRITES),
+                     {"rows": json.dumps(written)})
 
 
 # The words a feature's record may seed, and how to tell the store already has
-# one: a title row stating it. Constants, never input.
-_SEEDED_WORDS = {"title": "title != ''", "network": "network != ''",
-                 "year": "year != ''", "runtime": "runtime IS NOT NULL"}
+# one: a service's group stating it. Constants, never input.
+_SEEDED_WORDS = {"title": "{} != ''", "network": "{} != ''",
+                 "year": "{} != ''", "runtime": "{} IS NOT NULL"}
+
+
+def _stated_anywhere(word: str) -> str:
+    """SQL over a title's row: some service's group states `word`."""
+    tests = [_SEEDED_WORDS[word].format(f"{source}_{word}") for source in groups.sources()
+             if groups.has(tables.TITLES, source, word)]
+    return "(" + " OR ".join(tests or ["0"]) + ")"
 
 
 def seed_words(conn: db.Connection, media: str, ids: Mapping[str, Any] | None, *,
@@ -410,16 +479,17 @@ def seed_words(conn: db.Connection, media: str, ids: Mapping[str, Any] | None, *
     title is described.
 
     A SEED, NOT AN ANSWER. Filed under the first service in the declared order
-    the record's ids name, on a row left undescribed (`season_count` unset), so
+    the record's ids name, on a group left undescribed (`season_count` unset), so
     the first surface that draws the title has that service describe it
     (app/metadata/refresh.py) and its own words replace these. A WORD ANY SERVICE
     ALREADY STATES FOR THE TITLE IS NOT SEEDED, each word on its own: the store's
     words are always better than a record's copy of them.
 
     A RECORD OF ONE SEASON may carry that season's own name and episode total (a
-    board row that is one season); they seed that season's row the same way —
-    only where no service has a row for the season — and, holding no dates, the
-    row reads as not described, so the season is described when it is drawn.
+    board row that is one season); they seed that season's group the same way —
+    only where no service has a group for the season — and, holding no dates, it
+    reads as not described, so the season is described when it is drawn. A
+    service whose season group states no name is given the total alone.
     """
     words = {"title": str(title or ""), "network": str(network or ""),
              "year": str(year) if year not in (None, "") else "",
@@ -434,31 +504,39 @@ def seed_words(conn: db.Connection, media: str, ids: Mapping[str, Any] | None, *
     key = identity.resolve(conn, media, ids)
     if key is not None:
         held = conn.execute(
-            "SELECT " + ", ".join(f"MAX({test})" for test in _SEEDED_WORDS.values())
-            + f" FROM {rows.TITLES} WHERE title_key = ?", (key,)).fetchone()
-        words = {name: (None if name == "runtime" else "") if stated else words[name]
-                 for (name, stated) in zip(_SEEDED_WORDS, held)}
+            "SELECT " + ", ".join(_stated_anywhere(word) for word in _SEEDED_WORDS)
+            + f" FROM {tables.TITLES} WHERE title_key = ?", (key,)).fetchone()
+        if held is not None:
+            words = {name: (None if name == "runtime" else "") if stated else words[name]
+                     for (name, stated) in zip(_SEEDED_WORDS, held)}
+        described = " OR ".join(groups.present(tables.SEASONS, name)
+                                for name in groups.sources())
         if has_season and conn.execute(
-                f"SELECT 1 FROM {rows.TITLES} t JOIN {rows.SEASONS} s ON s.source = t.source "
-                "AND s.media = t.media AND s.source_id = t.source_id "
-                "WHERE t.title_key = ? AND s.season = ? LIMIT 1", (key, int(season))).fetchone():
+                f"SELECT 1 FROM {tables.SEASONS} WHERE title_key = ? AND season = ? "
+                f"AND ({described}) LIMIT 1", (key, int(season))).fetchone():
             has_season = False
-    seeded = {name: value for name, value in words.items() if value not in (None, "")}
+    seeded = {name: value for name, value in words.items()
+              if value not in (None, "") and groups.has(tables.TITLES, source, name)}
     if not seeded and not has_season:
         return None
     for row in _title_rows(conn, source, media, own, ids, now):
         if seeded:
-            sets = [f"{name} = ?" for name in seeded]
+            sets = [f"{source}_{name} = ?" for name in seeded]
             params = list(seeded.values())
             if "title" in seeded:
-                sets.append("title_fold = ?")
+                sets.append(f"{source}_title_fold = ?")
                 params.append(rows.fold_title(seeded["title"]))
-            conn.execute(f"UPDATE {rows.TITLES} SET {', '.join(sets)} WHERE rowid = ?",
-                         (*params, row["rid"]))
+            conn.execute(f"UPDATE {tables.TITLES} SET {', '.join(sets)} "
+                         f"WHERE title_key = ? AND {source}_id = ?",
+                         (*params, row["title_key"], row["source_id"]))
         if has_season:
-            conn.execute(_upsert_listed_season_sql(), {"rows": json.dumps([[
-                source, str(media), str(row["source_id"]), int(season), str(season_name or ""),
-                int(episode_count or 0), "", "", now, 0]])})
+            conn.execute(_season_upsert_sql(source, _LISTED_SEASON_WRITES,
+                                            _LISTED_SEASON_REWRITES),
+                         {"rows": json.dumps([_season_row(
+                             source, _LISTED_SEASON_WRITES, row["title_key"], int(season),
+                             {"name": str(season_name or ""),
+                              "episode_count": int(episode_count or 0),
+                              "premiere": "", "poster": ""}, now)])})
     return source
 
 
@@ -466,9 +544,9 @@ def write_title_facts(conn: db.Connection, source: str, media: str, own_id: Any,
                       ids: Mapping[str, Any] | None, title: str = "", network: str = "",
                       now: int) -> None:
     """File what a service called a title and who it says carried it
-    (base.DetailPort.fetch_title_facts) onto that service's row of it, inside
+    (base.DetailPort.fetch_title_facts) onto that service's group of it, inside
     the caller's transaction. A word the service did not state is left as the
-    row has it. Its clock is left alone: two words re-read are not the whole
+    group has it. Its clock is left alone: two words re-read are not the whole
     description re-read."""
     title, network = str(title or ""), str(network or "")
     if not (title or network):
@@ -476,13 +554,14 @@ def write_title_facts(conn: db.Connection, source: str, media: str, own_id: Any,
     for row in _title_rows(conn, source, media, own_id, ids, now):
         sets, params = [], []
         if title:
-            sets += ["title = ?", "title_fold = ?"]
+            sets += [f"{source}_title = ?", f"{source}_title_fold = ?"]
             params += [title, rows.fold_title(title)]
         if network:
-            sets.append("network = ?")
+            sets.append(f"{source}_network = ?")
             params.append(network)
-        conn.execute(f"UPDATE {rows.TITLES} SET {', '.join(sets)} WHERE rowid = ?",
-                     (*params, row["rid"]))
+        conn.execute(f"UPDATE {tables.TITLES} SET {', '.join(sets)} "
+                     f"WHERE title_key = ? AND {source}_id = ?",
+                     (*params, row["title_key"], row["source_id"]))
 
 
 # ---------------------------------------------------------------------------
@@ -558,9 +637,9 @@ def season_stale_after(days: list[date | None], now: int) -> int:
     return rows.episode_stale_after(noon, now)
 
 
-# The words a description states for every title row it writes, in one spelling
-# (`_title_values`), and with them what filing an answer sets on the row — the
-# columns `_UPSERT_DESCRIBED` writes, `title_key` beside them.
+# The words a description states for every title group it writes, in one spelling
+# (`_title_values`), and with them what filing an answer sets on the group — the
+# columns `_described_sql` writes of those a service's group has.
 _DESCRIBED = ("ids_json", "year", "network", "country", "language", "certification",
               "status", "overview", "runtime", "genres_json", "ratings_json", "anime_type",
               "release_types_json", "first_aired", "homepage", "season_count", "videos_json",
@@ -599,7 +678,7 @@ def _title_values(answer: Mapping[str, Any], source: str, ids: dict) -> dict:
 
 class Written(NamedTuple):
     """What filing one answer changed — what a refresh logs, so a heal can be
-    followed: the title's key before and after (a re-key, or this service's row
+    followed: the title's key before and after (a re-key, or this service's group
     moving to another title), its picture before and after, and its ids."""
     key: str
     previous_key: str | None
@@ -636,17 +715,18 @@ def write(conn: db.Connection, source: str, media: str, own_id: Any,
           answer: Mapping[str, Any], *, asked_season: int | None, tz: ZoneInfo,
           now: int) -> Written | None:
     """File one service's details answer, inside the caller's transaction:
-    the title's row, and — for an answer about a season — that season's row and
-    its episodes' rows. Returns what changed (`Written`), or None for an answer
-    that says nothing (`answered`), which writes nothing.
+    the title's group, and — for an answer about a season — that season's group
+    and its episodes'. Returns what changed (`Written`), or None for an answer
+    that says nothing (`answered`) or is about another of the service's entries
+    for the title, which writes nothing.
 
     THE IDS GO THROUGH THE ONE RESOLUTION (identity.settle), so a service that
     now names a title differently — a re-pointed TMDB id, a newly learned one —
-    re-keys it or moves this service's row to the title it names, exactly as a
+    re-keys it or moves this service's entry to the title it names, exactly as a
     listing does. The ids written are what the service said this time.
 
     A NAME OR A PICTURE THE ANSWER DOES NOT STATE IS NOT ERASED: a listing may
-    have given the row one the per-title answer leaves out.
+    have given the group one the per-title answer leaves out.
 
     ONE ANSWER IS A BATCH OF ONE (`write_many`).
     """
@@ -669,7 +749,7 @@ def write_many(conn: db.Connection, answers: Iterable[Answer], *, tz: ZoneInfo,
 
 
 class _Spelled(NamedTuple):
-    """What filing one answer writes that the store's rows do not decide."""
+    """What filing one answer writes that the store's groups do not decide."""
     ids: dict
     values: dict
     title: str
@@ -677,11 +757,11 @@ class _Spelled(NamedTuple):
     # The title's own cast, None for an answer about a season, which states that
     # season's.
     cast: str | None
-    # The season the answer is about: its row's columns after the title's, and
-    # each of its episodes'.
-    season: tuple[list, list[list]] | None
-    # Each season the list beside it names, its columns after the title's.
-    listed: list[list]
+    # The season the answer is about: its group's values, and each of its
+    # episodes' (season, number, values).
+    season: tuple[int, dict, list[tuple[int, dict]]] | None
+    # Each season the list beside it names: (season, values).
+    listed: list[tuple[int, dict]]
 
 
 def _spell(item: Answer, *, tz: ZoneInfo, now: int) -> _Spelled:
@@ -718,18 +798,25 @@ class _Filed(NamedTuple):
 
 
 class Planned(NamedTuple):
-    """A batch of answers as `apply` writes it, decided by `plan`."""
+    """A batch of answers as `apply` writes it, decided by `plan`. Each write
+    names the settle that decides its title's key and the key used where that
+    names none."""
     settles: identity.SettlePlan
-    # Every title row the batch writes, once each, as its last answer left it —
-    # spelled for `_UPSERT_DESCRIBED` without the key it is filed under, which
-    # `keyed` names: (the settle that decides it, the key if that names none).
-    titles: str
-    keyed: list[tuple[int, str]]
-    # (settle, its fallback key, media, service, address) for each picture stated.
+    # {service: [(settle, fallback, group values by name)]}: every title group
+    # the batch writes, once each, as its last answer left it.
+    titles: dict[str, list[tuple[int, str, dict]]]
+    # Entries an answer names under another title than they are filed under:
+    # (service, media, own id, the key they are under, settle, fallback).
+    moves: list[tuple[str, str, str, str, int, str]]
+    # [service, media, spelling, own id, settle, fallback] for each group created.
+    created: list[tuple[str, str, str, str, int, str]]
+    # (settle, fallback, media, service, address) for each picture stated.
     sightings: list[tuple[int, str, str, str, str]]
-    seasons: str
-    episodes: str
-    listed: str
+    # {service: [(settle, fallback, season, values)]}
+    seasons: dict[str, list[tuple[int, str, int, dict]]]
+    # {service: [(settle, fallback, season, number, values)]}
+    episodes: dict[str, list[tuple[int, str, int, int, dict]]]
+    listed: dict[str, list[tuple[int, str, int, dict]]]
     filed: list[_Filed | None | Exception]
     now: int
 
@@ -741,18 +828,18 @@ def plan(conn: db.Connection, answers: Iterable[Answer], *, tz: ZoneInfo,
     the reading and deciding.
 
     EACH ANSWER EXACTLY AS IF THE ONES BEFORE IT HAD BEEN WRITTEN, each in its own
-    transaction: its rows are found (`service_rows`' rule) among the rows as the
-    batch has left them, its title settled after every settle before it
-    (identity.Planner), and each row's clock kept from the row as the answer
-    finds it (rows.kept_clock) — so a show's title row and one of its seasons,
+    transaction: its group is found (`service_rows`' rule) among the groups as
+    the batch has left them, its title settled after every settle before it
+    (identity.Planner), and the group's clock kept from the group as the answer
+    finds it (rows.kept_clock) — so a show's title and one of its seasons,
     answered in one pass, are the same two writes they were as two transactions.
 
-    THE ANSWERS CARRYING A SEASON LIST COME LAST. A season's row is written by two
-    statements — a description of the season (`_UPSERT_SEASON`) and a list naming
-    it (`_UPSERT_LISTED_SEASON`) — and `apply` runs every description before
-    every list. Taken in that order, that is the order one transaction per answer
-    would have written them in: the order the answers arrive in is the service's,
-    and any order is one they could have arrived in.
+    THE ANSWERS CARRYING A SEASON LIST COME LAST. A season's group is written by
+    two statements — a description of the season and a list naming it — and
+    `apply` runs every description before every list. Taken in that order, that
+    is the order one transaction per answer would have written them in: the order
+    the answers arrive in is the service's, and any order is one they could
+    have arrived in.
 
     AN ANSWER THIS CANNOT READ is that answer's failure (`write_many`), found
     before it touches anything another answer reads.
@@ -777,7 +864,7 @@ def plan(conn: db.Connection, answers: Iterable[Answer], *, tz: ZoneInfo,
                    for at, item in enumerate(answers) if at in spelled]
                   + [(item.source, item.media, item.own_id, None)
                      for at, item in enumerate(answers) if at in spelled and item.seasons])
-    # And what each settle will ask about the rows found, read together.
+    # And what each settle will ask about the groups found, read together.
     planner.prefetch(identity.Settling(
         item.media, spelled[at].ids,
         filed_under=next((str(row["title_key"]) for row in held.found(
@@ -785,24 +872,40 @@ def plan(conn: db.Connection, answers: Iterable[Answer], *, tz: ZoneInfo,
         fallback=identity.per_source_key(item.source, item.own_id))
         for at, item in enumerate(answers) if at in spelled)
 
-    touched: dict[tuple[str, str, str], dict] = {}
-    keyed: dict[tuple[str, str, str], tuple[int, str]] = {}
+    touched: dict[tuple[str, str, str], tuple[int, str, dict]] = {}
+    moves: list[tuple[str, str, str, str, int, str]] = []
+    created: list[tuple[str, str, str, str, int, str]] = []
     sightings: list[tuple[int, str, str, str, str]] = []
-    seasons: list[list] = []
-    episodes: list[list] = []
-    listed: list[list] = []
+    seasons: dict[str, list] = {}
+    episodes: dict[str, list] = {}
+    listed: dict[str, list] = {}
     settled = 0
     for at in sorted(spelled, key=lambda at: bool(spelled[at].listed)):
         item, words = answers[at], spelled[at]
         found = held.found(item.source, item.media, item.own_id, words.ids)
         before = dict(found[0]) if found else None
-        # The key the row holds as this answer finds it — before its own settle,
-        # which may re-key it.
+        # The key the group holds as this answer finds it — before its own
+        # settle, which may re-key it.
         previous_key = planner.moved_to(str(before["title_key"])) if before else None
         fallback = identity.per_source_key(item.source, item.own_id)
         key = planner.settle(identity.Settling(
             item.media, words.ids, filed_under=str(before["title_key"]) if before else None,
             fallback=fallback)) or fallback
+        own = str(before["source_id"]) if before else rows.own_id(item.source, item.own_id,
+                                                                  words.ids)
+        # ANOTHER OF THE SERVICE'S ENTRIES IS THIS TITLE'S GROUP: the answer is
+        # about a second id the service holds for the title, and its words are
+        # not kept (the module docstring says why). Its settle stands — the ids
+        # it taught are the title's.
+        occupant = held.occupant(item.source, key)
+        if occupant is not None and occupant != own:
+            settled += 1
+            continue
+        if before is not None and previous_key != key:
+            # A SERVICE RE-POINTED ITS SHARED IDS, NOT ITS OWN: this group goes
+            # where its own id now says, its seasons and episodes with it.
+            moves.append((item.source, item.media, own, previous_key, settled, fallback))
+            before["title_key"] = key
         changes = {**words.values, "title_key": key, "enriched": 1,
                    "stale_after": now + TITLE_REFRESH_SECONDS, "failed_at": None,
                    "fail_count": 0}
@@ -816,21 +919,17 @@ def plan(conn: db.Connection, answers: Iterable[Answer], *, tz: ZoneInfo,
         # picture it did not state, and the title's cast from an answer about a
         # season, are older words left in place.
         rewritten = set(changes)
-        if not found:
-            found = [held.create({"source": item.source, "media": item.media,
-                                  "source_id": str(item.own_id), "title": "", "title_fold": "",
-                                  "poster": "", "cast_json": "[]", **changes,
-                                  "fetched_at": now})]
+        if before is None:
+            row = held.create({"source": item.source, "media": item.media, "source_id": own,
+                               "title": "", "title_fold": "", "poster": "", "cast_json": "[]",
+                               **changes, "fetched_at": now})
+            created.append((item.source, item.media, str(item.own_id), own, settled, fallback))
         else:
-            for row in found:
-                row.update(changes,
-                           fetched_at=rows.kept_clock(item.source, rows.TITLES, row, rewritten,
-                                                      now))
-                held.changed(row)
-        for row in found:
-            unique = (str(row["source"]), str(row["media"]), str(row["source_id"]))
-            touched[unique] = row
-            keyed[unique] = (settled, fallback)
+            row = found[0]
+            row.update(changes, fetched_at=rows.kept_clock(item.source, tables.TITLES, row,
+                                                           rewritten, now))
+            held.changed(row)
+        touched[(item.source, item.media, own)] = (settled, fallback, row)
         # THE PICTURE IS A SIGHTING TOO, filed in the poster registry as the store
         # writes it — under the title's tmdb id, else its key — so a service's new
         # address reaches every page that draws a picture the moment it is
@@ -839,15 +938,14 @@ def plan(conn: db.Connection, answers: Iterable[Answer], *, tz: ZoneInfo,
         if words.poster:
             sightings.append((settled, fallback, item.media, item.source, words.poster))
         if words.season is not None:
-            season_tail, episode_tails = words.season
-            for row in found:
-                own = [item.source, item.media, str(row["source_id"])]
-                seasons.append([*own, *season_tail])
-                episodes.extend([*own, *tail] for tail in episode_tails)
+            number, season_values, episode_tails = words.season
+            seasons.setdefault(item.source, []).append(
+                (settled, fallback, number, season_values))
+            episodes.setdefault(item.source, []).extend(
+                (settled, fallback, number, episode, values) for episode, values in episode_tails)
         if words.listed:
-            listed.extend([item.source, item.media, str(row["source_id"]), *tail]
-                          for row in held.found(item.source, item.media, item.own_id, None)
-                          for tail in words.listed)
+            listed.setdefault(item.source, []).extend(
+                (settled, fallback, season, values) for season, values in words.listed)
         filed[at] = _Filed(
             settled, fallback,
             previous_key=previous_key,
@@ -856,12 +954,13 @@ def plan(conn: db.Connection, answers: Iterable[Answer], *, tz: ZoneInfo,
             ids=words.ids, previous_ids=_loads(before["ids_json"]) if before else {})
         settled += 1
 
+    by_source: dict[str, list[tuple[int, str, dict]]] = {}
+    for (source, _media, _own), written in touched.items():
+        by_source.setdefault(source, []).append(written)
     return Planned(
-        settles=planner.plan(),
-        titles=json.dumps([[row["source"], row["media"], row["source_id"],
-                            *(row[column] for column in _WRITTEN)] for row in touched.values()]),
-        keyed=list(keyed.values()), sightings=sightings, seasons=json.dumps(seasons),
-        episodes=json.dumps(episodes), listed=json.dumps(listed), filed=filed, now=now)
+        settles=planner.plan(), titles=by_source, moves=moves, created=created,
+        sightings=sightings, seasons=seasons, episodes=episodes, listed=listed, filed=filed,
+        now=now)
 
 
 def apply(conn: db.Connection, planned: Planned) -> list[Written | None | Exception]:
@@ -869,13 +968,14 @@ def apply(conn: db.Connection, planned: Planned) -> list[Written | None | Except
     connection it was planned on, which db.transaction's `prepare` guarantees
     holds what it did then. A FIXED NUMBER OF STATEMENTS however many answers:
     the identities (identity.SettlePlan, and a re-key's own repointing where one
-    re-keys a title), the title rows, the pictures, the seasons, their episodes
-    and the season lists, one statement each. A write transaction holds the
-    database's one write lock for as long as its statements take, and while the
-    event loop is busy each can wait a GIL switch interval.
+    re-keys a title — and a group moving between titles, which is as rare), then
+    for each service the title groups, the seasons, their episodes and the season
+    lists, one statement each, and the ids and pictures. A write transaction
+    holds the database's one write lock for as long as its statements take, and
+    while the event loop is busy each can wait a GIL switch interval.
 
-    EVERY ROW IS FILED UNDER THE KEY ITS TITLE ANSWERS TO ONCE THE BATCH IS DONE
-    (identity.settle_many says why), and its picture with it — the order a
+    EVERY GROUP IS FILED UNDER THE KEY ITS TITLE ANSWERS TO ONCE THE BATCH IS
+    DONE (identity.settle_many says why), and its picture with it — the order a
     calendar fill writes in (app/metadata/__init__.py's `write_records`)."""
     planned.settles.apply(conn)
     keys = [found.key if found is not None else None for found in planned.settles.identities]
@@ -883,120 +983,125 @@ def apply(conn: db.Connection, planned: Planned) -> list[Written | None | Except
     def final(settled: int, fallback: str) -> str:
         return keys[settled] or fallback
 
-    if planned.keyed:
-        conn.execute(_UPSERT_DESCRIBED, {
-            "rows": planned.titles,
-            "keys": json.dumps([final(settled, fallback) for settled, fallback in planned.keyed])})
+    rows.move_entries(conn, [rows.Move(source, media, own, identity.follow(conn, old),
+                                       final(settled, fallback))
+                             for source, media, own, old, settled, fallback in planned.moves],
+                      now=planned.now)
+    for source, written in planned.titles.items():
+        names = [name for name in _WRITTEN if groups.has(tables.TITLES, source, name)]
+        conn.execute(_described_sql(source, names), {
+            "rows": json.dumps([[row["media"], row["source_id"],
+                                 *(row[name] for name in names)] for _s, _f, row in written]),
+            "keys": json.dumps([final(settled, fallback) for settled, fallback, _r in written]),
+            "now": planned.now})
+    rows.file_ids(conn, [[source, media, spelling, own, final(settled, fallback)]
+                     for source, media, spelling, own, settled, fallback in planned.created])
     artwork.file_sightings(conn, [
         (media, identity.tmdb_of(key), key, source, url)
         for settled, fallback, media, source, url in planned.sightings
         for key in (final(settled, fallback),)], planned.now)
-    for sql, written in ((_upsert_season_sql(), planned.seasons),
-                         (_upsert_episode_sql(), planned.episodes),
-                         (_upsert_listed_season_sql(), planned.listed)):
-        if written != "[]":
-            conn.execute(sql, {"rows": written})
+    for source, written in planned.seasons.items():
+        conn.execute(_season_upsert_sql(source, _SEASON_WRITES, _SEASON_REWRITES), {
+            "rows": json.dumps([_season_row(source, _SEASON_WRITES, final(settled, fallback),
+                                            season, values, planned.now)
+                                for settled, fallback, season, values in written])})
+    for source, written in planned.episodes.items():
+        names = rows.episode_written(source, _EPISODE_WRITES)
+        conn.execute(rows.episode_upsert_sql(source, _EPISODE_WRITES, _EPISODE_REWRITES), {
+            "rows": json.dumps([[final(settled, fallback), f"S{season}E{number}",
+                                 str(Media.SHOW), season, number,
+                                 *(values[name] for name in names), planned.now]
+                                for settled, fallback, season, number, values in written])})
+    for source, written in planned.listed.items():
+        conn.execute(_season_upsert_sql(source, _LISTED_SEASON_WRITES, _LISTED_SEASON_REWRITES), {
+            "rows": json.dumps([_season_row(source, _LISTED_SEASON_WRITES,
+                                            final(settled, fallback), season, values, planned.now)
+                                for settled, fallback, season, values in written])})
     return [Written(final(found.settled, found.fallback), found.previous_key, found.poster,
                     found.previous_poster, found.ids, found.previous_ids)
             if isinstance(found, _Filed) else found
             for found in planned.filed]
 
 
-# EVERY TITLE ROW A BATCH DESCRIBES IN ONE STATEMENT, each once, as its last
-# answer left it (`_Rows`): a row the store holds is rewritten from what was read
-# of it and what each answer changed — what a statement per answer did one answer
-# at a time — and a row it does not hold is added, the schema's defaults filling
-# what a description does not state. The key each is filed under travels beside
-# the rows (rows.json_rows' `keyed_at`), known only once the batch's identities
-# are written.
-_UPSERT_DESCRIBED = f"""
-INSERT INTO {rows.TITLES} (source, media, source_id, title_key, {', '.join(_WRITTEN)})
-{rows.json_rows(3 + len(_WRITTEN), keyed_at=3)}
-ON CONFLICT(source, media, source_id) DO UPDATE SET
-    title_key = excluded.title_key,
-    {', '.join(f'{column} = excluded.{column}' for column in _WRITTEN)}
-"""
+def _described_sql(source: str, names: list[str]) -> str:
+    """EVERY TITLE GROUP A BATCH DESCRIBES IN ONE STATEMENT, each once, as its
+    last answer left it (`_Rows`): a group the store holds is rewritten from what
+    was read of it and what each answer changed — what a statement per answer did
+    one answer at a time — and a group it does not hold is added, the schema's
+    empties filling what a description does not state. Each row: media, the
+    entry's own id, then `names`; the key it is filed under beside it."""
+    columns = ("id", *names)
+    selected = ["json_extract(:keys, '$[' || r.key || ']')", "json_extract(r.value, '$[0]')",
+                ":now", *(f"json_extract(r.value, '$[{at}]')" for at in range(1, 1 + len(columns)))]
+    return (f"INSERT INTO {tables.TITLES} (title_key, media, created_at, "
+            + ", ".join(f"{source}_{name}" for name in columns) + ")\n"
+            f"SELECT {', '.join(selected)} FROM json_each(:rows) r WHERE true ORDER BY r.key\n"
+            "ON CONFLICT(title_key) DO UPDATE SET "
+            + ", ".join(f"{source}_{name} = excluded.{source}_{name}" for name in columns))
 
-# A SEASON'S DESCRIPTION, every season of a batch in one statement, applied in
-# the batch's order (rows.json_rows). Each row: source, media, source_id, then
-# `_season_tails`' season columns.
-_UPSERT_SEASON = f"""
-INSERT INTO {rows.SEASONS}
-    (source, media, source_id, season, name, overview, episode_count, premiere,
-     air_dates_json, cast_json, fetched_at, stale_after, failed_at, fail_count)
-{rows.json_rows(14)}
-ON CONFLICT(source, media, source_id, season) DO UPDATE SET
-    name = excluded.name, overview = excluded.overview,
-    episode_count = excluded.episode_count, premiere = excluded.premiere,
-    air_dates_json = excluded.air_dates_json, cast_json = excluded.cast_json,
-    stale_after = excluded.stale_after, failed_at = NULL, fail_count = 0,
-"""
+
+# A SEASON'S DESCRIPTION, every season of a batch in one statement per service,
+# applied in the batch's order.
+_SEASON_WRITES = {name: f"given.{name}" for name in (
+    "name", "overview", "episode_count", "premiere", "air_dates_json", "cast_json",
+    "stale_after")} | {"failed_at": "NULL", "fail_count": "0"}
 _SEASON_REWRITES: dict[str, str | None] = dict.fromkeys(
     ("name", "overview", "episode_count", "premiere", "air_dates_json", "cast_json"))
 
 
-def _upsert_season_sql() -> str:
-    return _UPSERT_SEASON + "    fetched_at = " + rows.ceiling_clock(rows.SEASONS,
-                                                                     _SEASON_REWRITES)
-
-
-# AN EPISODE'S DESCRIPTION, over whatever row a listing or the episode drain
+# AN EPISODE'S DESCRIPTION, over whatever group a listing or the episode drain
 # left: the answer wins where it states something, and a column it does not
 # carry — the drain's vote count — is left as it was.
 #
-# EVERY EPISODE OF A BATCH IN ONE STATEMENT (rows.json_rows), as a listing's
-# are: a write transaction holds the database's one write lock for as long as its
-# statements take, and while the event loop is busy each one can wait a GIL switch
-# interval — so a statement per episode held it longer the longer the season.
-_UPSERT_EPISODE = f"""
-INSERT INTO {rows.EPISODES}
-    (source, media, source_id, season, number, title, overview, first_aired,
-     episode_type, runtime, rating, fetched_at, stale_after)
-{rows.json_rows(13)}
-ON CONFLICT(source, media, source_id, season, number) DO UPDATE SET
-    title = CASE WHEN excluded.title != '' THEN excluded.title ELSE {rows.EPISODES}.title END,
-    overview = excluded.overview, first_aired = excluded.first_aired,
-    episode_type = CASE WHEN excluded.episode_type != '' THEN excluded.episode_type
-                        ELSE {rows.EPISODES}.episode_type END,
-    runtime = COALESCE(excluded.runtime, {rows.EPISODES}.runtime),
-    rating = excluded.rating, stale_after = excluded.stale_after,
-"""
+# EVERY EPISODE OF A BATCH IN ONE STATEMENT PER SERVICE (rows.json_rows), as a
+# listing's are: a write transaction holds the database's one write lock for as
+# long as its statements take, and while the event loop is busy each one can
+# wait a GIL switch interval — so a statement per episode held it longer the
+# longer the season.
+_EPISODE_WRITES = {
+    "title": "CASE WHEN given.title != '' THEN given.title ELSE held.title END",
+    "overview": "given.overview", "first_aired": "given.first_aired",
+    "episode_type": "CASE WHEN given.episode_type != '' THEN given.episode_type "
+                    "ELSE held.episode_type END",
+    "runtime": "COALESCE(given.runtime, held.runtime)",
+    "rating": "given.rating", "stale_after": "given.stale_after",
+}
 _EPISODE_REWRITES: dict[str, str | None] = {
-    "title": "excluded.title = ''", "overview": None, "first_aired": None,
-    "episode_type": "excluded.episode_type = ''", "runtime": "excluded.runtime IS NULL",
+    "title": "given.title = ''", "overview": None, "first_aired": None,
+    "episode_type": "given.episode_type = ''", "runtime": "given.runtime IS NULL",
     "rating": None}
 
 
-def _upsert_episode_sql() -> str:
-    return _UPSERT_EPISODE + "    fetched_at = " + rows.ceiling_clock(rows.EPISODES,
-                                                                      _EPISODE_REWRITES)
-
-
 def _season_tails(season: int, answer: Mapping[str, Any], *, tz: ZoneInfo,
-                  now: int) -> tuple[list, list[list]]:
-    """The season an answer describes, as `_UPSERT_SEASON` writes it after the
-    title's own columns, and each of its episodes as `_UPSERT_EPISODE` does."""
+                  now: int) -> tuple[int, dict, list[tuple[int, dict]]]:
+    """The season an answer describes, as its group's values, and each of its
+    episodes'."""
     episodes = sorted((e for e in answer.get("episodes") or [] if e.get("number") is not None),
                       key=lambda e: int(e["number"]))
     days = [local_day(e.get("first_aired"), tz) for e in episodes]
     dated = [e for e in episodes if local_day(e.get("first_aired"), tz) is not None]
     premiere = min(dated, key=lambda e: local_day(e.get("first_aired"), tz),
                    default=None)
-    described = [
-        season, str(answer.get("season_title") or ""), str(answer.get("season_overview") or ""),
-        len(episodes), str(premiere.get("first_aired") or "") if premiere else "",
-        json.dumps([day.isoformat() if day else None for day in days]),
-        json.dumps(list(answer.get("cast") or [])), now, season_stale_after(days, now), None, 0]
+    described = {
+        "name": str(answer.get("season_title") or ""),
+        "overview": str(answer.get("season_overview") or ""),
+        "episode_count": len(episodes),
+        "premiere": str(premiere.get("first_aired") or "") if premiere else "",
+        "air_dates_json": json.dumps([day.isoformat() if day else None for day in days]),
+        "cast_json": json.dumps(list(answer.get("cast") or [])),
+        "stale_after": season_stale_after(days, now), "failed_at": None, "fail_count": 0}
     each = []
     for episode, day in zip(episodes, days):
         noon = (datetime(day.year, day.month, day.day, 12, tzinfo=timezone.utc).timestamp()
                 if day else None)
-        each.append([
-            season, int(episode["number"]), str(episode.get("title") or ""),
-            str(episode.get("overview") or ""), str(episode.get("first_aired") or ""),
-            str(episode.get("episode_type") or ""), episode.get("runtime"), episode.get("rating"),
-            now, rows.episode_stale_after(noon, now)])
-    return described, each
+        each.append((int(episode["number"]), {
+            "title": str(episode.get("title") or ""),
+            "overview": str(episode.get("overview") or ""),
+            "first_aired": str(episode.get("first_aired") or ""),
+            "episode_type": str(episode.get("episode_type") or ""),
+            "runtime": episode.get("runtime"), "rating": episode.get("rating"),
+            "stale_after": rows.episode_stale_after(noon, now)}))
+    return season, described, each
 
 
 # ---------------------------------------------------------------------------
@@ -1006,14 +1111,17 @@ def _season_tails(season: int, answer: Mapping[str, Any], *, tz: ZoneInfo,
 class Failures(NamedTuple):
     """What marking a batch of failed refreshes writes (`plan_failures`)."""
     settles: identity.SettlePlan
-    # Title rowids, and season rows (source, media, source id, season), each named
-    # once per failure that marks it.
-    titles: str
-    seasons: str
-    # The bare rows that carry a failure for a title with none (`plan_failures`),
-    # without the key each is filed under, which `keyed` names.
-    bare: str
-    keyed: list[tuple[int, str]]
+    # {service: [title key, ...]} and {service: [[title key, season], ...]}, each
+    # named once per failure that marks it.
+    titles: dict[str, list[str]]
+    seasons: dict[str, list[list]]
+    # {service: [[media, own id, ids, fetched_at, stale_after, failed_at,
+    # fail_count]]} — the bare groups that carry a failure for a title with none
+    # (`plan_failures`), the key each is filed under in `keyed`.
+    bare: dict[str, list[list]]
+    keyed: dict[str, list[tuple[int, str]]]
+    # [service, media, own id, own id, settle] for each bare group's ids.
+    created: list[tuple[str, str, str, str, int, str]]
     now: int
 
 
@@ -1023,113 +1131,100 @@ def plan_failures(conn: db.Connection,
     refresh that could not be made is recorded — reads only, for db.transaction's
     `prepare`.
 
-    ON THE ROWS IT WAS FOR (`service_rows`): the title's own for the title, the
-    season's for a season, so a view leaves them alone for a while
+    ON THE GROUPS IT WAS FOR (`service_rows`): the title's own for the title,
+    the season's for a season, so a view leaves them alone for a while
     (app/metadata/refresh.py's backoff), each failure counted.
 
-    AND WHERE THE SERVICE HAS NO ROW FOR THE TITLE, A BARE ONE CARRIES IT — filed
-    under the title's key, described by nothing, as `_title_rows` makes one —
-    when the service's own id names the title on its own: TMDB's, a shared id the
-    waterfall keys by. Without it a title the service does not know was asked
-    about again every time anything queued it, since a failure recorded nowhere
-    is no backoff at all; with it, it is a row owed a description and nothing
-    else, and the backoff and give-up every owed row has apply
+    AND WHERE THE SERVICE HAS NO GROUP FOR THE TITLE, A BARE ONE CARRIES IT —
+    filed under the title's key, described by nothing, as `_title_rows` makes
+    one — when the service's own id names the title on its own: TMDB's, a shared
+    id the waterfall keys by. Without it a title the service does not know was
+    asked about again every time anything queued it, since a failure recorded
+    nowhere is no backoff at all; with it, it is a group owed a description and
+    nothing else, and the backoff and give-up every owed group has apply
     (refresh.queue_listed). A service whose own id names no title (Trakt's slug,
-    Simkl's number) would have its row filed under a key of its own, apart from
-    the title, so it is left unmarked as before.
+    Simkl's number) would have its group filed under a key of its own, apart
+    from the title, so it is left unmarked as before.
     """
     failed = [(str(source), str(media), str(own_id), season)
               for source, media, own_id, season in failed]
     planner = identity.Planner(conn, now=now)
     held = _Rows(conn, planner)
     held.prefetch([(source, media, own_id, None) for source, media, own_id, _s in failed])
-    titles: list[int] = []
-    seasons: list[list] = []
+    titles: dict[str, list[str]] = {}
+    seasons: dict[str, list[list]] = {}
     bare: dict[tuple[str, str, str], list] = {}
-    keyed: list[tuple[int, str]] = []
+    keyed: dict[str, list[tuple[int, str]]] = {}
+    created: list[tuple[str, str, str, str, int, str]] = []
+    settled = 0
     for source, media, own_id, season in failed:
         found = held.found(source, media, own_id, None)
         if season is not None:
-            seasons.extend([source, media, str(row["source_id"]), int(season)] for row in found)
+            seasons.setdefault(source, []).extend(
+                [str(row["title_key"]), int(season)] for row in found)
         elif found:
-            titles.extend(int(row["rid"]) for row in found)
+            titles.setdefault(source, []).extend(str(row["title_key"]) for row in found)
         elif (source, media, own_id) in bare:
             bare[(source, media, own_id)][-1] += 1
         elif planner.resolve(media, _with_own(source, own_id, None)) is not None:
             stated = {_namespace(source): id_rules.typed(_namespace(source), own_id)}
             fallback = identity.per_source_key(source, own_id)
             planner.settle(identity.Settling(media, stated, fallback=fallback))
-            keyed.append((len(keyed), fallback))
-            bare[(source, media, own_id)] = [source, media, own_id,
-                                             json.dumps(stated, sort_keys=True), now, 0, now, 1]
-    return Failures(planner.plan(), json.dumps(titles), json.dumps(seasons),
-                    json.dumps(list(bare.values())), keyed, now)
-
-
-# A BATCH'S FAILURES IN THREE STATEMENTS, each failure counted once per row it
-# marks, as a transaction each counted them.
-_FAIL_TITLES = f"""
-UPDATE {rows.TITLES} SET failed_at = :now, fail_count = fail_count + f.times
-FROM (SELECT value AS rid, COUNT(*) AS times FROM json_each(:rows) GROUP BY value) f
-WHERE {rows.TITLES}.rowid = f.rid
-"""
-_FAIL_SEASONS = f"""
-UPDATE {rows.SEASONS} SET failed_at = :now, fail_count = fail_count + f.times
-FROM (SELECT json_extract(value, '$[0]') AS source, json_extract(value, '$[1]') AS media,
-             json_extract(value, '$[2]') AS source_id, json_extract(value, '$[3]') AS season,
-             COUNT(*) AS times
-      FROM json_each(:rows) GROUP BY 1, 2, 3, 4) f
-WHERE {rows.SEASONS}.source = f.source AND {rows.SEASONS}.media = f.media
-  AND {rows.SEASONS}.source_id = f.source_id AND {rows.SEASONS}.season = f.season
-"""
-# Each row: source, media, source_id, ids_json, fetched_at, stale_after, failed_at,
-# fail_count — the key filed under travelling beside them (rows.json_rows).
-_BARE_FAILED = f"""
-INSERT INTO {rows.TITLES} (source, media, source_id, title_key, ids_json, fetched_at,
-                           stale_after, failed_at, fail_count)
-{rows.json_rows(8, keyed_at=3)}
-ON CONFLICT(source, media, source_id) DO NOTHING
-"""
+            keyed.setdefault(source, []).append((settled, fallback))
+            own = rows.own_id(source, own_id, stated)
+            created.append((source, media, own_id, own, settled, fallback))
+            settled += 1
+            bare[(source, media, own_id)] = [media, own, json.dumps(stated, sort_keys=True),
+                                             now, 0, now, 1]
+    by_source: dict[str, list[list]] = {}
+    for (source, _media, _own), values in bare.items():
+        by_source.setdefault(source, []).append(values)
+    return Failures(planner.plan(), titles, seasons, by_source, keyed, created, now)
 
 
 def mark_failures(conn: db.Connection, planned: Failures) -> None:
-    """Write what `plan_failures` decided, inside the caller's transaction."""
+    """Write what `plan_failures` decided, inside the caller's transaction — a
+    statement per service and kind, each failure counted once per group it
+    marks, as a transaction each counted them."""
     planned.settles.apply(conn)
-    if planned.titles != "[]":
-        conn.execute(_FAIL_TITLES, {"now": planned.now, "rows": planned.titles})
-    if planned.seasons != "[]":
-        conn.execute(_FAIL_SEASONS, {"now": planned.now, "rows": planned.seasons})
-    if planned.keyed:
-        keys = [found.key if found is not None else None
-                for found in planned.settles.identities]
-        conn.execute(_BARE_FAILED, {
-            "rows": planned.bare,
-            "keys": json.dumps([keys[at] or fallback for at, fallback in planned.keyed])})
+    keys = [found.key if found is not None else None for found in planned.settles.identities]
+    for source, marked in planned.titles.items():
+        conn.execute(
+            f"UPDATE {tables.TITLES} SET {source}_failed_at = :now, "
+            f"{source}_fail_count = {source}_fail_count + f.times "
+            "FROM (SELECT value AS title_key, COUNT(*) AS times FROM json_each(:rows) "
+            "GROUP BY value) f "
+            f"WHERE {tables.TITLES}.title_key = f.title_key AND {tables.TITLES}.{source}_id IS NOT NULL",
+            {"now": planned.now, "rows": json.dumps(marked)})
+    for source, marked in planned.seasons.items():
+        conn.execute(
+            f"UPDATE {tables.SEASONS} SET {source}_failed_at = :now, "
+            f"{source}_fail_count = {source}_fail_count + f.times "
+            "FROM (SELECT json_extract(value, '$[0]') AS title_key, "
+            "json_extract(value, '$[1]') AS season, COUNT(*) AS times "
+            "FROM json_each(:rows) GROUP BY 1, 2) f "
+            f"WHERE {tables.SEASONS}.title_key = f.title_key "
+            f"AND {tables.SEASONS}.season = f.season "
+            f"AND {tables.SEASONS}.{source}_fetched_at IS NOT NULL",
+            {"now": planned.now, "rows": json.dumps(marked)})
+    for source, values in planned.bare.items():
+        conn.execute(_bare_sql(source), {
+            "rows": json.dumps(values), "now": planned.now,
+            "keys": json.dumps([keys[at] or fallback for at, fallback in planned.keyed[source]])})
+    rows.file_ids(conn, [[source, media, spelling, own, keys[at] or fallback]
+                     for source, media, spelling, own, at, fallback in planned.created])
 
 
-# Every season a list names in one statement, the episodes' reason. Each row:
-# source, media, source_id, season, name, episode_count, premiere, poster,
-# fetched_at, and a `stale_after` of 0 — a list is not a description of the season.
-_UPSERT_LISTED_SEASON = f"""
-INSERT INTO {rows.SEASONS}
-    (source, media, source_id, season, name, episode_count, premiere, poster,
-     fetched_at, stale_after)
-{rows.json_rows(10)}
-ON CONFLICT(source, media, source_id, season) DO UPDATE SET
-    name = CASE WHEN excluded.name != '' THEN excluded.name ELSE {rows.SEASONS}.name END,
-    episode_count = excluded.episode_count,
-    premiere = CASE WHEN excluded.premiere != '' THEN excluded.premiere
-                    ELSE {rows.SEASONS}.premiere END,
-    poster = CASE WHEN excluded.poster != '' THEN excluded.poster ELSE {rows.SEASONS}.poster END,
-"""
+# Every season a list names in one statement per service, the episodes' reason.
+_LISTED_SEASON_WRITES = {
+    "name": "CASE WHEN given.name != '' THEN given.name ELSE held.name END",
+    "episode_count": "given.episode_count",
+    "premiere": "CASE WHEN given.premiere != '' THEN given.premiere ELSE held.premiere END",
+    "poster": "CASE WHEN given.poster != '' THEN given.poster ELSE held.poster END",
+}
 _LISTED_SEASON_REWRITES: dict[str, str | None] = {
-    "name": "excluded.name = ''", "episode_count": None,
-    "premiere": "excluded.premiere = ''", "poster": "excluded.poster = ''"}
-
-
-def _upsert_listed_season_sql() -> str:
-    return (_UPSERT_LISTED_SEASON + "    fetched_at = "
-            + rows.ceiling_clock(rows.SEASONS, _LISTED_SEASON_REWRITES))
+    "name": "given.name = ''", "episode_count": None,
+    "premiere": "given.premiere = ''", "poster": "given.poster = ''"}
 
 
 def write_season_list(conn: db.Connection, source: str, media: str, own_id: Any,
@@ -1137,33 +1232,57 @@ def write_season_list(conn: db.Connection, source: str, media: str, own_id: Any,
                       ids: Mapping[str, Any] | None = None) -> int:
     """File a service's season list for a title (base.SeasonsAnswer's `seasons`):
     each season's name, episode count, premiere and poster, on that service's
-    row of the title — a bare one made where it has none (`_title_rows`).
-    Returns how many seasons were filed.
+    groups of the title's seasons — a bare title group made where it has none
+    (`_title_rows`). Returns how many seasons were filed.
 
     THE LIST'S COUNT REPLACES THE DESCRIPTION'S, and that is how a season that
     grew is noticed (`season_described`). Its clock (`stale_after`) is left
     alone: a list is not a description of the season."""
     tails = _listed_tails(seasons, now)
-    written = [[str(source), str(media), str(row["source_id"]), *tail]
+    written = [_season_row(source, _LISTED_SEASON_WRITES, row["title_key"], season, values, now)
                for row in _title_rows(conn, str(source), str(media), own_id, ids, now)
-               for tail in tails]
+               for season, values in tails]
     if written:
-        conn.execute(_upsert_listed_season_sql(), {"rows": json.dumps(written)})
+        conn.execute(_season_upsert_sql(source, _LISTED_SEASON_WRITES, _LISTED_SEASON_REWRITES),
+                     {"rows": json.dumps(written)})
     return len(written)
 
 
-def _listed_tails(seasons: list[Mapping[str, Any]], now: int) -> list[list]:
-    """Each season a list names, as `_UPSERT_LISTED_SEASON` writes it after the
-    title's own columns."""
-    return [[int(entry["season"]), str(entry.get("name") or ""),
-             int(entry.get("episode_count") or 0), str(entry.get("first_aired") or ""),
-             str(entry.get("poster") or ""), now, 0]
-            for entry in seasons if entry.get("season") is not None]
+def _listed_tails(seasons: list[Mapping[str, Any]], now: int) -> list[tuple[int, dict]]:
+    """Each season a list names: (season, its values)."""
+    return [(int(entry["season"]), {
+        "name": str(entry.get("name") or ""),
+        "episode_count": int(entry.get("episode_count") or 0),
+        "premiere": str(entry.get("first_aired") or ""),
+        "poster": str(entry.get("poster") or "")})
+        for entry in seasons if entry.get("season") is not None]
+
+
+# What a season's group holds, read back under the column's own name.
+_SEASON_NAMES = ("name", "overview", "episode_count", "premiere", "air_dates_json", "poster",
+                 "cast_json", "videos_json", "fetched_at", "stale_after", "failed_at",
+                 "fail_count")
+
+
+def _season_sql(source: str, where: str) -> str:
+    return (f"SELECT season, {groups.select(tables.SEASONS, source, _SEASON_NAMES)} "
+            f"FROM {tables.SEASONS} WHERE title_key = ? "
+            f"AND {groups.present(tables.SEASONS, source)} {where}")
 
 
 # A season a list offers: numbered, and holding at least one episode — the rule
 # every service's own picker applies (base.SeasonsAnswer).
-_LISTED = "season > 0 AND episode_count > 0"
+_LISTED = "AND season > 0 AND episode_count > 0"
+
+
+def _listed_rows(conn: db.Connection, row) -> list[dict]:
+    """The seasons of a group's title its service lists, by season."""
+    return [{"season": int(s["season"]), "episode_count": int(s["episode_count"]),
+             "first_aired": str(s["premiere"] or ""), "name": str(s["name"] or ""),
+             "poster": str(s["poster"] or "")}
+            for s in conn.execute(
+                f"SELECT * FROM ({_season_sql(row['source'], '')}) WHERE 1 {_LISTED} "
+                "ORDER BY season", (row["title_key"],))]
 
 
 def listed_seasons(conn: db.Connection, source: str, media: str, own_id: Any, *,
@@ -1172,24 +1291,18 @@ def listed_seasons(conn: db.Connection, source: str, media: str, own_id: Any, *,
     base.SeasonsAnswer's `seasons` shape — or [] when the store cannot vouch for
     a whole list.
 
-    WHAT VOUCHES FOR IT IS THE SERVICE'S DESCRIPTION OF THE TITLE. Season rows
+    WHAT VOUCHES FOR IT IS THE SERVICE'S DESCRIPTION OF THE TITLE. Season groups
     come from three writers — a season list, a tracker's summary of one season,
-    a panel's description of one season — so the rows that happen to exist are
+    a panel's description of one season — so the groups that happen to exist are
     not a list: a tracker that summarised season 3 alone would read as a show of
     one season. A described title states how many seasons it has
-    (`season_count`), and the rows are this service's list when they number
+    (`season_count`), and the groups are this service's list when they number
     exactly that.
     """
     row = described_row(service_rows(conn, str(source), str(media), own_id, ids))
     if row is None:
         return []
-    found = [{"season": int(s["season"]), "episode_count": int(s["episode_count"]),
-              "first_aired": str(s["premiere"] or ""), "name": str(s["name"] or ""),
-              "poster": str(s["poster"] or "")}
-             for s in conn.execute(
-                 f"SELECT season, name, episode_count, premiere, poster FROM {rows.SEASONS} "
-                 f"WHERE source = ? AND media = ? AND source_id = ? AND {_LISTED} "
-                 "ORDER BY season", (row["source"], row["media"], row["source_id"]))]
+    found = _listed_rows(conn, row)
     return found if len(found) == int(row["season_count"] or 0) else []
 
 
@@ -1214,36 +1327,39 @@ def _loads_list(text: Any) -> list:
 
 
 def season_row(conn: db.Connection, row, season: int):
-    return conn.execute(
-        f"SELECT * FROM {rows.SEASONS} WHERE source = ? AND media = ? AND source_id = ? "
-        "AND season = ?", (row["source"], row["media"], row["source_id"], season)).fetchone()
+    """The season's group of `row`'s service — None where it has none."""
+    return conn.execute(_season_sql(row["source"], "AND season = ?"),
+                        (row["title_key"], int(season))).fetchone()
 
 
 def _only_described_season(conn: db.Connection, row) -> int | None:
-    """The one season this row has a description of, where it has exactly one —
+    """The one season this group has a description of, where it has exactly one —
     what a service answers a title with when nobody named a season."""
-    found = [r["season"] for r in conn.execute(
-        f"SELECT * FROM {rows.SEASONS} WHERE source = ? AND media = ? AND source_id = ?",
-        (row["source"], row["media"], row["source_id"])) if season_described(r)]
+    found = [r["season"] for r in conn.execute(_season_sql(row["source"], ""),
+                                               (row["title_key"],)) if season_described(r)]
     return int(found[0]) if len(found) == 1 else None
 
 
 def _episodes(conn: db.Connection, row, season: int) -> list[dict]:
+    source = str(row["source"])
+    names = ("number", "title", "first_aired", "rating", "overview", "episode_type", "runtime")
+    wanted = [name for name in names if name != "number"]
     return [{"number": int(e["number"]), "title": str(e["title"] or ""),
              "first_aired": str(e["first_aired"] or ""), "rating": e["rating"],
              "overview": str(e["overview"] or ""), "episode_type": str(e["episode_type"] or ""),
              "runtime": e["runtime"]}
             for e in conn.execute(
-                f"SELECT * FROM {rows.EPISODES} WHERE source = ? AND media = ? "
-                "AND source_id = ? AND season = ? AND fetched_at > 0 ORDER BY number",
-                (row["source"], row["media"], row["source_id"], season))]
+                f"SELECT number, {groups.select(tables.EPISODES, source, wanted)} "
+                f"FROM {tables.EPISODES} WHERE title_key = ? AND season = ? "
+                f"AND number IS NOT NULL AND {source}_fetched_at > 0 ORDER BY number",
+                (row["title_key"], season))]
 
 
 def read(conn: db.Connection, source: str, media: str, own_id: Any,
          season: int | None, *, ids: Mapping[str, Any] | None = None) -> dict | None:
     """One service's stored answer about a title — and a season of it, where one
-    is named — in base.DetailPort's key set; None when this service's row for it
-    is not described, or the season named is not.
+    is named — in base.DetailPort's key set; None when this service's group for
+    it is not described, or the season named is not.
 
     A SEASON'S CAST IS THE SEASON'S WHERE THE SERVICE NAMED ONE and the title's
     otherwise, the rule every service's own answer follows."""
@@ -1297,15 +1413,10 @@ def read(conn: db.Connection, source: str, media: str, own_id: Any,
         "season_title": str(of_season["name"] or "") if of_season is not None else "",
         "season_count": int(row["season_count"] or 0),
         # THE SEASON LIST, in base.SeasonsAnswer's shape: every season this
-        # service's rows hold episodes of — the list its own answers stated, kept
-        # with them (`write_many`) — and never a season the store cannot vouch for.
-        "seasons": [{"season": int(r["season"]), "episode_count": int(r["episode_count"]),
-                     "first_aired": str(r["premiere"] or ""), "name": str(r["name"] or ""),
-                     "poster": str(r["poster"] or "")}
-                    for r in conn.execute(
-                        f"SELECT season, episode_count, premiere, name, poster FROM {rows.SEASONS} "
-                        f"WHERE source = ? AND media = ? AND source_id = ? AND {_LISTED} "
-                        "ORDER BY season", (row["source"], row["media"], row["source_id"]))],
+        # service's groups hold episodes of — the list its own answers stated,
+        # kept with them (`write_many`) — and never a season the store cannot
+        # vouch for.
+        "seasons": _listed_rows(conn, row),
         "cast": season_cast or title_cast,
         "episodes": _episodes(conn, row, int(season)) if of_season is not None else [],
     }

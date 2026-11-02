@@ -12,9 +12,9 @@ WHAT IT DOES:
      copy (a temporary directory unless --keep names one). SOURCE is never
      written.
   2. Converts the copy if it has not been converted: the app's own migrations up
-     to the newest it knows, and migration 49 on top while it is not yet in that
-     list. Reports how long each took and the file's size before and after. A
-     copy taken after an instance has run the conversion is only read.
+     to 48, then 49, and none after it. Reports how long each took and the
+     file's size before and after. A copy taken after an instance has run the
+     conversion is only read.
   3. Accounts, counting per table and per service:
        - every title_metadata row: its own id is a `service_ids` row naming a
          title, and a row of the entry that title's group is was copied word for
@@ -39,9 +39,15 @@ a check fails; 0 otherwise.
 
 WHAT IS EXPECTED, AND NOT A LOSS: words of a service's SECOND entry for a title
 (Simkl files some later seasons as titles of their own) are not copied into the
-title's group — the entry stays findable as a `service_ids` row — and a searched
-listing its own feed also lists stands down, as the calendar's read already
-dropped it. Both are counted and named.
+title's group, its seasons or its episodes — the entry stays findable as a
+`service_ids` row — and a searched listing its own feed also lists stands down,
+as the calendar's read already dropped it. Both are counted and named.
+
+WHAT THE LIVE CODE HAS WRITTEN SINCE is told apart without trusting a group's
+clock alone (`Store.rewritten`): a group's `fetched_at` is its oldest word's, so
+a write of part of it — a seed, a fact, a listing's name — leaves it where it
+was. A group or description holding every word its retired row stated is found
+whatever it has been given since.
 
     ./.venv/Scripts/python.exe scripts/check_title_store_conversion.py data/proddb/app.db
     ./.venv/Scripts/python.exe scripts/check_title_store_conversion.py SOURCE --keep DIR
@@ -189,9 +195,7 @@ def convert(path: Path) -> None:
         if version_of(conn) != before:
             print(f"  migrations {before + 1}..{version_of(conn)}: "
                   f"{time.perf_counter() - started:.2f} s, {path.stat().st_size / 1e6:,.1f} MB")
-        # The app's own step 49 — in its list once the code reading these tables
-        # landed with it, and the module's definition before that.
-        conversion = dict(listed).get(49, db.MIGRATION_49)
+        conversion = dict(listed)[49]
         size = path.stat().st_size
         started = time.perf_counter()
         conn.execute("BEGIN IMMEDIATE")
@@ -255,6 +259,18 @@ class Store:
         self.title_columns = set(columns_of(conn, "titles"))
         self.season_columns = set(columns_of(conn, "seasons"))
         self.episode_columns = set(columns_of(conn, "episodes"))
+        # (source, title key) a calendar fill has listed since the conversion — a
+        # listing rewrites its title's group and its episodes' stubs as it is
+        # filed, and moves no clock of theirs while it does.
+        self.listed_since: set[tuple[str, str]] = set()
+        for r in rows(conn, "SELECT * FROM episodes"):
+            for source in SOURCES:
+                if f"{source}_air_ts" not in self.episode_columns or r[f"{source}_air_ts"] is None:
+                    continue
+                listed = [r[f"{source}_listed_at"],
+                          *(i.get("listed_at") for i in json.loads(r[f"{source}_repeats_json"] or "[]"))]
+                if any(self.since(at) for at in listed):
+                    self.listed_since.add((source, r["title_key"]))
 
     def follow(self, key: str) -> str:
         return self.aliases.get(key, key)
@@ -267,6 +283,32 @@ class Store:
         """Written after the conversion — a group or listing the live code has
         rewritten, which no retired row is expected to match."""
         return value is not None and self.converted_at and int(value) > self.converted_at
+
+    def rewritten(self, new, source: str, key: str, old_rows) -> bool:
+        """Whether the live code has written `source`'s group on `new` since the
+        conversion. ITS CLOCK ALONE CANNOT SAY: a group's `fetched_at` is its
+        OLDEST word's (rows.kept_clock), so a write of part of it leaves the clock
+        where it was. Any of these does: a later clock, an expiry no retired row
+        of the entry had (every answer sets one; the conversion copies it), a
+        failure recorded since, or a listing of the title filed since."""
+        def clock(name: str):
+            column = f"{source}_{name}"
+            return new[column] if column in new.keys() else None
+
+        if self.since(clock("fetched_at")) or self.since(clock("failed_at")):
+            return True
+        if all(row["stale_after"] != clock("stale_after") for row in old_rows):
+            return True
+        return (source, key) in self.listed_since
+
+
+def kept_every_word(row, new, source: str, columns: set, keys: set, defaults: dict) -> bool:
+    """Every word `row` (a retired row) stated is in `new`'s group of `source`,
+    whatever the group has been given since — a seed (descriptions.seed_words)
+    and a fact a later answer added fill words the retired row left empty."""
+    return all(row[c] == new[f"{source}_{c}"] for c in row.keys()
+               if c not in keys and f"{source}_{c}" in columns
+               and says_something(row[c], defaults.get(c)))
 
 
 def account_titles(conn, store: Store, report: Report) -> None:
@@ -300,20 +342,26 @@ def account_titles(conn, store: Store, report: Report) -> None:
         if new[f"{source}_id"] not in primary_spellings[(source, key)]:
             report.add(section, "MISSING", f"{source}: the group's id is not its primary entry's",
                        (key, new[f"{source}_id"], sorted(primary_spellings[(source, key)])))
-        rewritten = store.since(new[f"{source}_fetched_at"])
-        copied = None
+        keys = ROW_KEYS["title_metadata"]
+        copied = kept = None
         for row, primary in members:
-            if primary and not rewritten and all(
-                    row[c] == new[f"{source}_{c}"] for c in row.keys()
-                    if c not in ROW_KEYS["title_metadata"] and f"{source}_{c}" in store.title_columns):
+            if primary and all(row[c] == new[f"{source}_{c}"] for c in row.keys()
+                               if c not in keys and f"{source}_{c}" in store.title_columns):
                 copied = row
                 break
+        if copied is None:
+            kept = next((row for row, primary in members if primary and kept_every_word(
+                row, new, source, store.title_columns, keys, defaults)), None)
+        rewritten = store.rewritten(new, source, key, [row for row, primary in members if primary])
         for row, primary in members:
             if row is copied:
                 report.add(section, "found", f"{source}: the title's group, word for word")
-            elif primary and rewritten:
+            elif row is kept:
+                report.add(section, "found", f"{source}: the title's group, every word it "
+                           "stated kept, words added since")
+            elif primary and copied is None and kept is None and rewritten:
                 report.add(section, "found", f"{source}: the title's group, rewritten since")
-            elif primary and copied is not None:
+            elif primary and (copied is not None or kept is not None):
                 report.add(section, "found", f"{source}: a second spelling of the group's entry")
             elif primary:
                 report.add(section, "MISSING", f"{source}: the group matches no row of its entry",
@@ -354,6 +402,16 @@ def account_descriptions(conn, store: Store, report: Report, table: str) -> None
         slot = (key, f"S{row['season']}E{row['number']}") if episode else (key, row["season"])
         slots[(source, slot)].append((row, primary))
     for (source, slot), members in slots.items():
+        # ONLY THE TITLE'S OWN ENTRY DESCRIBES ITS SEASONS AND EPISODES: another
+        # entry numbers its own (Simkl's later season filed as a title of its
+        # own), so its rows are not copied — wherever they would have landed.
+        for row, primary in members:
+            if not primary:
+                report.add(section, "found", f"{source}: another entry's (its words stay in "
+                           f"{table})")
+        members = [(row, primary) for row, primary in members if primary]
+        if not members:
+            continue
         new = new_rows.get(slot)
         if new is None or new[f"{source}_fetched_at"] is None:
             for row, _primary in members:
@@ -362,15 +420,20 @@ def account_descriptions(conn, store: Store, report: Report, table: str) -> None
         same = [all(row[c] == new[f"{source}_{c}"] for c in row.keys()
                     if c not in ROW_KEYS[table] and f"{source}_{c}" in new_columns)
                 for row, _primary in members]
-        for (row, primary), copied in zip(members, same):
+        kept = [kept_every_word(row, new, source, new_columns, ROW_KEYS[table], defaults)
+                for row, _primary in members]
+        rewritten = store.rewritten(new, source, slot[0], [row for row, _p in members])
+        for (row, _primary), copied, whole in zip(members, same, kept):
             if copied:
                 report.add(section, "found", f"{source}: word for word")
-            elif store.since(new[f"{source}_fetched_at"]):
+            elif whole:
+                report.add(section, "found", f"{source}: every word it stated kept, "
+                           "words added since")
+            elif any(same) or any(kept):
+                report.add(section, "found", f"{source}: another spelling of the entry was "
+                           f"copied (its words stay in {table})")
+            elif rewritten:
                 report.add(section, "found", f"{source}: rewritten since")
-            elif any(same):
-                report.add(section, "found", f"{source}: another of the service's rows for it was "
-                           f"copied ({'a second spelling of the entry' if primary else 'another entry'}"
-                           f"; its words stay in {table})")
             else:
                 report.add(section, "MISSING", f"{source}: the row holds other words",
                            (source, row["source_id"], slot))

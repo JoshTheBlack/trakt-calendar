@@ -26,7 +26,7 @@ from app.config import Settings
 from app.metadata import identity as title_identity
 from app.providers.base import Media, Record, Source, SourceUnavailable
 from app.providers.trakt import transport as trakt_transport
-from tests.support import DatabaseTestCase
+from tests.support import DatabaseTestCase, listings
 
 TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJtYXRjaGluZyJ9.c2lnbmF0dXJl"
 TODAY = date(2026, 10, 15)
@@ -246,15 +246,15 @@ class TmdbIsAskedAboutATitleWithNoTmdbIdTests(MatchingTestCase):
         self.assertEqual(await self.run_pass(), 1)
         self.assertEqual(self.tmdb.asked[0]["tvdb"], 4242)
         self.assertEqual(self.trakt.asked, [], "Trakt is not asked on TMDB's pace")
-        self.assertEqual(await db.fetch_value("SELECT title_key FROM calendar_airings"),
-                         "show:tmdb:555")
+        self.assertEqual([listed["title_key"] for listed in await listings()],
+                         ["show:tmdb:555"])
 
     async def test_it_is_asked_once_a_week(self):
         await self.run_pass()
         self.tmdb.answers = {}
         await db.execute("DELETE FROM titles")
         await db.execute("DELETE FROM title_aliases")
-        await db.execute("UPDATE calendar_airings SET title_key = 'show:tvdb:4242'")
+        await db.execute("UPDATE episodes SET title_key = 'show:tvdb:4242'")
         await self.run_pass()
         self.assertEqual(len(self.tmdb.asked), 1)
 

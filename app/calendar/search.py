@@ -793,9 +793,8 @@ async def complete_from_other_service(settings, *, source: str, endpoint_key: st
     own record states the id asked about), and the write is fill_one_gap, the
     search's own gap fill: that service's own record, built by its own builder,
     stored as its calendar feed would have stored it. So the airing joins this
-    card whenever the two services' dates make one episode (cache.may_join), and
-    stands as that service's own card when they do not, exactly as its calendar
-    would draw it.
+    card's episode row whatever its date (app/metadata/episodes.py), exactly as
+    its calendar's listing would.
 
     THE IDS COME FROM THE STORE (metadata.group_identity), never from the request:
     a write whose subject is a key the server resolves can only land on a title

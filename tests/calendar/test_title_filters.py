@@ -27,7 +27,7 @@ from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Media, Record, Source
 from app.sources import prefs as source_prefs
-from tests.support import migrated_db
+from tests.support import migrated_db, stored_groups
 
 SHOWS = get_endpoint("shows/new")
 MOVIES = get_endpoint("movies")
@@ -152,7 +152,7 @@ class TheReadTests(unittest.IsolatedAsyncioTestCase):
         db.close_thread_connection()
 
     def groups(self):
-        return calendar_cache.group_records([
+        return stored_groups([
             # Both services list it; only TMDB states its keywords.
             _record(Source.TMDB, "1", tmdb=1, title="Shared Anime", keywords=["anime"],
                     show_type="scripted"),
@@ -269,7 +269,7 @@ class ANetworkFloorLeavesFilmsAloneTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([r.id for r in records], ["a-film"])
 
     async def test_the_read_keeps_a_film(self):
-        groups = calendar_cache.group_records([self.film()])
+        groups = stored_groups([self.film()])
         kept, filtered = await calendar_cache.visible_records(
             groups, MOVIES, settings=Settings(network_filter=["HBO"]))
         self.assertEqual([r.id for r in kept], ["a-film"])

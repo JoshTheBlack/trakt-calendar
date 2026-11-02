@@ -247,7 +247,7 @@ class FilmRowPosterTests(MonthFragmentTestCase):
 
     def test_the_calendars_own_picture_is_drawn_with_no_lookup(self):
         store(a_record("The Matrix", 603, Media.MOVIE, poster="https://media.trakt.tv/m.jpg"),
-              endpoint="movies/releases")
+              endpoint="movies")
         self.watch_one()
         calls, patched = self.lookups()
         with patched:

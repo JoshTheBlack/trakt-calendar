@@ -170,10 +170,9 @@ def _gather(conn: db.Connection) -> dict[str, tuple[str, dict]]:
             if value not in (None, ""):
                 held.setdefault(name, value)
 
-    # Each service's own rows, in the declared order, so the first writer of an
+    # Each service's own group, in the declared order, so the first writer of an
     # id is the same service every time.
-    title_rows = conn.execute(
-        f"SELECT title_key, source, media, ids_json FROM {rows.TITLES}").fetchall()
+    title_rows = conn.execute(rows.title_groups_sql(("ids_json",))).fetchall()
     for row in sorted(title_rows, key=lambda r: rows.SOURCE_ORDER.get(str(r["source"]), 99)):
         add(row["title_key"], row["media"], _loads(row["ids_json"]))
     for table in _TRACKER_TABLES:

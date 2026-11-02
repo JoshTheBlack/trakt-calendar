@@ -32,7 +32,7 @@ from app.providers.trakt import calendar as trakt_calendar
 from app.config import Settings
 from app.providers import base
 from app.endpoints import ENDPOINTS, get_endpoint
-from tests.support import FIXTURES, calendar_records, migrated_db, window_fetch
+from tests.support import FIXTURES, calendar_records, listings, migrated_db, stored_groups, window_fetch
 
 
 SHOWS = get_endpoint("shows")
@@ -989,7 +989,7 @@ class WindowOverrunTests(CacheTestCase):
             _entry("rick-and-morty", "2026-07-07T01:00:00Z", season=9, number=8),
             _entry("rick-and-morty", "2026-07-06T01:00:00Z", season=0, number=76),
         ], SHOWS)
-        groups = calendar_cache.group_records(records)
+        groups = stored_groups(records)
         self.assertEqual(len(groups), 3)
         self.assertEqual(len({g["key"] for g in groups}), 3)
 
@@ -1001,7 +1001,7 @@ class WindowOverrunTests(CacheTestCase):
             _entry("repeat", "2026-07-06T01:00:00Z", season=1, number=1),
             _entry("repeat", "2026-07-06T09:00:00Z", season=1, number=1),
         ], SHOWS)
-        groups = calendar_cache.group_records(records)
+        groups = stored_groups(records)
         self.assertEqual(len(groups), 2)
         self.assertEqual(len({g["key"] for g in groups}), 2)
 
@@ -1936,7 +1936,10 @@ if __name__ == "__main__":  # pragma: no cover
 
 def _listed(source: base.Source, n: int, day: date) -> base.Record:
     ts = datetime(day.year, day.month, day.day, tzinfo=timezone.utc).timestamp()
-    return base.Record(source=source, media=base.Media.SHOW, id=f"{source}-{n}",
+    # A TMDB listing is filed under its tmdb id (Provider.listing_id); a Trakt
+    # one stating no Trakt id, under the id it arrived with.
+    return base.Record(source=source, media=base.Media.SHOW,
+                       id=str(n) if source == base.Source.TMDB else f"{source}-{n}",
                        ids={"tmdb": n}, detail_url="", title=f"Show {n}", air_ts=ts,
                        date_only=True, season=1, episode_number=1, episode_label="S01E01")
 
@@ -1991,10 +1994,8 @@ class ASourceStillWorkingItsAnswerOutTests(CacheTestCase):
                                                   now=now)
 
     async def stored(self):
-        rows = await db.fetch_all(
-            "SELECT source, source_id FROM calendar_airings WHERE endpoint = ? "
-            "ORDER BY source, source_id", (self.PREMIERES.key,))
-        return [(row["source"], row["source_id"]) for row in rows]
+        return sorted((listing["source"], listing["source_id"])
+                      for listing in await listings(self.PREMIERES.key))
 
     async def coverage(self):
         answered, asked, stored = await calendar_cache.entries.span_coverage(
@@ -2025,7 +2026,7 @@ class ASourceStillWorkingItsAnswerOutTests(CacheTestCase):
         self.ready.set_result(2)
         await self.follow_ups()
         self.assertEqual(await self.stored(),
-                         [("tmdb", "tmdb-1"), ("tmdb", "tmdb-2"), ("trakt", "trakt-1")])
+                         [("tmdb", "1"), ("tmdb", "2"), ("trakt", "trakt-1")])
         self.assertEqual(set((await self.coverage()).sources), {"tmdb", "trakt"})
         self.assertEqual(await db.fetch_value(
             "SELECT stored_at FROM calendar_coverage WHERE source = 'trakt'"), trakt_stored_at,

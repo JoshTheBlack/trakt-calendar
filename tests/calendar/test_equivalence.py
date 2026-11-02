@@ -15,7 +15,6 @@ from __future__ import annotations
 import unittest
 from zoneinfo import ZoneInfo
 
-from app.calendar import cache as calendar_cache
 from app.calendar import resolve as calendar_resolve
 from app.config import Settings
 from app.endpoints import get_endpoint
@@ -23,6 +22,8 @@ from app.providers.base import Record, Source, render
 from app.providers.tmdb import normalize as tmdb_normalize
 from app.sources import prefs as source_prefs
 from app.templating import templates
+
+from tests.support import stored_groups
 
 AIR_TS = 1784145600.0
 
@@ -42,7 +43,7 @@ def _record(source, **overrides) -> Record:
 
 
 def _resolved(*records: Record, order=()) -> Record:
-    groups = calendar_cache.group_records(list(records))
+    groups = stored_groups(list(records))
     assert len(groups) == 1, "these records do not match; the matcher would draw two cards"
     prefs = source_prefs.SourcePrefs(user_id=1, metadata_order=list(order)) if order else None
     return calendar_resolve.resolve(groups[0], prefs)

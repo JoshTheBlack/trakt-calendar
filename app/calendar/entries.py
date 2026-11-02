@@ -1,23 +1,19 @@
-"""The calendar's storage: its airings, its coverage, and the reads that join them
-to the title store.
+"""The calendar's storage: its listings, its coverage, and the reads that turn them
+back into the records a card is drawn from.
 
-WHAT THIS REPLACES. Until now a fill compressed every source's records for an
-(endpoint, seven days) into one blob in `api_cache` and the read path inflated
-four or five of them per month. Two questions that mattered could not be asked of
-that shape at all: "which titles does the stored calendar name" needed EVERY
-window inflated, and "what airs on this day" needed a whole month decompressed to
-answer for one day.
-
-WHAT A TITLE IS, IS NOT THE CALENDAR'S. What each service says about a title and
-its episodes lives in the title store (app/metadata/rows.py), which every feature
-reads; the calendar stores what it LISTS — an airing, on an endpoint, at a time —
-and which spans each service was asked about. A fill hands its records to
-app/metadata's `store_records`, which files each under its title's key, and the
-airings are written under that same key in the same transaction.
+WHAT A TITLE AND AN EPISODE ARE, IS NOT THE CALENDAR'S. The title store
+(app/metadata/) holds one row per title, per season and per episode, every
+service's facts side by side; a calendar's LISTING of an episode is that
+service's instants on the episode's row (app/metadata/episodes.py), each with
+the calendars it is on. A fill hands its records to the store's
+`metadata.write_records`, which files each under its title's key, and their
+instants are filed on their episodes' rows in the same transaction. Which
+listings make one card is the row: decided as they are written, not at every
+read.
 
 NOTHING HERE IS PER-VIEWER, and that is the invariant the whole design serves.
-Every source's rows are stored whole; which one a viewer sees, and whether their
-filters hide it, is decided at READ against their own preferences.
+Every source's listings are stored whole; which one a viewer sees, and whether
+their filters hide it, is decided at READ against their own preferences.
 `app/calendar/resolve.py` owns the read-time decision; this module owns the rows.
 """
 from __future__ import annotations
@@ -28,28 +24,19 @@ from collections.abc import Iterable
 from datetime import date
 from typing import NamedTuple
 
-from .. import db
-from .. import metadata
-from ..metadata import identity as title_identity
+from .. import db, endpoints, metadata, providers
+from ..metadata import episodes as episode_rows
+from ..metadata import groups, identity as title_identity
 from ..metadata import rows as title_rows
-from ..metadata import typed_search
+from ..metadata import tables, typed_search
 from ..providers.base import Media, Record, Source, epoch_moment
 
 logger = logging.getLogger(__name__)
 
-# Written onto every airing whose source did not state a coordinate. -1 RATHER
-# THAN NULL because SQLite permits NULLs inside a non-INTEGER primary key, so a
-# nullable season would let one airing insert twice over. A third of premiere
-# entries state no season or no episode number -- overwhelmingly Simkl anime,
-# where an absolute episode number is simply how the entry is spelled -- so
-# "unstated" is the ordinary case and needs a value the key can compare.
-UNSTATED = -1
 
-# The store's tables, as the calendar's own joins name them — spelled where the
-# store defines them, never again here.
-_TITLES = title_rows.TITLES
-_EPISODES = title_rows.EPISODES
-_IDENTITY = title_identity.TABLE
+def _bit(endpoint_key: str) -> int:
+    """The calendar's bit in a listing's `calendars` mask (Endpoint.bit)."""
+    return endpoints.ENDPOINTS[endpoint_key].bit
 
 
 def _utc_date(air_ts: float) -> str:
@@ -62,108 +49,28 @@ def _utc_date(air_ts: float) -> str:
 # ---------------------------------------------------------------------------
 # writing a fill
 # ---------------------------------------------------------------------------
-
-# `from_search` IS THE LAST COLUMN AND THE CALLER STATES IT. A fill writes 0 and
-# every airing NO FEED OFFERED writes 1 — a calendar search followed, and a title
-# added to somebody's tracker (app/distrakt/arrival.py) — which is what lets the
-# fill's delete spare rows it would never put back. The name is narrower than
-# the meaning, "not from a feed"; see store_loose_airings and MIGRATION_37.
 #
-# A SEARCHED ROW FILLS A GAP IN ITS SERVICE'S FEED, SO IT STANDS DOWN THE MOMENT
-# THE FEED LISTS THAT EPISODE — and the natural key alone could not say so. It
-# includes the INSTANT, and a service's per-title answer and its feed routinely
-# disagree on one: Simkl's lookups keep a premiere's day and its calendar files
-# give the time, so East of Eden's S01E01 was a date-only searched row at 00:00
-# UTC beside the feed's 07:00. Both stood, one service listed the episode twice,
-# and the read drew it as two cards (cache.join_listings puts one listing per
-# service in a card) — MEASURED, every such title on the dev instance once a
-# refill brought the feed's listing. So the rule is said by the EPISODE —
-# (source, media, source_id, endpoint, season, episode_number), the key less its
-# instant — in three places: a read drops a searched row whose service's feed
-# lists the episode (`_in_fetch_order`), a fill deletes the ones its records or
-# its span supersede (`store_span`), and a search writes none for an episode the
-# feed already lists (`store_loose_airings`).
+# A SEARCHED LISTING FILLS A GAP IN ITS SERVICE'S FEED, SO IT STANDS DOWN THE
+# MOMENT THE FEED LISTS THAT EPISODE. A calendar search followed, and a title
+# added to somebody's tracker (app/distrakt/arrival.py), write an instant no feed
+# offered — marked `searched` for its calendar — and a service's per-title answer
+# and its feed routinely disagree on the instant: Simkl's lookups keep a
+# premiere's day and its calendar files give the time, so East of Eden's S01E01
+# was a date-only searched listing at 00:00 UTC beside the feed's 07:00. Both
+# stood, one service listed the episode twice, and the read drew it as two cards
+# — MEASURED, every such title on the dev instance once a refill brought the
+# feed's listing. So the rule is said by the EPISODE, at any instant: a fill takes
+# the searched instants its records or its span supersede off the calendar
+# (`store_span`), a search writes none for an episode the feed already lists
+# (`store_loose_airings`), and a read drops one whose service's feed lists the
+# same episode (`_records`).
 #
-# EVERY STATEMENT BELOW WRITES A WHOLE FILL, and the rows travel as JSON arrays
-# spelled before the transaction opens (`_airing_rows`). A fill's write lock is
-# held for as long as its statements take, and while the event loop is busy each
-# statement can wait a GIL switch interval to win the GIL back — so a store that
-# issued a statement or eight per record held the lock 5.3 s under one month
-# read, MEASURED on a copy of a real instance, and the next writer gave up at the
-# busy timeout. A fixed number of statements holds it for milliseconds. The title
-# key each airing is filed under is known only inside the transaction, and
-# travels as a second array the rows index by position.
-_INSERT_AIRINGS = """
-INSERT OR REPLACE INTO calendar_airings
-    (source, media, source_id, endpoint, title_key, air_ts, air_date, date_only,
-     season, episode_number, episode_label, stored_at, from_search)
-SELECT json_extract(r.value, '$[0]'), json_extract(r.value, '$[1]'),
-       json_extract(r.value, '$[2]'), json_extract(r.value, '$[3]'),
-       json_extract(:keys, '$[' || r.key || ']'),
-       json_extract(r.value, '$[4]'), json_extract(r.value, '$[5]'),
-       json_extract(r.value, '$[6]'), json_extract(r.value, '$[7]'),
-       json_extract(r.value, '$[8]'), json_extract(r.value, '$[9]'),
-       json_extract(r.value, '$[10]'), json_extract(r.value, '$[11]')
-FROM json_each(:rows) r ORDER BY r.key
-"""
-
-
-def _coordinate(record: Record) -> tuple[int, int]:
-    """The (season, episode_number) an airing row is keyed by, UNSTATED for
-    either half the source did not give."""
-    return (int(record.season if record.season is not None else UNSTATED),
-            int(record.episode_number if record.episode_number is not None else UNSTATED))
-
-
-def _episode(record: Record, endpoint_key: str) -> tuple:
-    """One service's episode on one calendar — an airing's key less its instant:
-    (source, media, source_id, endpoint, season, episode_number)."""
-    return (str(record.source), str(record.media), str(record.id), endpoint_key,
-            *_coordinate(record))
-
-
-# One service's rows of the episodes in `:episodes` (each an `_episode`) — every
-# column is in the primary key's leading half, so each is a seek, and the
-# payload drives the join (CROSS JOIN fixes the order).
-_EPISODE_ROWS = """
-SELECT a.rowid FROM json_each(:episodes) j CROSS JOIN calendar_airings a
-  ON a.source = json_extract(j.value, '$[0]') AND a.media = json_extract(j.value, '$[1]')
- AND a.source_id = json_extract(j.value, '$[2]') AND a.endpoint = json_extract(j.value, '$[3]')
- AND a.season = json_extract(j.value, '$[4]') AND a.episode_number = json_extract(j.value, '$[5]')
-WHERE a.from_search = {from_search}
-"""
-_DELETE_SUPERSEDED = (f"DELETE FROM calendar_airings "
-                      f"WHERE rowid IN ({_EPISODE_ROWS.format(from_search=1)})")
-# The fed episodes among them, as one row (identity.py's reads say why one).
-_FED_EPISODES = f"""
-SELECT json_group_array(json_array(source, media, source_id, endpoint, season, episode_number))
-FROM calendar_airings WHERE rowid IN ({_EPISODE_ROWS.format(from_search=0)})
-"""
-
-# What the sources that answered listed in the span before, gone — `from_search
-# = 0` SPARES WHAT NO FEED EVER LISTED. This delete exists so a title a source
-# has STOPPED listing stops being drawn, and a searched row was never in that
-# source's answer to begin with. MIGRATION_37 has the measured case.
-_DELETE_FED = """
-DELETE FROM calendar_airings
-WHERE from_search = 0 AND endpoint = ? AND air_date >= ? AND air_date < ?
-  AND source IN (SELECT value FROM json_each(?))
-"""
-
-# A span's searched rows of the named sources whose episode that source's feed
-# lists, at any date.
-_DELETE_SUPERSEDED_IN_SPAN = """
-DELETE FROM calendar_airings
-WHERE from_search = 1 AND endpoint = ? AND air_date >= ? AND air_date < ?
-  AND source IN (SELECT value FROM json_each(?))
-  AND EXISTS (SELECT 1 FROM calendar_airings fed
-              WHERE fed.from_search = 0 AND fed.source = calendar_airings.source
-                AND fed.media = calendar_airings.media
-                AND fed.source_id = calendar_airings.source_id
-                AND fed.endpoint = calendar_airings.endpoint
-                AND fed.season = calendar_airings.season
-                AND fed.episode_number = calendar_airings.episode_number)
-"""
+# EVERY STATEMENT WRITES A WHOLE FILL, and what it writes is decided before the
+# transaction opens. A fill's write lock is held for as long as its statements
+# take, and while the event loop is busy each statement can wait a GIL switch
+# interval to win the GIL back — so a store that issued a statement or eight per
+# record held the lock 5.3 s under one month read, MEASURED on a copy of a real
+# instance, and the next writer gave up at the busy timeout.
 
 _UPSERT_COVERAGE = """
 INSERT INTO calendar_coverage
@@ -177,29 +84,21 @@ ON CONFLICT(endpoint, span_start, source) DO UPDATE SET
 """
 
 
-def _airing_rows(endpoint_key: str, records: list[Record], *, now: int,
-                 from_search: int) -> list[str]:
-    """Each record's airing row as `_INSERT_AIRINGS` reads it — everything but
-    the title key, which the title store decides inside the caller's transaction
-    (metadata.store_records). Pure: built before the transaction opens."""
-    return [json.dumps([
-        str(record.source), str(record.media), str(record.id), endpoint_key,
-        float(record.air_ts), _utc_date(record.air_ts), 1 if record.date_only else 0,
-        *_coordinate(record), str(record.episode_label or ""), now, from_search,
-    ]) for record in records]
-
-
-def _write_airings(conn: db.Connection, listed: metadata.Listings, rows: list[str],
-                   plan=None) -> None:
-    """`listed`'s titles through the title store and their airings (`rows`, one
-    per record, in order) filed under the keys it answers — inside the caller's
-    transaction. `plan` is the title store's decisions, made before the
-    transaction (metadata.plan_records), or None to make them here."""
-    keys = (metadata.store_records(conn, listed) if plan is None
-            else metadata.write_records(conn, listed, plan))
-    if keys:
-        conn.execute(_INSERT_AIRINGS, {"rows": "[" + ",".join(rows) + "]",
-                                       "keys": json.dumps(keys)})
+def _listings(records: list[Record], keys: list[str], *, bit: int, now: int,
+              searched: bool) -> list[episode_rows.Listing]:
+    """Each record as the instant the store files on its episode's row."""
+    out = []
+    for record, key in zip(records, keys):
+        out.append(episode_rows.Listing(
+            key=key, source=str(record.source), media=str(record.media),
+            season=record.season, number=record.episode_number,
+            instant=episode_rows.Instant(
+                at=float(record.air_ts), date_only=1 if record.date_only else 0,
+                calendars=bit, searched=bit if searched else 0,
+                label=str(record.episode_label or ""), listed_at=now),
+            episode_title=str(record.episode_title or ""),
+            own=title_rows.own_id(str(record.source), record.id, record.ids)))
+    return out
 
 
 async def store_span(endpoint_key: str, span_start: date, span_end: date,
@@ -207,30 +106,32 @@ async def store_span(endpoint_key: str, span_start: date, span_end: date,
                      now: int, stale_after: int) -> None:
     """Replace what is stored for `endpoint_key` over [span_start, span_end).
 
-    DELETE THEN INSERT, PER SOURCE THAT ANSWERED WITH DATA, and it has to be: a
-    title a source has STOPPED listing leaves no row for an upsert to find, so an
-    insert-only refresh would go on drawing it for ever. Only sources that
-    ANSWERED are cleared -- wiping a source's airings because it was unreachable
+    WHAT THE SOURCES THAT ANSWERED WITH DATA LISTED IN THE SPAN LEAVES THIS
+    CALENDAR, AND WHAT THEY LIST NOW IS FILED, and it has to be both: a title a
+    source has STOPPED listing leaves nothing for a write to find, so a
+    write-only refresh would go on drawing it for ever. Only sources that
+    ANSWERED are cleared -- wiping a source's listings because it was unreachable
     would turn a refused request into a month that lost half its entries.
 
     `unchanged` IS A THIRD ANSWER AND NOT A KIND OF SILENCE. A source whose files
-    all replied 304 has told us something definite -- the rows already stored are
-    still correct -- so its coverage advances exactly as an answer does, and its
-    airings are LEFT ALONE rather than deleted.
+    all replied 304 has told us something definite -- the listings already stored
+    are still correct -- so its coverage advances exactly as an answer does, and
+    its listings are LEFT ALONE rather than cleared.
 
-    One transaction, so a reader never sees the gap between the delete and the
-    insert, and so a title re-keyed by what this fill states moves with the
-    airings that stated it.
+    One transaction, so a reader never sees the gap between the clearing and the
+    filing, and so a title re-keyed by what this fill states moves with the
+    listings that stated it.
     """
     first, last = span_start.isoformat(), span_end.isoformat()
     answered = [str(s) for s in sources]
+    bit = _bit(endpoint_key)
 
-    # TRIMMED HERE AS WELL AS AT THE FETCH, because an airing is FILED BY ITS OWN
+    # TRIMMED HERE AS WELL AS AT THE FETCH, because a listing is FILED BY ITS OWN
     # DATE. A source may treat the `days` bound as a floor rather than a ceiling
     # -- Trakt has returned entries two months past a seven-day window -- and a
-    # row landing in a span with no coverage row would never be read, and the
-    # next fill of its own span would delete it unseen. Dropping it loudly is the
-    # honest failure; the span it belongs to fetches it properly when asked.
+    # listing landing in a span with no coverage row would never be read, and the
+    # next fill of its own span would take it off unseen. Dropping it loudly is
+    # the honest failure; the span it belongs to fetches it properly when asked.
     inside = [r for r in records if first <= _utc_date(r.air_ts) < last]
     if len(inside) != len(records):
         logger.debug("%d %s entr(ies) fell outside the span starting %s; trimmed.",
@@ -238,33 +139,47 @@ async def store_span(endpoint_key: str, span_start: date, span_end: date,
     replied = sorted({*answered, *(str(s) for s in unchanged)})
     # EVERYTHING THE STATEMENTS CARRY, SPELLED BEFORE THE LOCK IS TAKEN.
     listed = metadata.listings(inside, now=now, stale_after=stale_after)
-    airings = _airing_rows(endpoint_key, inside, now=now, from_search=0)
-    # WHAT THE FEED NOW LISTS, NO SEARCH LISTS FOR IT: every searched row of an
-    # episode these records name, at any date (the comment above _INSERT_AIRINGS
-    # says why the key's instant cannot decide it).
-    superseded = json.dumps(sorted({_episode(r, endpoint_key) for r in inside}))
     coverage = json.dumps([[name, 1 if name in replied else 0]
                            for name in sorted({*map(str, asked), *replied})])
 
-    # WHICH TITLE EACH LISTING IS, DECIDED BEFORE THE LOCK IS TAKEN: the title
-    # store's reads and the deciding they feed (metadata.plan_records), made
-    # again inside only if another writer committed in between
-    # (db.transaction's `prepare`) — so the lock is held for the writes alone.
-    def _plan(conn):
-        return metadata.plan_records(conn, listed)
+    def _fill(conn, positions: list[int], keys: list[str], primaries,
+              **halves) -> episode_rows.Fill:
+        return episode_rows.plan_fill(
+            conn, _listings([inside[at] for at in positions], [keys[at] for at in positions],
+                            bit=bit, now=now, searched=False),
+            bit=bit, primaries=primaries, span=(span_start, span_end), answered=answered,
+            replied=replied, **halves)
 
-    def _work(conn, plan):
-        if answered:
-            conn.execute(_DELETE_FED, (endpoint_key, first, last, json.dumps(answered)))
-        if inside:
-            conn.execute(_DELETE_SUPERSEDED, {"episodes": superseded})
-            _write_airings(conn, listed, airings, plan)
-        # AND WHAT A SOURCE THAT SAID "UNCHANGED" ALREADY LISTED: its feed rows
-        # stand as they were, so a searched row in this span that one of them
-        # supersedes is taken here — the only write such a span gets.
-        if replied:
-            conn.execute(_DELETE_SUPERSEDED_IN_SPAN,
-                         (endpoint_key, first, last, json.dumps(replied)))
+    # WHICH TITLE EACH LISTING IS AND WHICH ROW IT IS FILED ON, DECIDED BEFORE THE
+    # LOCK IS TAKEN: the title store's reads and the deciding they feed
+    # (metadata.plan_records, episodes.plan_fill), made again inside only if
+    # another writer committed in between (db.transaction's `prepare`) — so the
+    # lock is held for the writes alone.
+    #
+    # EXCEPT FOR THE FEW TITLES A MERGE RESHAPES. A batch that re-keys a title or
+    # moves an entry merges rows as it is written (app/metadata/merge.py), so
+    # those titles' rows are not the rows it read: their share of the span is
+    # filed inside, after the merge (`planned.landed`), and every other title's
+    # before, as always. MEASURED on a copy of dev, a week of All Episodes
+    # re-keying five titles while a month was read on another thread: filing
+    # the whole span inside held the lock 2.98 s, this holds it 1.31 s, and the
+    # store before the one-row-per-episode tables held it 1.21 s.
+    def _plan(conn):
+        planned = metadata.plan_records(conn, listed)
+        return planned, _fill(conn, list(range(len(inside))), planned.keys, planned.primaries,
+                              excluding=planned.touched)
+
+    def _work(conn, prepared) -> None:
+        planned, fill = prepared
+        metadata.write_records(conn, listed, planned)
+        episode_rows.apply(conn, fill)
+        if planned.touched:
+            landed = planned.landed
+            positions = [at for at, key in enumerate(planned.keys) if key in landed]
+            primaries = title_rows.primaries(conn, listed.rows.only(positions),
+                                             [planned.keys[at] for at in positions])
+            episode_rows.apply(conn, _fill(conn, positions, planned.keys, primaries,
+                                           titles=landed))
         conn.execute(_UPSERT_COVERAGE, {"endpoint": endpoint_key, "span": first,
                                         "sources": coverage, "now": now,
                                         "stale_after": stale_after})
@@ -274,7 +189,7 @@ async def store_span(endpoint_key: str, span_start: date, span_end: date,
 
 async def store_loose_airings(endpoint_key: str, records, *, now: int,
                               stale_after: int) -> list[Record]:
-    """Store airings that no CALENDAR FEED offered, filling a gap in one, and
+    """Store listings that no CALENDAR FEED offered, filling a gap in one, and
     return the ones written.
 
     WHY A SOURCE CAN BE MISSING ITS OWN TITLE. A service answers two different
@@ -285,21 +200,21 @@ async def store_loose_airings(endpoint_key: str, records, *, now: int,
     calendar this app is built from simply has a hole in it.
 
     SO THE SEARCH REPAIRS IT. A catalogue lookup already had to describe the
-    title and date its seasons to draw a result row at all; writing that as an
-    airing costs nothing more and turns "go to the month and hope" into a card
+    title and date its seasons to draw a result row at all; writing that as a
+    listing costs nothing more and turns "go to the month and hope" into a card
     that is actually there.
 
     WRITTEN AS THE FEED WOULD HAVE WRITTEN IT, deliberately. Same source, same
-    ids, same natural key, same title store — so a row here resolves and filters
-    and renders like every other, and a later fill listing the same episode
-    supersedes it rather than drawing it twice (the comment above
-    _INSERT_AIRING). The records come back with their ids completed from the
-    title store (metadata.store_records), so a caller drawing them keys them as
-    the calendar's read will.
+    ids, same title store — so a listing here resolves and filters and renders
+    like every other, and a later fill listing the same episode supersedes it
+    rather than drawing it twice. The records come back with their ids completed
+    from the title store (metadata.write_records), so a caller drawing them keys
+    them as the calendar's read will.
 
-    NO GAP, NO ROW: an episode its service's feed already lists on this calendar
-    is not written at all, at whatever instant the feed gives it — the feed's
-    listing is the card, and a second listing from one service is a second card.
+    NO GAP, NO LISTING: an episode its service's feed already lists on this
+    calendar is not written at all, at whatever instant the feed gives it — the
+    feed's listing is the card, and a second listing from one service is a
+    second card.
 
     NO COVERAGE ROW IS WRITTEN, and that is the important restraint. Coverage
     records which sources were ASKED about a window and which ANSWERED — this
@@ -309,22 +224,37 @@ async def store_loose_airings(endpoint_key: str, records, *, now: int,
     records = list(records or ())
     if not records:
         return []
+    bit = _bit(endpoint_key)
     listed = metadata.listings(records, now=now, stale_after=stale_after)
-    airings = _airing_rows(endpoint_key, records, now=now, from_search=1)
-    episodes = json.dumps(sorted({_episode(r, endpoint_key) for r in records}))
 
     def _write(conn) -> list[Record]:
-        (found,) = conn.execute(_FED_EPISODES, {"episodes": episodes}).fetchone()
-        fed = {tuple(episode) for episode in json.loads(found)}
-        gaps = [at for at, record in enumerate(records)
-                if _episode(record, endpoint_key) not in fed]
-        if gaps:
-            _write_airings(conn, listed.only(gaps), [airings[at] for at in gaps])
-        return [records[at] for at in gaps]
+        # WHICH OF THEM THE FEED ALREADY LISTS: read against where each entry is
+        # filed now, before anything registers a title for a gap that is not one.
+        filed = title_rows.filed_keys(conn, [(str(r.source), str(r.media), own)
+                                             for r, own in zip(records, listed.rows.owns)])
+        keys = [filed.get((str(r.source), str(r.media), own), "")
+                for r, own in zip(records, listed.rows.owns)]
+        known = title_rows.primaries(conn, listed.rows, keys)
+        probe = episode_rows.plan_fill(
+            conn, _listings(records, keys, bit=bit, now=now, searched=True),
+            bit=bit, primaries=known)
+        gaps = [at for at, (key, written) in enumerate(zip(keys, probe.written))
+                if written or not key]
+        if not gaps:
+            return []
+        narrowed = listed.only(gaps)
+        planned = metadata.plan_records(conn, narrowed)
+        metadata.write_records(conn, narrowed, planned)
+        gap_records = [records[at] for at in gaps]
+        fill = episode_rows.plan_fill(
+            conn, _listings(gap_records, planned.keys, bit=bit, now=now, searched=True),
+            bit=bit, primaries=title_rows.primaries(conn, narrowed.rows, planned.keys))
+        episode_rows.apply(conn, fill)
+        return [record for record, written in zip(gap_records, fill.written) if written]
 
     written = await db.transaction(_write)
     if written:
-        logger.info("calendar search filled %d airing(s) on %s that no feed listed.",
+        logger.info("calendar search filled %d listing(s) on %s that no feed listed.",
                     len(written), endpoint_key)
     return written
 
@@ -333,107 +263,52 @@ async def store_loose_airings(endpoint_key: str, records, *, now: int,
 # reading a span back
 # ---------------------------------------------------------------------------
 
-# WHAT A SERVICE'S TITLE ROW SAYS, as every read of one here names it — an
-# airing's (`_READ_SQL`) and a title-only record's (`_TITLE_ONLY_SQL`), so the
-# two cannot come to read one row differently (`_words`).
-_TITLE_COLUMNS = ", ".join(f"t.{column}" for column in (
-    "title", "ids_json", "detail_url", "year", "network", "country", "language",
-    "certification", "status", "overview", "poster", "runtime", "genres_json",
-    "ratings_json", "anime_type", "release_types_json", "enriched", "keywords_json",
-    "show_type", "facts_known"))
-
-# THREE LEVELS AND THE IDENTITY, THREE LEFT JOINS, ONE QUERY. The title and
-# episode joins are LEFT because a missing row at either level is ordinary rather
-# than exceptional: an episode row exists only for a stated coordinate, and Simkl
-# publishes no per-episode facts at all. The identity join is LEFT because a title
-# registered before the store knew its identity reads exactly as it always did.
-_READ_SQL = f"""
-SELECT a.source, a.media, a.source_id, a.title_key, a.air_ts, a.date_only,
-       a.season, a.episode_number, a.episode_label, a.from_search,
-       {_TITLE_COLUMNS},
-       e.title AS episode_title, e.runtime AS episode_runtime,
-       e.rating AS episode_rating,
-       i.ids_json AS known_ids
-FROM calendar_airings a
-LEFT JOIN {_TITLES} t
-       ON t.source = a.source AND t.media = a.media AND t.source_id = a.source_id
-LEFT JOIN {_EPISODES} e
-       ON e.source = a.source AND e.media = a.media AND e.source_id = a.source_id
-      AND e.season = a.season AND e.number = a.episode_number
-LEFT JOIN {_IDENTITY} i ON i.title_key = a.title_key
-WHERE a.endpoint = ? AND a.air_date >= ? AND a.air_date < ?
-ORDER BY a.air_ts, a.title_key
-"""
+# WHAT A SERVICE'S TITLE GROUP SAYS, as every read here names it — a listing's
+# record (`_records`) and a title-only record (`title_only_records`), so the two
+# cannot come to read one group differently (`_words`).
+_TITLE_WORDS = ("title", "ids_json", "detail_url", "year", "network", "country", "language",
+                "certification", "status", "overview", "poster", "runtime", "genres_json",
+                "ratings_json", "anime_type", "release_types_json", "enriched", "keywords_json",
+                "show_type", "facts_known")
 
 
-def _record_from_row(row, titles: dict | None = None) -> Record:
-    """One stored airing, back as the Record the read path already knows.
-
-    `titles` remembers what each service's title row says — its words and ids,
-    decoded from JSON — for the rows of one read, so a title airing a dozen times
-    is decoded once (`_in_fetch_order`), and its airings SHARE those lists and
-    maps: nothing writes into a record's containers (resolution builds its own,
-    cache.group_records says so), and a month's worth of copies was tens of
-    thousands of objects for the garbage collector to walk again and again while
-    the month was built.
-
-    ITS IDS ARE THE SERVICE'S OWN WITH THE TITLE'S SHARED IDS BENEATH THEM. The
-    read groups listings by the ids they carry (cache.group_base), so a listing
-    whose service knows a show only by its tvdb id would never join the listing
-    of the same show its tmdb id names — two cards for one episode. The title
-    store knows both, and adding what it knows under the service's own statement
-    (identity.with_shared) makes every listing of one title key the same way.
-
-    A MISSING TITLE ROW IS NOT AN ERROR. The LEFT JOIN can miss while a fill is
-    in flight, or if retention swept the title before its airings; what comes
-    back then is an airing with a blank title, which renders as a thin card
-    rather than vanishing.
-    """
-    season = row["season"]
-    number = row["episode_number"]
-    title = (row["source"], row["media"], row["source_id"], row["title_key"])
-    held = None if titles is None else titles.get(title)
-    if held is None:
-        ids = json.loads(row["ids_json"] or "{}") if row["ids_json"] else {}
-        known = json.loads(row["known_ids"]) if row["known_ids"] else {}
-        if known:
-            ids = title_identity.with_shared(ids, known)
-        releases = (json.loads(row["release_types_json"] or "{}")
-                    if row["release_types_json"] else {})
-        held = (_words(row), ids, known, releases)
-        if titles is not None:
-            titles[title] = held
-    words, ids, known, releases = held
-    return Record(
-        **words,
-        source=Source(str(row["source"])), media=Media(str(row["media"])),
-        id=str(row["source_id"]), ids=ids,
-        # And everything the title store knows of it, kept apart from what this
-        # service stated (Record.known_ids says why).
-        known_ids=known,
-        air_ts=float(row["air_ts"]), date_only=bool(row["date_only"]),
-        # THE EPISODE'S OWN RUNTIME WHERE ONE IS KNOWN, the title's otherwise.
-        # A show's episodes really do differ -- a double-length finale is not the
-        # show's nominal runtime. Simkl publishes no per-episode runtime at all,
-        # so falling back is the ordinary path and not a failure.
-        runtime=(row["episode_runtime"] if row["episode_runtime"] is not None
-                 else row["runtime"]),
-        episode_label=row["episode_label"] or None,
-        episode_title=row["episode_title"] or "",
-        season=None if season == UNSTATED else season,
-        episode_number=None if number == UNSTATED else number,
-        anime_type=row["anime_type"] or "",
-        release_types_by_country=releases,
-    )
+def _title_columns(alias: str = "t") -> str:
+    """Every service's title words, each as `t_{source}_{word}`."""
+    return ", ".join(f"{groups.column(tables.TITLES, source, word, alias)} AS t_{source}_{word}"
+                     for source in groups.sources() for word in ("id", *_TITLE_WORDS))
 
 
-def _words(row) -> dict:
-    """The Record fields one service's title row states about the TITLE — read
-    once, for an airing's record (`_record_from_row`) and a title-only one
-    (`_title_only_from_row`) alike."""
-    source = str(row["source"])
+# WHAT A CARD READS OF AN EPISODE'S DESCRIPTION: its name, its runtime, and
+# whether the service describes it at all.
+_EPISODE_WORDS = ("title", "runtime", "fetched_at")
+
+
+def _rows_sql(where: str) -> str:
+    """Episode rows `where` names (a condition on the row, aliased `e`) — their
+    listings and what a card reads of their descriptions — with their title's
+    every service's words and every id the store knows of it. The title is
+    joined LEFT: a listing whose title nothing describes is drawn as a thin card
+    rather than not at all."""
+    described = ", ".join(f"e.{source}_{name}" for source in groups.sources()
+                          for name in _EPISODE_WORDS
+                          if groups.has(tables.EPISODES, source, name))
+    return (f"SELECT {episode_rows.listing_select('e')}, {described}, "
+            f"i.ids_json AS known_ids, {_title_columns('i')} "
+            f"FROM {tables.EPISODES} e LEFT JOIN {tables.TITLES} i ON i.title_key = e.title_key "
+            f"WHERE {where}")
+
+
+def _group_of(row, source: str) -> dict:
+    """`source`'s title words on a read row, under their own names."""
+    return {word: row[f"t_{source}_{word}"] for word in ("id", *_TITLE_WORDS)}
+
+
+def _words(row, source: str) -> dict:
+    """The Record fields one service's title group states about the TITLE —
+    read once, for a listing's record (`_records`) and a title-only one
+    (`title_only_records`) alike."""
     ratings = json.loads(row["ratings_json"] or "{}") if row["ratings_json"] else {}
-    # None for a row no description has stated them on — not "none" (Record.keywords).
+    # None for a group no description has stated them on — not "none" (Record.keywords).
     keywords, show_type = title_rows.facts_of(row)
     return dict(
         keywords=keywords, show_type=show_type,
@@ -445,7 +320,7 @@ def _words(row) -> dict:
         country=row["country"] or "", language=row["language"] or "",
         status=row["status"] or "",
         # BACK OUT OF THE MAP UNDER THIS SOURCE'S OWN NAME. `Record.rating` is
-        # one number shown under one service's mark, so a row that holds three
+        # one number shown under one service's mark, so a group that holds three
         # services' scores still hands this source only its own.
         rating=ratings.get(source),
         # IMDb IS IN THE SAME MAP AND IS NOT THIS SOURCE'S OWN SCORE, which is
@@ -459,29 +334,172 @@ def _words(row) -> dict:
     )
 
 
+class _Title(NamedTuple):
+    """One service's title group as a read decodes it once for every listing of
+    the title: its words, its own ids, every id the store knows, its release
+    schedule, its runtime and anime format, and the id its listings are filed
+    under."""
+    words: dict
+    ids: dict
+    known: dict
+    releases: dict
+    runtime: int | None
+    anime_type: str
+    listing_id: str
+
+
+def _listing_id(source: str, ids) -> str:
+    """The id `source` files a listing of the title `ids` name under — its own
+    rule, asked of the registry (Provider.listing_id)."""
+    return providers.registered()[Source(source)].listing_id(ids)
+
+
+def _title(row, source: str, decoded: dict) -> _Title:
+    """`source`'s title group of a read row, decoded once per read and shared:
+    nothing writes into a record's containers (resolution builds its own,
+    cache.group_records says so), and a month's worth of copies was tens of
+    thousands of objects for the garbage collector to walk again and again while
+    the month was built.
+
+    ITS IDS ARE THE SERVICE'S OWN WITH THE TITLE'S SHARED IDS BENEATH THEM. A
+    listing whose service knows a show only by its tvdb id is still the title's
+    listing, and the title store's ids (identity.with_shared) are what key every
+    listing of one title the same way."""
+    held = decoded.get((row["title_key"], source))
+    if held is None:
+        group = _group_of(row, source)
+        known = json.loads(row["known_ids"]) if row["known_ids"] else {}
+        own = json.loads(group["ids_json"] or "{}") if group["ids_json"] else {}
+        held = _Title(
+            _words(group, source), title_identity.with_shared(own, known) if known else own,
+            known, json.loads(group["release_types_json"] or "{}")
+            if group["release_types_json"] else {},
+            group["runtime"], str(group["anime_type"] or ""),
+            # The id the service files its listings of the title under, by its
+            # own rule (Provider.listing_id) — from its group's ids, or what the
+            # store knows of the title where the service has no group — and the
+            # group's own entry where the ids state none of the service's.
+            _listing_id(source, own or known) or str(group["id"] or ""))
+        decoded[(row["title_key"], source)] = held
+    return held
+
+
+def _records(row, bit: int, decoded: dict,
+             stored: episode_rows.Row | None = None) -> list[Record]:
+    """Every listing a stored episode row holds on calendar `bit`, as the Record
+    the read path knows — less every searched instant whose service's feed lists
+    the same episode on that calendar.
+
+    A SEARCHED LISTING STANDS DOWN FOR ITS FEED HERE TOO, not only when a fill
+    takes it off (store_span): a fill reaches a span only when it is due, and one
+    whose service answered "unchanged" — every frozen month — may not be filled
+    with data for weeks, nor ever by a share page.
+
+    A MISSING TITLE GROUP IS NOT AN ERROR: a listing whose title nothing
+    describes (retention swept it, or a ceiling did) renders as a thin card
+    rather than vanishing."""
+    stored = stored if stored is not None else episode_rows.Row.read(row)
+    out = []
+    for source in groups.sources():
+        held = [i for i in stored.instants[source] if i.calendars & bit]
+        fed = {(i.entry, i.unstated) for i in held if i.fed & bit}
+        title = None
+        for instant in held:
+            if instant.searched & bit and (instant.entry, instant.unstated) in fed:
+                continue
+            title = title or _title(row, source, decoded)
+            season, number = stored.stated(instant)
+            if instant.entry is not None:
+                namespace = title_rows.ID_NAMESPACE[source]
+                ids = title_identity.with_shared({namespace: _typed(instant.entry)}, title.known)
+                record_id = instant.entry
+            else:
+                ids, record_id = title.ids, title.listing_id
+            described = groups.has(tables.EPISODES, source, "fetched_at") and \
+                row[f"{source}_fetched_at"] is not None
+            episode_runtime = (row[f"{source}_runtime"]
+                               if described and groups.has(tables.EPISODES, source, "runtime")
+                               else None)
+            out.append(Record(
+                **title.words,
+                source=Source(source), media=Media(str(row["media"])),
+                id=str(record_id), ids=ids,
+                # And everything the title store knows of it, kept apart from
+                # what this service stated (Record.known_ids says why).
+                known_ids=title.known,
+                air_ts=float(instant.at), date_only=bool(instant.date_only),
+                # THE EPISODE'S OWN RUNTIME WHERE ONE IS KNOWN, the title's
+                # otherwise. A show's episodes really do differ -- a double-length
+                # finale is not the show's nominal runtime. Simkl publishes no
+                # per-episode runtime at all, so falling back is the ordinary path
+                # and not a failure.
+                runtime=episode_runtime if episode_runtime is not None else title.runtime,
+                episode_label=instant.label or None,
+                episode_title=(str(row[f"{source}_title"] or "") if described else ""),
+                season=season, episode_number=number,
+                anime_type=title.anime_type,
+                release_types_by_country=title.releases,
+                # WHICH STORED LISTING THIS IS: the episode's row, which is the
+                # card (cache.group_records).
+                card=f"{row['title_key']}|{row['unit']}"))
+    return out
+
+
+def _typed(own: str):
+    return int(own) if own.isdigit() else own
+
+
+def _in_fetch_order(found, bit: int) -> list[Record]:
+    """Stored rows — or (row, its parsed Row) pairs — as Records, ordered as a
+    fill would have produced them.
+
+    SQL cannot order them: a row holds several services' instants. Air time
+    first, then the registry's declared order between two services describing
+    the same instant — a stable sort, so each row's own order survives inside
+    each source."""
+    decoded: dict = {}
+    records = [record for held in found
+               for record in (_records(held[0], bit, decoded, held[1])
+                              if isinstance(held, tuple) else _records(held, bit, decoded))]
+    records.sort(key=lambda r: (r.air_ts, title_rows.SOURCE_ORDER.get(str(r.source), 99)))
+    return records
+
+
+def _span_rows(conn: db.Connection, bit: int, lo: float, hi: float) -> list[tuple]:
+    """The episode rows with an instant on calendar `bit` inside [lo, hi), with
+    their titles' words — each beside its parsed listings."""
+    found = conn.execute(_rows_sql(f"e.rowid IN ({episode_rows.span_rowids()})"),
+                         {"lo": lo, "hi": hi, "bit": bit}).fetchall()
+    parsed = ((row, episode_rows.Row.read(row)) for row in found)
+    return [(row, stored) for row, stored in parsed
+            if episode_rows.in_span(stored, bit, lo, hi)]
+
+
 async def read_span(endpoint_key: str, span_start: date, span_end: date
                     ) -> tuple[list[Record], tuple[str, ...], tuple[str, ...], int | None]:
-    """Every stored airing for `endpoint_key` in [span_start, span_end), with who
-    was asked, who answered, and when it was stored.
+    """Every stored listing for `endpoint_key` dated in [span_start, span_end),
+    with who was asked, who answered, and when it was stored.
 
     The coverage lists come from `calendar_coverage` and NEVER from which sources
-    happen to have airings here: a source that legitimately lists nothing in a
+    happen to have listings here: a source that legitimately lists nothing in a
     span would otherwise be indistinguishable from one that was never asked,
     which is the difference between "partial" and "nothing to report".
     """
-    first, last = span_start.isoformat(), span_end.isoformat()
-    found = await db.fetch_all(_READ_SQL, (endpoint_key, first, last))
+    bit = _bit(endpoint_key)
+    lo, hi = episode_rows.epoch(span_start), episode_rows.epoch(span_end)
+    found = await db.run(lambda conn: _span_rows(conn, bit, lo, hi))
+    records = [record for record in _in_fetch_order(found, bit) if lo <= record.air_ts < hi]
     answered, asked, stored_at = await span_coverage(endpoint_key, span_start)
-    return _in_fetch_order(found), answered, asked, stored_at
+    return records, answered, asked, stored_at
 
 
 async def span_coverage(endpoint_key: str, span_start: date
                         ) -> tuple[tuple[str, ...], tuple[str, ...], int | None]:
     """(who answered, who was asked, when it was stored) for the span beginning
-    `span_start` — `read_span`'s coverage half, with no airing read at all.
+    `span_start` — `read_span`'s coverage half, with no listing read at all.
 
     FOR THE READ PATH, WHICH NO LONGER GROUPS A SPAN ON ITS OWN. Whether a span
-    is fresh, partial or missing is a question about coverage; its airings are
+    is fresh, partial or missing is a question about coverage; its listings are
     read once for the whole range a reader asked about (`read_span_whole`), so
     reading them here as well would read every row twice.
 
@@ -500,120 +518,50 @@ async def span_coverage(endpoint_key: str, span_start: date
     return answered, asked, stored_at
 
 
-# EVERY OTHER STORED LISTING OF THE EPISODES A RANGE HOLDS, at any date. One
-# episode is ONE card whichever services list it, and whether two services'
-# listings are the same card is decided by comparing their DATES — so a listing
-# just outside the range, or weeks outside it within the same month, can decide
-# where a card inside it is drawn. This reads exactly the listings that can
-# matter, which is every listing of each episode the range names
-# (app/calendar/cache.py's `join_listings` is the rule that compares them).
-#
-# THE EPISODE IS THE COORDINATE: (title_key, season, episode_number) for a show,
-# the title alone for a film. A show listing with no full coordinate is not an
-# episode this can name, and its own day is all that ever joins it to one
-# (cache.match_keys), so it never needs a listing from elsewhere. The title_key is
-# the title store's, so two services' listings of one title share it once the
-# store knows they are one title — a re-key moves both.
-#
-# BY TITLE, THEN BY COORDINATE, AND THE ORDER IS THE COST. The only index that
-# reaches an airing by what it IS rather than when is `ix_calendar_airings_key`,
-# on the title alone. Joining each of a month's five thousand coordinates to it
-# visits every row of its title once PER COORDINATE — MEASURED on a copy of a
-# real instance, a plan that does that took 39 seconds for one `shows` month.
-# Materialising the distinct titles first visits each title's rows once and
-# tests the coordinate on the row in hand: 33ms for that month, 79ms for the
-# busiest one held, 16ms for a day — beside 206-384ms for the range's own rows.
-_HELD_EPISODES = f"""
-WITH held AS MATERIALIZED (
-    SELECT DISTINCT title_key, season, episode_number FROM calendar_airings
-    WHERE endpoint = :endpoint AND air_date >= :first AND air_date < :last
-      AND (media = 'movie' OR (season != {UNSTATED} AND episode_number != {UNSTATED}))),
-held_titles AS MATERIALIZED (SELECT DISTINCT title_key FROM held)
-"""
-_OTHER_LISTINGS_SQL = _HELD_EPISODES + _READ_SQL.replace(
-    "FROM calendar_airings a",
-    "FROM held_titles k CROSS JOIN calendar_airings a ON a.title_key = k.title_key",
-).replace(
-    "WHERE a.endpoint = ? AND a.air_date >= ? AND a.air_date < ?",
-    """WHERE +a.endpoint = :endpoint AND (a.air_date < :first OR a.air_date >= :last)
-  AND (a.title_key, a.season, a.episode_number) IN
-      (SELECT title_key, season, episode_number FROM held)""",
-)
-
-
 async def read_span_whole(endpoint_key: str, span_start: date, span_end: date
                           ) -> list[Record]:
-    """Every stored airing for `endpoint_key` in [span_start, span_end), and every
-    other stored listing, at any date, of each episode those airings name — the
-    rows a reader of that range needs to say which cards it draws, and where.
+    """Every listing on `endpoint_key` of each episode row that has one dated in
+    [span_start, span_end) — every service's, at whatever date: the rows a reader
+    of that range needs to say which cards it draws, and where.
+
+    WHOLE IS THE POINT. One episode is one row, and the row is one card whatever
+    dates its services give it — so a listing outside the range is part of a card
+    inside it, and decides which day this viewer's card is drawn on.
 
     No coverage is read: whether each span inside the range was filled is the
     caller's question (`span_coverage`), asked once per span before this.
     """
-    first, last = span_start.isoformat(), span_end.isoformat()
+    bit = _bit(endpoint_key)
+    lo, hi = episode_rows.epoch(span_start), episode_rows.epoch(span_end)
 
     # THE RECORDS ARE BUILT ON THE WORKER THAT READ THE ROWS, not on the event
     # loop: tens of thousands of them for a busy month, and the loop serves every
     # other request while they are built.
     def _read(conn) -> list[Record]:
-        inside = conn.execute(_READ_SQL, (endpoint_key, first, last)).fetchall()
-        outside = conn.execute(_OTHER_LISTINGS_SQL, {"endpoint": endpoint_key, "first": first,
-                                                     "last": last}).fetchall()
-        return _in_fetch_order([*inside, *outside])
+        return _in_fetch_order(_span_rows(conn, bit, lo, hi), bit)
 
     return await db.run(_read)
-
-
-def _in_fetch_order(found) -> list[Record]:
-    """Stored rows as Records, ordered as a fill would have produced them, less
-    every searched row whose service's feed lists the same episode among them.
-
-    SQL has already ordered by air time; this settles the tie between two sources
-    describing the same instant, which SQL cannot because the order is the
-    registry's rather than any column's. A stable sort, so the query's own
-    ordering survives inside each source.
-
-    A SEARCHED ROW STANDS DOWN FOR ITS FEED HERE TOO, not only when a fill
-    deletes it (store_span): a fill reaches a span only when it is due, and one
-    whose service answered "unchanged" — every frozen month — may not be filled
-    with data for weeks, nor ever by a share page. Every reader hands this an
-    episode's listings whole (read_span_whole, read_groups), so the feed's row is
-    among them wherever it falls.
-    """
-    fed = {_episode_of_row(row) for row in found if not row["from_search"]}
-    titles: dict = {}
-    records = [_record_from_row(r, titles) for r in found
-               if not (r["from_search"] and _episode_of_row(r) in fed)]
-    records.sort(key=lambda r: (r.air_ts, title_rows.SOURCE_ORDER.get(str(r.source), 99)))
-    return records
-
-
-def _episode_of_row(row) -> tuple:
-    """A stored airing's episode for one service — its key less its instant (the
-    endpoint is the query's own)."""
-    return (row["source"], row["media"], row["source_id"], row["season"], row["episode_number"])
 
 
 # ---------------------------------------------------------------------------
 # a service's description of a title, for a card it does not list
 # ---------------------------------------------------------------------------
 
-# EVERY ROW THE NAMED SERVICES HOLD FOR THE NAMED TITLES, in one statement
-# however many a span names — the keys and the services travel as JSON arrays,
-# so a month of two and a half thousand titles is one seek per key on
-# `ix_title_metadata_key` rather than seven chunks of placeholders. A described
-# row first where a service holds two for one title.
-_TITLE_ONLY_SQL = f"""
-SELECT t.source, t.media, t.source_id, t.title_key, {_TITLE_COLUMNS}
-FROM {_TITLES} t
-WHERE t.title_key IN (SELECT value FROM json_each(:keys))
-  AND t.source IN (SELECT value FROM json_each(:sources))
-ORDER BY t.title_key, t.source, t.enriched DESC, t.source_id
-"""
+def _title_only_sql(sources: list[str]) -> str:
+    """Each named service's group of the named titles, an arm per service, in
+    one statement however many a span names — the keys travel as a JSON array,
+    so a month of two and a half thousand titles is one seek per key."""
+    arms = " UNION ALL ".join(
+        f"SELECT '{source}' AS source, t.media AS media, t.title_key AS title_key, "
+        + groups.select(tables.TITLES, source, ("id", *_TITLE_WORDS), "t")
+        + f" FROM {tables.TITLES} t WHERE t.title_key IN (SELECT value FROM json_each(:keys)) "
+        f"AND {groups.present(tables.TITLES, source, 't')}"
+        for source in sources)
+    return f"SELECT * FROM ({arms}) ORDER BY title_key, source"
 
 
 def _title_only_from_row(row) -> Record:
-    """One service's row for a title as a TITLE-ONLY record: everything it says
+    """One service's group of a title as a TITLE-ONLY record: everything it says
     about the title, and nothing about an airing.
 
     WHAT IT LEAVES OUT IS AS DELIBERATE AS WHAT IT CARRIES, because the read
@@ -621,18 +569,20 @@ def _title_only_from_row(row) -> Record:
       - no airing — `air_ts` 0 and date-only, an instant nobody could mistake
         for a listing's, and never read: resolution takes the card's day and
         time from the services that list it (resolve.resolve_records);
-      - no episode coordinate and no episode words — it is the title's row;
+      - no episode coordinate and no episode words — it is the title's group;
       - no release schedule and no anime format, which the read asks of the
         records that list a card (filter.filter_release_groups,
         filter.prune_disguised_films) and never of a description joined to it.
-    Its ids are the ones its own row states, and they are also what it knows the
-    title by (`known_ids`) — what lets the card's buttons address this service.
+    Its ids are the ones its own group states, and they are also what it knows
+    the title by (`known_ids`) — what lets the card's buttons address this
+    service.
     """
+    source = str(row["source"])
     ids = json.loads(row["ids_json"] or "{}") if row["ids_json"] else {}
     return Record(
-        **_words(row),
-        source=Source(str(row["source"])), media=Media(str(row["media"])),
-        id=str(row["source_id"]), ids=ids, known_ids=dict(ids),
+        **_words(row, source),
+        source=Source(source), media=Media(str(row["media"])),
+        id=_listing_id(source, ids) or str(row["id"] or ""), ids=ids, known_ids=dict(ids),
         air_ts=0.0, date_only=True, runtime=row["runtime"],
     )
 
@@ -640,163 +590,145 @@ def _title_only_from_row(row) -> Record:
 async def title_only_records(sources: Iterable[str], title_keys: Iterable[str]
                              ) -> dict[tuple[str, str, str], Record]:
     """`{(source, media, title key): that service's title-only record}` for every
-    title among `title_keys` that one of `sources` holds a row for — one read,
-    and the store's rows only: nothing is asked of any service."""
+    title among `title_keys` that one of `sources` holds a group for — one read,
+    and the store's groups only: nothing is asked of any service."""
     keys = sorted({str(key) for key in title_keys if key})
-    names = sorted({str(source) for source in sources})
+    names = [str(source) for source in groups.sources() if str(source) in set(map(str, sources))]
     if not keys or not names:
         return {}
-    found = await db.fetch_all(_TITLE_ONLY_SQL, {"keys": json.dumps(keys),
-                                                  "sources": json.dumps(names)})
-    out: dict[tuple[str, str, str], Record] = {}
-    for row in found:
-        out.setdefault((str(row["source"]), str(row["media"]), str(row["title_key"])),
-                       _title_only_from_row(row))
-    return out
+    found = await db.fetch_all(_title_only_sql(names), {"keys": json.dumps(keys)})
+    return {(str(row["source"]), str(row["media"]), str(row["title_key"])):
+            _title_only_from_row(row) for row in found}
 
 
 # ---------------------------------------------------------------------------
 # the calendar's own search
 # ---------------------------------------------------------------------------
-# WHICH GROUPS A QUERY MATCHES, on one endpoint. It answers `title_key` — the
-# cross-source identity the read path groups by — rather than airings, because a
-# group is what has to be loaded WHOLE: two services describing one title may
-# spell it differently, so matching on the title alone can find one source's
-# record and miss the other's, and a group missing a source resolves to a
-# different card than the calendar draws.
-#
-# TWO SHAPES OF ONE QUESTION, because each is fast exactly where the other is
-# slow; `groups_matching` says which it asks when. Both answer the same set
-# whenever fewer than the limit match, which is what lets it choose on cost.
-#
-# THE MATCHES FIRST (`_SEARCH_SQL`): the folded titles are scanned in the title
-# store's fold index, which holds nothing else, and only the rows that matched
-# are looked up on this endpoint through the airings' own primary key. `CROSS
-# JOIN` is what fixes that order — SQLite never reorders one — and it has to be
-# fixed: left to itself the planner starts from the endpoint's airings, every one
-# of them, and checks each title as it goes. MEASURED on a copy of a real
-# instance (28,005 airings on `shows`, 14,761 on `shows/premieres`, 21,247
-# titles): a query naming a title took 38ms on premieres, 57ms on `shows` and
-# 112ms across every calendar that way, even when nothing matched; matches
-# first, 2ms per calendar.
-# `INDEXED BY` RATHER THAN A `rowid IN (...)` SUBQUERY, because this one stops at
-# the limit and the subquery cannot: it collects EVERY matching rowid before the
-# first airing is read, 3-10ms for two letters that match thousands of titles,
-# while a scan of the index itself hands matches over as it finds them.
-# A RAW STRING, because the escape character this states IS a backslash.
-_SEARCH_SQL = rf"""
-SELECT DISTINCT a.title_key
-FROM {_TITLES} t INDEXED BY {title_rows.FOLD_INDEX}
-CROSS JOIN calendar_airings a
-  ON a.source = t.source AND a.media = t.media AND a.source_id = t.source_id
- AND a.endpoint = ?
-WHERE t.title_fold LIKE ? ESCAPE '\'
-LIMIT ?
-"""
 
-# THE ENDPOINT FIRST (`_SEARCH_BY_AIRING_SQL`), in air-date order: the shape this
-# search has always had, and still the right one twice over. On a SMALL calendar
-# it costs next to nothing whatever is typed, because the whole calendar is a
-# few hundred airings — under a millisecond measured on `shows/new` (438) and
-# `shows/finales` (249) — while matches-first has to walk every title that
-# matches anywhere, 16-24ms for two letters there. And for a query BROAD enough
-# to match more groups than the limit takes, it is the one that decides WHICH
-# groups a search loads — the earliest-airing ones, as it always has.
-_SEARCH_BY_AIRING_SQL = rf"""
-SELECT DISTINCT a.title_key
-FROM calendar_airings a
-JOIN {_TITLES} t
-  ON t.source = a.source AND t.media = a.media AND t.source_id = a.source_id
-WHERE a.endpoint = ? AND t.title_fold LIKE ? ESCAPE '\'
-LIMIT ?
-"""
-
-# The same read the span path uses, addressed by group instead of by date range.
-# One placeholder per key, which is why the caller's limit matters.
-# `+a.endpoint` KEEPS THE ENDPOINT OFF THE INDEX, which is SQLite's own spelling
-# for "do not use an index for this term": the planner otherwise walks the
-# endpoint's whole month index and tests each airing's key, when the keys are a
-# handful and `ix_calendar_airings_key` goes straight to their rows. Measured on
-# the same copy, forty groups: 6.1ms -> 0.8ms on premieres, 17ms -> 9.6ms on
-# `shows`, the same rows either way.
-_BY_KEY_SQL = _READ_SQL.replace(
-    "WHERE a.endpoint = ? AND a.air_date >= ? AND a.air_date < ?",
-    "WHERE +a.endpoint = ? AND a.title_key IN (__KEYS__)")
+def _on_calendar(source: str, alias: str) -> str:
+    """SQL: `source` lists an instant of the episode row aliased `alias` on the
+    calendar `:bit`."""
+    return (f"({alias}.{source}_calendars & :bit OR ({alias}.{source}_repeats_json != '[]' "
+            f"AND EXISTS (SELECT 1 FROM json_each({alias}.{source}_repeats_json) r "
+            f"WHERE json_extract(r.value, '$.calendars') & :bit)))")
 
 
-# HOW MANY AIRINGS MAKE A CALENDAR BIG ENOUGH TO SEARCH MATCHES-FIRST. Reading
-# every airing of the endpoint costs about 2ms a thousand on the measured copy
-# (0.5ms for 438, 15ms for 7,770, 40ms for 14,761), and the matches-first read
-# costs about 2ms for a query naming a title — so a thousand is where the two
-# meet. Counting up to it is a walk of at most this many index entries.
+def _matching_sql(*, matches_first: bool) -> str:
+    """The title keys on calendar `:bit` a folded title of the SAME service that
+    lists them there matches (`:needle`), at most `:limit`.
+
+    TWO SHAPES OF ONE QUESTION, because each is fast exactly where the other is
+    slow (`groups_matching` says which it asks when).
+    MATCHES FIRST: each service's folded titles are scanned in its own fold
+    index, which holds nothing else, and only the titles that matched are looked
+    up on the calendar through the episode rows' title index — a few ms per
+    calendar, where starting from the calendar's rows walked every one of them.
+    THE CALENDAR FIRST: its rows in air order through each service's air index,
+    the title checked as it goes — the shape this search has always had, and the
+    one that decides WHICH titles a broad query loads: the earliest-listed."""
+    arms = []
+    for source in groups.sources():
+        if not groups.has(tables.EPISODES, source, "air_ts"):
+            continue
+        if matches_first:
+            arms.append(
+                f"SELECT t.title_key FROM {tables.TITLES} t INDEXED BY ix_titles_{source}_fold "
+                rf"WHERE t.{source}_title_fold LIKE :needle ESCAPE '\' "
+                f"AND EXISTS (SELECT 1 FROM {tables.EPISODES} e WHERE e.title_key = t.title_key "
+                f"AND {_on_calendar(source, 'e')})")
+        else:
+            arms.append(
+                f"SELECT e.title_key, e.{source}_air_ts AS at FROM {tables.EPISODES} e "
+                f"JOIN {tables.TITLES} t ON t.title_key = e.title_key "
+                f"WHERE e.{source}_calendars != 0 AND {_on_calendar(source, 'e')} "
+                rf"AND t.{source}_title_fold LIKE :needle ESCAPE '\'")
+    if matches_first:
+        return f"SELECT DISTINCT title_key FROM ({' UNION ALL '.join(arms)}) LIMIT :limit"
+    return (f"SELECT title_key FROM ({' UNION ALL '.join(arms)}) GROUP BY title_key "
+            "ORDER BY MIN(at), title_key LIMIT :limit")
+
+
+# HOW MANY LISTED ROWS MAKE A CALENDAR BIG ENOUGH TO SEARCH MATCHES-FIRST. Reading
+# every row of the calendar costs about 2ms a thousand on the measured copy, and
+# the matches-first read about 2ms for a query naming a title — so a thousand is
+# where the two meet. Counting up to it is a walk of at most this many rows.
 _SMALL_CALENDAR = 1000
 
-_CALENDAR_SIZE_SQL = """
-SELECT COUNT(*) FROM (SELECT 1 FROM calendar_airings WHERE endpoint = ? LIMIT ?)
-"""
+
+def _calendar_size_sql() -> str:
+    arms = " UNION ALL ".join(
+        f"SELECT 1 FROM {tables.EPISODES} WHERE {source}_calendars & :bit"
+        for source in groups.sources() if groups.has(tables.EPISODES, source, "air_ts"))
+    return f"SELECT COUNT(*) FROM ({arms} LIMIT :limit)"
 
 
 async def groups_matching(endpoint_key: str, query: str, limit: int) -> list[str]:
     """The `title_key`s on `endpoint_key` whose title matches `query`.
 
-    MATCHED ON `title_fold`, the same folding a stored title was written with —
-    case-folded and accent-stripped, so "pokemon" finds "Pokemon" (the title
-    store's `like_needle`). The index on that column is what makes this a lookup
-    rather than a scan.
+    MATCHED ON THE FOLDED TITLE, the same folding a stored title was written
+    with — case-folded and accent-stripped, so "pokemon" finds "Pokemon" (the
+    title store's `like_needle`). Each service's fold index is what makes this a
+    lookup rather than a scan.
 
     WHICH READ IS ASKED IS A COST DECISION AND NEVER CHANGES THE ANSWER. A small
-    calendar is read endpoint-first, whatever was typed. A big one is read
-    matches-first, and fewer than `limit` back is the whole answer — the same
-    set the endpoint-first read would have found. `limit` or more means the
-    query matched more groups than a search loads, and which of them is the
-    endpoint-first read's to say, so it is asked again that way. The keys come
+    calendar is read calendar-first, whatever was typed. A big one is read
+    matches-first, and fewer than `limit` back is the whole answer — the same set
+    the calendar-first read would have found. `limit` or more means the query
+    matched more titles than a search loads, and which of them is the
+    calendar-first read's to say, so it is asked again that way. The keys come
     back in no particular order: `read_groups` sorts what it loads.
     """
-    needle = typed_search.like_needle(query)
-    size = await db.fetch_value(_CALENDAR_SIZE_SQL, (endpoint_key, _SMALL_CALENDAR), 0)
+    params = {"bit": _bit(endpoint_key), "needle": typed_search.like_needle(query),
+              "limit": limit}
+    size = await db.fetch_value(_calendar_size_sql(), {"bit": params["bit"],
+                                                       "limit": _SMALL_CALENDAR}, 0)
     if size >= _SMALL_CALENDAR:
-        found = await db.fetch_all(_SEARCH_SQL, (endpoint_key, needle, limit))
+        found = await db.fetch_all(_matching_sql(matches_first=True), params)
         if len(found) < limit:
             return [str(r["title_key"]) for r in found]
-    found = await db.fetch_all(_SEARCH_BY_AIRING_SQL, (endpoint_key, needle, limit))
+    found = await db.fetch_all(_matching_sql(matches_first=False), params)
     return [str(r["title_key"]) for r in found]
 
 
 async def read_groups(endpoint_key: str, title_keys) -> list[Record]:
-    """Every stored airing of `title_keys` on one endpoint, whole.
+    """Every stored listing of `title_keys` on one calendar, whole.
 
-    WHOLE IS THE POINT — every source's record for each group, so the read path
-    resolves the same card a month read would. Loading by group rather than by
+    WHOLE IS THE POINT — every source's listing of each episode, so the read path
+    resolves the same card a month read would. Loading by title rather than by
     month is what makes a search cheap: one real `shows` month held 12,880
-    airings, and the titles a query matches are a handful of them.
+    listings, and the titles a query matches are a handful of them.
     """
-    keys = [str(k) for k in title_keys]
+    keys = sorted({str(k) for k in title_keys})
     if not keys:
         return []
-    sql = _BY_KEY_SQL.replace("__KEYS__", ", ".join("?" * len(keys)))
-    found = await db.fetch_all(sql, (endpoint_key, *keys))
-    return _in_fetch_order(found)
+    bit = _bit(endpoint_key)
+    found = await db.fetch_all(_rows_sql("e.title_key IN (SELECT value FROM json_each(?))"),
+                               (json.dumps(keys),))
+    return _in_fetch_order(found, bit)
 
 
 async def sources_airing(endpoint_key: str, title_key: str, season: int | None) -> set[str]:
-    """The sources with a stored airing of `title_key` (that season, or with no
+    """The sources with a stored listing of `title_key` (that season, or with no
     season for a film) on `endpoint_key` — which services' calendars already
-    draw it there. A keyed read on the airings' own index."""
-    if season is None:
-        found = await db.fetch_all(
-            "SELECT DISTINCT source FROM calendar_airings "
-            "WHERE endpoint = ? AND title_key = ?", (endpoint_key, str(title_key)))
-    else:
-        found = await db.fetch_all(
-            "SELECT DISTINCT source FROM calendar_airings "
-            "WHERE endpoint = ? AND title_key = ? AND season = ?",
-            (endpoint_key, str(title_key), int(season)))
-    return {str(row["source"]) for row in found}
+    draw it there. A keyed read on the episode rows' title index."""
+    bit = _bit(endpoint_key)
+    found = await db.fetch_all(
+        f"SELECT * FROM {tables.EPISODES} WHERE title_key = ?"
+        + ("" if season is None else " AND season = ?"),
+        (str(title_key),) if season is None else (str(title_key), int(season)))
+    out = set()
+    for row in found:
+        stored = episode_rows.Row.read(row)
+        for source, held in stored.instants.items():
+            if any(instant.calendars & bit and
+                   (season is None or stored.stated(instant)[0] == season) for instant in held):
+                out.add(source)
+    return out
 
 
 class ListedCard(NamedTuple):
     """One title's season (None for a film, or a listing that names none) on one
-    calendar, as the stored airings hold it in a span: the services listing it
+    calendar, as the stored listings hold it in a span: the services listing it
     on that calendar AT ANY DATE (a service dating it outside the span still
     lists it), its first day in the span, and every id the title store knows for
     it."""
@@ -810,40 +742,59 @@ class ListedCard(NamedTuple):
 
 
 async def listed_cards(endpoint_keys, first: date, last: date) -> list[ListedCard]:
-    """Every title and season with a stored airing on `endpoint_keys` dated in
+    """Every title and season with a stored listing on `endpoint_keys` dated in
     [first, last) — the background matcher's worklist (app/calendar/completion.py).
-    One grouped read over the airings' (endpoint, date) range, with the identity
-    joined for what the store knows of each title."""
+    One read of the span's episode rows, with the identity of each title."""
     keys = [str(k) for k in endpoint_keys]
     if not keys:
         return []
-    found = await db.fetch_all(
-        "SELECT a.endpoint, a.title_key, a.media, a.season, MIN(a.air_date) AS day, "
-        "       (SELECT group_concat(DISTINCT b.source) FROM calendar_airings b "
-        "         WHERE b.title_key = a.title_key AND b.endpoint = a.endpoint "
-        "           AND b.season = a.season) AS sources, "
-        "       i.ids_json AS known_ids "
-        "FROM calendar_airings a "
-        f"LEFT JOIN {_IDENTITY} i ON i.title_key = a.title_key "
-        f"WHERE a.endpoint IN ({', '.join('?' * len(keys))}) "
-        "  AND a.air_date >= ? AND a.air_date < ? "
-        "GROUP BY a.endpoint, a.title_key, a.season",
-        (*keys, first.isoformat(), last.isoformat()))
-    return [ListedCard(
-        endpoint=str(row["endpoint"]), title_key=str(row["title_key"]),
-        media=str(row["media"]),
-        season=None if row["season"] == UNSTATED else int(row["season"]),
-        sources=frozenset(str(row["sources"]).split(",")),
-        day=date.fromisoformat(str(row["day"])),
-        known_ids=json.loads(row["known_ids"]) if row["known_ids"] else {})
-        for row in found]
+    lo, hi = episode_rows.epoch(first), episode_rows.epoch(last)
+    mask = 0
+    for key in keys:
+        mask |= _bit(key)
+
+    def _read(conn) -> list:
+        return conn.execute(
+            f"SELECT {episode_rows.listing_select('e')}, i.ids_json AS known_ids "
+            f"FROM {tables.EPISODES} e LEFT JOIN {tables.TITLES} i ON i.title_key = e.title_key "
+            f"WHERE e.rowid IN ({episode_rows.span_rowids()})",
+            {"lo": lo, "hi": hi, "bit": mask}).fetchall()
+
+    found = await db.run(_read)
+    # Every title's season on each calendar: the services listing it there at
+    # any date, its first day in the span, what the store knows of the title.
+    cards: dict[tuple[str, str, int | None], dict] = {}
+    rows_of: dict[str, list] = {}
+    for row in found:
+        rows_of.setdefault(str(row["title_key"]), []).append(row)
+    for key in keys:
+        bit = _bit(key)
+        for title_key, held_rows in rows_of.items():
+            for row in held_rows:
+                stored = episode_rows.Row.read(row)
+                for source, instants in stored.instants.items():
+                    for instant in instants:
+                        if not instant.calendars & bit:
+                            continue
+                        season = stored.stated(instant)[0]
+                        card = cards.setdefault((key, title_key, season), {
+                            "media": str(row["media"]), "sources": set(), "day": None,
+                            "known": json.loads(row["known_ids"]) if row["known_ids"] else {}})
+                        card["sources"].add(source)
+                        if lo <= instant.at < hi:
+                            day = date.fromisoformat(instant.day)
+                            card["day"] = day if card["day"] is None else min(card["day"], day)
+    return [ListedCard(endpoint=key, title_key=title_key, media=card["media"], season=season,
+                       sources=frozenset(card["sources"]), day=card["day"],
+                       known_ids=card["known"])
+            for (key, title_key, season), card in cards.items() if card["day"] is not None]
 
 
 # ---------------------------------------------------------------------------
 # retention
 # ---------------------------------------------------------------------------
 
-# HOW LONG A STORED AIRING IS KEPT AT ALL, as opposed to how fresh it has to be
+# HOW LONG A STORED LISTING IS KEPT AT ALL, as opposed to how fresh it has to be
 # to serve a request -- two clocks, deliberately different fields, because "this
 # is stale, refresh it when somebody touches it" and "delete this" are different
 # instructions and one number cannot mean both.
@@ -855,10 +806,10 @@ async def listed_cards(endpoint_keys, first: date, last: date) -> list[ListedCar
 # keep correct.
 #
 # AND THE TIERS MAKE IT A NON-EVENT: anything with traffic refreshes far inside
-# six months, so the only rows this deletes are ones nobody has touched in half a
-# year, which refetch on the next visit.
+# six months, so the only listings this removes are ones nobody has touched in
+# half a year, which refetch on the next visit.
 #
-# ONE HONEST REGRESSION, RECORDED RATHER THAN DISCOVERED. The blob this replaces
+# ONE HONEST REGRESSION, RECORDED RATHER THAN DISCOVERED. The blob this replaced
 # was swept at app/cache.py's RETAIN_SECONDS plus TTL_GRACE_SECONDS -- nine
 # months in total, deliberately, because a public share link never refetches and
 # must go on rendering whatever it has. A share link to a month between six and
@@ -867,37 +818,60 @@ async def listed_cards(endpoint_keys, first: date, last: date) -> list[ListedCar
 RETAIN_SECONDS = 180 * 24 * 60 * 60
 
 
-async def sweep(now: int | None = None) -> int:
-    """Delete calendar rows nothing has touched inside the retention window, and
-    then the title store's rows no airing names any more.
+def _sweep_listings(conn: db.Connection, cutoff: int) -> int:
+    """Every instant last stored at or before `cutoff` taken off its row — a
+    row nothing lists or describes any more removed — inside the caller's
+    transaction. Returns how many instants went."""
+    names = [source for source in groups.sources()
+             if groups.has(tables.EPISODES, source, "listed_at")]
+    if not names:
+        return 0
+    old = " OR ".join(f"({source}_listed_at <= :cutoff OR {source}_repeats_json != '[]')"
+                      for source in names)
+    book = episode_rows.Book()
+    book.hold(conn.execute(f"SELECT * FROM {tables.EPISODES} WHERE {old}",
+                           {"cutoff": cutoff}).fetchall())
+    removed = 0
+    for row in book.rows.values():
+        for source, instants in row.instants.items():
+            for instant in list(instants):
+                if int(instant.listed_at or 0) <= cutoff:
+                    row.take(source, instant, instant.calendars)
+                    removed += 1
+    book.write(conn)
+    return removed
 
-    ORDER IS THE WHOLE OF THE CARE HERE. Airings go first; a title or an episode
-    row is removed only once it is old AND NOTHING STILL AIRS IT
-    (title_rows.sweep_unlisted). Deleting a title on age alone would strand every
-    airing still pointing at it — the read's LEFT JOIN would hand back a card with
-    no name, which is worse than either keeping the row or dropping the airing
-    with it. One transaction, so that order cannot be seen half-done.
+
+async def sweep(now: int | None = None) -> int:
+    """Take off every listing nothing has stored inside the retention window, and
+    then the title store's groups nothing lists any more.
+
+    ORDER IS THE WHOLE OF THE CARE HERE. Listings go first; a service's group is
+    cleared only once it is old AND NOTHING THE SERVICE STILL LISTS NAMES IT
+    (title_rows.sweep_unlisted). Clearing a title's group on age alone would
+    strand every listing still drawn under it — a card with no name, which is
+    worse than either keeping the group or dropping the listing with it. One
+    transaction, so that order cannot be seen half-done.
     """
     ts = db.now() if now is None else now
     cutoff = ts - RETAIN_SECONDS
 
     def _work(conn) -> int:
-        removed = conn.execute(
-            "DELETE FROM calendar_airings WHERE stored_at <= ?", (cutoff,)).rowcount
+        removed = _sweep_listings(conn, cutoff)
         conn.execute("DELETE FROM calendar_coverage WHERE stored_at <= ?", (cutoff,))
         title_rows.sweep_unlisted(conn, cutoff)
         # And whatever a service's own terms say may not be kept, held or not —
         # after the age sweep, which it overrides (TMDB's six months).
         title_rows.sweep_past_ceilings(conn, ts)
-        # The validators outlive nothing. A file whose rows are gone has nothing
-        # for a 304 to confirm, so keeping its ETag would answer "unchanged" for
-        # a month this app no longer holds anything about.
+        # The validators outlive nothing. A file whose listings are gone has
+        # nothing for a 304 to confirm, so keeping its ETag would answer
+        # "unchanged" for a month this app no longer holds anything about.
         conn.execute("DELETE FROM calendar_source_files WHERE fetched_at <= ?", (cutoff,))
         return removed
 
     removed = await db.transaction(_work)
     if removed:
-        logger.info("calendar retention: removed %d airing(s) not stored inside "
+        logger.info("calendar retention: removed %d listing(s) not stored inside "
                     "the last %d days.", removed, RETAIN_SECONDS // 86400)
     return removed
 
@@ -906,30 +880,34 @@ async def sweep(now: int | None = None) -> int:
 # which episodes the calendar holds that nobody has looked up
 # ---------------------------------------------------------------------------
 
-# WHICH SEASONS THE EPISODE DRAIN STILL OWES WORK ON. Written once and shared by
-# the drain's batch and by the count the page shows, because those two answering
-# differently is the exact failure that makes a backlog readout untrustworthy.
-#
-# Parameters, in order: the id namespace to read out of ids_json, the source, and
-# the clock a due date is compared against.
-_OWED_SEASONS = (
-    "SELECT json_extract(t.ids_json, '$.' || ?) AS service_id, "
-    "       a.media, a.season, "
-    # NULL and 0 both mean "never answered", and both must sort ahead of every
-    # real timestamp — hence the coalesce rather than MIN alone.
-    "       MIN(COALESCE(e.fetched_at, 0)) AS answered_at, "
-    "       MAX(a.stored_at) AS newest "
-    "FROM calendar_airings a "
-    f"JOIN {_TITLES} t ON t.source = a.source AND t.media = a.media "
-    "                      AND t.source_id = a.source_id "
-    f"LEFT JOIN {_EPISODES} e ON e.source = a.source AND e.media = a.media "
-    "                             AND e.source_id = a.source_id "
-    "                             AND e.season = a.season "
-    "                             AND e.number = a.episode_number "
-    "WHERE a.source = ? AND a.season >= 0 AND a.episode_number >= 0 "
-    "  AND (e.fetched_at IS NULL OR e.fetched_at = 0 OR e.stale_after <= ?) "
-    "GROUP BY service_id, a.media, a.season"
-)
+def _owed_seasons_sql(source: str) -> str:
+    """WHICH SEASONS THE EPISODE DRAIN STILL OWES WORK ON. Written once and
+    shared by the drain's batch and by the count the page shows, because those
+    two answering differently is the exact failure that makes a backlog readout
+    untrustworthy.
+
+    Each numbered episode the service lists in full — the title's own entry's
+    listing, stating its coordinate — whose description it owes: none, a
+    listing's stub, or one fallen due. Parameters: the id namespace to read out
+    of the group's ids, and the clock a due date is compared against."""
+    stated = (f"(e.{source}_unstated = 0 OR EXISTS (SELECT 1 FROM "
+              f"json_each(e.{source}_repeats_json) r WHERE "
+              "COALESCE(json_extract(r.value, '$.unstated'), 0) = 0))")
+    entry = (f"AND e.{source}_entry IS NULL"
+             if groups.has(tables.EPISODES, source, "entry") else "")
+    return (
+        f"SELECT json_extract(t.{source}_ids_json, '$.' || ?) AS service_id, "
+        "       e.media, e.season, "
+        # NULL and 0 both mean "never answered", and both must sort ahead of
+        # every real timestamp — hence the coalesce rather than MIN alone.
+        f"       MIN(COALESCE(e.{source}_fetched_at, 0)) AS answered_at, "
+        f"       MAX(e.{source}_listed_at) AS newest "
+        f"FROM {tables.EPISODES} e JOIN {tables.TITLES} t ON t.title_key = e.title_key "
+        f"WHERE e.{source}_air_ts IS NOT NULL AND t.{source}_id IS NOT NULL "
+        f"  AND e.season >= 0 AND e.number >= 0 AND {stated} {entry} "
+        f"  AND (e.{source}_fetched_at IS NULL OR e.{source}_fetched_at = 0 "
+        f"       OR e.{source}_stale_after <= ?) "
+        "GROUP BY service_id, e.media, e.season")
 
 
 async def owed_season_count(source: str, id_namespace: str, now: int) -> int:
@@ -939,8 +917,7 @@ async def owed_season_count(source: str, id_namespace: str, now: int) -> int:
     down cannot disagree with the work actually being done.
     """
     return int(await db.fetch_value(
-        f"SELECT COUNT(*) FROM ({_OWED_SEASONS})",
-        (id_namespace, source, now)) or 0)
+        f"SELECT COUNT(*) FROM ({_owed_seasons_sql(source)})", (id_namespace, now)) or 0)
 
 
 async def owed_episodes(source: str, id_namespace: str, limit: int,
@@ -951,13 +928,13 @@ async def owed_episodes(source: str, id_namespace: str, limit: int,
     A SEASON AT A TIME, NOT AN EPISODE AT A TIME, because that is the shape of
     the call that answers it — one request returns a season's whole episode list.
 
-    A ROW WRITTEN BY A LISTING IS NOT AN ANSWER. The feed gives an episode title
-    and nothing else, so `fetched_at = 0` marks a stub: present, keyed, and still
+    A LISTING'S STUB IS NOT AN ANSWER. The feed gives an episode title and
+    nothing else, so `fetched_at = 0` marks a stub: present, keyed, and still
     owed everything a lookup would add.
 
-    AN AIRING WITH NO STATED EPISODE NUMBER IS NOT OWED, and leaving it in was a
-    live defect: `store_episodes` cannot key a row for a coordinate the source
-    never gave, so such an airing came back owed on EVERY pass, and the drain
+    A LISTING WITH NO STATED EPISODE NUMBER IS NOT OWED, and leaving it in was a
+    live defect: `store_episodes` cannot answer an episode the source never
+    numbered, so such a listing came back owed on EVERY pass, and the drain
     re-read those seasons once a minute for ever.
 
     NEVER-LOOKED-UP SEASONS GO FIRST, and only then the ones falling due. A
@@ -965,8 +942,8 @@ async def owed_episodes(source: str, id_namespace: str, limit: int,
     RIGHT NOW; a due one shows facts that were true when they were fetched.
     """
     found = await db.fetch_all(
-        _OWED_SEASONS + " ORDER BY answered_at ASC, newest DESC LIMIT ?",
-        (id_namespace, source, now, limit))
+        _owed_seasons_sql(source) + " ORDER BY answered_at ASC, newest DESC LIMIT ?",
+        (id_namespace, now, limit))
     out: list[tuple[int, str, int]] = []
     for row in found:
         try:
@@ -981,51 +958,46 @@ async def store_episodes(source: str, service_id: int, media: str, season: int,
     """Write one season's episode facts — every episode of it the calendar lists
     — addressed by the service's own id.
 
-    A SEASON WITH NO EPISODES STILL COUNTS AS ANSWERED, which is why the stub
-    rows are stamped even when the list is empty: without it a season Trakt has
-    nothing for is owed again on every pass for ever.
+    A SEASON WITH NO EPISODES STILL COUNTS AS ANSWERED, which is why each listed
+    episode's description is stamped even when the list is empty: without it a
+    season Trakt has nothing for is owed again on every pass for ever.
 
-    WHEN EACH ROW FALLS DUE AGAIN IS DECIDED PER EPISODE, from that episode's own
-    latest AIRING rather than from the season's or from the lookup's clock — a
-    season part-aired sits on both sides of the correction window at once.
+    WHEN EACH EPISODE FALLS DUE AGAIN IS DECIDED PER EPISODE, from that
+    episode's own latest LISTING rather than from the season's or from the
+    lookup's clock — a season part-aired sits on both sides of the correction
+    window at once.
     """
-    source_ids = await title_rows.source_ids_for(source, media, service_id)
-    if not source_ids:
-        return 0
     by_number = {int(e["number"]): e for e in episodes if e.get("number") is not None}
-    asked = {"source": source, "media": media, "season": int(season),
-             "ids": json.dumps([str(source_id) for source_id in source_ids])}
 
     def _work(conn) -> int:
-        # Every airing of this season, so a stub a listing wrote is answered even
-        # when the lookup did not mention that episode — one row back, and one
-        # statement to write them all (a season used to be a statement per
-        # episode, and the drain answers a couple of hundred seasons a pass).
-        (found,) = conn.execute(_SEASON_AIRINGS, asked).fetchone()
-        answers = [
-            # The LAST airing, not the first: a re-airing is another chance for
+        # The title whose group is the entry, and every listed episode of this
+        # season on its rows — one row back, one statement to write them all (a
+        # season used to be a statement per episode, and the drain answers a
+        # couple of hundred seasons a pass).
+        found = conn.execute(
+            f"SELECT e.* FROM {tables.SERVICE_IDS} i JOIN {tables.EPISODES} e "
+            "ON e.title_key = i.title_key AND e.season = ? AND e.number IS NOT NULL "
+            "WHERE i.source = ? AND i.media = ? AND i.service_id = ? AND i.is_primary = 1",
+            (int(season), source, media, str(service_id))).fetchall()
+        answers = []
+        for row in found:
+            stored = episode_rows.Row.read(row)
+            listed = [instant for instant in stored.instants.get(source, ())
+                      if instant.entry is None and not instant.unstated]
+            if not listed or not stored.coordinated:
+                continue
+            # The LAST listing, not the first: a re-airing is another chance for
             # somebody to have corrected the record, so the correction window
             # opens again behind it.
-            title_rows.EpisodeAnswer(str(source_id), int(number),
-                                     by_number.get(int(number)) or {},
-                                     title_rows.episode_stale_after(air_ts, now))
-            for source_id, number, air_ts in json.loads(found)
-            if number is not None and number >= 0]
+            last = max(instant.at for instant in listed)
+            answers.append(title_rows.EpisodeAnswer(
+                str(row["title_key"]), int(row["number"]),
+                by_number.get(int(row["number"])) or {},
+                title_rows.episode_stale_after(last, now)))
         title_rows.write_episode_answers(conn, source, media, season, answers, now=now)
         return len(answers)
 
     return await db.transaction(_work)
-
-
-# Each airing episode of one season of the named service rows, with its last
-# airing — the rows `store_episodes` answers.
-_SEASON_AIRINGS = """
-SELECT json_group_array(json_array(source_id, episode_number, aired)) FROM (
-    SELECT source_id, episode_number, MAX(air_ts) AS aired FROM calendar_airings
-    WHERE source = :source AND media = :media AND season = :season
-      AND source_id IN (SELECT value FROM json_each(:ids))
-    GROUP BY source_id, episode_number)
-"""
 
 
 # ---------------------------------------------------------------------------
@@ -1038,25 +1010,30 @@ async def signature() -> str:
 
     THE CONTRACT IS WHAT MATTERS, not the shape: the tracker's name resolution
     caches an index against this and must rebuild when the calendar has moved.
-    COUNT plus the newest stored_at is enough -- an airing added, replaced or
-    swept moves one or the other.
+    How many rows something lists plus the newest store is enough -- a listing
+    added, replaced or swept moves one or the other.
     """
+    names = [source for source in groups.sources()
+             if groups.has(tables.EPISODES, source, "listed_at")]
+    listed = " OR ".join(f"{source}_air_ts IS NOT NULL" for source in names) or "0"
+    newest = (f"MAX({', '.join(f'COALESCE(MAX({s}_listed_at), 0)' for s in names)}, 0)"
+              if len(names) > 1 else f"COALESCE(MAX({names[0]}_listed_at), 0)" if names else "0")
     row = await db.fetch_one(
-        "SELECT COUNT(*) AS n, COALESCE(MAX(stored_at), 0) AS newest "
-        "FROM calendar_airings")
+        f"SELECT (SELECT COUNT(*) FROM {tables.EPISODES} WHERE {listed}) AS n, "
+        f"(SELECT {newest} FROM {tables.EPISODES}) AS newest")
     return f"{int(row['n'])}:{int(row['newest'])}" if row else "0:0"
 
 
 async def sources_with_rows(endpoint_key: str, span_start: date, span_end: date
-                           ) -> set[str]:
-    """Which sources actually HOLD airings for this span.
+                            ) -> set[str]:
+    """Which sources actually HOLD listings on this calendar for this span.
 
     NOT THE COVERAGE TABLE, AND THE DIFFERENCE IS A BUG THAT SHIPPED. Coverage
     records who replied; this records who left something behind. They came apart
     when a source answered "unchanged" for a span it had never stored anything
-    for — coverage said answered, the airings table was empty, and because the
-    gate that decides whether "unchanged" is acceptable read COVERAGE, the state
-    justified itself for ever.
+    for — coverage said answered, nothing was stored, and because the gate that
+    decides whether "unchanged" is acceptable read COVERAGE, the state justified
+    itself for ever.
 
     THE FAILURE DIRECTION IS CHOSEN. A source that has genuinely nothing to say
     about a span looks the same as one that never stored anything, so it will
@@ -1064,8 +1041,21 @@ async def sources_with_rows(endpoint_key: str, span_start: date, span_end: date
     The other way round loses a whole service off a calendar silently, which is
     what happened.
     """
-    found = await db.fetch_all(
-        "SELECT DISTINCT source FROM calendar_airings "
-        "WHERE endpoint = ? AND air_date >= ? AND air_date < ?",
-        (endpoint_key, span_start.isoformat(), span_end.isoformat()))
-    return {str(r["source"]) for r in found}
+    names = [source for source in groups.sources()
+             if groups.has(tables.EPISODES, source, "air_ts")]
+    if not names:
+        return set()
+    # One EXISTS per service, each reaching its own air-time index — the first
+    # instant — or the few rows holding repeats.
+    holds = ", ".join(
+        f"(EXISTS (SELECT 1 FROM {tables.EPISODES} WHERE {source}_calendars != 0 "
+        f"AND {source}_calendars & :bit AND {source}_air_ts >= :lo AND {source}_air_ts < :hi) "
+        f"OR EXISTS (SELECT 1 FROM {tables.EPISODES} e, json_each(e.{source}_repeats_json) r "
+        f"WHERE e.{source}_repeats_json != '[]' "
+        "AND json_extract(r.value, '$.calendars') & :bit "
+        "AND json_extract(r.value, '$.at') >= :lo AND json_extract(r.value, '$.at') < :hi)) "
+        f"AS {source}" for source in names)
+    row = await db.fetch_one(f"SELECT {holds}", {
+        "bit": _bit(endpoint_key), "lo": episode_rows.epoch(span_start),
+        "hi": episode_rows.epoch(span_end)})
+    return {source for source in names if row[source]}

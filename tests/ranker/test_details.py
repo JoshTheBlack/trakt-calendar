@@ -25,7 +25,7 @@ from unittest.mock import patch
 
 from app import db
 from app.config import Settings
-from app.metadata import descriptions, refresh as metadata_refresh, rows
+from app.metadata import descriptions, refresh as metadata_refresh, tables
 from app.providers.trakt import transport
 from app.ranker import core as ranker
 from tests.support import AppTestCase, DetailsPanel, ORIGIN
@@ -138,8 +138,8 @@ class ABoardTitleOpensThePanelTests(_BoardPanelTestCase):
         beside the three of the service describing the panel. A count alone
         widens nothing: a season's number is not how many came before it."""
         key = self.add(ids={"trakt": 7, "tmdb": 1})
-        asyncio.run(db.execute(f"UPDATE {rows.TITLES} SET season_count = 5 "
-                               "WHERE source = 'tmdb' AND title_key = ?", (key,)))
+        asyncio.run(db.execute(f"UPDATE {tables.TITLES} SET tmdb_season_count = 5 "
+                               "WHERE tmdb_id IS NOT NULL AND title_key = ?", (key,)))
         asyncio.run(db.transaction(lambda conn: descriptions.write_season_list(
             conn, "tmdb", "show", "1", [{"season": n, "episode_count": 10} for n in range(1, 6)],
             now=db.now(), ids={"tmdb": 1})))

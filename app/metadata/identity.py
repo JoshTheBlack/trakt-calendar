@@ -44,15 +44,10 @@ from typing import Any, NamedTuple
 
 from .. import db
 from ..providers.base import MATCH_SOURCES, ItemKey, parse_item_key, resolve_key
-from . import holders
+from . import holders, tables
 from . import ids as id_rules
 
 logger = logging.getLogger(__name__)
-
-# The identity tables. Named once, for the statements below and for the calendar's
-# read, which merges a title's known ids into each listing it draws.
-TABLE = "titles"
-ALIASES = "title_aliases"
 
 # The lower id spaces a title can be FOUND by, each with its own index (migration
 # 47). tmdb has none: a title holding a tmdb id is keyed on it, so its key is that
@@ -149,10 +144,10 @@ class _Title(NamedTuple):
 # of it. MEASURED on a copy of a real instance: a fill's store issued ~3,300
 # statements and held the lock 5.3 s under one month read, and the next writer
 # gave up at the busy timeout.
-_ALIASES_SQL = (f"SELECT json_group_array(json_array(old_key, title_key)) FROM {ALIASES} "
+_ALIASES_SQL = (f"SELECT json_group_array(json_array(old_key, title_key)) FROM {tables.ALIASES} "
                 "WHERE old_key IN (SELECT value FROM json_each(?))")
 _ROWS_SQL = (f"SELECT json_group_array(json_array(title_key, media, ids_json, created_at)) "
-             f"FROM {TABLE} WHERE title_key IN (SELECT value FROM json_each(?))")
+             f"FROM {tables.TITLES} WHERE title_key IN (SELECT value FROM json_each(?))")
 # One arm per indexed id space, each spelled in its index's own expression: the
 # planner reaches an expression index only through the expression it was built
 # on, so the space cannot be a parameter. The payload drives the join (CROSS
@@ -161,14 +156,14 @@ _HOLDERS_SQL = ("SELECT json_group_array(json_array(media, name, id, title_key))
                 + " UNION ALL ".join(
                     f"SELECT t.media AS media, '{name}' AS name, "
                     f"json_extract(t.ids_json, '$.{name}') AS id, t.title_key AS title_key "
-                    f"FROM json_each(:{name}) w CROSS JOIN {TABLE} t "
+                    f"FROM json_each(:{name}) w CROSS JOIN {tables.TITLES} t "
                     f"ON t.media = json_extract(w.value, '$[0]') "
                     f"AND json_extract(t.ids_json, '$.{name}') = json_extract(w.value, '$[1]')"
                     for name in sorted(_INDEXED))
                 + ")")
 # Every title a batch decided, in one statement. `WHERE true` is SQLite's own
 # remedy for an upsert on a SELECT, whose ON would otherwise read as a join's.
-_WRITE_SQL = (f"INSERT INTO {TABLE} (title_key, media, ids_json, created_at) "
+_WRITE_SQL = (f"INSERT INTO {tables.TITLES} (title_key, media, ids_json, created_at) "
               "SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), "
               "json_extract(value, '$[2]'), json_extract(value, '$[3]') "
               "FROM json_each(?) WHERE true "
@@ -345,13 +340,13 @@ def _retire(conn: db.Connection, old: str, new: str, *, now: int) -> None:
     naming it naming `new`, and `old` itself an alias. A re-key is rare, and the
     holders it moves live in every feature's tables."""
     counts = holders.repoint(conn, old, new, now=now)
-    conn.execute(f"UPDATE {ALIASES} SET title_key = ? WHERE title_key = ?", (new, old))
-    conn.execute(f"DELETE FROM {ALIASES} WHERE old_key = ?", (new,))
+    conn.execute(f"UPDATE {tables.ALIASES} SET title_key = ? WHERE title_key = ?", (new, old))
+    conn.execute(f"DELETE FROM {tables.ALIASES} WHERE old_key = ?", (new,))
     conn.execute(
-        f"INSERT INTO {ALIASES} (old_key, title_key, aliased_at) VALUES (?, ?, ?) "
+        f"INSERT INTO {tables.ALIASES} (old_key, title_key, aliased_at) VALUES (?, ?, ?) "
         "ON CONFLICT(old_key) DO UPDATE SET title_key = excluded.title_key, "
         "aliased_at = excluded.aliased_at", (old, new, now))
-    conn.execute(f"DELETE FROM {TABLE} WHERE title_key = ?", (old,))
+    conn.execute(f"DELETE FROM {tables.TITLES} WHERE title_key = ?", (old,))
     touched = {table: n for table, n in counts.items() if n}
     logger.info("title store: re-keyed %s -> %s (%s)", old, new,
                 ", ".join(f"{table} {n}" for table, n in sorted(touched.items())) or "no rows")

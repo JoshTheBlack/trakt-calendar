@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 from app import db
 from app.metadata import descriptions
 from tests.metadata.test_panel import _answer
-from tests.support import DatabaseTestCase
+from tests.support import DatabaseTestCase, title_group, title_groups
 
 OLD = 1_000_000
 NOW = OLD + 30 * 24 * 60 * 60
@@ -25,10 +25,10 @@ UTC = ZoneInfo("UTC")
 
 # Every table a description writes or a re-key moves, ordered by its key.
 _TABLES = {
-    "title_metadata": "source, media, source_id",
-    "season_metadata": "source, media, source_id, season",
-    "episode_metadata": "source, media, source_id, season, number",
     "titles": "title_key",
+    "service_ids": "source, media, service_id",
+    "seasons": "title_key, season",
+    "episodes": "title_key, unit",
     "title_aliases": "old_key",
     "show_posters": "media, tmdb, source",
     "title_posters": "media, title_key, source",
@@ -120,11 +120,9 @@ class ABatchIsItsAnswersOneByOneTests(DatabaseTestCase):
             descriptions.Answer("tmdb", "show", "12",
                                 _answer("tmdb", "12", None, keywords=["heist"],
                                         show_type="Scripted"))])
-        row = await db.fetch_one("SELECT fetched_at, cast_json FROM title_metadata "
-                                 "WHERE source = 'tmdb' AND source_id = '5'")
+        row = await title_group("show:tmdb:5", "tmdb")
         self.assertEqual((row["fetched_at"], row["cast_json"]), (OLD, '["Lead"]'))
-        self.assertEqual(await db.fetch_value(
-            "SELECT facts_known FROM title_metadata WHERE source_id = '12'"), 1)
+        self.assertEqual((await title_group("show:tmdb:12", "tmdb"))["facts_known"], 1)
 
     async def test_a_re_key_moves_a_later_answers_rows(self):
         six = _answer("tmdb", "6", None, title="Six")
@@ -164,8 +162,7 @@ class AnAnswerThatCannotBeReadCostsTheBatchNothingElseTests(DatabaseTestCase):
         self.assertIsInstance(filed[1], ValueError)
         self.assertEqual([found.key for found in (filed[0], filed[2])],
                          ["show:tmdb:7", "show:tmdb:9"])
-        self.assertEqual(sorted(row["source_id"] for row in await db.fetch_all(
-            "SELECT source_id FROM title_metadata")), ["7", "9"])
+        self.assertEqual(sorted(g["source_id"] for g in await title_groups()), ["7", "9"])
 
     async def test_one_answer_raises_it(self):
         broken = {**_answer("tmdb", "8", 1), "episodes": [{"number": "eight"}]}

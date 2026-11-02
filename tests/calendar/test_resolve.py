@@ -29,7 +29,7 @@ from app.endpoints import get_endpoint
 from app.providers.base import Record, Source, render
 from app.providers.trakt import calendar as trakt_calendar
 from app.sources import prefs as source_prefs
-from tests.support import calendar_records, migrated_db, window_fetch
+from tests.support import calendar_records, migrated_db, window_fetch, stored_groups
 
 SHOWS = get_endpoint("shows")
 MOVIES = get_endpoint("movies")
@@ -263,7 +263,7 @@ class ResolvingOneSourceTests(unittest.TestCase):
 
     def group(self):
         records = calendar_records([RICH], SHOWS)
-        return calendar_cache.group_records(records)[0]
+        return stored_groups(records)[0]
 
     def test_the_record_comes_back_whole(self):
         record = calendar_resolve.resolve(self.group())
@@ -312,7 +312,7 @@ class WhichSourceAViewerReadsTests(unittest.TestCase):
         """Three groups: one both services listed, one only Trakt, one only
         Simkl — which is the shape a real window has (measured on the author's
         own cache: 4 of 35 entries in one week carried both)."""
-        return calendar_cache.group_records([
+        return stored_groups([
             _record(Source.TRAKT, "shared", tmdb=100, title="Shared"),
             _record(Source.SIMKL, "shared-simkl", tmdb=100, title="Shared"),
             _record(Source.TRAKT, "trakt-only"),
@@ -374,7 +374,7 @@ class WhatTheInstanceAdmitsAtReadTests(unittest.TestCase):
     """
 
     def groups(self):
-        return calendar_cache.group_records([
+        return stored_groups([
             _record(Source.TRAKT, "shared", tmdb=100, title="Shared"),
             _record(Source.SIMKL, "shared-simkl", tmdb=100, title="Shared"),
             _record(Source.TRAKT, "trakt-only"),
@@ -448,7 +448,7 @@ class ASourceChoiceNeverChangesWhatTheFiltersJudgeTests(unittest.IsolatedAsyncio
             r = _record(source, slug, tmdb=tmdb, title=title)
             r.genres, r.network = genres, network
             return r
-        return calendar_cache.group_records([
+        return stored_groups([
             record(Source.TMDB, "286597", tmdb=286597, title="Sam Pang Tonight",
                    genres=["comedy"], network="10"),
             record(Source.SIMKL, "2727595", tmdb=286597, title="Sam Pang Tonight",

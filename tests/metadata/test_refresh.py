@@ -15,7 +15,6 @@ THE PROMISES:
 """
 from __future__ import annotations
 
-import json
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import mock
@@ -26,7 +25,7 @@ from app.metadata import descriptions, refresh
 from app.providers.base import SeasonsAnswer, SourceUnavailable
 from app.providers.tmdb import transport as tmdb_transport
 from tests.metadata.test_panel import _answer
-from tests.support import DatabaseTestCase
+from tests.support import DatabaseTestCase, put_title, title_groups
 
 # In the past, because a drain files what it is answered on the real clock.
 T0 = 1_700_000_000
@@ -142,7 +141,8 @@ class WhatAViewQueuesTests(_RefreshTestCase):
     async def test_a_row_whose_refresh_failed_waits_out_its_backoff(self):
         await _describe("tmdb", "5", at=T0)
         now = T0 + 10 * DAY
-        await db.execute("UPDATE title_metadata SET fail_count = 1, failed_at = ?", (now - 60,))
+        await db.execute("UPDATE titles SET tmdb_fail_count = 1, tmdb_failed_at = ?",
+                         (now - 60,))
         self.assertEqual(await self.view(refresh.Wanted("show", {"tmdb": 5}), at=now), 0)
         self.assertEqual(await self.view(refresh.Wanted("show", {"tmdb": 5}),
                                          at=now + 2 * 60 * 60), 1)
@@ -227,8 +227,7 @@ class TheDrainTests(_RefreshTestCase):
         self.assertEqual(self.ports["tmdb"].asked,
                          [("details", "show", "5", None, True), ("seasons", "5", True)])
         self.assertEqual(await _queue(), [])
-        stale_after = await db.fetch_value(
-            "SELECT stale_after FROM title_metadata WHERE source = 'tmdb'")
+        stale_after = (await title_groups("tmdb"))[0]["stale_after"]
         self.assertGreater(stale_after, now)
 
     async def test_a_failure_marks_the_row_and_drops_the_entry(self):
@@ -237,7 +236,7 @@ class TheDrainTests(_RefreshTestCase):
         await refresh.queue_title(SETTINGS, "show", {"tmdb": 5}, reason="viewed")
         self.assertEqual(await refresh.drain(SETTINGS, now=T0 + DAY), 0)
         self.assertEqual(await _queue(), [])
-        row = await db.fetch_one("SELECT fail_count, failed_at FROM title_metadata")
+        (row,) = await title_groups()
         self.assertEqual((row["fail_count"], row["failed_at"]), (1, T0 + DAY))
 
     async def test_a_service_that_says_slow_down_keeps_its_rows_queued_unmarked(self):
@@ -258,8 +257,7 @@ class TheDrainTests(_RefreshTestCase):
             self.assertEqual(await refresh.drain(SETTINGS, now=T0 + DAY), 0)
         self.assertEqual(len(asked), 1, "the batch went on asking after the 429")
         self.assertEqual(len(await _queue()), 3)
-        self.assertEqual(await db.fetch_value(
-            "SELECT MAX(fail_count) FROM title_metadata WHERE source = 'tmdb'"), 0)
+        self.assertEqual(max(g["fail_count"] for g in await title_groups("tmdb")), 0)
 
     async def test_a_service_this_instance_cannot_ask_keeps_its_rows_queued(self):
         await refresh.queue_title(SETTINGS, "show", {"tmdb": 5}, reason="viewed")
@@ -293,7 +291,8 @@ async def _listed(tmdb_id: int, *, at: int) -> None:
     record = normalize.to_record({"id": tmdb_id, "name": f"Show {tmdb_id}",
                                   "first_air_date": "2026-10-27"}, Media.SHOW, 1, "2026-10-27")
     listed = metadata.listings([record], now=at, stale_after=at + DAY)
-    await db.transaction(lambda conn: metadata.store_records(conn, listed))
+    await db.transaction(lambda conn: metadata.write_records(
+        conn, listed, metadata.plan_records(conn, listed)))
 
 
 class ASparseListingIsDescribedTests(_RefreshTestCase):
@@ -315,7 +314,7 @@ class ASparseListingIsDescribedTests(_RefreshTestCase):
 
     async def test_a_service_whose_listings_arrive_complete_is_never_queued(self):
         await _describe("trakt", "9", at=T0)
-        await db.execute("UPDATE title_metadata SET enriched = 0")
+        await db.execute("UPDATE titles SET trakt_enriched = 0")
         self.assertEqual(await refresh.queue_listed(SETTINGS, now=T0 + 30), 0)
 
     async def test_a_described_listing_is_owed_nothing(self):
@@ -427,10 +426,9 @@ class ACalendarTitleIsDescribedTests(_RefreshTestCase):
         self.ports["tmdb"].fetch_details = _nothing
         self.assertEqual(await self._queue_cards(), 1)
         await refresh.drain(SETTINGS, now=T0 + 30)
-        row = await db.fetch_one(
-            "SELECT title_key, season_count, fail_count, failed_at FROM title_metadata "
-            "WHERE source = 'tmdb'")
-        self.assertEqual(tuple(row), ("show:tmdb:101", None, 1, T0 + 30))
+        (row,) = await title_groups("tmdb")
+        self.assertEqual((row["title_key"], row["season_count"], row["fail_count"],
+                          row["failed_at"]), ("show:tmdb:101", None, 1, T0 + 30))
         self.assertEqual(await self._queue_cards(T0 + 60), 0)
         now = T0 + 2 * DAY
         for _attempt in range(refresh.LISTED_GIVE_UP_AFTER - 1):
@@ -444,9 +442,8 @@ class ACalendarTitleIsDescribedTests(_RefreshTestCase):
         await _aired("simkl", 1, 101, date(2026, 10, 16))
         await self._queue_cards()
         self.assertEqual(await refresh.drain(SETTINGS, now=T0 + 30), 1)
-        self.assertEqual(await db.fetch_value(
-            "SELECT title_key FROM title_metadata WHERE source = 'tmdb' "
-            "AND season_count IS NOT NULL"), "show:tmdb:101")
+        self.assertEqual([g["title_key"] for g in await title_groups("tmdb")
+                          if g["season_count"] is not None], ["show:tmdb:101"])
 
     async def test_a_service_whose_own_id_names_no_title_leaves_no_bare_row(self):
         """Trakt's id is not a key the waterfall files a title by: a row for it
@@ -454,7 +451,7 @@ class ACalendarTitleIsDescribedTests(_RefreshTestCase):
         self.ports["trakt"] = _Port("trakt", fails=True)
         await refresh.queue_title(SETTINGS, "show", {"trakt": 9}, reason="viewed")
         await refresh.drain(SETTINGS, now=T0)
-        self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM title_metadata"), 0)
+        self.assertEqual(await title_groups(), [])
         self.assertEqual(await _queue(), [])
 
     def test_every_service_states_whether_it_describes_every_card(self):
@@ -474,11 +471,9 @@ class HeldRowsNearTheCeilingTests(_RefreshTestCase):
         self.near = self.now - tmdb_transport.MAX_CACHE_SECONDS + DAY
 
     async def _title(self, source: str, own_id: int, fetched_at: int) -> None:
-        await db.execute(
-            "INSERT INTO title_metadata (source, media, source_id, title_key, ids_json, "
-            "fetched_at) VALUES (?, 'show', ?, ?, ?, ?)",
-            (source, str(own_id), f"show:tmdb:{own_id}", json.dumps({source: own_id}),
-             fetched_at))
+        await db.transaction(lambda conn: put_title(
+            conn, source, "show", str(own_id), f"show:tmdb:{own_id}",
+            ids={source: own_id}, fetched_at=fetched_at))
 
     async def test_a_held_row_near_its_ceiling_is_queued(self):
         await self._title("tmdb", 21, self.near)
@@ -495,8 +490,7 @@ class HeldRowsNearTheCeilingTests(_RefreshTestCase):
         self.assertEqual(await refresh.queue_ceiling(SETTINGS, now=self.now), 0)
 
     async def test_a_service_with_no_ceiling_is_never_queued_for_one(self):
-        await db.execute(
-            "INSERT INTO title_metadata (source, media, source_id, title_key, ids_json, "
-            "fetched_at) VALUES ('trakt', 'show', 'slug', 'show:tmdb:21', '{\"trakt\": 9}', ?)",
-            (self.near,))
+        await db.transaction(lambda conn: put_title(
+            conn, "trakt", "show", "slug", "show:tmdb:21", ids={"trakt": 9},
+            fetched_at=self.near))
         self.assertEqual(await refresh.queue_ceiling(SETTINGS, now=self.now), 0)

@@ -25,7 +25,7 @@ from datetime import date, datetime, timezone
 from unittest import mock
 
 from app import db
-from app.metadata import descriptions, rows
+from app.metadata import descriptions, tables
 from app.providers import detail_source
 from app.providers.base import SeasonsAnswer, Source
 from app.providers import season_choices
@@ -409,8 +409,8 @@ class WhatAChoiceWritesTests(_ControlTestCase):
         # description says how many seasons there are (labels.board_columns).
         self.assertEqual(self.facts(key(SHOW)), (None, None, None))
         asyncio.run(db.execute(
-            f"UPDATE {rows.TITLES} SET season_count = 4 "
-            "WHERE source = 'trakt' AND title_key = ?", (key(SHOW),)))
+            f"UPDATE {tables.TITLES} SET trakt_season_count = 4 "
+            "WHERE trakt_id IS NOT NULL AND title_key = ?", (key(SHOW),)))
         # Four listed seasons, 8 + 10 + 9 + 10 episodes.
         self.assertEqual(self.facts(key(SHOW)), (4, 37, None))
 
@@ -476,8 +476,8 @@ class WhatTheWholeShowCountsTests(_ControlTestCase):
             ids={"trakt": 70, "tmdb": int(SHOW)})))
         if described is not None:
             asyncio.run(db.execute(
-                f"UPDATE {rows.TITLES} SET season_count = ? WHERE source = 'trakt'",
-                (described,)))
+                f"UPDATE {tables.TITLES} SET trakt_season_count = ? "
+                "WHERE trakt_id IS NOT NULL", (described,)))
 
     def test_the_specials_are_not_a_season_of_the_count(self):
         self.build_with_seasons()
@@ -498,10 +498,10 @@ class WhatTheWholeShowCountsTests(_ControlTestCase):
 
     def test_a_boards_read_finds_season_rows_by_their_title(self):
         """Every season row the board's read reaches, it reaches by its title's
-        own (source, media, source_id) — never by service alone. Left to choose,
-        the planner walked every season row of the listing service for each
-        whole-show row: MEASURED on a copy of dev, a 340-row board read in 42 s
-        with TMDB's 17,700 season rows, and in 0.02 s driven from the title."""
+        key — never by walking the seasons. Left to choose, the planner once
+        walked every season row of the listing service for each whole-show row:
+        MEASURED on a copy of dev, a 340-row board read in 42 s with TMDB's
+        17,700 season rows, and in 0.02 s driven from the title."""
         sql = f"EXPLAIN QUERY PLAN {ranker._ITEMS} WHERE i.board_id = ?"
         plan = asyncio.run(db.run(lambda conn: [
             str(row["detail"]) for row in conn.execute(sql, (0,)).fetchall()]))
@@ -509,7 +509,7 @@ class WhatTheWholeShowCountsTests(_ControlTestCase):
         self.assertTrue(reaches)
         for line in reaches:
             with self.subTest(line=line):
-                self.assertIn("source_id=", line)
+                self.assertIn("title_key=", line)
 
 
 if __name__ == "__main__":

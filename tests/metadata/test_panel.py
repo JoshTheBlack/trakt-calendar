@@ -22,7 +22,7 @@ from app.config import Settings
 from app.metadata import descriptions, panel
 from app.providers import detail_source
 from app.providers.base import Source, Video, VideoKind
-from tests.support import DatabaseTestCase
+from tests.support import DatabaseTestCase, season_groups, title_groups
 
 
 def _video(video_id, source, kind="trailer"):
@@ -257,8 +257,8 @@ class TheStoreAnswersTests(DatabaseTestCase):
     async def test_a_stale_stored_answer_is_still_drawn(self):
         port = _DetailPort("trakt", [])
         await self.describe(port)
-        await db.execute("UPDATE title_metadata SET stale_after = 0")
-        await db.execute("UPDATE season_metadata SET stale_after = 0")
+        await db.execute("UPDATE titles SET trakt_stale_after = 0")
+        await db.execute("UPDATE seasons SET trakt_stale_after = 0")
         await self.describe(port)
         self.assertEqual(len(port.asked), 1)
 
@@ -267,15 +267,14 @@ class TheStoreAnswersTests(DatabaseTestCase):
         await self.describe(port, season=1)
         await self.describe(port, season=2)
         self.assertEqual([own_id for _what, own_id, _cache in port.asked], ["7", "7"])
-        self.assertEqual(await db.fetch_value(
-            "SELECT COUNT(*) FROM season_metadata WHERE source = 'trakt'"), 2)
+        self.assertEqual(len(await season_groups("trakt")), 2)
 
     async def test_a_cache_only_read_is_not_kept(self):
         """A share page's read of a service's response cache may be partial;
         written as a description it would mark the title described."""
         port = _DetailPort("trakt", [])
         await self.describe(port, cache_only=True)
-        self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM title_metadata"), 0)
+        self.assertEqual(await title_groups(), [])
 
 
 class PresentedTests(DatabaseTestCase):
@@ -346,6 +345,5 @@ class AWholeTitleGoesToWhoCanDescribeItTests(DatabaseTestCase):
 
     async def test_an_answer_that_says_nothing_is_not_stored(self):
         await self._describe({"tmdb": self.EMPTY, "trakt": {**self.EMPTY, "title": "Silo"}})
-        stored = {row["source"]: json.loads(row["ids_json"]) for row in await db.fetch_all(
-            "SELECT source, ids_json FROM title_metadata")}
+        stored = {row["source"]: json.loads(row["ids_json"]) for row in await title_groups()}
         self.assertNotIn("tmdb", stored)

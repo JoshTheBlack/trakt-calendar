@@ -342,6 +342,9 @@ class _SimklProvider:
     def episode_url(self, ids, season: int, number: int) -> str:
         return calendar.episode_url(ids, season, number)
 
+    def listing_id(self, ids) -> str:
+        return calendar.listing_id(ids)
+
     def status_means(self, status: str) -> frozenset[str]:
         return titles.status_means(status)
 

@@ -188,6 +188,15 @@ def poster(media: dict) -> str | None:
     return None
 
 
+def listing_id(ids: dict) -> str:
+    """The id a Trakt listing of a title is filed under: its slug where Trakt
+    names one, its number otherwise — readable in a log line and an address,
+    and Trakt resolves either. A payload names the slug `slug`; a normalized id
+    map, which is what the title store keeps, `trakt_slug` (`_ids.normalize`),
+    so a stored title's ids give the same answer as its listing did."""
+    return str(ids.get("slug") or ids.get("trakt_slug") or ids.get("trakt") or "")
+
+
 def title_url(media: Media, ids: dict) -> str:
     """The canonical Trakt page for a title, named the way Trakt prefers.
 
@@ -288,7 +297,7 @@ def to_record(entry: dict, kind: Media) -> Record | None:
     return Record(
         source=Source.TRAKT,
         media=kind,
-        id=ids.get("slug") or str(ids.get("trakt") or ""),
+        id=listing_id(ids),
         ids=_ids.normalize(ids),
         # THE SLUG IF TRAKT NAMED ONE, THE NUMERIC ID IF IT DID NOT. Trakt resolves
         # either — `/shows/<id>` reaches the same page `/shows/<slug>` does — but

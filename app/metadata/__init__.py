@@ -10,10 +10,13 @@ for it knew every service's. This package owns the rows that describe titles
 every column elsewhere that holds a title's key (holders.py).
 
 ONE WAY IN. Every path that meets a title registers it here:
-  - `store_records` for a SERVICE'S OWN LISTINGS (a calendar fill, an airing a
-    search wrote), inside the caller's transaction: each record's title is
-    resolved, its row written under that title's key, and no service is asked —
-    a busy fill names hundreds of titles against a 10-a-second ceiling;
+  - `plan_records` then `write_records` for a SERVICE'S OWN LISTINGS (a calendar
+    fill, an airing a search wrote) — the reads and the deciding before the
+    caller's write lock, the writes inside it: each record's title is resolved,
+    its service's group written under that title's key, and no service is asked
+    — a busy fill names hundreds of titles against a 10-a-second ceiling. The
+    listing itself is filed on its episode's row (episodes.py) in the same
+    transaction;
   - `ensure` / `ensure_many` for a title met BY ITS IDS (a search pick, a tracker
     arrival, a board add, an import, a restore). Handed a viewer's `settings`,
     they also ask each service the title has no id from, ONCE, by shared id —
@@ -53,7 +56,10 @@ class Listings(NamedTuple):
     # One per service title, however many of its airings arrive — which is most
     # of what a fill is: ONE RESOLUTION PER SERVICE TITLE, from its first record.
     titles: list[identity.Settling]
+    # (service, media, the id the listing is filed under), and the service's own
+    # id for the title in its one spelling (rows.own_id), per service title.
     refs: list[tuple[str, str, str]]
+    owns: list[str]
     # Each record's position in `titles`.
     title_of: list[int]
     rows: rows.ListingRows
@@ -68,7 +74,7 @@ class Listings(NamedTuple):
 
 
 def listings(records: Iterable[Record], *, now: int, stale_after: int) -> Listings:
-    """`records` made ready for `store_records` — pure, for the caller to call
+    """`records` made ready for `plan_records` — pure, for the caller to call
     before its transaction."""
     records = list(records)
     return _listed(records, rows.listing_rows(records, now=now, stale_after=stale_after), now)
@@ -77,74 +83,130 @@ def listings(records: Iterable[Record], *, now: int, stale_after: int) -> Listin
 def _listed(records: list[Record], spelled: rows.ListingRows, now: int) -> Listings:
     titles: list[identity.Settling] = []
     refs: list[tuple[str, str, str]] = []
+    owns: list[str] = []
     title_of: list[int] = []
     seen: dict[tuple[str, str, str], int] = {}
-    for record in records:
+    for record, own in zip(records, spelled.owns):
         ref = (str(record.source), str(record.media), str(record.id))
         if ref not in seen:
             seen[ref] = len(titles)
             refs.append(ref)
+            owns.append(own)
             titles.append(identity.Settling(
                 str(record.media), dict(record.ids or {}),
                 fallback=identity.per_source_key(record.source, record.id)))
         title_of.append(seen[ref])
-    return Listings(records, titles, refs, title_of, spelled, now)
+    return Listings(records, titles, refs, owns, title_of, spelled, now)
 
 
-def store_records(conn: db.Connection, listed: Listings) -> list[str]:
-    """Register each listing's title and write the service's own rows for it,
-    inside the caller's transaction. Returns each record's title key, in order.
+class Planned(NamedTuple):
+    """What `plan_records` decided about a batch of listings."""
+    settles: identity.SettlePlan
+    # Each record's title key once the plan is written.
+    keys: list[str]
+    # Entries a listing names under another title than the one they are filed
+    # under, with no re-key behind it (rows.move_entries).
+    moves: list[rows.Move]
+    # {(title key, service): the entry that title's group is once written} —
+    # right for every title the plan's merges leave alone; a title in `touched`
+    # has its own decided by the merge, and a caller reads it again after
+    # `write_records` (`rows.primaries`).
+    primaries: dict[tuple[str, str], str]
 
-    A FIXED NUMBER OF STATEMENTS, however many records: one read of where each
-    service's row is filed, the identity's batch (identity.settle_many), and a
-    statement per table written (rows.write_listings). A write transaction's lock
-    is held while it runs, and a statement can wait a GIL switch interval while
-    the event loop is busy — so a fill's lock time grew with its records, and the
-    next writer's patience ran out (identity.py's reads have the measurement).
+    @property
+    def touched(self) -> frozenset[str]:
+        """Every title key whose rows writing the plan merges — each re-key's two
+        titles and each moved entry's — as they are BEFORE it is written. Rare:
+        a few titles in a fill of thousands, none in most."""
+        keys = {key for pair in self.settles.retired for key in pair}
+        keys.update(key for move in self.moves for key in (move.old, move.new))
+        return frozenset(keys)
+
+    @property
+    def landed(self) -> frozenset[str]:
+        """`touched` as it is AFTER the plan is written: a retired key is the
+        title it merged into."""
+        retired = dict(self.settles.retired)
+
+        def followed(key: str) -> str:
+            while key in retired:
+                key = retired[key]
+            return key
+
+        return frozenset(followed(key) for key in self.touched)
+
+
+def plan_records(conn: db.Connection, listed: Listings) -> Planned:
+    """Which title each listing is, and what writing them would move — read and
+    decided, NOT written: for a caller that makes them before taking the write
+    lock (db.transaction's `prepare`) and writes them inside it
+    (`write_records`)."""
+    own_refs = [(source, media, own) for (source, media, _spelling), own
+                in zip(listed.refs, listed.owns)]
+    filed = rows.filed_keys(conn, [*listed.refs, *own_refs])
+    filings = [filed.get(ref) or filed.get(own) for ref, own in zip(listed.refs, own_refs)]
+    settles = identity.plan_settles(
+        conn, [title._replace(filed_under=filing)
+               for title, filing in zip(listed.titles, filings)], now=listed.now)
+    keys = [identity.per_source_key(record.source, record.id)
+            if (found := settles.identities[at]) is None else found.key
+            for record, at in zip(listed.records, listed.title_of)]
+    # WHERE A RE-KEY TAKES A FILING, it is followed: the entry moves with the
+    # title, not on its own.
+    retired = dict(settles.retired)
+
+    def followed(key: str) -> str:
+        while key in retired:
+            key = retired[key]
+        return key
+
+    moves = []
+    for at, ((source, media, _spelling), (_s, _m, own), filing) in enumerate(
+            zip(listed.refs, own_refs, filings)):
+        found = settles.identities[at]
+        if filing is None or found is None:
+            continue
+        if followed(filing) != found.key:
+            moves.append(rows.Move(source, media, own, followed(filing), found.key))
+    return Planned(settles, keys, moves, rows.primaries(conn, listed.rows, keys))
+
+
+def write_records(conn: db.Connection, listed: Listings, planned: Planned) -> list[str]:
+    """`listed` written as `planned` (`plan_records`, made on this connection from
+    what it holds now) decided, inside the caller's transaction: each listing's
+    title registered and its service's group written. Returns each record's
+    title key, in order.
+
+    A FIXED NUMBER OF STATEMENTS, however many records: the identity's batch
+    (identity.settle_many) and a statement per service and table written
+    (rows.write_listings) — an entry moving is the rare exception, written row
+    by row (rows.move_entries). A write transaction's lock is held while it
+    runs, and a statement can wait a GIL switch interval while the event loop is
+    busy — so a fill's lock time grew with its records, and the next writer's
+    patience ran out (identity.py's reads have the measurement).
 
     THE RECORDS' IDS ARE COMPLETED IN PLACE with the title's shared ids once its
     rows are written (identity.complete). A caller that draws the records it just
     stored — a search following a result to its card — then keys them as the
     calendar's read will, rather than by whichever ids this one service stated.
-    The rows keep what the service SAID.
+    The groups keep what the service SAID.
 
     AND EVERY KEY IS THE ONE ITS TITLE ANSWERS TO WHEN THE FILL IS DONE. A later
     record of the same fill can re-key a title an earlier one registered — Simkl's
     listing names a show by its tvdb id, Trakt's names its tmdb id too — and the
-    key the first resolution returned is then retired. A row written under it, or
-    an airing the caller files under it, has no identity to join and draws as a
-    card of its own until the window is next filled (identity.settle_many).
+    key the first resolution returned is then retired. A listing filed under it
+    would have no identity to join (identity.settle_many).
     """
-    return write_records(conn, listed, plan_records(conn, listed))
-
-
-def plan_records(conn: db.Connection, listed: Listings) -> identity.SettlePlan:
-    """`store_records`' reads and decisions, made and NOT written — for a caller
-    that makes them before taking the write lock (db.transaction's `prepare`)
-    and writes them inside it (`write_records`)."""
-    filed = rows.filed_keys(conn, listed.refs)
-    return identity.plan_settles(
-        conn, [title._replace(filed_under=filed.get(ref))
-               for title, ref in zip(listed.titles, listed.refs)], now=listed.now)
-
-
-def write_records(conn: db.Connection, listed: Listings, plan: identity.SettlePlan) -> list[str]:
-    """`listed` written as `plan` (`plan_records`, made on this connection from
-    what it holds now) decided, inside the caller's transaction. Returns each
-    record's title key, in order."""
     if not listed.records:
         return []
-    plan.apply(conn)
-    keys: list[str] = []
+    planned.settles.apply(conn)
+    rows.move_entries(conn, planned.moves, now=listed.now)
     for record, at in zip(listed.records, listed.title_of):
-        found = plan.identities[at]
-        if found is None:
-            keys.append(identity.per_source_key(record.source, record.id))
-            continue
-        keys.append(found.key)
-        record.ids = identity.with_shared(record.ids, found.ids)
-    rows.write_listings(conn, listed.rows, keys, now=listed.now)
-    return keys
+        found = planned.settles.identities[at]
+        if found is not None:
+            record.ids = identity.with_shared(record.ids, found.ids)
+    rows.write_listings(conn, listed.rows, planned.keys, now=listed.now)
+    return planned.keys
 
 
 class Asked(NamedTuple):

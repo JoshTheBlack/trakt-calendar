@@ -243,6 +243,256 @@ def statements_per_transaction():
         yield counts
 
 
+# ---------------------------------------------------------------------------
+# the title store, as a test reads and seeds it
+# ---------------------------------------------------------------------------
+#
+# ONE ROW PER TITLE, SEASON AND EPISODE, a column group per service
+# (app/metadata/groups.py). A test asks about one service's group by name rather
+# than spelling `{source}_{column}` — the helpers below read a group back under
+# its columns' own names, and list every listing the episode rows hold one per
+# (service, instant, calendar), the shape a test asserting "what is listed"
+# wants. Seeding goes through the live writers where one fits (`put_listing`:
+# the store's own fold; `put_title`: the store's own `service_ids` filing), and
+# writes a group's columns directly only for what no writer would put there —
+# a clock in the past, a failure count.
+
+def as_stored(records):
+    """`records` as the calendar's read hands them over: each carrying the
+    episode row the title store files it on (`Record.card`) — its title by the
+    shared waterfall, and its row by the store's own filing and fold
+    (app/metadata/episodes.py's `Book`), run in memory on one calendar. For a
+    test that builds Records by hand and groups them with no database."""
+    from app.calendar import cache
+    from app.metadata import episodes
+
+    records = list(records)
+    book = episodes.Book()
+    for record in records:
+        instant = episodes.Instant(float(record.air_ts), calendars=1, entry=None)
+        book.place(cache.group_base(record), str(record.media), str(record.source),
+                   record.season, record.episode_number, instant)
+    for record in records:
+        book.refold(cache.group_base(record), 1, episodes.utc_day(float(record.air_ts)))
+    for record in records:
+        stated = ((None, None) if str(record.media) == "movie"
+                  else (record.season, record.episode_number))
+        record.card = next(
+            f"{row.key}|{row.unit}" for row in book.of_title(cache.group_base(record))
+            if any(held.at == float(record.air_ts)
+                   and (row.stated(held) if row.media != "movie" else (None, None)) == stated
+                   for held in row.instants[str(record.source)]))
+    return records
+
+
+def stored_groups(records) -> list[dict]:
+    """The calendar's groups of hand-built `records`, as `as_stored` files them."""
+    from app.calendar import cache
+    return cache.group_records(as_stored(records))
+
+
+def _title_columns() -> tuple[str, ...]:
+    from app.metadata import groups, tables
+    return (*groups.NOT_WORDS[tables.TITLES], *groups.WORDS[tables.TITLES])
+
+
+async def title_groups(source: str | None = None) -> list[dict]:
+    """Every service group in `titles` (only `source`'s, when named), each with
+    `source`, `title_key`, `media`, `source_id` (the group's own id) and every
+    group column under its own name."""
+    from app import db
+    from app.metadata import groups, rows
+
+    names = [source] if source else list(groups.sources())
+    found = await db.fetch_all(rows.title_groups_sql(_title_columns(), sources=names))
+    return [dict(row) for row in found]
+
+
+async def title_group(title_key: str, source: str) -> dict | None:
+    """One title's group of one service, or None where it has none."""
+    return next((group for group in await title_groups(source)
+                 if group["title_key"] == str(title_key)), None)
+
+
+_SEASON_COLUMNS = ("name", "overview", "episode_count", "premiere", "air_dates_json", "poster",
+                   "cast_json", "videos_json", "fetched_at", "stale_after", "failed_at",
+                   "fail_count")
+
+
+async def season_groups(source: str | None = None) -> list[dict]:
+    """Every service's group of every season row (only `source`'s, when named):
+    `source`, `title_key`, `season` and the group's columns."""
+    from app import db
+    from app.metadata import groups, tables
+
+    out = []
+    for name in ([source] if source else groups.sources()):
+        for row in await db.fetch_all(
+                f"SELECT title_key, season, {groups.select(tables.SEASONS, name, _SEASON_COLUMNS)} "
+                f"FROM {tables.SEASONS} WHERE {groups.present(tables.SEASONS, name)} "
+                "ORDER BY title_key, season"):
+            out.append({"source": name, **dict(row)})
+    return out
+
+
+async def season_group(title_key: str, season: int, source: str) -> dict | None:
+    return next((group for group in await season_groups(source)
+                 if group["title_key"] == str(title_key) and group["season"] == int(season)),
+                None)
+
+
+_EPISODE_COLUMNS = ("title", "overview", "first_aired", "episode_type", "runtime", "rating",
+                    "votes", "fetched_at", "stale_after")
+
+
+async def episode_groups(source: str | None = None) -> list[dict]:
+    """Every service's DESCRIPTION of every episode row (only `source`'s, when
+    named) — a listing's stub (`fetched_at` 0) included: `source`, `title_key`,
+    `unit`, `season`, `number` and the description's columns."""
+    from app import db
+    from app.metadata import groups, tables
+
+    out = []
+    for name in ([source] if source else groups.sources()):
+        for row in await db.fetch_all(
+                f"SELECT title_key, unit, season, number, "
+                f"{groups.select(tables.EPISODES, name, _EPISODE_COLUMNS)} "
+                f"FROM {tables.EPISODES} WHERE {groups.present(tables.EPISODES, name)} "
+                "ORDER BY title_key, season, number"):
+            out.append({"source": name, **dict(row)})
+    return out
+
+
+async def listings(endpoint: str | None = None) -> list[dict]:
+    """Every listing the episode rows hold, one per (service, instant, calendar)
+    — on `endpoint` alone when one is named — as `source`, `media`, `source_id`
+    (the id the listing is filed under), `endpoint`, `title_key`, `unit`,
+    `air_ts`, `date_only`, `season` and `episode_number` (what the listing
+    stated, None for a half it left out), `from_search`, `label`, `stored_at`."""
+    from app import db, providers
+    from app.endpoints import ENDPOINTS
+    from app.metadata import episodes, groups, tables
+    from app.providers.base import Source
+
+    rows = await db.fetch_all(f"SELECT * FROM {tables.EPISODES} ORDER BY title_key, unit")
+    filed_as = {}
+    for row in await db.fetch_all(f"SELECT title_key, "
+                                  + ", ".join(f"{s}_ids_json, {s}_id" for s in groups.sources())
+                                  + f" FROM {tables.TITLES}"):
+        for source in groups.sources():
+            # The read's own rule (app/calendar/entries.py): the service's
+            # spelling of its ids, else the group's entry.
+            filed_as[(row["title_key"], source)] = (
+                providers.registered()[Source(source)].listing_id(
+                    json.loads(row[f"{source}_ids_json"] or "{}"))
+                or str(row[f"{source}_id"] or ""))
+    out = []
+    for row in rows:
+        stored = episodes.Row.read(row)
+        for source, held in stored.instants.items():
+            for instant in held:
+                season, number = stored.stated(instant)
+                for key, spec in ENDPOINTS.items():
+                    if not instant.calendars & spec.bit or (endpoint and key != endpoint):
+                        continue
+                    out.append({
+                        "source": source, "media": stored.media,
+                        "source_id": instant.entry or filed_as.get((stored.key, source), ""),
+                        "endpoint": key, "title_key": stored.key, "unit": stored.unit,
+                        "air_ts": instant.at, "date_only": instant.date_only,
+                        "season": season, "episode_number": number,
+                        "from_search": int(bool(instant.searched & spec.bit)),
+                        "label": instant.label, "stored_at": instant.listed_at})
+    return out
+
+
+def put_title(conn, source: str, media: str, source_id, title_key: str, *,
+              ids: dict | None = None, **values) -> None:
+    """A service's group of a title, inside the caller's connection: the entry
+    `source_id` names filed in `service_ids` by the store's own writer, the
+    group's columns as `values` give them (`fetched_at` now unless given)."""
+    import time
+
+    from app.metadata import groups, rows, tables
+
+    own = rows.own_id(source, source_id, ids or {})
+    stated = dict(ids or {rows.ID_NAMESPACE[source]: int(own) if own.isdigit() else own})
+    columns = {"id": own, "ids_json": json.dumps(stated), "fetched_at": int(time.time()),
+               **values}
+    if "title" in values and "title_fold" not in values:
+        columns["title_fold"] = rows.fold_title(values["title"])
+    conn.execute(f"INSERT INTO {tables.TITLES} (title_key, media, created_at) VALUES (?, ?, 0) "
+                 "ON CONFLICT(title_key) DO NOTHING", (title_key, media))
+    conn.execute(f"UPDATE {tables.TITLES} SET "
+                 + ", ".join(f"{source}_{name} = ?" for name in columns
+                             if groups.has(tables.TITLES, source, name))
+                 + " WHERE title_key = ?",
+                 (*(value for name, value in columns.items()
+                    if groups.has(tables.TITLES, source, name)), title_key))
+    rows.file_ids(conn, [[source, media, str(source_id), own, title_key]])
+
+
+def put_season(conn, source: str, title_key: str, season: int, **values) -> None:
+    """A service's group of one season, inside the caller's connection."""
+    import time
+
+    from app.metadata import groups, tables
+
+    columns = {"fetched_at": int(time.time()), **values}
+    conn.execute(f"INSERT INTO {tables.SEASONS} (title_key, season) VALUES (?, ?) "
+                 "ON CONFLICT(title_key, season) DO NOTHING", (title_key, int(season)))
+    conn.execute(f"UPDATE {tables.SEASONS} SET "
+                 + ", ".join(f"{source}_{name} = ?" for name in columns
+                             if groups.has(tables.SEASONS, source, name))
+                 + " WHERE title_key = ? AND season = ?",
+                 (*(value for name, value in columns.items()
+                    if groups.has(tables.SEASONS, source, name)), title_key, int(season)))
+
+
+def put_episode(conn, source: str, title_key: str, season: int, number: int, *,
+                media: str = "show", **values) -> None:
+    """A service's description of one numbered episode, inside the caller's
+    connection (`fetched_at` 0 — a listing's stub — unless given)."""
+    from app.metadata import groups, tables
+
+    unit = f"S{int(season)}E{int(number)}"
+    columns = {"fetched_at": 0, **values}
+    conn.execute(f"INSERT INTO {tables.EPISODES} (title_key, unit, media, season, number) "
+                 "VALUES (?, ?, ?, ?, ?) ON CONFLICT(title_key, unit) DO NOTHING",
+                 (title_key, unit, media, int(season), int(number)))
+    conn.execute(f"UPDATE {tables.EPISODES} SET "
+                 + ", ".join(f"{source}_{name} = ?" for name in columns
+                             if groups.has(tables.EPISODES, source, name))
+                 + " WHERE title_key = ? AND unit = ?",
+                 (*(value for name, value in columns.items()
+                    if groups.has(tables.EPISODES, source, name)), title_key, unit))
+
+
+def put_listing(conn, source: str, media: str, source_id, endpoint: str, title_key: str,
+                air_ts: float, *, season: int | None = None, number: int | None = None,
+                date_only: bool = False, from_search: bool = False, stored_at: int = 0,
+                label: str = "") -> None:
+    """A service's listing of an episode on a calendar, inside the caller's
+    connection — filed on its episode's row, and folded, by the store's own
+    writer (app/metadata/episodes.py). The title's group of the service, where
+    it has one, says whether `source_id` is its entry."""
+    from app.endpoints import ENDPOINTS
+    from app.metadata import episodes, rows, tables
+
+    bit = ENDPOINTS[endpoint].bit
+    own = rows.own_id(source, source_id, {})
+    held = conn.execute(f"SELECT {source}_id FROM {tables.TITLES} WHERE title_key = ?",
+                        (title_key,)).fetchone()
+    entry = None if held is None or held[0] in (None, own) else own
+    book = episodes.Book()
+    book.hold(episodes.read_titles(conn, [title_key]))
+    instant = episodes.Instant(float(air_ts), int(date_only), bit, bit if from_search else 0,
+                               0, label, int(stored_at), entry)
+    book.place(title_key, media, source, season, number, instant)
+    book.refold(title_key, bit, instant.day)
+    book.write(conn)
+
+
 class DatabaseTestCase(unittest.IsolatedAsyncioTestCase):
     """A freshly migrated database per test, for async tests with no HTTP."""
 

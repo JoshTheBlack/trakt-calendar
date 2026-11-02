@@ -9,10 +9,10 @@ locked by live measurement against the real Trakt API:
     five or six window reads, each cached and TTL'd independently.
 
   - STORE EACH SOURCE'S NORMALIZED RECORD AS ROWS. app/calendar/entries.py owns
-    the airings and coverage, and the title store (app/metadata/) what each
-    service says about a title; this module owns the window arithmetic and the
-    read path over them, and a "window" is now a DATE RANGE rather than a stored
-    object.
+    the listings and coverage, and the title store (app/metadata/) one row per
+    title, season and episode holding what each service says; this module owns
+    the window arithmetic and the read path over them, and a "window" is a DATE
+    RANGE rather than a stored object.
     Normalizing on the way IN is what lets a second source fill the same tables:
     a payload stored raw would have to be interpreted at read time by something
     that knows every source's field layout, and that something is exactly what a
@@ -20,19 +20,18 @@ locked by live measurement against the real Trakt API:
     in — the four local spellings of an air time are derived at READ, from
     `air_ts`, by app/providers/base.py's `render`.
 
-    THE GROUPING HAPPENS AT READ, NOT AT FILL, and that is a correction rather
-    than a move. Whether two records are one card depends on WHAT ELSE IS STORED
-    (see match_keys: one episode's every listing decides its units, and an
-    uncoordinated record folds into one only when exactly one candidate exists),
-    so storing the answer froze a judgement made against whatever happened to be
-    fetched beside it, and a later fill supplying the missing listing could not
-    revise it.
+    ONE EPISODE IS ONE ROW, AND THE ROW IS THE CARD. Which listings are one
+    episode is decided as they are WRITTEN (app/metadata/episodes.py's fold), and
+    re-decided by every write that touches the title and day — so a later fill
+    supplying a missing listing revises it, and a read only reads the row
+    (`group_records`). One service listing an episode twice is the one thing a
+    row draws as more than one card.
 
     AND IT IS NOT DONE WINDOW BY WINDOW. A window is the unit a FILL works in;
-    a card is ONE EPISODE whichever services list it (`may_join`), so a read
-    makes its windows current one by one and then reads its airings once, whole
-    — every listing of every episode it holds, at any date — and draws each card
-    on the day the viewer's own service gives it (`placed`).
+    a card is ONE EPISODE whichever services list it and however far apart they
+    date it, so a read makes its windows current one by one and then reads its
+    rows once, whole — every listing of every episode it holds, at any date — and
+    draws each card on the day the viewer's own service gives it (`placed`).
 
     `asked` NAMES WHO WAS REACHED FOR AND `answered` NAMES WHO REPLIED — two
     columns of `calendar_coverage` — and the gap between them is the only thing
@@ -243,12 +242,14 @@ def dedupe_records(records: list[Record]) -> list[Record]:
 
 
 def group_base(record: Record) -> str:
-    """The part of a group key that names the TITLE, with no airing in it.
+    """The TITLE a record that names no stored row is of — a record a service
+    has just described, never stored (a stored listing's title is its row's,
+    `Record.card`).
 
     The cross-source waterfall (app/providers/base.py's resolve_key), never a
     service's own id — keying on one of those would make the same title arriving
-    from two services two rows for ever. It stringifies whatever id it lands on,
-    which is the whole of this app's defence against the type mismatch that
+    from two services two titles for ever. It stringifies whatever id it lands
+    on, which is the whole of this app's defence against the type mismatch that
     matters most here: Simkl reports a tmdb id as the string "285652" and Trakt
     reports the same one as the int 285652, and a comparison that did not coerce
     would match NOTHING while looking exactly like sparse coverage from one
@@ -259,79 +260,10 @@ def group_base(record: Record) -> str:
     wrong merge, and a title nobody can name in a shared id space is one there is
     no honest way to recognize. The title store files such a title under the same
     spelling (app/metadata/identity.py's per_source_key).
-
-    A STORED RECORD CARRIES ITS TITLE'S SHARED IDS AS WELL AS ITS SERVICE'S, put
-    there by the read (entries._record_from_row) — so this answers the title
-    store's key, and two services' listings of one title share it even when one
-    of them names the title only by a lower id.
     """
     identity = resolve_key(record.media, record.ids)
     return str(identity) if identity is not None else title_identity.per_source_key(
         record.source, record.id)
-
-
-def episode_coords(record: Record) -> tuple[int, int] | None:
-    """(season, episode) when a record states BOTH, else None.
-
-    A THIRD OF PREMIERE ENTRIES STATE NEITHER, measured over July and August:
-    1230 of them carry no season or no episode number, overwhelmingly Simkl
-    anime, where a season is simply not part of how the entry is spelled — an
-    absolute episode number and nothing else — plus a scattering of Trakt records
-    that give a season and no number. So "the coordinates" is not a field a
-    matcher may assume it has, and None here is the ordinary case rather than a
-    malformed one. What such a record can still say is handled by `match_keys`
-    below.
-    """
-    if record.season is not None and record.episode_number is not None:
-        return (record.season, record.episode_number)
-    return None
-
-
-def episode_of(record: Record, base: str | None = None) -> tuple | None:
-    """WHICH EPISODE a record lists, as something two services can agree on: the
-    title's base and (season, episode) for a show stating both, the base alone
-    for a film — a film is one title on the film calendar, and its release is
-    the one airing it has — and None for a show record that states no full
-    coordinate, which can only be joined to an episode by its day (`match_keys`).
-    `base` is the record's `group_base`, for a caller that has worked it out.
-    """
-    base = group_base(record) if base is None else base
-    if str(record.media) == "movie":
-        return (base,)
-    coordinate = episode_coords(record)
-    return (base, coordinate) if coordinate is not None else None
-
-
-# HOW FAR APART, ACROSS A MONTH'S EDGE, TWO SERVICES' DATES FOR ONE EPISODE MAY BE
-# AND STILL BE ONE CARD. Inside one calendar month any distance joins.
-JOIN_ACROSS_MONTHS_DAYS = 7
-
-
-def may_join(first: date, second: date) -> bool:
-    """Whether two listings of ONE episode, on these UTC days, may be one card:
-    the same calendar month, or at most a week apart across a month's edge.
-
-    THE RULE IS ABOUT THE CALENDAR A READER SEES, NOT ABOUT STORAGE. It used to
-    be the storage's: listings were matched inside one seven-day window, and the
-    only repair across a window's edge joined halves at most a day apart. So the
-    same episode drew as two cards whenever two services dated it either side of
-    a Monday — MEASURED: Yellowjackets S04E01, which Simkl dates 21 November
-    01:00 UTC and Trakt 23 November 02:00 UTC (a Monday), drew on both days. On
-    the dev instance 30 episodes on All Episodes, 3 premieres and 4 films drew
-    twice that way.
-
-    A MONTH, BECAUSE THAT IS THE PAGE. Two services disagreeing about which day
-    of the month an episode airs on still mean the same episode on the same
-    page, and one card drawn on the day the viewer's own service gives is the
-    answer that cannot be confused with a second airing. Across the page's edge
-    a week is admitted, so a premiere dated the 31st by one service and the 2nd
-    by another is still one card. FURTHER APART THAN THAT STAYS TWO, and those
-    are not one airing said twice: they are numbering disputes — Dimension 20's
-    season 29 premiere is 8 April on Trakt and 16 September on Simkl — where two
-    cards in two months is the honest drawing of two services' disagreement.
-    """
-    return ((first.year, first.month) == (second.year, second.month)
-            or abs((first - second).days) <= JOIN_ACROSS_MONTHS_DAYS)
 
 
 _SOURCE_RANK = {str(source): rank for rank, source in enumerate(Source)}
@@ -340,168 +272,83 @@ _SOURCE_RANK = {str(source): rank for rank, source in enumerate(Source)}
 def _listing_order(record: Record) -> tuple:
     """Date order, and a total one: a tie on the instant goes to the registry's
     declared order and then the service's own id, so the same listings make the
-    same units however a reader happened to fetch them."""
+    same cards however a reader happened to fetch them."""
     return (float(record.air_ts), _SOURCE_RANK.get(str(record.source), len(_SOURCE_RANK)),
             str(record.id))
 
 
-def join_listings(listings: list[Record]) -> list[list[Record]]:
-    """ONE EPISODE's listings — every service's records of it — as the units a
-    calendar draws, each unit one card. Pure, and deterministic in its input.
+# HOW FAR APART, ACROSS A MONTH'S EDGE, ONE SERVICE'S REPEATED LISTING AND
+# ANOTHER SERVICE'S LISTING OF THE SAME EPISODE MAY BE AND STILL BE DRAWN AS ONE
+# CARD. Inside one calendar month any distance joins.
+JOIN_ACROSS_MONTHS_DAYS = 7
 
-    IN DATE ORDER, A LISTING JOINS THE CURRENT UNIT when its service is not in
-    it yet and it may join (`may_join`) EVERY listing already in it; otherwise
-    it starts the next unit. EVERY, not any: a unit is one airing, so each of
-    its listings has to be close enough to each other one, and a chain of
-    neighbours a month long would be several airings glued together.
 
-    ONE LISTING PER SERVICE PER UNIT. A service listing one episode twice is a
-    repeat the calendar has always drawn twice, and folding a service into its
-    own other listing would collapse it rather than reconcile two services.
+def may_join(first: date, second: date) -> bool:
+    """Whether two listings of ONE episode, on these UTC days, are drawn
+    together where one of their services lists the episode more than once: the
+    same calendar month, or at most a week apart across a month's edge (a
+    premiere dated the 31st by one service and the 2nd by another).
 
-    VIEWER-INDEPENDENT, WHICH IS WHY IT MAY RUN ANYWHERE. Which units an episode
-    makes depends on what the services said and nothing else; which of a unit's
-    listings describes it, and so which DAY it is drawn on, is the viewer's
-    (app/calendar/resolve.py).
+    WHERE NO SERVICE LISTS IT TWICE, ANY DISTANCE JOINS (`cards_of`): two
+    services disagreeing about which day an episode airs on — Dimension 20's
+    season 29 premiere is 8 April on Trakt and 16 September on Simkl — are one
+    episode said twice, drawn once on the viewer's own service's day with the
+    other day beside it."""
+    return ((first.year, first.month) == (second.year, second.month)
+            or abs((first - second).days) <= JOIN_ACROSS_MONTHS_DAYS)
+
+
+def cards_of(listings: list[Record]) -> list[list[Record]]:
+    """ONE EPISODE's listings — every service's listing of one stored episode
+    row — as the cards a calendar draws. Pure, and deterministic in its input.
+
+    ONE CARD, WHATEVER THE DATES, UNLESS ONE SERVICE LISTS THE EPISODE TWICE.
+    Which listings are one episode is the row (`Record.card`), decided as they
+    were written. One service saying the episode airs twice is a repeat the
+    calendar has always drawn twice, so in date order a listing joins the
+    current card when its service is not in it yet and it may join every
+    listing already there (`may_join`), and otherwise starts the next — folding
+    a service into its own other listing would collapse it rather than
+    reconcile two services. Then cards that share no service are one card, each
+    joining the nearest earlier one: two services' dates for one episode,
+    however far apart, are one episode.
 
     HANDED EVERY STORED LISTING OF THE EPISODE, NEVER A RANGE'S SHARE OF THEM.
-    The scan is in date order and each unit's membership depends on the one
-    before it, so a listing far outside a reader's range can still decide where
-    a unit inside it closes. A month, a day, a search and a share page all read
-    an episode whole (entries.read_span_whole, entries.read_groups), which is
-    what makes them draw the same cards on the same days by construction.
+    Each card's membership depends on the listings before it, so a listing far
+    outside a reader's range can still decide where a card inside it closes. A
+    month, a day, a search and a share page all read an episode whole
+    (entries.read_span_whole, entries.read_groups), which is what makes them
+    draw the same cards on the same days by construction.
     """
-    return _units(listings, {id(record): record_utc_date(record) for record in listings})
-
-
-def _units(listings: list[Record], day_of: dict[int, date]) -> list[list[Record]]:
-    """`join_listings` with each listing's UTC day already worked out (`day_of`,
-    by the listing's id) — the matcher works out every record's once."""
+    day_of = {id(record): record_utc_date(record) for record in listings}
     units: list[list[Record]] = []
     for record in sorted(listings, key=_listing_order):
-        day = day_of[id(record)]
         current = units[-1] if units else None
         if (current is not None
                 and all(str(held.source) != str(record.source) for held in current)
-                and all(may_join(day_of[id(held)], day) for held in current)):
+                and all(may_join(day_of[id(held)], day_of[id(record)]) for held in current)):
             current.append(record)
         else:
             units.append([record])
-    return units
-
-
-def match_keys(records: list[Record]) -> list[str]:
-    """The final group key for each of `records`, in the same order — THE
-    MATCHER: which records are one card.
-
-    TWO RULES, ONE FOR EACH KIND OF RECORD.
-
-    A RECORD THAT NAMES AN EPISODE (`episode_of`: a full coordinate, or a film)
-    is grouped with that episode's other listings by `join_listings`, whatever
-    their dates — the first unit of an episode is keyed `base|season|episode`
-    (a film's, `base`) and each later one carries a repeat marker (`#2`), which
-    is what keeps a numbering dispute months apart, or a service's own second
-    listing, its own card.
-
-    A RECORD THAT DOES NOT is folded into a unit of the SAME TITLE when exactly
-    one episode can be the airing it means. TWO SOURCES CAN AGREE PERFECTLY
-    ABOUT THE ID AND STILL FAIL TO MATCH, because they describe the airing at
-    DIFFERENT RESOLUTIONS. Measured on real stored windows: one service lists an
-    anime premiere as episode 1 with no season at all and the other lists it as
-    S01E01, same title, same tmdb id, same day. The conditions:
-
-      - same base (the same title in the same shared id space),
-      - a listing of that episode on the same UTC calendar day, because a show
-        airing twice in one week is two airings and nothing here may guess which
-        one an uncoordinated record is,
-      - and agreement on whichever half of the coordinate the record DID state.
-        This is the condition that carries most of the weight: one live window
-        holds eight uncoordinated records for a single title on one day, one per
-        episode, against that title's eight coordinated ones — day alone would
-        make all eight ambiguous and match none of them, while the stated episode
-        number picks each one out exactly.
-
-    AMBIGUITY IS COUNTED BEFORE ANYTHING ELSE NARROWS IT, AND THAT ORDER IS THE
-    WHOLE SAFETY ARGUMENT. Every episode of the title listed that day is a
-    candidate, whoever listed it; only if there is EXACTLY ONE is the record
-    folded in, and only then is it asked whether the unit it would join already
-    carries a record from this same source — in which case it is refused too,
-    because folding a service's uncoordinated listing into its own coordinated
-    one would be collapsing that service's listing rather than reconciling two
-    of them. Counting the other way round — narrowing by source and THEN
-    counting — is a real trap and not a theoretical one: on a day where one
-    service lists season 4 and the other season 5 of the same show, it would
-    leave exactly one survivor for an uncoordinated third record and merge it
-    into the wrong season, silently.
-
-    ZERO CANDIDATES OR SEVERAL, AND THE RECORD KEEPS A KEY OF ITS OWN — its
-    title and its day — and renders as its own card. That is the direction this
-    has to fail in: a visible duplicate is a cosmetic complaint, and a wrong
-    merge hides one title behind another with nothing on the page to say so. Its
-    DAY and not the storage week it was filed in: no live week holds two
-    services' unfolded records of one title (measured on the dev instance), and
-    keying on the day is what keeps this rule the same however a reader's range
-    falls across the weeks.
-
-    WHAT THIS DELIBERATELY DOES NOT DO is match on title and day. Two different
-    SEASONS of one show premiering on the same day is a real thing — three live
-    examples, all with both records fully coordinated — and any rule of the form
-    "same title, same day, one card" destroys them. They are untouched here
-    precisely because both sides name a different episode.
-    """
-    return _matched(records)[0]
-
-
-def _matched(records: list[Record]) -> tuple[list[str], list[str]]:
-    """`match_keys`, with each record's `group_base` beside its key — the title
-    each card is of, which the matcher works out on the way."""
-    keys: list[str] = [""] * len(records)
-    # EACH RECORD'S TITLE AND DAY, WORKED OUT ONCE: both are asked of a record
-    # three or four times below, and a month holds tens of thousands of them.
-    bases = [group_base(record) for record in records]
-    day_of = {id(record): record_utc_date(record) for record in records}
-    episodes: dict[tuple, list[int]] = {}
-    for index, (record, base) in enumerate(zip(records, bases)):
-        episode = episode_of(record, base)
-        if episode is not None:
-            episodes.setdefault(episode, []).append(index)
-
-    # Each episode's units, and for every (title, day) the units that have a
-    # listing on it — the only things an uncoordinated record can be folded into.
-    position = {id(record): index for index, record in enumerate(records)}
-    on_day: dict[tuple[str, date], dict[str, dict]] = {}
-    for episode, members in episodes.items():
-        base = episode[0]
-        stem = base if len(episode) == 1 else f"{base}|{episode[1][0]}|{episode[1][1]}"
-        for number, listings in enumerate(_units([records[i] for i in members], day_of), 1):
-            unit = {"key": stem if number == 1 else f"{stem}#{number}",
-                    "coordinate": episode[1] if len(episode) > 1 else None,
-                    "sources": {str(r.source) for r in listings}}
-            for record in listings:
-                keys[position[id(record)]] = unit["key"]
-                on_day.setdefault((base, day_of[id(record)]), {})[unit["key"]] = unit
-
-    for index, record in enumerate(records):
-        if keys[index]:
-            continue
-        base, day = bases[index], day_of[id(record)]
-        candidates = [unit for unit in on_day.get((base, day), {}).values()
-                      if unit["coordinate"] is not None
-                      and (record.episode_number is None
-                           or unit["coordinate"][1] == record.episode_number)
-                      and (record.season is None or unit["coordinate"][0] == record.season)]
-        coordinates = {unit["coordinate"] for unit in candidates}
-        if len(coordinates) == 1 and str(record.source) not in candidates[0]["sources"]:
-            candidates[0]["sources"].add(str(record.source))
-            keys[index] = candidates[0]["key"]
+    cards: list[list[Record]] = []
+    for unit in units:
+        services = {str(record.source) for record in unit}
+        apart = [card for card in cards if not services & {str(r.source) for r in card}]
+        if apart:
+            min(apart, key=lambda card: min(abs(float(a.air_ts) - float(b.air_ts))
+                                            for a in card for b in unit)).extend(unit)
         else:
-            keys[index] = f"{base}@{day.isoformat()}"
-    return keys, bases
+            cards.append(list(unit))
+    return cards
 
 
 def group_records(records: list[Record]) -> list[dict]:
     """The read path's groups: one per card, each source's record kept whole
     under its own name.
+
+    WHICH RECORDS ARE ONE CARD IS THE STORE'S ANSWER: the episode row each
+    listing is filed on (`Record.card`), split only where one service lists the
+    episode twice (`cards_of`). A record that names no row is a card of its own.
 
     PROVENANCE IS RECORDED FOR EVERY FIELD, not only for the ones that disagree,
     because "both sources agreed" and "only one source had it" must be able to
@@ -520,40 +367,23 @@ def group_records(records: list[Record]) -> list[dict]:
     half for nothing (MEASURED, profiled). Nothing writes into a record a group
     holds.
 
-    A KEY COLLIDING WITH ITSELF FOR ONE SOURCE is a repeated airing of a record
-    that names no episode — the same title listed twice on one day — and gets a
-    distinct key rather than overwriting, because the calendar has always drawn
-    both and this is not the place to decide it should stop. `match_keys` never
-    puts one service twice into an episode's unit, so this is the only way two
-    records of one source can meet here.
-
-    WHICH RECORDS SHARE A KEY IS `match_keys`' ANSWER, NOT THIS FUNCTION'S, and
-    it is only as good as the records handed to it: an episode's units are
-    decided by ALL its listings, so a caller grouping part of them may make
-    different cards from a reader holding the rest. Every read path hands over
-    an episode whole (entries.read_span_whole, entries.read_groups).
+    `base` IS THE TITLE the card is of — its row's title key — kept so that what
+    reads a group by its title need not work it out again.
     """
-    index: dict[str, dict] = {}
+    by_row: dict[str, list[Record]] = {}
+    for record in records:
+        by_row.setdefault(record.card or f"#{id(record)}", []).append(record)
     out: list[dict] = []
-    keys, titles = _matched(records)
-    for record, base, title in zip(records, keys, titles):
-        name = str(record.source)
-        key, bump = base, 1
-        while key in index and name in index[key]["by_source"]:
-            bump += 1
-            key = f"{base}#{bump}"
-        group = index.get(key)
-        if group is None:
-            # `base` is the TITLE the card is of — `group_base` of its records,
-            # every one the same title by the matcher's rule — kept so that what
-            # reads a group by its title need not work it out again.
-            group = {"key": key, "base": title, "ids": {}, "by_source": {}}
-            index[key] = group
+    for row, listings in by_row.items():
+        base = row.split("|", 1)[0] if listings[0].card else group_base(listings[0])
+        for number, card in enumerate(cards_of(listings), 1):
+            group = {"key": f"{row}#{number}", "base": base, "ids": {}, "by_source": {}}
+            for record in card:
+                group["by_source"][str(record.source)] = record
+                for namespace, value in (record.ids or {}).items():
+                    if value not in (None, ""):
+                        group["ids"].setdefault(namespace, value)
             out.append(group)
-        group["by_source"][name] = record
-        for namespace, value in (record.ids or {}).items():
-            if value not in (None, ""):
-                group["ids"].setdefault(namespace, value)
     return out
 
 
@@ -906,15 +736,12 @@ async def store_window(endpoint_key: str, start: date, records: list[Record],
     30 September, opened a month with no such card and nothing to land on; the
     next visit, reading rows, found it. The read path reads the rows back.
 
-    THE GROUPING IS NO LONGER WHAT IS STORED. It used to be: the window blob held
-    the finished groups, so the match ran once at fill and every read served its
-    answer. Rows store each source's records separately and `match_keys` runs at
-    READ instead — which is not a regression but a correction. Whether two
-    records are one card depends on WHAT ELSE IS STORED (see match_keys: an
-    episode's every listing decides its units, and an uncoordinated record folds
-    into one only when exactly one candidate exists), so a fill that stored the
-    answer froze a judgement made against whatever had been fetched alongside
-    it. A later fill adding another service's listing could not revise it.
+    WHICH LISTINGS ARE ONE EPISODE IS DECIDED HERE, AND REVISED BY EVERY LATER
+    WRITE. Each listing is filed on its episode's row, and one that names no full
+    episode joins a numbered one only while exactly one candidate exists
+    (app/metadata/episodes.py's fold) — re-decided whenever a write touches its
+    title and day, so a later fill adding another service's listing revises the
+    judgement instead of being frozen out by it.
     """
     # WHAT IS ALREADY KNOWN GOES IN WITH THEM. A fresh calendar payload is
     # unenriched by construction, so storing it as-is would blank every title the
@@ -1430,7 +1257,7 @@ async def with_title_only(parsed, settings=None) -> list[tuple[dict, list[Record
 
     WHAT ONE IS. A service that describes every card (Capabilities.
     describes_every_card — TMDB) and does not list this airing may still have
-    said what the title is: its row in the title store, under the title's key,
+    said what the title is: its group on the title's row in the title store
     holds the certification, language, network, genres and keywords the services
     that list the card often do not state — measured on one October's All
     Episodes, 10,899 of 16,997 cards had no certification and 15,038 no
@@ -1464,9 +1291,9 @@ async def with_title_only(parsed, settings=None) -> list[tuple[dict, list[Record
     ONE READ FOR THE WHOLE SPAN, of the store's rows only — nothing is asked of
     any service and nothing is written, so a read for one viewer leaves every
     row exactly as the next viewer finds it. A group that already holds a
-    listing from the describing service gains nothing: that listing is the same
-    row (entries._READ_SQL joins it). One record per title, shared by every card
-    of it in the span — nothing downstream writes to a record it is handed.
+    listing from the describing service gains nothing: that listing carries the
+    same group's words. One record per title, shared by every card of it in the
+    span — nothing downstream writes to a record it is handed.
     `settings` is the operator's admission (resolve.describing_sources): a
     service this instance keeps off its calendar describes none of its cards.
     """
@@ -2070,13 +1897,13 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         raise first_error
     partial = errored > 0 or incomplete
 
-    # THE SPAN'S AIRINGS, READ ONCE AND WHOLE, and both halves of that are the
+    # THE SPAN'S LISTINGS, READ ONCE AND WHOLE, and both halves of that are the
     # point. ONCE: windows are where a fill is decided, not where a card is —
-    # matched window by window, one episode two services dated either side of a
-    # Monday drew as two cards (see may_join). WHOLE: every other stored listing
-    # of each episode the span holds comes with it, at whatever date, because
-    # whether a listing here is one card with a listing elsewhere decides which
-    # day this viewer's card is drawn on (entries.read_span_whole has the cost).
+    # read window by window, one episode two services dated either side of a
+    # Monday drew as two cards. WHOLE: every other stored listing of each
+    # episode the span holds comes with it, at whatever date, because it is the
+    # same card and decides which day this viewer's card is drawn on
+    # (entries.read_span_whole).
     # A WINDOW NOTHING HAS FILLED CONTRIBUTES NO AIRINGS of its own, exactly as
     # when it was read by itself: what sits in one is only what a search or a
     # tracker wrote there, and a read that may not fill serves it as the empty

@@ -609,11 +609,16 @@ class MigrationTests(DbTestCase):
         self.assertEqual(conn.execute("SELECT title FROM episode_metadata").fetchone()[0], "Second")
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertFalse({"calendar_titles", "calendar_episodes"} & tables)
-        self.assertTrue({"titles", "title_aliases", "season_metadata", "metadata_refresh",
+        # 47's identity table is kept aside by 49 (`titles_v47`), still empty.
+        self.assertTrue({"titles_v47", "title_aliases", "season_metadata", "metadata_refresh",
                          "title_posters", "network_logos"} <= tables)
-        for table in ("titles", "title_aliases", "season_metadata", "metadata_refresh",
+        for table in ("titles_v47", "title_aliases", "season_metadata", "metadata_refresh",
                       "title_posters", "network_logos"):
             self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0, table)
+        # And 49 made the service's row its title's row in the one store.
+        self.assertEqual(tuple(conn.execute(
+            "SELECT title_key, simkl_title, simkl_network FROM titles").fetchone()),
+            ("show:tvdb:4321", "A Show", "HBO"))
         indexes = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
         self.assertTrue({"ix_title_metadata_fold", "ix_title_metadata_key",
                          "ix_title_metadata_due", "ix_title_metadata_fetched",

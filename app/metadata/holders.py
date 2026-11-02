@@ -30,9 +30,9 @@ row has one and it is empty — never overwritten.
 
 AND WHAT A HOLDER KEEPS ALIVE. A feature's row is a reason to keep every service's
 description of the title it holds (`held_keys`): the store's retention sweep
-(app/metadata/rows.py) deletes a description only once no airing names it AND no
-feature row holds its title, so a tracker or board title never loses the words it
-is drawn with to a calendar that stopped listing it.
+(app/metadata/rows.py) clears a service's group only once no listing names its
+title AND no feature row holds it, so a tracker or board title never loses the
+words it is drawn with to a calendar that stopped listing it.
 """
 from __future__ import annotations
 
@@ -44,6 +44,7 @@ from typing import Any, NamedTuple
 from .. import db
 from ..providers.base import ItemKey, parse_item_key
 from . import ids as id_rules
+from . import merge
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +59,16 @@ class Holder(NamedTuple):
 
 HOLDERS: tuple[Holder, ...] = (
     Holder("titles", ("title_key",),
-           "the identity itself — merged into the new key by identity.settle"),
+           "the identity and every service's group — its identity merged by "
+           "identity.settle, its groups by merge.titles"),
     Holder("title_aliases", ("old_key", "title_key"),
            "keys a title used to have — kept by identity.settle, never here"),
-    Holder("title_metadata", ("title_key",), "each service's description of the title"),
-    Holder("calendar_airings", ("title_key",), "every listing of the title on a calendar"),
+    Holder("seasons", ("title_key",), "every service's words about a season — merge.titles"),
+    Holder("episodes", ("title_key",),
+           "every service's listing of an episode and its words about it — merge.titles"),
+    Holder("service_ids", ("title_key",),
+           "which title each of a service's own ids names — merge.titles"),
+    Holder("share_highlights", ("title_key",), "a shared month's featured shows"),
     Holder("title_posters", ("title_key",), "pictures of a title with no tmdb id"),
     Holder("not_watching_shows", ("item_id",), "a viewer's not-watching mark"),
     Holder("calendar_view_state", ("last_show_ids_json",),
@@ -96,8 +102,6 @@ HOLDERS: tuple[Holder, ...] = (
 # later is a decision somebody has to make here, not a holder a re-key silently
 # leaves behind.
 NOT_HOLDERS: dict[str, str] = {
-    "episode_metadata": "keyed by the service's own id for the title",
-    "season_metadata": "keyed by the service's own id for the title",
     "metadata_refresh": "keyed by the service's own id for the title",
     "show_posters": "keyed by tmdb id, which a re-key never takes away",
     "season_posters": "keyed by tmdb id, which a re-key never takes away",
@@ -138,7 +142,7 @@ NOT_HOLDERS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 # A TRIPLE AS THE KEY IT SPELLS — the shared waterfall's flat form, exactly what
-# `ItemKey.__str__` writes and `title_metadata.title_key` holds.
+# `ItemKey.__str__` writes and `titles.title_key` holds.
 _FLAT_TRIPLE = "media || ':' || match_source || ':' || match_id"
 
 # THE HOLDERS WHOSE ROWS DRAW A TITLE, and so keep every service's description of
@@ -159,10 +163,12 @@ _KEEPS_ALIVE: dict[str, str] = {
 # holder, which tests/metadata/test_holders.py checks — a holder added later is a
 # decision about retention as well as about re-keying.
 KEEPS_NOTHING_ALIVE: dict[str, str] = {
-    "titles": "the identity itself, which the sweep does not touch",
+    "titles": "the identity, which the sweep never removes, and the groups it decides about",
     "title_aliases": "the identity's retired keys",
-    "title_metadata": "the descriptions the sweep is deciding about",
-    "calendar_airings": "has a rule of its own: a row an airing names is kept",
+    "seasons": "the descriptions the sweep is deciding about",
+    "episodes": "has a rule of its own: a group a service's listing stands beside is kept",
+    "service_ids": "an entry's ids, kept and cleared with its group",
+    "share_highlights": "a featured show is one its month lists, which keeps its words",
     "title_posters": "pictures, kept by the poster registry's own retention",
     "not_watching_shows": "a mark on a calendar card, which the card's own airing draws",
     "calendar_view_state": "which titles a visit drew, kept only to say what is new",
@@ -235,11 +241,14 @@ def repoint(conn: db.Connection, old: str, new: str, *, now: int) -> dict[str, i
     Returns {table: rows moved}. The identity tables are identity.settle's.
 
     A key with no shared id (a title one service names) can only be held by the
-    tables that file such titles — the calendar's and a viewer's marks — so the
+    tables that file such titles — the store's own and a viewer's marks — so the
     tracker's and the board's are skipped for it rather than asked."""
     counts = {
-        "title_metadata": _column(conn, "title_metadata", "title_key", old, new),
-        "calendar_airings": _column(conn, "calendar_airings", "title_key", old, new),
+        # THE STORE'S OWN ROWS MERGE, each service's group decided on its own
+        # (app/metadata/merge.py); every other holder is repointed.
+        **merge.titles(conn, old, new, now=now),
+        "share_highlights": _scoped_column(conn, "share_highlights", "title_key",
+                                           ("user_id", "year", "month"), old, new),
         "title_posters": _scoped_column(conn, "title_posters", "title_key",
                                         ("media", "source"), old, new),
         "not_watching_shows": _scoped_column(conn, "not_watching_shows", "item_id",

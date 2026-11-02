@@ -30,7 +30,7 @@ from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Record, Source
 from app.sources import prefs as source_prefs
-from tests.support import migrated_db
+from tests.support import migrated_db, stored_groups
 
 SHOWS = get_endpoint("shows")
 AIR_TS = 1784145600.0
@@ -57,7 +57,7 @@ def _record(source, **overrides) -> Record:
 def _group(*records: Record) -> dict:
     """The stored group shape, built the way a fill builds it — so every group
     below is one the matcher would really produce."""
-    groups = calendar_cache.group_records(list(records))
+    groups = stored_groups(list(records))
     assert len(groups) == 1, "these records do not match; the matcher would draw two cards"
     return groups[0]
 

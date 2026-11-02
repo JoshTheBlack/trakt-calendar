@@ -177,11 +177,11 @@ class TypingTests(_SearchTestCase):
     def test_the_list_is_every_stored_title_not_the_viewers_calendar(self):
         """Unfiltered: a title another viewer's month stored, and one this
         viewer's own filters would hide, are both addable."""
-        asyncio.run(auth_prefs.update_user_prefs(self.user_id, endpoint="shows/all",
+        asyncio.run(auth_prefs.update_user_prefs(self.user_id, endpoint="shows",
                                                  tv_genres="-drama"))
         self.assertEqual(self.value("SELECT tv_genres FROM user_prefs WHERE user_id = ?",
                                     (self.user_id,)), "-drama")
-        store(a_record(genres=["drama"]), endpoint="shows/all")
+        store(a_record(genres=["drama"]), endpoint="shows")
         self.assertEqual([row["title"] for row in result_rows(self.typed("sever"))],
                          ["Severance"])
 
@@ -201,7 +201,7 @@ class TypingTests(_SearchTestCase):
         self.assertEqual(self.typed("s").strip(), "")
 
     def test_films_are_listed_under_the_film_medium(self):
-        store(a_record("Heat", 949, Media.MOVIE, runtime=170), endpoint="movies/releases")
+        store(a_record("Heat", 949, Media.MOVIE, runtime=170), endpoint="movies")
         self.assertEqual([r["title"] for r in result_rows(self.typed("heat", "movie"))], ["Heat"])
         self.assertEqual(result_rows(self.typed("heat")), [])
 

@@ -294,21 +294,24 @@ class WhichGroupsAQueryLoadsTests(SearchTestCase):
                                                       params).fetchall())
         return " | ".join(str(row["detail"]) for row in rows)
 
-    async def test_the_matches_are_found_in_the_fold_index_before_any_airing_is_read(self):
+    async def test_the_matches_are_found_in_the_fold_index_before_any_listing_is_read(self):
         """THE SHAPE IS THE SPEED. Measured on a copy of a real instance, the
-        planner left to itself walked the endpoint's every airing — 38-112ms a
-        keystroke for a query naming one title — and this order is 2ms."""
-        plan = await self.plan(calendar_entries._SEARCH_SQL, (SHOWS, "%x%", 40))
-        self.assertIn("ix_title_metadata_fold", plan)
-        self.assertNotIn("ix_calendar_airings_month", plan)
-        self.assertLess(plan.index("ix_title_metadata_fold"),
-                        plan.index("sqlite_autoindex_calendar_airings_1"))
+        planner left to itself walked the calendar's every listing — 38-112ms a
+        keystroke for a query naming one title — and this order is 2ms: each
+        service's fold index scanned, and only a matching title's episode rows
+        looked up, through their title."""
+        plan = await self.plan(calendar_entries._matching_sql(matches_first=True),
+                               {"bit": 8, "needle": "%x%", "limit": 40})
+        for source in ("tmdb", "trakt", "simkl"):
+            self.assertIn(f"ix_titles_{source}_fold", plan)
+        self.assertNotIn("SCAN e ", plan + " ")
+        self.assertIn("ix_episodes_season", plan)
 
-    async def test_a_group_is_read_through_its_key_and_not_the_endpoints_month(self):
-        sql = calendar_entries._BY_KEY_SQL.replace("__KEYS__", "?, ?")
-        plan = await self.plan(sql, (SHOWS, "a", "b"))
-        self.assertIn("ix_calendar_airings_key", plan)
-        self.assertNotIn("ix_calendar_airings_month", plan)
+    async def test_a_group_is_read_through_its_key_and_not_the_calendars_month(self):
+        sql = calendar_entries._rows_sql("e.title_key IN (SELECT value FROM json_each(?))")
+        plan = await self.plan(sql, ('["a", "b"]',))
+        self.assertIn("ix_episodes_season", plan)
+        self.assertNotIn("SCAN e ", plan + " ")
 
 
 class WhichGroupsABigCalendarLoadsTests(WhichGroupsAQueryLoadsTests):
@@ -330,7 +333,7 @@ class WhichGroupsABigCalendarLoadsTests(WhichGroupsAQueryLoadsTests):
                           wraps=calendar_entries.db.fetch_all) as spy:
             await calendar_entries.groups_matching(SHOWS, "severance", 40)
         self.assertEqual([c.args[0] for c in spy.call_args_list],
-                         [calendar_entries._SEARCH_SQL])
+                         [calendar_entries._matching_sql(matches_first=True)])
 
 
 class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):

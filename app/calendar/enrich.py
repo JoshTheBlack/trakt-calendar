@@ -90,6 +90,7 @@ from .. import db
 from .. import perftrace
 from ..metadata import refresh as metadata_refresh
 from ..metadata import rows as title_rows
+from ..metadata import tables
 from ..providers.base import Media, Record, Source, SourceUnavailable
 from ..providers.simkl import titles as simkl_titles
 from ..providers.simkl import transport as simkl_transport
@@ -1310,17 +1311,18 @@ async def backlog(*, now: int | None = None) -> tuple[int, int]:
     unanswered row is not this drain's to owe.
     """
     ts = db.now() if now is None else now
+    simkl = str(Source.SIMKL)
     titles = await db.fetch_value(
-        f"SELECT COUNT(*) FROM {title_rows.TITLES} t "
+        f"SELECT COUNT(*) FROM {tables.TITLES} t "
         "LEFT JOIN simkl_titles s "
-        "  ON s.simkl_id = json_extract(t.ids_json, '$.simkl') AND s.media = t.media "
-        "WHERE t.enriched = 0 AND t.source = ? "
+        f"  ON s.simkl_id = json_extract(t.{simkl}_ids_json, '$.simkl') AND s.media = t.media "
+        f"WHERE t.{simkl}_enriched = 0 AND t.{simkl}_id IS NOT NULL "
         # An empty payload is a stored failure (see _upsert_failure); a row WITH
         # a payload is an answer this title has not been given yet, and no number
         # of later failures makes that stop being owed.
         "  AND NOT (COALESCE(s.fail_count, 0) >= ? "
         "           AND (s.payload IS NULL OR length(s.payload) <= ?))",
-        (str(Source.SIMKL), _GIVE_UP_AFTER, _EMPTY_PAYLOAD_MAX_BYTES))
+        (_GIVE_UP_AFTER, _EMPTY_PAYLOAD_MAX_BYTES))
     # AND EVERY OTHER SERVICE'S SPARSE LISTINGS, which the title store's refresh
     # queue completes rather than this drain (TMDB's — Capabilities.
     # describes_sparse_listings): one number for "titles still being looked

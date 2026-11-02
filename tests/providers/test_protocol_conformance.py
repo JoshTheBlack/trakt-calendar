@@ -753,6 +753,24 @@ class EveryServiceDeclaresItsStoreColumnsTests(unittest.TestCase):
                                  provider.calendar_port is not None)
 
 
+class EveryServiceSaysWhichIdAListingIsFiledUnderTests(unittest.TestCase):
+    """Provider.listing_id: the id a service's listing of a title is filed under,
+    read off the ids it stated — what the calendar's read gives a card's record
+    as its own id (app/calendar/entries.py), so it must be the service's own and
+    never another's."""
+
+    def test_a_title_this_service_knows_is_filed_under_its_own_id(self):
+        for source, provider in providers.registered().items():
+            with self.subTest(source=str(source)):
+                self.assertEqual(provider.listing_id({str(source): 12345, "imdb": "tt1"}),
+                                 "12345")
+
+    def test_a_title_it_does_not_know_is_filed_under_nothing(self):
+        for source, provider in providers.registered().items():
+            with self.subTest(source=str(source)):
+                self.assertEqual(provider.listing_id({"imdb": "tt1", "tvdb": 4321}), "")
+
+
 class EveryServiceSaysWhatItsStatusMeansTests(unittest.TestCase):
     """Provider.status_means: each service's status word as the one vocabulary
     (base.STATUS_WORDS), so two services' statuses can be compared without

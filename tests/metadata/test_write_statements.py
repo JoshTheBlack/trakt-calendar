@@ -21,7 +21,7 @@ from app.metadata import descriptions, refresh
 from app.metadata import rows as title_rows
 from app.providers.base import Media, Record, SeasonsAnswer, Source, SourceUnavailable
 from tests.metadata.test_panel import _answer
-from tests.support import DatabaseTestCase, statements_per_transaction
+from tests.support import DatabaseTestCase, episode_groups, listings, season_groups, statements_per_transaction, title_groups
 
 DAY = 1783540800.0  # 2026-07-08 20:00Z
 WEEK = (date(2026, 7, 6), date(2026, 7, 13))
@@ -43,10 +43,10 @@ class ADescriptionsStatementsDoNotGrowWithItsSeasonTests(DatabaseTestCase):
 
     async def test_thirty_episodes_and_seasons_cost_what_three_do(self):
         self.assertEqual(await self._describe(3, 31), await self._describe(30, 32))
-        self.assertEqual(await db.fetch_value(
-            "SELECT COUNT(*) FROM episode_metadata WHERE source_id = '32'"), 30)
-        self.assertEqual(await db.fetch_value(
-            "SELECT COUNT(*) FROM season_metadata WHERE source_id = '32'"), 30)
+        self.assertEqual(sum(g["title_key"].endswith(":32")
+                             for g in await episode_groups()), 30)
+        self.assertEqual(sum(g["title_key"].endswith(":32")
+                             for g in await season_groups()), 30)
 
 
 class AnEnrichmentPassesStatementsDoNotGrowWithItsAnswersTests(DatabaseTestCase):
@@ -68,7 +68,8 @@ class AnEnrichmentPassesStatementsDoNotGrowWithItsAnswersTests(DatabaseTestCase)
         await self._listed(range(1, 34))
         self.assertEqual(await self._answer(range(1, 4)), await self._answer(range(4, 34)))
         self.assertEqual(await db.fetch_value(
-            "SELECT COUNT(*) FROM title_metadata WHERE enriched = 1 AND network = 'Tokyo MX'"),
+            "SELECT COUNT(*) FROM titles WHERE simkl_enriched = 1 "
+            "AND simkl_network = 'Tokyo MX'"),
             33)
 
     async def test_an_answer_still_teaches_its_title_the_ids_it_learned(self):
@@ -77,8 +78,8 @@ class AnEnrichmentPassesStatementsDoNotGrowWithItsAnswersTests(DatabaseTestCase)
         await self._listed(range(1, 2))
         await title_rows.apply_enrichment_many(
             "simkl", [(1, "show", {"ids": {"simkl": 1, "tvdb": 4321}})], db.now())
-        self.assertEqual(await db.fetch_value("SELECT title_key FROM calendar_airings"),
-                         "show:tvdb:4321")
+        self.assertEqual([listed["title_key"] for listed in await listings()],
+                         ["show:tvdb:4321"])
 
     async def test_a_row_whose_id_moved_after_it_was_found_is_left_alone(self):
         await self._listed(range(1, 2))
@@ -86,7 +87,9 @@ class AnEnrichmentPassesStatementsDoNotGrowWithItsAnswersTests(DatabaseTestCase)
 
         async def found_then_moved(sql, params=(), default=None):
             answer = await real(sql, params, default)
-            await db.execute("UPDATE title_metadata SET ids_json = '{\"simkl\": 99}'")
+            # The group became another of Simkl's entries in between.
+            await db.execute("UPDATE titles SET simkl_id = '99', "
+                             "simkl_ids_json = '{\"simkl\": 99}'")
             return answer
 
         title_rows.db.fetch_value = found_then_moved
@@ -95,7 +98,7 @@ class AnEnrichmentPassesStatementsDoNotGrowWithItsAnswersTests(DatabaseTestCase)
                 "simkl", [(1, "show", {"network": "Tokyo MX"})], db.now())
         finally:
             title_rows.db.fetch_value = real
-        self.assertEqual(await db.fetch_value("SELECT enriched FROM title_metadata"), 0)
+        self.assertEqual(await db.fetch_value("SELECT simkl_enriched FROM titles"), 0)
 
 
 class _Port:
@@ -152,12 +155,10 @@ class ARefreshPassesStatementsDoNotGrowWithItsAnswersTests(DatabaseTestCase):
     async def test_a_pass_of_thirty_costs_what_a_pass_of_three_does(self):
         self.assertEqual(await self._pass(range(1, 4)), await self._pass(range(4, 34)))
         self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM metadata_refresh"), 0)
-        self.assertEqual(await db.fetch_value(
-            "SELECT COUNT(*) FROM title_metadata WHERE fail_count = 1"), 11)
-        self.assertEqual(await db.fetch_value(
-            "SELECT COUNT(*) FROM season_metadata WHERE season = 1 AND fail_count = 1"), 11)
-        self.assertEqual(await db.fetch_value(
-            "SELECT COUNT(*) FROM season_metadata WHERE season = 2"), 22)
+        self.assertEqual(sum(g["fail_count"] == 1 for g in await title_groups()), 11)
+        self.assertEqual(sum(g["season"] == 1 and g["fail_count"] == 1
+                             for g in await season_groups()), 11)
+        self.assertEqual(sum(g["season"] == 2 for g in await season_groups()), 22)
 
 
 class APassThatCannotFileAnAnswerTests(DatabaseTestCase):
@@ -190,8 +191,7 @@ class APassThatCannotFileAnAnswerTests(DatabaseTestCase):
         with self.assertLogs(refresh.logger, "WARNING"):
             self.assertEqual(await refresh.drain(SimpleNamespace(timezone="UTC"), now=2), 2)
         self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM metadata_refresh"), 0)
-        self.assertEqual(sorted(row["source_id"] for row in await db.fetch_all(
-            "SELECT source_id FROM title_metadata")), ["1", "4"])
+        self.assertEqual(sorted(g["source_id"] for g in await title_groups()), ["1", "4"])
 
     async def test_a_write_that_fails_whole_drops_the_passs_entries(self):
         async def locked(answers, *, tz):
@@ -201,7 +201,7 @@ class APassThatCannotFileAnAnswerTests(DatabaseTestCase):
                 self.assertLogs(refresh.logger, "WARNING"):
             self.assertEqual(await refresh.drain(SimpleNamespace(timezone="UTC"), now=2), 0)
         self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM metadata_refresh"), 0)
-        self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM title_metadata"), 0)
+        self.assertEqual(await title_groups(), [])
 
 
 class AQueuesStatementsDoNotGrowWithWhatItQueuesTests(DatabaseTestCase):
