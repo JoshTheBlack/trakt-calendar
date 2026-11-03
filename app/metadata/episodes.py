@@ -408,12 +408,17 @@ class Book:
                             for row in kept]),
                 json.dumps(gone))
 
-    def write(self, conn: db.Connection, spelled: tuple[str, str] | None = None) -> None:
+    def write(self, conn: db.Connection, spelled: tuple[str, str] | None) -> None:
         """Every row this book changed, written inside the caller's transaction
         in two statements — both issued whenever anything changed, so the count
-        does not depend on what the write happened to empty. `spelled` is this
-        book's `spell`, made earlier."""
-        spelled = self.spell() if spelled is None else spelled
+        does not depend on what the write happened to empty.
+
+        `spelled` IS THIS BOOK'S `spell`, MADE BEFORE THE LOCK, AND None IS ITS
+        ANSWER "NOTHING CHANGED" — never "not spelled yet". Spelling here when
+        handed None spelled every row of an unchanged refill a second time under
+        the lock, to find again that nothing changed: MEASURED on a copy of dev, a
+        Simkl month stored back unchanged held the lock 0.21–0.34 s doing it,
+        where its coverage write alone takes a few milliseconds."""
         if spelled is None:
             return
         kept, gone = spelled

@@ -210,14 +210,7 @@ def write_records(conn: db.Connection, listed: Listings, planned: Planned, *,
     a fill's lock time grew with its records, and the next writer's patience
     ran out (identity.py's reads have the measurement).
 
-    THE RECORDS' IDS ARE COMPLETED IN PLACE with the title's shared ids once its
-    rows are written (identity.complete). A caller that draws the records it just
-    stored — a search following a result to its card — then keys them as the
-    calendar's read will, rather than by whichever ids this one service stated.
-    The groups keep what the service SAID — less, for a listing naming another
-    title than its entry's, the ids that named it (`plan_records`).
-
-    AND EVERY KEY IS THE ONE ITS TITLE ANSWERS TO WHEN THE FILL IS DONE. A later
+    EVERY KEY IS THE ONE ITS TITLE ANSWERS TO WHEN THE FILL IS DONE. A later
     record of the same fill can re-key a title an earlier one registered — Simkl's
     listing names a show by its tvdb id, Trakt's names its tmdb id too — and the
     key the first resolution returned is then retired. A listing filed under it
@@ -230,14 +223,27 @@ def write_records(conn: db.Connection, listed: Listings, planned: Planned, *,
     if not listed.records:
         return []
     planned.settles.apply(conn, laps=laps)
-    for record, at in zip(listed.records, listed.title_of):
-        found = planned.settles.identities[at]
-        if found is not None:
-            record.ids = identity.with_shared(planned.stated.get(at, record.ids), found.ids)
     rows.write_listings(conn, planned.writes, now=listed.now)
     if laps is not None:
         laps.lap("listings")
     return planned.keys
+
+
+def complete_records(listed: Listings, planned: Planned) -> None:
+    """Complete `listed`'s records' ids IN PLACE with their titles' shared ids
+    (identity.complete), as `planned` found them — once `write_records` has
+    written them, and outside its transaction: it reads nothing, and a month of
+    Simkl's listings took 20–26 ms of the lock doing it there.
+
+    A caller that draws the records it just stored — a search following a result
+    to its card — then keys them as the calendar's read will, rather than by
+    whichever ids this one service stated. The groups keep what the service SAID
+    — less, for a listing naming another title than its entry's, the ids that
+    named it (`plan_records`)."""
+    for record, at in zip(listed.records, listed.title_of):
+        found = planned.settles.identities[at]
+        if found is not None:
+            record.ids = identity.with_shared(planned.stated.get(at, record.ids), found.ids)
 
 
 class Asked(NamedTuple):

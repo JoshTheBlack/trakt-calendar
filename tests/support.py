@@ -514,7 +514,7 @@ def put_listing(conn, source: str, media: str, source_id, endpoint: str, title_k
                                0, label, int(stored_at), entry)
     book.place(title_key, media, source, season, number, instant)
     book.refold(title_key, bit, instant.day)
-    book.write(conn)
+    book.write(conn, book.spell())
 
 
 class DatabaseTestCase(unittest.IsolatedAsyncioTestCase):

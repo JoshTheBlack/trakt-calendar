@@ -223,8 +223,11 @@ async def store_span(endpoint_key: str, span_start: date, span_end: date,
         planning.append(time.perf_counter() - started)
         return prepared
 
+    written: list[metadata.Planned] = []
+
     def _work(conn, prepared) -> None:
         planned, fill = prepared
+        written.append(planned)
         # WHERE THE LOCK'S TIME GOES, one DEBUG line per store: a hold over a
         # second is logged by db.transaction, and that line alone cannot say
         # whether the plan was made again under it (another connection wrote in
@@ -252,6 +255,7 @@ async def store_span(endpoint_key: str, span_start: date, span_end: date,
                      len(planned.settles.retired), laps)
 
     await db.transaction(_work, prepare=_plan)
+    metadata.complete_records(listed, written[-1])
 
 
 async def store_loose_airings(endpoint_key: str, records, *, now: int,
@@ -312,6 +316,8 @@ async def store_loose_airings(endpoint_key: str, records, *, now: int,
         narrowed = listed.only(gaps)
         planned = metadata.plan_records(conn, narrowed)
         metadata.write_records(conn, narrowed, planned)
+        # A search's handful, drawn as cards straight after: completed here.
+        metadata.complete_records(narrowed, planned)
         gap_records = [records[at] for at in gaps]
         fill = episode_rows.plan_fill(
             conn, _listings(gap_records, planned.keys, bit=bit, now=now, searched=True),

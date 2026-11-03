@@ -10,9 +10,11 @@ requires the same count.
 from __future__ import annotations
 
 from datetime import date
+from unittest import mock
 
 from app import db
 from app.calendar import entries
+from app.metadata import episodes
 from app.providers.base import Media, Record, Source
 from tests.support import DatabaseTestCase, statements_per_transaction, statements_run
 from tests.support import listings as stored_listings
@@ -59,6 +61,23 @@ class ARefillWritesOnlyWhatChangedTests(DatabaseTestCase):
             await store(listings(40))
         (statements,) = run
         self.assertEqual([sql.split()[2] for sql in statements], ["calendar_coverage"])
+
+    async def test_an_unchanged_refill_decides_its_rows_once_before_the_lock(self):
+        """"Nothing changed" is `Book.spell`'s answer None, which the write once
+        took for "not spelled yet" and spelled every row again under the lock —
+        sending nothing either time, so the statements above could not see it."""
+        await store(listings(40))
+        spell = episodes.Book.spell
+        spelled: list[bool] = []
+
+        def counted(book):
+            answer = spell(book)
+            spelled.append(answer is None)
+            return answer
+
+        with mock.patch.object(episodes.Book, "spell", counted):
+            await store(listings(40))
+        self.assertEqual(spelled, [True])
 
     async def test_a_refill_writes_the_rows_that_changed_and_no_others(self):
         await store(listings(40))
