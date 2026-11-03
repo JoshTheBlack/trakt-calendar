@@ -189,9 +189,15 @@ async def set(key: str, value, retain_seconds: int | None = RETAIN_SECONDS) -> N
     refresh re-inserts and bumps `cached_at`, so the clock only ever runs on rows
     nothing has asked for. What expires is precisely the orphans, plus titles
     genuinely untouched for half a year — and those simply get fetched again.
+
+    IN TURN, LIKE EVERY WRITE (db.transaction): a write made around the writer
+    queue commits while a calendar store is deciding its rows in its turn, and
+    the store must then decide them again under the lock. MEASURED on a harness
+    copy while a month's refills and the background lookups ran together: six
+    stores re-decided, holding the lock 0.17–0.70 s each to do it. The payload
+    is compressed before the lock is taken (`prepare`).
     """
-    def _work(conn: db.Connection) -> None:
-        blob = _encode(value)
+    def _write(conn: db.Connection, blob: bytes) -> None:
         conn.execute(
             "INSERT INTO api_cache (cache_key, payload, cached_at, ttl_seconds, byte_size) "
             "VALUES (?, ?, ?, ?, ?) "
@@ -202,7 +208,7 @@ async def set(key: str, value, retain_seconds: int | None = RETAIN_SECONDS) -> N
         )
 
     try:
-        await db.run(_work)
+        await db.transaction(_write, prepare=lambda conn: _encode(value))
     except (db.DatabaseError, TypeError, ValueError):
         pass
 
@@ -214,13 +220,10 @@ async def delete(key: str) -> None:
     this table is a copy of somebody else's answer, and leaving it for the sweep
     costs nothing but bytes. A short-lived handshake is different: once it has
     ended its row describes nothing, and the sweep's grace period would keep it
-    for months.
+    for months. In turn, like `set`.
     """
-    def _work(conn: db.Connection) -> None:
-        conn.execute("DELETE FROM api_cache WHERE cache_key = ?", (key,))
-
     try:
-        await db.run(_work)
+        await db.execute("DELETE FROM api_cache WHERE cache_key = ?", (key,))
     except db.DatabaseError:
         pass
 

@@ -1,10 +1,13 @@
-"""app/cache.py's `fresh_keys` — `get`'s question for many keys in one read.
+"""app/cache.py — `fresh_keys`, `get`'s question for many keys in one read, and
+the cache's writes taking their turn.
 
-It decides which of a few thousand cards a background pass asks about
+`fresh_keys` decides which of a few thousand cards a background pass asks about
 (app/calendar/completion.py), so a key it wrongly calls fresh is a card never
 asked about, and one it wrongly calls stale is a request spent twice."""
 from __future__ import annotations
 
+import asyncio
+import time
 from unittest.mock import patch
 
 from app import cache, db
@@ -30,3 +33,38 @@ class FreshKeysTests(DatabaseTestCase):
         await cache.set("k", 1)
         self.assertEqual(await cache.fresh_keys([], 60), frozenset())
         self.assertEqual(await cache.fresh_keys(["k"], 0), frozenset())
+
+
+class TheCachesWritesTakeTheirTurnTests(DatabaseTestCase):
+    """A write made around the writer queue commits while a calendar store is
+    deciding its rows in its turn, and the store then decides them again under
+    the lock. The cache's writes wait for the turn ahead of them — its
+    deciding included, which holds no lock a write outside the queue would
+    have to wait for."""
+
+    async def _beside_a_store(self, write) -> list[str]:
+        order: list[str] = []
+
+        def prepare(conn):
+            order.append("store decides")
+            time.sleep(0.2)
+            order.append("store decided")
+
+        ahead = asyncio.ensure_future(db.transaction(
+            lambda conn, _prepared: order.append("store writes"), prepare=prepare))
+        await asyncio.sleep(0.05)
+        await write()
+        order.append("cache written")
+        await ahead
+        return order
+
+    async def test_a_cache_write_waits_for_the_turn_ahead_of_it(self):
+        self.assertEqual(await self._beside_a_store(lambda: cache.set("k", 1)),
+                         ["store decides", "store decided", "store writes", "cache written"])
+        self.assertEqual(await cache.get("k", 60), 1)
+
+    async def test_so_does_a_cache_delete(self):
+        await cache.set("k", 1)
+        self.assertEqual(await self._beside_a_store(lambda: cache.delete("k")),
+                         ["store decides", "store decided", "store writes", "cache written"])
+        self.assertIsNone(await cache.get("k", 60))

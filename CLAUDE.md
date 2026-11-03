@@ -124,8 +124,13 @@ prepares, takes the lock and writes. SQLite does not queue writers — a waiter
 sleeps and retries, and a later writer can take the lock first — so on the
 development server's first minute after a restart a refresh pass lost to three
 week stores in a row and failed at `db.BUSY_TIMEOUT_MS`. A write that goes round
-the helpers (a body handed to `db.run`) skips the queue and keeps that failure,
-so a write belongs in `transaction` or `execute`.
+the helpers (a body handed to `db.run`) skips the queue and keeps that failure —
+and commits while a store decides its rows in its turn, so the store decides
+them again under the lock (the response cache's writes did: 0.17–0.70 s of lock
+per store, MEASURED on a harness copy) — so a write belongs in `transaction` or
+`execute`, `app/cache.py`'s included. A STORE'S TURN IS ONE WINDOW'S
+(`entries.store_span`): every other write waits behind a turn's deciding, and a
+Simkl month decided in one turn kept a one-row write waiting 3.2–3.4 s.
 
 **The session ROW is the authority on expiry, not the cookie.**
 `app/auth/cookies.py` issues it HttpOnly, SameSite=Lax, Path=/, no Domain, and
