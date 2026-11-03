@@ -35,6 +35,14 @@ from ..providers.base import Media, Record, Source, epoch_moment
 logger = logging.getLogger(__name__)
 
 
+# HOW MANY DAYS ONE COVERAGE ROW SPEAKS FOR. A row of `calendar_coverage` says which
+# services were asked about one window of a calendar, beginning `span_start`, and
+# which replied and when — so retention reads a window's listings by it, and the
+# fill writes one per window its answer covers (app/calendar/cache.py tiles the
+# windows by `window_start`).
+WINDOW_DAYS = 7
+
+
 def _bit(endpoint_key: str) -> int:
     """The calendar's bit in a listing's `calendars` mask (Endpoint.bit)."""
     return endpoints.ENDPOINTS[endpoint_key].bit
@@ -73,6 +81,13 @@ def _utc_date(air_ts: float) -> str:
 # record held the lock 5.3 s under one month read, MEASURED on a copy of a real
 # instance, and the next writer gave up at the busy timeout.
 
+# A COVERAGE ROW'S `stored_at` IS WHEN ITS SERVICE LAST REPLIED FOR THE WINDOW —
+# with listings, or "unchanged" — and it is what keeps that service's listings in
+# the window (`sweep`), so a refill that changes nothing keeps them by this row
+# alone. A FAILED ANSWER says nothing about them: it marks the service asked and
+# not answered and leaves the time of its last reply where it was. Moving it would
+# keep listings no reply had confirmed — a service whose token stopped working
+# would hold its last listings for as long as somebody kept asking.
 _UPSERT_COVERAGE = """
 INSERT INTO calendar_coverage
     (endpoint, span_start, source, asked, answered, stored_at, stale_after)
@@ -81,7 +96,10 @@ SELECT :endpoint, :span, json_extract(value, '$[0]'), 1, json_extract(value, '$[
 FROM json_each(:sources) WHERE true
 ON CONFLICT(endpoint, span_start, source) DO UPDATE SET
     asked = 1, answered = excluded.answered,
-    stored_at = excluded.stored_at, stale_after = excluded.stale_after
+    stored_at = CASE WHEN excluded.answered = 1 THEN excluded.stored_at
+                     ELSE calendar_coverage.stored_at END,
+    stale_after = CASE WHEN excluded.answered = 1 THEN excluded.stale_after
+                       ELSE calendar_coverage.stale_after END
 """
 
 
@@ -524,17 +542,21 @@ async def span_coverage(endpoint_key: str, span_start: date
     reading them here as well would read every row twice.
 
     AND FOR THE SCHEDULE (cache.refresh_months), whose clock this is: stored
-    rather than remembered, so a restart does not reset it. The EARLIEST source's
-    store rather than the latest: a span is only as fresh as its stalest source,
-    so one source refilled an hour ago must not make the whole span look current
-    while another has not been asked in a week.
+    rather than remembered, so a restart does not reset it. The EARLIEST REPLY
+    rather than the latest: a span is only as fresh as its stalest source, so one
+    source refilled an hour ago must not make the whole span look current while
+    another has not been asked in a week. A service that FAILED is not stale by
+    this clock — its failure keeps the time of its last reply (`_UPSERT_COVERAGE`)
+    and is asked again on a clock of its own (cache._failed_retry_due); only a
+    span nobody has replied for is dated by its asking.
     """
     cover = await db.fetch_all(
         "SELECT source, asked, answered, stored_at FROM calendar_coverage "
         "WHERE endpoint = ? AND span_start = ?", (endpoint_key, span_start.isoformat()))
     asked = tuple(str(r["source"]) for r in cover if r["asked"])
     answered = tuple(str(r["source"]) for r in cover if r["answered"])
-    stored_at = min((int(r["stored_at"]) for r in cover), default=None)
+    stored_at = min((int(r["stored_at"]) for r in cover if r["answered"]),
+                    default=min((int(r["stored_at"]) for r in cover), default=None))
     return answered, asked, stored_at
 
 
@@ -858,35 +880,88 @@ class _Sweep(NamedTuple):
                     or self.ceilings)
 
 
+# WHICH EPISODE ROWS HOLD A LISTING OF ONE SERVICE THAT RETENTION TAKES OFF, two
+# ways, each through an index or the few rows that hold repeats:
+#   - A FED listing — one its service's feed gave — inside a window whose coverage
+#     row for the service is past the retention window (`:windows`, [bit, lo, hi]
+#     each): nothing has confirmed it for six months, whatever it was stored at;
+#   - A SEARCHED one (a search or a tracker add wrote it, and no feed lists it)
+#     stored before the cutoff: a per-title lookup confirms itself only when it is
+#     made, so its own clock is its age.
+def _due_sql(source: str) -> str:
+    fed_in = ("json_extract(w.value, '$[1]') <= {at} AND {at} < json_extract(w.value, '$[2]') "
+              "AND ({calendars} & ~{searched}) & json_extract(w.value, '$[0]')")
+    repeat = {name: f"json_extract(r.value, '$.{name}')"
+              for name in ("at", "calendars", "searched", "listed_at")}
+    return (
+        f"FROM {tables.EPISODES} e WHERE e.rowid IN ("
+        f"SELECT x.rowid FROM json_each(:windows) w CROSS JOIN {tables.EPISODES} x "
+        f"WHERE x.{source}_calendars != 0 AND x.{source}_air_ts >= json_extract(w.value, '$[1]') "
+        f"AND x.{source}_air_ts < json_extract(w.value, '$[2]') "
+        f"AND (x.{source}_calendars & ~x.{source}_searched) & json_extract(w.value, '$[0]') "
+        f"UNION SELECT rowid FROM {tables.EPISODES} WHERE {source}_searched != 0 "
+        f"AND COALESCE({source}_listed_at, 0) <= :cutoff "
+        f"UNION SELECT rowid FROM {tables.EPISODES} WHERE {source}_repeats_json != '[]' "
+        f"AND EXISTS (SELECT 1 FROM json_each({source}_repeats_json) r WHERE "
+        f"({repeat['searched']} != 0 AND COALESCE({repeat['listed_at']}, 0) <= :cutoff) "
+        f"OR EXISTS (SELECT 1 FROM json_each(:windows) w WHERE "
+        + fed_in.format(at=repeat["at"], calendars=repeat["calendars"],
+                        searched=repeat["searched"]) + ")))")
+
+
 def _plan_sweep(conn: db.Connection, now: int) -> _Sweep:
     """Everything a sweep at `now` takes off, read and decided and NOT written —
     each read a query that answers in one row, and almost always with nothing."""
     cutoff = now - RETAIN_SECONDS
+    (stale,), = conn.execute(
+        "SELECT json_group_array(json_array(endpoint, span_start, source)) "
+        "FROM calendar_coverage WHERE stored_at <= ?", (cutoff,)).fetchall()
+    windows: dict[str, list[list]] = {}
+    for endpoint_key, span_start, source in json.loads(stale):
+        if endpoint_key in endpoints.ENDPOINTS:
+            lo = episode_rows.epoch(date.fromisoformat(span_start))
+            windows.setdefault(str(source), []).append(
+                [_bit(endpoint_key), lo, lo + WINDOW_DAYS * 86400.0])
     book = episode_rows.Book()
-    book.hold(episode_rows.read_due(conn, cutoff))
+    for source in groups.sources():
+        if groups.has(tables.EPISODES, source, "listed_at"):
+            book.hold(episode_rows.read_where(conn, _due_sql(source), {
+                "cutoff": cutoff, "windows": json.dumps(windows.get(source, []))}))
     removed = 0
     emptied = []
     for row in book.rows.values():
         for source, instants in row.instants.items():
             listed = bool(instants)
             for instant in list(instants):
-                if int(instant.listed_at or 0) <= cutoff:
-                    row.take(source, instant, instant.calendars)
+                bits = instant.searched if int(instant.listed_at or 0) <= cutoff else 0
+                for bit, lo, hi in windows.get(source, ()):
+                    if instant.fed & bit and lo <= instant.at < hi:
+                        bits |= bit
+                if bits:
+                    row.take(source, instant, bits)
                     removed += 1
             if listed and not instants:
                 emptied.append((source, row.key, row.unit))
-    (coverage, files), = conn.execute(
-        "SELECT EXISTS (SELECT 1 FROM calendar_coverage WHERE stored_at <= :cutoff), "
-        "EXISTS (SELECT 1 FROM calendar_source_files WHERE fetched_at <= :cutoff)",
-        {"cutoff": cutoff}).fetchall()
-    return _Sweep(book, book.spell(), removed, bool(coverage), bool(files),
+    (files,), = conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM calendar_source_files WHERE fetched_at <= ?)",
+        (cutoff,)).fetchall()
+    return _Sweep(book, book.spell(), removed, stale != "[]", bool(files),
                   title_rows.plan_unlisted(conn, cutoff, emptied=emptied),
                   title_rows.plan_past_ceilings(conn, now))
 
 
 async def sweep(now: int | None = None) -> int:
-    """Take off every listing nothing has stored inside the retention window, and
-    then the title store's groups nothing lists any more.
+    """Take off every listing nothing has confirmed inside the retention window,
+    and then the title store's groups nothing lists any more.
+
+    A FEED'S LISTING IS CONFIRMED BY ITS WINDOW'S COVERAGE ROW, NOT BY ITS OWN
+    CLOCK. A refill that finds nothing changed writes nothing but that row, so a
+    listing's `listed_at` says when it last CHANGED; the row's `stored_at` says
+    when its service last replied for the window, and a listing goes with the row
+    once that is past the window (`_due_sql`). Every listing a feed files lies in
+    a window the same fill writes a coverage row for (`store_span`), so none is
+    left with nothing to confirm it. A searched listing is confirmed by nothing
+    after its own lookup, so it goes by its own age.
 
     ORDER IS THE WHOLE OF THE CARE HERE. Listings go first; a service's group is
     cleared only once it is old AND NOTHING THE SERVICE STILL LISTS NAMES IT

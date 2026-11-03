@@ -114,6 +114,39 @@ class RetentionTests(unittest.IsolatedAsyncioTestCase):
     async def test_the_sweep_is_a_no_op_on_an_empty_calendar(self):
         self.assertEqual(await calendar_entries.sweep(now=self.new), 0)
 
+    async def test_a_listing_its_window_confirms_is_kept_however_old_its_store(self):
+        """A refill that finds nothing changed writes only its coverage row, so a
+        listing stored long ago and confirmed since is kept by the row."""
+        await self._store([_record("steady", 1, 1, AIR)], start=date(2026, 7, 6),
+                          now=self.old)
+        await calendar_cache.store_window(
+            SHOWS, calendar_cache.window_start(date(2026, 7, 6)), [], 600, self.new,
+            sources=[], asked=["trakt"], unchanged=["trakt"])
+        self.assertEqual(await calendar_entries.sweep(now=self.new), 0)
+        self.assertEqual(len(await listings()), 1)
+
+    async def test_a_searched_listing_goes_by_its_own_age_in_a_confirmed_window(self):
+        await calendar_entries.store_loose_airings(SHOWS, [_record("found", 1, 1, AIR)],
+                                                   now=self.old, stale_after=self.old)
+        await self._store([_record("other", 1, 1, AIR)], start=date(2026, 7, 6),
+                          now=self.new)
+        self.assertEqual(await calendar_entries.sweep(now=self.new), 1)
+        kept = await listings()
+        self.assertEqual([listed["from_search"] for listed in kept], [False])
+
+    async def test_a_failed_answer_confirms_nothing(self):
+        """A service that could not be asked has said nothing about what it listed:
+        its window keeps the time of its last reply, and its listings go by it."""
+        await self._store([_record("quiet", 1, 1, AIR)], start=date(2026, 7, 6),
+                          now=self.old)
+        await calendar_cache.store_window(
+            SHOWS, calendar_cache.window_start(date(2026, 7, 6)), [], 600, self.new,
+            sources=[], asked=["trakt"])
+        self.assertEqual(await db.fetch_value(
+            "SELECT stored_at FROM calendar_coverage WHERE source = 'trakt'"), self.old)
+        self.assertEqual(await calendar_entries.sweep(now=self.new), 1)
+        self.assertEqual(len(await listings()), 0)
+
 
 class ASourceReportingUnchangedTests(unittest.IsolatedAsyncioTestCase):
     """"Unchanged" is a third answer, and both wrong readings of it lose data.

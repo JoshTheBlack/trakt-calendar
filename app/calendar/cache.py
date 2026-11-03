@@ -125,7 +125,10 @@ logger = logging.getLogger(__name__)
 # regardless of which module made it. Enable it with LOG_LEVEL=DEBUG.
 _perf = logging.getLogger("app.perf")
 
-WINDOW_DAYS = 7
+# HOW LONG ONE WINDOW IS — the storage's grain (entries.WINDOW_DAYS: a coverage
+# row says what one window holds), named here for the fill and the read, which
+# tile every month by it.
+WINDOW_DAYS = entries.WINDOW_DAYS
 
 # A fixed reference point the 7-day windows tile out from. Any fixed date works;
 # a Monday is chosen so a window starts on a Monday, which reads naturally. What
@@ -944,6 +947,7 @@ async def ensure_window(endpoint: Endpoint, settings, start: date, *,
         raise
     await store_window(endpoint.key, start, records, ttl, ts,
                        sources=answered, asked=in_play, unchanged=unchanged)
+    _note_failure(endpoint, start, in_play, [*answered, *unchanged], ts)
     # AFTER THE STORE, never before it: the store records a pending source as
     # asked and not answered, and a follow-up that stored first would have its
     # answer marked missing again by this one.
@@ -1157,10 +1161,11 @@ _FAILED_RETRY_SECONDS = 60
 _FAILED_REFRESH_SECONDS = 15 * 60
 
 # When each (endpoint, window) last had a failed source asked again, so a source
-# that keeps failing outright — which stores nothing, and so leaves the window's
-# own clock where it was — is retried once a minute rather than on every read.
-# Shared by the reader and the schedule, so neither repeats the other's attempt.
-# In memory: a restart simply makes the first read after it try again.
+# that keeps failing — which leaves the window's own clock at its last reply
+# (entries' coverage write) — is retried once a minute rather than on every read.
+# A fill a source failed in counts as an attempt (`_note_failure`). Shared by the
+# reader and the schedule, so neither repeats the other's attempt. In memory: a
+# restart simply makes the first read after it try again.
 #
 # PRUNED ON THE SLOWER OF THE TWO CLOCKS THAT READ IT. The process runs for weeks
 # between restarts and every window that ever failed used to stay here for all
@@ -1168,6 +1173,14 @@ _FAILED_REFRESH_SECONDS = 15 * 60
 # each waits from the LATER of the window's store and the attempt, and that much
 # has passed since the attempt — so dropping it changes no answer.
 _failed_retried_at: dict[tuple[str, str], int] = {}
+
+
+def _note_failure(endpoint: Endpoint, start: date, asked, replied, ts: int) -> None:
+    """A fill of this window that some source it asked did not answer — the
+    attempt the failure clock waits from (`_failed_retry_due`). A source still
+    working its answer out has not failed."""
+    if set(map(str, asked)) - set(map(str, replied)) - pending_sources(endpoint.key, start):
+        _failed_retried_at[(endpoint.key, start.isoformat())] = ts
 
 
 def _failed_retry_due(endpoint: Endpoint, start: date, cached: WindowCoverage,
