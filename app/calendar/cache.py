@@ -96,6 +96,8 @@ import calendar as _calendar
 import functools
 import logging
 import time
+from collections import Counter
+from collections.abc import Iterable, Mapping
 from datetime import date, datetime, timedelta, timezone
 from itertools import groupby
 from typing import Any, NamedTuple
@@ -109,6 +111,7 @@ from . import filter as calendar_filter
 from . import resolve as calendar_resolve
 from . import state as calendar_state
 from . import vocab
+from .. import after_response
 from .. import db
 from .. import providers
 from ..media import artwork
@@ -566,7 +569,7 @@ def _window_sources(endpoint: Endpoint, settings, start: date) -> list[Provider]
 
 
 async def fetch_window_records(endpoint: Endpoint, settings, start: date, *,
-                               covered=()
+                               covered=(), sources=None
                                ) -> tuple[list[Record], list[str]]:
     """Ask every source in play for this window what airs in it, and return
     (records, the sources that ANSWERED), floor-filtered, trimmed and de-duped.
@@ -592,9 +595,17 @@ async def fetch_window_records(endpoint: Endpoint, settings, start: date, *,
     left out of the answer, as a refusal is, and remembered as PENDING
     (`_note_pending`), which the store that follows this turns into a fill of
     that source's share alone once its answer is ready (`_follow_pending`).
+
+    `sources`, when given, names which of the sources in play are asked — the
+    ones a window's coverage says are due (`ensure_window`); the rest are not
+    asked at all.
     """
+    in_play = _window_sources(endpoint, settings, start)
+    if sources is not None:
+        named = set(map(str, sources))
+        in_play = [provider for provider in in_play if str(provider.source) in named]
     records, answered, unchanged, pending = await _answers(
-        _window_sources(endpoint, settings, start), endpoint, settings, start, covered=covered)
+        in_play, endpoint, settings, start, covered=covered)
     for source, ready in pending:
         _note_pending(endpoint, start, source, ready)
     return records, answered, unchanged
@@ -842,10 +853,16 @@ def _ttl_seconds(settings, start: date | None = None, now: int | None = None) ->
     return max(flat, tier) if behind >= _STALENESS_TIERS[1][0] else flat
 
 
-# Spans a background refill is already running for, so ten viewers opening the
-# same stale month fire one fetch rather than ten. Keyed on (endpoint, span)
-# because that is exactly the unit a fill covers.
-_refilling: set[tuple[str, str]] = set()
+# Each (endpoint, service, window) a background refill is already renewing, so
+# ten viewers opening the same stale month fire one fetch rather than ten — and
+# the weeks one Simkl month file renewed, which lapse together, are renewed by
+# ONE refill rather than one a week each storing the whole month again. Keyed by
+# service and window because that is what an answer covers: every window of its
+# service's answer span (`answer_span`). COUNTED, because two refills' spans can
+# overlap — a week straddling two months is read with both months' files — and
+# the first to end must not unlatch a week the other is still renewing. A key
+# goes when the last refill holding it ends.
+_refilling: Counter[tuple[str, str, str]] = Counter()
 _refill_tasks: set[asyncio.Task] = set()
 
 
@@ -853,38 +870,59 @@ def _forget_refill(task: asyncio.Task) -> None:
     _refill_tasks.discard(task)
 
 
-def schedule_refill(endpoint: Endpoint, settings, start: date) -> bool:
-    """Refill one stale span in the background. Returns whether it started one.
+def schedule_refill(endpoint: Endpoint, settings, start: date,
+                    sources: Iterable[str] | None = None) -> bool:
+    """Refill one stale span in the background — `sources` alone, the ones its
+    coverage says are due, or every source in play — and return whether it
+    started one.
 
     THE POINT OF THE WHOLE STORAGE CHANGE, AND IT IS WORTH SECONDS RATHER THAN
     MILLISECONDS. A lapsed TTL used to make the next viewer WAIT for the fetch
     that renewed it — a page load blocked on Trakt and Simkl answering, five or
     six spans deep for a month, with nothing on screen until they did. Rows can
     be served while they are being replaced, so a stale span is now handed over
-    immediately and renewed behind the request.
+    immediately and renewed behind the request — once its answer has been sent
+    (`ensure_window`).
 
-    FIRE AND FORGET, NEVER AWAITED, and coalesced on the span: a month opened by
-    ten people at once is one refill, not ten. The latch is dropped in a `finally`
-    so a failed fetch leaves nothing latched — the next read tries again rather
-    than finding the span permanently "already refilling".
+    FIRE AND FORGET, NEVER AWAITED, and coalesced by service over what its
+    answer covers: a month opened by ten people at once is one refill, not ten,
+    and a service already being asked about a window — by this window's refill
+    or by a neighbour's whose answer spans it — is not asked again. MEASURED on a
+    copy of dev: storing one Simkl month file's answer, 12,386 listings, took
+    5–7 s of worker time, and the five weeks it renews lapse at the same moment,
+    so a refill per week would have planned the same month five times over. The
+    latch is dropped in a `finally` so a failed fetch leaves nothing latched —
+    the next read tries again rather than finding the span permanently "already
+    refilling" — and a service whose answer turned out to confirm only the
+    window asked ("unchanged" speaks for its own validator alone) leaves its
+    other weeks to be asked when they are next read.
 
     DEGRADES TO A NO-OP with no running loop (a script, a sync test path, or the
     app tearing down). The scheduled month refresh still runs every tick, so a
     skipped background refill costs at most the interval until that notices.
     """
-    key = (endpoint.key, start.isoformat())
-    if key in _refilling:
-        return False
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return False
+    in_play = [str(p.source) for p in _window_sources(endpoint, settings, start)]
+    wanted = in_play if sources is None else [s for s in in_play if s in set(map(str, sources))]
+    ask = [source for source in wanted
+           if (endpoint.key, source, start.isoformat()) not in _refilling]
+    if not ask:
+        return False
+    latched = {(endpoint.key, source, window.isoformat())
+               for source, (first, after) in answer_spans(ask, start).items()
+               for window in aligned_windows(first, after - timedelta(days=1))}
+    # Every service in play, unnarrowed: the whole-window fill (`None`).
+    named = None if ask == in_play and sources is None else ask
 
     async def _run() -> None:
+        # Nobody waits on this: what it does is no request's time.
+        detach()
         try:
             with activity("background refill"):
-                await ensure_window(endpoint, settings, start,
-                                    allow_fetch=True, force=True)
+                await fill_sources(endpoint, settings, start, named)
         except SourceUnavailable as exc:
             logger.debug("background refill of the %s span starting %s failed: %s",
                          endpoint.key, start, exc)
@@ -892,9 +930,12 @@ def schedule_refill(endpoint: Endpoint, settings, start: date) -> bool:
             logger.exception("background refill of the %s span starting %s raised.",
                              endpoint.key, start)
         finally:
-            _refilling.discard(key)
+            for key in latched:
+                _refilling[key] -= 1
+                if _refilling[key] <= 0:
+                    del _refilling[key]
 
-    _refilling.add(key)
+    _refilling.update(latched)
     task = asyncio.create_task(_run())
     _refill_tasks.add(task)
     task.add_done_callback(_forget_refill)
@@ -926,13 +967,107 @@ async def ensure_window(endpoint: Endpoint, settings, start: date, *,
     written, so reporting them as incomplete says something untrue and says it
     until they expire; refetching them is what actually answers the question, and
     it is the same treatment a payload in an older shape already gets.
+
+    DECIDED SERVICE BY SERVICE, from each one's own coverage row
+    (entries.source_coverage, `_due`):
+      - a window nothing has filled, or a service in play it never asked, is
+        filled NOW, those services alone — those rows are not stale, they are
+        INCOMPLETE, and serving them would show a month missing a whole service
+        while the banner said everything was fine;
+      - a service whose reply has lapsed, or whose last answer failed and is due
+        another try, is asked AFTER THIS REQUEST HAS ANSWERED, alone
+        (after_response.later): the window is served from what is stored at
+        once — a calendar is not a bank balance, and a span that lapsed a minute
+        ago is the same span — and the refill neither delays this page nor
+        competes with it for the loop and the database;
+      - a service that is fresh is not asked at all — one Simkl month file
+        confirms its month's weeks (answer_span), and each of them then waits
+        on nobody but Trakt's own clock.
+    `force` asks every service in play again, now. Nothing overrides
+    allow_fetch, so a share page cannot be made to fetch by anything.
     """
     ts = db.now() if now is None else now
     ttl = _ttl_seconds(settings, start, ts)
     in_play = [str(p.source) for p in _window_sources(endpoint, settings, start)]
-    answered_before, asked_before, stored_at = await entries.span_coverage(endpoint.key, start)
-    cached = (None if stored_at is None
-              else WindowCoverage(answered_before, asked_before, int(stored_at)))
+    held = await entries.source_coverage(endpoint.key, start)
+    cached = _held_coverage(held)
+    if not allow_fetch:
+        return cached or WindowCoverage((), (), None)
+    if force or cached is None:
+        return await fill_sources(endpoint, settings, start, None, now=ts)
+    unasked, behind = _due(endpoint, start, in_play, held, cached, ts, max_age=ttl,
+                           failure_after=_FAILED_RETRY_SECONDS)
+    if behind:
+        after_response.later(lambda: schedule_refill(endpoint, settings, start, behind))
+    if not unasked:
+        return cached
+    logger.debug("the %s window starting %s was filled without %s; asking now.",
+                 endpoint.key, start, ", ".join(unasked))
+    return await fill_sources(endpoint, settings, start, unasked, now=ts)
+
+
+def _held_coverage(held: Mapping[str, entries.SourceCoverage]) -> WindowCoverage | None:
+    """What a window's coverage rows say — who replied, who was asked, and when
+    it was stored: its earliest reply (entries.span_coverage says why) — or None
+    where nothing has filled it. Every row, a service out of play's included:
+    its rows are still the window's, and a read narrows them at read."""
+    if not held:
+        return None
+    # In the registry's declared order, which is the order the sources are asked
+    # in; a name it does not declare (none, in a running instance) after them.
+    declared = {str(source): at for at, source in enumerate(Source)}
+    ordered = sorted(held.items(), key=lambda item: (declared.get(item[0], len(declared)),
+                                                      item[0]))
+    replied = [row.stored_at for _source, row in ordered if row.answered]
+    return WindowCoverage(tuple(source for source, row in ordered if row.answered),
+                          tuple(source for source, row in ordered if row.asked),
+                          min(replied) if replied else min(row.stored_at for _s, row in ordered))
+
+
+def _due(endpoint: Endpoint, start: date, in_play: list[str],
+         held: Mapping[str, entries.SourceCoverage], cached: WindowCoverage, ts: int, *,
+         max_age: int, failure_after: int) -> tuple[list[str], list[str]]:
+    """(the services in play this window never asked, the services it asked that
+    are due again) — one whose reply is older than `max_age`, and one whose last
+    answer failed once the failure clock says so (`_failed_retry_due`, which
+    notes the attempt). A service still working its answer out is neither."""
+    unasked = [source for source in in_play if not (source in held and held[source].asked)]
+    lapsed = [source for source in in_play if source not in unasked and held[source].answered
+              and ts - held[source].stored_at > max_age]
+    failing = [source for source in in_play if source not in unasked
+               and not held[source].answered
+               and source not in pending_sources(endpoint.key, start)]
+    retry = failing if failing and _failed_retry_due(endpoint, start, cached, ts,
+                                                     after=failure_after) else []
+    return unasked, [*lapsed, *retry]
+
+
+async def fill_sources(endpoint: Endpoint, settings, start: date,
+                       sources: Iterable[str] | None, *, now: int | None = None
+                       ) -> WindowCoverage:
+    """Ask `sources` — those of the services in play it names, or every one —
+    what airs in this window, store their answers, and say what the window then
+    holds. Every other service's rows and coverage are left exactly as they are
+    (entries.store_span writes only the services it is told were asked). THE ONE
+    FILL: a window's first, a service it never asked, a stale service's refill
+    behind a reader, and the schedule's (`refresh_months`).
+
+    A FILL EVERY SERVICE IT ASKED REFUSED serves what is stored rather than
+    nothing, with each of them recorded as asked and not answered — so one the
+    window's rows never had (a month's file can cover a week no other service
+    has answered for yet) reads as the failure it is, and is asked again on the
+    failure clock (`_failed_retry_due`) rather than on every read — or, with
+    nothing stored, raises.
+    """
+    ts = db.now() if now is None else now
+    ttl = _ttl_seconds(settings, start, ts)
+    in_play = [str(p.source) for p in _window_sources(endpoint, settings, start)]
+    named = None if sources is None else set(map(str, sources))
+    ask = [source for source in in_play if named is None or source in named]
+    held = await entries.source_coverage(endpoint.key, start)
+    cached = _held_coverage(held)
+    if named is not None and not ask:
+        return cached or WindowCoverage((), (), None)
     # Which sources this span ALREADY holds rows from — the only ones whose
     # "unchanged" is a usable answer rather than a silent gap. Asked of the
     # AIRINGS and not of the coverage table: coverage records who replied, and a
@@ -941,73 +1076,32 @@ async def ensure_window(endpoint: Endpoint, settings, start: date, *,
     # that state justify itself for ever — see entries.sources_with_rows.
     has_rows = await entries.sources_with_rows(
         endpoint.key, start, start + timedelta(days=WINDOW_DAYS))
-    if cached is not None:
-        # `force` IS THE SCHEDULED REFRESH'S OWN CADENCE OVERRIDING THE READ
-        # PATH'S. The TTL here answers "is this fresh enough to serve", which
-        # is a different question from "is this month due a look" — see
-        # refresh_months. It never overrides allow_fetch, so a share page
-        # cannot be made to fetch by anything.
-        fresh = (ts - cached.cached_at) <= ttl and not force
-        unasked = set(in_play) - set(cached.asked)
-        if not allow_fetch or (fresh and not unasked
-                               and not _failed_retry_due(endpoint, start, cached, ts)):
-            return cached
-        if not force:
-            # STALE BUT SERVEABLE: hand over what is stored and renew it behind
-            # the request. Waiting here is what used to cost a page load seconds,
-            # and there is nothing a fresh fetch would give this viewer that the
-            # stored rows do not — a calendar is not a bank balance, and a span
-            # that lapsed a minute ago is the same span.
-            #
-            # A SOURCE NOW IN PLAY THAT WAS NEVER ASKED IS DIFFERENT, and falls
-            # through to the blocking path below: those rows are not stale, they
-            # are INCOMPLETE, and serving them would show a month missing a whole
-            # service while the banner said everything was fine.
-            if not unasked:
-                schedule_refill(endpoint, settings, start)
-                return cached
-        if unasked:
-            logger.debug(
-                "the %s window starting %s was filled without %s; refilling.",
-                endpoint.key, start, ", ".join(sorted(unasked)))
-    elif not allow_fetch:
-        return WindowCoverage((), (), None)
     try:
         records, answered, unchanged = await fetch_window_records(
-            endpoint, settings, start, covered=has_rows)
+            endpoint, settings, start, covered=has_rows,
+            **({} if named is None else {"sources": ask}))
     except SourceUnavailable:
-        if cached is not None:
-            # SERVE WHAT IS STORED RATHER THAN NOTHING — saying that every service
-            # this fill just asked was asked, so one the window's rows never had
-            # (a month's file can cover a week no other service has answered for
-            # yet) reads as the failure it is, not as nothing to report.
-            return cached._replace(asked=tuple(dict.fromkeys((*cached.asked, *in_play))))
-        raise
+        _note_failure(endpoint, start, ask, (), ts)
+        if cached is None:
+            raise
+        await store_window(endpoint.key, start, [], ttl, ts, sources=[], asked=ask)
+        return _held_coverage(await entries.source_coverage(endpoint.key, start))
     await store_window(endpoint.key, start, records, ttl, ts,
-                       sources=answered, asked=in_play, unchanged=unchanged)
-    _note_failure(endpoint, start, in_play, [*answered, *unchanged], ts)
+                       sources=answered, asked=ask, unchanged=unchanged)
+    _note_failure(endpoint, start, ask, [*answered, *unchanged], ts)
     # AFTER THE STORE, never before it: the store records a pending source as
     # asked and not answered, and a follow-up that stored first would have its
     # answer marked missing again by this one.
     _follow_pending(endpoint, settings, start)
-    if unchanged and not answered:
-        # EVERY SOURCE SAID "UNCHANGED", so this fetch brought no records at all
-        # while the stored rows are perfectly good. The store above still ran: it
-        # advanced the coverage clock without touching an airing, and the window
-        # is served exactly as the coverage now stands.
-        after = await entries.span_coverage(endpoint.key, start)
-        if after[2] is not None:
-            return WindowCoverage(after[0], after[1], int(after[2]))
-    await _after_fill(settings, records)
-    # Who was asked and who answered, from this fill, which knows them in the
-    # sources' declared order.
-    # A SOURCE THAT SAID "UNCHANGED" ANSWERED, beside one that brought rows as
-    # much as on its own: naming only the second made the very read this fill
-    # served report the first as unreadable — the incomplete-data banner — and,
-    # being partial, it was not kept for the reads after it.
-    replied = {*answered, *unchanged}
-    return WindowCoverage(tuple(name for name in in_play if name in replied),
-                          tuple(in_play), ts)
+    if answered:
+        await _after_fill(settings, records)
+    # WHAT THE WINDOW HOLDS NOW, every service in play — this fill's and the
+    # others'. A SOURCE THAT SAID "UNCHANGED" ANSWERED, beside one that brought
+    # rows as much as on its own: naming only the second made the very read this
+    # fill served report the first as unreadable — the incomplete-data banner —
+    # and, being partial, it was not kept for the reads after it.
+    return _held_coverage(await entries.source_coverage(endpoint.key, start)) \
+        or WindowCoverage((), tuple(ask), ts)
 
 
 async def _after_fill(settings, records: list[Record]) -> None:
@@ -2321,6 +2415,14 @@ async def refresh_months(settings, *, now: int | None = None) -> int:
     budget with no viewer waiting on it. Its whole reason to exist is to move
     that cost off the read path, and firing a month's worth of endpoints at once
     would move it onto the rate limiter instead.
+
+    THE SAME RULE AS A READ'S, SERVICE BY SERVICE (`_due`), on the schedule's own
+    clocks: a service whose reply is older than the tier allows, and one whose
+    last answer failed once the slower failure clock says so
+    (_FAILED_REFRESH_SECONDS: age alone left a failure up for days) — and those
+    alone are asked, so a month Simkl's file confirmed whole asks Simkl once, not
+    once a week. A window nothing has filled is filled whole; a service a filled
+    window never asked is the next read's to ask, as it always was.
     """
     ts = db.now() if now is None else now
     today = datetime.fromtimestamp(ts, tz=timezone.utc).date()
@@ -2330,18 +2432,19 @@ async def refresh_months(settings, *, now: int | None = None) -> int:
         first, last = _month_span(year, month)
         for endpoint in ENDPOINTS.values():
             for start in aligned_windows(first, last):
-                answered, asked, stored = await entries.span_coverage(endpoint.key, start)
-                # Due by age, or because a source it asked did not answer — see
-                # _FAILED_REFRESH_SECONDS for why age alone left a failure up for
-                # days.
-                if (stored is not None and (ts - stored) < max_age
-                        and not _failed_retry_due(
-                            endpoint, start, WindowCoverage(answered, asked, stored), ts,
-                            after=_FAILED_REFRESH_SECONDS)):
-                    continue
+                in_play = [str(p.source) for p in _window_sources(endpoint, settings, start)]
+                held = await entries.source_coverage(endpoint.key, start)
+                cached = _held_coverage(held)
+                # A window nothing has filled is filled whole (`None`: every
+                # service in play); a filled one only for the services due.
+                due = None
+                if cached is not None:
+                    _unasked, due = _due(endpoint, start, in_play, held, cached, ts,
+                                         max_age=max_age, failure_after=_FAILED_REFRESH_SECONDS)
+                    if not due:
+                        continue
                 try:
-                    await ensure_window(endpoint, settings, start,
-                                        allow_fetch=True, force=True, now=ts)
+                    await fill_sources(endpoint, settings, start, due, now=ts)
                 except SourceUnavailable:
                     # A source that cannot answer is not a reason to abandon the
                     # rest of the month; the span keeps whatever it had and is

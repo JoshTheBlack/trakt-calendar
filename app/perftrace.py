@@ -316,10 +316,12 @@ class RequestTimingMiddleware:
 
 
 def install(app) -> None:
-    """Add the request timer as the outermost middleware.
+    """Add the request timer outside every middleware that works on a request.
 
-    Starlette reverses registration order, so this must be added LAST — see the
-    class docstring for why being outermost is the whole point.
+    Starlette reverses registration order, so this must be added after them —
+    see the class docstring for why being outermost is the whole point. The one
+    middleware added after it, app/after_response.py's, does nothing until the
+    response has been sent, so it adds nothing to what this measures.
     """
     app.add_middleware(RequestTimingMiddleware)
 

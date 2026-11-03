@@ -579,14 +579,32 @@ async def span_coverage(endpoint_key: str, span_start: date
     and is asked again on a clock of its own (cache._failed_retry_due); only a
     span nobody has replied for is dated by its asking.
     """
-    cover = await db.fetch_all(
-        "SELECT source, asked, answered, stored_at FROM calendar_coverage "
-        "WHERE endpoint = ? AND span_start = ?", (endpoint_key, span_start.isoformat()))
-    asked = tuple(str(r["source"]) for r in cover if r["asked"])
-    answered = tuple(str(r["source"]) for r in cover if r["answered"])
-    stored_at = min((int(r["stored_at"]) for r in cover if r["answered"]),
-                    default=min((int(r["stored_at"]) for r in cover), default=None))
+    held = await source_coverage(endpoint_key, span_start)
+    asked = tuple(source for source, row in held.items() if row.asked)
+    answered = tuple(source for source, row in held.items() if row.answered)
+    stored_at = min((row.stored_at for row in held.values() if row.answered),
+                    default=min((row.stored_at for row in held.values()), default=None))
     return answered, asked, stored_at
+
+
+class SourceCoverage(NamedTuple):
+    """One service's coverage row for one window: whether it was asked, whether
+    its last answer was a reply (listings or "unchanged"), and when it last
+    replied — or, for one that never has, when it was first asked."""
+    asked: bool
+    answered: bool
+    stored_at: int
+
+
+async def source_coverage(endpoint_key: str, span_start: date) -> dict[str, SourceCoverage]:
+    """{service: its coverage row} for the window beginning `span_start` — what
+    decides, service by service, whether the window is fresh, stale, failed or
+    never asked (cache.ensure_window)."""
+    return {str(r["source"]): SourceCoverage(bool(r["asked"]), bool(r["answered"]),
+                                             int(r["stored_at"]))
+            for r in await db.fetch_all(
+                "SELECT source, asked, answered, stored_at FROM calendar_coverage "
+                "WHERE endpoint = ? AND span_start = ?", (endpoint_key, span_start.isoformat()))}
 
 
 async def read_span_whole(endpoint_key: str, span_start: date, span_end: date

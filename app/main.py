@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
+from . import after_response
 from . import auth
 from . import authz
 from . import cache
@@ -411,6 +412,11 @@ async def content_security_policy(request: Request, call_next):
 # actually waited, which includes the gates authz just installed and the gzip of
 # the response below them.
 perftrace.install(app)
+
+# OUTSIDE EVEN THAT: what a request owes once it has answered (a stale calendar
+# week's refill) starts when the response the client receives has been sent in
+# full, gzip and timing included — app/after_response.py says why.
+app.add_middleware(after_response.AfterResponseMiddleware)
 
 
 # The status codes that get a rendered page rather than Starlette's bare

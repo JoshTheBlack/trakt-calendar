@@ -17,6 +17,7 @@ No network — the Trakt fetch is patched.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import unittest
 import zlib
@@ -27,6 +28,7 @@ from zoneinfo import ZoneInfo
 
 from app import cache, db
 from app.calendar import cache as calendar_cache, filter as calendar_filter
+from app.calendar import entries as calendar_entries
 from app.providers.trakt import TraktError
 from app.providers.trakt import calendar as trakt_calendar
 from app.config import Settings
@@ -575,14 +577,139 @@ class SourcesInPlayForAWindowTests(CacheTestCase):
         self.assertEqual(
             list(inspect.signature(calendar_cache._window_sources).parameters),
             ["endpoint", "settings", "start"])
-        # `covered` IS ALLOWED AND IS NOT A PREFERENCE. It names which sources
-        # already hold rows for this span, which is a fact about storage that
-        # every viewer would compute identically — it decides whether a source
-        # may answer "unchanged", never which sources are asked or what is kept.
-        # What must never appear here is a viewer: no prefs, no user id.
+        # `covered` AND `sources` ARE ALLOWED AND ARE NOT PREFERENCES. `covered`
+        # names which sources already hold rows for this span — it decides
+        # whether a source may answer "unchanged", never what is kept — and
+        # `sources` which of those in play are due, by the window's own coverage
+        # (cache._due): facts about storage that every viewer would compute
+        # identically. What must never appear here is a viewer: no prefs, no
+        # user id.
         self.assertEqual(
             list(inspect.signature(calendar_cache.fetch_window_records).parameters),
-            ["endpoint", "settings", "start", "covered"])
+            ["endpoint", "settings", "start", "covered", "sources"])
+
+
+class AStaleWindowIsRefilledAfterTheAnswerTests(CacheTestCase):
+    """A stale window is served from what is stored at once, and only the
+    services whose own coverage has lapsed are asked — once the request that
+    noticed has been answered (after_response.later), so the refill neither
+    delays its page nor competes with it."""
+
+    START = calendar_cache.window_start(date(2026, 7, 13))
+    NOW = 1_000_000
+
+    async def _store(self, source: str, at: int) -> None:
+        await calendar_cache.store_window(SHOWS.key, self.START, [], 600, at,
+                                          sources=[source], asked=[source])
+
+    async def _ensure(self):
+        never = AsyncMock(side_effect=AssertionError("asked inline"))
+        with patch("app.calendar.cache.fetch_window_records", never), \
+                patch("app.calendar.cache.after_response.later") as later, \
+                patch("app.calendar.cache.schedule_refill") as refill:
+            coverage = await calendar_cache.ensure_window(SHOWS, self.settings, self.START,
+                                                          now=self.NOW)
+            for call in later.call_args_list:
+                call.args[0]()
+        never.assert_not_awaited()
+        return coverage, [list(call.args[3]) for call in refill.call_args_list]
+
+    async def test_a_stale_service_is_refilled_alone_after_the_answer(self):
+        await self._store("trakt", self.NOW - 3600)        # past the ten-minute TTL
+        await self._store("simkl", self.NOW - 60)           # fresh
+        coverage, refilled = await self._ensure()
+        self.assertEqual(coverage.cached_at, self.NOW - 3600)
+        self.assertEqual(refilled, [["trakt"]])
+
+    async def test_a_fresh_window_asks_nobody(self):
+        await self._store("trakt", self.NOW - 60)
+        await self._store("simkl", self.NOW - 60)
+        _coverage, refilled = await self._ensure()
+        self.assertEqual(refilled, [])
+
+    async def test_a_fill_of_named_services_asks_those_alone(self):
+        await self._store("trakt", self.NOW - 3600)
+        await self._store("simkl", self.NOW - 60)
+        fetch = AsyncMock(return_value=([], ["trakt"], []))
+        with patch("app.calendar.cache.fetch_window_records", fetch):
+            await calendar_cache.fill_sources(SHOWS, self.settings, self.START, ["trakt"],
+                                              now=self.NOW)
+        self.assertEqual(fetch.await_args.kwargs["sources"], ["trakt"])
+        held = await calendar_entries.source_coverage(SHOWS.key, self.START)
+        self.assertEqual((held["trakt"].stored_at, held["simkl"].stored_at),
+                         (self.NOW, self.NOW - 60))
+
+    async def test_a_service_that_failed_is_recorded_and_waits_its_clock(self):
+        """A fill whose every service refused still says so, so the next read
+        asks again on the failure clock rather than on every read."""
+        await self._store("trakt", self.NOW - 60)
+        calendar_cache._failed_retried_at.clear()
+        self.addCleanup(calendar_cache._failed_retried_at.clear)
+        refused = AsyncMock(side_effect=base.SourceUnavailable("down"))
+        with patch("app.calendar.cache.fetch_window_records", refused):
+            coverage = await calendar_cache.fill_sources(SHOWS, self.settings, self.START,
+                                                         ["simkl"], now=self.NOW)
+        self.assertEqual((list(coverage.asked), list(coverage.sources)),
+                         (["trakt", "simkl"], ["trakt"]))
+        _coverage, refilled = await self._ensure()
+        self.assertEqual(refilled, [], "a failure just recorded was asked again at once")
+
+
+class AMonthsWeeksAreRefilledByOneAnswerTests(CacheTestCase):
+    """One Simkl month file renews every whole week of its month, so those weeks
+    lapse together: a read finding them all stale asks Simkl ONCE while that
+    answer is on its way, beside a Trakt refill for each week."""
+
+    JULY = [calendar_cache.window_start(date(2026, 7, day)) for day in (13, 20, 27)]
+
+    async def test_a_week_a_neighbour_s_answer_renews_does_not_ask_for_it_again(self):
+        release = asyncio.Event()
+        asked = []
+
+        async def fill(endpoint, settings, start, sources, *, now=None):
+            asked.append((start, sources))
+            await release.wait()
+
+        self.addCleanup(calendar_cache._refilling.clear)
+        with patch("app.calendar.cache.fill_sources", side_effect=fill):
+            for start in self.JULY:
+                calendar_cache.schedule_refill(SHOWS, self.settings, start, ["trakt", "simkl"])
+            # Every service is already being asked about the 20th.
+            self.assertFalse(calendar_cache.schedule_refill(SHOWS, self.settings, self.JULY[1]))
+            await asyncio.sleep(0)
+            release.set()
+            await asyncio.gather(*calendar_cache._refill_tasks)
+        self.assertEqual(asked, [
+            (self.JULY[0], ["trakt", "simkl"]),
+            # Inside July: the 13th's answer from Simkl covers it.
+            (self.JULY[1], ["trakt"]),
+            # Straddling July and August: only an answer that read both covers it.
+            (self.JULY[2], ["trakt", "simkl"]),
+        ])
+        self.assertEqual(dict(calendar_cache._refilling), {}, "a finished refill left its latch")
+
+    async def test_a_week_two_refills_renew_stays_latched_until_both_end(self):
+        """The 27th straddles July and August, so its answer reads July's file
+        too and renews July's weeks — the 13th's refill ending first must not
+        unlatch the 20th while the 27th's is still renewing it."""
+        releases = {start: asyncio.Event() for start in self.JULY}
+
+        async def fill(endpoint, settings, start, sources, *, now=None):
+            await releases[start].wait()
+
+        self.addCleanup(calendar_cache._refilling.clear)
+        with patch("app.calendar.cache.fill_sources", side_effect=fill):
+            calendar_cache.schedule_refill(SHOWS, self.settings, self.JULY[0], ["simkl"])
+            calendar_cache.schedule_refill(SHOWS, self.settings, self.JULY[2], ["simkl"])
+            await asyncio.sleep(0)
+            releases[self.JULY[0]].set()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            self.assertFalse(calendar_cache.schedule_refill(SHOWS, self.settings, self.JULY[1],
+                                                            ["simkl"]))
+            releases[self.JULY[2]].set()
+            await asyncio.gather(*calendar_cache._refill_tasks)
+        self.assertEqual(dict(calendar_cache._refilling), {}, "a finished refill left its latch")
 
 
 class AskedAndAnsweredTests(CacheTestCase):
@@ -619,13 +746,16 @@ class AskedAndAnsweredTests(CacheTestCase):
     async def test_a_window_filled_before_a_source_was_in_play_is_refilled(self):
         """Nothing went wrong when it was written, so saying the data could not
         be loaded is untrue — and stays untrue for as long as the row lives.
-        Refetching is what actually answers the question, the same treatment a
-        payload in an older shape already gets."""
+        Asking the service it never asked is what actually answers the question,
+        and asking it alone: Trakt's reply is still fresh, and asking Trakt again
+        would spend a request to learn nothing."""
         await self._store(["trakt"], ["trakt"])
-        with patch("app.calendar.cache.fetch_window_records",
-                   window_fetch([_entry("refilled", "2026-07-07T12:00:00Z")])):
+        fetch = AsyncMock(side_effect=window_fetch([_entry("refilled", "2026-07-07T12:00:00Z")]))
+        with patch("app.calendar.cache.fetch_window_records", fetch):
             ids, meta = await self._read(now=1000)   # still well inside the TTL
-        self.assertEqual(ids, ["refilled"])
+        self.assertEqual([call.kwargs.get("sources") for call in fetch.await_args_list],
+                         [["simkl"]])
+        self.assertEqual(ids, ["stored"])
         self.assertFalse(meta["partial"])
         window, _ = await calendar_cache.read_cached_window(SHOWS.key, self.WINDOW)
         self.assertEqual(sorted(window.asked), ["simkl", "trakt"])
@@ -1487,7 +1617,7 @@ class MonthRefreshTests(CacheTestCase):
     NOW = 1_784_000_000  # 2026-07-13T05:33:20Z — a fixed instant inside July
 
     async def _refresh(self, now=None):
-        with patch("app.calendar.cache.ensure_window", new_callable=AsyncMock) as mocked:
+        with patch("app.calendar.cache.fill_sources", new_callable=AsyncMock) as mocked:
             mocked.return_value = calendar_cache.WindowCoverage((), (), None)
             await calendar_cache.refresh_months(self.settings, now=now or self.NOW)
         return mocked
@@ -1498,14 +1628,31 @@ class MonthRefreshTests(CacheTestCase):
         self.assertEqual({call.args[0].key for call in mocked.call_args_list},
                          set(ENDPOINTS))
 
-    async def test_it_forces_the_refill_rather_than_asking_the_read_ttl(self):
+    async def test_it_judges_its_own_tier_rather_than_the_read_ttl(self):
         """The read TTL answers "is this fresh enough to serve", which is a
         different question from "is this month due a look". A refresh that went
         through the ordinary freshness check would do nothing on any instance
         whose TTL is longer than the tier."""
-        mocked = await self._refresh()
-        self.assertTrue(all(call.kwargs.get("force") for call in mocked.call_args_list))
-        self.assertTrue(all(call.kwargs.get("allow_fetch") for call in mocked.call_args_list))
+        start = calendar_cache.window_start(date(2026, 7, 13))
+        await calendar_cache.store_window(SHOWS.key, start, [], 600, self.NOW - 25 * 3600,
+                                          sources=["trakt"], asked=["trakt"])
+        self.settings = dataclasses.replace(self.settings,
+                                            calendar_cache_ttl_minutes=30 * 24 * 60)
+        due = {(call.args[0].key, call.args[2]): call.args[3]
+               for call in (await self._refresh()).call_args_list}
+        self.assertEqual(due[(SHOWS.key, start)], ["trakt"])
+
+    async def test_it_asks_only_the_services_that_are_due(self):
+        """One service's reply lapsed, the other's is fresh: the schedule asks
+        the first alone — a month one Simkl file confirmed asks Simkl once."""
+        start = calendar_cache.window_start(date(2026, 7, 13))
+        await calendar_cache.store_window(SHOWS.key, start, [], 600, self.NOW - 25 * 3600,
+                                          sources=["trakt"], asked=["trakt"])
+        await calendar_cache.store_window(SHOWS.key, start, [], 600, self.NOW - 3600,
+                                          sources=["simkl"], asked=["simkl"])
+        due = {(call.args[0].key, call.args[2]): call.args[3]
+               for call in (await self._refresh()).call_args_list}
+        self.assertEqual(due[(SHOWS.key, start)], ["trakt"])
 
     async def test_a_span_stored_inside_the_tier_is_left_alone(self):
         """Daily for the current month: a span stored an hour ago is not due."""
@@ -1551,7 +1698,7 @@ class MonthRefreshTests(CacheTestCase):
         often warmed constantly and one that ran for a week warmed once. Nothing
         in this module remembers anything — a second pass reads the coverage the
         first one wrote."""
-        with patch("app.calendar.cache.ensure_window", new_callable=AsyncMock) as first:
+        with patch("app.calendar.cache.fill_sources", new_callable=AsyncMock) as first:
             first.return_value = calendar_cache.WindowCoverage((), (), None)
             await calendar_cache.refresh_months(self.settings, now=self.NOW)
         self.assertGreater(first.call_count, 0)
@@ -1564,7 +1711,7 @@ class MonthRefreshTests(CacheTestCase):
         self.assertEqual(second.call_count, 0)
 
     async def test_a_source_that_cannot_answer_does_not_abandon_the_month(self):
-        with patch("app.calendar.cache.ensure_window", new_callable=AsyncMock) as mocked:
+        with patch("app.calendar.cache.fill_sources", new_callable=AsyncMock) as mocked:
             mocked.side_effect = TraktError("Trakt unreachable", 503)
             refilled = await calendar_cache.refresh_months(self.settings, now=self.NOW)
         self.assertEqual(refilled, 0)          # nothing stored

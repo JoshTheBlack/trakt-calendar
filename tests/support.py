@@ -93,21 +93,26 @@ def window_fetch(entries):
     span read the same whichever sources answered; a test about per-viewer source
     selection needs records from two services and builds them itself.
     """
-    async def fetch(endpoint, settings, start, *, covered=()):
+    async def fetch(endpoint, settings, start, *, covered=(), sources=None):
         from app.providers.simkl import _SimklProvider
         from app.providers.tmdb import _TmdbProvider
 
         rows = entries(endpoint, start) if callable(entries) else entries
-        sources = ["trakt"]
+        answering = ["trakt"]
         if _SimklProvider.capabilities.answers(endpoint.key):
-            sources.append("simkl")
+            answering.append("simkl")
         if (_TmdbProvider.capabilities.answers(endpoint.key)
                 and getattr(settings, "tmdb_configured", False)):
-            sources.append("tmdb")
+            answering.append("tmdb")
+        # A fill asking only the services a window's coverage says are due
+        # (cache.ensure_window) hears from those alone — and the records are
+        # Trakt's, so a fill that did not ask Trakt brings none.
+        if sources is not None:
+            answering = [name for name in answering if name in set(map(str, sources))]
         # (records, answered, unchanged) — the stub never reports a source as
         # unchanged, because a test that wants that case is testing the
         # conditional GET and builds its own stub for it.
-        return calendar_records(rows, endpoint), sources, []
+        return (calendar_records(rows, endpoint) if "trakt" in answering else []), answering, []
     return fetch
 
 

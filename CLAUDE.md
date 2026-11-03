@@ -411,7 +411,19 @@ validator speaks for). The envelope
 records who was ASKED as well as who ANSWERED, which is what lets a source
 switched on later refill a window that legitimately has none of its records,
 and what keeps "partial" meaning a source that failed rather than one nobody
-asked. ONE GAP IS NOT A FAILURE: a source still WORKING ITS ANSWER OUT
+asked. WHICH SERVICES A READ ASKS IS DECIDED SERVICE BY SERVICE from each one's
+own coverage row (`cache._due`, `fill_sources` the one fill): a window nothing
+has filled, or a service in play it never asked, is filled inline, those services
+alone; a service whose reply lapsed, or whose failure is due a retry, is refilled
+alone AFTER THE RESPONSE HAS BEEN SENT (`after_response.later`, whose middleware
+wraps the whole app) — the window is served from what is stored at once; a fresh
+service is not asked, and nor is one a refill already under way is asking about
+the window, its own or a neighbour's whose answer spans it (`schedule_refill`'s
+latch, by service and window), so the weeks one Simkl file renewed, which lapse
+together, are refilled by one answer. `refresh_months` asks only the services
+past its own tier.
+A fill whose every service refused records the failure, so the failure clock,
+not every read, decides the next try. ONE GAP IS NOT A FAILURE: a source still WORKING ITS ANSWER OUT
 (`base.SourcePending`, raised at once with a `ready` awaitable) is stored asked
 and not answered, remembered in process (`cache._pending`), and its share alone
 is filled once `ready` finishes (`cache.fill_source`, started only AFTER the

@@ -79,7 +79,8 @@ MAIN = "main"
 GROUPS: dict[str, str] = {
     # The kernel: configuration, storage, HTTP plumbing, rendering. Depends on
     # no feature, which is what makes it safe for every feature to depend on it.
-    "assets": KERNEL, "cache": KERNEL, "changelog": KERNEL, "chrome": KERNEL,
+    "after_response": KERNEL, "assets": KERNEL, "cache": KERNEL, "changelog": KERNEL,
+    "chrome": KERNEL,
     "clock": KERNEL, "config": KERNEL, "csp": KERNEL, "db": KERNEL, "details_panel": KERNEL,
     "endpoints": KERNEL, "http_pool": KERNEL, "logging_setup": KERNEL,
     "perftrace": KERNEL, "route_params": KERNEL, "secrets_box": KERNEL,
