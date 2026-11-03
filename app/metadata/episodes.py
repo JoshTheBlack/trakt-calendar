@@ -515,6 +515,23 @@ def read_units(conn: db.Connection, refs: Iterable[tuple[str, str]]) -> list:
         (json.dumps(refs),))
 
 
+def read_due(conn: db.Connection, cutoff: int) -> list:
+    """The stored rows on which some service lists an instant last stored at or
+    before `cutoff` — the listing's own or a repeat's — whole, in one aggregated
+    row. The retention sweep's question, asked every minute and almost always
+    answered with none: SQL finds them, repeats and all, so the rows read are the
+    rows due and not every row that holds a repeat."""
+    due = " OR ".join(
+        f"(e.{source}_air_ts IS NOT NULL AND (COALESCE(e.{source}_listed_at, 0) <= :cutoff "
+        f"OR (e.{source}_repeats_json != '[]' AND EXISTS (SELECT 1 FROM "
+        f"json_each(e.{source}_repeats_json) r "
+        f"WHERE COALESCE(json_extract(r.value, '$.listed_at'), 0) <= :cutoff))))"
+        for source in groups.sources() if groups.has(tables.EPISODES, source, "listed_at"))
+    if not due:
+        return []
+    return _aggregated(conn, f"FROM {tables.EPISODES} e WHERE {due}", {"cutoff": cutoff})
+
+
 def read_titles(conn: db.Connection, keys: Iterable[str]) -> list:
     """Every stored episode row of the titles named."""
     keys = sorted({str(key) for key in keys})

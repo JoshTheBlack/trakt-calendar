@@ -818,28 +818,50 @@ async def listed_cards(endpoint_keys, first: date, last: date) -> list[ListedCar
 RETAIN_SECONDS = 180 * 24 * 60 * 60
 
 
-def _sweep_listings(conn: db.Connection, cutoff: int) -> int:
-    """Every instant last stored at or before `cutoff` taken off its row — a
-    row nothing lists or describes any more removed — inside the caller's
-    transaction. Returns how many instants went."""
-    names = [source for source in groups.sources()
-             if groups.has(tables.EPISODES, source, "listed_at")]
-    if not names:
-        return 0
-    old = " OR ".join(f"({source}_listed_at <= :cutoff OR {source}_repeats_json != '[]')"
-                      for source in names)
+class _Sweep(NamedTuple):
+    """What a retention sweep takes off, decided before its lock (`_plan_sweep`)."""
+    # The rows holding an instant past the window, with those instants taken
+    # off, as `Book.write` writes them — and how many instants that is.
+    book: episode_rows.Book
+    spelled: tuple[str, str] | None
+    removed: int
+    # Whether a coverage row, or a calendar file's validator, is past it.
+    coverage: bool
+    files: bool
+    # The groups nothing lists any more, and the groups past a service's ceiling.
+    unlisted: title_rows.Clearing
+    ceilings: title_rows.Clearing
+
+    @property
+    def due(self) -> bool:
+        return bool(self.spelled or self.coverage or self.files or self.unlisted
+                    or self.ceilings)
+
+
+def _plan_sweep(conn: db.Connection, now: int) -> _Sweep:
+    """Everything a sweep at `now` takes off, read and decided and NOT written —
+    each read a query that answers in one row, and almost always with nothing."""
+    cutoff = now - RETAIN_SECONDS
     book = episode_rows.Book()
-    book.hold(conn.execute(f"SELECT * FROM {tables.EPISODES} WHERE {old}",
-                           {"cutoff": cutoff}).fetchall())
+    book.hold(episode_rows.read_due(conn, cutoff))
     removed = 0
+    emptied = []
     for row in book.rows.values():
         for source, instants in row.instants.items():
+            listed = bool(instants)
             for instant in list(instants):
                 if int(instant.listed_at or 0) <= cutoff:
                     row.take(source, instant, instant.calendars)
                     removed += 1
-    book.write(conn)
-    return removed
+            if listed and not instants:
+                emptied.append((source, row.key, row.unit))
+    (coverage, files), = conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM calendar_coverage WHERE stored_at <= :cutoff), "
+        "EXISTS (SELECT 1 FROM calendar_source_files WHERE fetched_at <= :cutoff)",
+        {"cutoff": cutoff}).fetchall()
+    return _Sweep(book, book.spell(), removed, bool(coverage), bool(files),
+                  title_rows.plan_unlisted(conn, cutoff, emptied=emptied),
+                  title_rows.plan_past_ceilings(conn, now))
 
 
 async def sweep(now: int | None = None) -> int:
@@ -848,28 +870,44 @@ async def sweep(now: int | None = None) -> int:
 
     ORDER IS THE WHOLE OF THE CARE HERE. Listings go first; a service's group is
     cleared only once it is old AND NOTHING THE SERVICE STILL LISTS NAMES IT
-    (title_rows.sweep_unlisted). Clearing a title's group on age alone would
-    strand every listing still drawn under it — a card with no name, which is
-    worse than either keeping the group or dropping the listing with it. One
-    transaction, so that order cannot be seen half-done.
+    (title_rows.plan_unlisted, told which listings this takes off). Clearing a
+    title's group on age alone would strand every listing still drawn under it
+    — a card with no name, which is worse than either keeping the group or
+    dropping the listing with it. One transaction, so that order cannot be seen
+    half-done.
+
+    DECIDED BEFORE THE LOCK, AND NOTHING DUE TAKES NO LOCK. The heartbeat runs
+    this every minute, and nearly every minute nothing is due. It used to read,
+    inside its transaction, every episode row holding a repeat (308 whole rows
+    on the development copy) and every holder's keys row by row, to decide
+    nothing — MEASURED on a copy of dev: the lock held 0.12 s alone, up to
+    0.98 s beside one month read and 2.70 s beside three, and 4.33 s on dev under
+    load. The plan reads only what is due, each read answering in one row
+    (`_plan_sweep`); when it finds nothing, nothing is written and no writer
+    waits; when it finds something, the same plan is made again in the write's
+    turn (db.transaction's `prepare`), so the lock is held for the writes.
     """
     ts = db.now() if now is None else now
     cutoff = ts - RETAIN_SECONDS
+    if not (await db.run(lambda conn: _plan_sweep(conn, ts))).due:
+        return 0
 
-    def _work(conn) -> int:
-        removed = _sweep_listings(conn, cutoff)
-        conn.execute("DELETE FROM calendar_coverage WHERE stored_at <= ?", (cutoff,))
-        title_rows.sweep_unlisted(conn, cutoff)
+    def _work(conn, planned: _Sweep) -> int:
+        planned.book.write(conn, planned.spelled)
+        if planned.coverage:
+            conn.execute("DELETE FROM calendar_coverage WHERE stored_at <= ?", (cutoff,))
+        title_rows.clear(conn, planned.unlisted)
         # And whatever a service's own terms say may not be kept, held or not —
         # after the age sweep, which it overrides (TMDB's six months).
-        title_rows.sweep_past_ceilings(conn, ts)
+        title_rows.report_ceilings(title_rows.clear(conn, planned.ceilings))
         # The validators outlive nothing. A file whose listings are gone has
         # nothing for a 304 to confirm, so keeping its ETag would answer
         # "unchanged" for a month this app no longer holds anything about.
-        conn.execute("DELETE FROM calendar_source_files WHERE fetched_at <= ?", (cutoff,))
-        return removed
+        if planned.files:
+            conn.execute("DELETE FROM calendar_source_files WHERE fetched_at <= ?", (cutoff,))
+        return planned.removed
 
-    removed = await db.transaction(_work)
+    removed = await db.transaction(_work, prepare=lambda conn: _plan_sweep(conn, ts))
     if removed:
         logger.info("calendar retention: removed %d listing(s) not stored inside "
                     "the last %d days.", removed, RETAIN_SECONDS // 86400)

@@ -188,19 +188,27 @@ def _title_part(board_key: str) -> str:
     return ":".join(str(board_key).split(":")[:3])
 
 
+# EVERY KEY THE HOLDERS ABOVE HOLD, AND EVERY BOARD KEY A DELETED TIER LISTS, IN ONE
+# ROW. The retention sweep asks this every minute, and the driver lets go of the
+# GIL around every row it steps through and must win it back — up to a switch
+# interval each time while the event loop is busy — so a row per key (1,679 on the
+# development copy) was a switch per key; one row is one.
+_HELD_SQL = (
+    "SELECT json_array(json((SELECT json_group_array(key) FROM ("
+    + " UNION ".join(f"SELECT {_FLAT_TRIPLE} AS key FROM {table}" for table in _KEEPS_ALIVE)
+    + ") WHERE key IS NOT NULL)), "
+    f"json((SELECT json_group_array(j.value) FROM {_TIER_REMOVALS} r, json_each(r.items_json) j "
+    "WHERE json_valid(r.items_json) AND json_type(r.items_json) = 'array' "
+    "AND j.type = 'text')))")
+
+
 def held_keys(conn: db.Connection) -> set[str]:
     """Every title key a feature row holds that keeps its description alive —
-    see `_KEEPS_ALIVE`. Read inside the caller's transaction, so a sweep and the
-    rows it judges by are one moment."""
-    keys: set[str] = set()
-    for sql in _KEEPS_ALIVE.values():
-        keys.update(str(row[0]) for row in conn.execute(sql) if row[0])
-    for (document,) in conn.execute(
-            f"SELECT items_json FROM {_TIER_REMOVALS} WHERE json_valid(items_json)"):
-        listed = json.loads(document)
-        if isinstance(listed, list):
-            keys.update(_title_part(value) for value in listed if isinstance(value, str))
-    return keys
+    see `_KEEPS_ALIVE` — read in one row (`_HELD_SQL`). Read on the caller's
+    connection, so a sweep and the rows it judges by are one moment."""
+    (found,) = conn.execute(_HELD_SQL).fetchone()
+    held, removed = json.loads(found)
+    return {str(key) for key in held if key} | {_title_part(value) for value in removed}
 
 
 def keeps_alive_tables() -> frozenset[str]:

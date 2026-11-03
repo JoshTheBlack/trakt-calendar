@@ -972,11 +972,30 @@ def write_episode_answers(conn: db.Connection, source: str, media: str, season: 
 # retention
 # ---------------------------------------------------------------------------
 
+def _emptied(source: str, alias: str) -> str:
+    """SQL: the episode row aliased `alias` is one `:emptied` names for `source`
+    — one whose last listing by that service the sweep deciding this takes off."""
+    return (f"EXISTS (SELECT 1 FROM json_each(:emptied) x "
+            f"WHERE json_extract(x.value, '$[0]') = '{source}' "
+            f"AND json_extract(x.value, '$[1]') = {alias}.title_key "
+            f"AND json_extract(x.value, '$[2]') = {alias}.unit)")
+
+
 def _listed_by(source: str, alias: str) -> str:
     """SQL: `source` lists an episode of the title a row aliased `alias` is
-    about, on any calendar."""
+    about, on any calendar, once the sweep has taken off what it is taking off
+    (`_emptied`)."""
     return (f"EXISTS (SELECT 1 FROM {tables.EPISODES} e WHERE e.title_key = {alias}.title_key "
-            f"AND e.{source}_air_ts IS NOT NULL)")
+            f"AND e.{source}_air_ts IS NOT NULL AND NOT {_emptied(source, 'e')})")
+
+
+def _keys(conn: db.Connection, sql: str, params: Mapping[str, Any]) -> list:
+    """`sql`'s one aggregated row — a JSON array of keys — read back. A sweep's
+    reads answer in one row: the driver lets go of the GIL around every row it
+    steps through and must win it back, up to a switch interval each time while
+    the event loop is busy."""
+    (found,) = conn.execute(sql, params).fetchone()
+    return json.loads(found)
 
 
 def _clear(conn: db.Connection, table: str, source: str, keys: list, *,
@@ -1015,13 +1034,24 @@ def drop_empty_rows(conn: db.Connection) -> dict[str, int]:
                 f"DELETE FROM {tables.EPISODES} WHERE {episodes}").rowcount}
 
 
-def sweep_unlisted(conn: db.Connection, cutoff: int) -> dict[str, int]:
-    """Clear every service's group a title, season or episode row holds that
-    has gone untouched since `cutoff` and that NO CALENDAR LISTING OF THE
-    SERVICE STILL NAMES AND NO FEATURE ROW HOLDS, inside the caller's transaction
-    — after the calendar has swept its own listings, which is the order that
-    keeps a group while anything still draws it — and then the season and
-    episode rows nothing is left on. Returns {table: groups cleared}.
+# WHAT A SWEEP CLEARS: {(table, service): the rows' keys} — title keys, or
+# [title key, season] / [title key, unit] pairs — decided by `plan_unlisted` and
+# `plan_past_ceilings` before the sweep's lock is taken, written by `clear`.
+Clearing = dict[tuple[str, str], list]
+
+
+def plan_unlisted(conn: db.Connection, cutoff: int, *,
+                  emptied: Iterable[tuple[str, str, str]] = ()) -> Clearing:
+    """Every service's group a title, season or episode row holds that has gone
+    untouched since `cutoff` and that NO CALENDAR LISTING OF THE SERVICE STILL
+    NAMES AND NO FEATURE ROW HOLDS — decided, NOT written, in a read per table
+    and service and one for the holders, each answering in one row.
+
+    `emptied` names the episode rows whose last listing by a service the
+    calendar's own sweep is taking off in the same transaction — (service, title
+    key, unit) — counted as no longer listed by it: the listings go first and a
+    group nothing lists any more after them, the order that keeps a group while
+    anything still draws it (app/calendar/entries.py's `sweep`).
 
     A HELD TITLE KEEPS EVERY SERVICE'S DESCRIPTION, whatever the calendar thinks
     of it. A tracker row, a board row and what either may put back are drawn with
@@ -1035,38 +1065,38 @@ def sweep_unlisted(conn: db.Connection, cutoff: int) -> dict[str, int]:
     seasons — they are what its details panel and its tracker row read.
     """
     held = holders.held_keys(conn)
-    removed = {tables.TITLES: 0, tables.SEASONS: 0, tables.EPISODES: 0}
+    params = {"cutoff": cutoff, "emptied": json.dumps([list(row) for row in emptied])}
+    out: Clearing = {}
     for source in groups.sources():
         def stale(alias: str) -> str:
             clock = f"{alias}.{source}_fetched_at"
-            return f"{clock} IS NOT NULL AND {clock} <= ?"
+            return f"{clock} IS NOT NULL AND {clock} <= :cutoff"
 
-        titles = [str(key) for (key,) in conn.execute(
-            f"SELECT t.title_key FROM {tables.TITLES} t WHERE {stale('t')} "
-            f"AND NOT {_listed_by(source, 't')}", (cutoff,)) if key not in held]
-        removed[tables.TITLES] += _clear(conn, tables.TITLES, source, titles)
-        seasons = [[key, season] for key, season in conn.execute(
-            f"SELECT s.title_key, s.season FROM {tables.SEASONS} s WHERE {stale('s')} "
-            f"AND NOT {_listed_by(source, 's')}", (cutoff,)) if key not in held]
-        removed[tables.SEASONS] += _clear(conn, tables.SEASONS, source, seasons)
-        # An episode's description goes where this service no longer lists THAT
-        # episode — its own listing on the row is what kept it.
-        episodes = [[key, unit] for key, unit in conn.execute(
-            f"SELECT e.title_key, e.unit FROM {tables.EPISODES} e WHERE {stale('e')} "
-            f"AND {groups.absent(tables.EPISODES, source, 'e', listed=True)}",
-            (cutoff,)) if key not in held]
-        removed[tables.EPISODES] += _clear(conn, tables.EPISODES, source, episodes,
-                                           keep=groups.LISTING)
-    drop_empty_rows(conn)
-    return removed
+        found = {
+            tables.TITLES: [key for key in _keys(conn, (
+                f"SELECT json_group_array(t.title_key) FROM {tables.TITLES} t "
+                f"WHERE {stale('t')} AND NOT {_listed_by(source, 't')}"), params)
+                if key not in held],
+            tables.SEASONS: [pair for pair in _keys(conn, (
+                f"SELECT json_group_array(json_array(s.title_key, s.season)) "
+                f"FROM {tables.SEASONS} s WHERE {stale('s')} AND NOT {_listed_by(source, 's')}"),
+                params) if pair[0] not in held],
+            # An episode's description goes where this service no longer lists
+            # THAT episode — its own listing on the row is what kept it.
+            tables.EPISODES: [pair for pair in _keys(conn, (
+                f"SELECT json_group_array(json_array(e.title_key, e.unit)) "
+                f"FROM {tables.EPISODES} e WHERE {stale('e')} "
+                f"AND ({groups.absent(tables.EPISODES, source, 'e', listed=True)} "
+                f"OR {_emptied(source, 'e')})"), params) if pair[0] not in held]}
+        out.update({(table, source): keys for table, keys in found.items() if keys})
+    return out
 
 
-def sweep_past_ceilings(conn: db.Connection, now: int) -> dict[str, int]:
-    """Clear every group a service's own terms say may not be kept any longer —
-    whoever holds or lists the title — inside the caller's transaction, and then
-    the season and episode rows nothing is left on. The row stays: it is the
-    title's, and the other services' words on it are theirs. Returns {source:
-    groups cleared}.
+def plan_past_ceilings(conn: db.Connection, now: int) -> Clearing:
+    """Every group a service's own terms say may not be kept any longer —
+    whoever holds or lists the title — decided, NOT written, a read per table
+    and service each answering in one row. The row stays when it is written
+    (`clear`): it is the title's, and the other services' words on it are theirs.
 
     A SERVICE DECLARES ITS CEILING (`Capabilities.retain_seconds`, read through
     the registry), so this names no service: TMDB's terms forbid keeping anything
@@ -1081,34 +1111,75 @@ def sweep_past_ceilings(conn: db.Connection, now: int) -> dict[str, int]:
     answered for (`fetched_at` 0) and lives as long as the title's group it came
     with.
     """
-    removed: dict[str, int] = {}
+    out: Clearing = {}
     for source, provider in providers.registered().items():
         retain = provider.capabilities.retain_seconds
         if retain is None:
             continue
-        cutoff = now - int(retain)
         name = str(source)
-        stale = f"{name}_fetched_at IS NOT NULL AND {name}_fetched_at <= ?"
-        count = _clear(conn, tables.TITLES, name, [
-            str(key) for (key,) in conn.execute(
-                f"SELECT title_key FROM {tables.TITLES} WHERE {stale}", (cutoff,))])
-        count += _clear(conn, tables.SEASONS, name, [
-            [key, season] for key, season in conn.execute(
-                f"SELECT title_key, season FROM {tables.SEASONS} WHERE {stale}", (cutoff,))])
+        params = {"cutoff": now - int(retain)}
+        stale = f"{name}_fetched_at IS NOT NULL AND {name}_fetched_at <= :cutoff"
+        found = {
+            tables.TITLES: _keys(conn, f"SELECT json_group_array(title_key) FROM {tables.TITLES} "
+                                       f"WHERE {stale}", params),
+            tables.SEASONS: _keys(conn, "SELECT json_group_array(json_array(title_key, season)) "
+                                        f"FROM {tables.SEASONS} WHERE {stale}", params)}
         if groups.has(tables.EPISODES, name, "fetched_at"):
-            count += _clear(conn, tables.EPISODES, name, [
-                [key, unit] for key, unit in conn.execute(
-                    f"SELECT e.title_key, e.unit FROM {tables.EPISODES} e WHERE "
-                    f"(e.{name}_fetched_at > 0 AND e.{name}_fetched_at <= ?) "
-                    f"OR (e.{name}_fetched_at = 0 AND NOT EXISTS (SELECT 1 FROM {tables.TITLES} t "
-                    f"    WHERE t.title_key = e.title_key AND t.{name}_id IS NOT NULL))",
-                    (cutoff,))], keep=groups.LISTING)
+            # A stub goes with its title's group — the one there is, or the one
+            # this plan clears.
+            found[tables.EPISODES] = _keys(conn, (
+                "SELECT json_group_array(json_array(e.title_key, e.unit)) "
+                f"FROM {tables.EPISODES} e WHERE "
+                f"(e.{name}_fetched_at > 0 AND e.{name}_fetched_at <= :cutoff) "
+                f"OR (e.{name}_fetched_at = 0 AND (e.title_key IN (SELECT value FROM "
+                f"json_each(:titles)) OR NOT EXISTS (SELECT 1 FROM {tables.TITLES} t "
+                f"    WHERE t.title_key = e.title_key AND t.{name}_id IS NOT NULL)))"),
+                {**params, "titles": json.dumps(found[tables.TITLES])})
+        out.update({(table, name): keys for table, keys in found.items() if keys})
+    return out
+
+
+def clear(conn: db.Connection, clearing: Clearing) -> dict[tuple[str, str], int]:
+    """Each group `clearing` names cleared, inside the caller's transaction — a
+    statement per table and service named (and its entries' ids, for a title's
+    group) — the season and episode rows nothing is left on removed after.
+    Returns {(table, service): groups cleared}."""
+    counts = {(table, source): _clear(conn, table, source, keys,
+                                      keep=groups.LISTING if table == tables.EPISODES else ())
+              for (table, source), keys in clearing.items()}
+    if any(counts.values()):
+        drop_empty_rows(conn)
+    return counts
+
+
+def report_ceilings(counts: Mapping[tuple[str, str], int]) -> dict[str, int]:
+    """{service: groups cleared} of `clear`'s answer for `plan_past_ceilings`,
+    each service's logged — the one record of what its terms took."""
+    removed: dict[str, int] = {}
+    for (_table, source), count in counts.items():
+        removed[source] = removed.get(source, 0) + count
+    for source, count in removed.items():
         if count:
+            retain = providers.registered()[Source(source)].capabilities.retain_seconds
             logger.info("title store: removed %d %s group(s) not re-obtained inside the "
-                        "%d days that service's terms allow", count, name, retain // 86400)
-        removed[name] = count
-    drop_empty_rows(conn)
+                        "%d days that service's terms allow", count, source, retain // 86400)
     return removed
+
+
+def sweep_unlisted(conn: db.Connection, cutoff: int) -> dict[str, int]:
+    """`plan_unlisted` written, inside the caller's transaction — after the
+    calendar has swept its own listings. Returns {table: groups cleared}."""
+    removed = {tables.TITLES: 0, tables.SEASONS: 0, tables.EPISODES: 0}
+    for (table, _source), count in clear(conn, plan_unlisted(conn, cutoff)).items():
+        removed[table] += count
+    return removed
+
+
+def sweep_past_ceilings(conn: db.Connection, now: int) -> dict[str, int]:
+    """`plan_past_ceilings` written, inside the caller's transaction. Returns
+    {source: groups cleared}, every ceiling-bound service named."""
+    return {**{source: 0 for source in ceiling_sources()},
+            **report_ceilings(clear(conn, plan_past_ceilings(conn, now)))}
 
 
 # ---------------------------------------------------------------------------

@@ -95,7 +95,9 @@ been written, `apply` writes them in a fixed count — and takes its entries off
 queue in one more). `tests/support.py`'s `statements_per_transaction` holds
 each writer to the same count for ten rows as for a hundred
 (tests/calendar/test_write_statements.py, tests/metadata/test_write_statements.py,
-tests/calendar/test_enrich.py's `APassWritesItsBatchOnceTests`),
+tests/calendar/test_enrich.py's `APassWritesItsBatchOnceTests`), the retention
+sweep included — which decides before its lock what is due, each read one
+aggregated row, and takes no lock at all when nothing is (`entries.sweep`),
 and `db.transaction` logs a WARNING naming its body whenever the lock was held
 over `db.LOCK_HELD_WARN_SECONDS` (1 s), so the next long hold names itself.
 WRITES TAKE TURNS: every `db.transaction`, `db.execute` and `db.executemany`

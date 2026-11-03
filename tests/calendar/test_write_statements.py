@@ -42,10 +42,33 @@ def listings(count: int, *, offset: int = 0) -> list[Record]:
     return out
 
 
-async def store(records: list[Record]) -> None:
-    now = db.now()
+async def store(records: list[Record], *, now: int | None = None) -> None:
+    now = db.now() if now is None else now
     await entries.store_span("shows", *WEEK, records, sources=["simkl", "trakt"],
                              asked=["simkl", "trakt"], now=now, stale_after=now + 86400)
+
+
+class TheRetentionSweepsStatementsDoNotGrowWithWhatItSweepsTests(DatabaseTestCase):
+    """The heartbeat sweeps every minute, and nearly every minute nothing is
+    due: it must then take no lock at all, and when something is due its lock is
+    held for a fixed number of statements, however much goes."""
+
+    async def test_a_sweep_with_nothing_due_takes_no_lock(self):
+        await store(listings(40))
+        with statements_per_transaction() as counted:
+            self.assertEqual(await entries.sweep(), 0)
+        self.assertEqual(counted, [])
+
+    async def test_a_hundred_listings_going_cost_what_ten_do(self):
+        old = db.now() - entries.RETAIN_SECONDS - 10
+        await store(listings(10), now=old)
+        with statements_per_transaction() as few:
+            self.assertEqual(await entries.sweep(), 11)
+        await store(listings(100, offset=1000), now=old)
+        with statements_per_transaction() as many:
+            self.assertEqual(await entries.sweep(), 101)
+        self.assertEqual(few, many)
+        self.assertEqual(await stored_listings("shows"), [])
 
 
 class AFillsStatementsDoNotGrowWithItsRecordsTests(DatabaseTestCase):
