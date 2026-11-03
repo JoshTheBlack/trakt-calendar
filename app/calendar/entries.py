@@ -20,11 +20,12 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Iterable
 from datetime import date
 from typing import NamedTuple
 
-from .. import db, endpoints, metadata, providers
+from .. import db, endpoints, metadata, perftrace, providers
 from ..metadata import episodes as episode_rows
 from ..metadata import groups, identity as title_identity
 from ..metadata import rows as title_rows
@@ -164,25 +165,44 @@ async def store_span(endpoint_key: str, span_start: date, span_end: date,
     # re-keying five titles while a month was read on another thread: filing
     # the whole span inside held the lock 2.98 s, this holds it 1.31 s, and the
     # store before the one-row-per-episode tables held it 1.21 s.
+    planning: list[float] = []
+
     def _plan(conn):
+        started = time.perf_counter()
         planned = metadata.plan_records(conn, listed)
-        return planned, _fill(conn, list(range(len(inside))), planned.keys, planned.primaries,
-                              excluding=planned.touched)
+        prepared = planned, _fill(conn, list(range(len(inside))), planned.keys,
+                                  planned.primaries, excluding=planned.touched)
+        planning.append(time.perf_counter() - started)
+        return prepared
 
     def _work(conn, prepared) -> None:
         planned, fill = prepared
-        metadata.write_records(conn, listed, planned)
+        # WHERE THE LOCK'S TIME GOES, one DEBUG line per store: a hold over a
+        # second is logged by db.transaction, and that line alone cannot say
+        # whether the plan was made again under it (another connection wrote in
+        # between), a re-key's merge, or the writes held it.
+        laps = perftrace.Laps()
+        if len(planning) > 1:
+            laps.phases["prepare again"] = planning[-1]
+        metadata.write_records(conn, listed, planned, laps=laps)
         episode_rows.apply(conn, fill)
+        laps.lap("episodes")
         if planned.touched:
             landed = planned.landed
             positions = [at for at, key in enumerate(planned.keys) if key in landed]
             primaries = title_rows.primaries(conn, listed.rows.only(positions),
                                              [planned.keys[at] for at in positions])
-            episode_rows.apply(conn, _fill(conn, positions, planned.keys, primaries,
-                                           titles=landed))
+            reshaped = _fill(conn, positions, planned.keys, primaries, titles=landed)
+            laps.lap("reshaped re-plan")
+            episode_rows.apply(conn, reshaped)
+            laps.lap("reshaped write")
         conn.execute(_UPSERT_COVERAGE, {"endpoint": endpoint_key, "span": first,
                                         "sources": coverage, "now": now,
                                         "stale_after": stale_after})
+        laps.lap("coverage")
+        logger.debug("calendar store: %s from %s held the lock %.3f s for %d listing(s), "
+                     "%d re-key(s): %s", endpoint_key, first, laps.total, len(inside),
+                     len(planned.settles.retired), laps)
 
     await db.transaction(_work, prepare=_plan)
 

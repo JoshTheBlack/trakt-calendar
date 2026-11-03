@@ -42,7 +42,7 @@ import logging
 from collections.abc import Iterable, Mapping
 from typing import Any, NamedTuple
 
-from .. import db
+from .. import db, perftrace
 from ..providers.base import MATCH_SOURCES, ItemKey, parse_item_key, resolve_key
 from . import holders, tables
 from . import ids as id_rules
@@ -363,13 +363,20 @@ class SettlePlan(NamedTuple):
     written: dict[str, _Title]
     now: int
 
-    def apply(self, conn: db.Connection) -> None:
+    def apply(self, conn: db.Connection, *, laps: perftrace.Laps | None = None) -> None:
+        """Written: each re-key's repointing — which merges the two titles' rows
+        (app/metadata/merge.py) — then every title's row. `laps`, when given, is
+        told each half ("merges", then "settles")."""
         for old, new in self.retired:
             _retire(conn, old, new, now=self.now)
+        if laps is not None:
+            laps.lap("merges")
         if self.written:
             conn.execute(_WRITE_SQL, (json.dumps([
                 [key, title.media, json.dumps(title.ids, sort_keys=True), title.created_at]
                 for key, title in self.written.items()]),))
+        if laps is not None:
+            laps.lap("settles")
 
 
 def _probe(key: str) -> tuple[str, str, Any] | None:

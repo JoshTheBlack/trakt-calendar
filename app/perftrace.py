@@ -225,6 +225,35 @@ def span(label: str, **fields):
             logger.debug("%s⏱ %-26s %7.1fms  %s", rid, label, dt_ms, extra)
 
 
+class Laps:
+    """One block's time split into named phases, for a single log line saying
+    where it went: `lap(name)` closes the phase that has run since the last lap
+    (or since the block began) under that name, adding to it if it ran before.
+
+    FOR A BLOCK THAT MUST NOT GROW MORE LOG LINES THAN IT HAS: a write holding
+    the database's lock is timed whole by db.transaction, and a span per phase
+    inside it would be a line per phase per write, interleaved with every other
+    writer's. One line per hold keeps the phases of one hold together."""
+
+    __slots__ = ("_at", "phases")
+
+    def __init__(self) -> None:
+        self._at = time.perf_counter()
+        self.phases: dict[str, float] = {}
+
+    def lap(self, name: str) -> None:
+        now = time.perf_counter()
+        self.phases[name] = self.phases.get(name, 0.0) + (now - self._at)
+        self._at = now
+
+    @property
+    def total(self) -> float:
+        return sum(self.phases.values())
+
+    def __str__(self) -> str:
+        return ", ".join(f"{name} {seconds:.3f} s" for name, seconds in self.phases.items())
+
+
 # ---------------------------------------------------------------------------
 # per-request timing
 # ---------------------------------------------------------------------------

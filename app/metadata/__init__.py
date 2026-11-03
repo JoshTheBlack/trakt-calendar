@@ -35,7 +35,7 @@ import logging
 from collections.abc import Iterable, Mapping
 from typing import Any, NamedTuple
 
-from .. import db, providers
+from .. import db, perftrace, providers
 from ..providers.base import ItemKey, Media, Record, collect_ids
 from . import identity
 from . import ids as id_rules
@@ -188,7 +188,8 @@ def plan_records(conn: db.Connection, listed: Listings) -> Planned:
     return Planned(settles, keys, rows.primaries(conn, written, keys), written, stated)
 
 
-def write_records(conn: db.Connection, listed: Listings, planned: Planned) -> list[str]:
+def write_records(conn: db.Connection, listed: Listings, planned: Planned, *,
+                  laps: perftrace.Laps | None = None) -> list[str]:
     """`listed` written as `planned` (`plan_records`, made on this connection from
     what it holds now) decided, inside the caller's transaction: each listing's
     title registered and its service's group written. Returns each record's
@@ -214,15 +215,21 @@ def write_records(conn: db.Connection, listed: Listings, planned: Planned) -> li
     listing names a show by its tvdb id, Trakt's names its tmdb id too — and the
     key the first resolution returned is then retired. A listing filed under it
     would have no identity to join (identity.settle_many).
+
+    `laps`, when given, is told each phase's time — "merges", "settles",
+    "listings" — for the caller's account of its lock (app/calendar/entries.py's
+    `store_span`).
     """
     if not listed.records:
         return []
-    planned.settles.apply(conn)
+    planned.settles.apply(conn, laps=laps)
     for record, at in zip(listed.records, listed.title_of):
         found = planned.settles.identities[at]
         if found is not None:
             record.ids = identity.with_shared(planned.stated.get(at, record.ids), found.ids)
     rows.write_listings(conn, planned.rows, planned.keys, now=listed.now)
+    if laps is not None:
+        laps.lap("listings")
     return planned.keys
 
 
