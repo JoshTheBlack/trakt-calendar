@@ -281,7 +281,7 @@ class FetchShapeTests(CacheTestCase):
             label = "Nobody"
             capabilities = base.Capabilities(
                 endpoints=frozenset({"movies"}), days_before=None, days_after=None,
-                private_user_data=False, retain_seconds=None)
+                private_user_data=False, retain_seconds=None, reach=base.Reach.WINDOW)
 
             class calendar_port:
                 @staticmethod
@@ -1951,7 +1951,7 @@ def _source(source: base.Source, fetch) -> SimpleNamespace:
         source=source, calendar_port=port,
         capabilities=base.Capabilities(
             endpoints=frozenset({"shows/premieres"}), days_before=None, days_after=None,
-            private_user_data=False, retain_seconds=None))
+            private_user_data=False, retain_seconds=None, reach=base.Reach.WINDOW))
 
 
 class ASourceStillWorkingItsAnswerOutTests(CacheTestCase):

@@ -154,6 +154,29 @@ def aligned_windows(range_start: date, range_end: date) -> list[date]:
     return out
 
 
+def answer_span(provider, start: date) -> tuple[date, date]:
+    """[first, after) — the whole windows an answer from `provider` for the
+    window at `start` is authoritative for: every aligned window inside the days
+    it speaks for (Capabilities.authoritative), the window asked always among
+    them. A fill stores that service's listings inside it and nowhere else, takes
+    its listings off inside it and nowhere else, and writes a coverage row for
+    each window of it (entries.store_span) — so one Simkl month file fills its
+    month's weeks, and a window straddling two months is covered only by an
+    answer that read both."""
+    first, after = provider.capabilities.authoritative(start, WINDOW_DAYS)
+    windows = [window for window in aligned_windows(first, after)
+               if window >= first and window + timedelta(days=WINDOW_DAYS) <= after]
+    return windows[0], windows[-1] + timedelta(days=WINDOW_DAYS)
+
+
+def answer_spans(sources, start: date) -> dict[str, tuple[date, date]]:
+    """{service: `answer_span`} for each of `sources` answering the window at
+    `start` — asked of the registry, so no service is named here."""
+    registered = providers.registered()
+    return {str(source): answer_span(registered[Source(str(source))], start)
+            for source in sources}
+
+
 def record_utc_date(record: Record) -> date:
     """The UTC calendar day a record airs on. The windows are UTC-aligned, so
     this is the only date that decides which window owns it — a viewer's local
@@ -161,8 +184,10 @@ def record_utc_date(record: Record) -> date:
     return epoch_moment(record.air_ts).date()
 
 
-def in_window(record: Record, start: date) -> bool:
-    """Whether a record belongs to the 7-day window beginning `start`.
+def in_span(record: Record, span: tuple[date, date]) -> bool:
+    """Whether a record belongs to [first, after) — the span its service's
+    answer is authoritative for (`answer_span`): the window asked, or for a
+    calendar published a month at a time, every whole window of the months read.
 
     NEEDED BECAUSE TRAKT OVERRUNS THE `days` IT IS GIVEN. The request shape is
     exactly the documented one — /calendars/{target}/{path}/{start_date}/{days} —
@@ -192,9 +217,14 @@ def in_window(record: Record, start: date) -> bool:
     Trimmed on the record's own instant, which is also what the card is drawn
     from. Checked live across every endpoint: the top-level `first_aired` never
     disagrees with `episode.first_aired`.
+
+    WHAT LIES BEYOND THE SPAN IS NO ANSWER ABOUT IT, so it is dropped rather than
+    stored: those days' entries are some of them, never all, and a fill takes a
+    service's listings off only where its answer speaks for every one
+    (entries.store_span) — and Trakt declares exactly the window it was asked
+    (Capabilities.reach).
     """
-    day = record_utc_date(record)
-    return start <= day < start + timedelta(days=WINDOW_DAYS)
+    return span[0] <= record_utc_date(record) < span[1]
 
 
 def record_identity(record: Record) -> tuple:
@@ -553,10 +583,10 @@ async def fetch_window_records(endpoint: Endpoint, settings, start: date, *,
     does this raise — there is genuinely nothing to store, and the caller then
     falls back to the stale copy it may already have.
 
-    The trim is not tidiness. A source may treat the `days` bound as a floor
-    rather than a ceiling (see in_window), so consecutive windows overlap by days
-    or weeks; storing what arrived would mean caching the same airings several
-    times over and handing the page duplicate cards for every one of them.
+    The trim is not tidiness. Each service's records are kept inside the span its
+    answer is authoritative for (`answer_span`) and nowhere else: a source may
+    treat the `days` bound as a floor rather than a ceiling (see in_span), and
+    what lies past it is some of those days' entries, never all of them.
 
     A SOURCE STILL WORKING ITS ANSWER OUT (base.SourcePending) is neither: it is
     left out of the answer, as a refusal is, and remembered as PENDING
@@ -655,12 +685,13 @@ async def _answers(asked_of: list[Provider], endpoint: Endpoint, settings, start
     # are applied at read only (`narrow_for_viewer`).
     kept = calendar_filter.keep_languages(kept, settings.languages)
 
-    trimmed = [r for r in kept if in_window(r, start)]
+    spans = answer_spans(answered, start)
+    trimmed = [r for r in kept if in_span(r, spans[str(r.source)])]
     overrun = len(kept) - len(trimmed)
     if overrun:
         logger.debug(
-            "%d entr(ies) fell outside the %s window starting %s; trimmed.",
-            overrun, endpoint.key, start,
+            "%d entr(ies) fell outside the span their service's answer for the %s "
+            "window starting %s speaks for; trimmed.", overrun, endpoint.key, start,
         )
     # THE ONE THING THE MATCHER NEEDS THAT A CALENDAR FILE DOES NOT CARRY: the
     # ids a title is known by elsewhere. A source can list an airing under an id
@@ -752,10 +783,13 @@ async def store_window(endpoint_key: str, start: date, records: list[Record],
     # back. Applying first means a refilled month renders enriched on the very
     # read that refilled it.
     await calendar_enrich.apply_stored_enrichment(records)
+    # EACH SERVICE THAT ANSWERED WITH LISTINGS IS STORED OVER ITS WHOLE SPAN
+    # (`answer_span`): one Simkl month file fills, confirms and takes listings
+    # off its month's every window, not the one week that asked.
     await entries.store_span(
         endpoint_key, start, start + timedelta(days=WINDOW_DAYS), records,
         sources=sources, asked=(sources if asked is None else asked),
-        unchanged=unchanged,
+        unchanged=unchanged, spans=answer_spans(sources, start),
         now=now, stale_after=now + max(0, int(ttl_seconds)))
     # THE ROWS A MEMOISED SPAN WAS ASSEMBLED FROM HAVE JUST MOVED. This is the
     # one write that can change what a span holds, so it is the one place the
@@ -942,8 +976,12 @@ async def ensure_window(endpoint: Endpoint, settings, start: date, *,
         records, answered, unchanged = await fetch_window_records(
             endpoint, settings, start, covered=has_rows)
     except SourceUnavailable:
-        if cached is not None:  # serve the stale copy rather than nothing
-            return cached
+        if cached is not None:
+            # SERVE WHAT IS STORED RATHER THAN NOTHING — saying that every service
+            # this fill just asked was asked, so one the window's rows never had
+            # (a month's file can cover a week no other service has answered for
+            # yet) reads as the failure it is, not as nothing to report.
+            return cached._replace(asked=tuple(dict.fromkeys((*cached.asked, *in_play))))
         raise
     await store_window(endpoint.key, start, records, ttl, ts,
                        sources=answered, asked=in_play, unchanged=unchanged)

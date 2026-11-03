@@ -398,7 +398,16 @@ CHOICE DECIDES WHICH LISTINGS A CARD IS DRAWN FROM, NEVER WHAT THEIR FILTERS JUD
 lists included — judges a title as every service the INSTANCE admits describes it,
 in the viewer's order, and draws the card from the viewer's own services alone;
 otherwise narrowing to TMDB took Simkl's "talk-show" with Simkl's listing and a
-filtered title came back. The envelope
+filtered title came back. EACH SERVICE'S ANSWER IS STORED OVER THE SPAN IT IS
+AUTHORITATIVE FOR, and nowhere else (`cache.answer_span`, from the service's own
+`Capabilities.reach`, never its name): Trakt's and TMDB's the window asked,
+Simkl's every whole window of the calendar months its files cover — so one Simkl
+month file fills, confirms and takes listings off its month's every week, and a
+week straddling two months is covered only by an answer that read both files.
+`entries.store_span` keeps each service's records inside its span, takes its
+listings off there alone, and writes a coverage row for every window of it (a
+service answering "unchanged" confirms the window asked, which is what its
+validator speaks for). The envelope
 records who was ASKED as well as who ANSWERED, which is what lets a source
 switched on later refill a window that legitimately has none of its records,
 and what keeps "partial" meaning a source that failed rather than one nobody
@@ -788,8 +797,12 @@ this as precedent — the reason it was allowed is that the alternative repaired
 nothing, and that is a rare shape.
 
 **Trakt does not honour the `days` bound it is given** — a 7-day window has come
-back carrying entries two months past its end. Windows are trimmed before
-storage; without the trim a month read shows the same airing several times.
+back carrying entries two months past its end. Trakt declares `Reach.WINDOW`: its
+answer is authoritative for the window asked and nothing past it, so what lies
+beyond is dropped before storage (`cache.in_span`, and again in
+`entries.store_span`) and takes nothing off — it is some of those weeks'
+entries, never all, and a listing filed in a window no coverage row speaks for
+would never be read and would be taken off unseen by its own window's fill.
 
 **JavaScript is for what ONLY JavaScript can do, and the floor is MEASURED.**
 The whole first-party surface is **712 code lines across 15 .js files, 27 lines

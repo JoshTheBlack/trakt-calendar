@@ -18,8 +18,8 @@ from ...config import Settings
 from ...endpoints import Endpoint
 from .. import register
 from ..base import (EPISODE_KEEPING, EPISODE_LISTING, SEASON_KEEPING, TITLE_KEEPING,
-                    Capabilities, Media, Record, SearchCatalogue, SearchPage, SeasonsAnswer,
-                    Source, StoreColumns, TitleFacts, Video)
+                    Capabilities, Media, Reach, Record, SearchCatalogue, SearchPage,
+                    SeasonsAnswer, Source, StoreColumns, TitleFacts, Video)
 from . import by_id, calendar, detail, search, sync, titles, watchlist
 from .transport import SimklBlockedError, SimklError, SimklRateLimitError
 
@@ -281,6 +281,11 @@ class _SimklProvider:
         # app's own retention, and never while a feature row holds the title
         # (app/metadata/rows.py's sweep_unlisted).
         retain_seconds=None,
+        # EVERY DAY OF EACH MONTH A WINDOW READS. Simkl publishes its calendar as
+        # one archive file per month and kind (calendar.py's `fetch_window` reads
+        # every month a window touches, whole), so its answer is authoritative
+        # for each of those months — one read fills the month's weeks.
+        reach=Reach.MONTHS,
         # SPARSE, AND COMPLETED ELSEWHERE. Simkl's calendar files carry a title,
         # an id, a date and a picture, so every listing is stored unenriched —
         # and completed by app/calendar/enrich.py's drain against simkl_titles,

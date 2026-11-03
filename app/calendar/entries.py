@@ -22,7 +22,7 @@ import json
 import logging
 import time
 from collections.abc import Iterable
-from datetime import date
+from datetime import date, timedelta
 from typing import NamedTuple
 
 from .. import db, endpoints, metadata, perftrace, providers
@@ -88,12 +88,17 @@ def _utc_date(air_ts: float) -> str:
 # not answered and leaves the time of its last reply where it was. Moving it would
 # keep listings no reply had confirmed — a service whose token stopped working
 # would hold its last listings for as long as somebody kept asking.
+#
+# ONE STATEMENT FOR EVERY WINDOW A STORE COVERS, each row [window start, service,
+# whether it replied]: the window asked for every service asked, and every other
+# window an answer is authoritative for (cache.answer_span) for the service whose
+# answer it was.
 _UPSERT_COVERAGE = """
 INSERT INTO calendar_coverage
     (endpoint, span_start, source, asked, answered, stored_at, stale_after)
-SELECT :endpoint, :span, json_extract(value, '$[0]'), 1, json_extract(value, '$[1]'),
-       :now, :stale_after
-FROM json_each(:sources) WHERE true
+SELECT :endpoint, json_extract(value, '$[0]'), json_extract(value, '$[1]'), 1,
+       json_extract(value, '$[2]'), :now, :stale_after
+FROM json_each(:rows) WHERE true
 ON CONFLICT(endpoint, span_start, source) DO UPDATE SET
     asked = 1, answered = excluded.answered,
     stored_at = CASE WHEN excluded.answered = 1 THEN excluded.stored_at
@@ -122,10 +127,12 @@ def _listings(records: list[Record], keys: list[str], *, bit: int, now: int,
 
 async def store_span(endpoint_key: str, span_start: date, span_end: date,
                      records: list[Record], *, sources, asked, unchanged=(),
-                     now: int, stale_after: int) -> None:
-    """Replace what is stored for `endpoint_key` over [span_start, span_end).
+                     spans=None, now: int, stale_after: int) -> None:
+    """Store what each service answered for the window [span_start, span_end)
+    of `endpoint_key` — each over the span its answer is authoritative for
+    (`spans`, {service: [first, after)}; the window, for one not named).
 
-    WHAT THE SOURCES THAT ANSWERED WITH DATA LISTED IN THE SPAN LEAVES THIS
+    WHAT THE SOURCES THAT ANSWERED WITH DATA LISTED IN THEIR SPAN LEAVES THIS
     CALENDAR, AND WHAT THEY LIST NOW IS FILED, and it has to be both: a title a
     source has STOPPED listing leaves nothing for a write to find, so a
     write-only refresh would go on drawing it for ever. Only sources that
@@ -135,39 +142,62 @@ async def store_span(endpoint_key: str, span_start: date, span_end: date,
     `unchanged` IS A THIRD ANSWER AND NOT A KIND OF SILENCE. A source whose files
     all replied 304 has told us something definite -- the listings already stored
     are still correct -- so its coverage advances exactly as an answer does, and
-    its listings are LEFT ALONE rather than cleared.
+    its listings are LEFT ALONE rather than cleared. It speaks for the window
+    asked alone: what its validator confirms is this window's last read.
+
+    A COVERAGE ROW FOR EVERY WINDOW STORED, written here with the listings: the
+    window asked for every service asked, and every other window of a service's
+    span for that service — so one Simkl month file confirms its month's weeks,
+    and every listing a feed files lies in a window whose row confirms it
+    (`sweep`).
 
     One transaction, so a reader never sees the gap between the clearing and the
     filing, and so a title re-keyed by what this fill states moves with the
     listings that stated it.
     """
-    first, last = span_start.isoformat(), span_end.isoformat()
+    first = span_start.isoformat()
     answered = [str(s) for s in sources]
+    reach = {source: tuple((spans or {}).get(source) or (span_start, span_end))
+             for source in answered}
     bit = _bit(endpoint_key)
 
-    # TRIMMED HERE AS WELL AS AT THE FETCH, because a listing is FILED BY ITS OWN
-    # DATE. A source may treat the `days` bound as a floor rather than a ceiling
-    # -- Trakt has returned entries two months past a seven-day window -- and a
-    # listing landing in a span with no coverage row would never be read, and the
-    # next fill of its own span would take it off unseen. Dropping it loudly is
-    # the honest failure; the span it belongs to fetches it properly when asked.
-    inside = [r for r in records if first <= _utc_date(r.air_ts) < last]
+    # NOTHING OUTSIDE ITS SERVICE'S SPAN IS STORED, here as well as at the fetch,
+    # because a listing is FILED BY ITS OWN DATE: one landing in a window with no
+    # coverage row would never be read, and the next fill of its own window would
+    # take it off unseen. A source may treat the `days` bound as a floor rather
+    # than a ceiling — Trakt has returned entries two months past a seven-day
+    # window — and those are no answer about the later weeks. Dropping them
+    # loudly is the honest failure; the window they belong to fetches them
+    # properly when asked.
+    def _inside(record: Record) -> bool:
+        lo, hi = reach.get(str(record.source), (span_start, span_end))
+        return lo.isoformat() <= _utc_date(record.air_ts) < hi.isoformat()
+
+    inside = [r for r in records if _inside(r)]
     if len(inside) != len(records):
-        logger.debug("%d %s entr(ies) fell outside the span starting %s; trimmed.",
+        logger.debug("%d %s entr(ies) fell outside the span their answer speaks for, "
+                     "from the window starting %s; trimmed.",
                      len(records) - len(inside), endpoint_key, first)
     replied = sorted({*answered, *(str(s) for s in unchanged)})
     # EVERYTHING THE STATEMENTS CARRY, SPELLED BEFORE THE LOCK IS TAKEN.
     listed = metadata.listings(inside, now=now, stale_after=stale_after)
-    coverage = json.dumps([[name, 1 if name in replied else 0]
-                           for name in sorted({*map(str, asked), *replied})])
+    coverage = [[first, name, 1 if name in replied else 0]
+                for name in sorted({*map(str, asked), *replied})]
+    for source, (lo, hi) in sorted(reach.items()):
+        window = lo
+        while window < hi:
+            if window != span_start:
+                coverage.append([window.isoformat(), source, 1])
+            window += timedelta(days=WINDOW_DAYS)
+    coverage = json.dumps(coverage)
 
     def _fill(conn, positions: list[int], keys: list[str], primaries,
               **halves) -> episode_rows.Fill:
         return episode_rows.plan_fill(
             conn, _listings([inside[at] for at in positions], [keys[at] for at in positions],
                             bit=bit, now=now, searched=False),
-            bit=bit, primaries=primaries, span=(span_start, span_end), answered=answered,
-            replied=replied, **halves)
+            bit=bit, primaries=primaries, span=(span_start, span_end), spans=reach,
+            answered=answered, replied=replied, **halves)
 
     # WHICH TITLE EACH LISTING IS AND WHICH ROW IT IS FILED ON, DECIDED BEFORE THE
     # LOCK IS TAKEN: the title store's reads and the deciding they feed
@@ -214,9 +244,8 @@ async def store_span(endpoint_key: str, span_start: date, span_end: date,
             laps.lap("reshaped re-plan")
             episode_rows.apply(conn, reshaped)
             laps.lap("reshaped write")
-        conn.execute(_UPSERT_COVERAGE, {"endpoint": endpoint_key, "span": first,
-                                        "sources": coverage, "now": now,
-                                        "stale_after": stale_after})
+        conn.execute(_UPSERT_COVERAGE, {"endpoint": endpoint_key, "rows": coverage,
+                                        "now": now, "stale_after": stale_after})
         laps.lap("coverage")
         logger.debug("calendar store: %s from %s held the lock %.3f s for %d listing(s), "
                      "%d re-key(s): %s", endpoint_key, first, laps.total, len(inside),

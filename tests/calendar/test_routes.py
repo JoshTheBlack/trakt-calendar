@@ -34,7 +34,7 @@ from app.calendar import state as calendar_state
 from app.calendar import vocab
 from app.endpoints import ENDPOINTS
 from app.metadata import refresh as metadata_refresh
-from app.providers.base import Capabilities
+from app.providers.base import Capabilities, Reach
 from app.providers.trakt import TraktError
 from app.config import Settings
 from tests.support import save_settings
@@ -78,7 +78,7 @@ class _ThirdSource:
     calendar_port = SimpleNamespace(calendar_configured=lambda settings: True)
     capabilities = Capabilities(
         endpoints=frozenset({"shows"}), days_before=None, days_after=None,
-        private_user_data=False, retain_seconds=None)
+        private_user_data=False, retain_seconds=None, reach=Reach.WINDOW)
 
     def is_configured(self, settings) -> bool:
         return True
@@ -2382,7 +2382,7 @@ class TheCoverageGapSwitchTests(unittest.TestCase):
             "source": "mercury", "label": "Mercury", "calendar_port": None,
             "capabilities": Capabilities(endpoints=frozenset(), days_before=None,
                                          days_after=None, private_user_data=False,
-                                         retain_seconds=None)})()
+                                         retain_seconds=None, reach=Reach.WINDOW)})()
         _message, url = self._gap({"mercury": describer, **providers.registered()})
         self.assertNotIn("mercury", url or "")
         self.assertIn("source=trakt", url)

@@ -22,8 +22,8 @@ from datetime import date
 from ...config import Settings
 from .. import register
 from ..base import (EPISODE_KEEPING, EPISODE_LISTING, SEASON_KEEPING, TITLE_KEEPING,
-                    Capabilities, Media, Record, SearchCatalogue, SearchPage, SeasonsAnswer,
-                    Source, StoreColumns, TitleFacts, Video, status_spoken)
+                    Capabilities, Media, Reach, Record, SearchCatalogue, SearchPage,
+                    SeasonsAnswer, Source, StoreColumns, TitleFacts, Video, status_spoken)
 from . import calendar, detail, normalize, search, transport
 from .transport import TmdbError, TmdbNotFound, TmdbRateLimited
 
@@ -129,6 +129,10 @@ class _TmdbProvider:
         # than six months; the title store drops a TMDB row not re-obtained
         # inside that, held or not (app/metadata/rows.py).
         retain_seconds=transport.MAX_CACHE_SECONDS,
+        # THE WINDOW ASKED: each window is its own discover query, bounded by
+        # the window's own dates (calendar.py), and the premieres TMDB derives
+        # are worked out a week at a time (premieres.py).
+        reach=Reach.WINDOW,
         # EVERY SEARCH BOX ASKS TMDB, with the instance's read token, whoever is
         # searching: its catalogue covers both media, it pages, and a search of it
         # spends nobody's own account. Another service joins a search only when a

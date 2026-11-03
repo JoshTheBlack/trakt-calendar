@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
@@ -32,6 +32,7 @@ from app.providers.base import (
     Capabilities,
     Item,
     Media,
+    Reach,
     Source,
     collect_ids,
     epoch_moment,
@@ -153,7 +154,7 @@ class TestCapabilities:
     CAPS = Capabilities(
         endpoints=frozenset({"shows/new"}),
         days_before=30, days_after=90, private_user_data=False,
-        retain_seconds=None,
+        retain_seconds=None, reach=Reach.WINDOW,
     )
 
     def test_answers_only_the_endpoints_it_declares(self):
@@ -171,9 +172,40 @@ class TestCapabilities:
         read as one that covers nothing."""
         caps = Capabilities(endpoints=frozenset(), days_before=None,
                             days_after=None, private_user_data=True,
-                            retain_seconds=None)
+                            retain_seconds=None, reach=Reach.WINDOW)
         assert caps.covers(date(1999, 1, 1), today=date(2026, 7, 15))
         assert caps.covers(date(2099, 1, 1), today=date(2026, 7, 15))
+
+    def test_a_window_reach_speaks_for_the_window_asked(self):
+        assert self.CAPS.authoritative(date(2026, 10, 26), 7) == (date(2026, 10, 26),
+                                                                   date(2026, 11, 2))
+
+    def test_a_months_reach_speaks_for_every_month_the_window_touches(self):
+        caps = dataclasses.replace(self.CAPS, reach=Reach.MONTHS)
+        assert caps.authoritative(date(2026, 10, 12), 7) == (date(2026, 10, 1), date(2026, 11, 1))
+        assert caps.authoritative(date(2026, 10, 26), 7) == (date(2026, 10, 1), date(2026, 12, 1))
+        assert caps.authoritative(date(2026, 12, 28), 7) == (date(2026, 12, 1), date(2027, 2, 1))
+
+    def test_an_unknown_reach_is_an_error(self):
+        caps = dataclasses.replace(self.CAPS, reach="the whole year")
+        with pytest.raises(ValueError):
+            caps.authoritative(date(2026, 10, 12), 7)
+
+    def test_simkls_reach_is_the_months_its_calendar_reads(self):
+        """Simkl declares MONTHS because its fetch reads every month a window
+        touches, whole (simkl/calendar.py's `_months_covering`): the two must
+        name the same months, or a fill would take off listings of a month it
+        never read."""
+        from app.providers.simkl import _SimklProvider, calendar as simkl_calendar
+
+        caps = _SimklProvider.capabilities
+        for offset in range(0, 400, 3):
+            start = date(2026, 1, 1) + timedelta(days=offset)
+            months = simkl_calendar._months_covering(start, 7)
+            first, after = caps.authoritative(start, 7)
+            assert (first.year, first.month) == months[0]
+            last = after - timedelta(days=1)
+            assert (last.year, last.month) == months[-1]
 
 
 class TestRegistry:

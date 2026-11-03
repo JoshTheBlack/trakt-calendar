@@ -984,6 +984,22 @@ EPISODE_LISTING = frozenset({"air_ts", "date_only", "calendars", "searched", "un
 EPISODE_KEEPING = frozenset({"fetched_at", "stale_after"})
 
 
+class Reach(StrEnum):
+    """HOW FAR ONE ANSWER FOR A CALENDAR WINDOW SPEAKS — what a fill stores from
+    it and what it takes off by it (app/calendar/cache.py's `answer_span`,
+    app/calendar/entries.py's `store_span`). A declaration per source, because
+    it is a fact about how that service publishes its calendar."""
+    # EXACTLY THE WINDOW ASKED, and nothing past it. Trakt's calendar answers
+    # entries weeks beyond the `days` it was given — a 7-day request has come
+    # back carrying entries two months past its end — and those are no answer
+    # about the later weeks: they are not every entry of them.
+    WINDOW = "window"
+    # EVERY DAY OF THE CALENDAR MONTHS THE WINDOW TOUCHES: a calendar published
+    # as one file per month (Simkl's archive) answers a window by reading each
+    # month's file whole, and is authoritative for every day of each it read.
+    MONTHS = "months"
+
+
 @dataclass(frozen=True)
 class Capabilities:
     """What a source can be asked for, so a route can check instead of guessing.
@@ -1013,6 +1029,11 @@ class Capabilities:
     # say would be kept for ever by omission, which is the one way to be wrong
     # about another party's terms that nothing would ever notice.
     retain_seconds: int | None
+    # HOW FAR AN ANSWER FOR ONE CALENDAR WINDOW SPEAKS (`Reach`). REQUIRED, with
+    # no default: claiming too little reach costs a request, claiming too much
+    # takes listings off days the answer never spoke for, and which one a source
+    # forgot would be decided by nobody.
+    reach: Reach
     # Whether every search box asks this source WITHOUT anybody choosing it. A
     # source that is not is asked only when a viewer who has linked it adds it
     # ("also search …" — providers.for_search), with that viewer's own token. A
@@ -1050,6 +1071,19 @@ class Capabilities:
 
     def answers(self, endpoint_key: str) -> bool:
         return endpoint_key in self.endpoints
+
+    def authoritative(self, start: date, days: int) -> tuple[date, date]:
+        """[first, after) — every day an answer for [start, start + days) is
+        authoritative for (`reach`). An unknown reach is an error, never read as
+        either of the others."""
+        end = start + timedelta(days=days)
+        if self.reach is Reach.WINDOW:
+            return start, end
+        if self.reach is Reach.MONTHS:
+            last = end - timedelta(days=1)
+            return (date(start.year, start.month, 1),
+                    date(last.year + last.month // 12, last.month % 12 + 1, 1))
+        raise ValueError(f"no rule for an answer whose reach is {self.reach!r}")
 
     def covers(self, day: date, *, today: date | None = None) -> bool:
         """Whether `day` falls inside this source's reachable window."""

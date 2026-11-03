@@ -148,6 +148,84 @@ class RetentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(await listings()), 0)
 
 
+def _on(day: date, hour: int = 20) -> float:
+    return (day - date(1970, 1, 1)).days * 86400.0 + hour * 3600
+
+
+def _simkl(own: int, day: date) -> Record:
+    return Record(source=Source.SIMKL, media=Media.SHOW, id=str(own), ids={"simkl": own},
+                  detail_url="", title=f"Simkl {own}", air_ts=_on(day), season=1,
+                  episode_number=1, enriched=False)
+
+
+class AnAnswerIsStoredOverTheSpanItSpeaksForTests(unittest.IsolatedAsyncioTestCase):
+    """A service declares how far one answer for a window speaks
+    (Capabilities.reach): Trakt and TMDB the window asked, Simkl every day of the
+    months a window reads (its archive is a file per month). A fill stores that
+    service's listings inside the whole windows of that span, takes its listings
+    off there and nowhere else, and writes a coverage row for each window."""
+
+    async def asyncSetUp(self):
+        migrated_db("calspans")
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    async def _store(self, start: date, records, source: str) -> None:
+        await calendar_cache.store_window(SHOWS, calendar_cache.window_start(start), records,
+                                          600, 1000, sources=[source], asked=[source])
+
+    async def _covered(self, source: str) -> list[str]:
+        return [row["span_start"] for row in await db.fetch_all(
+            "SELECT span_start FROM calendar_coverage WHERE source = ? AND answered = 1 "
+            "ORDER BY span_start", (source,))]
+
+    async def _days(self) -> list[str]:
+        return sorted(calendar_entries._utc_date(listed["air_ts"]) for listed in await listings())
+
+    async def test_a_month_file_fills_every_whole_week_of_its_month(self):
+        """The week of 12 October reads October's file: October's whole weeks are
+        stored and covered; its first and last days belong to weeks that also
+        hold September's and November's days, which only an answer that read
+        those files speaks for."""
+        await self._store(date(2026, 10, 14), [
+            _simkl(1, date(2026, 10, 2)), _simkl(2, date(2026, 10, 14)),
+            _simkl(3, date(2026, 10, 21)), _simkl(4, date(2026, 10, 30))], "simkl")
+        self.assertEqual(await self._covered("simkl"), ["2026-10-05", "2026-10-12", "2026-10-19"])
+        self.assertEqual(await self._days(), ["2026-10-14", "2026-10-21"])
+
+    async def test_a_week_across_two_months_is_covered_by_the_answer_that_read_both(self):
+        await self._store(date(2026, 10, 28), [
+            _simkl(1, date(2026, 10, 30)), _simkl(2, date(2026, 11, 20))], "simkl")
+        self.assertEqual(await self._covered("simkl"), [
+            "2026-10-05", "2026-10-12", "2026-10-19", "2026-10-26",
+            "2026-11-02", "2026-11-09", "2026-11-16", "2026-11-23"])
+        self.assertEqual(await self._days(), ["2026-10-30", "2026-11-20"])
+
+    async def test_an_answer_takes_listings_off_only_inside_its_span(self):
+        await self._store(date(2026, 10, 28), [
+            _simkl(1, date(2026, 10, 14)), _simkl(2, date(2026, 11, 20))], "simkl")
+        # October's file no longer lists the 14th; November's weeks are not its.
+        await self._store(date(2026, 10, 7), [], "simkl")
+        self.assertEqual(await self._days(), ["2026-11-20"])
+
+    async def test_a_week_answer_takes_off_nothing_past_its_week(self):
+        trakt = [dataclasses.replace(_record("one", 1, 1, AIR)),
+                 dataclasses.replace(_record("two", 1, 1, AIR + 7 * 86400))]
+        await self._store(date(2026, 7, 6), [trakt[0]], "trakt")
+        await self._store(date(2026, 7, 13), [trakt[1]], "trakt")
+        await self._store(date(2026, 7, 6), [], "trakt")
+        self.assertEqual([listed["air_ts"] for listed in await listings()], [AIR + 7 * 86400])
+
+    async def test_trakts_entries_past_the_window_asked_are_not_stored(self):
+        """Trakt answers entries weeks past the `days` it was asked for — some of
+        those weeks' entries, never all, so no answer about them."""
+        await self._store(date(2026, 7, 6), [_record("now", 1, 1, AIR),
+                                             _record("later", 1, 2, AIR + 20 * 86400)], "trakt")
+        self.assertEqual([listed["air_ts"] for listed in await listings()], [AIR])
+        self.assertEqual(await self._covered("trakt"), ["2026-07-06"])
+
+
 class ASourceReportingUnchangedTests(unittest.IsolatedAsyncioTestCase):
     """"Unchanged" is a third answer, and both wrong readings of it lose data.
 

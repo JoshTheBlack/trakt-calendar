@@ -595,17 +595,19 @@ class Fill:
 
 def plan_fill(conn: db.Connection, listings: list[Listing], *, bit: int, primaries:
               Mapping[tuple[str, str], str], span: tuple[date, date] | None = None,
+              spans: Mapping[str, tuple[date, date]] | None = None,
               answered: Iterable[str] = (), replied: Iterable[str] = (),
               titles: Collection[str] | None = None,
               excluding: Collection[str] = ()) -> Fill:
     """Decide what filing `listings` on calendar `bit` writes — reads only, for
     db.transaction's `prepare` — as the calendar's fill always wrote it:
 
-      - a FEED's answer over `span` replaces what the services that `answered`
-        listed in it before: their instants inside the span leave that
-        calendar (a title a source has stopped listing stops being drawn) — and
-        a service that answered "unchanged" (`replied` without `answered`)
-        keeps its own;
+      - a FEED's answer replaces what the services that `answered` listed
+        before inside the span each answer is authoritative for (`spans`, by
+        service; `span`, the window asked, for one not named): their instants
+        there leave that calendar (a title a source has stopped listing stops
+        being drawn), and none anywhere else — and a service that answered
+        "unchanged" (`replied` without `answered`) keeps its own;
       - A SEARCHED LISTING STANDS DOWN FOR ITS FEED: an instant a search wrote
         of an episode is taken off the calendar wherever its service's feed
         lists that episode there, at whatever instant — by the feed's answer,
@@ -627,9 +629,18 @@ def plan_fill(conn: db.Connection, listings: list[Listing], *, bit: int, primari
     listing left out is counted as written: the other half writes it."""
     book = Book()
     lo = hi = None
+    reach: dict[str, tuple[float, float]] = {}
     if span is not None:
-        lo, hi = epoch(span[0]), epoch(span[1])
+        reach = {str(source): (epoch(first), epoch(after))
+                 for source, (first, after) in (spans or {}).items()}
+        # The rows read and re-folded: every span an answer speaks for, whole.
+        lo = min([epoch(span[0]), *(first for first, _after in reach.values())])
+        hi = max([epoch(span[1]), *(after for _first, after in reach.values())])
     excluding = frozenset(excluding)
+
+    def bounds(source: str) -> tuple[float, float]:
+        """The span `source`'s answer speaks for: its own, else the window."""
+        return reach.get(source) or (epoch(span[0]), epoch(span[1]))
 
     def ours(key: str) -> bool:
         return (titles is None or key in titles) and key not in excluding
@@ -659,8 +670,9 @@ def plan_fill(conn: db.Connection, listings: list[Listing], *, bit: int, primari
     if span is not None and answered:
         for row in list(book.rows.values()):
             for source in answered:
+                first, after = bounds(source)
                 for instant in list(row.instants.get(source, ())):
-                    if instant.fed & bit and lo <= instant.at < hi:
+                    if instant.fed & bit and first <= instant.at < after:
                         touched.add((row.key, bit, instant.day))
                         row.take(source, instant, bit & ~instant.searched)
     # A search's listing of an episode the feed lists, stood down.
@@ -682,7 +694,8 @@ def plan_fill(conn: db.Connection, listings: list[Listing], *, bit: int, primari
                 stated = row.stated(instant)
                 if ((row.key, source, *stated, instant.entry) in feeds
                         or (source in replied and fed_somewhere(row, source, instant)
-                            and lo is not None and lo <= instant.at < hi)):
+                            and span is not None
+                            and bounds(source)[0] <= instant.at < bounds(source)[1])):
                     touched.add((row.key, bit, instant.day))
                     row.take(source, instant, bit)
 

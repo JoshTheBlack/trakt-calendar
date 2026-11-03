@@ -22,8 +22,9 @@ from datetime import date
 
 from .. import register
 from ..base import (EPISODE_KEEPING, EPISODE_LISTING, SEASON_KEEPING, TITLE_KEEPING,
-                    Capabilities, Media, Record, SearchCatalogue, SearchHit, SearchPage,
-                    SeasonsAnswer, Source, StoreColumns, TitleFacts, Video, status_spoken)
+                    Capabilities, Media, Reach, Record, SearchCatalogue, SearchHit,
+                    SearchPage, SeasonsAnswer, Source, StoreColumns, TitleFacts, Video,
+                    status_spoken)
 from . import calendar, detail, sync, watchlist
 from .transport import TraktError, TraktRateLimitError
 
@@ -300,6 +301,12 @@ class _TraktProvider:
         # app's own retention, and never while a feature row holds the title
         # (app/metadata/rows.py's sweep_unlisted).
         retain_seconds=None,
+        # THE WINDOW ASKED AND NOTHING PAST IT. Trakt takes the `days` it is
+        # given as a floor rather than a ceiling — a 7-day window has come back
+        # with entries two months past its end (app/calendar/cache.py's
+        # `in_window` has the measurement) — and what lies beyond the bound is
+        # some of those weeks' entries, never all of them.
+        reach=Reach.WINDOW,
         # Trakt's calendar answers with `extended=full`, so a listing arrives
         # complete — genres, network, status, certification — and is never
         # stored sparse; there is nothing to describe it for.

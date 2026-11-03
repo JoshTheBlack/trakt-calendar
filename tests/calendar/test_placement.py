@@ -94,15 +94,20 @@ class PlacementTestCase(unittest.IsolatedAsyncioTestCase):
         db.close_thread_connection()
 
     async def store(self, records: list[Record]) -> None:
-        by_window: dict[date, list[Record]] = {}
+        """Each window filled as its services answer it: everything each lists
+        inside the span its answer speaks for (cache.answer_span) — a week for
+        Trakt and TMDB, the whole month for Simkl's monthly file."""
+        by_window: dict[date, set[str]] = {}
         for record in records:
             start = calendar_cache.window_start(calendar_cache.record_utc_date(record))
-            by_window.setdefault(start, []).append(record)
-        for start, held in by_window.items():
+            by_window.setdefault(start, set()).add(str(record.source))
+        for start, sources in sorted(by_window.items()):
+            spans = calendar_cache.answer_spans(sources, start)
+            held = [r for r in records if str(r.source) in spans
+                    and calendar_cache.in_span(r, spans[str(r.source)])]
             await calendar_cache.store_window(
                 SHOWS.key, start, held, 10**9, 1000,
-                sources=sorted({str(r.source) for r in held}),
-                asked=sorted({str(r.source) for r in held}))
+                sources=sorted(sources), asked=sorted(sources))
 
     async def cards(self, prefs, start: date, end: date, *, tz=NEW_YORK) -> list[tuple]:
         grouped, _meta = await calendar_cache.assemble_range(
