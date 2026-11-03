@@ -23,7 +23,8 @@ from app.metadata import rows as title_rows
 from app.providers.base import Media, Record, Source
 from app.config import Settings
 from app.endpoints import get_endpoint
-from tests.support import episode_groups, listings, migrated_db, put_listing, title_groups
+from tests.support import (episode_groups, listings, migrated_db, put_listing,
+                           statements_per_transaction, title_groups)
 
 SHOWS = "shows"
 # 2026-07-06 12:00Z, the start of the aligned window these are stored under.
@@ -224,6 +225,26 @@ class AnAnswerIsStoredOverTheSpanItSpeaksForTests(unittest.IsolatedAsyncioTestCa
                                              _record("later", 1, 2, AIR + 20 * 86400)], "trakt")
         self.assertEqual([listed["air_ts"] for listed in await listings()], [AIR])
         self.assertEqual(await self._covered("trakt"), ["2026-07-06"])
+
+    async def test_a_month_is_stored_a_window_at_a_time_the_window_asked_first(self):
+        """A store decides its rows in its turn of the writer queue, and every
+        other write waits behind that turn — so a month is a turn per week, not
+        one turn as long as the month's."""
+        stored: list[str] = []
+        real = calendar_entries._store_window
+
+        async def counted(endpoint_key, span_start, *args, **kwargs):
+            stored.append(span_start.isoformat())
+            await real(endpoint_key, span_start, *args, **kwargs)
+
+        with statements_per_transaction() as counts, \
+                patch.object(calendar_entries, "_store_window", counted):
+            await self._store(date(2026, 10, 14), [_simkl(n, date(2026, 10, day))
+                                                   for n, day in enumerate((6, 14, 21), 1)],
+                              "simkl")
+        self.assertEqual(stored, ["2026-10-12", "2026-10-05", "2026-10-19"])
+        self.assertEqual(len(counts), 3)
+        self.assertEqual(await self._days(), ["2026-10-06", "2026-10-14", "2026-10-21"])
 
 
 class ASourceReportingUnchangedTests(unittest.IsolatedAsyncioTestCase):

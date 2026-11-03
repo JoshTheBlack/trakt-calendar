@@ -145,21 +145,26 @@ async def store_span(endpoint_key: str, span_start: date, span_end: date,
     its listings are LEFT ALONE rather than cleared. It speaks for the window
     asked alone: what its validator confirms is this window's last read.
 
-    A COVERAGE ROW FOR EVERY WINDOW STORED, written here with the listings: the
-    window asked for every service asked, and every other window of a service's
-    span for that service — so one Simkl month file confirms its month's weeks,
-    and every listing a feed files lies in a window whose row confirms it
-    (`sweep`).
+    A COVERAGE ROW FOR EVERY WINDOW STORED, written with that window's listings:
+    the window asked for every service asked, and every other window of a
+    service's span for that service — so one Simkl month file confirms its
+    month's weeks, and every listing a feed files lies in a window whose row
+    confirms it (`sweep`).
 
-    One transaction, so a reader never sees the gap between the clearing and the
-    filing, and so a title re-keyed by what this fill states moves with the
-    listings that stated it.
+    ONE WINDOW, ONE TRANSACTION — the window asked first, then the rest of each
+    span in date order (`_store_window`) — so a reader never sees the gap
+    between a window's clearing and its filing, and a title re-keyed by what a
+    window states moves with the listings that stated it. NEVER A WHOLE SPAN IN
+    ONE: a store decides its rows in its turn of the writer queue
+    (db.transaction's `prepare`), and every other write this process makes
+    waits behind that turn. MEASURED on a copy of dev: Simkl's month answer,
+    12,386 listings, decided in one turn kept a one-row write waiting 3.2–3.4 s,
+    where the store that fetched the month again for each week kept one waiting
+    1.6–1.8 s.
     """
-    first = span_start.isoformat()
     answered = [str(s) for s in sources]
     reach = {source: tuple((spans or {}).get(source) or (span_start, span_end))
              for source in answered}
-    bit = _bit(endpoint_key)
 
     # NOTHING OUTSIDE ITS SERVICE'S SPAN IS STORED, here as well as at the fetch,
     # because a listing is FILED BY ITS OWN DATE: one landing in a window with no
@@ -177,26 +182,57 @@ async def store_span(endpoint_key: str, span_start: date, span_end: date,
     if len(inside) != len(records):
         logger.debug("%d %s entr(ies) fell outside the span their answer speaks for, "
                      "from the window starting %s; trimmed.",
-                     len(records) - len(inside), endpoint_key, first)
+                     len(records) - len(inside), endpoint_key, span_start)
+    later = sorted({window for lo, hi in reach.values() for window in _windows(lo, hi)
+                    if not span_start <= window < span_end})
+    windows = [(span_start, span_end), *((window, window + timedelta(days=WINDOW_DAYS))
+                                         for window in later)]
+    filed: dict[date, list[Record]] = {window: [] for window, _end in windows}
+    for record in inside:
+        day = _utc_date(record.air_ts)
+        filed[next(window for window, end in windows
+                   if window.isoformat() <= day < end.isoformat())].append(record)
+    await _store_window(endpoint_key, span_start, span_end, filed[span_start],
+                        sources=answered, asked=asked, unchanged=unchanged,
+                        now=now, stale_after=stale_after)
+    for window, end in windows[1:]:
+        speaking = [source for source in answered if reach[source][0] <= window < reach[source][1]]
+        await _store_window(endpoint_key, window, end, filed[window], sources=speaking,
+                            asked=speaking, now=now, stale_after=stale_after)
+
+
+def _windows(first: date, after: date) -> list[date]:
+    """The aligned windows of [first, after) — a span `store_span` is handed
+    begins on a window and ends on one."""
+    out = []
+    window = first
+    while window < after:
+        out.append(window)
+        window += timedelta(days=WINDOW_DAYS)
+    return out
+
+
+async def _store_window(endpoint_key: str, span_start: date, span_end: date,
+                        inside: list[Record], *, sources, asked, unchanged=(),
+                        now: int, stale_after: int) -> None:
+    """One window of `store_span`, in one transaction: what `sources` answered
+    for it filed, what they listed in it before and no longer do taken off, and
+    its coverage row for every service `asked`."""
+    first = span_start.isoformat()
+    answered = [str(s) for s in sources]
+    bit = _bit(endpoint_key)
     replied = sorted({*answered, *(str(s) for s in unchanged)})
     # EVERYTHING THE STATEMENTS CARRY, SPELLED BEFORE THE LOCK IS TAKEN.
     listed = metadata.listings(inside, now=now, stale_after=stale_after)
-    coverage = [[first, name, 1 if name in replied else 0]
-                for name in sorted({*map(str, asked), *replied})]
-    for source, (lo, hi) in sorted(reach.items()):
-        window = lo
-        while window < hi:
-            if window != span_start:
-                coverage.append([window.isoformat(), source, 1])
-            window += timedelta(days=WINDOW_DAYS)
-    coverage = json.dumps(coverage)
+    coverage = json.dumps([[first, name, 1 if name in replied else 0]
+                           for name in sorted({*map(str, asked), *replied})])
 
     def _fill(conn, positions: list[int], keys: list[str], primaries,
               **halves) -> episode_rows.Fill:
         return episode_rows.plan_fill(
             conn, _listings([inside[at] for at in positions], [keys[at] for at in positions],
                             bit=bit, now=now, searched=False),
-            bit=bit, primaries=primaries, span=(span_start, span_end), spans=reach,
+            bit=bit, primaries=primaries, span=(span_start, span_end),
             answered=answered, replied=replied, **halves)
 
     # WHICH TITLE EACH LISTING IS AND WHICH ROW IT IS FILED ON, DECIDED BEFORE THE
