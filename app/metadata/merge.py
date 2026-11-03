@@ -25,11 +25,12 @@ episode are re-decided against the merged title's numbered ones (app/metadata/
 episodes.py's `Book.refold`).
 
 AN ENTRY MOVES WITH ITS OWN ID. A service re-points its shared ids and never its
-own, so when a listing or an answer files an entry under a different title than
-it was — with no re-key behind it — the entry's group (where it was its title's),
-its seasons' and episodes' words, its listings and its ids go with it, and the
-title it lands on keeps its own group if it has one (a group is kept while its
-entry exists).
+own, so when the service's own answer about a title files its entry under a
+different title than it was — with no re-key behind it — the entry's group
+(where it was its title's), its seasons' and episodes' words, its listings and
+its ids go with it, and the title it lands on keeps its own group if it has one
+(a group is kept while its entry exists). A listing's copy of the ids never
+moves an entry (app/metadata/__init__.py's `plan_records` says why).
 
 RARE, AND WRITTEN ROW BY ROW: a re-key or a move is a handful of titles in a
 fill of thousands, and its own statements are excluded from the store's fixed

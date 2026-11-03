@@ -273,11 +273,21 @@ holding THAT SERVICE'S OWN id, when exactly one does
 (`watch_history._tracked_by_own_id`), because a service re-points its shared ids
 and never its own — Simkl moved The Great British Bake Off between TMDB's two
 titles, and its episodes stopped reaching the season the tracker held. THE STORE
-FOLLOWS THE SAME OWN ID: a listing or an answer that names an entry under another
-title than the one it is filed under, with no re-key behind it, moves the entry
-— its group where it was the title's, its seasons' and episodes' words, its
-listings, its ids — and the title it lands on keeps a group of its own
-(`merge.entry`). `tests/metadata/test_holders.py`
+FOLLOWS THE SAME OWN ID, BY THE SERVICE'S OWN ANSWER: a description — the
+service's answer about the title itself — naming its entry under another title
+than the one it is filed under, with no re-key behind it, moves the entry — its
+group where it was the title's, its seasons' and episodes' words, its listings,
+its ids — and the title it lands on keeps a group of its own (`merge.entry`,
+from `descriptions.plan`, onto a title another entry of the service holds too).
+A LISTING NEVER MOVES ONE (`metadata.plan_records`): one service's calendar
+files disagree with each other — Simkl's October file names its entry 2777093 as
+TMDB's 230757 and its November file as 276408, its own lookup the newer — and
+every week filled from one moved the entry and every week from the other moved it
+back, inside the fill's lock. A listing of a filed entry is filed under that
+entry's title and the ids that named another title are taught to neither, its
+group's ids included (`identity.Planner.named_apart` / `agreeing`); a listing
+still re-keys its entry's title up the waterfall, and files an entry the store
+has not met where its ids say. `tests/metadata/test_holders.py`
 fails when the schema grows a table neither holder list classifies (a table the
 store retired is `tables.RETIRED`'s), and SQL naming the store's tables lives in
 `app/metadata/` or names them through `tables.py`'s constants.

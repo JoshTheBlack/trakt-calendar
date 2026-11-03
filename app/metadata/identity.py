@@ -518,6 +518,42 @@ class Planner:
         self._settled.append((title, target))
         return target
 
+    def named_apart(self, title: Settling) -> str | None:
+        """The title `title`'s ids name, when it is NOT the title it is filed
+        under nor one that title would be re-keyed into — ids naming another
+        title of the same id space or a lower one — else None. Answered against
+        every title settled so far, and writing nothing.
+
+        A RE-KEY IS NOT APART: a title filed under its tvdb id whose ids now
+        state a tmdb id moves up the waterfall to it, everything it holds with
+        it. Two titles of one id space are two titles (the module docstring), so
+        ids naming one while filed under the other say something about which
+        title the statement is about."""
+        filed = self._known.moved_to(title.filed_under)
+        if not filed:
+            return None
+        current = self._known.follow(filed)
+        # The ids as a settle reads them: the filing's own id adopted wherever
+        # they do not contradict it (`_settle`'s first step).
+        incoming = id_rules.canonical(title.ids)
+        _adopt_filing_id(self._known, incoming, filed)
+        landing = _resolve(self._known, title.media, incoming)
+        if landing is None or landing == current or rank(landing) < rank(current):
+            return None
+        return landing
+
+    def agreeing(self, title: Settling) -> dict:
+        """`title`'s ids less every shared id the title it is filed under does
+        not hold as stated: what a statement that named another title still says
+        about the one it is filed under — its service's own ids, and the shared
+        ids the two agree on. It teaches that title nothing."""
+        filed = self._known.moved_to(title.filed_under)
+        held = self._known.row(self._known.follow(filed)) if filed else None
+        known = held.ids if held is not None else {}
+        return {name: value for name, value in (title.ids or {}).items()
+                if name not in MATCH_SOURCES
+                or known.get(name) == id_rules.typed(name, value)}
+
     def plan(self) -> SettlePlan:
         """Everything settled, each identity the key its title answers to once
         the batch is done (`settle_many` says why)."""

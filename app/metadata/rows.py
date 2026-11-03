@@ -427,6 +427,19 @@ class ListingRows(NamedTuple):
         positions = list(positions)
         return ListingRows(*([column[i] for i in positions] for column in self))
 
+    def with_ids(self, changes: Mapping[int, Mapping[str, Any]]) -> "ListingRows":
+        """These rows with the listing at each position in `changes` stating
+        those ids instead of its own — every other word as it was spelled."""
+        if not changes:
+            return self
+        titles = list(self.titles)
+        for at, ids in changes.items():
+            spelled = json.loads(titles[at])
+            # Each row: media, the own id, then the group's listed fields.
+            spelled[2 + _listed_fields(self.sources[at]).index("ids_json")] = json.dumps(dict(ids))
+            titles[at] = json.dumps(spelled)
+        return self._replace(titles=titles)
+
 
 def listing_rows(records: Iterable[Record], *, now: int, stale_after: int) -> ListingRows:
     """What `write_listings` writes for each of `records`, spelled — pure, and
@@ -558,8 +571,9 @@ def filed_keys(conn: db.Connection, refs: Iterable[tuple[str, str, str]]
 
 
 class Move(NamedTuple):
-    """One service's entry for a title found under another title: the listing or
-    the answer that named it says it is this one now."""
+    """One service's entry for a title found under another title: the service's
+    own answer about the title says it is this one now. A listing never makes
+    one (app/metadata/__init__.py's `plan_records` says why)."""
     source: str
     media: str
     own: str
@@ -574,8 +588,9 @@ def move_entries(conn: db.Connection, moves: Iterable[Move], *, now: int) -> Non
 
     A SERVICE RE-POINTS ITS SHARED IDS AND NEVER ITS OWN — Simkl moved The Great
     British Bake Off between TMDB's two titles — and what that service said about
-    the title is about the title its own id names. Rare, and each its own few
-    statements, like a re-key."""
+    the title is about the title its own id names. Made only by a service's own
+    answer about the title, so once per re-point; each its own few statements,
+    like a re-key."""
     for move in dict.fromkeys(moves):
         if move.old != move.new:
             merge.entry(conn, move.source, move.media, move.own, move.old, move.new, now=now)

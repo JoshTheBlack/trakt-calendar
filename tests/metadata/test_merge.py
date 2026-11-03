@@ -9,9 +9,12 @@ are one row, one service's two of one episode a listing and its repeat, and a
 listing naming no full episode is re-decided against the merged title's
 numbered ones.
 
-AN ENTRY MOVES WITH ITS OWN ID, driven here the way it happens — a service's
-listing stating another shared id for the same own id — and the title it lands
-on keeps its own group if it has one.
+AN ENTRY MOVES WITH ITS OWN ID, driven here the way it happens — the service's
+own answer about the title stating another shared id for the same own id — and
+the title it lands on keeps its own group if it has one. A LISTING'S COPY OF THE
+IDS NEVER MOVES ONE, whichever way it points (app/metadata/__init__.py's
+`plan_records`): Simkl's own calendar files name one entry as two TMDB titles a
+month apart.
 
 No network.
 """
@@ -19,11 +22,13 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 from app import db
 from app.calendar import entries
-from app.metadata import merge, tables
+from app.metadata import descriptions, merge, tables
 from app.providers.base import Media, Record, Source
+from tests.metadata.test_panel import _answer
 from tests.support import (DatabaseTestCase, listings, put_listing, put_season, put_title,
                            season_group, title_group)
 
@@ -173,22 +178,32 @@ class ARekeyMergesEachServicesGroupTests(DatabaseTestCase):
         self.assertEqual((row["simkl_air_ts"], row["simkl_unstated"]), (at("2026-10-01", 21), 1))
 
 
-def _simkl(own: int, tmdb: int, title: str, day: str, *, number: int = 1) -> Record:
+def _simkl(own: int, tmdb: int, title: str, day: str, *, number: int = 1,
+           **ids) -> Record:
     return Record(source=Source.SIMKL, media=Media.SHOW, id=str(own),
-                  ids={"simkl": own, "tmdb": tmdb}, detail_url="s", title=title,
+                  ids={"simkl": own, "tmdb": tmdb, **ids}, detail_url="s", title=title,
                   air_ts=at(day), season=1, episode_number=number, episode_label=f"S01E0{number}",
                   enriched=False)
 
 
-async def _fill(endpoint: str, records: list[Record]) -> None:
-    await entries.store_span(endpoint, *SPAN, records, sources=["simkl"], asked=["simkl"],
+async def _fill(endpoint: str, records: list[Record], span=SPAN) -> None:
+    await entries.store_span(endpoint, *span, records, sources=["simkl"], asked=["simkl"],
                              now=NOW, stale_after=NOW + 86_400)
+
+
+async def _described(own: int, tmdb: int, title: str) -> None:
+    """Simkl's own answer about entry `own` (its /tv/{id}), naming `tmdb`, filed
+    as the refresh pass files one."""
+    answer = _answer("simkl", str(own), None, title=title)
+    answer["ids"] = {"simkl": own, "tmdb": tmdb}
+    await descriptions.store_many([descriptions.Answer("simkl", "show", str(own), answer)],
+                                  tz=ZoneInfo("UTC"))
 
 
 class AnEntryMovesWithItsOwnIdTests(DatabaseTestCase):
     """Simkl moved The Great British Bake Off between TMDB's two titles: its own
-    id stayed, the tmdb id it stated changed. The entry, its words and every
-    listing it made go to the title it now names."""
+    id stayed, the tmdb id its own answer about the title stated changed. The
+    entry, its words and every listing it made go to the title it now names."""
 
     async def asyncSetUp(self):
         await super().asyncSetUp()
@@ -198,11 +213,11 @@ class AnEntryMovesWithItsOwnIdTests(DatabaseTestCase):
                                      [{"number": 1, "title": "Cake Week"}], now=NOW)
 
     async def test_the_group_its_ids_and_its_listings_go_to_the_title_it_names(self):
-        await _fill("shows", [_simkl(9, 2, "Bake Off", "2026-10-01")])
+        await _described(9, 2, "Bake Off")
         self.assertIsNone(await title_group("show:tmdb:1", "simkl"))
         self.assertEqual((await title_group("show:tmdb:2", "simkl"))["source_id"], "9")
         self.assertEqual(await _ids("simkl"), {"9": ("show:tmdb:2", 1)})
-        # Including the calendar this fill did not refill.
+        # Including every calendar's listing of it.
         self.assertEqual({(listed["endpoint"], listed["title_key"]) for listed in await listings()},
                          {("shows", "show:tmdb:2"), ("shows/premieres", "show:tmdb:2")})
         self.assertEqual((await _row("show:tmdb:2", "S1E1"))["simkl_title"], "Cake Week")
@@ -211,9 +226,91 @@ class AnEntryMovesWithItsOwnIdTests(DatabaseTestCase):
     async def test_a_title_with_a_group_of_its_own_keeps_it(self):
         await _fill("shows/new", [_simkl(8, 2, "Bake Off: The Professionals", "2026-11-01")])
         with self.assertLogs("app.metadata.merge", "WARNING"):
-            await _fill("shows", [_simkl(9, 2, "Bake Off", "2026-10-01")])
+            await _described(9, 2, "Bake Off")
         group = await title_group("show:tmdb:2", "simkl")
         self.assertEqual((group["source_id"], group["title"]),
                          ("8", "Bake Off: The Professionals"))
         self.assertEqual(await _ids("simkl"), {"8": ("show:tmdb:2", 1), "9": ("show:tmdb:2", 0)})
         self.assertEqual((await _row("show:tmdb:2", "S1E1"))["simkl_entry"], "9")
+
+
+OCTOBER = (date(2026, 10, 1), date(2026, 10, 8))
+NOVEMBER = (date(2026, 11, 1), date(2026, 11, 8))
+
+
+class AListingNeverMovesAnEntryTests(DatabaseTestCase):
+    """Simkl's October calendar file names its entry 2777093 as TMDB's 230757,
+    its November file as 276408. Each week's fill used to move the entry to the
+    title its file named — and back — inside the fill's lock. The entry stays
+    where it was filed; only Simkl's own answer about the title moves it."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        await _fill("shows", [_simkl(9, 1, "Cash Battle", "2026-10-03", tvdb=77)], OCTOBER)
+
+    async def _novembers(self, tmdb: int = 2) -> None:
+        await _fill("shows", [_simkl(9, tmdb, "Cash Battle", "2026-11-01", number=2,
+                                     tvdb=77)], NOVEMBER)
+
+    async def test_a_listing_naming_another_title_is_filed_under_the_entrys(self):
+        with self.assertLogs("app.metadata", "INFO") as logged:
+            await self._novembers()
+        self.assertEqual(await _ids("simkl"), {"9": ("show:tmdb:1", 1)})
+        self.assertEqual({(listed["title_key"], listed["unit"]) for listed in await listings()},
+                         {("show:tmdb:1", "S1E1"), ("show:tmdb:1", "S1E2")})
+        self.assertTrue(any("show:tmdb:2" in line and "stays filed under show:tmdb:1" in line
+                            for line in logged.output))
+        self.assertFalse(any("moved from" in line for line in logged.output))
+
+    async def test_its_ids_are_taught_to_neither_title(self):
+        """The other title is not registered, and the entry's group does not take
+        the tmdb id that named it — a card keyed or linked by it would draw the
+        other show."""
+        await self._novembers()
+        self.assertIsNone(await db.fetch_one(
+            f"SELECT 1 FROM {tables.TITLES} WHERE title_key = 'show:tmdb:2'"))
+        group = await title_group("show:tmdb:1", "simkl")
+        self.assertEqual(json.loads(group["ids_json"]).get("tmdb"), None)
+        self.assertEqual(json.loads(group["ids_json"])["simkl"], 9)
+        # The id the two agree on stays stated.
+        self.assertEqual(json.loads(group["ids_json"])["tvdb"], 77)
+
+    async def test_alternating_files_move_nothing(self):
+        with self.assertNoLogs("app.metadata.merge", "INFO"):
+            for _ in range(2):
+                await self._novembers()
+                await _fill("shows", [_simkl(9, 1, "Cash Battle", "2026-10-03", tvdb=77)],
+                            OCTOBER)
+        self.assertEqual(await _ids("simkl"), {"9": ("show:tmdb:1", 1)})
+        self.assertEqual({listed["title_key"] for listed in await listings()}, {"show:tmdb:1"})
+
+    async def test_the_services_own_answer_moves_it_and_no_listing_moves_it_back(self):
+        await self._novembers()
+        await _described(9, 2, "Cash Battle")
+        self.assertEqual(await _ids("simkl"), {"9": ("show:tmdb:2", 1)})
+        with self.assertNoLogs("app.metadata.merge", "INFO"):
+            await _fill("shows", [_simkl(9, 1, "Cash Battle", "2026-10-03", tvdb=77)], OCTOBER)
+            await self._novembers()
+        self.assertEqual(await _ids("simkl"), {"9": ("show:tmdb:2", 1)})
+        self.assertEqual({listed["title_key"] for listed in await listings()}, {"show:tmdb:2"})
+
+    async def test_a_listing_still_rekeys_the_title_its_entry_is_filed_under(self):
+        """Filed under its tvdb id, an entry whose listing now states a tmdb id
+        moves up the waterfall with its title: a re-key, not a move."""
+        await _fill("shows", [Record(
+            source=Source.SIMKL, media=Media.SHOW, id="5", ids={"simkl": 5, "tvdb": 500},
+            detail_url="s", title="Tvdb Only", air_ts=at("2026-10-04"), season=1,
+            episode_number=1, enriched=False)], OCTOBER)
+        self.assertEqual((await _ids("simkl"))["5"], ("show:tvdb:500", 1))
+        await _fill("shows", [Record(
+            source=Source.SIMKL, media=Media.SHOW, id="5", ids={"simkl": 5, "tvdb": 500, "tmdb": 50},
+            detail_url="s", title="Tvdb Only", air_ts=at("2026-11-02"), season=1,
+            episode_number=2, enriched=False)], NOVEMBER)
+        self.assertEqual((await _ids("simkl"))["5"], ("show:tmdb:50", 1))
+        self.assertEqual(await db.fetch_value(
+            f"SELECT title_key FROM {tables.ALIASES} WHERE old_key = 'show:tvdb:500'"),
+            "show:tmdb:50")
+
+    async def test_an_entry_the_store_has_not_met_is_filed_where_its_listing_says(self):
+        await _fill("shows", [_simkl(10, 3, "New Here", "2026-11-03")], NOVEMBER)
+        self.assertEqual((await _ids("simkl"))["10"], ("show:tmdb:3", 1))

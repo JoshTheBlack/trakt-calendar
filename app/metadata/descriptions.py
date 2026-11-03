@@ -291,6 +291,14 @@ class _Rows:
         self._index(unique)
         return self._rows[unique]
 
+    def forget(self, row: dict) -> None:
+        """`row` is no group any more: its entry moved onto a title another of
+        its service's entries holds the group of (merge.entry drops it)."""
+        unique = (str(row["source"]), str(row["media"]), str(row["source_id"]))
+        self._rows.pop(unique, None)
+        for own_id in self._states.pop(unique, set()):
+            self._stating.get((unique[0], unique[1], own_id), set()).discard(unique)
+
 
 def _with_own(source: str, own_id: Any, ids: Mapping[str, Any] | None) -> dict:
     """`ids` with the service's own id for the title — what `service_rows`
@@ -722,8 +730,11 @@ def write(conn: db.Connection, source: str, media: str, own_id: Any,
 
     THE IDS GO THROUGH THE ONE RESOLUTION (identity.settle), so a service that
     now names a title differently — a re-pointed TMDB id, a newly learned one —
-    re-keys it or moves this service's entry to the title it names, exactly as a
-    listing does. The ids written are what the service said this time.
+    re-keys it or moves this service's entry to the title it names. THIS IS THE
+    ONE WRITER THAT MOVES AN ENTRY: a listing's copy of the ids never does,
+    because one service's listings disagree with each other where its own
+    answer about the title does not (app/metadata/__init__.py's `plan_records`).
+    The ids written are what the service said this time.
 
     A NAME OR A PICTURE THE ANSWER DOES NOT STATE IS NOT ERASED: a listing may
     have given the group one the per-title answer leaves out.
@@ -893,18 +904,24 @@ def plan(conn: db.Connection, answers: Iterable[Answer], *, tz: ZoneInfo,
             fallback=fallback)) or fallback
         own = str(before["source_id"]) if before else rows.own_id(item.source, item.own_id,
                                                                   words.ids)
+        # A SERVICE RE-POINTED ITS SHARED IDS, NOT ITS OWN: this group goes
+        # where its own id now says, its seasons and episodes with it — the one
+        # writer that moves an entry (`write` says why).
+        moved = before is not None and previous_key != key
+        if moved:
+            moves.append((item.source, item.media, own, previous_key, settled, fallback))
         # ANOTHER OF THE SERVICE'S ENTRIES IS THIS TITLE'S GROUP: the answer is
         # about a second id the service holds for the title, and its words are
         # not kept (the module docstring says why). Its settle stands — the ids
-        # it taught are the title's.
+        # it taught are the title's — and an entry it moved there arrives as
+        # that second id, its group dropped (merge.entry).
         occupant = held.occupant(item.source, key)
         if occupant is not None and occupant != own:
+            if moved:
+                held.forget(found[0])
             settled += 1
             continue
-        if before is not None and previous_key != key:
-            # A SERVICE RE-POINTED ITS SHARED IDS, NOT ITS OWN: this group goes
-            # where its own id now says, its seasons and episodes with it.
-            moves.append((item.source, item.media, own, previous_key, settled, fallback))
+        if moved:
             before["title_key"] = key
         changes = {**words.values, "title_key": key, "enriched": 1,
                    "stale_after": now + TITLE_REFRESH_SECONDS, "failed_at": None,
