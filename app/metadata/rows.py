@@ -38,7 +38,7 @@ from __future__ import annotations
 import json
 import logging
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
@@ -347,26 +347,47 @@ _LISTING_REWRITES: dict[str, str | None] = {
 _MINE = "(held.id IS NULL OR held.id = given.id)"
 
 
-def _upsert_title_sql(source: str) -> str:
-    fields = _listed_fields(source)
-    names = ("id", *fields, "fetched_at", "stale_after")
-    sets = [f"{source}_id = COALESCE({tables.TITLES}.{source}_id, excluded.{source}_id)"]
-    for name in (*fields, "stale_after"):
-        sets.append(f"{source}_{name} = " + groups.spelled(
-            f"CASE WHEN {_MINE} THEN {_LISTING_WRITES[name]} ELSE held.{name} END",
-            tables.TITLES, source))
+def _listing_sets(source: str) -> list[tuple[str, str]]:
+    """(column, template) for every column a listing's write sets on `source`'s
+    title group — THE ONE STATEMENT OF THE LISTING'S WRITE RULES, spelled into
+    the upsert (`_upsert_title_sql`) and into the question asked before the lock
+    of whether writing would change anything (`changing`), so the two cannot
+    come to disagree."""
+    sets = [("id", "COALESCE(held.id, given.id)")]
+    for name in (*_listed_fields(source), "stale_after"):
+        sets.append((name, f"CASE WHEN {_MINE} THEN {_LISTING_WRITES[name]} ELSE held.{name} END"))
     clock = ceiling_clock(tables.TITLES, source, _LISTING_REWRITES)
-    sets.append(f"{source}_fetched_at = " + groups.spelled(
-        f"CASE WHEN {_MINE} THEN {clock} ELSE held.fetched_at END", tables.TITLES, source))
-    # Each row: media, then the group's columns (`names`); the key it is filed
-    # under, and the moment a title nobody registered yet is created at, beside.
-    selected = ["json_extract(:keys, '$[' || r.key || ']')", "json_extract(r.value, '$[0]')",
-                ":now", *(f"json_extract(r.value, '$[{at}]')"
-                          for at in range(1, 1 + len(names)))]
-    return (f"INSERT INTO {tables.TITLES} (title_key, media, created_at, "
-            + ", ".join(f"{source}_{name}" for name in names) + ")\n"
-            + f"SELECT {', '.join(selected)} FROM json_each(:rows) r WHERE true ORDER BY r.key"
-            + "\nON CONFLICT(title_key) DO UPDATE SET " + ",\n    ".join(sets))
+    sets.append(("fetched_at", f"CASE WHEN {_MINE} THEN {clock} ELSE held.fetched_at END"))
+    return sets
+
+
+def _listing_columns(source: str) -> tuple[str, ...]:
+    """The columns a listing's write inserts, in `_listing_given`'s order."""
+    return ("title_key", "media", "created_at",
+            *(f"{source}_{name}" for name in ("id", *_listed_fields(source), "fetched_at",
+                                             "stale_after")))
+
+
+def _listing_given(source: str) -> str:
+    """The rows a listing's write reads, each column named as the table names
+    it (`_listing_columns`): the key the listing is filed under, its media, the
+    moment a title nobody registered yet is created at, then `source`'s group as
+    `listing_rows` spells it — and `at`, the row's position in `:rows`."""
+    names = ("id", *_listed_fields(source), "fetched_at", "stale_after")
+    return ("SELECT r.key AS at, json_extract(:keys, '$[' || r.key || ']') AS title_key, "
+            "json_extract(r.value, '$[0]') AS media, :now AS created_at, "
+            + ", ".join(f"json_extract(r.value, '$[{i}]') AS {source}_{name}"
+                        for i, name in enumerate(names, start=1))
+            + " FROM json_each(:rows) r")
+
+
+def _upsert_title_sql(source: str) -> str:
+    columns = ", ".join(_listing_columns(source))
+    return (f"INSERT INTO {tables.TITLES} ({columns})\n"
+            f"SELECT {columns} FROM ({_listing_given(source)}) WHERE true ORDER BY at"
+            "\nON CONFLICT(title_key) DO UPDATE SET " + ",\n    ".join(
+                f"{source}_{name} = {groups.spelled(template, tables.TITLES, source)}"
+                for name, template in _listing_sets(source)))
 
 
 # A SPELLING OF AN ENTRY, AND WHETHER IT IS THE TITLE'S GROUP — every spelling a
@@ -390,17 +411,34 @@ ON CONFLICT(source, media, service_id) DO UPDATE SET
 """
 
 
-def file_ids(conn: db.Connection, entries: Iterable[list]) -> None:
-    """Each [source, media, spelling, own id, title key]'s spellings in
-    `service_ids` — the spelling it arrived under and the one `own_id` reads —
-    in one statement, after the groups it names are written."""
+def _spelled_ids(entries: Iterable[list]) -> list[list]:
+    """Each [source, media, spelling, own id, title key]'s spellings, as
+    `_UPSERT_SERVICE_IDS` reads them: the spelling it arrived under and the one
+    `own_id` reads, each once — the last entry naming it deciding its title."""
     spelled: dict[tuple[str, str, str], list] = {}
     for source, media, spelling, own, key in entries:
         for name in dict.fromkeys((str(spelling), str(own))):
             spelled[(str(source), str(media), name)] = [str(source), str(media), name,
                                                         str(own), str(key)]
+    return list(spelled.values())
+
+
+def file_ids(conn: db.Connection, entries: Iterable[list]) -> None:
+    """Each [source, media, spelling, own id, title key]'s spellings in
+    `service_ids` — the spelling it arrived under and the one `own_id` reads —
+    in one statement, after the groups it names are written."""
+    spelled = _spelled_ids(entries)
     if spelled:
-        conn.execute(_UPSERT_SERVICE_IDS, {"ids": json.dumps(list(spelled.values()))})
+        conn.execute(_UPSERT_SERVICE_IDS, {"ids": json.dumps(spelled)})
+
+
+# Where each spelling is filed now, and whether it is its title's group — one row.
+_IDS_HELD_SQL = f"""
+SELECT json_group_array(json_array(s.source, s.media, s.service_id, s.title_key, s.is_primary))
+FROM json_each(?) j CROSS JOIN {tables.SERVICE_IDS} s
+  ON s.source = json_extract(j.value, '$[0]') AND s.media = json_extract(j.value, '$[1]')
+ AND s.service_id = json_extract(j.value, '$[2]')
+"""
 
 
 class ListingRows(NamedTuple):
@@ -516,35 +554,104 @@ def primaries(conn: db.Connection, rows: ListingRows, keys: list[str]
     return out
 
 
-def write_listings(conn: db.Connection, rows: ListingRows, keys: list[str], *,
-                   now: int) -> None:
-    """Services' listings of their titles, written inside the caller's
-    transaction: each listing's title group under its key in `keys` (one per
-    listing, in order) where that entry is the title's group, every spelling of
-    each entry in `service_ids`, and each picture — a statement per service and
-    table, however many listings there are."""
-    if not keys:
-        return
-    by_source: dict[str, tuple[list[str], list[str]]] = {}
+def _entries(rows: ListingRows, keys: list[str]) -> list[int]:
+    """The listings a title group is written from: ONE PER ENTRY — (title key,
+    service, own id) — its last in write order (`ordered`), the entries in the
+    order they first appear there. An entry's listings in one answer state the
+    same words, the show's carried on each of its airings, so its last is all of
+    them; one write per entry is what lets each be judged against the stored row
+    alone (groups.changing)."""
+    last: dict[tuple[str, str, str], int] = {}
     for at in ordered(rows, keys):
-        payload, filed = by_source.setdefault(rows.sources[at], ([], []))
-        payload.append(rows.titles[at])
-        filed.append(keys[at])
-    for source, (payload, filed) in by_source.items():
-        conn.execute(_upsert_title_sql(source), {
-            "rows": "[" + ",".join(payload) + "]", "keys": json.dumps(filed), "now": now})
-    file_ids(conn, [[source, json.loads(title)[0], spelling, own, key]
-                    for source, own, spelling, key, title in zip(
-                        rows.sources, rows.owns, rows.spellings, keys, rows.titles)])
+        last[(keys[at], rows.sources[at], rows.owns[at])] = at
+    return list(last.values())
+
+
+class ListingWrites(NamedTuple):
+    """What `write_listings` writes of a batch of listings, decided before the
+    lock (`plan_listing_writes`): only what would change the stored rows."""
+    # {service: (each entry's title group as `_upsert_title_sql` reads it, the
+    # key each is filed under)}.
+    titles: dict[str, tuple[list[str], list[str]]]
+    # [source, media, spelling, own id, title key] for each spelling whose
+    # filing — its title, or whether it is the title's group — would change.
+    ids: list[list]
+    # (media, None, title key, source, address) for each picture to file.
+    sightings: list[tuple]
+
+    @property
+    def empty(self) -> bool:
+        return not (self.titles or self.ids or self.sightings)
+
+
+def plan_listing_writes(conn: db.Connection, rows: ListingRows, keys: list[str],
+                        primaries: Mapping[tuple[str, str], str], *, now: int,
+                        whole: Collection[str] = ()) -> ListingWrites:
+    """What writing `rows` under `keys` would change — read and decided, NOT
+    written: a statement per service for the title groups (groups.changing, over
+    `_listing_sets`), one for the entries' spellings, one for the pictures.
+
+    A REFILL THAT CHANGED NOTHING WRITES NONE OF IT. A service's clock is not a
+    change except where a ceiling reads it (`ceiling_sources`): the coverage row
+    the refill writes says when the service last confirmed the window, and a
+    listing's group is not rewritten to say so again — while TMDB's group is
+    re-stamped whenever a re-read restates every word it holds (`ceiling_clock`),
+    because its terms are about when each word was obtained.
+
+    `primaries` is `primaries`' answer for these rows; `whole` names title keys a
+    merge in the same write reshapes, whose rows are written whatever this read
+    of them as they were before says."""
+    whole = frozenset(whole)
+    by_source: dict[str, list[int]] = {}
+    for at in _entries(rows, keys):
+        by_source.setdefault(rows.sources[at], []).append(at)
+    titles: dict[str, tuple[list[str], list[str]]] = {}
+    for source, positions in by_source.items():
+        counted = [(name, template) for name, template in _listing_sets(source)
+                   if name != "fetched_at" or source in ceiling_sources()]
+        moving = groups.changing(
+            conn, tables.TITLES, ("title_key",), _listing_given(source), counted, source,
+            {"rows": "[" + ",".join(rows.titles[at] for at in positions) + "]",
+             "keys": json.dumps([keys[at] for at in positions]), "now": now})
+        kept = [at for i, at in enumerate(positions) if i in moving or keys[at] in whole]
+        if kept:
+            titles[source] = ([rows.titles[at] for at in kept], [keys[at] for at in kept])
+    spelled = _spelled_ids([source, json.loads(title)[0], spelling, own, key]
+                           for source, own, spelling, key, title in zip(
+                               rows.sources, rows.owns, rows.spellings, keys, rows.titles))
+    held: dict[tuple[str, str, str], tuple[str, int]] = {}
+    if spelled:
+        (found,) = conn.execute(_IDS_HELD_SQL, (json.dumps(spelled),)).fetchone()
+        held = {(source, media, str(name)): (str(key), int(primary))
+                for source, media, name, key, primary in json.loads(found)}
+    ids = [entry for entry in spelled
+           if entry[4] in whole or held.get(tuple(entry[:3])) != (
+               entry[4], int(primaries.get((entry[4], entry[0])) == entry[3]))]
     # A TITLE WITH NO TMDB ID HAS ITS LISTING'S PICTURE FILED UNDER ITS KEY, as
     # the store knows it only here (app/media/artwork.py's `title_posters`). One
     # with a tmdb id is filed by the calendar's fill, which records every
     # picture a fetch brought (app/calendar/cache.py's `_poster_sighting`).
-    artwork.file_sightings(conn, [
+    sightings = list(dict.fromkeys(
         (media, None, key, source, url)
         for picture, key in zip(rows.pictures, keys)
         if picture is not None and identity.tmdb_of(key) is None
-        for media, source, url in (picture,)], now)
+        for media, source, url in (picture,)))
+    return ListingWrites(titles, ids, artwork.unseen(conn, sightings, now))
+
+
+def write_listings(conn: db.Connection, writes: ListingWrites, *, now: int) -> None:
+    """Services' listings of their titles as `plan_listing_writes` decided them,
+    inside the caller's transaction — on the connection it was planned on, which
+    db.transaction's `prepare` guarantees holds what it did then: each entry's
+    title group under its key where that entry is the title's group, its
+    spellings in `service_ids`, each picture — a statement per service and
+    table, however many listings there are, and none where nothing changes."""
+    for source, (payload, filed) in writes.titles.items():
+        conn.execute(_upsert_title_sql(source), {
+            "rows": "[" + ",".join(payload) + "]", "keys": json.dumps(filed), "now": now})
+    if writes.ids:
+        conn.execute(_UPSERT_SERVICE_IDS, {"ids": json.dumps(writes.ids)})
+    artwork.file_sightings(conn, writes.sightings, now)
 
 
 # Where each named spelling of a service's entry is filed now — one read for a

@@ -115,6 +115,16 @@ def _id_order(own: str) -> tuple:
     return (len(own), own) if own.isdigit() else (float("inf"), own)
 
 
+def _compared(instants: Iterable[Instant]) -> list[tuple]:
+    """A service's instants as `Row.differs` compares them: what a write spells
+    of each (`listing_columns`), the moment it was stored only where a search
+    put it on a calendar."""
+    return sorted((float(i.at), int(i.date_only), int(i.calendars), int(i.searched),
+                   int(i.unstated), str(i.label or ""), str(i.entry or ""),
+                   int(i.listed_at or 0) if i.searched else -1)
+                  for i in instants if i.calendars)
+
+
 def instants_of(row: Mapping[str, Any], source: str) -> list[Instant]:
     """`source`'s instants on a stored episode row, earliest first — none where
     it does not list the episode."""
@@ -210,6 +220,18 @@ class Row:
     @property
     def listed(self) -> bool:
         return any(i.calendars for held in self.instants.values() for i in held)
+
+    def differs(self) -> bool:
+        """Whether writing this row would change its listings: a row not stored
+        yet, or one whose instants are other than those read — compared as they
+        are written, less the moment each was last stored. A feed's listing a
+        refill brings back as it was is NOT rewritten to say so: its window's
+        coverage row is what confirms it (app/calendar/entries.py's `sweep`). A
+        SEARCHED instant's moment is compared, because its own age is its clock."""
+        if self.stored is None:
+            return True
+        return any(_compared(instants_of(self.stored, source)) != _compared(self.instants[source])
+                   for source in groups.sources())
 
     def stated(self, instant: Instant) -> tuple[int | None, int | None]:
         """The coordinate an instant's listing stated, as the row and its
@@ -370,7 +392,7 @@ class Book:
         nothing lists or describes any more — or None for no change. Pure, so a
         caller spells it before its transaction and the lock is held for the
         statements alone."""
-        changed = [row for row in self.rows.values() if row.changed]
+        changed = [row for row in self.rows.values() if row.changed and row.differs()]
         if not changed:
             return None
         kept = [row for row in changed if row.listed or row.described]
@@ -378,6 +400,8 @@ class Book:
         # day's row and folded onto a numbered episode — was never written.
         gone = [[row.key, row.unit] for row in changed
                 if row.stored is not None and not (row.listed or row.described)]
+        if not kept and not gone:
+            return None
         return (json.dumps([[row.key, row.unit, row.media, row.season, row.number,
                              *(value for source in groups.sources()
                                for value in listing_columns(source, row.instants[source]).values())]
@@ -687,8 +711,11 @@ def plan_fill(conn: db.Connection, listings: list[Listing], *, bit: int, primari
     for key, touched_bit, day in sorted(touched):
         if lo is None or lo <= epoch(date.fromisoformat(day)) < hi:
             book.refold(key, touched_bit, day)
+    # ONLY WHAT WOULD CHANGE IS WRITTEN: a row whose listings come back as they
+    # were (`Row.differs`), and a stub whose name is already its row's.
     fill.spelled = book.spell()
-    fill.stubs = {source: json.dumps(rows) for source, rows in fill.stubs.items()}
+    fill.stubs = {source: json.dumps(kept)
+                  for source, kept in _changing_stubs(conn, fill.stubs).items()}
     return fill
 
 
@@ -731,16 +758,52 @@ _STUB_WRITES = {
 }
 
 
+def _stub_columns(source: str) -> tuple[str, ...]:
+    return ("title_key", "unit", "media", "season", "number", f"{source}_title",
+            f"{source}_fetched_at")
+
+
+def _stub_given(source: str, rows: str = ":rows") -> str:
+    """The stubs a write reads from `rows` — [title key, unit, media, season,
+    number, the feed's name] each — named as the table names them, `at` each
+    one's position."""
+    return ("SELECT r.key AS at, " + ", ".join(
+        f"json_extract(r.value, '$[{i}]') AS {name}"
+        for i, name in enumerate(_stub_columns(source)[:-1]))
+        + f", 0 AS {source}_fetched_at FROM json_each({rows}) r")
+
+
 def _stub_sql(source: str) -> str:
-    return (f"INSERT INTO {tables.EPISODES} (title_key, unit, media, season, number, "
-            f"{source}_title, {source}_fetched_at)\n"
-            "SELECT json_extract(r.value, '$[0]'), json_extract(r.value, '$[1]'), "
-            "json_extract(r.value, '$[2]'), json_extract(r.value, '$[3]'), "
-            "json_extract(r.value, '$[4]'), json_extract(r.value, '$[5]'), 0 "
-            "FROM json_each(:rows) r WHERE true ORDER BY r.key\n"
+    columns = ", ".join(_stub_columns(source))
+    return (f"INSERT INTO {tables.EPISODES} ({columns})\n"
+            f"SELECT {columns} FROM ({_stub_given(source)}) WHERE true ORDER BY at\n"
             "ON CONFLICT(title_key, unit) DO UPDATE SET "
             + ", ".join(f"{source}_{name} = {groups.spelled(rule, tables.EPISODES, source)}"
                         for name, rule in _STUB_WRITES.items()))
+
+
+def _changing_stubs(conn: db.Connection, stubs: Mapping[str, list[list]]
+                    ) -> dict[str, list[list]]:
+    """{service: the stubs whose write would change their row} (groups.changing
+    over `_STUB_WRITES`): a row with none of the service's, or a feed's name a
+    description has not replaced and that differs — every service's in ONE
+    statement, whichever have any, so a fill's count does not depend on them."""
+    names = [source for source in groups.sources()
+             if groups.has(tables.EPISODES, source, "title")]
+    if not any(stubs.get(source) for source in names):
+        return {}
+    arms = " UNION ALL ".join(
+        f"SELECT '{source}' AS source, at FROM ("
+        + groups.changing_sql(tables.EPISODES, ("title_key", "unit"),
+                              _stub_given(source, f":rows_{source}"), _STUB_WRITES.items(), source)
+        + ")" for source in names)
+    (found,) = conn.execute(f"SELECT json_group_array(json_array(source, at)) FROM ({arms})",
+                            {f"rows_{source}": json.dumps(stubs.get(source, []))
+                             for source in names}).fetchone()
+    moving = {(str(source), int(at)) for source, at in json.loads(found)}
+    return {source: kept for source in names
+            if (kept := [stub for at, stub in enumerate(stubs.get(source, []))
+                         if (source, at) in moving])}
 
 
 def apply(conn: db.Connection, fill: Fill) -> None:

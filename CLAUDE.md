@@ -74,12 +74,30 @@ owes) is made before the transaction. The title store's batch is
 (`metadata.plan_records` → `identity.SettlePlan`, then `episodes.plan_fill`) on
 the same connection first, and again under the lock only if another connection
 committed meanwhile (`PRAGMA data_version`), so the lock is held for the writes
-alone. A batch that re-keys a title or moves an entry plans the episode rows of
-the titles it reshapes inside, once the merge is written — those titles' share
-of the span, read in one aggregated row — and every other title's before
-(`episodes.plan_fill`'s `titles` / `excluding`); the merge itself is rare,
-written row by row (`app/metadata/merge.py`), and outside the fixed count as a
-re-key's repointing always was. Filing the whole span inside held the lock
+alone. AND THE WRITES ARE ONLY WHAT WOULD CHANGE. Before the lock each writer
+asks — with the very SET templates its upsert is spelled from, so the two cannot
+disagree (`groups.changing`) — whether writing would change the stored row: a
+title group once per ENTRY, its last listing's words (`rows.plan_listing_writes`;
+an entry's listings in one answer carry the show's words), a spelling in
+`service_ids`, a stub, a picture (`artwork.unseen`, an address seen again
+re-stamped at most weekly), an episode row by its instants (`episodes.Row.
+differs`, the moment an unchanged feed listing was stored set aside) — and sends
+only those, so A REFILL THAT CHANGED NOTHING WRITES ITS COVERAGE ROW AND NOTHING
+ELSE, and decides even that before the lock — `Book.spell`'s None is "nothing
+changed", never "not spelled yet" (MEASURED on a copy of dev: a week of All
+Episodes stored back held the lock 0.77–1.31 s; an unchanged refill, a whole
+Simkl month's included, now holds it 0.000–0.001 s alone or under three month
+reads; `tests/calendar/test_write_statements.py`'s
+`ARefillWritesOnlyWhatChangedTests`). A store's one DEBUG line names where its
+hold went (`perftrace.Laps`: a prepare made again, merges, settles, listings,
+episodes, coverage). A batch that re-keys a title plans the episode rows of the
+titles it reshapes inside, once the merge is written — those titles' share of
+the span, read in one aggregated row — and every other title's before
+(`episodes.plan_fill`'s `titles` / `excluding`); the merge itself is rare —
+a fill moves no entry (the title store's paragraph), so a fill's merges are
+re-keys alone, thirteen in the development server's first 35 minutes on the
+store — written row by row (`app/metadata/merge.py`), and outside the fixed
+count as a re-key's repointing always was. Filing the whole span inside held the lock
 2.98 s under a month's read where the store before held it 1.21 s; this holds it
 1.31 s (MEASURED, a week of All Episodes re-keying five titles, on a copy of
 dev). A payload-driven join says CROSS JOIN, and an UPDATE … FROM by rowid takes
@@ -214,7 +232,20 @@ when it rewrites everything the group holds (`rows.ceiling_clock` for an upsert,
 `rows.kept_clock` for a write made from Python; `groups.WORDS` names the words,
 and tests/metadata/test_retention.py fails on a column of the three tables that
 neither it, `groups.NOT_WORDS` nor `groups.IDENTITY` names), and the heartbeat
-re-reads a held group before its ceiling (`refresh.queue_ceiling`).
+re-reads a held group before its ceiling (`refresh.queue_ceiling`). A REFILL
+WRITES ONLY WHAT WOULD CHANGE, AND A CEILING-BOUND CLOCK MOVING IS A CHANGE:
+`rows.plan_listing_writes` counts `fetched_at` only for `ceiling_sources`, so a
+TMDB group a re-read restates whole is re-stamped, while an unchanged Trakt or
+Simkl group is not rewritten (its clock then says when its listing last CHANGED
+it, which `sweep_unlisted` reads only once nothing lists it). A LISTING'S CLOCK
+IS ITS WINDOW'S COVERAGE ROW: a feed's listing is kept while its service's
+coverage row for its window replied inside the retention window, and goes with
+the row (`entries.sweep`, `_due_sql`) — every listing a feed files lies in a
+window the same fill covers — and a coverage row's `stored_at` is when its
+service LAST REPLIED, a failure marking it answered = 0 and leaving the time, or
+a service whose token stopped working would keep its last listings for as long
+as anybody asked. A SEARCHED listing — a per-title lookup — goes by its own
+`listed_at`.
 The credential is the v4 read token,
 sent only in the Authorization header (`config.tmdb_token_error` refuses the
 short key, `tmdb_configured` reads a stored one as unset). NO SERVICE IS

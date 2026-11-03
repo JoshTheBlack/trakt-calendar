@@ -106,6 +106,75 @@ def _upsert(conn: db.Connection, spec: tuple[str, tuple[str, ...]], rows: list[t
                                          "ts": ts, "fail": fail_count})
 
 
+# AN ADDRESS SEEN AGAIN IS RE-STAMPED AT MOST THIS OFTEN. A sighting of the address
+# already held changes nothing but `last_seen_at`, and a calendar refill re-states
+# every picture it lists — a write per listing per refill, every ten minutes for a
+# month somebody is looking at, to move a clock whose shortest reader is TMDB's
+# six months. Left a week behind, the clock only ever makes an address go sooner
+# than its terms allow, never later; and an address that is new, or replaces
+# another, is filed the moment it is seen.
+SEEN_AGAIN_SECONDS = 7 * 24 * 3600
+
+# Each row of `spec` named by `:keys` (its key columns, then the address), with
+# the address held and when it was last seen — one row back.
+def _held_sql(spec: tuple[str, tuple[str, ...]]) -> str:
+    table, columns = spec
+    joined = " AND ".join(f"t.{name} = json_extract(k.value, '$[{i}]')"
+                          for i, name in enumerate(columns))
+    return (f"SELECT json_group_array(json_array({', '.join(f't.{c}' for c in columns)}, "
+            f"t.url, t.last_seen_at)) FROM json_each(:keys) k CROSS JOIN {table} t ON {joined}")
+
+
+def _unseen(conn: db.Connection, spec: tuple[str, tuple[str, ...]], rows: list[tuple],
+            ts: int) -> list[tuple]:
+    """`rows` — each its key columns then its address — less those the registry
+    already holds at that address and has seen within `SEEN_AGAIN_SECONDS`."""
+    if not rows:
+        return []
+    (found,) = conn.execute(_held_sql(spec), {"keys": json.dumps([list(row) for row in rows])}
+                            ).fetchone()
+    width = len(spec[1])
+    held = {tuple(values[:width]): (values[width], int(values[width + 1] or 0))
+            for values in json.loads(found)}
+    return [row for row in rows
+            if (seen := held.get(tuple(row[:width]))) is None or seen[0] != row[width]
+            or ts - seen[1] >= SEEN_AGAIN_SECONDS]
+
+
+def unseen(conn: db.Connection,
+           sightings: Iterable[tuple[str, int | None, str, str, str]], ts: int) -> list[tuple]:
+    """`file_sightings`' (media, tmdb, title key, source, url) less those that
+    would change nothing worth writing (`SEEN_AGAIN_SECONDS`) — read, NOT
+    written: for a writer deciding before its lock."""
+    sightings = list(sightings)
+    shows, titles = _split(sightings)
+    kept_shows = set(_unseen(conn, _SHOW, shows, ts))
+    kept_titles = set(_unseen(conn, _TITLE, titles, ts))
+    return [sighting for sighting in sightings
+            if (_show_row(sighting) in kept_shows) or (_title_row(sighting) in kept_titles)]
+
+
+def _show_row(sighting) -> tuple | None:
+    media, tmdb, _key, source, url = sighting
+    return (str(media), int(tmdb), str(source), str(url)) if media and source and url and tmdb \
+        else None
+
+
+def _title_row(sighting) -> tuple | None:
+    media, tmdb, key, source, url = sighting
+    return (str(media), str(key), str(source), str(url)) \
+        if media and source and url and not tmdb and key else None
+
+
+def _split(sightings) -> tuple[list[tuple], list[tuple]]:
+    """(show_posters rows, title_posters rows) of (media, tmdb, title key,
+    source, url) sightings: under the tmdb id where the title has one, else
+    under the title store's key; one with nothing to file by, neither."""
+    sightings = list(sightings)
+    return ([row for row in map(_show_row, sightings) if row is not None],
+            [row for row in map(_title_row, sightings) if row is not None])
+
+
 def file_sighting(conn: db.Connection, media: str, tmdb: int | None, title_key: str,
                   source: str, url: str, ts: int) -> None:
     """A picture a service stated for a title, filed inside the caller's
@@ -121,14 +190,7 @@ def file_sightings(conn: db.Connection,
                    sightings: Iterable[tuple[str, int | None, str, str, str]], ts: int) -> None:
     """`file_sighting` for many (media, tmdb, title key, source, url) at once —
     a statement per table, however many there are."""
-    shows, titles = [], []
-    for media, tmdb, title_key, source, url in sightings:
-        if not media or not source or not url:
-            continue
-        if tmdb:
-            shows.append((str(media), int(tmdb), str(source), str(url)))
-        elif title_key:
-            titles.append((str(media), str(title_key), str(source), str(url)))
+    shows, titles = _split(sightings)
     _upsert(conn, _SHOW, shows, ts)
     _upsert(conn, _TITLE, titles, ts)
 
@@ -136,16 +198,15 @@ def file_sightings(conn: db.Connection,
 async def record_title_poster_urls(sightings) -> None:
     """record_poster_urls for titles with no tmdb id: `sightings` is an iterable
     of (media, title_key, source, url). Best-effort, the same way."""
-    found = [(m, k, s, u) for m, k, s, u in sightings if m and k and s and u]
+    found = list(dict.fromkeys((str(m), str(k), str(s), str(u))
+                               for m, k, s, u in sightings if m and k and s and u))
     if not found:
         return
     ts = db.now()
-
-    def _work(conn: db.Connection) -> None:
-        _upsert(conn, _TITLE, found, ts)
-
     try:
-        await db.transaction(_work)
+        fresh = await db.run(lambda conn: _unseen(conn, _TITLE, found, ts))
+        if fresh:
+            await db.transaction(lambda conn: _upsert(conn, _TITLE, fresh, ts))
     except db.DatabaseError:
         pass
 
@@ -181,16 +242,17 @@ async def record_poster_urls(sightings) -> None:
     in one fetch, so a window with dozens of items costs one transaction rather
     than one per title. `sightings` is an iterable of (media, tmdb, source, url).
     Best-effort, same as the single-row form."""
-    rows = [(m, t, s, u) for m, t, s, u in sightings if m and t and u]
+    rows = list(dict.fromkeys((str(m), int(t), str(s), str(u))
+                              for m, t, s, u in sightings if m and t and u))
     if not rows:
         return
     ts = db.now()
-
-    def _work(conn: db.Connection) -> None:
-        _upsert(conn, _SHOW, rows, ts)
-
+    # Only what would change (`SEEN_AGAIN_SECONDS`), and no write's turn at all
+    # when that is nothing — a refill re-states every picture it lists.
     try:
-        await db.transaction(_work)
+        fresh = await db.run(lambda conn: _unseen(conn, _SHOW, rows, ts))
+        if fresh:
+            await db.transaction(lambda conn: _upsert(conn, _SHOW, fresh, ts))
     except db.DatabaseError:
         pass
 

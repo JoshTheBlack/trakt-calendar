@@ -116,6 +116,8 @@ class Planned(NamedTuple):
     # taken to state} for each whose ids named another title than the one its
     # entry is filed under — `identity.Planner.agreeing`'s answer.
     stated: dict[int, dict]
+    # What writing `rows` would change, and only that (rows.plan_listing_writes).
+    writes: rows.ListingWrites
 
     @property
     def touched(self) -> frozenset[str]:
@@ -185,7 +187,12 @@ def plan_records(conn: db.Connection, listed: Listings) -> Planned:
             for record, at in zip(listed.records, listed.title_of)]
     written = listed.rows.with_ids({position: stated[at] for position, at
                                     in enumerate(listed.title_of) if at in stated})
-    return Planned(settles, keys, rows.primaries(conn, written, keys), written, stated)
+    primaries = rows.primaries(conn, written, keys)
+    planned = Planned(settles, keys, primaries, written, stated, rows.ListingWrites({}, [], []))
+    # A TITLE A RE-KEY MERGES is written whole: what was read of it is its rows
+    # as they were before the merge this same write makes.
+    return planned._replace(writes=rows.plan_listing_writes(
+        conn, written, keys, primaries, now=listed.now, whole=planned.touched | planned.landed))
 
 
 def write_records(conn: db.Connection, listed: Listings, planned: Planned, *,
@@ -227,7 +234,7 @@ def write_records(conn: db.Connection, listed: Listings, planned: Planned, *,
         found = planned.settles.identities[at]
         if found is not None:
             record.ids = identity.with_shared(planned.stated.get(at, record.ids), found.ids)
-    rows.write_listings(conn, planned.rows, planned.keys, now=listed.now)
+    rows.write_listings(conn, planned.writes, now=listed.now)
     if laps is not None:
         laps.lap("listings")
     return planned.keys

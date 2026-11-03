@@ -187,6 +187,39 @@ def spelled(template: str, table: str, source: str, *, given: str = "excluded") 
         lambda m: f"{table if m[1] == 'held' else given}.{source}_{m[2]}", template)
 
 
+def changing(conn, table: str, keys: tuple[str, ...], given_sql: str,
+             sets: Iterable[tuple[str, str]], source: str, params: Mapping[str, Any]
+             ) -> set[int]:
+    """The positions (`at`) of the rows `given_sql` reads — a SELECT naming each
+    column as `table` names it, `{source}_x` for a group's — whose upsert by
+    `sets` ((column, template) each: the very templates the upsert is spelled
+    from) would change the stored row: one not there yet, or one a set would
+    leave other than it is. READ ONLY, in one aggregated row: what a writer asks
+    before its lock, so a write that would change nothing is never sent.
+
+    A WRITE THAT CHANGES NOTHING STILL HOLDS THE LOCK, and a calendar's refill
+    used to write its whole span every time it ran: MEASURED on a copy of dev, a
+    week of All Episodes stored back as it was held the lock 0.77–0.82 s alone
+    and 1.07–1.31 s beside month reads — the title groups 0.38–0.84 s of it, the
+    episode rows 0.19–0.53 s."""
+    (found,) = conn.execute(
+        f"SELECT json_group_array(at) FROM ({changing_sql(table, keys, given_sql, sets, source)})",
+        params).fetchone()
+    return set(json.loads(found))
+
+
+def changing_sql(table: str, keys: tuple[str, ...], given_sql: str,
+                 sets: Iterable[tuple[str, str]], source: str) -> str:
+    """`changing`'s question as a SELECT of `at`, for a caller asking it of
+    several services in one statement."""
+    join = " AND ".join(f"held.{key} = given.{key}" for key in keys)
+    differs = " OR ".join(
+        f"({spelled(template, 'held', source, given='given')}) IS NOT held.{source}_{name}"
+        for name, template in sets) or "0"
+    return (f"SELECT given.at AS at FROM ({given_sql}) AS given "
+            f"LEFT JOIN {table} AS held ON {join} WHERE held.{keys[0]} IS NULL OR {differs}")
+
+
 def loads(text: Any, default: Any) -> Any:
     """A JSON column's value, or `default` for one that does not parse to the
     same kind of thing."""

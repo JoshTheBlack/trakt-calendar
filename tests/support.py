@@ -221,26 +221,45 @@ def statements_per_transaction():
     a test storing ten and a hundred of something and finding the same count is
     what holds a writer to that.
     """
+    counts: list[int] = []
+    with _transactions_traced(lambda statements: counts.append(len(statements))):
+        yield counts
+
+
+@contextlib.contextmanager
+def statements_run():
+    """Every statement each `db.transaction` body runs while the block is open —
+    a list per transaction, in the order they ran, each one's SQL text. Only the
+    body is recorded, as `statements_per_transaction` counts it."""
+    run: list[list[str]] = []
+    with _transactions_traced(run.append):
+        yield run
+
+
+@contextlib.contextmanager
+def _transactions_traced(done):
+    """`db.transaction` with each body's statements (sqlite3's trace callback,
+    which fires once per statement — once per row of an executemany) handed to
+    `done` as the body ends."""
     from unittest import mock
 
     from app import db
 
-    counts: list[int] = []
     real = db.transaction
 
-    async def counting(fn, *, prepare=None):
+    async def traced(fn, *, prepare=None):
         def body(conn, *prepared):
-            seen = [0]
-            conn.set_trace_callback(lambda _sql: seen.__setitem__(0, seen[0] + 1))
+            seen: list[str] = []
+            conn.set_trace_callback(seen.append)
             try:
                 return fn(conn, *prepared)
             finally:
                 conn.set_trace_callback(None)
-                counts.append(seen[0])
+                done(seen)
         return await real(body, prepare=prepare)
 
-    with mock.patch.object(db, "transaction", counting):
-        yield counts
+    with mock.patch.object(db, "transaction", traced):
+        yield
 
 
 # ---------------------------------------------------------------------------

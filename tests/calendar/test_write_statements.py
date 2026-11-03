@@ -14,7 +14,7 @@ from datetime import date
 from app import db
 from app.calendar import entries
 from app.providers.base import Media, Record, Source
-from tests.support import DatabaseTestCase, statements_per_transaction
+from tests.support import DatabaseTestCase, statements_per_transaction, statements_run
 from tests.support import listings as stored_listings
 
 DAY = 1783540800.0  # 2026-07-08 20:00Z
@@ -46,6 +46,38 @@ async def store(records: list[Record], *, now: int | None = None) -> None:
     now = db.now() if now is None else now
     await entries.store_span("shows", *WEEK, records, sources=["simkl", "trakt"],
                              asked=["simkl", "trakt"], now=now, stale_after=now + 86400)
+
+
+class ARefillWritesOnlyWhatChangedTests(DatabaseTestCase):
+    """The commonest store is a refill naming what it named an hour ago: it
+    writes its coverage row — the service confirming the window — and none of
+    the title or episode rows it would only have written back as they were."""
+
+    async def test_a_refill_that_changed_nothing_writes_its_coverage_and_nothing_else(self):
+        await store(listings(40))
+        with statements_run() as run:
+            await store(listings(40))
+        (statements,) = run
+        self.assertEqual([sql.split()[2] for sql in statements], ["calendar_coverage"])
+
+    async def test_a_refill_writes_the_rows_that_changed_and_no_others(self):
+        await store(listings(40))
+        changed = listings(40)
+        changed[2].title = "Renamed"
+        changed[1].air_ts += 3600
+        with statements_run() as run:
+            await store(changed)
+        (statements,) = run
+        written = " ".join(statements)
+        self.assertIn("Renamed", written)
+        self.assertEqual(await db.fetch_value(
+            "SELECT trakt_title FROM titles WHERE trakt_id = '102'"), "Renamed")
+        self.assertEqual(await db.fetch_value(
+            "SELECT COUNT(*) FROM episodes WHERE simkl_air_ts = ?", (changed[1].air_ts,)), 1)
+        # The titles and episodes that came back as they were are in no
+        # statement's payload.
+        self.assertNotIn("Trakt 4", written)
+        self.assertNotIn("Simkl 3", written)
 
 
 class TheRetentionSweepsStatementsDoNotGrowWithWhatItSweepsTests(DatabaseTestCase):

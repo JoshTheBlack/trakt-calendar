@@ -186,9 +186,16 @@ def _tmdb_record(title: str = "A show") -> Record:
 
 
 async def _write_listing(record: Record, key: str, *, now: int) -> None:
-    """One listing's title group written under `key`, as a fill writes it."""
+    """One listing's title group written under `key`, as a fill writes it:
+    what would change decided first, then written."""
     spelled = rows.listing_rows([record], now=now, stale_after=now)
-    await db.transaction(lambda conn: rows.write_listings(conn, spelled, [key], now=now))
+
+    def _work(conn):
+        writes = rows.plan_listing_writes(conn, spelled, [key],
+                                          rows.primaries(conn, spelled, [key]), now=now)
+        rows.write_listings(conn, writes, now=now)
+
+    await db.transaction(_work)
 
 
 class OneClockForEveryWordTests(DatabaseTestCase):
