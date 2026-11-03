@@ -42,6 +42,16 @@ WHAT IS EXPECTED, AND NOT A LOSS: words of a service's SECOND entry for a title
 title's group, its seasons or its episodes — the entry stays findable as a
 `service_ids` row — and a searched listing its own feed also lists stands down,
 as the calendar's read already dropped it. Both are counted and named.
+And on a copy of an instance that has RUN since its conversion, a group or a
+description the retention sweep has taken since (app/calendar/entries.py's
+`sweep`): a service's words untouched for `entries.RETAIN_SECONDS`, about a
+title no feature row holds (`holders.held_keys`), and about a title or episode
+that service no longer lists. A listing's STUB — an episode's name as a feed
+spelled it, never itself fetched — is older than any window the moment it is
+written, so it goes as soon as its service stops listing that episode: a refill
+that renumbers a season, a premiere no longer listed. Each is checked against
+the sweep's own terms (`Store.swept`) and counted as "swept since"; a missing
+row the sweep would NOT have taken is still MISSING.
 
 WHAT THE LIVE CODE HAS WRITTEN SINCE is told apart without trusting a group's
 clock alone (`Store.rewritten`): a group's `fetched_at` is its oldest word's, so
@@ -263,14 +273,28 @@ class Store:
         # listing rewrites its title's group and its episodes' stubs as it is
         # filed, and moves no clock of theirs while it does.
         self.listed_since: set[tuple[str, str]] = set()
+        # What each service lists NOW: (source, title key, unit) and (source,
+        # title key) — what the retention sweep asks (`swept`).
+        self.listed_units: set[tuple[str, str, str]] = set()
+        self.listed_titles: set[tuple[str, str]] = set()
         for r in rows(conn, "SELECT * FROM episodes"):
             for source in SOURCES:
                 if f"{source}_air_ts" not in self.episode_columns or r[f"{source}_air_ts"] is None:
                     continue
+                self.listed_units.add((source, r["title_key"], r["unit"]))
+                self.listed_titles.add((source, r["title_key"]))
                 listed = [r[f"{source}_listed_at"],
                           *(i.get("listed_at") for i in json.loads(r[f"{source}_repeats_json"] or "[]"))]
                 if any(self.since(at) for at in listed):
                     self.listed_since.add((source, r["title_key"]))
+        # THE RETENTION SWEEP'S OWN TERMS (app/metadata/rows.py's sweep_unlisted,
+        # run by app/calendar/entries.py's sweep): a service's group untouched for
+        # the retention window, of something that service no longer lists, of a
+        # title no feature row holds.
+        from app.calendar import entries
+        from app.metadata import holders
+        self.cutoff = int(time.time()) - entries.RETAIN_SECONDS
+        self.held = holders.held_keys(conn)
 
     def follow(self, key: str) -> str:
         return self.aliases.get(key, key)
@@ -283,6 +307,18 @@ class Store:
         """Written after the conversion — a group or listing the live code has
         rewritten, which no retired row is expected to match."""
         return value is not None and self.converted_at and int(value) > self.converted_at
+
+    def swept(self, source: str, key: str, unit: str | None, fetched_at) -> bool:
+        """Whether the retention sweep took `source`'s group of this title (`unit`
+        None) or episode since the conversion, by its own terms. A listing's
+        STUB — an episode's name as a feed spelled it, `fetched_at` 0 — is
+        older than any window, so it goes once its service stops listing the
+        episode: a refill that renumbers a season or drops a premiere."""
+        if key in self.held or fetched_at is None or int(fetched_at) > self.cutoff:
+            return False
+        if unit is None:
+            return (source, key) not in self.listed_titles
+        return (source, key, unit) not in self.listed_units
 
     def rewritten(self, new, source: str, key: str, old_rows) -> bool:
         """Whether the live code has written `source`'s group on `new` since the
@@ -336,8 +372,12 @@ def account_titles(conn, store: Store, report: Report) -> None:
         new = store.titles[key]
         if new[f"{source}_id"] is None:
             for row, _p in members:
-                report.add(section, "MISSING", f"{source}: its title has no {source} group",
-                           (source, row["source_id"], key))
+                if store.swept(source, key, None, row["fetched_at"]):
+                    report.add(section, "found", f"{source}: swept since (nothing lists the "
+                               "title any more)")
+                else:
+                    report.add(section, "MISSING", f"{source}: its title has no {source} group",
+                               (source, row["source_id"], key))
             continue
         if new[f"{source}_id"] not in primary_spellings[(source, key)]:
             report.add(section, "MISSING", f"{source}: the group's id is not its primary entry's",
@@ -415,7 +455,11 @@ def account_descriptions(conn, store: Store, report: Report, table: str) -> None
         new = new_rows.get(slot)
         if new is None or new[f"{source}_fetched_at"] is None:
             for row, _primary in members:
-                report.add(section, "MISSING", source, (source, row["source_id"], slot))
+                if store.swept(source, slot[0], slot[1] if episode else None, row["fetched_at"]):
+                    report.add(section, "found", f"{source}: swept since (its service no longer "
+                               f"lists the {'episode' if episode else 'title'})")
+                else:
+                    report.add(section, "MISSING", source, (source, row["source_id"], slot))
             continue
         same = [all(row[c] == new[f"{source}_{c}"] for c in row.keys()
                     if c not in ROW_KEYS[table] and f"{source}_{c}" in new_columns)
