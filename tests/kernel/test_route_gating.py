@@ -190,8 +190,8 @@ class UnauthenticatedTests(GatingTestCase):
         self.assertEqual(resp.json()["reason"], "login_required")
 
     def test_calendar_level_is_refused(self):
-        for path in ("/", "/calendar", "/api/state", "/calendar/fragments/season-line",
-                     "/calendar/fragments/details"):
+        for path in ("/", "/calendar", "/api/state", "/calendar/fragments/card",
+                     "/calendar/fragments/badge", "/calendar/fragments/details"):
             with self.subTest(path=path):
                 self.assertEqual(self.client.get(path).status_code, 401)
 

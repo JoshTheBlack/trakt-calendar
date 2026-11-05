@@ -75,7 +75,7 @@ class TightTests(unittest.TestCase):
         """Drawn once per card, over a thousand times a month. Moved below the
         first line, the marker silently stops applying."""
         for name in ("_card.html", "_filter_badge.html", "_filter_offer.html",
-                     "_source_logo.html", "_library_button.html"):
+                     "_season_line.html", "_source_logo.html", "_library_button.html"):
             with self.subTest(name):
                 source = (TEMPLATES_DIR / name).read_text(encoding="utf-8")
                 self.assertTrue(source.startswith(TIGHT_MARKER))

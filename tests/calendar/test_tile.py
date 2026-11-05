@@ -2,32 +2,29 @@
 
 THE COMPLAINT: only a handful of cards showed it, and every one of them was a
 title linked on both Trakt and Simkl. It read as missing source data and was
-not. The route took a bare `id`, treated it as a TRAKT id, and refused outright
-unless the instance held Trakt catalogue credentials — so a Simkl-only card could
-never show the line, not because Simkl cannot answer but because nothing asked it.
+not: the line was asked of Trakt alone. "Which source answers for this title" is
+the same question whether the answer is a description or a season
+(detail_source.choose and for_season).
 
-WHAT CHANGED: the route takes IDS and picks a source, exactly as the details
-fragment beside it does, and both packages' season summaries are reachable
-through one port method. "Which source answers for this title" is the same
-question whether the answer is a description or a season.
+AND THE LINE IS DRAWN WITH THE CARD, from what the title store holds of the
+season (app/metadata/panel.py's `season_lines`; its own tests are
+tests/metadata/test_season_lines.py). It used to be a request per card as the
+card scrolled into view, each a service's season lookup; now a season the store
+does not know draws nothing and is queued behind the page.
 
-AND THE LINE ARRIVES DRAWN. The card draws a slot that fetches
-/calendar/fragments/season-line as it scrolls into view and is replaced by the
-answer, so nothing in the browser turns a payload into markup and nothing has to
-watch the cards a late day brings.
-
-No network — every source's port is stood in for.
+No network.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 import unittest
 from datetime import date
-from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.providers import detail_source, season as season_rules
-from app.providers.base import Media, Source, SourceUnavailable
+from app import db
+from app.metadata import descriptions
+from app.providers import season as season_rules
 
 from tests.calendar.test_routes import CalendarRouteTestCase, _entry
 from tests.support import window_fetch
@@ -96,134 +93,48 @@ class TheDerivationIsSharedTests(unittest.TestCase):
         self.assertEqual(out["first_aired"], "2026-09-01")
 
 
-class TheLineIsDrawnForWhicheverSourceCanAnswerTests(CalendarRouteTestCase):
-    """The behaviour the complaint was about — the line does not depend on a
-    title happening to carry a Trakt id — and the shape it now arrives in."""
-
-    URL = "/calendar/fragments/season-line"
-
-    def setUp(self):
-        super().setUp()
-        self.sign_in_as(self._make_user("tilewatcher"))
-
-    def _ask(self, query, *, answer=None, raises=None, source=Source.SIMKL):
-        asked = {}
-
-        async def _summary(settings, source_id, season, media):
-            asked.update(source_id=source_id, season=season, media=media)
-            if raises is not None:
-                raise raises
-            return dict(answer if answer is not None else AIRED)
-
-        port = SimpleNamespace(fetch_season_summary=_summary,
-                               catalogue_configured=lambda settings: True)
-        with patch("app.providers.detail_source.choose",
-                   return_value=detail_source.Answerer(source, "4242", stored_only=False)), \
-             patch("app.providers.get",
-                   return_value=SimpleNamespace(detail_port=port)), \
-             patch("app.clock.today", return_value=date(2026, 9, 3)):
-            return self.client.get(f"{self.URL}?{query}"), asked
-
-    def test_a_simkl_only_card_gets_its_line(self):
-        """THE REPORTED BUG. This used to be refused on an instance without
-        Trakt catalogue credentials, and a card with no Trakt id never asked."""
-        resp, asked = self._ask("media=show&simkl=4242&season=2")
-        self.assertEqual(resp.status_code, 200, resp.text[:200])
-        self.assertIn('<div class="season-info">', resp.text)
-        self.assertEqual(asked["source_id"], "4242",
-                         "the chosen source was not asked with its own id")
-
-    def test_the_line_says_how_many_episodes_what_aired_last_and_what_airs_next(self):
-        resp, _ = self._ask("media=show&simkl=4242&season=2")
-        self.assertIn("📋 <b>5</b> eps · S2", resp.text)
-        self.assertIn("🏁 Latest: <b>2026-09-01</b>", resp.text)
-        self.assertIn('<span class="si next">📡 Next: <b>2026-09-08</b>', resp.text)
-
-    def test_one_episode_is_not_counted_in_the_plural(self):
-        resp, _ = self._ask("media=show&simkl=4242&season=2",
-                            answer={**AIRED, "total": 1})
-        self.assertIn("📋 <b>1</b> ep · S2", resp.text)
-
-    def test_the_season_asked_for_is_the_season_asked_about(self):
-        _, asked = self._ask("media=show&simkl=4242&season=2")
-        self.assertEqual(asked["season"], 2)
-        self.assertEqual(asked["media"], Media.SHOW)
-
-    def test_a_title_no_source_can_answer_for_draws_nothing(self):
-        """Well formed, and nobody to ask. The answer replaces the slot that
-        asked, so an empty one simply removes it — at 200, because a status the
-        page does not swap would leave the slot standing."""
-        with patch("app.providers.detail_source.choose", return_value=None):
-            resp = self.client.get(f"{self.URL}?media=show&trakt=1&season=1")
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.text.strip(), "")
-
-    def test_a_request_naming_no_season_draws_nothing_rather_than_crashing(self):
-        resp, asked = self._ask("media=show&simkl=4242")
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.text.strip(), "")
-        self.assertEqual(asked, {}, "a season-less request still asked a service")
-
-    def test_a_medium_this_app_does_not_have_draws_nothing(self):
-        resp, _ = self._ask("media=podcast&simkl=4242&season=2")
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.text.strip(), "")
-
-    def test_a_service_that_could_not_be_reached_is_not_an_empty_season(self):
-        """A rate limit must never render as "no episodes" — the card would
-        state a fact nobody reported. It is the shared degradation contract
-        that is caught here, not one service's error type, because either of
-        two sources can answer this route. Nothing is drawn, which states
-        nothing."""
-        resp, _ = self._ask("media=show&simkl=4242&season=2",
-                            raises=SourceUnavailable("Rate limited", status=429))
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.text.strip(), "")
-        self.assertNotIn("Rate limited", resp.text)
-
-    def test_a_season_nobody_could_date_draws_nothing(self):
-        resp, _ = self._ask("media=show&simkl=4242&season=2",
-                            answer=season_rules.empty_season(2))
-        self.assertEqual(resp.text.strip(), "")
-
-
-class TheCardAsksForItsOwnLineTests(CalendarRouteTestCase):
-    """What the card draws so the line can arrive without a script."""
+class TheCardDrawsItsLineFromTheStoreTests(CalendarRouteTestCase):
+    """What the page draws under a card: the line the store decides, or nothing
+    — and never a request of its own."""
 
     PAGE = "/calendar?year=2026&month=7&endpoint=shows"
 
     def setUp(self):
         super().setUp()
-        self.sign_in_as(self._make_user("slotwatcher"))
-        patcher = patch("app.calendar.cache.fetch_window_records",
-                        window_fetch([_entry("the-drama", "The Drama", "2026-07-15T20:00:00Z")]))
+        self.sign_in_as(self._make_user("linewatcher"))
+        self.drama = _entry("the-drama", "The Drama", "2026-07-15T20:00:00Z")
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch([self.drama]))
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.queued: list = []
+        viewed = patch("app.metadata.refresh.viewed",
+                       lambda settings, wanted, **kwargs: self.queued.extend(wanted))
+        viewed.start()
+        self.addCleanup(viewed.stop)
 
-    def _slot(self) -> str:
-        found = re.search(r'<div class="season-line-slot"[^>]*>',
-                          self.client.get(self.PAGE).text, re.S)
-        self.assertIsNotNone(found, "the card drew no season-line slot")
-        return found.group(0)
+    def _keep_the_season(self):
+        ids = self.drama["show"]["ids"]
+        summary = {"season": 1, **season_rules.derive_season(
+            [date.fromisoformat(day) for day in AIRED["air_dates"]], date(2026, 9, 3))}
+        asyncio.run(db.transaction(lambda conn: descriptions.write_season_summary(
+            conn, "trakt", "show", ids["trakt"], summary, ids=dict(ids), now=db.now())))
 
-    def test_the_slot_fetches_the_line_as_the_card_scrolls_into_view(self):
-        slot = self._slot()
-        self.assertIn('hx-get="/calendar/fragments/season-line?media=show', slot)
-        self.assertIn("season=1", slot)
-        self.assertIn('hx-trigger="intersect once', slot)
-
-    def test_the_answer_replaces_the_slot(self):
-        """outerHTML, so an empty answer removes the slot rather than leaving an
-        empty box under the card."""
-        self.assertIn('hx-swap="outerHTML"', self._slot())
-
-    def test_the_line_does_not_light_the_page_wide_progress_bar(self):
-        """Every element inherits <body>'s hx-indicator. A line per card as a
-        month scrolls past is not something anybody is waiting through, so the
-        slot names itself as its indicator instead."""
-        self.assertIn('hx-indicator="this"', self._slot())
-
-    def test_no_script_builds_the_line(self):
+    def test_a_season_the_store_holds_is_drawn_with_the_card(self):
+        self.client.get(self.PAGE)  # the month's first load files the title
+        self._keep_the_season()
         html = self.client.get(self.PAGE).text
-        self.assertNotIn("season-tiles.js", html)
+        self.assertIn('<div class="season-info">', html)
+        self.assertIn("📋 <b>5</b> eps · S1", html)
+
+    def test_a_season_the_store_does_not_hold_draws_nothing_and_is_queued(self):
+        html = self.client.get(self.PAGE).text
+        self.assertNotIn("season-info", html)
+        owed = [wanted for wanted in self.queued if wanted.source is not None]
+        self.assertEqual([(wanted.source, wanted.season) for wanted in owed], [("trakt", 1)])
+
+    def test_no_card_asks_for_its_own_line(self):
+        html = self.client.get(self.PAGE).text
+        self.assertNotIn("season-line", html)
         self.assertNotIn("data-tile-url", html)
+        self.assertEqual(self.client.get(
+            "/calendar/fragments/season-line?media=show&trakt=1&season=1").status_code, 404)

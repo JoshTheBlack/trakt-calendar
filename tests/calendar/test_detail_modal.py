@@ -647,8 +647,12 @@ class OpeningAOneServiceCardAsksTheOtherTests(AppTestCase):
                            episode_label="S01E01", enriched=True)
                     for season, _when in moments]
 
+        # Nothing here describes the redrawn card's season: the line under it
+        # is read from the store and asks nobody (calendar/routes.py's
+        # `_season_lines`).
         port = SimpleNamespace(fetch_seasons=_seasons, records_for=_records,
-                               fetch_details=AsyncMock(return_value={}))
+                               fetch_details=AsyncMock(return_value={}),
+                               catalogue_configured=lambda settings: False)
         with patch("app.providers.for_shared_id_lookup", return_value=[
                     (Source.SIMKL, SimpleNamespace(find_by_shared_id=_find))]), \
              patch("app.providers.get", return_value=publishing(detail_port=port)):
@@ -683,8 +687,12 @@ class OpeningAOneServiceCardAsksTheOtherTests(AppTestCase):
                            episode_label="S01E01", enriched=True)
                     for season, _when in moments]
 
+        # Nothing here describes the redrawn card's season: the line under it
+        # is read from the store and asks nobody (calendar/routes.py's
+        # `_season_lines`).
         port = SimpleNamespace(fetch_seasons=_seasons, records_for=_records,
-                               fetch_details=AsyncMock(return_value={}))
+                               fetch_details=AsyncMock(return_value={}),
+                               catalogue_configured=lambda settings: False)
         with patch("app.providers.for_shared_id_lookup", return_value=[
                     (Source.SIMKL, SimpleNamespace(find_by_shared_id=_find))]), \
              patch("app.providers.get", return_value=publishing(detail_port=port)):

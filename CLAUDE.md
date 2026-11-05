@@ -615,6 +615,15 @@ expression's output), because every container in a card lays out by flex or grid
 or positions what it holds; a template in ordinary inline flow may not opt in,
 since a line break between two inline tags is a visible space there. MEASURED,
 the same October: text nodes 84 -> 23 a card, the documents otherwise identical.
+AND A CARD'S SEASON LINE IS DRAWN WITH IT, FROM THE STORE: `routes._season_lines`
+reads every drawn card's season rows in one query (`panel.season_lines`, every
+service's `episode_count` / `air_dates_json`) and decides each by
+`detail_source.for_season`'s walk (`later_for_season`, one walk for both) — and
+a service whose season the store does not hold DECIDES NOTHING: no line, and that
+service's season queued behind the page (`refresh.Wanted.source`, which narrows a
+view's queueing to the one service the page drew words from). It used to be a
+request per card as it scrolled into view (4-13 s each beside a month read,
+MEASURED on a copy of dev); a filtered October owes 227 seasons, all TMDB's.
 
 **A viewer's filters are per MEDIUM, and one function turns a medium into
 columns.** `app/calendar/vocab.py` owns it: `TV_FIELDS`/`MOVIE_FIELDS` say which

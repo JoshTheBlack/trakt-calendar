@@ -22,14 +22,18 @@ package decides how a page draws.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from datetime import datetime, timezone
+from collections.abc import Mapping, Sequence
+from datetime import date, datetime, timezone
+from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
 from .. import clock, db, providers
 from ..providers import detail_source, videos
+from ..providers import season as season_rules
 from ..providers.base import AIR_DISPLAY, Media, Source, SourceUnavailable, Video, proxied_image
-from . import descriptions
+from . import descriptions, groups, tables
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +175,106 @@ async def season_facts(settings, chosen: detail_source.Answerer, media, season: 
         logger.warning("title store: %s's season %s of %s could not be kept",
                        source, season, chosen.source_id, exc_info=True)
     return summary
+
+
+class SeasonLine(NamedTuple):
+    """What the store says about the line under one calendar card: the line
+    (app/providers/season.py's `tile_summary`) where it decides one — an empty
+    season's says nothing and draws nothing — and, where it cannot, the service
+    whose description of the season it is still waiting for (`owed`)."""
+    line: dict | None
+    owed: detail_source.Answerer | None = None
+
+
+class SeasonWanted(NamedTuple):
+    """One card's season: its title's key in the store, its medium, every id the
+    card carries, and the season."""
+    title_key: str
+    media: str
+    ids: Mapping[str, Any]
+    season: int
+
+
+def season_lines(conn: db.Connection, settings, wanted: Sequence[SeasonWanted], *,
+                 today: date) -> list[SeasonLine]:
+    """The line under each card of `wanted` — how many episodes its season has,
+    what aired last, what airs next — FROM THE STORE ALONE, in the reads a
+    calendar answer already makes: every service's group of every season asked
+    about, in one query.
+
+    WHO DESCRIBES THE SEASON IS detail_source's, as for every season a surface
+    draws: `choose` the title's describing service, and where the store says it
+    holds nothing of the season (`for_season`'s rule — no total), each later
+    service in turn (`later_for_season`), the first holding it answering. ASKING
+    IS NOT THIS FUNCTION'S, so a service whose description of the season the
+    store does not hold yet decides nothing: the line waits for it (`owed`)
+    rather than borrowing a later service's answer that asking would have passed
+    over. The caller queues what is owed behind its page (refresh.viewed), and
+    the next drawing has it."""
+    wanted = list(wanted)
+    if not wanted:
+        return []
+    shapes = _season_shapes(conn, {(item.title_key, int(item.season)) for item in wanted})
+    out = []
+    for item in wanted:
+        chosen = detail_source.choose(settings, item.ids)
+        if chosen is None or str(item.media) != str(Media.SHOW):
+            out.append(SeasonLine(None))
+            continue
+        held = shapes.get((item.title_key, int(item.season)), {})
+        out.append(_line_of(settings, item, chosen, held, today))
+    return out
+
+
+def _line_of(settings, item: SeasonWanted, chosen: detail_source.Answerer,
+             held: Mapping[str, dict], today: date) -> SeasonLine:
+    first = held.get(str(chosen.source))
+    if first is None:
+        return SeasonLine(None, None if chosen.stored_only else chosen)
+    if not _holds(first):
+        for other in detail_source.later_for_season(settings, item.ids, chosen):
+            found = held.get(str(other.source))
+            if found is None:
+                return SeasonLine(None, other)
+            if _holds(found):
+                first = found
+                break
+    return SeasonLine(season_rules.tile_summary(
+        {"season": int(item.season), **season_rules.derive_season(first, today)}, today))
+
+
+def _holds(days: list) -> bool:
+    """`for_season`'s question of a season summary — does it count any episode
+    — asked of the stored shape the summary is derived from."""
+    return len(days) > 0
+
+
+def _season_shapes(conn: db.Connection, pairs) -> dict[tuple[str, int], dict[str, list]]:
+    """{(title key, season): {service: its episodes' days}} for every service
+    whose group of that season is DESCRIBED (descriptions.season_described) —
+    one read for every season asked about."""
+    sources = [source for source in groups.sources()
+               if groups.has(tables.SEASONS, source, "air_dates_json")]
+    if not pairs or not sources:
+        return {}
+    columns = ", ".join(
+        f"{groups.column(tables.SEASONS, source, 'episode_count', 's')} AS {source}_count, "
+        f"{groups.column(tables.SEASONS, source, 'air_dates_json', 's')} AS {source}_days"
+        for source in sources)
+    found: dict[tuple[str, int], dict[str, list]] = {}
+    for row in conn.execute(
+            f"SELECT s.title_key, s.season, {columns} FROM json_each(?) w "
+            f"CROSS JOIN {tables.SEASONS} s ON s.title_key = json_extract(w.value, '$[0]') "
+            f"AND s.season = json_extract(w.value, '$[1]')",
+            (json.dumps(sorted(pairs)),)):
+        for source in sources:
+            shape = {"episode_count": row[f"{source}_count"],
+                     "air_dates_json": row[f"{source}_days"]}
+            if descriptions.season_described(shape):
+                found.setdefault((str(row["title_key"]), int(row["season"])), {})[source] = [
+                    date.fromisoformat(day) if day else None
+                    for day in json.loads(shape["air_dates_json"] or "[]")]
+    return found
 
 
 async def season_list(settings, chosen: detail_source.Answerer, media, *, ids=None,

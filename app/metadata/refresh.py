@@ -133,10 +133,14 @@ _BACKOFF_MAX_SECONDS = 24 * 60 * 60
 
 class Wanted(NamedTuple):
     """One title a surface drew: what it is, every id known for it, and the
-    season on screen (None for the title alone, or a film)."""
+    season on screen (None for the title alone, or a film) — and, where the
+    surface drew ONE service's words (a calendar card's season line,
+    panel.season_lines' `owed`), that service: only its rows are queued for the
+    title (None: every service's)."""
     media: str
     ids: Mapping[str, Any]
     season: int | None = None
+    source: str | None = None
 
 
 class Entry(NamedTuple):
@@ -180,6 +184,9 @@ def _due(conn: db.Connection, settings, wanted: Iterable[Wanted], *, now: int,
     still has its other descriptions kept current.
     """
     asked: dict[str, tuple[str, dict, set[int]]] = {}
+    # The services each title's rows may be queued for: every one, unless every
+    # item that named the title named one service (`Wanted.source`).
+    only: dict[str, set[str] | None] = {}
     for item in wanted:
         media = str(item.media)
         key = identity.resolve(conn, media, item.ids)
@@ -190,6 +197,10 @@ def _due(conn: db.Connection, settings, wanted: Iterable[Wanted], *, now: int,
                     if value not in (None, "")})
         if item.season is not None and media == str(Media.SHOW):
             seasons.add(int(item.season))
+        if item.source is None:
+            only[key] = None
+        elif only.setdefault(key, set()) is not None:
+            only[key].add(str(item.source))
     if not asked:
         return []
     held: dict[tuple[str, str], list] = {}
@@ -206,6 +217,8 @@ def _due(conn: db.Connection, settings, wanted: Iterable[Wanted], *, now: int,
     for source, _port in _askable(settings):
         namespace = rows.ID_NAMESPACE[source]
         for key, (media, ids, seasons) in asked.items():
+            if only[key] is not None and source not in only[key]:
+                continue
             found = held.get((key, source), [])
             row = descriptions.described_row(found)
             own_id = str(ids.get(namespace) or "").strip() or next(

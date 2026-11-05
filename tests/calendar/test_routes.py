@@ -1081,10 +1081,14 @@ class ServerRenderedViewTests(CalendarRouteTestCase):
         with patch.object(metadata_refresh, "viewed",
                           lambda settings, wanted, **kw: seen.append((list(wanted), kw))):
             self.client.get(self.PAGE)
-        (wanted, kw), = seen
-        self.assertEqual((kw["budget"], kw["missing"]),
-                         (metadata_refresh.MONTH_BUDGET, False))
+        (wanted, kw), = [(wanted, kw) for wanted, kw in seen if kw.get("missing") is False]
+        self.assertEqual(kw["budget"], metadata_refresh.MONTH_BUDGET)
         self.assertEqual(len(wanted), 4)
+        # The only other thing a month asks is the season lines its drawn cards
+        # could not be given — each naming the one service owed it.
+        for wanted, kw in seen:
+            if kw.get("missing") is not False:
+                self.assertTrue(all(item.source for item in wanted))
 
     def test_the_stat_tiles_carry_the_whole_months_counts(self):
         self.client.post("/api/state?year=2026&month=7&endpoint=shows",

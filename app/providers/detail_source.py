@@ -44,7 +44,7 @@ store WHAT.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from typing import NamedTuple
 
 # The registry through its MODULE OBJECT rather than as names bound off it, so a
@@ -240,13 +240,9 @@ async def for_season(settings, ids, chosen: Answerer, ask, holds,
     can be asked, which is what stored-only means.
     """
     first = await ask(chosen)
-    if holds(first) or chosen.stored_only:
+    if holds(first):
         return chosen, first
-    for source, value in known_ids(ids, order):
-        if (source == chosen.source
-                or not providers.get(source).detail_port.catalogue_configured(settings)):
-            continue
-        other = Answerer(source, value, stored_only=False)
+    for other in later_for_season(settings, ids, chosen, order):
         try:
             answer = await ask(other)
         except SourceUnavailable:
@@ -254,6 +250,22 @@ async def for_season(settings, ids, chosen: Answerer, ask, holds,
         if holds(answer):
             return other, answer
     return chosen, first
+
+
+def later_for_season(settings, ids, chosen: Answerer,
+                     order: Sequence[str] | None = None) -> Iterator[Answerer]:
+    """The services `for_season` turns to, in turn, when `chosen` holds nothing
+    of the season: every later one the title names that this instance can ask —
+    none after a stored-only `chosen`. ONE WALK, so a season decided from what
+    the store already holds (app/metadata/panel.py's `season_lines`) goes the way
+    asking would."""
+    if chosen.stored_only:
+        return
+    for source, value in known_ids(ids, order):
+        if (source == chosen.source
+                or not providers.get(source).detail_port.catalogue_configured(settings)):
+            continue
+        yield Answerer(source, value, stored_only=False)
 
 
 def known_ids(ids, order: Sequence[str] | None = None) -> list[tuple[Source, str]]:

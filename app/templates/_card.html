@@ -25,13 +25,12 @@
    response served from the owner's own origin — which is the rule the public
    share page has always held itself to and the signed-in panel did not.
 
-   THE TWO URLs A CARD ASKS ITS OWN QUESTIONS AT ARE BUILT HERE, by
-   `details_url` (app/templating.py) — the details panel and the season line. The
-   card already knows every id it carries, so the query is markup; it used to be
-   assembled by two copies of one JavaScript function, one per page, renamed only
-   to dodge a clash in the shared global scope. Both send every id and let the
-   SERVER pick who to ask, because only the server can see whose credentials this
-   instance has (see app/providers/detail_source.py).
+   THE DETAILS PANEL'S URL IS BUILT HERE, by `details_url` (app/templating.py).
+   The card already knows every id it carries, so the query is markup; it used to
+   be assembled by two copies of one JavaScript function, one per page, renamed
+   only to dodge a clash in the shared global scope. It sends every id and lets
+   the SERVER pick who to ask, because only the server can see whose credentials
+   this instance has (see app/providers/detail_source.py).
    THE CALENDAR AND THE MONTH RIDE ON THE PANEL'S ADDRESS as references, for one
    question: whether the panel should ask the service this card's calendar is
    missing about it, and which month's cards the answer redraws
@@ -345,19 +344,15 @@
             {% if item.imdb_rating %}<span class="imdb-rating" title="IMDb score"><span class="imdb-mark">IMDb</span>{{ item.imdb_rating }}</span>{% endif %}
             <span class="time">{{ item.air_time }}</span>
         </div>
-        {# THE SEASON LINE ASKS FOR ITSELF as the card scrolls into view, and is
-           replaced by whatever the server draws for it (_season_line.html) —
-           nothing at all where there is nothing to say. `intersect once` for the
-           reason _day_skeleton.html gives, with a margin so the line is usually
-           there before the card is. `hx-indicator="this"` because the page-wide
-           progress bar is for something a person is waiting through, and a line
-           per card as a month scrolls past is not that. The slot sits out of the
-           card body's flow (style.css), so one still waiting adds no gap. #}
-        {% if item.media != 'movie' and item.season is not none %}
-        <div class="season-line-slot"
-             hx-get="{{ details_url('/calendar/fragments/season-line', item.media, item.ids, item.season) }}"
-             hx-trigger="intersect once rootMargin:200px" hx-swap="outerHTML" hx-indicator="this"></div>
-        {% endif %}
+        {# THE SEASON LINE IS DRAWN WITH THE CARD, from what the title store
+           holds of the season (calendar/routes.py's `_season_lines`) — nothing
+           at all where there is nothing to say, or where the store has not been
+           told yet; it is queued behind the page, and the next drawing has it.
+           It used to ask for itself as the card scrolled into view, a request a
+           card that popped its line in late. #}
+        {% if season_lines is defined and item.media != 'movie' and item.season is not none %}
+        {%- with line = season_lines.get(item.airing_key), season = item.season %}{% include "_season_line.html" %}{% endwith %}
+        {%- endif %}
         <div class="links-row">
             {# ONE BUTTON PER SERVICE THAT HAS A PAGE FOR THIS TITLE, each wearing
                that service's own name, in the registry's order. A card several

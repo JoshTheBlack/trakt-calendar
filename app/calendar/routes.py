@@ -76,8 +76,8 @@ INITIAL_DAY_BLOCKS = 5
 # of daily serials puts ninety titles on a single Tuesday — measured at 717ms of
 # template rendering for one month, which is pure Python and therefore holds the
 # event loop for its whole duration (a worker thread does not help: the GIL means
-# the render still runs on the one core the loop needs). Every day block and every
-# season line that same page then asks for queues behind it.
+# the render still runs on the one core the loop needs). Every day block that same
+# page then asks for queues behind it.
 #
 # So the budget is CARDS, which is what the paragraph above was always really
 # about, and the day count is left as a ceiling for the calendars where cards are
@@ -820,6 +820,7 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
                              for view in month_view.grouped[index]["items"]],
         tz=tz, prefs=source_selection,
         **vocab.active_specs(prefs, endpoint.media, honour_pause=True))
+    season_lines = await _season_lines(settings, drawn)
     drawn_as = iter(drawn)
     for index in sorted(inline):
         group = month_view.grouped[index]
@@ -926,6 +927,8 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
         "logo_networks": logo_networks,
         # WHAT EACH CARD'S PICTURE IS DRAWN AS — see `_card_pictures`.
         "card_pictures": await _card_pictures(user, settings),
+        # THE LINE UNDER EACH DRAWN CARD, from the title store — `_season_lines`.
+        "season_lines": season_lines,
         # WHERE A CARD'S COMPARE CONTROL ASKS FOR IT DRAWN WHOLE — see `_card_url`.
         "card_expand": partial(_card_url, endpoint.key, year, month,
                                source=request.query_params.get("source"), new=new_token,
@@ -1032,6 +1035,39 @@ async def _card_pictures(user, settings) -> metadata_pictures.CardPictures:
     order = posters.order_for(
         (await source_prefs.load(user.user_id)).source_order(list(Source)))
     return metadata_pictures.CardPictures(settings, order)
+
+
+async def _season_lines(settings, items) -> dict[str, dict]:
+    """The line under each of these cards — how many episodes its season has,
+    what aired last, what airs next — {airing key: line}, decided from the title
+    store as the cards are drawn (app/metadata/panel.py's `season_lines`, by
+    detail_source's season rule).
+
+    DRAWN WITH THE CARD, NOT ASKED FOR BY IT. Each card used to fetch its own
+    line as it scrolled into view: a request per card, a scrolled month's worth
+    of them, and each a service's season lookup — MEASURED at 4-13 s apiece
+    beside a month read on a copy of dev — so the line popped in late or not at
+    all. A season the store has no description of from the service that would
+    answer draws no line yet, and is queued behind the page (refresh.viewed,
+    naming that one service), so the next drawing has it."""
+    wanted, keys = [], []
+    for item in items:
+        title_key = str(getattr(item, "card", "") or "").rpartition("|")[0]
+        if title_key and item.season is not None and str(item.media) == str(Media.SHOW):
+            wanted.append(metadata_panel.SeasonWanted(title_key, str(item.media),
+                                                      dict(item.ids or {}), int(item.season)))
+            keys.append(item.airing_key)
+    if not wanted:
+        return {}
+    today = clock.today()
+    lines = await db.run(lambda conn: metadata_panel.season_lines(conn, settings, wanted,
+                                                                  today=today))
+    metadata_refresh.viewed(
+        settings, [metadata_refresh.Wanted(asked.media, asked.ids, asked.season,
+                                           source=str(found.owed.source))
+                   for asked, found in zip(wanted, lines) if found.owed is not None],
+        budget=metadata_refresh.MONTH_BUDGET)
+    return {key: found.line for key, found in zip(keys, lines) if found.line}
 
 
 def _library(user, settings) -> integrations_routes.LibraryView | None:
@@ -1462,6 +1498,8 @@ async def calendar_day(request: Request):
         context["not_watching"] = meta["not_watching_keys"]
         context["logo_networks"] = await _logo_networks(
             settings, [item for group in grouped for item in group["items"]])
+        context["season_lines"] = await _season_lines(
+            settings, [item for group in grouped for item in group["items"]])
         # NOTHING LAYS THIS DAY OUT: it arrives with its cards, and how wide it is
         # and whether hide mode empties it are the stylesheet's questions about
         # those cards (style.css's `--cols`), asked the moment it lands and asked
@@ -1565,6 +1603,7 @@ async def calendar_card(request: Request):
         "settings": settings, "is_admin": bool(user and user.is_admin),
         "library": _library(user, settings),
         "logo_networks": await _logo_networks(settings, [found]),
+        "season_lines": await _season_lines(settings, [found]),
         "month": month, "year": year, "endpoint": endpoint,
         "page_token": _page_token(request),
     })
@@ -1986,68 +2025,6 @@ async def add_month_to_library(request: Request):
         # successful add remembered its id, so the buttons come back marked
         # without this restating what "added" looks like.
         marks=_marks_for(integrations_routes.LibraryView(settings), target, added))
-
-
-@guard.get("/calendar/fragments/season-line", AuthLevel.CALENDAR_APPROVED)
-async def season_line_fragment(request: Request):
-    """The line under a card — how many episodes, what aired last, what airs
-    next — drawn for the card that asked.
-
-    THE CARD FETCHES IT FOR ITSELF as it scrolls into view: _card.html draws a
-    slot carrying `hx-trigger="intersect once"`, the house pattern
-    _day_skeleton.html already uses, and this answer replaces the slot. It used to
-    be JSON that a script turned into markup behind a hand-held
-    IntersectionObserver — one that had to be disconnected and rebuilt on every
-    boosted navigation and never saw the cards on a day that arrived late. htmx
-    processes a late day's slots as they land, so there is nothing to re-arm.
-
-    THE CALLER HANDS OVER IDS, NOT A SERVICE, exactly as the details fragment
-    below does. `detail_source.choose` picks who can answer, so a Simkl-only card
-    gets its line as readily as one Trakt listed, and
-    `DetailPort.fetch_season_summary` is what makes asking either the same act.
-
-    NOTHING TO SAY IS AN EMPTY ANSWER AT 200, which removes the slot the way an
-    empty day removes its placeholder. That covers a title nobody can describe,
-    a request naming no season, and a service that could not be reached — caught
-    as the shared degradation contract rather than one service's error type, so a
-    rate limit never renders as "no episodes": a line that is not drawn states
-    nothing. A non-200 would not be swapped at all (static/js/boost.js's
-    `noSwap`), leaving an empty slot behind for a trigger that fires once.
-
-    Gated on the CATALOGUE credential per source, never on an access token: a
-    season's episode list is public, globally cached and the same for everybody,
-    so it must not stop working because one person's token lapsed.
-    """
-    from .. import providers  # deferred: see _coverage_gap, same reason
-    from ..providers import season as season_rules
-
-    settings = await load_settings()
-    params = request.query_params
-    season = route_params.season(params.get("season"))
-    asked = detail_source.ids_from_query(params)
-    chosen = detail_source.choose(settings, asked)
-    provider = providers.get(chosen.source) if chosen is not None else None
-    line = None
-    if season is not None and provider is not None and provider.detail_port is not None:
-        try:
-            media = Media(params.get("media", "show"))
-            # The same season rule the panel follows (detail_source.for_season):
-            # a service with no episodes of this season hands it to the next.
-            _answered, detail = await detail_source.for_season(
-                settings, asked, chosen,
-                lambda answerer: providers.get(answerer.source).detail_port.fetch_season_summary(
-                    settings, answerer.source_id, season, media),
-                lambda summary: int((summary or {}).get("total") or 0) > 0)
-        except SourceUnavailable as exc:
-            logger.info("No season line from %s: %s", chosen.source, exc)
-        except ValueError:
-            # A medium this app does not have, which only a hand-built address
-            # can name. Nothing to describe, and nothing worth a 500.
-            pass
-        else:
-            line = season_rules.tile_summary(detail, clock.today())
-    return templates.TemplateResponse(request, "_season_line.html", {
-        "request": request, "line": line, "season": season})
 
 
 @guard.get("/calendar/fragments/details", AuthLevel.CALENDAR_APPROVED)
@@ -2510,6 +2487,7 @@ async def _marked_cards(request: Request, user, settings, prefs, endpoint, year:
     """The mark's answer drawn: the title's cards, the chips of its days and the
     two counts a mark moves, out of band (_marked_cards.html)."""
     logo_networks = await _logo_networks(settings, items)
+    season_lines = await _season_lines(settings, items)
     completed = [item for item in items if season is None or item.season == season]
     replaces: dict = {}
     moved = None
@@ -2537,6 +2515,7 @@ async def _marked_cards(request: Request, user, settings, prefs, endpoint, year:
         # WHICH NETWORKS HAVE A LOGO, asked once here rather than once per
         # card by the browser — see `_logo_networks`.
         "logo_networks": logo_networks,
+        "season_lines": season_lines,
         "month": month, "year": year, "endpoint": endpoint,
         # The redrawn cards' marks recount the same filed month.
         "page_token": _page_token(request),
