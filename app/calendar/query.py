@@ -390,6 +390,10 @@ class View(NamedTuple):
     enriched: bool = True
     keywords_known: bool = True
     show_type_known: bool = True
+    # Filled by `ranked`, for a day over a page alone: how many of
+    # `COUNTED_FACTS` the card will show — what a big day's first page ranks by
+    # after who lists it (app/calendar/day_pages.py).
+    complete: int = 0
 
     @property
     def primary(self) -> Listing:
@@ -513,6 +517,17 @@ def place(card: Card, *, instance, reads, orders: calendar_resolve.Orders,
 # viewer's order that states it (`_winner`).
 _JUDGED_SCALARS = ("network", "country", "certification", "language", "poster")
 
+# WHAT A CARD SHOWS OF ITS TITLE, counted for how complete the card is: a fact
+# counts when any of the viewer's own services that speaks for the card states
+# it, which is exactly when the drawn card shows it — the card takes each field
+# from the first of those services that states it, whatever their order. Asked
+# only for a day over a page (`ranked`), in a statement of its own over the same
+# combinations the judging reads: MEASURED on a copy of dev, worked out in the
+# month's judging it cost every month 0.07-0.10 s for the few big days a shell
+# draws.
+COUNTED_FACTS = ("poster", "overview", "network", "runtime", "genres_json", "ratings_json",
+                 "certification", "country", "language", "status")
+
 
 def _speaks(source: str) -> str:
     """SQL: `source` speaks for the combo's card — it lists it (`c.listed`), or
@@ -538,6 +553,25 @@ def _stated(source: str) -> str:
 def _text(source: str, name: str) -> str:
     """SQL: `source`'s title word `name` is stated — present, not empty."""
     return f"NULLIF({groups.column(tables.TITLES, source, name, 't')}, '') IS NOT NULL"
+
+
+def _states(source: str, name: str) -> str:
+    """SQL: `source`'s title word `name` holds something — not NULL and not the
+    column's own empty value (groups.EMPTY: '', '[]', '{}'); a number is an
+    answer whatever it is, zero included."""
+    column = groups.column(tables.TITLES, source, name, "t")
+    empty = groups.EMPTY[name]
+    if empty is None:
+        return f"{column} IS NOT NULL"
+    return f"COALESCE({column}, {groups.literal(empty)}) NOT IN ({groups.literal(empty)}, '')"
+
+
+def _completeness() -> str:
+    """SQL: how many of `COUNTED_FACTS` the combo's card shows — each one any of
+    the viewer's own services speaking for it states."""
+    return " + ".join(
+        f"(CASE WHEN {_any(lambda s, f=fact: f'({_own(s)} AND {_speaks(s)} AND {_states(s, f)})')}"
+        f" THEN 1 ELSE 0 END)" for fact in COUNTED_FACTS)
 
 
 def _winner(order: str, present: Callable[[str], str]) -> str:
@@ -812,6 +846,44 @@ def _verdicts(conn: db.Connection, combos: Sequence[tuple], viewer: Viewer, *,
                                     bool(row["own_enriched"]), bool(row["own_stated"]))
             for row in conn.execute(_judge_sql(media, release, floor, mine, params, titles),
                                     params).fetchall()}
+
+
+def _completeness_sql() -> str:
+    """How many of `COUNTED_FACTS` each combination of `:combos` (`_combo`)
+    shows — the judging statement's own reading of the combination and its
+    title row, asking nothing else."""
+    return f"""
+WITH c AS (
+  SELECT key AS k, json_extract(value, '$[0]') AS title_key,
+         json_extract(value, '$[1]') AS listed, json_extract(value, '$[2]') AS cand,
+         json_extract(value, '$[5]') AS own
+  FROM json_each(:combos)
+)
+SELECT c.k, {_completeness()} AS complete
+FROM c LEFT JOIN {tables.TITLES} t ON t.title_key = c.title_key"""
+
+
+def completeness(conn: db.Connection, views: Sequence[View], viewer: Viewer) -> list[View]:
+    """`views` with `complete` filled — how many of `COUNTED_FACTS` each card
+    shows this viewer, by one statement over the combinations they share."""
+    if not views:
+        return []
+    describers = calendar_resolve.describing_sources(viewer.settings)
+    reads = _reads(viewer.prefs)
+    orders = calendar_resolve.Orders(viewer.prefs)
+    combos: dict[tuple, int] = {}
+    named: dict = {}
+    keyed = [combos.setdefault(_combo(view, describers, reads, orders, named), len(combos))
+             for view in views]
+    counts = {int(row["k"]): int(row["complete"] or 0) for row in conn.execute(
+        _completeness_sql(), {"combos": json.dumps(list(combos))}).fetchall()}
+    return [view._replace(complete=counts.get(at, 0)) for view, at in zip(views, keyed)]
+
+
+async def ranked(viewer: Viewer, views: Sequence[View]) -> list[View]:
+    """`completeness` on a worker thread — what a big day's first page asks
+    (app/calendar/day_pages.py) before it ranks the day."""
+    return await db.run(lambda conn: completeness(conn, views, viewer))
 
 
 def judge(conn: db.Connection, views: list[View], viewer: Viewer) -> Placed:

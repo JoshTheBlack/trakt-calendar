@@ -2272,6 +2272,20 @@ class BigDaysArePagedTests(CalendarRouteTestCase):
         self.assertIn(f'id="day-chip-{self.BIG}"', html)
         self.assertIn('title="5 items"', html)
 
+    def test_the_first_page_is_the_days_best_ranked_cards_in_its_own_order(self):
+        """Every card here is Trakt's alone, so the more complete one ranks
+        first: the day's last card makes the page, ahead of the second."""
+        self.entries[4]["show"].update({"overview": "Words.", "network": "HBO",
+                                        "genres": ["drama"]})
+        html = self._late_day()
+        self.assertIn("Show 0", html)
+        self.assertIn("Show 4", html)
+        self.assertNotIn("Show 1", html)
+        self.assertLess(html.index("Show 0"), html.index("Show 4"))
+        rest = self.client.get(self._rest_url(html)).text
+        self.assertEqual(re.findall(r'class="show-title">(Show \d)<', rest),
+                         ["Show 1", "Show 2", "Show 3"])
+
     def test_the_rest_draws_every_other_card_and_nothing_twice(self):
         html = self._late_day()
         first = set(re.findall(r'data-airing="([0-9a-f]{16})"', html))

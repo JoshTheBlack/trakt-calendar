@@ -823,28 +823,31 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
     # for their identity and day alone, and a day after them is drawn when it is
     # scrolled to (`calendar_day`). The jump's card is the drawn one, which is
     # what the template's identity test asks about. A BIG DAY DRAWS ITS FIRST
-    # PAGE and the control that asks for the rest (app/calendar/day_pages.py) —
-    # as far as the jump's card, wherever that falls in it.
-    pages = {index: day_pages.first_page(
-                 len(month_view.grouped[index]["items"]),
-                 next((at for at, view in enumerate(month_view.grouped[index]["items"])
-                       if view is anchor), None))
-             for index in inline}
+    # PAGE and the control that asks for the rest (app/calendar/day_pages.py,
+    # which says which cards the first page is) — the jump's card among them,
+    # wherever it ranks.
+    specs = vocab.active_specs(prefs, endpoint.media, honour_pause=True)
+    pages = {}
+    for index in inline:
+        views = month_view.grouped[index]["items"]
+        pages[index] = await _first_page(
+            endpoint, settings, views, tz=tz, selection=source_selection, specs=specs,
+            anchor_at=next((at for at, view in enumerate(views) if view is anchor), None))
     drawn = await calendar_cache.present(
-        endpoint, settings, [view for index in sorted(inline)
-                             for view in month_view.grouped[index]["items"][:pages[index]]],
-        tz=tz, prefs=source_selection,
-        **vocab.active_specs(prefs, endpoint.media, honour_pause=True))
+        endpoint, settings, [month_view.grouped[index]["items"][at] for index in sorted(inline)
+                             for at in pages[index]],
+        tz=tz, prefs=source_selection, **specs)
     season_lines = await _season_lines(settings, drawn)
     drawn_as = iter(drawn)
     for index in sorted(inline):
         group = month_view.grouped[index]
-        views, group["items"] = group["items"], [next(drawn_as) for _ in range(pages[index])]
+        views, group["items"] = group["items"], [next(drawn_as) for _ in pages[index]]
         if anchor is not None and any(view is anchor for view in views):
-            anchor = group["items"][[id(view) for view in views].index(id(anchor))]
-        if pages[index] < len(views):
+            anchor = group["items"][pages[index].index(
+                next(at for at, view in enumerate(views) if view is anchor))]
+        if len(pages[index]) < len(views):
             group["more"] = {
-                "count": len(views) - pages[index],
+                "count": len(views) - len(pages[index]),
                 "url": _rest_url(user.user_id, endpoint.key, date.fromisoformat(group["date"]),
                                  pages[index], source=request.query_params.get("source"),
                                  new=new_token, page=page_token)}
@@ -1323,14 +1326,28 @@ def _day_url(endpoint_key: str, day: date, *, source: str | None = None,
     return url
 
 
-def _rest_url(user_id: int, endpoint_key: str, day: date, drawn: int, *,
+async def _first_page(endpoint, settings, views, *, tz, selection, specs,
+                      anchor_at: int | None = None) -> tuple[int, ...]:
+    """The places in a day (`views`, keys-only, in the day's order) of the
+    cards its first page draws — every one for a day up to a page, and past it
+    the day ranked (day_pages.first_page) once each card's completeness has been
+    read: asked here alone, for the days that are paged, never by the month's
+    read."""
+    if len(views) > day_pages.DAY_PAGE_CARDS:
+        views = await calendar_cache.ranked(endpoint, settings, views, tz=tz, prefs=selection,
+                                            **specs)
+    return day_pages.first_page(views, anchor_at)
+
+
+def _rest_url(user_id: int, endpoint_key: str, day: date, drawn: tuple[int, ...], *,
               source: str | None = None, new: str = "", page: str = "") -> str:
     """The address a big day's "show the rest" control asks (`calendar_day_rest`):
     one signed token (app/calendar/day_pages.py) naming this account, the
-    calendar and day, how many of its cards were drawn, and the same references
-    a late day carries."""
+    calendar and day, which of its cards were drawn (their places in the day),
+    and the same references a late day carries."""
     return "/calendar/day/rest?t=" + day_pages.token(day_pages.Rest(
-        user_id, endpoint_key, day, drawn, source or "", new or "", page or "", db.now()))
+        user_id, endpoint_key, day, tuple(drawn), source or "", new or "", page or "",
+        db.now()))
 
 
 def _card_url(endpoint_key: str, year: int, month: int, item, *, source: str | None = None,
@@ -1473,7 +1490,7 @@ async def calendar_day(request: Request):
         context, group, meta = await _draw_day(
             request, user, settings, prefs, endpoint, year, month, day,
             source=request.query_params.get("source"), new=request.query_params.get("new") or "",
-            page=_page_token(request), skip=0)
+            page=_page_token(request))
     except _DayFailed as failed:
         # The shell is already on screen with the month's real numbers, so one day
         # failing is a gap in the month, not a broken page. It replaces itself with
@@ -1500,12 +1517,14 @@ class _DayFailed(Exception):
 
 
 async def _draw_day(request: Request, user, settings, prefs, endpoint, year: int, month: int,
-                    day: date, *, source: str | None, new: str, page: str, skip: int
+                    day: date, *, source: str | None, new: str, page: str,
+                    drawn: tuple[int, ...] | None = None
                     ) -> tuple[dict, dict | None, dict]:
-    """ONE DAY READ AND DRAWN for a viewer, from its `skip`th card — what a late
-    day draws (skip 0: its first page, app/calendar/day_pages.py) and what a big
-    day's "show the rest" control draws (the rest). (context, the day's group or
-    None for a day holding nothing, the read's numbers); raises _DayFailed.
+    """ONE DAY READ AND DRAWN for a viewer — what a late day draws (`drawn`
+    None: its first page, app/calendar/day_pages.py) and what a big day's "show
+    the rest" control draws (every card but the places `drawn` names, which its
+    page drew). (context, the day's group or None for a day holding nothing,
+    the read's numbers); raises _DayFailed.
 
     THE DAY IS READ WHOLE AND DRAWN IN PART: its chip, and whether it is still
     the day the shell counted (`month_changed`), are about every card on it,
@@ -1590,26 +1609,32 @@ async def _draw_day(request: Request, user, settings, prefs, endpoint, year: int
         counted = sorted(key for on, key in filed.drawn() if on == day.isoformat())
         context["month_changed"] = counted != sorted(view.mark_key for view in views)
         context["month_url"] = _month_url(endpoint.key, year, month, source=source)
-    upto = day_pages.first_page(len(views)) if skip == 0 else len(views)
-    items = await calendar_cache.present(endpoint, settings, views[skip:upto], tz=tz,
-                                         prefs=source_selection, **specs)
+    if drawn is None:
+        places = await _first_page(endpoint, settings, views, tz=tz,
+                                   selection=source_selection, specs=specs)
+    else:
+        before = set(drawn)
+        places = tuple(at for at in range(len(views)) if at not in before)
+    items = await calendar_cache.present(endpoint, settings, [views[at] for at in places],
+                                         tz=tz, prefs=source_selection, **specs)
     context["logo_networks"] = await _logo_networks(settings, items)
     context["season_lines"] = await _season_lines(settings, items)
     if not grouped:
         return context, None, meta
     group = {**grouped[0], "items": items}
-    if upto < len(views):
-        group["more"] = {"count": len(views) - upto,
-                         "url": _rest_url(user.user_id, endpoint.key, day, upto,
+    if drawn is None and len(places) < len(views):
+        group["more"] = {"count": len(views) - len(places),
+                         "url": _rest_url(user.user_id, endpoint.key, day, places,
                                           source=source, new=new, page=page)}
     return context, group, meta
 
 
 @guard.get("/calendar/day/rest", AuthLevel.CALENDAR_APPROVED)
 async def calendar_day_rest(request: Request):
-    """THE REST OF A BIG DAY — every card after the ones its page drew — for the
-    control the day drew in their place (app/calendar/day_pages.py says why a day
-    is drawn in pages). The answer replaces the control: the cards land in the
+    """THE REST OF A BIG DAY — every card its page did not draw, in the day's
+    order — for the control the day drew in their place (app/calendar/day_pages.py
+    says why a day is drawn in pages, and which cards a page draws first). The
+    answer replaces the control: the cards land in the
     day's own grid, its chip is redrawn out of band, and where the day no longer
     holds what the shell counted, the page says so (`_draw_day`).
 
@@ -1630,7 +1655,7 @@ async def calendar_day_rest(request: Request):
     try:
         context, group, _meta = await _draw_day(
             request, user, settings, prefs, endpoint, day.year, day.month, day,
-            source=rest.source or None, new=rest.new, page=rest.page, skip=rest.drawn)
+            source=rest.source or None, new=rest.new, page=rest.page, drawn=rest.drawn)
     except _DayFailed as failed:
         return templates.TemplateResponse(request, "_day_rest.html", {
             **failed.context, "refused": False, "error": failed.message, "group": None})

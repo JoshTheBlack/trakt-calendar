@@ -1295,6 +1295,14 @@ async def present(endpoint: Endpoint, settings, views, *, tz: ZoneInfo, prefs=No
         query.Viewer(endpoint, settings, prefs, tz, vocab.complete_specs(specs)), views)
 
 
+async def ranked(endpoint: Endpoint, settings, views, *, tz: ZoneInfo, prefs=None,
+                 **specs) -> list:
+    """`views` — a big day's cards — with how complete each one is
+    (query.ranked), which its first page ranks by (app/calendar/day_pages.py)."""
+    return await query.ranked(
+        query.Viewer(endpoint, settings, prefs, tz, vocab.complete_specs(specs)), views)
+
+
 class Exempting(NamedTuple):
     """Which of a read's exemptions are in play — `exempts_undescribed`'s answer.
 

@@ -856,14 +856,22 @@ IT HOLDS (`_FILED_CARDS_MAX` cards in all, as well as `_PAGES_MAX` pages and
 (app/calendar/day_pages.py, `DAY_PAGE_CARDS`) — the shell's inline day and a late
 day alike (`_draw_day`, the one drawing of a day): its first page, then a
 "Show the other N" control whose answer (`calendar_day_rest`, `_day_rest.html`)
-is the rest of its cards in the control's place. PAGING, NEVER CAPPING: the
+is the rest of its cards in the control's place. THE FIRST PAGE IS A RANKING
+(`day_pages.first_page`): the cards more of the viewer's own services list first
+(`View.listed`), then the cards showing more of their title (`View.complete`, a
+count of `query.COUNTED_FACTS` asked for a day over a page alone — `query.ranked`,
+one statement over the combinations the judging reads, never the month's read),
+then the day's order — and both pages are drawn in the day's order. PAGING, NEVER CAPPING: the
 day's count, chip and is-new marks, the filed month and the month-changed check
 are all the WHOLE day's — a day is read whole and drawn in part — and the rest
 compares the day with what was filed exactly as a late day does. The control
 carries ONE SIGNED TOKEN (app/signed_tokens.py, the sealing the picture report
-token shares) naming the account, the day, how many were drawn and the page's
-references; another account's or an edited one draws nothing but a sentence. A
-jump's card is drawn wherever it falls in its day. A DAY THAT ARRIVES AFTER ITS MONTH CHANGED draws the
+token shares) naming the account, the day, WHICH PLACES IN THE DAY were drawn
+and the page's references — the places, not the ranking again, because the
+ranking reads descriptions the page's own view queues, and ranked again at the
+press a card described meanwhile could be drawn twice or not at all; another
+account's or an edited one draws nothing but a sentence. A jump's card is drawn
+wherever it ranks in its day. A DAY THAT ARRIVES AFTER ITS MONTH CHANGED draws the
 store as it is now — the only thing it can draw: a card that went has no rows — and
 when what it draws is not what the shell filed for that day, it says so for the
 whole page, out of band (`_month_changed.html`). The page also asks once a minute
