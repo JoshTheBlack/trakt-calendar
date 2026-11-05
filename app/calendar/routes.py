@@ -1052,10 +1052,22 @@ def _library(user, settings) -> integrations_routes.LibraryView | None:
 # token that names nothing (a restart, an old tab) reads the month as before.
 #
 # IN MEMORY AND BOUNDED, because what it saves is a read and losing it costs one:
-# the last `_PAGES_MAX` pages, none older than `_PAGE_SECONDS`, pruned as each
-# page files — the process runs for weeks.
+# the last `_PAGES_MAX` pages, none older than `_PAGE_SECONDS` — pruned whenever
+# the store is touched, not only when a page files — AND NEVER MORE THAN
+# `_FILED_CARDS_MAX` CARDS IN ALL, because a page's size is the month's: one page
+# of an unfiltered All Episodes month files ~18,000 cards, and 256 such pages
+# held 3.4 GB in a process that runs for weeks (MEASURED on a copy of dev). The
+# oldest pages go first; a page bigger than the whole bound is not filed, and its
+# marks read the month as a page with no token does.
+#
+# AND EACH PAGE FILES LITTLE PER CARD: a month's cards are mostly a few hundred
+# titles' episodes, which spell their marks the same way, so equal spellings —
+# and equal days, mark keys and title keys — are one object for the whole page
+# (`_file_month`). MEASURED, user 1's October All Episodes: 13.4 MB a page with
+# filters paused (18,490 cards) before, the figure in `_file_month` after.
 _PAGES_MAX = 256
 _PAGE_SECONDS = 2 * 60 * 60
+_FILED_CARDS_MAX = 200_000
 
 
 class _FiledCard(NamedTuple):
@@ -1084,29 +1096,52 @@ class _FiledMonth(NamedTuple):
 _pages: OrderedDict = OrderedDict()
 
 
+def _prune_pages(moment: float, *, room: int = 0) -> None:
+    """Let go of every filed page past `_PAGE_SECONDS`, then of the oldest until
+    `room` more cards fit under `_FILED_CARDS_MAX` and one more page under
+    `_PAGES_MAX`. Pages are filed in time order, so the oldest is always first."""
+    while _pages and moment - next(iter(_pages.values())).at > _PAGE_SECONDS:
+        _pages.popitem(last=False)
+    if not room:
+        return
+    held = sum(len(filed.cards) for filed in _pages.values())
+    while _pages and (len(_pages) >= _PAGES_MAX or held + room > _FILED_CARDS_MAX):
+        _key, gone = _pages.popitem(last=False)
+        held -= len(gone.cards)
+
+
 def _file_month(user_id: int, endpoint_key: str, year: int, month: int,
                 grouped: list[dict]) -> str:
     """File the month a page drew (`grouped`, its keys-only cards) and return
-    the token naming it."""
+    the token naming it — or no token, for a page larger than the whole store.
+
+    EQUAL VALUES ARE ONE OBJECT FOR THE PAGE (`shared`): every card of a title
+    spells its marks alike, so the page holds each distinct spelling set, day and
+    key once and a card refers to them. MEASURED on a copy of dev, user 1's
+    October All Episodes: 0.8 -> 0.2 MB a page with their filters (1,334 cards),
+    13.4 -> 2.5 MB with them paused (18,490 cards)."""
     moment = time.monotonic()
-    while _pages and (len(_pages) >= _PAGES_MAX
-                      or moment - next(iter(_pages.values())).at > _PAGE_SECONDS):
-        _pages.popitem(last=False)
+    shared: dict = {}
+    cards = tuple(_FiledCard(shared.setdefault(group["date"], group["date"]),
+                             shared.setdefault(item.mark_key, item.mark_key),
+                             shared.setdefault(item.title_key, item.title_key),
+                             shared.setdefault(spelled := calendar_state.item_spellings(item),
+                                               spelled))
+                  for group in grouped for item in group["items"])
+    if len(cards) > _FILED_CARDS_MAX:
+        return ""
+    _prune_pages(moment, room=max(len(cards), 1))
     token = secrets.token_urlsafe(9)
-    _pages[(user_id, token)] = _FiledMonth(
-        endpoint_key, year, month,
-        tuple(_FiledCard(group["date"], item.mark_key, item.title_key,
-                         calendar_state.item_spellings(item))
-              for group in grouped for item in group["items"]), moment, moment)
+    _pages[(user_id, token)] = _FiledMonth(endpoint_key, year, month, cards, moment, moment)
     return token
 
 
 def _filed_month(user_id: int, token: str, endpoint_key: str, year: int,
                  month: int) -> _FiledMonth | None:
     """The month `token` filed for this account, when it is this month."""
+    _prune_pages(time.monotonic())
     filed = _pages.get((user_id, token)) if token else None
-    if (filed is None or (filed.endpoint, filed.year, filed.month) != (endpoint_key, year, month)
-            or time.monotonic() - filed.at > _PAGE_SECONDS):
+    if filed is None or (filed.endpoint, filed.year, filed.month) != (endpoint_key, year, month):
         return None
     return filed
 

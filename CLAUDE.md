@@ -809,10 +809,13 @@ buttons arrive in their state. The page keeps no marks of its own — a mark pos
 and its answer redraws every card for that title — so a day landing while a mark
 is in flight is drawn from whichever reached the database first, and the other's
 answer redraws it. THE SHELL FILES THE MONTH IT DREW (`_file_month`: each card's
-day, title and every spelling a mark names it by, in process, bounded) under a
-page token every mark and late day carries, and a mark recounts the month's
-numbers and chips from it while drawing its title's own rows — a mark that read
-the month again took 1.5 s. A DAY THAT ARRIVES AFTER ITS MONTH CHANGED draws the
+day, title and every spelling a mark names it by, equal values one object per
+page, in process) under a page token every mark and late day carries, and a mark
+recounts the month's numbers and chips from it while drawing its title's own
+rows — a mark that read the month again took 1.5 s. THE STORE IS BOUNDED BY WHAT
+IT HOLDS (`_FILED_CARDS_MAX` cards in all, as well as `_PAGES_MAX` pages and
+`_PAGE_SECONDS`, pruned whenever it is touched): an unfiltered month files
+~18,000 cards, and 256 of those pages were 3.4 GB. A DAY THAT ARRIVES AFTER ITS MONTH CHANGED draws the
 store as it is now — the only thing it can draw: a card that went has no rows — and
 when what it draws is not what the shell filed for that day, it says so for the
 whole page, out of band (`_month_changed.html`). The page also asks once a minute
