@@ -20,7 +20,7 @@ import time
 from typing import Any, Mapping, NamedTuple
 
 from . import arr, seer
-from .. import perftrace
+from .. import after_response, perftrace
 from ..config import load_settings
 
 logger = logging.getLogger(__name__)
@@ -140,7 +140,9 @@ def library_snapshot() -> dict:
     actually looking and stops when they are not, and no request ever pays for it.
     """
     if (time.time() - LIBRARY_CACHE["_ts"]) >= LIBRARY_TTL:
-        _spawn_refresh()
+        # Once this request has answered (after_response): the read is three
+        # services' worth of requests the page that noticed it must not race.
+        after_response.later(_spawn_refresh)
     return {k: LIBRARY_CACHE[k] for k in ("sonarr", "radarr", "seer")}
 
 

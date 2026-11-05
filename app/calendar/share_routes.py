@@ -44,7 +44,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse,
 from . import (cache as calendar_cache, resolve as calendar_resolve,
                share_card, share_card_cache, share_code, share_links,
                state as calendar_state, vocab)
-from .. import auth, authz, chrome, clock, details_panel, perftrace, route_params
+from .. import after_response, auth, authz, chrome, clock, details_panel, perftrace, route_params
 from ..auth import AuthLevel
 from ..authz import Guard
 from ..config import load_settings
@@ -1022,8 +1022,8 @@ _warm_tasks: set[asyncio.Task] = set()
 
 def _spawn_poster_warm(view: ShareView, owner_id: int, visible: Sequence[Item],
                        settings, order: tuple[str, ...]) -> None:
-    """Start resolving the artwork this month's card will want, and return
-    immediately.
+    """Start resolving the artwork this month's card will want once the page
+    has been answered (after_response), and return immediately.
 
     A REAL TASK with its exceptions swallowed, not a bare un-awaited coroutine —
     that is a RuntimeWarning and no warm at all — because nothing here may affect
@@ -1039,7 +1039,14 @@ def _spawn_poster_warm(view: ShareView, owner_id: int, visible: Sequence[Item],
     if key in _warming or len(_warming) >= _WARM_CEILING:
         return
     refs = [(item, ref) for item, ref in _poster_refs(select_tile_items(visible))]
-    if not refs:
+    if refs:
+        after_response.later(lambda: _start_poster_warm(key, refs, settings, order))
+
+
+def _start_poster_warm(key: tuple, refs, settings, order: tuple[str, ...]) -> None:
+    # Asked again as it starts: another page of the same month may have begun
+    # its warm while this one was being answered.
+    if key in _warming or len(_warming) >= _WARM_CEILING:
         return
     _warming.add(key)
     task = asyncio.create_task(_warm_job(key, refs, settings, order))

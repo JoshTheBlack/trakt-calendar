@@ -86,7 +86,7 @@ from typing import Any, NamedTuple
 
 from . import cache as calendar_cache
 from . import entries
-from .. import db
+from .. import after_response, db
 from .. import perftrace
 from ..metadata import refresh as metadata_refresh
 from ..metadata import rows as title_rows
@@ -1442,7 +1442,9 @@ def schedule_drain(settings) -> None:
     FIRE AND FORGET, ON PURPOSE, AND NEVER AWAITED BY THE CALLER. The caller
     is a request that just finished fetching and storing a calendar window;
     it must not wait on enrichment to answer that request, so this schedules
-    the work as a background task and returns immediately. Coalescing is
+    the work as a background task, started once that request's answer has
+    been sent (after_response) — a drain's lookups do not run beside the page
+    that asked for them — and returns immediately. Coalescing is
     `run_drain`'s job, not this function's — calling this while a pass is
     already running is exactly as safe as calling it while nothing is
     running, because `run_drain` folds a busy call into the rerun flag rather
@@ -1459,6 +1461,10 @@ def schedule_drain(settings) -> None:
         asyncio.get_running_loop()
     except RuntimeError:
         return
+    after_response.later(lambda: _start_drain(settings))
+
+
+def _start_drain(settings) -> None:
     task = asyncio.create_task(run_drain(settings))
     _drain_tasks.add(task)
     task.add_done_callback(_forget_drain_task)

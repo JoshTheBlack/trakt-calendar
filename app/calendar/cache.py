@@ -1201,12 +1201,23 @@ def _note_pending(endpoint: Endpoint, start: date, source: str, ready) -> None:
 
 def _follow_pending(endpoint: Endpoint, settings, start: date) -> None:
     """Start the follow-up of every source this window is waiting on that has
-    none yet — called by the store, once the window's own rows are written."""
+    none yet — called by the store, once the window's own rows are written,
+    and started once the request it stored for has answered (after_response):
+    the answer it waits for fills the window behind the page, not beside it."""
     for key, held in list(_pending.items()):
-        if key[:2] != (endpoint.key, start.isoformat()) or held.follow_up is not None:
-            continue
-        task = asyncio.create_task(_follow_up(endpoint, settings, start, key[2], held.ready))
-        _pending[key] = held._replace(follow_up=task)
+        if key[:2] == (endpoint.key, start.isoformat()) and held.follow_up is None:
+            after_response.later(lambda key=key: _start_follow_up(endpoint, settings, start, key))
+
+
+def _start_follow_up(endpoint: Endpoint, settings, start: date,
+                     key: tuple[str, str, str]) -> None:
+    # Asked again as it starts: a store of the same window may have started one
+    # in between, or the source been given up on.
+    held = _pending.get(key)
+    if held is None or held.follow_up is not None:
+        return
+    task = asyncio.create_task(_follow_up(endpoint, settings, start, key[2], held.ready))
+    _pending[key] = held._replace(follow_up=task)
 
 
 async def _follow_up(endpoint: Endpoint, settings, start: date, source: str, ready) -> None:

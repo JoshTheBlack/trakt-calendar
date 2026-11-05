@@ -139,6 +139,20 @@ per store, MEASURED on a harness copy) — so a write belongs in `transaction` o
 (`entries.store_span`): every other write waits behind a turn's deciding, and a
 Simkl month decided in one turn kept a one-row write waiting 3.2–3.4 s.
 
+**Work a request starts behind itself starts once its answer has been sent.**
+`app/after_response.py` owns it: `later(start)` holds a starter until the
+response's last byte has gone (a pure ASGI middleware, outermost), and starts it
+at once outside a request. Every starter of background work a request reaches
+goes through it — a stale week's refill, a pending answer's follow-up, the
+enrichment drain a fill asks for, the title store's refresh after a view, a
+page's network-logo warm-up, a share page's poster warm, a lapsed library read,
+TMDB's season-premieres worker — each checking again as it starts what it
+checked before. Started during the page, they ran beside it: a filter save's
+logo look-ups ran beside its 718-card render. The tracker's watchlist pass is
+the one exception and says why: it rides on Starlette's background task, which
+attaches only to an answer the route gave, so a request its access check refuses
+starts nothing. `tests/kernel/test_after_response.py` holds every starter to it.
+
 **The session ROW is the authority on expiry, not the cookie.**
 `app/auth/cookies.py` issues it HttpOnly, SameSite=Lax, Path=/, no Domain, and
 Secure with the `__Host-` name unless the Secure policy says otherwise; its

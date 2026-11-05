@@ -53,7 +53,7 @@ from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from .. import db, providers
+from .. import after_response, db, providers
 from ..providers import detail_source
 from ..providers.base import Media, SourceUnavailable
 from . import descriptions, episodes, groups, holders, identity, rows, tables
@@ -323,15 +323,16 @@ async def queue_viewed(settings, wanted: Iterable[Wanted], *, budget: int,
 def viewed(settings, wanted: Iterable[Wanted], *, budget: int, missing: bool = True) -> None:
     """A page has drawn these titles: queue their due rows (`queue_viewed`) and
     start a pass over them — BEHIND THE PAGE, as a task of its own that the
-    caller never waits for. The page has already drawn what the store holds;
-    nothing it shows depends on this, so neither it nor the next request on the
+    caller never waits for, started once the page's answer has been sent
+    (after_response). The page has already drawn what the store holds; nothing
+    it shows depends on this, so neither it nor the next request on the
     connection pays for the read that decides what is due (about fifty
-    milliseconds for a calendar month of 1,500 titles on the development copy).
-    A view whose queueing fails costs nothing but one more view before it is
-    queued."""
+    milliseconds for a calendar month of 1,500 titles on the development copy),
+    nor for the requests the pass makes. A view whose queueing fails costs
+    nothing but one more view before it is queued."""
     wanted = list(wanted)
     if wanted and budget > 0:
-        start(_queue_then_run(settings, wanted, budget, missing))
+        after_response.later(lambda: start(_queue_then_run(settings, wanted, budget, missing)))
 
 
 async def _queue_then_run(settings, wanted: list[Wanted], budget: int, missing: bool) -> None:

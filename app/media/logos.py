@@ -46,7 +46,7 @@ from typing import NamedTuple
 import anyio.to_thread
 from PIL import Image, ImageDraw
 
-from .. import db
+from .. import after_response, db
 from ..config import DATA_DIR
 from ..perftrace import span
 from ..providers.base import Media, proxied_image
@@ -427,7 +427,15 @@ _warming: asyncio.Task | None = None
 
 
 def warm_later(settings, roster: dict[str, Sequence]) -> None:
-    """Resolve what `roster` lacks off the back of the request that found it."""
+    """Resolve what `roster` lacks behind the request that found it — started
+    once that request's answer has been sent (after_response). Started while
+    the page was still being drawn, its TMDB look-ups ran beside the render:
+    MEASURED on the development server, a filter save's month drew 718 cards in
+    3.7 s with the look-ups its own read had just started running beside it."""
+    after_response.later(lambda: _start_warm(settings, roster))
+
+
+def _start_warm(settings, roster: dict[str, Sequence]) -> None:
     global _warming
     if _warming is not None:
         return

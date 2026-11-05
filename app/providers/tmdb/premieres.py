@@ -41,7 +41,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from typing import NamedTuple
 
-from ... import cache, db, perftrace
+from ... import after_response, cache, db, perftrace
 from ...config import Settings
 from ..base import Media, Record, SourcePending
 from . import detail, discover, normalize, transport
@@ -183,7 +183,9 @@ def _running_loop():
 def work(settings: Settings, span: Span) -> asyncio.Future:
     """Have `span` worked out — joining it if it is already waiting — and return
     the future that finishes when it is (and raises when it failed). Starts the
-    worker that works the spans out one at a time, and returns at once."""
+    worker that works the spans out one at a time — once the request that asked
+    has answered (after_response), so its few hundred requests a span do not
+    begin beside that page — and returns at once."""
     global _worker, _loop
     loop = asyncio.get_running_loop()
     if _loop is not loop:
@@ -199,9 +201,14 @@ def work(settings: Settings, span: Span) -> asyncio.Future:
         _waiting[span] = job
         logger.info("TMDB season premieres: the days %s are queued to be worked out "
                     "(%d waiting)", span, len(_waiting))
-    if _worker is None or _worker.done():
-        _worker = loop.create_task(_work_through())
+    after_response.later(_start_worker)
     return job.done
+
+
+def _start_worker() -> None:
+    global _worker
+    if _worker is None or _worker.done():
+        _worker = asyncio.get_running_loop().create_task(_work_through())
 
 
 async def _work_through() -> None:
