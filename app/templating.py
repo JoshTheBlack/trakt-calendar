@@ -41,10 +41,27 @@ TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 DEDENT_MARKER = "{#- dedent -#}"
 _LEADING_WHITESPACE = re.compile(r"^[ \t]+", re.M)
 
+# AND ONE THAT OPENS WITH THIS IS SENT WITHOUT THE LINE BREAKS BETWEEN ITS TAGS
+# TOO: a newline that follows a tag's `>` or a statement or comment tag (`%}`,
+# `#}`) and precedes a tag or a statement or comment tag goes — never one beside
+# an EXPRESSION, whose output may be text a newline was spacing. Each such
+# newline is a text node of its own in the browser, which a card drew sixty of:
+# MEASURED on one October's All Episodes, 61 of a card's 84 text nodes were
+# whitespace between its tags. FOR A TEMPLATE WHOSE EVERY CONTAINER LAYS OUT BY
+# FLEX OR GRID, OR POSITIONS WHAT IT HOLDS, where whitespace between tags draws
+# nothing — the calendar card and what it is built from — and only those: in
+# ordinary inline flow a line break between two tags is a visible space. A line
+# break is `\r\n` as well as `\n`: the loader hands the source over undecoded, and
+# a template saved by an editor that writes CRLF would otherwise silently stop
+# being tightened.
+TIGHT_MARKER = "{#- tight -#}"
+_BETWEEN_TAGS = re.compile(r"(?:(?<=>)|(?<=%\})|(?<=#\}))\r?\n(?=<|\{%|\{#)")
+
 
 class Dedent(Extension):
     """Strips each line's leading whitespace from a template that opens with
-    DEDENT_MARKER, AT COMPILE TIME — once per template, not once per render.
+    DEDENT_MARKER or TIGHT_MARKER, AT COMPILE TIME — once per template, not once
+    per render — and, behind TIGHT_MARKER, the line breaks between its tags.
 
     Only LEADING whitespace, and the newline stays. HTML collapses a run of
     whitespace between tags to the same single space a newline already is, so
@@ -54,6 +71,8 @@ class Dedent(Extension):
     every template being changed under its author."""
 
     def preprocess(self, source: str, name: str | None, filename: str | None = None) -> str:
+        if source.startswith(TIGHT_MARKER):
+            return _BETWEEN_TAGS.sub("", _LEADING_WHITESPACE.sub("", source))
         if not source.startswith(DEDENT_MARKER):
             return source
         return _LEADING_WHITESPACE.sub("", source)

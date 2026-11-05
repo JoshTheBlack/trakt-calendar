@@ -608,7 +608,13 @@ SAME GOES FOR A BADGE'S THREE FILTER BUTTONS: the badge's `<summary>` asks for
 them `click once` from `/calendar/fragments/badge` (`_filter_offer.html`, the
 same for everybody — the stored answer is the badge's mark, drawn with the card)
 and they land after it, never with the card: 6.2 KB and 29.5 elements of every
-card.
+card. AND A CARD'S TEMPLATES SEND NO WHITESPACE BETWEEN THEIR TAGS: they open
+with `{#- tight -#}` (app/templating.py's `Dedent`, at compile time: each line's
+indentation, and a line break between tags or statement tags — never beside an
+expression's output), because every container in a card lays out by flex or grid
+or positions what it holds; a template in ordinary inline flow may not opt in,
+since a line break between two inline tags is a visible space there. MEASURED,
+the same October: text nodes 84 -> 23 a card, the documents otherwise identical.
 
 **A viewer's filters are per MEDIUM, and one function turns a medium into
 columns.** `app/calendar/vocab.py` owns it: `TV_FIELDS`/`MOVIE_FIELDS` say which

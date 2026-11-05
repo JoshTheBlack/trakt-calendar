@@ -1,3 +1,4 @@
+{#- tight -#}
 {# One calendar card. The ONLY place card markup lives, so the full page and any
    fragment that returns days render byte-identical cards.
 
@@ -367,11 +368,11 @@
                holds its id — has a page too, and its button is drawn greyed
                (`listed`), so the colour still says whose calendars the card came
                from (resolve.resolve_records, detail_source.service_links). #}
-            {% for link in item.links %}
-            {{ src.link(link.source, link.url, link.listed) }}
-            {% else %}
-            {{ src.link(item.source|string, item.detail_url) }}
-            {% endfor %}
+            {%- for link in item.links %}
+            {{- src.link(link.source, link.url, link.listed) }}
+            {%- else %}
+            {{- src.link(item.source|string, item.detail_url) }}
+            {%- endfor %}
             {#- THE ADD-TO-LIBRARY BUTTONS, for an administrator, drawn in the
                 state they are in. `library` is app/integrations/routes.py's
                 LibraryView — the server's own record of which services can be
