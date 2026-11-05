@@ -752,9 +752,23 @@ body.hide-not-watching .card.not-watching:not(#jump-target) { display: none; }
    its cards at all.
    A DAY HOLDING THE JUMP'S CARD IS NOT EMPTY, however marked the rest of it is:
    a card made visible inside a collapsed day is still nowhere (measured: a day
-   whose every title was marked stayed display none around the anchor). */
-body.hide-not-watching .day-block:not(.is-skeleton):not(:has(.card:is(:not(.not-watching), #jump-target))),
+   whose every title was marked stayed display none around the anchor).
+   NOR IS A BIG DAY WITH ITS REST STILL TO SHOW: the cards behind its control
+   (`.day-more`, app/calendar/day_pages.py) are not on the page to be asked. */
+body.hide-not-watching .day-block:not(.is-skeleton):not(:has(.card:is(:not(.not-watching), #jump-target))):not(:has(.day-more)),
 body.hide-not-watching .day-block.is-skeleton[data-visible="0"] { display: none; }
+/* A BIG DAY'S "SHOW THE OTHER N" (_day_more.html), and what answers it when
+   there is nothing to show: a row of its own at the end of the day's cards,
+   across every column of the grid and the whole width of the poster wall. */
+.day-more, .day-more-note { grid-column: 1 / -1; flex: 1 0 100%; justify-self: center; }
+.day-more {
+    padding: 10px 22px; border-radius: 999px; border: 1px solid var(--card-border);
+    background: var(--bg-panel); color: var(--text); font: inherit; font-weight: 600;
+    font-size: 0.85rem; cursor: pointer;
+}
+.day-more:hover, .day-more:focus-visible { border-color: var(--gold-soft); outline: none; }
+.day-more.htmx-request { opacity: 0.6; cursor: progress; }
+.day-more-note { margin: 0; text-align: center; color: var(--text-dim); font-size: 0.85rem; }
 
 .poster-wrap { position: relative; width: 100%; aspect-ratio: 2/3; background: linear-gradient(135deg, #1c2130, #10131b); overflow: hidden; }
 .poster-wrap img { width: 100%; height: 100%; object-fit: cover; transition: filter .22s ease; }

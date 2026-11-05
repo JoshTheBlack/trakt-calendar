@@ -2229,7 +2229,98 @@ class TheCardDrawnWholeTests(CalendarRouteTestCase):
         self.assertIn(self._get().status_code, (302, 303, 401, 403))
 
 
+class BigDaysArePagedTests(CalendarRouteTestCase):
+    """A day holding more than a page of cards draws its first page and a
+    control that asks for the rest (app/calendar/day_pages.py) — the page here is
+    two cards — while its count, its chip and what the shell filed stay the
+    whole day's."""
+
+    PAGE = "/calendar?endpoint=shows&year=2026&month=7"
+    BIG = "2026-07-15"
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("big_day_viewer")
+        self.sign_in_as(self.user_id)
+        self.entries = [_entry(f"show-{n}", f"Show {n}", f"2026-07-15T{10 + n:02d}:00:00Z")
+                        for n in range(5)]
+        # Two quiet days first, so the big day is a late one.
+        self.entries += [_entry(f"early-{n}", f"Early {n}", f"2026-07-0{n + 1}T20:00:00Z")
+                         for n in range(calendar_routes.INITIAL_DAY_BLOCKS)]
+        fetch = patch("app.calendar.cache.fetch_window_records",
+                      window_fetch(lambda endpoint, start: self.entries))
+        fetch.start()
+        self.addCleanup(fetch.stop)
+        page = patch.object(calendar_routes.day_pages, "DAY_PAGE_CARDS", 2)
+        page.start()
+        self.addCleanup(page.stop)
+
+    def _late_day(self) -> str:
+        shell = self.client.get(self.PAGE).text
+        url = next(url for url in _day_urls(shell) if f"date={self.BIG}" in url)
+        return self.client.get(url).text
+
+    @staticmethod
+    def _rest_url(html: str) -> str:
+        return re.search(r'hx-get="(/calendar/day/rest\?t=[A-Za-z0-9_-]+)"', html).group(1)
+
+    def test_a_big_day_draws_its_first_page_and_counts_the_whole_day(self):
+        html = self._late_day()
+        self.assertEqual(len(re.findall(r'data-airing="[0-9a-f]{16}"', html)), 2)
+        self.assertIn("5 items", html)
+        self.assertIn("Show the other 3", html)
+        self.assertIn(f'id="day-chip-{self.BIG}"', html)
+        self.assertIn('title="5 items"', html)
+
+    def test_the_rest_draws_every_other_card_and_nothing_twice(self):
+        html = self._late_day()
+        first = set(re.findall(r'data-airing="([0-9a-f]{16})"', html))
+        rest = self.client.get(self._rest_url(html))
+        self.assertEqual(rest.status_code, 200)
+        others = set(re.findall(r'data-airing="([0-9a-f]{16})"', rest.text))
+        self.assertEqual(len(others), 3)
+        self.assertFalse(first & others)
+        self.assertNotIn("day-block", rest.text)
+        self.assertNotIn("monthChanged", rest.text)
+
+    def test_another_accounts_control_draws_nothing_of_theirs(self):
+        url = self._rest_url(self._late_day())
+        self.sign_in_as(self._make_user("somebody_else"))
+        answer = self.client.get(url)
+        self.assertEqual(answer.status_code, 200)
+        self.assertNotIn("data-airing", answer.text)
+        self.assertIn("open too long", answer.text)
+
+    def test_an_edited_control_draws_nothing(self):
+        url = self._rest_url(self._late_day())
+        edited = url[:-3] + ("AAA" if not url.endswith("AAA") else "BBB")
+        self.assertNotIn("data-airing", self.client.get(edited).text)
+
+    def test_a_day_changed_since_the_page_says_so_with_its_rest(self):
+        html = self._late_day()
+        self.entries.append(_entry("show-late", "Show Late", "2026-07-15T15:30:00Z"))
+        asyncio.run(support.load_window(get_endpoint("shows"), _configured_settings(),
+                                        calendar_cache.window_start(date(2026, 7, 15)),
+                                        force=True))
+        rest = self.client.get(self._rest_url(html)).text
+        self.assertIn('id="monthChanged" class="warning-banner"', rest)
+
+    def test_an_inline_big_day_is_paged_too(self):
+        self.entries = [_entry(f"show-{n}", f"Show {n}", f"2026-07-01T{10 + n:02d}:00:00Z")
+                        for n in range(5)]
+        shell = self.client.get(self.PAGE).text
+        self.assertIn("Show the other 3", shell)
+        self.assertEqual(_stat(shell, "statTotal"), "5")
+
+    def test_the_card_a_jump_names_is_drawn_wherever_it_falls_in_its_day(self):
+        shell = self.client.get(
+            f"{self.PAGE}&highlight={quote(_mark_key('show-4'))}&day={self.BIG}").text
+        self.assertIn('id="jump-target"', shell)
+        self.assertIn("Show 4", shell)
+
+
 class ABadgesButtonsOnDemandTests(CalendarRouteTestCase):
+
     """`/calendar/fragments/badge`: the three buttons a card badge asks for the
     first time it is opened."""
 

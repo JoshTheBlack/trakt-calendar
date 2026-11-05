@@ -36,6 +36,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from markupsafe import Markup
 
+from . import day_pages
 from . import (cache as calendar_cache, enrich as calendar_enrich,
                entries as calendar_entries, filter as calendar_filter, query as calendar_query,
                resolve as calendar_resolve, search as calendar_search,
@@ -204,10 +205,12 @@ def _requested_endpoint(request: Request, prefs: dict, settings):
     )
 
 
-async def _viewer_source_selection(request: Request, user, media=None) -> source_prefs.SourcePrefs:
+async def _viewer_source_selection(request: Request, user, media=None, *,
+                                   source: str | None = None) -> source_prefs.SourcePrefs:
     """This viewer's saved source preferences for `media`, with `calendar_source`
     swapped for a `?source=` override when the query names one of the app's own
-    selections.
+    selections — or `source`, where the override arrived some other way (a big
+    day's signed control, `day_pages.Rest.source`).
 
     `media` NARROWS FIRST AND THE OVERRIDE STILL WINS, which is the order the two
     want: the medium picks which of the account's two saved answers is in play,
@@ -227,7 +230,7 @@ async def _viewer_source_selection(request: Request, user, media=None) -> source
     saved = await source_prefs.load(user.user_id)
     if media is not None:
         saved = saved.for_media(media)
-    requested = request.query_params.get("source")
+    requested = source if source is not None else request.query_params.get("source")
     if requested and source_prefs.is_selection(requested):
         return dataclasses.replace(saved, calendar_source=requested)
     return saved
@@ -811,22 +814,40 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
         user.user_id, endpoint.key, year, month, month_view.new_ids)
     page_token = (_file_month(user.user_id, endpoint.key, year, month, month_view.grouped)
                   if month_view.error is None else "")
+    # THE CHIPS COUNT THE WHOLE MONTH, so they are worked out before the inline
+    # days are swapped for what they draw — which, for a big day, is its first
+    # page alone.
+    day_chips = _day_chips(month_view, year, month, days, month_view.not_watching_keys,
+                           view["hide_not_watching"], anchor)
     # THE INLINE DAYS ARE DRAWN NOW, AND ONLY THEY: the month's cards were read
     # for their identity and day alone, and a day after them is drawn when it is
     # scrolled to (`calendar_day`). The jump's card is the drawn one, which is
-    # what the template's identity test asks about.
+    # what the template's identity test asks about. A BIG DAY DRAWS ITS FIRST
+    # PAGE and the control that asks for the rest (app/calendar/day_pages.py) —
+    # as far as the jump's card, wherever that falls in it.
+    pages = {index: day_pages.first_page(
+                 len(month_view.grouped[index]["items"]),
+                 next((at for at, view in enumerate(month_view.grouped[index]["items"])
+                       if view is anchor), None))
+             for index in inline}
     drawn = await calendar_cache.present(
         endpoint, settings, [view for index in sorted(inline)
-                             for view in month_view.grouped[index]["items"]],
+                             for view in month_view.grouped[index]["items"][:pages[index]]],
         tz=tz, prefs=source_selection,
         **vocab.active_specs(prefs, endpoint.media, honour_pause=True))
     season_lines = await _season_lines(settings, drawn)
     drawn_as = iter(drawn)
     for index in sorted(inline):
         group = month_view.grouped[index]
-        views, group["items"] = group["items"], [next(drawn_as) for _ in group["items"]]
+        views, group["items"] = group["items"], [next(drawn_as) for _ in range(pages[index])]
         if anchor is not None and any(view is anchor for view in views):
             anchor = group["items"][[id(view) for view in views].index(id(anchor))]
+        if pages[index] < len(views):
+            group["more"] = {
+                "count": len(views) - pages[index],
+                "url": _rest_url(user.user_id, endpoint.key, date.fromisoformat(group["date"]),
+                                 pages[index], source=request.query_params.get("source"),
+                                 new=new_token, page=page_token)}
     for index, group in enumerate(month_view.grouped):
         group["inline"] = index in inline
         if not group["inline"]:
@@ -892,9 +913,7 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
         # EVERY CONSUMER GETS THE EXPANDED SET, not the raw stored one. Mixing
         # the two is how a mark hides a card but not its day's chip: the card
         # asks about `mark_key` and the chip would be counting raw ids.
-        "day_chips": _day_chips(month_view, year, month, days,
-                                month_view.not_watching_keys,
-                                view["hide_not_watching"], anchor),
+        "day_chips": day_chips,
         "error": month_view.error,
         "partial": month_view.partial,
         "unenriched": month_view.unenriched,
@@ -1304,6 +1323,16 @@ def _day_url(endpoint_key: str, day: date, *, source: str | None = None,
     return url
 
 
+def _rest_url(user_id: int, endpoint_key: str, day: date, drawn: int, *,
+              source: str | None = None, new: str = "", page: str = "") -> str:
+    """The address a big day's "show the rest" control asks (`calendar_day_rest`):
+    one signed token (app/calendar/day_pages.py) naming this account, the
+    calendar and day, how many of its cards were drawn, and the same references
+    a late day carries."""
+    return "/calendar/day/rest?t=" + day_pages.token(day_pages.Rest(
+        user_id, endpoint_key, day, drawn, source or "", new or "", page or "", db.now()))
+
+
 def _card_url(endpoint_key: str, year: int, month: int, item, *, source: str | None = None,
               new: str = "", page: str = "") -> str:
     """The address a card's one compare control fetches the card drawn whole
@@ -1440,17 +1469,62 @@ async def calendar_day(request: Request):
         return JSONResponse({"ok": False, "error": "Invalid date"}, status_code=400)
     if not settings.calendar_source_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+    try:
+        context, group, meta = await _draw_day(
+            request, user, settings, prefs, endpoint, year, month, day,
+            source=request.query_params.get("source"), new=request.query_params.get("new") or "",
+            page=_page_token(request), skip=0)
+    except _DayFailed as failed:
+        # The shell is already on screen with the month's real numbers, so one day
+        # failing is a gap in the month, not a broken page. It replaces itself with
+        # a block that says so and offers to try again, rather than sitting there
+        # as a placeholder that looks like it is still loading.
+        return templates.TemplateResponse(
+            request, "_day_fragment.html", {**failed.context, "group": None,
+                                            "error": failed.message})
+    return await templating.drawn(
+        request, "_day_fragment.html",
+        # A day with nothing on it groups to nothing; the fragment then renders
+        # empty and the placeholder it replaces simply disappears, which is what an
+        # empty day should look like.
+        {**context, "group": group, "error": None, "partial": meta["partial"]},
+    )
 
+
+class _DayFailed(Exception):
+    """A day that could not be read, with what its error block is drawn from."""
+
+    def __init__(self, context: dict, message: str):
+        super().__init__(message)
+        self.context, self.message = context, message
+
+
+async def _draw_day(request: Request, user, settings, prefs, endpoint, year: int, month: int,
+                    day: date, *, source: str | None, new: str, page: str, skip: int
+                    ) -> tuple[dict, dict | None, dict]:
+    """ONE DAY READ AND DRAWN for a viewer, from its `skip`th card — what a late
+    day draws (skip 0: its first page, app/calendar/day_pages.py) and what a big
+    day's "show the rest" control draws (the rest). (context, the day's group or
+    None for a day holding nothing, the read's numbers); raises _DayFailed.
+
+    THE DAY IS READ WHOLE AND DRAWN IN PART: its chip, and whether it is still
+    the day the shell counted (`month_changed`), are about every card on it,
+    which a page of it cannot answer; only the cards drawn are worked out in
+    full (calendar_cache.present).
+
+    Everything that decides WHAT this viewer may see comes from their session:
+    the per-user filters and their not-watching marks are read here, never taken
+    from the request, so this cannot be asked for someone else's view or for an
+    unfiltered day."""
     # Same source selection the shell resolved for this month — see _day_url:
     # the placeholder it built for this day already carries the same `source`
     # override, so this read asks the same source(s) the shell's own numbers
     # for the month were computed from.
-    source_selection = await _viewer_source_selection(request, user, endpoint.media)
-
+    source_selection = await _viewer_source_selection(request, user, endpoint.media,
+                                                      source=source or "")
+    specs = vocab.active_specs(prefs, endpoint.media, honour_pause=True)
     tz = _resolve_viewer_tz(user, settings)
     not_watching = await calendar_state.not_watching_ids(user.user_id)
-    new = await _new_marks(user.user_id, endpoint.key, year, month,
-                           request.query_params.get("new") or "")
     context = {
         "request": request, "not_watching": not_watching,
         # WHICH MONTH THIS DAY IS ON, for the watch toggle on each of its cards:
@@ -1461,23 +1535,23 @@ async def calendar_day(request: Request):
         # carrying the same stored answers (vocab.BadgeModes).
         "can_filter": True,
         "badge_modes": vocab.BadgeModes(prefs),
-        # The shell's is-new answer, for the cards on this day — see the docstring.
-        "new_ids": new,
+        # THE SHELL'S IS-NEW ANSWER, for the cards on this day. The diff and its
+        # baseline commit are a whole-month decision the shell already made and
+        # wrote; this reads the answer it filed back as the account making the
+        # request (`_new_marks`), and a token naming nothing marks nothing.
+        "new_ids": await _new_marks(user.user_id, endpoint.key, year, month, new),
         # And the month it filed, which a mark on one of these cards recounts.
-        "page_token": _page_token(request),
+        "page_token": page,
         "settings": settings, "is_admin": bool(user and user.is_admin),
         # And the same add-to-library buttons, in the state they are in.
         "library": _library(user, settings),
         "card_pictures": await _card_pictures(user, settings),
         "card_expand": partial(_card_url, endpoint.key, year, month,
-                               source=request.query_params.get("source"),
-                               new=request.query_params.get("new") or "",
-                               page=_page_token(request)),
+                               source=source, new=new, page=page),
         "date": day.isoformat(), "label": calendar_cache.day_label(day),
         # The retry asks for exactly what the placeholder did, token included —
         # which is the whole of what a retry now has to carry forward.
-        "retry_url": _day_url(endpoint.key, day, source=request.query_params.get("source"),
-                              new=request.query_params.get("new") or ""),
+        "retry_url": _day_url(endpoint.key, day, source=source, new=new),
         "partial": False,
         # Replaced below once this day's items are known; the error path renders
         # no cards, so an empty set is the right answer for it.
@@ -1486,58 +1560,82 @@ async def calendar_day(request: Request):
     try:
         with span("calendar.day", endpoint=endpoint.key, day=day.isoformat()) as sp:
             grouped, meta = await calendar_cache.assemble_range(
-                endpoint, settings, tz=tz, start_date=day, end_date=day,
-                **vocab.active_specs(prefs, endpoint.media, honour_pause=True),
-                not_watching_ids=not_watching,
-                prefs=source_selection,
-            )
+                endpoint, settings, tz=tz, start_date=day, end_date=day, **specs,
+                not_watching_ids=not_watching, prefs=source_selection, drawn=False)
             sp.set(items=meta["total"])
-        # The expanded marks for THIS day's items, from the same assembler the
-        # shell used — a day fetched late must decide "is this marked" by exactly
-        # the rule the shell's own blocks were drawn with.
-        context["not_watching"] = meta["not_watching_keys"]
-        context["logo_networks"] = await _logo_networks(
-            settings, [item for group in grouped for item in group["items"]])
-        context["season_lines"] = await _season_lines(
-            settings, [item for group in grouped for item in group["items"]])
-        # NOTHING LAYS THIS DAY OUT: it arrives with its cards, and how wide it is
-        # and whether hide mode empties it are the stylesheet's questions about
-        # those cards (style.css's `--cols`), asked the moment it lands and asked
-        # again every time a mark changes the answer.
-        # Its chip in the jump-to strip is still the server's, drawn by the rule
-        # the shell's came from, so a day that arrives collapsed stops being a
-        # destination there.
-        if grouped:
-            context["chip"] = _day_chip(day, grouped[0]["items"], meta["not_watching_keys"],
-                                        prefs["hide_not_watching"])
-        # WHAT THE SHELL COUNTED FOR THIS DAY, against what the day draws now. A
-        # refill can land between the two (_month_changed.html has the case), and
-        # the day draws what the store holds — the only thing it can draw — so
-        # where they differ it is the page's numbers that went stale, and the day
-        # says so for the whole page.
-        filed = _filed_month(user.user_id, _page_token(request), endpoint.key, year, month)
-        if filed is not None:
-            counted = sorted(key for on, key in filed.drawn() if on == day.isoformat())
-            context["month_changed"] = counted != sorted(
-                item.mark_key for group in grouped for item in group["items"])
-            context["month_url"] = _month_url(endpoint.key, year, month,
-                                              source=request.query_params.get("source"))
     except TraktError as exc:
-        # The shell is already on screen with the month's real numbers, so one day
-        # failing is a gap in the month, not a broken page. It replaces itself with
-        # a block that says so and offers to try again, rather than sitting there
-        # as a placeholder that looks like it is still loading.
-        return templates.TemplateResponse(
-            request, "_day_fragment.html", {**context, "group": None, "error": str(exc)})
+        raise _DayFailed(context, str(exc)) from exc
+    views = grouped[0]["items"] if grouped else []
+    # The expanded marks for THIS day's items, from the same assembler the
+    # shell used — a day fetched late must decide "is this marked" by exactly
+    # the rule the shell's own blocks were drawn with.
+    context["not_watching"] = meta["not_watching_keys"]
+    # NOTHING LAYS THIS DAY OUT: it arrives with its cards, and how wide it is
+    # and whether hide mode empties it are the stylesheet's questions about
+    # those cards (style.css's `--cols`), asked the moment it lands and asked
+    # again every time a mark changes the answer.
+    # Its chip in the jump-to strip is still the server's, drawn by the rule
+    # the shell's came from, so a day that arrives collapsed stops being a
+    # destination there.
+    if views:
+        context["chip"] = _day_chip(day, views, meta["not_watching_keys"],
+                                    prefs["hide_not_watching"])
+    # WHAT THE SHELL COUNTED FOR THIS DAY, against what the day holds now. A
+    # refill can land between the two (_month_changed.html has the case), and
+    # the day draws what the store holds — the only thing it can draw — so
+    # where they differ it is the page's numbers that went stale, and the day
+    # says so for the whole page.
+    filed = _filed_month(user.user_id, page, endpoint.key, year, month)
+    if filed is not None:
+        counted = sorted(key for on, key in filed.drawn() if on == day.isoformat())
+        context["month_changed"] = counted != sorted(view.mark_key for view in views)
+        context["month_url"] = _month_url(endpoint.key, year, month, source=source)
+    upto = day_pages.first_page(len(views)) if skip == 0 else len(views)
+    items = await calendar_cache.present(endpoint, settings, views[skip:upto], tz=tz,
+                                         prefs=source_selection, **specs)
+    context["logo_networks"] = await _logo_networks(settings, items)
+    context["season_lines"] = await _season_lines(settings, items)
+    if not grouped:
+        return context, None, meta
+    group = {**grouped[0], "items": items}
+    if upto < len(views):
+        group["more"] = {"count": len(views) - upto,
+                         "url": _rest_url(user.user_id, endpoint.key, day, upto,
+                                          source=source, new=new, page=page)}
+    return context, group, meta
 
-    return await templating.drawn(
-        request, "_day_fragment.html",
-        # A day with nothing on it groups to nothing; the fragment then renders
-        # empty and the placeholder it replaces simply disappears, which is what an
-        # empty day should look like.
-        {**context, "group": grouped[0] if grouped else None,
-         "error": None, "partial": meta["partial"]},
-    )
+
+@guard.get("/calendar/day/rest", AuthLevel.CALENDAR_APPROVED)
+async def calendar_day_rest(request: Request):
+    """THE REST OF A BIG DAY — every card after the ones its page drew — for the
+    control the day drew in their place (app/calendar/day_pages.py says why a day
+    is drawn in pages). The answer replaces the control: the cards land in the
+    day's own grid, its chip is redrawn out of band, and where the day no longer
+    holds what the shell counted, the page says so (`_draw_day`).
+
+    EVERYTHING IT ACTS ON IS IN ONE SIGNED TOKEN, read as the account making the
+    request: a token another account's page drew, an edited one, or one past its
+    life answers with a sentence and a link to reload, in the control's place."""
+    user = await auth.current_user(request)
+    rest = day_pages.read(request.query_params.get("t") or "", user_id=user.user_id,
+                          now=db.now())
+    endpoint = ENDPOINTS.get(rest.endpoint) if rest is not None else None
+    if (rest is None or endpoint is None
+            or not all(_TOKEN.fullmatch(token) for token in (rest.new, rest.page) if token)):
+        return templates.TemplateResponse(request, "_day_rest.html",
+                                          {"request": request, "refused": True})
+    settings = await load_settings()
+    prefs = await auth.get_user_prefs(user.user_id)
+    day = rest.day
+    try:
+        context, group, _meta = await _draw_day(
+            request, user, settings, prefs, endpoint, day.year, day.month, day,
+            source=rest.source or None, new=rest.new, page=rest.page, skip=rest.drawn)
+    except _DayFailed as failed:
+        return templates.TemplateResponse(request, "_day_rest.html", {
+            **failed.context, "refused": False, "error": failed.message, "group": None})
+    return await templating.drawn(request, "_day_rest.html", {
+        **context, "refused": False, "error": None, "group": group})
 
 
 # What a compare control's `card` and `airing` may be: a title-store key and an

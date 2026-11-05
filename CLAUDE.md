@@ -852,7 +852,18 @@ recounts the month's numbers and chips from it while drawing its title's own
 rows — a mark that read the month again took 1.5 s. THE STORE IS BOUNDED BY WHAT
 IT HOLDS (`_FILED_CARDS_MAX` cards in all, as well as `_PAGES_MAX` pages and
 `_PAGE_SECONDS`, pruned whenever it is touched): an unfiltered month files
-~18,000 cards, and 256 of those pages were 3.4 GB. A DAY THAT ARRIVES AFTER ITS MONTH CHANGED draws the
+~18,000 cards, and 256 of those pages were 3.4 GB. A BIG DAY IS DRAWN IN PAGES
+(app/calendar/day_pages.py, `DAY_PAGE_CARDS`) — the shell's inline day and a late
+day alike (`_draw_day`, the one drawing of a day): its first page, then a
+"Show the other N" control whose answer (`calendar_day_rest`, `_day_rest.html`)
+is the rest of its cards in the control's place. PAGING, NEVER CAPPING: the
+day's count, chip and is-new marks, the filed month and the month-changed check
+are all the WHOLE day's — a day is read whole and drawn in part — and the rest
+compares the day with what was filed exactly as a late day does. The control
+carries ONE SIGNED TOKEN (app/signed_tokens.py, the sealing the picture report
+token shares) naming the account, the day, how many were drawn and the page's
+references; another account's or an edited one draws nothing but a sentence. A
+jump's card is drawn wherever it falls in its day. A DAY THAT ARRIVES AFTER ITS MONTH CHANGED draws the
 store as it is now — the only thing it can draw: a card that went has no rows — and
 when what it draws is not what the shell filed for that day, it says so for the
 whole page, out of band (`_month_changed.html`). The page also asks once a minute

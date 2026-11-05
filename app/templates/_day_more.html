@@ -1,0 +1,8 @@
+{#- tight -#}
+{# THE REST OF A BIG DAY, asked for when pressed (app/calendar/day_pages.py says
+   why a day is drawn in pages). A request, not a script: the answer
+   (/calendar/day/rest, _day_rest.html) is the rest of the day's cards and takes
+   this control's place in the grid. Its one parameter is a signed token naming
+   the account, the day and how many cards were drawn. #}
+<button type="button" class="day-more" hx-get="{{ group.more.url }}" hx-trigger="click once"
+        hx-target="this" hx-swap="outerHTML">Show the other {{ group.more.count }}</button>
