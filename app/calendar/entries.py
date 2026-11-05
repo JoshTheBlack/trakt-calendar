@@ -18,6 +18,8 @@ their filters hide it, is decided at READ against their own preferences.
 """
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import logging
 import time
@@ -192,13 +194,89 @@ async def store_span(endpoint_key: str, span_start: date, span_end: date,
         day = _utc_date(record.air_ts)
         filed[next(window for window, end in windows
                    if window.isoformat() <= day < end.isoformat())].append(record)
-    await _store_window(endpoint_key, span_start, span_end, filed[span_start],
-                        sources=answered, asked=asked, unchanged=unchanged,
-                        now=now, stale_after=stale_after)
+    said = {source: _said(filed[span_start], source) for source in answered}
+    with _storing(endpoint_key, span_start, said, now):
+        await _store_window(endpoint_key, span_start, span_end, filed[span_start],
+                            sources=answered, asked=asked, unchanged=unchanged,
+                            now=now, stale_after=stale_after)
     for window, end in windows[1:]:
-        speaking = [source for source in answered if reach[source][0] <= window < reach[source][1]]
-        await _store_window(endpoint_key, window, end, filed[window], sources=speaking,
-                            asked=speaking, now=now, stale_after=stale_after)
+        said = {source: _said(filed[window], source) for source in answered
+                if reach[source][0] <= window < reach[source][1]}
+        speaking = {source: saying for source, saying in said.items()
+                    if not _stored_from_the_same(endpoint_key, window, source, saying, now)}
+        if not speaking:
+            continue
+        with _storing(endpoint_key, window, speaking, now):
+            await _store_window(endpoint_key, window, end, filed[window], sources=list(speaking),
+                                asked=list(speaking), now=now, stale_after=stale_after)
+
+
+# A WINDOW ONE ANSWER HAS JUST STORED IS NOT STORED AGAIN FROM AN OVERLAPPING
+# ANSWER OF THE SAME SERVICE. Simkl's answer is stored over every whole window of
+# the month files it read (cache.answer_span), so a week straddling two months
+# and a week inside one both store that month's inner weeks — and a restart,
+# whose weeks have all lapsed, asks both. MEASURED on a copy of dev: opening
+# October All Episodes with every week stale stored 15 windows for 8 distinct
+# ones, October's inner weeks three times each, every store deciding its rows in
+# a turn of the writer queue the viewer's own writes waited behind.
+#
+# WHAT IS REMEMBERED IS WHAT THE ANSWER SAID, so a window is passed over only
+# when the newer answer lists exactly what the stored one did — a month file
+# regenerated between the two fetches is stored as any answer is. And only for
+# answers made within `_OVERLAP_SECONDS` of each other, which is one burst of
+# refills: the window passed over keeps the coverage the first store gave it,
+# moments older, and an answer a later refill brings is stored as always.
+#
+# CLAIMED AS ITS STORE BEGINS, NOT WHEN IT ENDS: the two answers' stores run at
+# once — each a window at a time — so a mark made at the end let the second
+# store a window the first was still storing. A store that fails gives its
+# claim up, and the window is left to the refill its lapsed coverage asks for.
+# Keyed by the database (db.generation) as every memo of rows must be; pruned by
+# the clock each store moves, so it holds the last minute's windows at most.
+_OVERLAP_SECONDS = 60
+_stored_from: dict[tuple[int, str, str, str], tuple[str, int]] = {}
+
+
+def _said(records: list[Record], source: str) -> str:
+    """One service's listings of one window as one short value, equal for two
+    answers exactly when they list the same things the same way. Taken BEFORE
+    the window is stored: a store completes its records' ids in place
+    (metadata.complete_records)."""
+    text = "\n".join(sorted(repr(record) for record in records
+                            if str(record.source) == source))
+    return hashlib.blake2b(text.encode(), digest_size=16).hexdigest()
+
+
+def _stored_from_the_same(endpoint_key: str, window: date, source: str, saying: str,
+                          now: int) -> bool:
+    """Whether `source`'s listings of this window are stored, or being stored,
+    from an answer saying the same (`_said`), made within `_OVERLAP_SECONDS` of
+    this one."""
+    held = _stored_from.get((db.generation(), endpoint_key, window.isoformat(), source))
+    if held is None:
+        return False
+    said_then, at = held
+    return said_then == saying and abs(now - at) <= _OVERLAP_SECONDS
+
+
+@contextlib.contextmanager
+def _storing(endpoint_key: str, window: date, said: dict[str, str], now: int):
+    """Claim this window for what each service in `said` answered, for as long
+    as the claim is good (`_OVERLAP_SECONDS`) — or until the store fails."""
+    for key in [key for key, (_saying, at) in _stored_from.items()
+                if at < now - _OVERLAP_SECONDS]:
+        del _stored_from[key]
+    keys = {source: (db.generation(), endpoint_key, window.isoformat(), source)
+            for source in said}
+    for source, key in keys.items():
+        _stored_from[key] = (said[source], now)
+    try:
+        yield
+    except BaseException:
+        for source, key in keys.items():
+            if _stored_from.get(key) == (said[source], now):
+                del _stored_from[key]
+        raise
 
 
 def _windows(first: date, after: date) -> list[date]:

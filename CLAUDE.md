@@ -412,7 +412,12 @@ week straddling two months is covered only by an answer that read both files.
 `entries.store_span` keeps each service's records inside its span, takes its
 listings off there alone, and writes a coverage row for every window of it (a
 service answering "unchanged" confirms the window asked, which is what its
-validator speaks for). The envelope
+validator speaks for). A WINDOW AN OVERLAPPING ANSWER OF THE SAME SERVICE HAS
+JUST STORED IS NOT STORED AGAIN (`entries._stored_from`): a straddling week's
+Simkl answer and an inner week's both speak for that month's inner weeks, and a
+restart asks both — 15 stores for 8 windows — so a store claims each window for
+what each service said (a digest of its listings, taken before the store) and an
+answer within a minute saying exactly the same leaves it alone. The envelope
 records who was ASKED as well as who ANSWERED, which is what lets a source
 switched on later refill a window that legitimately has none of its records,
 and what keeps "partial" meaning a source that failed rather than one nobody

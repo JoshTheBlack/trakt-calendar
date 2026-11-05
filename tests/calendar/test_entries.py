@@ -226,6 +226,59 @@ class AnAnswerIsStoredOverTheSpanItSpeaksForTests(unittest.IsolatedAsyncioTestCa
         self.assertEqual([listed["air_ts"] for listed in await listings()], [AIR])
         self.assertEqual(await self._covered("trakt"), ["2026-07-06"])
 
+    async def _stored_windows(self, start: date, records, *, now: int) -> list[str]:
+        """The windows one Simkl answer for the week of `start` stores."""
+        stored: list[str] = []
+        real = calendar_entries._store_window
+
+        async def counted(endpoint_key, span_start, *args, **kwargs):
+            stored.append(span_start.isoformat())
+            await real(endpoint_key, span_start, *args, **kwargs)
+
+        with patch.object(calendar_entries, "_store_window", counted):
+            await calendar_cache.store_window(SHOWS, calendar_cache.window_start(start), records,
+                                              600, now, sources=["simkl"], asked=["simkl"])
+        return stored
+
+    OCTOBER = [(1, 6), (2, 14), (3, 21), (4, 30)]
+
+    def _october(self, title: str = "") -> list:
+        records = [_simkl(n, date(2026, 10, day)) for n, day in self.OCTOBER]
+        if title:
+            records[1] = dataclasses.replace(records[1], title=title)
+        return records
+
+    async def test_a_week_an_overlapping_answer_just_stored_is_not_stored_again(self):
+        """The week of 26 October reads October's and November's files and the
+        week of 5 October October's, so both answers speak for October's inner
+        weeks; a restart asks both at once. The second does not store again the
+        weeks the first just stored from the same listings — its own week is
+        stored, as every asked week is."""
+        first = await self._stored_windows(date(2026, 10, 28), self._october(), now=5000)
+        self.assertIn("2026-10-12", first)
+        second = await self._stored_windows(date(2026, 10, 7), self._october(), now=5030)
+        self.assertEqual(second, ["2026-10-05"])
+        self.assertEqual(await self._days(), ["2026-10-06", "2026-10-14", "2026-10-21",
+                                              "2026-10-30"])
+
+    async def test_an_overlapping_answer_that_says_something_else_is_stored(self):
+        await self._stored_windows(date(2026, 10, 28), self._october(), now=5000)
+        second = await self._stored_windows(date(2026, 10, 7), self._october("Renamed"),
+                                            now=5030)
+        self.assertEqual(second, ["2026-10-05", "2026-10-12"])
+
+    async def test_answers_a_burst_apart_are_both_stored(self):
+        """Only answers made together are one burst: the refill an hour later
+        renews every week its answer speaks for, as always."""
+        await self._stored_windows(date(2026, 10, 28), self._october(), now=5000)
+        second = await self._stored_windows(date(2026, 10, 7), self._october(),
+                                            now=5000 + 3600)
+        self.assertEqual(second, ["2026-10-05", "2026-10-12", "2026-10-19"])
+        # And what the first answer stored is no longer held for the next.
+        self.assertEqual({at for (generation, *_window), (_said, at)
+                          in calendar_entries._stored_from.items()
+                          if generation == db.generation()}, {8600})
+
     async def test_a_month_is_stored_a_window_at_a_time_the_window_asked_first(self):
         """A store decides its rows in its turn of the writer queue, and every
         other write waits behind that turn — so a month is a turn per week, not
