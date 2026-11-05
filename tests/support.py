@@ -162,6 +162,15 @@ def _schema_template() -> Path:
         asyncio.run(db.migrate())
         asyncio.run(db.run(lambda conn: conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")))
         db.close_thread_connection()
+        # AND THE TEMPLATE IS LEFT, never left current: a test that writes
+        # without a database of its own would otherwise write INTO the template,
+        # and every test copying it afterwards would start with those rows —
+        # MEASURED, a card test's titles turned up in fresh databases across
+        # tests/metadata, in whichever runs scheduled it first in a worker. Such
+        # a write lands in a throwaway copy instead.
+        unscoped = TMP / "unscoped.db"
+        shutil.copyfile(path, unscoped)
+        db.set_db_path(unscoped)
         _template_path = path
     return _template_path
 

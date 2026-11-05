@@ -56,7 +56,7 @@ def _card(*records: Record, order=()) -> str:
         endpoint=get_endpoint("shows/new"), settings=Settings())
 
 
-class ASpellingIsNotADisagreementTests(unittest.TestCase):
+class ASpellingIsNotADisagreementTests(CardTestCase):
 
     def test_titles_differing_only_in_case_offer_no_flip(self):
         resolved = _resolved(_record(Source.TRAKT, title="The Show"),
@@ -102,7 +102,7 @@ class ASpellingIsNotADisagreementTests(unittest.TestCase):
         self.assertIn("poster", resolved.alternatives)
 
 
-class OneStatusVocabularyTests(unittest.TestCase):
+class OneStatusVocabularyTests(CardTestCase):
     """Simkl words a status in three words where Trakt and TMDB use six; each of
     Simkl's covers every word it cannot tell apart (simkl/titles.STATUS_MEANS)."""
 
