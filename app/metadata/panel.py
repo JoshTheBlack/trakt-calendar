@@ -288,12 +288,24 @@ async def describe_panel(settings, chosen: detail_source.Answerer, ids, media,
     every = detail_source.known_ids(ids)
     others = [(source, value) for source, value in every if source != chosen.source]
     listing = every if with_seasons and str(media) == str(Media.SHOW) else []
-    described, *gathered = await asyncio.gather(
+    reads = [asyncio.ensure_future(read) for read in (
         _describe_season(settings, chosen, ids, media, season, cache_only=cache_only),
         *(_videos(settings, source, value, media, ids=ids, cache_only=cache_only)
           for source, value in others),
         *(_cached_seasons(settings, source, value, media, ids=ids)
-          for source, value in listing))
+          for source, value in listing))]
+    try:
+        described, *gathered = await asyncio.gather(*reads)
+    except BaseException:
+        # A PANEL THAT CANNOT BE DESCRIBED STOPS ASKING FOR THE REST OF ITSELF.
+        # `gather` leaves the other reads running when one raises, and they went
+        # on asking services for videos about a title the viewer had already been
+        # told could not be described, their answers reaching nobody — and in the
+        # suite, a lookup the test had not patched reached the network after the
+        # test had ended, or did not, by the timing alone.
+        for read in reads:
+            read.cancel()
+        raise
     answerer, details = described
     if details is None:
         return answerer, None

@@ -13,6 +13,7 @@ THE PROMISES:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest import mock
 from zoneinfo import ZoneInfo
@@ -219,6 +220,27 @@ class APanelPoolsEveryServicesVideosTests(DatabaseTestCase):
         self.assertEqual(details["videos"][0].video_id, "traktvideo1")
         # Trakt's own description was stored, so its list costs nothing more.
         self.assertNotIn(("videos", "1", False), ports[Source.TRAKT].asked)
+
+    async def test_a_description_that_fails_leaves_no_other_services_read_running(self):
+        """The panel fails as it always did; the other services' reads it started
+        beside the description stop with it rather than asking on for nobody."""
+        from app.providers.base import SourceUnavailable
+
+        trakt = _DetailPort("trakt", [])
+        trakt.fetch_details = mock.AsyncMock(side_effect=SourceUnavailable("down"))
+        simkl = _DetailPort("simkl", [])
+        answered = []
+
+        async def slow_videos(settings, media, source_id, *, cache_only=False):
+            await asyncio.sleep(0.05)
+            answered.append(source_id)
+            return []
+
+        simkl.fetch_videos = slow_videos
+        with self.assertRaises(SourceUnavailable):
+            await self.panel({"trakt": "1", "simkl": "2"}, trakt=trakt, simkl=simkl)
+        await asyncio.sleep(0.3)
+        self.assertEqual(answered, [], "Simkl's read went on after the panel had failed")
 
     async def test_nothing_to_describe_is_still_nothing(self):
         trakt = _DetailPort("trakt", [])
