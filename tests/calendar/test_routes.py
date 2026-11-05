@@ -34,7 +34,7 @@ from app.calendar import entries as calendar_entries, state as calendar_state
 from app.calendar import vocab
 from app.endpoints import ENDPOINTS, get_endpoint
 from app.metadata import refresh as metadata_refresh
-from app.providers.base import Capabilities, Reach
+from app.providers.base import Capabilities, Reach, Source
 from app.providers.trakt import TraktError
 from app.config import Settings
 from tests.support import save_settings, settling
@@ -2398,8 +2398,21 @@ class TheCalendarDoesNotGoDarkOverOneServicesCredentialTests(CalendarRouteTestCa
         save_settings(Settings())
         self.user_id = self._make_user("simkl_only_viewer")
         self.sign_in_as(self.user_id)
-        patcher = patch("app.calendar.cache.fetch_window_records",
-                        window_fetch([_entry("show-a", "Show A", "2026-07-15T20:00:00Z")]))
+        # SIMKL'S LISTING, the only service in play here: support.window_fetch
+        # attributes its records to Trakt, which this instance cannot ask.
+        listed = support.calendar_records(
+            [_entry("show-a", "Show A", "2026-07-15T20:00:00Z")], get_endpoint("shows/new"))
+        simkl = [dataclasses.replace(record, source=Source.SIMKL, id="4242",
+                                     ids={"simkl": 4242}) for record in listed]
+
+        async def fetch(endpoint, settings, start, *, covered=(), sources=None):
+            answering = [str(provider.source)
+                         for provider in calendar_cache._window_sources(endpoint, settings, start)]
+            if sources is not None:
+                answering = [name for name in answering if name in set(map(str, sources))]
+            return (simkl if "simkl" in answering else []), answering, []
+
+        patcher = patch("app.calendar.cache.fetch_window_records", fetch)
         patcher.start()
         self.addCleanup(patcher.stop)
 

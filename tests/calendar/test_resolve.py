@@ -133,7 +133,8 @@ class AMonthRendersExactlyAsItDidTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         migrated_db("calresolve")
-        self.settings = Settings()
+        # A TRAKT-ONLY INSTANCE: its client id, and Simkl's public calendar off.
+        self.settings = Settings(trakt_client_id="cid", simkl_public_calendar_enabled=False)
 
     async def asyncTearDown(self):
         db.close_thread_connection()

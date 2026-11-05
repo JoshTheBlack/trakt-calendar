@@ -76,16 +76,20 @@ def window_fetch(entries):
 
     `entries` is either the raw entries every window should answer with, or a
     callable (endpoint, start) -> raw entries for a test that wants one window to
-    differ from another. The answer names EVERY SOURCE THAT COULD HAVE ANSWERED
-    THIS ENDPOINT as having replied — `trakt` always, `simkl` for the four
-    endpoints its calendar covers, and `tmdb` for its three when the test's
-    Settings hold a TMDB read token (it is in play only then) — because that is
+    differ from another. The answer names EVERY SOURCE IN PLAY FOR THE WINDOW as
+    having replied — the fill's own answer (cache._window_sources): Trakt where
+    the test's Settings hold its client id, Simkl for the endpoints its calendar
+    covers, TMDB for its three where they hold a read token — because that is
     what a real fill against the registered sources returns, and because the
     caller records who it ASKED independently: a stub answering for fewer
     sources than are in play stores a window that was asked-but-silent, and the
     read path then marks the span partial. A test exercising a genuinely partial
     fetch (one source refused) wants that, and builds its own stub instead of
-    this one.
+    this one. NEVER FOR A SOURCE NOT IN PLAY: one answered for though the fill
+    did not ask it made a month's read depend on which of its weeks a
+    concurrent fill reached first — a week whose own fill found another week's
+    month-wide answer already stored asked nobody, and kept none of the records
+    the stub had put in the other weeks' answers.
 
     Patching HERE rather than at the transport keeps the floor filter and the
     window trim out of the way, which is what a test about the read path wants;
@@ -96,16 +100,11 @@ def window_fetch(entries):
     selection needs records from two services and builds them itself.
     """
     async def fetch(endpoint, settings, start, *, covered=(), sources=None):
-        from app.providers.simkl import _SimklProvider
-        from app.providers.tmdb import _TmdbProvider
+        from app.calendar import cache
 
         rows = entries(endpoint, start) if callable(entries) else entries
-        answering = ["trakt"]
-        if _SimklProvider.capabilities.answers(endpoint.key):
-            answering.append("simkl")
-        if (_TmdbProvider.capabilities.answers(endpoint.key)
-                and getattr(settings, "tmdb_configured", False)):
-            answering.append("tmdb")
+        answering = [str(provider.source)
+                     for provider in cache._window_sources(endpoint, settings, start)]
         # A fill asking only the services a window's coverage says are due
         # (cache.ensure_window) hears from those alone — and the records are
         # Trakt's, so a fill that did not ask Trakt brings none.
