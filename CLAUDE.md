@@ -425,8 +425,11 @@ wraps the whole app) — the window is served from what is stored at once; a fre
 service is not asked, and nor is one a refill already under way is asking about
 the window, its own or a neighbour's whose answer spans it (`schedule_refill`'s
 latch, by service and window), so the weeks one Simkl file renewed, which lapse
-together, are refilled by one answer. `refresh_months` asks only the services
-past its own tier.
+together, are refilled by one answer; and a refill, decided by a read and started
+after its answer, re-reads the window's coverage as it starts and asks only what
+is still lapsed (`cache._still_lapsed`) — a filter save's refills started after
+its 44 s answer asked Trakt again for four weeks the shell's had renewed.
+`refresh_months` asks only the services past its own tier.
 A fill whose every service refused records the failure, so the failure clock,
 not every read, decides the next try. ONE GAP IS NOT A FAILURE: a source still WORKING ITS ANSWER OUT
 (`base.SourcePending`, raised at once with a `ready` awaitable) is stored asked

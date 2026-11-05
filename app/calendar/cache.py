@@ -915,14 +915,17 @@ def schedule_refill(endpoint: Endpoint, settings, start: date,
                for source, (first, after) in answer_spans(ask, start).items()
                for window in aligned_windows(first, after - timedelta(days=1))}
     # Every service in play, unnarrowed: the whole-window fill (`None`).
-    named = None if ask == in_play and sources is None else ask
+    whole = ask == in_play and sources is None
 
     async def _run() -> None:
         # Nobody waits on this: what it does is no request's time.
         detach()
         try:
             with activity("background refill"):
-                await fill_sources(endpoint, settings, start, named)
+                asking = await _still_lapsed(endpoint, settings, start, ask)
+                if asking:
+                    await fill_sources(endpoint, settings, start,
+                                       None if whole and asking == ask else asking)
         except SourceUnavailable as exc:
             logger.debug("background refill of the %s span starting %s failed: %s",
                          endpoint.key, start, exc)
@@ -940,6 +943,27 @@ def schedule_refill(endpoint: Endpoint, settings, start: date,
     _refill_tasks.add(task)
     task.add_done_callback(_forget_refill)
     return True
+
+
+async def _still_lapsed(endpoint: Endpoint, settings, start: date,
+                        sources: Iterable[str]) -> list[str]:
+    """`sources` less every one whose reply for this window is fresh NOW — the
+    services a refill decided on still owes, asked when it starts.
+
+    A REFILL IS DECIDED BY A READ AND STARTED AFTER THAT READ'S ANSWER
+    (`ensure_window`, after_response), and a long answer leaves time for another
+    refill to renew the same services and drop its latch. MEASURED on a copy of
+    dev, a restart opening October All Episodes with every week lapsed: a filter
+    save read the month while the shell's refills were still storing, and its
+    own refills, started after its 44-second answer, asked Trakt again for four
+    weeks those refills had renewed and stored them a second time. A service
+    whose last answer failed, or that was never asked, is still owed."""
+    ts = db.now()
+    ttl = _ttl_seconds(settings, start, ts)
+    held = await entries.source_coverage(endpoint.key, start)
+    fresh = {source for source, row in held.items()
+             if row.answered and ts - row.stored_at <= ttl}
+    return [source for source in sources if source not in fresh]
 
 
 async def ensure_window(endpoint: Endpoint, settings, start: date, *,

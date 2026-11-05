@@ -679,7 +679,9 @@ class AMonthsWeeksAreRefilledByOneAnswerTests(CacheTestCase):
             await asyncio.sleep(0)
             release.set()
             await asyncio.gather(*calendar_cache._refill_tasks)
-        self.assertEqual(asked, [
+        # In whichever order the refills start: each first reads its week's
+        # coverage, to ask only what is still owed.
+        self.assertCountEqual(asked, [
             (self.JULY[0], ["trakt", "simkl"]),
             # Inside July: the 13th's answer from Simkl covers it.
             (self.JULY[1], ["trakt"]),
@@ -710,6 +712,35 @@ class AMonthsWeeksAreRefilledByOneAnswerTests(CacheTestCase):
             releases[self.JULY[2]].set()
             await asyncio.gather(*calendar_cache._refill_tasks)
         self.assertEqual(dict(calendar_cache._refilling), {}, "a finished refill left its latch")
+
+    async def test_a_refill_asks_only_the_services_still_lapsed_when_it_starts(self):
+        """A refill is decided by a read and started once that read has answered
+        — long enough, behind a slow answer, for another refill to renew a
+        service and drop its latch. It asks only what is still owed then: here
+        Trakt's reply was renewed in between, Simkl's is still a month old."""
+        week = self.JULY[1]
+        now = db.now()
+        await db.execute(
+            "INSERT INTO calendar_coverage (endpoint, span_start, source, asked, answered, "
+            "stored_at, stale_after) VALUES (?, ?, 'trakt', 1, 1, ?, ?), "
+            "(?, ?, 'simkl', 1, 1, ?, ?)",
+            (SHOWS.key, week.isoformat(), now, now + 600,
+             SHOWS.key, week.isoformat(), now - 30 * 86400, now - 30 * 86400 + 600))
+        asked = []
+
+        async def fill(endpoint, settings, start, sources, *, now=None):
+            asked.append(sources)
+
+        self.addCleanup(calendar_cache._refilling.clear)
+        with patch("app.calendar.cache.fill_sources", side_effect=fill):
+            self.assertTrue(calendar_cache.schedule_refill(SHOWS, self.settings, week,
+                                                           ["trakt", "simkl"]))
+            await asyncio.gather(*calendar_cache._refill_tasks)
+            # Nothing owed at all: nobody is asked.
+            await db.execute("UPDATE calendar_coverage SET stored_at = ?", (now,))
+            calendar_cache.schedule_refill(SHOWS, self.settings, week, ["trakt", "simkl"])
+            await asyncio.gather(*calendar_cache._refill_tasks)
+        self.assertEqual(asked, [["simkl"]])
 
 
 class AskedAndAnsweredTests(CacheTestCase):
