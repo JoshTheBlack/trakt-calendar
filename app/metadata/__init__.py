@@ -120,6 +120,12 @@ class Planned(NamedTuple):
     writes: rows.ListingWrites
 
     @property
+    def empty(self) -> bool:
+        """Whether `write_records` would write nothing — the listings change no
+        title, no spelling and no picture the store holds."""
+        return self.settles.empty and self.writes.empty
+
+    @property
     def touched(self) -> frozenset[str]:
         """Every title key whose rows writing the plan merges — each re-key's two
         titles — as they are BEFORE it is written. Rare: a few titles in a fill

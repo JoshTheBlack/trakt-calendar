@@ -41,7 +41,7 @@ import sqlite3
 import threading
 import time
 import weakref
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
@@ -309,7 +309,7 @@ async def fetch_value(sql: str, params: Sequence[Any] = (), default: Any = None)
     return default if row is None else row[0]
 
 
-async def execute(sql: str, params: Sequence[Any] = ()) -> Result:
+async def execute(sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> Result:
     """One write statement, in its turn among this process's writes
     (`_writer_queue`), so a run of transactions cannot keep it out until the
     busy timeout."""

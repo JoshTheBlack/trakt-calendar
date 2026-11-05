@@ -363,6 +363,11 @@ class SettlePlan(NamedTuple):
     written: dict[str, _Title]
     now: int
 
+    @property
+    def empty(self) -> bool:
+        """Whether `apply` would write nothing: no re-key, no title's row."""
+        return not (self.retired or self.written)
+
     def apply(self, conn: db.Connection, *, laps: perftrace.Laps | None = None) -> None:
         """Written: each re-key's repointing — which merges the two titles' rows
         (app/metadata/merge.py) — then every title's row. `laps`, when given, is

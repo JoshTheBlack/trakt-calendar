@@ -327,14 +327,15 @@ async def _store_window(endpoint_key: str, span_start: date, span_end: date,
     # re-keying five titles while a month was read on another thread: filing
     # the whole span inside held the lock 2.98 s, this holds it 1.31 s, and the
     # store before the one-row-per-episode tables held it 1.21 s.
-    planning: list[float] = []
+    # (seconds, whether under the lock) for each time the plan was made.
+    planning: list[tuple[float, bool]] = []
 
     def _plan(conn):
         started = time.perf_counter()
         planned = metadata.plan_records(conn, listed)
         prepared = planned, _fill(conn, list(range(len(inside))), planned.keys,
                                   planned.primaries, excluding=planned.touched)
-        planning.append(time.perf_counter() - started)
+        planning.append((time.perf_counter() - started, conn.in_transaction))
         return prepared
 
     written: list[metadata.Planned] = []
@@ -347,8 +348,8 @@ async def _store_window(endpoint_key: str, span_start: date, span_end: date,
         # whether the plan was made again under it (another connection wrote in
         # between), a re-key's merge, or the writes held it.
         laps = perftrace.Laps()
-        if len(planning) > 1:
-            laps.phases["prepare again"] = planning[-1]
+        if again := [seconds for seconds, locked in planning if locked]:
+            laps.phases["prepare again"] = again[-1]
         metadata.write_records(conn, listed, planned, laps=laps)
         episode_rows.apply(conn, fill)
         laps.lap("episodes")
@@ -368,7 +369,35 @@ async def _store_window(endpoint_key: str, span_start: date, span_end: date,
                      "%d re-key(s): %s", endpoint_key, first, laps.total, len(inside),
                      len(planned.settles.retired), laps)
 
-    await db.transaction(_work, prepare=_plan)
+    # AN ANSWER THAT CHANGES NOTHING IN THE WINDOW HOLDS NOBODY'S TURN. Its rows
+    # are decided on a plain read, outside the writer queue, and when writing
+    # them would change nothing — Simkl regenerates a month file every hour, and
+    # most of its weeks come back exactly as they were stored — only its coverage
+    # row is written, a statement in a turn of its own: the way the retention
+    # sweep takes no lock when nothing is due. MEASURED on a copy of dev, a
+    # restart opening a month whose weeks had all lapsed: each store decided its
+    # rows for 1.1–1.6 s in its turn (20 s and more beside two month reads), and
+    # a viewer's filter save and not-watching mark waited 2.6–2.9 s for theirs,
+    # while most of those stores wrote their coverage row and nothing else.
+    #
+    # A DECISION THAT GOES STALE BEFORE THE COVERAGE ROW IS WRITTEN COSTS
+    # NOTHING THE QUEUE'S ORDER DID NOT ALREADY: a write landing in between is
+    # one the window's rows take either way — another answer's store, a merge
+    # moving its titles' rows with their listings, a description's words — and
+    # the coverage row says only that this service replied. A window that DOES
+    # change decides again in its turn, as every transaction's `prepare` does,
+    # so what it writes is decided from what the database holds once nobody
+    # else can write.
+    planned, fill = await db.run(_plan)
+    if planned.empty and fill.empty:
+        await db.execute(_UPSERT_COVERAGE, {"endpoint": endpoint_key, "rows": coverage,
+                                            "now": now, "stale_after": stale_after})
+        logger.debug("calendar store: %s from %s changed nothing in %d listing(s); its "
+                     "coverage alone written, decided in %.3f s", endpoint_key, first,
+                     len(inside), planning[0][0])
+        written.append(planned)
+    else:
+        await db.transaction(_work, prepare=_plan)
     metadata.complete_records(listed, written[-1])
 
 

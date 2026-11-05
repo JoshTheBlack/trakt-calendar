@@ -597,6 +597,12 @@ class Fill:
     # so the write lock is held for the statements alone.
     spelled: tuple[str, str] | None = None
 
+    @property
+    def empty(self) -> bool:
+        """Whether `apply` would write nothing: no row's listings and no
+        episode's feed name would change."""
+        return self.spelled is None and not self.stubs
+
 
 def plan_fill(conn: db.Connection, listings: list[Listing], *, bit: int, primaries:
               Mapping[tuple[str, str], str], span: tuple[date, date] | None = None,

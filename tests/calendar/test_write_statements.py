@@ -9,14 +9,17 @@ requires the same count.
 """
 from __future__ import annotations
 
+import asyncio
+import threading
 from datetime import date
 from unittest import mock
 
-from app import db
+from app import db, metadata
 from app.calendar import entries
 from app.metadata import episodes
 from app.providers.base import Media, Record, Source
-from tests.support import DatabaseTestCase, statements_per_transaction, statements_run
+from tests.support import (DatabaseTestCase, statements_executed, statements_per_transaction,
+                           statements_run)
 from tests.support import listings as stored_listings
 
 DAY = 1783540800.0  # 2026-07-08 20:00Z
@@ -56,11 +59,39 @@ class ARefillWritesOnlyWhatChangedTests(DatabaseTestCase):
     the title or episode rows it would only have written back as they were."""
 
     async def test_a_refill_that_changed_nothing_writes_its_coverage_and_nothing_else(self):
+        """Decided on a plain read, it takes no transaction: its coverage row is
+        one statement in a turn of its own."""
         await store(listings(40))
-        with statements_run() as run:
+        with statements_run() as run, statements_executed() as executed:
             await store(listings(40))
-        (statements,) = run
-        self.assertEqual([sql.split()[2] for sql in statements], ["calendar_coverage"])
+        self.assertEqual(run, [])
+        self.assertEqual([sql.split()[2] for sql in executed], ["calendar_coverage"])
+
+    async def test_a_viewers_write_does_not_wait_while_an_unchanged_refill_decides(self):
+        """Every write waits its turn behind the one ahead of it, so a store that
+        decided its rows in its turn held a filter save or a mark behind that
+        deciding — seconds, for a month's week — even when it then wrote only its
+        coverage row. An unchanged refill decides before taking a turn."""
+        await store(listings(40))
+        deciding, release = threading.Event(), threading.Event()
+        real = metadata.plan_records
+
+        def slow(conn, listed):
+            deciding.set()
+            release.wait(5)
+            return real(conn, listed)
+
+        with mock.patch.object(metadata, "plan_records", slow):
+            refill = asyncio.ensure_future(store(listings(40)))
+            self.assertTrue(await asyncio.to_thread(deciding.wait, 5))
+            try:
+                await asyncio.wait_for(
+                    db.execute("UPDATE users SET timezone = timezone WHERE id = 0"), 2)
+            finally:
+                release.set()
+                await refill
+        self.assertEqual(await db.fetch_value(
+            "SELECT COUNT(*) FROM calendar_coverage WHERE endpoint = 'shows'"), 2)
 
     async def test_an_unchanged_refill_decides_its_rows_once_before_the_lock(self):
         """"Nothing changed" is `Book.spell`'s answer None, which the write once

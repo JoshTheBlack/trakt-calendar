@@ -83,12 +83,19 @@ an entry's listings in one answer carry the show's words), a spelling in
 re-stamped at most weekly), an episode row by its instants (`episodes.Row.
 differs`, the moment an unchanged feed listing was stored set aside) — and sends
 only those, so A REFILL THAT CHANGED NOTHING WRITES ITS COVERAGE ROW AND NOTHING
-ELSE, and decides even that before the lock — `Book.spell`'s None is "nothing
-changed", never "not spelled yet" (MEASURED on a copy of dev: a week of All
-Episodes stored back held the lock 0.77–1.31 s; an unchanged refill, a whole
-Simkl month's included, now holds it 0.000–0.001 s alone or under three month
-reads; `tests/calendar/test_write_statements.py`'s
-`ARefillWritesOnlyWhatChangedTests`). A store's one DEBUG line names where its
+ELSE, and decides even that OUTSIDE THE WRITER QUEUE, on a plain read: a window
+whose plan writes nothing (`Planned.empty`, `Fill.empty`) writes its coverage row
+alone with `db.execute`, a turn of its own, and one that changes decides again in
+its turn as every `prepare` does (`entries._store_window`) — `Book.spell`'s None
+is "nothing changed", never "not spelled yet" (MEASURED on a copy of dev: a week
+of All Episodes stored back held the lock 0.77–1.31 s; an unchanged refill, a
+whole Simkl month's included, now holds it 0.000–0.001 s alone or under three
+month reads; and through a restart's refills of weeks that had changed little, a
+one-row write waited p95 0.25 s where deciding in the turn kept it 4.8 s;
+`tests/calendar/test_write_statements.py`'s `ARefillWritesOnlyWhatChangedTests`).
+A decision gone stale before its coverage row is written costs nothing the
+queue's order did not already: a write landing in between is one the rows take
+either way, and the coverage row says only that the service replied. A store's one DEBUG line names where its
 hold went (`perftrace.Laps`: a prepare made again, merges, settles, listings,
 episodes, coverage). A batch that re-keys a title plans the episode rows of the
 titles it reshapes inside, once the merge is written — those titles' share of

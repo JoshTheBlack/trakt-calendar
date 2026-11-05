@@ -242,6 +242,31 @@ def statements_run():
 
 
 @contextlib.contextmanager
+def statements_executed():
+    """The SQL of every write made OUTSIDE a transaction while the block is open
+    — each `db.execute`, and each `db.executemany` once — in the order they
+    ran."""
+    from unittest import mock
+
+    from app import db
+
+    executed: list[str] = []
+    real_execute, real_many = db.execute, db.executemany
+
+    async def execute(sql, params=()):
+        executed.append(sql)
+        return await real_execute(sql, params)
+
+    async def executemany(sql, rows):
+        executed.append(sql)
+        return await real_many(sql, rows)
+
+    with mock.patch.object(db, "execute", execute), \
+            mock.patch.object(db, "executemany", executemany):
+        yield executed
+
+
+@contextlib.contextmanager
 def _transactions_traced(done):
     """`db.transaction` with each body's statements (sqlite3's trace callback,
     which fires once per statement — once per row of an executemany) handed to
