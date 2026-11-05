@@ -41,7 +41,7 @@ from app import auth, db
 from app.auth import trakt_routes
 from app.providers.trakt import detail as trakt_detail, sync as trakt_sync
 from app.config import Settings
-from tests.support import save_settings
+from tests.support import save_settings, settling
 from app.main import app
 from app.media import posters
 from app.ranker import core as ranker
@@ -124,7 +124,7 @@ class StandaloneTestCase(unittest.TestCase):
         # to use. Nothing in this file links an account to anything.
         save_settings(Settings(trakt_client_id="instance-client",
                                trakt_access_token=OPERATOR_TOKEN, tmdb_api_key=TMDB_TOKEN))
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.admin_id = asyncio.run(auth.create_user(
             username="admin_user", password="hunter2hunter2", settings=Settings(),
             is_admin=True))

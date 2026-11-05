@@ -254,6 +254,24 @@ async def settled() -> None:
         await asyncio.gather(*list(after_response._writes))
 
 
+def settling(app):
+    """`app` as a TestClient's ASGI app that returns only once the writes the
+    request owed after its answer (after_response.write) have landed.
+
+    A TestClient not entered as a context manager runs each request on an event
+    loop of its own and stops it the moment the app returns, cancelling every
+    task still waiting — and an owed write waits its turn in the writer queue
+    behind whatever the page started before it (a refresh queueing what it drew,
+    say). MEASURED: across two runs of the calendar, auth and tracker suites, a
+    page's is-new commit or a session's slide was cancelled that way in dozens
+    of tests, and a test reading what one stored failed one run in two. A server
+    keeps its loop; this is the harness making the same promise."""
+    async def settled_app(scope, receive, send):
+        await app(scope, receive, send)
+        await settled()
+    return settled_app
+
+
 @contextlib.contextmanager
 def statements_executed():
     """The SQL of every write made OUTSIDE a transaction while the block is open
@@ -868,7 +886,7 @@ class AppTestCase(unittest.TestCase):
 
         self.db_path = migrated_db(type(self).__name__.lower())
         save_settings(self.make_settings())
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
 
     def tearDown(self):
         from app import db

@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 from app import auth, db
 from app.media import user_images
 from app.config import Settings
-from tests.support import save_settings
+from tests.support import save_settings, settling
 from app.main import app
 from tests.support import migrated_db
 
@@ -305,7 +305,7 @@ class AccountDeletionCleanupTests(unittest.TestCase):
     def setUp(self):
         migrated_db("delete")
         save_settings(Settings())
-        self.client = TestClient(app, base_url="https://testserver",
+        self.client = TestClient(settling(app), base_url="https://testserver",
                                   headers={"Origin": "https://testserver"})
 
     def tearDown(self):
@@ -365,7 +365,7 @@ class RouteTests(unittest.TestCase):
         # sitting exactly where this one's account looks for its own.
         shutil.rmtree(user_images.USER_DATA_DIR, ignore_errors=True)
         save_settings(Settings())
-        self.client = TestClient(app, base_url="https://testserver",
+        self.client = TestClient(settling(app), base_url="https://testserver",
                                   headers={"Origin": "https://testserver"})
         resp = self.client.post("/onboarding", json={
             "username": "routeadmin", "password": "hunter2hunter2",
@@ -378,7 +378,7 @@ class RouteTests(unittest.TestCase):
         db.close_thread_connection()
 
     def test_signed_out_request_is_refused(self):
-        anon = TestClient(app, base_url="https://testserver", headers={"Origin": "https://testserver"})
+        anon = TestClient(settling(app), base_url="https://testserver", headers={"Origin": "https://testserver"})
         resp = anon.post("/me/avatar", json={"image_b64": _b64(_png_bytes())})
         self.assertIn(resp.status_code, (401, 303))
         anon.close()

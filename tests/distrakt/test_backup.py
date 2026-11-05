@@ -28,7 +28,7 @@ from app.providers.base import ItemKey
 from app.distrakt import backup
 from app.distrakt import watch_history as wh
 from app.config import Settings
-from tests.support import save_settings
+from tests.support import save_settings, settling
 from app.main import app
 from tests.distrakt.test_store import month_back
 from tests.support import ORIGIN, migrated_db, new_db_path, restore_backup
@@ -209,7 +209,7 @@ class ExportRouteTests(unittest.TestCase):
     def setUp(self):
         migrated_db("export-route")
         save_settings(Settings())
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = self._make_distrakt_user("tracker")
         self.other_id = self._make_distrakt_user("other")
 

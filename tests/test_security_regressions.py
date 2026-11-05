@@ -41,7 +41,7 @@ from fastapi.testclient import TestClient
 from app import auth, authz, db, distrakt
 from app.calendar import share_links
 from app.config import TRUSTED_PROXY_IPS_DEFAULT, Settings
-from tests.support import load_settings, save_settings
+from tests.support import load_settings, save_settings, settling
 from app.media import user_images
 from app.main import app
 from tests.support import AppTestCase, DetailsPanel
@@ -305,7 +305,7 @@ class CookiePolicyDetectionTests(RegressionTestCase):
     ONBOARD = {"username": "josh", "password": PASSWORD, "password_confirm": PASSWORD}
 
     def onboard(self, base_url, origin):
-        client = TestClient(app, base_url=base_url, headers={"Origin": origin})
+        client = TestClient(settling(app), base_url=base_url, headers={"Origin": origin})
         try:
             resp = client.post("/onboarding", json=self.ONBOARD)
         finally:
@@ -334,7 +334,7 @@ class CookiePolicyDetectionTests(RegressionTestCase):
         https, so the cookie must stay Secure."""
         # Traefik forwards the original Host, so the host matches and only the
         # scheme differs — which is the whole signature of TLS termination.
-        client = TestClient(app, base_url="http://shows.example.com", headers={
+        client = TestClient(settling(app), base_url="http://shows.example.com", headers={
             "Origin": "https://shows.example.com",
             "X-Forwarded-Proto": "https",
         })
@@ -349,7 +349,7 @@ class CookiePolicyDetectionTests(RegressionTestCase):
     def test_an_unreported_scheme_fails_closed(self):
         """No Origin and no Referer — the middleware still admits the request on
         Sec-Fetch-Site, and an unknown scheme must resolve to the safe answer."""
-        client = TestClient(app, base_url="http://localhost:8000",
+        client = TestClient(settling(app), base_url="http://localhost:8000",
                             headers={"Sec-Fetch-Site": "same-origin"})
         try:
             resp = client.post("/onboarding", json=self.ONBOARD)
@@ -404,7 +404,7 @@ class FreshProxiedInstallCanOnboardTests(RegressionTestCase):
             "X-Forwarded-For": "203.0.113.7",
         }
         base.update(headers)
-        return TestClient(app, base_url="http://shows.example.com", headers=base)
+        return TestClient(settling(app), base_url="http://shows.example.com", headers=base)
 
     def test_onboarding_succeeds_behind_an_unconfigured_proxy(self):
         client = self.proxied_client()

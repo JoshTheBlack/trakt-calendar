@@ -367,7 +367,8 @@ def client(settings):
     test that has no reason to exercise it.
     """
     from app.main import app
+    from tests.support import settling
 
-    c = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+    c = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
     yield c
     c.close()

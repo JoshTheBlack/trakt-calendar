@@ -24,7 +24,7 @@ from app.providers import title_search
 from app.calendar import state as calendar_state
 from app.providers.base import ItemKey, Media, PlayCounts
 from app.config import Settings
-from tests.support import save_settings
+from tests.support import save_settings, settling
 from app.main import app
 from tests.support import ORIGIN, migrated_db, tracker_month
 
@@ -557,7 +557,7 @@ class ManualCompletedRouteTests(unittest.TestCase):
     def setUp(self):
         migrated_db("backfill-route")
         save_settings(Settings(trakt_client_id="id", trakt_access_token="tok"))
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(_make_user("tracker"))
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=self.user_id, provider="trakt", provider_user_id=7,
@@ -655,7 +655,7 @@ class CorrectingAFrozenMonthTests(unittest.TestCase):
     def setUp(self):
         migrated_db("backfill-frozen")
         save_settings(Settings(trakt_client_id="id", trakt_access_token="tok"))
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(_make_user("tracker"))
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=self.user_id, provider="trakt", provider_user_id=7,
@@ -768,7 +768,7 @@ class FilmsAreVisibleTests(unittest.TestCase):
     def setUp(self):
         migrated_db("backfill-visible")
         save_settings(Settings(trakt_client_id="id", trakt_access_token="tok"))
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(_make_user("tracker"))
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=self.user_id, provider="trakt", provider_user_id=7,
@@ -829,7 +829,7 @@ class AddingAFilmByHandTests(unittest.TestCase):
     def setUp(self):
         migrated_db("backfill-addfilm")
         save_settings(Settings(trakt_client_id="id", trakt_access_token="tok"))
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(_make_user("tracker"))
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=self.user_id, provider="trakt", provider_user_id=7,
@@ -910,7 +910,7 @@ class RemovingAFilmTests(unittest.TestCase):
     def setUp(self):
         migrated_db("backfill-rmfilm")
         save_settings(Settings(trakt_client_id="id", trakt_access_token="tok"))
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(_make_user("tracker"))
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=self.user_id, provider="trakt", provider_user_id=7,
@@ -1053,7 +1053,7 @@ class BackfillRouteTests(unittest.TestCase):
     def setUp(self):
         migrated_db("backfill-api")
         save_settings(Settings(trakt_client_id="id", trakt_access_token="tok"))
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(_make_user("tracker"))
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=self.user_id, provider="trakt", provider_user_id=7,

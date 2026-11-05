@@ -37,7 +37,7 @@ from app.metadata import refresh as metadata_refresh
 from app.providers.base import Capabilities, Reach
 from app.providers.trakt import TraktError
 from app.config import Settings
-from tests.support import save_settings
+from tests.support import save_settings, settling
 from app.sources import prefs as source_prefs
 from app.main import app
 from tests.support import ORIGIN, migrated_db, window_fetch
@@ -92,7 +92,7 @@ class CalendarRouteTestCase(unittest.TestCase):
     def setUp(self):
         migrated_db("calroute")
         save_settings(_configured_settings())
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
 
     def serving_month(self, entries=()):
         """Hold the calendar fetch still for the life of the test.

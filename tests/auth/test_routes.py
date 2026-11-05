@@ -27,7 +27,7 @@ from app import auth, config, db
 from app.sources import prefs as source_prefs
 from app.auth import routes as auth_routes
 from app.config import Settings
-from tests.support import load_settings, save_settings
+from tests.support import load_settings, save_settings, settling
 from app.main import app
 from tests.support import migrated_db
 
@@ -46,7 +46,7 @@ class RouteTestCase(unittest.TestCase):
         # The Origin header is what a browser sends on any fetch() that changes
         # something, and mutating requests without one are refused; the test
         # client sends no headers it isn't told to.
-        self.client = TestClient(app, base_url="https://testserver",
+        self.client = TestClient(settling(app), base_url="https://testserver",
                                  headers={"Origin": "https://testserver"})
 
     def tearDown(self):

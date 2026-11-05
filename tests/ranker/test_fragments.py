@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 from app import auth, authz, db
 from app.ranker import core as ranker, item_keys, routes as ranker_routes
 from app.config import Settings
-from tests.support import save_settings
+from tests.support import save_settings, settling
 from app.media import user_images
 from app.main import app
 from tests.support import ORIGIN, STATIC_DIR, TEMPLATES_DIR, migrated_db
@@ -58,7 +58,7 @@ class FragmentTestCase(unittest.TestCase):
         migrated_db("frag")
         shutil.rmtree(user_images.USER_DATA_DIR, ignore_errors=True)
         save_settings(Settings())
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         # Something has to exist or the first-run gate answers before any access
         # level is consulted.
         self.make_user("admin_user", is_admin=True)

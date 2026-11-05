@@ -155,7 +155,9 @@ starts nothing. `tests/kernel/test_after_response.py` holds every starter to it.
 A WRITE THE ANSWER DOES NOT DEPEND ON goes the same way (`after_response.write`):
 a session's slide and a month's is-new commit waited their turn in the writer
 queue behind a restart's refills, up to 1.17 s, on pages that drew nothing from
-either.
+either. A test client not entered as a context manager stops its loop when the
+app returns, cancelling such a write mid-queue, so every test client is made over
+`tests/support.py`'s `settling(app)`, which returns once they have landed.
 
 **The session ROW is the authority on expiry, not the cookie.**
 `app/auth/cookies.py` issues it HttpOnly, SameSite=Lax, Path=/, no Domain, and
