@@ -84,7 +84,7 @@ GROUPS: dict[str, str] = {
     "clock": KERNEL, "config": KERNEL, "csp": KERNEL, "db": KERNEL, "details_panel": KERNEL,
     "endpoints": KERNEL, "http_pool": KERNEL, "logging_setup": KERNEL,
     "perftrace": KERNEL, "route_params": KERNEL, "secrets_box": KERNEL,
-    "templating": KERNEL, "timezones": KERNEL, "youtube": KERNEL,
+    "signed_tokens": KERNEL, "templating": KERNEL, "timezones": KERNEL, "youtube": KERNEL,
 
     # The value-type contract a source produces (Media, Item, Source, ItemKey).
     # Its own group because it is the one part of providers/ the kernel is

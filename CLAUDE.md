@@ -710,7 +710,11 @@ card through `CardPictures`), replacing the static fallback chain, and
 `/api/posters/missed` — PUBLIC, because Firefox sends no cookie on the proxy's
 redirect; a short-lived token signed with a key derived from ENCRYPTION_KEY
 (`secrets_box.derived_key`, never the sealing key itself) decides what it acts
-on; an image's request only — answers at once with the first address, in the
+on — A FEW DOZEN BYTES, every picture a page draws carries one: a versioned
+binary layout, each service and medium an explicit one-byte code
+(`pictures._SOURCE_CODES`, every registered Source held to one by a test; a
+service without one draws the static chain), base64url in ONE spelling, read
+strictly; an image's request only — answers at once with the first address, in the
 viewer's order and from what the registry holds NOW, that the token's chain of
 hops has not tried (so two dead pictures never bounce a browser between them),
 and confirms BEHIND the answer: a HEAD of the registry's address, never the

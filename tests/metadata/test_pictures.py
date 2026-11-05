@@ -17,6 +17,7 @@ THE PROMISES:
 from __future__ import annotations
 
 import asyncio
+import base64
 from types import SimpleNamespace
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
@@ -26,7 +27,7 @@ from contextlib import contextmanager
 
 from cryptography.fernet import Fernet
 
-from app import db, secrets_box
+from app import db, secrets_box, signed_tokens
 from app.media import artwork
 from app.metadata import pictures, refresh
 from app.providers.base import proxied_image, proxied_origin
@@ -66,6 +67,14 @@ def _report(source="trakt", url=DEAD, *, season=None, at=None, tried=()) -> pict
                            (*map(pictures.digest, tried), pictures.digest(url)))
 
 
+def _raw(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def _text(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
 def _token_of(src: str) -> str:
     default = parse_qs(urlsplit(src).query).get("default", [""])[0]
     return parse_qs(urlsplit(default).query).get("t", [""])[0]
@@ -95,20 +104,69 @@ class TheTokenTests(DatabaseTestCase):
         self.assertEqual(pictures.read(pictures.token(report), now=report.issued_at), report)
 
     def test_an_edited_token_is_refused(self):
-        payload, signature = pictures.token(_report()).split(".")
-        forged = pictures._b64(pictures._unb64(payload).replace(b"trakt", b"simkl"))
-        self.assertIsNone(pictures.read(f"{forged}.{signature}", now=db.now()))
+        """Every byte is signed — the service's code, the digest, the clock, the
+        signature itself: one bit changed anywhere is refused."""
+        raw = _raw(pictures.token(_report()))
+        for at in range(len(raw)):
+            with self.subTest(at=at):
+                edited = bytearray(raw)
+                edited[at] ^= 0x01
+                self.assertIsNone(pictures.read(_text(bytes(edited)), now=db.now()))
+
+    def test_a_token_is_a_few_dozen_characters(self):
+        """The point of the binary layout: every picture a signed-in page draws
+        carries one, and the JSON one spelled out each service, the order and
+        every digest — ~190 characters."""
+        self.assertLessEqual(len(pictures.token(_report())), 64)
+        self.assertRegex(pictures.token(_report()), r"^[A-Za-z0-9_-]+$")
+
+    def test_every_title_shape_reads_back(self):
+        for title, season in ((pictures.Title("movie", 603, "", None), None),
+                              (pictures.Title("show", None, "show:simkl:12345", 0), 0),
+                              (pictures.Title("show", None, "show:tvdb:9", -1), 2_000),
+                              (pictures.Title("show", 10 ** 9, "", 2026), None)):
+            with self.subTest(title=title):
+                report = pictures.Report(title, "simkl", season, pictures.digest(LIVE),
+                                         ("tmdb", "trakt", "simkl"), db.now(),
+                                         (pictures.digest(DEAD), pictures.digest(LIVE)))
+                self.assertEqual(pictures.read(pictures.token(report), now=report.issued_at),
+                                 report)
+
+    def test_every_registered_service_has_a_token_code(self):
+        from app.providers.base import Source
+        self.assertEqual(set(pictures._SOURCE_CODES), {str(source) for source in Source})
+        self.assertEqual(len(set(pictures._SOURCE_CODES.values())), len(pictures._SOURCE_CODES))
+
+    def test_a_service_with_no_code_draws_the_static_chain(self):
+        choices = [artwork.Choice("trakt", DEAD, None), artwork.Choice("simkl", LIVE, None)]
+        with mock.patch.dict(pictures._SOURCE_CODES, clear=True):
+            self.assertEqual(pictures.drawn(SETTINGS, TITLE, choices, ORDER),
+                             proxied_image(DEAD, fallbacks=[LIVE]))
+
+    def test_a_signed_token_this_layout_does_not_read_is_refused(self):
+        """Signed with the right key, and still refused: another layout's
+        version, a code no service has, bytes left over, a length past the end.
+        A token in the old JSON layout reads as rubbish."""
+        payload = _raw(pictures.token(_report()))[:-signed_tokens.SIGNATURE_BYTES]
+        for label, bad in (("version", bytes([2]) + payload[1:]),
+                           ("trailing byte", payload + b"\x00"),
+                           ("cut short", payload[:-3]),
+                           ("unknown medium", payload[:1] + payload[1:6] + b"\x09" + payload[7:])):
+            with self.subTest(label):
+                self.assertIsNone(pictures.read(_text(bad + signed_tokens.sign(pictures._PURPOSE, bad)), now=db.now()))
+        self.assertIsNone(pictures.read(
+            "WyJzaG93Iiw1MDAsIiIsMixudWxsXQ.c2lnbmF0dXJlc2lnbmF0dQ", now=db.now()))
 
     def test_with_no_encryption_key_another_processes_token_is_refused(self):
         with _encryption_key(None):
             text = pictures.token(_report())
-            with mock.patch.object(pictures, "_PROCESS_KEY", b"another process" * 2):
+            with mock.patch.object(signed_tokens, "_PROCESS_KEY", b"another process" * 2):
                 self.assertIsNone(pictures.read(text, now=db.now()))
 
     def test_with_an_encryption_key_a_token_survives_a_restart(self):
         with _encryption_key(KEY):
             text = pictures.token(_report())
-            with mock.patch.object(pictures, "_PROCESS_KEY", b"another process" * 2):
+            with mock.patch.object(signed_tokens, "_PROCESS_KEY", b"another process" * 2):
                 self.assertIsNotNone(pictures.read(text, now=db.now()))
 
     def test_a_token_signed_under_another_encryption_key_is_refused(self):
@@ -122,8 +180,16 @@ class TheTokenTests(DatabaseTestCase):
         self.assertIsNone(pictures.read(pictures.token(report),
                                         now=1000 + pictures.TOKEN_SECONDS + 1))
 
+    def test_one_token_has_one_spelling(self):
+        """A character outside the alphabet is not skipped over: the same bytes
+        spelled with a stray character are refused, not read."""
+        text = pictures.token(_report())
+        for spelled in (text[:5] + "!" + text[5:], text[:5] + "+" + text[5:], text + "="):
+            with self.subTest(spelled=spelled):
+                self.assertIsNone(pictures.read(spelled, now=db.now()))
+
     def test_rubbish_is_refused(self):
-        for text in ("", "nodot", "a.b", "....", "é.é"):
+        for text in ("", "nodot", "a.b", "....", "é.é", "A" * 2000):
             with self.subTest(text=text):
                 self.assertIsNone(pictures.read(text, now=db.now()))
 

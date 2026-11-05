@@ -61,12 +61,8 @@ signed address), so a heal can be followed end to end by its key.
 """
 from __future__ import annotations
 
-import base64
 import hashlib
-import hmac
-import json
 import logging
-import secrets
 import time
 from collections import deque
 from collections.abc import Iterable, Sequence
@@ -75,7 +71,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from .. import db, http_pool, secrets_box
+from .. import db, http_pool, signed_tokens
 from ..media import artwork
 from ..providers.base import proxied_image, proxied_origin
 from . import identity, refresh
@@ -96,15 +92,8 @@ CONFIRMS_PER_MINUTE = 30
 # One heal per title per this long, however many of its pictures report.
 HEAL_EVERY_SECONDS = 6 * 60 * 60
 
-# What the signing key is derived for (secrets_box.derived_key).
+# What the signing key is derived for (app/signed_tokens.py).
 _PURPOSE = "picture report token"
-# The key an instance with no ENCRYPTION_KEY signs with, made when the process
-# starts and never stored.
-_PROCESS_KEY = secrets.token_bytes(32)
-
-
-def _signing_key() -> bytes:
-    return secrets_box.derived_key(_PURPOSE) or _PROCESS_KEY
 
 # The confirmation's own pool: a HEAD of an image host, no credential — a token
 # sent to an address recorded from somebody else would hand them one.
@@ -139,50 +128,102 @@ class Report(NamedTuple):
     tried: tuple[str, ...] = ()
 
 
+# How many bytes of an address's SHA-256 a token names it by, and its spelling
+# as text (`digest`) — 80 bits, enough to tell one recorded address from any
+# other, which is all it is asked: the registry's address is compared with it,
+# and the token is signed, so nobody can choose a digest it carries.
+_DIGEST_BYTES = 10
+
+
 def digest(url: str) -> str:
     """An address as a token names it: enough to tell it from any other, and no
     address in the page twice."""
-    return hashlib.sha256(str(url).encode("utf-8")).hexdigest()[:20]
+    return hashlib.sha256(str(url).encode("utf-8")).hexdigest()[:2 * _DIGEST_BYTES]
 
 
-def _b64(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+# THE TOKEN IS A FEW DOZEN BYTES, NOT A JSON DOCUMENT, because every picture a
+# signed-in page draws carries one — a card's poster, every tracker and board
+# row — and a JSON array in base64 spelled each service, the order and every
+# digest out in full: ~190 characters a picture. Sealed by app/signed_tokens.py
+# (the key, the signature, the one spelling); the LAYOUT is this module's, behind
+# a version byte of its own so a later one can be told apart rather than misread:
+#   version · issued (varint) · medium (code) · tmdb id (varint, 0 = none) ·
+#   title key (text; empty where the tmdb id names the title, as every caller
+#   spells it) · the row's season · service (code) · whether the picture was the
+#   season's own · the digest (`_DIGEST_BYTES`) · the order (count + codes) ·
+#   the digests tried BEFORE this one (count + each) — the reported one is
+#   always the chain's last.
+_VERSION = 1
+# EACH SERVICE AND MEDIUM NAMED EXPLICITLY, never by its place in a registry that
+# can grow: a code means the same service in a token issued before a release that
+# added one. A service with no code cannot be drawn with a report address
+# (`report_address` falls back), and a code with no service refuses the token;
+# tests/metadata/test_pictures.py holds every registered Source to a code.
+_SOURCE_CODES = {"tmdb": 1, "trakt": 2, "simkl": 3}
+_MEDIA_CODES = {"show": 1, "movie": 2}
+_SOURCES_BY_CODE = {code: name for name, code in _SOURCE_CODES.items()}
+_MEDIA_BY_CODE = {code: name for name, code in _MEDIA_CODES.items()}
+# The longest title key a token carries — far past any key the store spells, and
+# a bound on what a forged length could make the reader slice.
+_MAX_KEY_BYTES = 512
 
 
-def _unb64(text: str) -> bytes:
-    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+def _code(reader: signed_tokens.Reader, table: dict[int, str]) -> str:
+    code = reader.byte()
+    if code not in table:
+        raise ValueError("a code this module does not write")
+    return table[code]
 
 
 def token(report: Report) -> str:
-    """A report signed with this process's key."""
+    """A report sealed with this instance's key — see the layout above. Raises
+    ValueError for a report this layout cannot carry (a service or medium with
+    no code, a digest not this module's)."""
     t = report.title
-    payload = _b64(json.dumps(
-        [t.media, t.tmdb, t.title_key, t.season, report.source, report.season, report.digest,
-         list(report.order), report.issued_at, list(report.tried or (report.digest,))],
-        separators=(",", ":")).encode("utf-8"))
-    signature = _b64(hmac.new(_signing_key(), payload.encode("ascii"),
-                              hashlib.sha256).digest()[:16])
-    return f"{payload}.{signature}"
+    if len((t.title_key or "").encode("utf-8")) > _MAX_KEY_BYTES:
+        raise ValueError("a title key longer than a token carries")
+    earlier = [found for found in (report.tried or (report.digest,)) if found != report.digest]
+    if any(len(bytes.fromhex(found)) != _DIGEST_BYTES for found in (report.digest, *earlier)):
+        raise ValueError("a digest this module did not make")
+    try:
+        payload = b"".join((
+            bytes((_VERSION,)), signed_tokens.varint(report.issued_at),
+            bytes((_MEDIA_CODES[str(t.media)],)), signed_tokens.varint(t.tmdb or 0),
+            signed_tokens.text(t.title_key or ""), signed_tokens.optional_int(t.season),
+            bytes((_SOURCE_CODES[str(report.source)],)),
+            signed_tokens.optional_int(report.season), bytes.fromhex(report.digest),
+            bytes((len(report.order), *(_SOURCE_CODES[str(name)] for name in report.order))),
+            signed_tokens.varint(len(earlier)), *(bytes.fromhex(found) for found in earlier)))
+    except KeyError as exc:
+        raise ValueError(f"no token code for {exc}") from None
+    return signed_tokens.seal(_PURPOSE, payload)
 
 
 def read(text: str, *, now: int) -> Report | None:
-    """The report a token says, or None for one this process did not sign, one
+    """The report a token says, or None for one this instance did not seal, one
     past `TOKEN_SECONDS`, or anything malformed."""
-    try:
-        payload, signature = str(text or "").split(".", 1)
-        expected = _b64(hmac.new(_signing_key(), payload.encode("ascii"),
-                                 hashlib.sha256).digest()[:16])
-        if not hmac.compare_digest(signature, expected):
-            return None
-        (media, tmdb, title_key, season, source, own, address, order, issued,
-         tried) = json.loads(_unb64(payload))
-        report = Report(Title(str(media), int(tmdb) if tmdb else None, str(title_key or ""),
-                              None if season is None else int(season)),
-                        str(source), None if own is None else int(own), str(address),
-                        tuple(str(name) for name in order), int(issued),
-                        tuple(str(found) for found in tried))
-    except (ValueError, TypeError, UnicodeError):
+    payload = signed_tokens.opened(_PURPOSE, text)
+    if payload is None:
         return None
+    try:
+        reader = signed_tokens.Reader(payload)
+        if reader.byte() != _VERSION:
+            return None
+        issued = reader.varint()
+        media = _code(reader, _MEDIA_BY_CODE)
+        tmdb = reader.varint() or None
+        title_key = reader.text(_MAX_KEY_BYTES)
+        season = reader.optional_int()
+        source = _code(reader, _SOURCES_BY_CODE)
+        own = reader.optional_int()
+        address = reader.take(_DIGEST_BYTES).hex()
+        order = tuple(_code(reader, _SOURCES_BY_CODE) for _ in range(reader.byte()))
+        earlier = tuple(reader.take(_DIGEST_BYTES).hex() for _ in range(reader.varint()))
+        reader.end()
+    except (ValueError, UnicodeError):
+        return None
+    report = Report(Title(media, tmdb, title_key, season), source, own, address, order,
+                    issued, (*earlier, address))
     if not 0 <= now - report.issued_at <= TOKEN_SECONDS:
         return None
     return report
@@ -207,7 +248,17 @@ def report_address(settings, title: Title, choice: artwork.Choice, order: Iterab
     report = Report(title, str(choice.source), choice.season, address,
                     tuple(str(name) for name in order), db.now() if now is None else now,
                     (*tried, address))
-    return f"{origin}{ROUTE}?t={token(report)}"
+    try:
+        signed = token(report)
+    except ValueError:
+        # A report the token's layout has no code for — a service registered
+        # without one (`_SOURCE_CODES`) — draws the static fallback chain
+        # instead, as an instance with no public address does, rather than a
+        # report address nothing could read back.
+        logger.warning("pictures: no report address for %s's %s picture — %s", title.key,
+                       choice.source, "a service or medium with no token code")
+        return ""
+    return f"{origin}{ROUTE}?t={signed}"
 
 
 def drawn(settings, title: Title, choices: Sequence[artwork.Choice], order: Iterable[str],
