@@ -591,6 +591,19 @@ values agree, `field_sources` lists the winner first, which is what
 `Record.shown_source` names and the details panel is opened with.
 `tests/calendar/test_equivalence.py` holds it; `tests/providers/
 test_protocol_conformance.py` holds every service to an answer for its words.
+A CARD IS DRAWN WITH ITS WINNERS AND COMPARES ON DEMAND: `_card.html` draws
+each field's winning value and no flip or pair of chips; a card with
+`alternatives` (or `air_choices`) carries ONE control on its poster that GETs
+the card drawn whole (`expanded`) from `calendar_card`
+(`/calendar/fragments/card`, references only — the card's store row
+`Record.card`, its `airing_key`, the page's tokens, built by `_card_url`) and
+swaps it in for itself. MEASURED, October All Episodes: every one of a filtered
+month's 1,334 cards carried a flip and a pair of chips; this took 4.9 KB and 39
+elements off each card's 18.2 KB / 134. The answer reads the title's own rows
+like a mark (~30 ms); a card the store no longer draws answers 204. A surface
+that hands the card no `card_expand` draws no control (the share page has a
+card of its own, which never compares); `tests/calendar/test_card_provenance.py`
+holds both drawings, `test_routes.py`'s `TheCardDrawnWholeTests` the route.
 
 **A viewer's filters are per MEDIUM, and one function turns a medium into
 columns.** `app/calendar/vocab.py` owns it: `TV_FIELDS`/`MOVIE_FIELDS` say which

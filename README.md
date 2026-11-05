@@ -306,8 +306,9 @@ worked out**. Season Finales and All Episodes stay Trakt's and Simkl's.
 
 TMDB gives dates, not times. A card TMDB describes — every card, for anyone whose service
 order starts with TMDB, which is the default — sits on TMDB's day and shows a time only when
-another service's airing falls on that same day; when the services disagree, the card shows
-each one's date side by side. TMDB lists far more than the other two (about five times the
+another service's airing falls on that same day. A card shows one value for each detail —
+your first service's — and where the services disagree, a small service mark on its poster
+opens every service's answer side by side, dates included. TMDB lists far more than the other two (about five times the
 series premieres in a typical month, many of them regional or web series): switch TMDB off
 for TV or films in 🎚️ Filters, or trim it with **hide titles only one service lists**, **hide
 shows only TMDB lists that name no network**, languages, show types or missing data. A

@@ -95,9 +95,26 @@
    them. The values are drawn as ELEMENTS now and the flip is a radio choosing
    between them, so the page holds each of them exactly once, in the place it is
    shown. The DOM is where the markup lives, not where a copy of the data is
-   parked. #}
+   parked.
+
+   AND ONLY A CARD SOMEBODY ASKED TO COMPARE DRAWS THEM AT ALL. A card is drawn
+   with the winning value of every field and nothing else; where its services
+   disagree it carries ONE control, on the poster where its flip's mark sits,
+   that fetches this same card drawn `expanded` — the flips and the pairs of
+   chips above — and swaps it in for itself (calendar/routes.py's
+   `calendar_card`). Most cards had something to compare and nobody compares
+   most cards: MEASURED on one October's All Episodes, every one of a filtered
+   month's 1,334 cards carried a flip and a pair of chips, 4.9 KB and 39
+   elements of each card's 18.2 KB and 134. The first press waits one short
+   read; every flip after it is the radios', instant. A surface that hands the
+   card no `card_expand` draws no control, and the share page has its own
+   card, which never compares. #}
 {% import '_source_logo.html' as src with context %}
 {% import '_filter_badge.html' as fb with context %}
+{%- set full = expanded is defined and expanded -%}
+{#- What this drawing of the card compares: everything, expanded; nothing,
+    otherwise — the one switch the three flips and the chips below read. -#}
+{%- set alts = item.alternatives if full else {} -%}
 
 {# Which service supplied the value currently on screen for `field` — asked of
    the record rather than worked out here, so the three places that need it (the
@@ -224,7 +241,18 @@
             <svg class="icon-open" width="16" height="16" aria-hidden="true"><use href="#eye-open"></use></svg>
             <svg class="icon-closed" width="16" height="16" aria-hidden="true"><use href="#eye-closed"></use></svg>
         </button>
-        {%- if 'poster' in item.alternatives %}
+        {#- THE ONE CONTROL A CARD WHOSE SERVICES DISAGREE CARRIES — see the header.
+            It wears the mark of the service whose values are on screen, as the
+            poster's flip does, and asks for this card drawn whole in its place.
+            A request, not a script: `click once`, because once it has answered the
+            card it sat on is gone. -#}
+        {%- if not full and card_expand is defined and (item.alternatives or item.air_choices) %}
+        <button type="button" class="source-swap card-expand"
+                title="From {{ src.label(won_by('poster') or item.source|string) }} — click to compare every service's answer"
+                hx-get="{{ card_expand(item) }}" hx-trigger="click once"
+                hx-target="closest .card" hx-swap="outerHTML">{{ src.mark(won_by('poster') or item.source|string) }}</button>
+        {%- endif %}
+        {%- if 'poster' in alts %}
         {#- EVERY SERVICE'S PICTURE IS IN THE PAGE and the checked radio decides
             which is drawn. `loading="lazy"` on all of them, so the ones not on
             screen cost nothing until they are asked for. The flip's own mark is
@@ -245,7 +273,7 @@
     </div>
     <div class="card-body">
         <div class="title-row">
-            {%- if 'title' in item.alternatives %}
+            {%- if 'title' in alts %}
             {%- call(name, value) swap('title') -%}
             <span class="show-title" data-field="title" data-source="{{ name }}">{{ value }}</span>
             {%- endcall %}
@@ -266,7 +294,7 @@
                 the front of the row, because it names the days itself and a
                 two-line row hides what comes after the genres. `air_choices` is
                 empty wherever they agree, which is nearly every card. -#}
-            {% if item.air_choices %}
+            {% if full and item.air_choices %}
             <span class="chip dual day" data-field="airing" title="when it airs — the services disagree">
                 {%- for name, when in item.air_choices %}<span class="dual-value">📆 {{ when }}{{ src.mark(name) }}</span>{% endfor -%}
             </span>
@@ -280,7 +308,7 @@
                values, each shown once per thing the services said — a rating once
                per service that gave one, even when two give the same number. #}
             {% for field, glyph in [('rating', '⭐'), ('network', '📡'), ('runtime', '⏱️'), ('status', '📶')] %}
-            {% if field in item.alternatives %}
+            {% if field in alts %}
             <span class="chip dual" data-field="{{ field }}" title="{{ field }} — the services disagree">
                 {%- for name, value in item.alternatives[field].items() %}<span class="dual-value">{{ glyph }} {{ value }}{% if field == 'runtime' %}m{% endif %}{{ src.mark(name) }}</span>{% endfor -%}
             </span>
@@ -289,7 +317,7 @@
         </div>
         {% if item.overview %}
         <div class="overview-row">
-            {%- if 'overview' in item.alternatives %}
+            {%- if 'overview' in alts %}
             {%- call(name, value) swap('overview') -%}
             <span class="overview" data-field="overview" data-source="{{ name }}">{{ value }}</span>
             {%- endcall %}

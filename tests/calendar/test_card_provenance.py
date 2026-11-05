@@ -64,9 +64,11 @@ def _record(source, **overrides) -> Record:
     return Record(**values)
 
 
-def _card_html(*records: Record, prefs=None) -> str:
+def _card_html(*records: Record, prefs=None, expanded=True) -> str:
     """One rendered card for the group `records` form, resolved and rendered the
-    way the calendar's own read path does it."""
+    way the calendar's own read path does it — DRAWN WHOLE, as its compare
+    control fetches it, unless `expanded` is False: the card a page draws first,
+    with the control and nothing to compare (`ACardIsDrawnWithItsWinnersTests`)."""
     groups = stored_groups(list(records))
     assert len(groups) == 1, "these records do not match; the matcher would draw two cards"
     resolved = _resolve(groups[0], prefs)
@@ -77,7 +79,8 @@ def _card_html(*records: Record, prefs=None) -> str:
         # is answered with every card for it ON THIS MONTH, so the button has to
         # say which month it is asking about.
         month=1, year=2026, endpoint=get_endpoint("shows/new"),
-        settings=Settings())
+        settings=Settings(), expanded=expanded,
+        card_expand=lambda item: f"/calendar/fragments/card?airing={item.airing_key}")
 
 
 def _swap(html: str, field: str) -> str | None:
@@ -154,6 +157,61 @@ class ACardTheOtherServiceListedTests(CardTestCase):
         TMDB, whose id it names, greyed beside it."""
         self.assertEqual(self.html.count('class="trakt-btn"'), 1)
         self.assertEqual(self.html.count('class="trakt-btn unlisted"'), 1)
+
+
+class ACardIsDrawnWithItsWinnersTests(CardTestCase):
+    """The card a page draws first: every field's winning value and nothing
+    else, and — where the services disagree — ONE control that fetches the card
+    drawn whole in its place (_card.html's header; the classes below are about
+    that whole drawing)."""
+
+    def setUp(self):
+        super().setUp()
+        self.records = (_record(Source.TRAKT),
+                        _record(Source.SIMKL, title="Another Title", rating=7.2,
+                                poster="https://simkl.test/q.jpg"))
+        self.html = _card_html(*self.records, expanded=False)
+
+    def test_it_draws_the_winners_and_no_flip_and_no_pair_of_chips(self):
+        self.assertIn("One Title", self.html)
+        self.assertNotIn("Another Title", self.html)
+        self.assertNotIn(quote("https://simkl.test/q.jpg", safe=""), self.html)
+        self.assertNotIn('class="flip"', self.html)
+        self.assertNotIn("flip-pick", self.html)
+        self.assertNotIn("chip dual", self.html)
+
+    def test_one_control_fetches_the_card_drawn_whole_in_its_place(self):
+        controls = re.findall(r'<button[^>]*class="source-swap card-expand"[^>]*>', self.html, re.S)
+        self.assertEqual(len(controls), 1)
+        control = controls[0]
+        self.assertRegex(control, r'hx-get="/calendar/fragments/card\?airing=[0-9a-f]{16}"')
+        self.assertIn('hx-trigger="click once"', control)
+        self.assertIn('hx-target="closest .card"', control)
+        self.assertIn('hx-swap="outerHTML"', control)
+        # It wears the mark of the service whose values are on screen, and is a
+        # button — a control static/js/ui.js's opener leaves to act for itself.
+        self.assertIn('alt="Trakt"', self.html.split("card-expand", 1)[1].split("</button>", 1)[0])
+
+    def test_a_disagreement_about_the_day_alone_offers_it_too(self):
+        html = _card_html(_record(Source.TRAKT),
+                          _record(Source.SIMKL, air_ts=AIR_TS + 2 * 86400), expanded=False)
+        self.assertIn("card-expand", html)
+        self.assertNotIn("chip dual day", html)
+
+    def test_a_card_whose_services_agree_offers_nothing(self):
+        self.assertNotIn("card-expand", _card_html(_record(Source.TRAKT), expanded=False))
+
+    def test_a_surface_that_offers_no_address_draws_no_control(self):
+        groups = stored_groups(list(self.records))
+        item = render(_resolve(groups[0]), UTC)
+        html = templates.env.get_template("_card.html").render(
+            item=item, not_watching=set(), new_ids=set(), is_admin=False, month=1,
+            year=2026, endpoint=get_endpoint("shows/new"), settings=Settings())
+        self.assertNotIn("card-expand", html)
+        self.assertNotIn('class="flip"', html)
+
+    def test_drawn_whole_it_carries_no_control(self):
+        self.assertNotIn("card-expand", _card_html(*self.records))
 
 
 class ADisagreementIsDrawnWhereThereIsOneTests(CardTestCase):

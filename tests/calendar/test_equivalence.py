@@ -50,9 +50,11 @@ def _resolved(*records: Record, order=()) -> Record:
 
 
 def _card(*records: Record, order=()) -> str:
+    """The card drawn whole, as its compare control fetches it — the drawing
+    that shows every service's answer (_card.html's header)."""
     return templates.env.get_template("_card.html").render(
         item=render(_resolved(*records, order=order), ZoneInfo("UTC")), not_watching=set(),
-        new_ids=set(), is_admin=False, month=1, year=2026,
+        new_ids=set(), is_admin=False, month=1, year=2026, expanded=True,
         endpoint=get_endpoint("shows/new"), settings=Settings())
 
 

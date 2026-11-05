@@ -1301,11 +1301,17 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
    the poster's bottom edge. The middle of that edge because the four corners are
    spoken for — runtime and episode down the left, rating and the watching eye
    down the right, the network's logo bottom-right. */
-.poster-wrap .flip-value > .source-swap {
+.poster-wrap .flip-value > .source-swap,
+.poster-wrap > .card-expand {
     position: absolute; bottom: 9px; left: 50%; transform: translateX(-50%); z-index: 6;
     padding: 3px; background: rgba(10,12,16,0.82); backdrop-filter: blur(4px);
 }
-.poster-wrap .flip-value > .source-swap .source-logo { height: 15px; }
+.poster-wrap .flip-value > .source-swap .source-logo,
+.poster-wrap > .card-expand .source-logo { height: 15px; }
+/* THE CONTROL THAT ASKS FOR THE CARD DRAWN WHOLE (_card.html) is a <button>
+   dressed as the flip's mark, so the browser's own button face goes. */
+.card-expand { font: inherit; color: inherit; }
+.card-expand:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 .flip:has(.flip-pick:focus-visible) .flip-pick:checked + .flip-value > .source-swap {
     outline: 2px solid var(--gold); outline-offset: 2px;
 }

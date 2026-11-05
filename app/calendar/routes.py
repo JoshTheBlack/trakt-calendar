@@ -26,6 +26,7 @@ import re
 import secrets
 import time
 from collections import OrderedDict
+from functools import partial
 from typing import NamedTuple
 from datetime import date, datetime, timedelta
 from urllib.parse import quote, urlencode
@@ -925,6 +926,10 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
         "logo_networks": logo_networks,
         # WHAT EACH CARD'S PICTURE IS DRAWN AS — see `_card_pictures`.
         "card_pictures": await _card_pictures(user, settings),
+        # WHERE A CARD'S COMPARE CONTROL ASKS FOR IT DRAWN WHOLE — see `_card_url`.
+        "card_expand": partial(_card_url, endpoint.key, year, month,
+                               source=request.query_params.get("source"), new=new_token,
+                               page=page_token),
         # How many cards the shell is actually turning into HTML, for the render
         # span the caller opens around it.
         "inline_cards": sum(len(group["items"]) for group in month_view.grouped
@@ -1063,8 +1068,7 @@ def _library(user, settings) -> integrations_routes.LibraryView | None:
 # AND EACH PAGE FILES LITTLE PER CARD: a month's cards are mostly a few hundred
 # titles' episodes, which spell their marks the same way, so equal spellings —
 # and equal days, mark keys and title keys — are one object for the whole page
-# (`_file_month`). MEASURED, user 1's October All Episodes: 13.4 MB a page with
-# filters paused (18,490 cards) before, the figure in `_file_month` after.
+# (`_file_month`, which has the measurements).
 _PAGES_MAX = 256
 _PAGE_SECONDS = 2 * 60 * 60
 _FILED_CARDS_MAX = 200_000
@@ -1119,7 +1123,8 @@ def _file_month(user_id: int, endpoint_key: str, year: int, month: int,
     spells its marks alike, so the page holds each distinct spelling set, day and
     key once and a card refers to them. MEASURED on a copy of dev, user 1's
     October All Episodes: 0.8 -> 0.2 MB a page with their filters (1,334 cards),
-    13.4 -> 2.5 MB with them paused (18,490 cards)."""
+    13.4 -> 3.8 MB with them paused (18,490 cards, 3,383 spelling sets for 3,339
+    titles) — so the whole store tops out near 40 MB at `_FILED_CARDS_MAX`."""
     moment = time.monotonic()
     shared: dict = {}
     cards = tuple(_FiledCard(shared.setdefault(group["date"], group["date"]),
@@ -1254,6 +1259,25 @@ def _day_url(endpoint_key: str, day: date, *, source: str | None = None,
     (`_file_month`)."""
     url = (f"/calendar/day?endpoint={quote(endpoint_key)}"
           f"&year={day.year}&month={day.month}&date={day.isoformat()}")
+    if source:
+        url += f"&source={quote(source)}"
+    if new:
+        url += f"&new={quote(new, safe='')}"
+    if page:
+        url += f"&page={quote(page, safe='')}"
+    return url
+
+
+def _card_url(endpoint_key: str, year: int, month: int, item, *, source: str | None = None,
+              new: str = "", page: str = "") -> str:
+    """The address a card's one compare control fetches the card drawn whole
+    from (`calendar_card`). REFERENCES ONLY: which calendar and month, the card's
+    own row in the title store (`Record.card`, its title's key and episode row)
+    and its airing's digest, plus the same three references a late day carries —
+    the source override, the is-new token and the page token — so the card comes
+    back exactly as the page drew it, with every service's values beside."""
+    url = (f"/calendar/fragments/card?endpoint={quote(endpoint_key)}&year={year}&month={month}"
+           f"&card={quote(str(item.card or ''), safe='')}&airing={item.airing_key}")
     if source:
         url += f"&source={quote(source)}"
     if new:
@@ -1409,6 +1433,10 @@ async def calendar_day(request: Request):
         # And the same add-to-library buttons, in the state they are in.
         "library": _library(user, settings),
         "card_pictures": await _card_pictures(user, settings),
+        "card_expand": partial(_card_url, endpoint.key, year, month,
+                               source=request.query_params.get("source"),
+                               new=request.query_params.get("new") or "",
+                               page=_page_token(request)),
         "date": day.isoformat(), "label": calendar_cache.day_label(day),
         # The retry asks for exactly what the placeholder did, token included —
         # which is the whole of what a retry now has to carry forward.
@@ -1472,6 +1500,74 @@ async def calendar_day(request: Request):
         {**context, "group": grouped[0] if grouped else None,
          "error": None, "partial": meta["partial"]},
     )
+
+
+# What a compare control's `card` and `airing` may be: a title-store key and an
+# episode row, joined by the last "|", and an airing's sixteen hex digits
+# (Item.airing_key). Bounded: they reach a database read and nothing else.
+_CARD_REF = re.compile(r"[^\s|]{3,200}\|[^\s|]{1,120}")
+_AIRING = re.compile(r"[0-9a-f]{16}")
+
+
+@guard.get("/calendar/fragments/card", AuthLevel.CALENDAR_APPROVED)
+async def calendar_card(request: Request):
+    """ONE CARD DRAWN WHOLE — every service's value beside the winner, the flips
+    and the pairs of chips — for the compare control a card whose services
+    disagree carries (_card.html says why a card is drawn without them). The
+    answer replaces the card that asked.
+
+    THE CARD IS READ AS A MARK READS ITS TITLE: its title's own rows, every
+    listing of them whole (calendar/query.py's `titles`), placed and judged for
+    this viewer — their filters, their source selection, their order — and only
+    the card the address names is drawn. A card this read does not draw any more
+    (a refill moved it, a description filtered it) answers 204 and the page is
+    left as it is; the month-changed sentence is what says the page went stale.
+
+    WHAT THE CARD IS WEARING IS THE PAGE'S: whether it is marked, from this
+    viewer's marks now; whether it is new, from the shell's filed answer (the
+    `new` token, `_new_marks`); its mark button recounts the page's filed month
+    (`page`)."""
+    settings = await load_settings()
+    user = await auth.current_user(request)
+    prefs = await auth.get_user_prefs(user.user_id)
+    today = clock.today()
+    year = route_params.valid_year(request.query_params.get("year"), today.year)
+    month = route_params.valid_month(request.query_params.get("month"), today.month)
+    endpoint = _requested_endpoint(request, prefs, settings)
+    card = request.query_params.get("card") or ""
+    airing = request.query_params.get("airing") or ""
+    if not _CARD_REF.fullmatch(card) or not _AIRING.fullmatch(airing):
+        return JSONResponse({"ok": False, "error": "Invalid card"}, status_code=400)
+    title_key, _bar, unit = card.rpartition("|")
+    tz = _resolve_viewer_tz(user, settings)
+    selection = await _viewer_source_selection(request, user, endpoint.media)
+    viewer = calendar_query.Viewer(
+        endpoint, settings, selection, tz,
+        vocab.complete_specs(vocab.active_specs(prefs, endpoint.media, honour_pause=True)))
+    first = date(year, month, 1)
+    last = date(year, month, _calendar.monthrange(year, month)[1])
+    placed = await calendar_query.titles(viewer, {title_key})
+    views = [view for view in placed.views if view.card.unit == unit
+             and first <= date.fromisoformat(view.air_date) <= last]
+    items = await calendar_query.present(viewer, views)
+    found = next((item for item in items if item.airing_key == airing), None)
+    if found is None:
+        return Response(status_code=204)
+    not_watching = await calendar_state.not_watching_ids(user.user_id)
+    return await templating.drawn(request, "_card.html", {
+        "request": request, "item": found, "expanded": True,
+        "not_watching": ({found.mark_key} if calendar_state.marked(not_watching, found)
+                         else set()),
+        "new_ids": await _new_marks(user.user_id, endpoint.key, year, month,
+                                    request.query_params.get("new") or ""),
+        "can_filter": True, "badge_modes": vocab.BadgeModes(prefs),
+        "card_pictures": await _card_pictures(user, settings),
+        "settings": settings, "is_admin": bool(user and user.is_admin),
+        "library": _library(user, settings),
+        "logo_networks": await _logo_networks(settings, [found]),
+        "month": month, "year": year, "endpoint": endpoint,
+        "page_token": _page_token(request),
+    })
 
 
 @guard.get("/calendar/changed", AuthLevel.CALENDAR_APPROVED)
@@ -2430,6 +2526,12 @@ async def _marked_cards(request: Request, user, settings, prefs, endpoint, year:
         "not_watching": marked, "new_ids": set(),
         "can_filter": True, "badge_modes": vocab.BadgeModes(prefs),
         "card_pictures": await _card_pictures(user, settings),
+        # A redrawn card is drawn as the page draws it, its compare control
+        # included; it carries no is-new mark (`new_ids` above), so neither does
+        # what that control fetches.
+        "card_expand": partial(_card_url, endpoint.key, year, month,
+                               source=request.query_params.get("source"),
+                               page=_page_token(request)),
         "settings": settings, "is_admin": bool(user and user.is_admin),
         "library": _library(user, settings),
         # WHICH NETWORKS HAVE A LOGO, asked once here rather than once per

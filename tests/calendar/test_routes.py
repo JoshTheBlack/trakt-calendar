@@ -1555,6 +1555,67 @@ class TheMonthChangedNoticeTests(CalendarRouteTestCase):
         self.assertNotIn("hx-get", answer.text)
 
 
+class TheFiledMonthIsBoundedTests(unittest.TestCase):
+    """The month a page drew is filed in process for its marks and late days, and
+    the process runs for weeks: the store lets go of a page by age whenever it
+    is touched, holds no more than `_FILED_CARDS_MAX` cards in all — a page's
+    size is its month's, and an unfiltered All Episodes month is ~18,000 cards —
+    and keeps each distinct spelling once a page."""
+
+    def setUp(self):
+        calendar_routes._pages.clear()
+        self.addCleanup(calendar_routes._pages.clear)
+        self.now = 1_000.0
+        clock = patch.object(calendar_routes.time, "monotonic", lambda: self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    @staticmethod
+    def _month(cards: int, *, titles: int = 1) -> list[dict]:
+        items = [SimpleNamespace(mark_key=f"show:tmdb:{n % titles}",
+                                 title_key=f"show:tmdb:{n % titles}", id=f"slug-{n % titles}",
+                                 media="show", ids={"tmdb": n % titles}, known_ids={})
+                 for n in range(cards)]
+        return [{"date": "2026-07-04", "items": items}]
+
+    def _file(self, cards: int, **kwargs) -> str:
+        return calendar_routes._file_month(1, "shows", 2026, 7, self._month(cards, **kwargs))
+
+    def test_a_page_past_its_age_goes_when_the_store_is_read(self):
+        token = self._file(3)
+        self.now += calendar_routes._PAGE_SECONDS + 1
+        self.assertIsNone(calendar_routes._filed_month(1, token, "shows", 2026, 7))
+        self.assertEqual(len(calendar_routes._pages), 0)
+
+    def test_the_oldest_pages_go_once_the_cards_held_would_pass_the_bound(self):
+        with patch.object(calendar_routes, "_FILED_CARDS_MAX", 10):
+            first, second = self._file(4), self._file(4)
+            third = self._file(4)
+            self.assertIsNone(calendar_routes._filed_month(1, first, "shows", 2026, 7))
+            self.assertIsNotNone(calendar_routes._filed_month(1, second, "shows", 2026, 7))
+            self.assertIsNotNone(calendar_routes._filed_month(1, third, "shows", 2026, 7))
+            self.assertLessEqual(sum(len(filed.cards) for filed in calendar_routes._pages.values()),
+                                 10)
+
+    def test_a_page_bigger_than_the_whole_store_is_not_filed(self):
+        with patch.object(calendar_routes, "_FILED_CARDS_MAX", 10):
+            kept = self._file(4)
+            self.assertEqual(self._file(11), "")
+            self.assertIsNotNone(calendar_routes._filed_month(1, kept, "shows", 2026, 7))
+
+    def test_no_more_pages_than_the_page_bound(self):
+        with patch.object(calendar_routes, "_PAGES_MAX", 3):
+            for _ in range(5):
+                self._file(1)
+        self.assertEqual(len(calendar_routes._pages), 3)
+
+    def test_a_titles_cards_share_one_spelling_set(self):
+        token = self._file(30, titles=3)
+        cards = calendar_routes._filed_month(1, token, "shows", 2026, 7).cards
+        self.assertEqual(len({id(card.spellings) for card in cards}), 3)
+        self.assertEqual(len({id(card.air_date) for card in cards}), 1)
+
+
 class CalendarShellTests(CalendarRouteTestCase):
     """The page ships the first few days and asks for the rest itself."""
 
@@ -2100,6 +2161,69 @@ class CalendarSearchRouteTests(CalendarRouteTestCase):
         self.client.cookies.clear()
         self.assertIn(self.client.get(f"{self.URL}&q=drama").status_code,
                       (302, 303, 401, 403))
+
+class TheCardDrawnWholeTests(CalendarRouteTestCase):
+    """`/calendar/fragments/card`: the one card a compare control names, drawn
+    whole for this viewer — read by its title's rows, judged by their filters,
+    wearing their marks — or nothing at all when the store no longer draws it."""
+
+    PAGE = "/calendar?endpoint=shows&year=2026&month=7"
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("card_viewer")
+        self.sign_in_as(self.user_id)
+        self.drama = _entry("the-drama", "The Drama", "2026-07-15T20:00:00Z")
+        self.drama["show"]["genres"] = ["drama"]
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch([self.drama]))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        html = self.client.get(self.PAGE).text
+        self.airing = re.search(r'data-id="%s" data-airing="([0-9a-f]{16})"'
+                                % re.escape(_mark_key("the-drama")), html).group(1)
+        (row,) = asyncio.run(db.fetch_all(
+            "SELECT e.title_key, e.unit FROM episodes e JOIN titles t "
+            "ON t.title_key = e.title_key WHERE t.trakt_title = 'The Drama'"))
+        self.card = f"{row['title_key']}|{row['unit']}"
+
+    def _get(self, card=None, airing=None, extra=""):
+        return self.client.get(
+            f"/calendar/fragments/card?endpoint=shows&year=2026&month=7"
+            f"&card={quote(card or self.card, safe='')}&airing={airing or self.airing}{extra}")
+
+    def test_it_answers_with_the_card_alone_drawn_whole(self):
+        response = self._get()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.text.lstrip().startswith('<div class="card'))
+        self.assertIn(f'data-airing="{self.airing}"', response.text)
+        self.assertIn("The Drama", response.text)
+        self.assertNotIn("card-expand", response.text)
+        self.assertNotIn("day-block", response.text)
+
+    def test_it_wears_this_viewers_mark(self):
+        asyncio.run(calendar_state.set_not_watching(self.user_id, "the-drama", True))
+        self.assertIn("not-watching", _card_class(self._get().text, _mark_key("the-drama")))
+
+    def test_a_card_the_store_does_not_draw_any_more_answers_nothing(self):
+        response = self._get(airing="0" * 16)
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.text, "")
+
+    def test_a_card_this_viewers_filters_hide_answers_nothing(self):
+        self.client.post("/calendar/filters", json={
+            vocab.field_name(vocab.TV_GENRES, "drama"): "exclude"})
+        self.assertEqual(self._get().status_code, 204)
+
+    def test_an_address_naming_no_card_is_refused(self):
+        for card, airing in (("no-bar-at-all", None), ("a b|c", None), (None, "not-hex"),
+                             ("x" * 400 + "|S1E1", None)):
+            with self.subTest(card=card, airing=airing):
+                self.assertEqual(self._get(card=card, airing=airing).status_code, 400)
+
+    def test_it_is_a_signed_in_viewers_alone(self):
+        self.client.cookies.clear()
+        self.assertIn(self._get().status_code, (302, 303, 401, 403))
+
 
 class CalendarDayRouteTests(CalendarRouteTestCase):
     """The content route: ONE day's block, and nothing else."""
