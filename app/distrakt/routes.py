@@ -2696,7 +2696,8 @@ async def _named_pick(settings, media: Media, named, *,
     (metadata/typed_search.py's stored_title) — so a key this instance does not
     hold is a refusal, never a title built from what the page sent. Either way
     the per-title season lookup then runs exactly as it always has
-    (title_search.pick_from_hit).
+    (title_search.pick_from_hit), and the season the result names is the title
+    store's (metadata.picked).
 
     `named` IS WHAT THE REQUEST CARRIED — a GET's query parameters or a POST's
     JSON body — because the fragment that draws the season picker and the add
@@ -2707,10 +2708,11 @@ async def _named_pick(settings, media: Media, named, *,
         hit = await typed_search.stored_title(title_key, media)
         if hit is None:
             return None
-        return await title_search.pick_from_hit(settings, hit, cached_only=cached_only)
-    return await title_search.resolve_pick(settings, media, str(named.get("q") or ""),
-                                           named.get("i"), title_search.SearchRef.named(named),
-                                           cached_only=cached_only)
+        return await metadata.picked(
+            await title_search.pick_from_hit(settings, hit, cached_only=cached_only))
+    return await metadata.picked(await title_search.resolve_pick(
+        settings, media, str(named.get("q") or ""), named.get("i"),
+        title_search.SearchRef.named(named), cached_only=cached_only))
 
 
 def _pick_reference(named) -> dict:

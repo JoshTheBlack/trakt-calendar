@@ -637,6 +637,13 @@ class Pick(NamedTuple):
     seasons: list[dict]
     named_season: int | None
     media: Media
+    # (service, its own id) the season lookup asked — None for a film, which
+    # asks nobody — and whether that lookup said anything at all: a cached-only
+    # re-read of an answer the response cache no longer holds says nothing, which
+    # is not the service saying the entry names no season. The title store files
+    # what was said and answers the named season (metadata.picked).
+    asked: tuple[str, str] | None = None
+    answered: bool = False
 
 
 async def pick_from_hit(settings, hit: MergedSearchHit, *, cached_only: bool) -> Pick | None:
@@ -705,6 +712,9 @@ async def pick_from_hit(settings, hit: MergedSearchHit, *, cached_only: bool) ->
         seasons=answer.seasons,
         named_season=answer.named_season,
         media=hit.media,
+        asked=(str(provider.source), str(source_id)),
+        answered=bool(answer.seasons or answer.ids or answer.network
+                      or answer.named_season is not None),
     )
 
 

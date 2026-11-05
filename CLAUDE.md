@@ -1049,7 +1049,13 @@ the calendar's to `/calendar/jump` WRITES the season's airing and is answered wi
 any other a submit button carrying its own `season:<n>`, since only one place can
 be gone to) — and `app/providers/season_choices.py`
 decides what it offers, greys, refuses and suggests, with each surface's own words for
-"already here". Ticked seasons post as one flat field each, `season:<n>`
+"already here". AN ENTRY THAT IS ONE SEASON OF ITS TITLE — Simkl files a later
+anime season as a title of its own — is offered as that season alone, and which
+season it is is the TITLE STORE'S (`seasons.{service}_id` / `{service}_named`,
+`descriptions.named_season`): filed from the service's season list whenever one is
+read (a refresh pass, a picker's lookup) and read back by the tracker's and the
+board's pickers through `metadata.picked`, so an add re-reading a lookup the
+response cache has let go still knows it. Ticked seasons post as one flat field each, `season:<n>`
 (`season_choices.ticked`). A tracker add of several seasons asks the re-watch question
 per season, stopping at the first that needs it and re-posting it and the rest with
 `answering` naming which season the answer is about. The calendar's catalogue half

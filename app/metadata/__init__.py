@@ -275,6 +275,28 @@ async def ensure(media: Any, ids: Mapping[str, Any] | None, *, settings=None,
     return found
 
 
+async def picked(pick):
+    """`pick` (providers.title_search.Pick) with the season its entry IS as the
+    title store holds it (descriptions.named_season): what the pick's own season
+    lookup said is filed first, where it said anything — and a lookup that said
+    nothing (a cached-only re-read of an answer the response cache let go) is
+    answered from the store, which kept it. A pick no service's season list
+    names seasons for is returned as it is."""
+    from . import descriptions
+
+    if pick is None or pick.asked is None or not descriptions.names_seasons(pick.asked[0]):
+        return pick
+    source, own_id = pick.asked
+    media = str(pick.media)
+    held = await db.run(lambda conn: descriptions.named_season(conn, source, media, own_id))
+    if not pick.answered:
+        return pick._replace(named_season=held)
+    if held != pick.named_season:
+        await db.transaction(lambda conn: descriptions.file_named(
+            conn, source, media, own_id, pick.named_season))
+    return pick
+
+
 async def ask(media: Any, ids: Mapping[str, Any] | None, *, settings,
               filed_under: str | None = None,
               asking: Iterable[str] | None = None) -> Asked:

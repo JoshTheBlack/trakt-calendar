@@ -380,8 +380,10 @@ async def season_pick(settings: Settings,
     """A show hit's season list — the per-title lookup a result's checklist is
     opened for — plus every id it surfaces and the season a season-title names.
     The shared picker verb, so a title's seasons read the same here as in the
-    tracker's add."""
-    return await title_search.pick_from_hit(settings, hit, cached_only=False)
+    tracker's add — the season it names as the title store holds it
+    (metadata.picked)."""
+    return await metadata.picked(await title_search.pick_from_hit(settings, hit,
+                                                                  cached_only=False))
 
 
 async def stored_seasons(settings: Settings,

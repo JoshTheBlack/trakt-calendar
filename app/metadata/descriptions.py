@@ -710,13 +710,16 @@ class Written(NamedTuple):
 class Answer(NamedTuple):
     """One service's details answer to file (`write_many`): the service, the
     title by the id that service is asked by, the answer, the season it was asked
-    about (None for the title alone), and a season list read beside it."""
+    about (None for the title alone), and a season list read beside it — with
+    the season of its title the entry IS, as that list's answer named it
+    (base.SeasonsAnswer's `named_season`; None beside a list is "none")."""
     source: str
     media: str
     own_id: Any
     answer: Mapping[str, Any]
     asked_season: int | None = None
     seasons: list[Mapping[str, Any]] | None = None
+    named_season: int | None = None
 
 
 def write(conn: db.Connection, source: str, media: str, own_id: Any,
@@ -828,6 +831,9 @@ class Planned(NamedTuple):
     # {service: [(settle, fallback, season, number, values)]}
     episodes: dict[str, list[tuple[int, str, int, int, dict]]]
     listed: dict[str, list[tuple[int, str, int, dict]]]
+    # {service: [(settle, fallback, own id, the season it names or None)]}: each
+    # entry a season list said which season of its title it is (`write_named`).
+    named: dict[str, list[tuple[int, str, str, int | None]]]
     filed: list[_Filed | None | Exception]
     now: int
 
@@ -890,6 +896,7 @@ def plan(conn: db.Connection, answers: Iterable[Answer], *, tz: ZoneInfo,
     seasons: dict[str, list] = {}
     episodes: dict[str, list] = {}
     listed: dict[str, list] = {}
+    named: dict[str, list] = {}
     settled = 0
     for at in sorted(spelled, key=lambda at: bool(spelled[at].listed)):
         item, words = answers[at], spelled[at]
@@ -904,6 +911,12 @@ def plan(conn: db.Connection, answers: Iterable[Answer], *, tz: ZoneInfo,
             fallback=fallback)) or fallback
         own = str(before["source_id"]) if before else rows.own_id(item.source, item.own_id,
                                                                   words.ids)
+        # WHICH SEASON OF ITS TITLE THE ENTRY IS, from the season list read
+        # beside the answer — kept for an entry whose words are not (below): a
+        # second entry of one title is exactly the per-season entry it names.
+        if item.seasons is not None and names_seasons(item.source):
+            named.setdefault(item.source, []).append(
+                (settled, fallback, own, item.named_season))
         # A SERVICE RE-POINTED ITS SHARED IDS, NOT ITS OWN: this group goes
         # where its own id now says, its seasons and episodes with it — the one
         # writer that moves an entry (`write` says why).
@@ -976,8 +989,8 @@ def plan(conn: db.Connection, answers: Iterable[Answer], *, tz: ZoneInfo,
         by_source.setdefault(source, []).append(written)
     return Planned(
         settles=planner.plan(), titles=by_source, moves=moves, created=created,
-        sightings=sightings, seasons=seasons, episodes=episodes, listed=listed, filed=filed,
-        now=now)
+        sightings=sightings, seasons=seasons, episodes=episodes, listed=listed, named=named,
+        filed=filed, now=now)
 
 
 def apply(conn: db.Connection, planned: Planned) -> list[Written | None | Exception]:
@@ -1034,6 +1047,9 @@ def apply(conn: db.Connection, planned: Planned) -> list[Written | None | Except
             "rows": json.dumps([_season_row(source, _LISTED_SEASON_WRITES,
                                             final(settled, fallback), season, values, planned.now)
                                 for settled, fallback, season, values in written])})
+    for source, written in planned.named.items():
+        write_named(conn, source, [(final(settled, fallback), own, season)
+                                   for settled, fallback, own, season in written])
     return [Written(final(found.settled, found.fallback), found.previous_key, found.poster,
                     found.previous_poster, found.ids, found.previous_ids)
             if isinstance(found, _Filed) else found
@@ -1321,6 +1337,83 @@ def listed_seasons(conn: db.Connection, source: str, media: str, own_id: Any, *,
         return []
     found = _listed_rows(conn, row)
     return found if len(found) == int(row["season_count"] or 0) else []
+
+
+# ---------------------------------------------------------------------------
+# which season an entry is
+# ---------------------------------------------------------------------------
+#
+# A SERVICE CAN FILE A LATER SEASON AS A TITLE OF ITS OWN — Simkl does, for
+# anime: "Shingeki no Kyojin Season 3" is an entry of its own that numbers its
+# episodes from 1 and carries the series' shared ids — and its own record of the
+# entry says which season of the series it is (app/providers/simkl/_naming.py).
+# The store keeps that answer on the season's row, `{service}_id` naming the
+# entry and `{service}_named` saying it names exactly this season, filed from the
+# service's season list whenever one is read (a refresh, a season picker), and
+# a picker reads it here: what a viewer adding the entry is offered is the one
+# season it is. A service declares the columns or never says (`names_seasons`).
+
+def names_seasons(source: str) -> bool:
+    return groups.has(tables.SEASONS, str(source), "named")
+
+
+def write_named(conn: db.Connection, source: str,
+                named: Iterable[tuple[str, str, int | None]]) -> None:
+    """File each (title key, the service's own id of an entry of it, the season
+    of the title that entry is — or None, it names none), in the caller's
+    transaction, in two statements however many: every other season the entry
+    was said to be is let go, then the one it is is marked."""
+    named = [[str(key), str(own), season] for key, own, season in named]
+    if not named or not names_seasons(source):
+        return
+    entry, marked = (groups.column(tables.SEASONS, source, name) for name in ("id", "named"))
+    conn.execute(
+        f"UPDATE {tables.SEASONS} SET {entry} = NULL, {marked} = 0 "
+        f"WHERE title_key IN (SELECT json_extract(value, '$[0]') FROM json_each(:rows)) "
+        f"AND EXISTS (SELECT 1 FROM json_each(:rows) j "
+        f"WHERE json_extract(j.value, '$[0]') = {tables.SEASONS}.title_key "
+        f"AND json_extract(j.value, '$[1]') = {tables.SEASONS}.{entry} "
+        f"AND {tables.SEASONS}.season IS NOT json_extract(j.value, '$[2]'))",
+        {"rows": json.dumps(named)})
+    conn.execute(
+        f"INSERT INTO {tables.SEASONS} (title_key, season, {entry}, {marked}) "
+        f"SELECT json_extract(value, '$[0]'), json_extract(value, '$[2]'), "
+        f"json_extract(value, '$[1]'), 1 FROM json_each(:rows) "
+        f"WHERE json_extract(value, '$[2]') IS NOT NULL "
+        f"ON CONFLICT(title_key, season) DO UPDATE SET "
+        f"{entry} = excluded.{entry}, {marked} = 1",
+        {"rows": json.dumps(named)})
+
+
+def named_season(conn: db.Connection, source: str, media: str, own_id: Any) -> int | None:
+    """The season of its title the service's entry `own_id` is, as the store
+    holds it — None where it was said to name none, or nothing was said."""
+    if not names_seasons(source):
+        return None
+    entry, marked = (groups.column(tables.SEASONS, source, name, "s") for name in ("id", "named"))
+    found = conn.execute(
+        f"SELECT s.season FROM {tables.SERVICE_IDS} i JOIN {tables.SEASONS} s "
+        f"ON s.title_key = i.title_key AND {entry} = ? AND {marked} = 1 "
+        f"WHERE i.source = ? AND i.media = ? AND i.service_id = ?",
+        (str(own_id), str(source), str(media), str(own_id))).fetchall()
+    return int(found[0][0]) if len(found) == 1 else None
+
+
+def file_named(conn: db.Connection, source: str, media: str, own_id: Any,
+               season: int | None) -> bool:
+    """`write_named` for one entry the store files under a title, writing only
+    when the store holds something else — what a season picker's lookup files.
+    Returns whether it wrote. An entry the store has not met is left to the
+    surface that registers it (`ensure`), and its next season list."""
+    if not names_seasons(source):
+        return False
+    held = conn.execute(f"SELECT title_key FROM {tables.SERVICE_IDS} "
+                        f"WHERE source = ? AND media = ? AND service_id = ?",
+                        (str(source), str(media), str(own_id))).fetchone()
+    if held is None or named_season(conn, source, media, own_id) == season:
+        return False
+    write_named(conn, source, [(held[0], str(own_id), season)])
+    return True
 
 
 # ---------------------------------------------------------------------------

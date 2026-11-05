@@ -679,11 +679,12 @@ async def _look_up(settings, port, entry: Entry) -> descriptions.Answer:
     season = None if entry.season == TITLE else entry.season
     answer = await port.fetch_details(settings, Media(entry.media), entry.own_id, season,
                                       fresh=True)
-    seasons = None
+    listed = None
     if season is None and entry.media == str(Media.SHOW):
-        seasons = (await port.fetch_seasons(settings, entry.own_id, Media.SHOW,
-                                            fresh=True)).seasons
-    return descriptions.Answer(entry.source, entry.media, entry.own_id, answer, season, seasons)
+        listed = await port.fetch_seasons(settings, entry.own_id, Media.SHOW, fresh=True)
+    return descriptions.Answer(entry.source, entry.media, entry.own_id, answer, season,
+                               listed.seasons if listed is not None else None,
+                               listed.named_season if listed is not None else None)
 
 
 # What a service's "slow down" arrives as: an HTTP 429 on the app-wide
