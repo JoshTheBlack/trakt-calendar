@@ -54,6 +54,12 @@ def _html(can_filter=True, prefs=None, **overrides) -> str:
         badge_modes=vocab.BadgeModes(prefs or {}))
 
 
+def _offer(dimension: str, token: str, media: str) -> str:
+    """A badge's three buttons, as /calendar/fragments/badge draws them."""
+    return templates.env.get_template("_filter_offer.html").render(
+        dimension=dimension, token=token, media=media, badge_modes=vocab.BadgeModes({}))
+
+
 def _tokens(html: str, dimension: str) -> list[str]:
     """Every data-token the card offers for one dimension, in document order."""
     return [
@@ -212,11 +218,25 @@ class ABadgeDrawsWhatIsStoredTests(unittest.TestCase):
     def test_every_badge_posts_the_dimension_the_token_and_the_media(self):
         """One press sends one fact, and the MERGE is the server's -- nothing in
         the browser knows what a spec is."""
-        html = _html()
+        html = _offer("genre", "game-show", "show")
         self.assertIn('hx-post="/calendar/filters/badge"', html)
         self.assertIn('"dimension": "genre"', html)
         self.assertIn('"media": "show"', html)
         self.assertIn('"token": "game-show"', html)
+
+    def test_the_buttons_arrive_when_the_badge_is_first_opened(self):
+        """The card carries the badge and its stored mark; the three buttons are
+        asked for by the <summary> the first time it is pressed and land right
+        after it — never with the card (_filter_badge.html has the measurement)."""
+        html = _html()
+        self.assertNotIn("filter-offer", html)
+        self.assertNotIn('hx-post="/calendar/filters/badge"', html)
+        summary = re.search(r'data-filter="genre" data-token="game-show"[^>]*>\s*(<summary[^>]*>)',
+                            html, re.S).group(1)
+        self.assertIn('hx-get="/calendar/fragments/badge?d=genre&amp;t=game-show&amp;m=show"',
+                      summary)
+        self.assertIn('hx-trigger="click once"', summary)
+        self.assertIn('hx-swap="afterend"', summary)
 
     def test_one_offer_open_at_a_time_is_the_browsers_own_grouping(self):
         """Every badge shares one `name`, which is HTML's exclusive-accordion
@@ -229,8 +249,8 @@ class ABadgeDrawsWhatIsStoredTests(unittest.TestCase):
         _filter_badge.html: every badge for one genre shared a name, and a name
         holds ONE checked radio in the whole document. Buttons belong to no
         group, so twelve cards can all say what is stored."""
-        html = _html(prefs={"tv_genres": "-drama"})
-        self.assertNotIn('type="radio"', html.split('class="meta-row"')[-1])
+        html = _offer("genre", "drama", "show")
+        self.assertNotIn('type="radio"', html)
         self.assertIn('<button type="button" class="filter-offer-btn out"', html)
 
     def test_the_mark_is_inside_the_summary_a_closed_details_still_renders(self):

@@ -603,7 +603,12 @@ elements off each card's 18.2 KB / 134. The answer reads the title's own rows
 like a mark (~30 ms); a card the store no longer draws answers 204. A surface
 that hands the card no `card_expand` draws no control (the share page has a
 card of its own, which never compares); `tests/calendar/test_card_provenance.py`
-holds both drawings, `test_routes.py`'s `TheCardDrawnWholeTests` the route.
+holds both drawings, `test_routes.py`'s `TheCardDrawnWholeTests` the route. THE
+SAME GOES FOR A BADGE'S THREE FILTER BUTTONS: the badge's `<summary>` asks for
+them `click once` from `/calendar/fragments/badge` (`_filter_offer.html`, the
+same for everybody — the stored answer is the badge's mark, drawn with the card)
+and they land after it, never with the card: 6.2 KB and 29.5 elements of every
+card.
 
 **A viewer's filters are per MEDIUM, and one function turns a medium into
 columns.** `app/calendar/vocab.py` owns it: `TV_FIELDS`/`MOVIE_FIELDS` say which

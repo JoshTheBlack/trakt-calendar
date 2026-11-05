@@ -2225,6 +2225,34 @@ class TheCardDrawnWholeTests(CalendarRouteTestCase):
         self.assertIn(self._get().status_code, (302, 303, 401, 403))
 
 
+class ABadgesButtonsOnDemandTests(CalendarRouteTestCase):
+    """`/calendar/fragments/badge`: the three buttons a card badge asks for the
+    first time it is opened."""
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in_as(self._make_user("badge_viewer"))
+
+    def test_the_three_buttons_post_one_fact_each(self):
+        response = self.client.get("/calendar/fragments/badge?d=genre&t=game-show&m=show")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.text.strip().startswith('<div class="filter-offer">'))
+        self.assertEqual(response.text.count('hx-post="/calendar/filters/badge"'), 3)
+        self.assertIn('"token": "game-show"', response.text)
+
+    def test_a_badge_the_calendar_does_not_filter_on_is_refused(self):
+        for query in ("d=day&t=Monday&m=show", "d=genre&t=&m=show", "d=genre&t=drama&m=book",
+                      f"d=genre&t={'x' * 300}&m=show"):
+            with self.subTest(query=query):
+                self.assertEqual(
+                    self.client.get(f"/calendar/fragments/badge?{query}").status_code, 400)
+
+    def test_it_is_a_signed_in_viewers_alone(self):
+        self.client.cookies.clear()
+        self.assertIn(self.client.get("/calendar/fragments/badge?d=genre&t=drama&m=show")
+                      .status_code, (302, 303, 401, 403))
+
+
 class CalendarDayRouteTests(CalendarRouteTestCase):
     """The content route: ONE day's block, and nothing else."""
 

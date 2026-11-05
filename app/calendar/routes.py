@@ -3170,6 +3170,28 @@ async def post_filters(request: Request):
         return await templating.drawn(request, "_filters_answer.html", month)
 
 
+@guard.get("/calendar/fragments/badge", AuthLevel.CALENDAR_APPROVED)
+async def filter_badge_offer(request: Request):
+    """A card badge's three buttons, asked for the first time the badge is
+    opened (_filter_badge.html says why they are not drawn with the card).
+
+    THE SAME ANSWER FOR EVERYBODY ASKING ABOUT ONE TOKEN: the buttons say what
+    a press would send and nothing about what is stored — that is the badge's
+    own mark, drawn with the card and redrawn by every press — so this reads no
+    preference. A dimension the calendar does not filter on, an empty token, or
+    a medium this app does not have is refused, as the press would be."""
+    dimension = request.query_params.get("d") or ""
+    token = (request.query_params.get("t") or "").strip()
+    try:
+        media = str(Media(request.query_params.get("m") or ""))
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid medium"}, status_code=400)
+    if vocab.badge_field(dimension, media) is None or not token or len(token) > 200:
+        return JSONResponse({"ok": False, "error": "Invalid badge"}, status_code=400)
+    return templates.TemplateResponse(request, "_filter_offer.html", {
+        "request": request, "dimension": dimension, "token": token, "media": media})
+
+
 @guard.post("/calendar/filters/badge", AuthLevel.CALENDAR_APPROVED)
 async def post_filter_badge(request: Request):
     """Add one token to one of this viewer's filter dimensions -- the offer a
