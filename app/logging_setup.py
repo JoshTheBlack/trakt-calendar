@@ -30,12 +30,27 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import os
+import threading
+from collections import OrderedDict
 from pathlib import Path
 
 FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 LOG_FILE_MAX_BYTES = 10 * 1024 * 1024
 LOG_FILE_BACKUPS = 5
+
+# A FACT ABOUT THE DATA IS SAID ONCE. Some lines describe what a service states —
+# one title's ids disagreeing between two of its answers, a listing naming
+# another title than its entry is filed under — and every calendar store that
+# meets the same listing again used to say it again: on the development server,
+# 291 of 381 INFO lines in eight minutes after a restart were two such messages
+# restated. Production logs at INFO and rolls its file at LOG_FILE_MAX_BYTES, so
+# the repeats pushed out what mattered. `once` says each distinct line the first
+# time this process meets it, keeping the last `_SAID_MAX` it has said (the
+# process runs for weeks, so the memory is bounded, oldest forgotten first).
+_SAID_MAX = 4096
+_said: OrderedDict[tuple, None] = OrderedDict()
+_said_lock = threading.Lock()
 
 _OFF = {"", "0", "false", "no", "off"}
 _DEFAULT = {"1", "true", "yes", "on"}
@@ -52,6 +67,20 @@ def log_file_path(value: str | None = None) -> Path | None:
         from . import config
         return Path(config.DATA_DIR) / "logs" / "app.log"
     return Path(raw)
+
+
+def once(logger: logging.Logger, level: int, message: str, *args) -> None:
+    """Log `message` % `args` at `level`, unless this process has already said
+    that exact line on `logger`. Safe from a worker thread."""
+    key = (logger.name, level, message, args)
+    with _said_lock:
+        if key in _said:
+            _said.move_to_end(key)
+            return
+        _said[key] = None
+        if len(_said) > _SAID_MAX:
+            _said.popitem(last=False)
+    logger.log(level, message, *args)
 
 
 def configure() -> Path | None:

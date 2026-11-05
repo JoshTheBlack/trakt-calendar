@@ -42,7 +42,7 @@ import logging
 from collections.abc import Iterable, Mapping
 from typing import Any, NamedTuple
 
-from .. import db, perftrace
+from .. import db, logging_setup, perftrace
 from ..providers.base import MATCH_SOURCES, ItemKey, parse_item_key, resolve_key
 from . import holders, tables
 from . import ids as id_rules
@@ -716,8 +716,9 @@ def _merge_into(merged: dict, other: Mapping[str, Any], key: str) -> None:
         if held in (None, ""):
             merged[name] = value
         elif name in MATCH_SOURCES and str(held) != str(value):
-            logger.info("title store: %s holds %s=%s; another statement said %s",
-                        key, name, held, value)
+            logging_setup.once(logger, logging.INFO,
+                               "title store: %s holds %s=%s; another statement said %s",
+                               key, name, held, value)
 
 
 # ---------------------------------------------------------------------------

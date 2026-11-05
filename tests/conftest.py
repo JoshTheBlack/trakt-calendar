@@ -299,6 +299,17 @@ def no_background_title_refresh(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def nothing_said_yet(monkeypatch):
+    """Each test starts with the log having said nothing (app/logging_setup.py's
+    `once`): a line an earlier test in the same worker said is not one this test
+    has seen."""
+    from collections import OrderedDict
+
+    from app import logging_setup
+    monkeypatch.setattr(logging_setup, "_said", OrderedDict())
+
+
+@pytest.fixture(autouse=True)
 def no_answer_still_being_worked_out(monkeypatch):
     """Each test starts with no source's answer being worked out and no window
     waiting on one: TMDB's season-premieres derivation and the calendar's

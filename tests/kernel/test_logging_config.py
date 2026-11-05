@@ -138,3 +138,40 @@ def _nothing():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AFactAboutTheDataIsSaidOnceTests(unittest.TestCase):
+    """`logging_setup.once`: a line every calendar store would restate is said
+    the first time this process meets it — on the development server two such
+    messages were 291 of 381 INFO lines in eight minutes."""
+
+    def setUp(self):
+        from collections import OrderedDict
+        from unittest.mock import patch
+
+        from app import logging_setup
+        self.logging_setup = logging_setup
+        patcher = patch.object(logging_setup, "_said", OrderedDict())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.logger = logging.getLogger("app.test_once")
+
+    def _say(self, *args):
+        self.logging_setup.once(self.logger, logging.INFO, "%s holds %s", *args)
+
+    def test_the_same_line_is_said_once_and_another_line_is_said_too(self):
+        with self.assertLogs(self.logger, logging.INFO) as said:
+            for _ in range(3):
+                self._say("show:tmdb:1", "tvdb=2")
+            self._say("show:tmdb:1", "tvdb=3")
+        self.assertEqual([record.getMessage() for record in said.records],
+                         ["show:tmdb:1 holds tvdb=2", "show:tmdb:1 holds tvdb=3"])
+
+    def test_what_it_remembers_is_bounded_and_the_oldest_goes_first(self):
+        from unittest.mock import patch
+        with patch.object(self.logging_setup, "_SAID_MAX", 2), \
+                self.assertLogs(self.logger, logging.INFO) as said:
+            for title in ("a", "b", "c", "a"):
+                self._say(title, "x")
+        self.assertEqual(len(self.logging_setup._said), 2)
+        self.assertEqual([record.args[0] for record in said.records], ["a", "b", "c", "a"])

@@ -35,7 +35,7 @@ import logging
 from collections.abc import Iterable, Mapping
 from typing import Any, NamedTuple
 
-from .. import db, perftrace, providers
+from .. import db, logging_setup, perftrace, providers
 from ..providers.base import ItemKey, Media, Record, collect_ids
 from . import identity
 from . import ids as id_rules
@@ -182,8 +182,10 @@ def plan_records(conn: db.Connection, listed: Listings) -> Planned:
         apart = planner.named_apart(title)
         if apart is not None:
             source, _media, _spelling = listed.refs[at]
-            logger.info("title store: a %s listing of its entry %s names %s; the entry stays "
-                        "filed under %s", source, listed.owns[at], apart, title.filed_under)
+            logging_setup.once(logger, logging.INFO,
+                               "title store: a %s listing of its entry %s names %s; the entry "
+                               "stays filed under %s", source, listed.owns[at], apart,
+                               title.filed_under)
             stated[at] = planner.agreeing(title)
             title = title._replace(ids=stated[at])
         planner.settle(title)
