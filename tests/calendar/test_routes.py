@@ -2229,6 +2229,107 @@ class TheCardDrawnWholeTests(CalendarRouteTestCase):
         self.assertIn(self._get().status_code, (302, 303, 401, 403))
 
 
+class ComparingATitleComparesItEverywhereTests(CalendarRouteTestCase):
+    """Pressing one card's compare control draws every card of its title on the
+    page whole — the others out of band in the same answer — and the page files
+    the title as compared, so a day drawn after the press, and a mark's redraw,
+    draw it compared too (calendar_card, _FiledMonth.compared). No script: the
+    answer's markup says where each card goes."""
+
+    PAGE = "/calendar?endpoint=shows&year=2026&month=7"
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("compare_viewer")
+        self.sign_in_as(self.user_id)
+        drama = []
+        for number, aired in ((1, "2026-07-01T20:00:00Z"), (2, "2026-07-20T20:00:00Z")):
+            entry = _entry("the-drama", "The Drama", aired)
+            entry["episode"]["number"] = number
+            entry["show"]["ids"]["tmdb"] = 4242
+            drama.append(entry)
+        # Four more days first, so the drama's second week is a late day.
+        fillers = [_entry(f"filler-{n}", f"Filler {n}", f"2026-07-0{n + 2}T20:00:00Z")
+                   for n in range(calendar_routes.INITIAL_DAY_BLOCKS - 1)]
+        listed = support.calendar_records(drama + fillers, get_endpoint("shows"))
+        trakt = [dataclasses.replace(record, overview="In Trakt words.") for record in listed]
+        # SIMKL LISTS THE DRAMA TOO, in other words: a disagreement to compare.
+        simkl = [dataclasses.replace(record, source=Source.SIMKL, id="4242",
+                                     ids={"simkl": 4242, "tmdb": 4242},
+                                     overview="In Simkl words.")
+                 for record in listed if record.title == "The Drama"]
+
+        async def fetch(endpoint, settings, start, *, covered=(), sources=None):
+            answering = [str(provider.source)
+                         for provider in calendar_cache._window_sources(endpoint, settings, start)]
+            if sources is not None:
+                answering = [name for name in answering if name in set(map(str, sources))]
+            records = ((trakt if "trakt" in answering else [])
+                       + (simkl if "simkl" in answering else []))
+            return records, answering, []
+
+        patcher = patch("app.calendar.cache.fetch_window_records", fetch)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def _compare_urls(html: str) -> list[str]:
+        return [h.replace("&amp;", "&") for h in re.findall(
+            r'class="source-swap card-expand"[^>]*hx-get="(/calendar/fragments/card\?[^"]+)"', html)]
+
+    def _late_day(self, shell: str) -> str:
+        url = next(url for url in _day_urls(shell) if "date=2026-07-20" in url)
+        return self.client.get(url).text
+
+    def test_the_answer_redraws_the_titles_other_cards_out_of_band(self):
+        shell = self.client.get(self.PAGE).text
+        (url,) = self._compare_urls(shell)
+        answer = self.client.get(url)
+        self.assertEqual(answer.status_code, 200)
+        self.assertTrue(answer.text.lstrip().startswith('<div class="card'))
+        oob = re.findall(r"hx-swap-oob=\"outerHTML:\.card\[data-airing='([0-9a-f]{16})'\]\"",
+                         answer.text)
+        self.assertEqual(len(oob), 1, "the drama's other episode, and nothing else")
+        self.assertNotIn(re.search(r'airing=([0-9a-f]{16})', url).group(1), oob)
+        self.assertEqual(answer.text.count('class="flip-pick"') % 2, 0)
+        self.assertGreaterEqual(answer.text.count("In Simkl words."), 2)
+        self.assertNotIn("card-expand", answer.text)
+        self.assertNotIn("Filler", answer.text)
+
+    def test_a_day_drawn_after_the_press_draws_the_title_compared(self):
+        shell = self.client.get(self.PAGE).text
+        self.client.get(self._compare_urls(shell)[0])
+        day = self._late_day(shell)
+        self.assertIn("In Simkl words.", day)
+        self.assertIn('class="flip-pick"', day)
+        self.assertNotIn("card-expand", day)
+
+    def test_until_it_is_pressed_a_day_draws_the_title_bare(self):
+        day = self._late_day(self.client.get(self.PAGE).text)
+        self.assertIn("card-expand", day)
+        self.assertNotIn('class="flip-pick"', day)
+
+    def test_another_page_has_compared_nothing(self):
+        shell = self.client.get(self.PAGE).text
+        self.client.get(self._compare_urls(shell)[0])
+        reloaded = self.client.get(self.PAGE).text
+        self.assertIn("card-expand", self._late_day(reloaded))
+
+    def test_a_marks_redraw_keeps_the_title_compared(self):
+        shell = self.client.get(self.PAGE).text
+        url = self._compare_urls(shell)[0]
+        self.client.get(url)
+        page = re.search(r"[?&]page=([A-Za-z0-9_-]+)", url).group(1)
+        key = re.search(r'data-id="([^"]+)" data-airing="%s"'
+                        % re.search(r'airing=([0-9a-f]{16})', url).group(1), shell).group(1)
+        answer = self.client.post(
+            f"/api/state?year=2026&month=7&endpoint=shows&page={page}",
+            json={"item_id": key, "not_watching": True})
+        self.assertEqual(answer.status_code, 200)
+        self.assertIn('class="flip-pick"', answer.text)
+        self.assertNotIn("card-expand", answer.text)
+
+
 class BigDaysArePagedTests(CalendarRouteTestCase):
     """A day holding more than a page of cards draws its first page and a
     control that asks for the rest (app/calendar/day_pages.py) — the page here is

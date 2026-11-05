@@ -1149,6 +1149,12 @@ class _FiledMonth(NamedTuple):
     # filing, or a month-changed check that read the month again and found it
     # the same (`calendar_changed`).
     checked: float
+    # THE TITLES THIS PAGE HAS ASKED TO COMPARE (title-store keys), added by
+    # `calendar_card`: every card of such a title is drawn compared wherever this
+    # page draws it next — a late day, a big day's rest, a mark's redraw — or a
+    # day scrolled to after the press would bring the title's cards back bare.
+    # One set per page, never more than its titles; it goes with the page.
+    compared: set
 
     def drawn(self) -> list[tuple[str, str]]:
         """(day, mark key) of every card, in the order the page drew them."""
@@ -1195,7 +1201,8 @@ def _file_month(user_id: int, endpoint_key: str, year: int, month: int,
         return ""
     _prune_pages(moment, room=max(len(cards), 1))
     token = secrets.token_urlsafe(9)
-    _pages[(user_id, token)] = _FiledMonth(endpoint_key, year, month, cards, moment, moment)
+    _pages[(user_id, token)] = _FiledMonth(endpoint_key, year, month, cards, moment, moment,
+                                           set())
     return token
 
 
@@ -1609,6 +1616,8 @@ async def _draw_day(request: Request, user, settings, prefs, endpoint, year: int
         counted = sorted(key for on, key in filed.drawn() if on == day.isoformat())
         context["month_changed"] = counted != sorted(view.mark_key for view in views)
         context["month_url"] = _month_url(endpoint.key, year, month, source=source)
+        # The titles this page has compared draw compared here too.
+        context["compared"] = frozenset(filed.compared)
     if drawn is None:
         places = await _first_page(endpoint, settings, views, tz=tz,
                                    selection=source_selection, specs=specs)
@@ -1672,19 +1681,24 @@ _AIRING = re.compile(r"[0-9a-f]{16}")
 
 @guard.get("/calendar/fragments/card", AuthLevel.CALENDAR_APPROVED)
 async def calendar_card(request: Request):
-    """ONE CARD DRAWN WHOLE — every service's value beside the winner, the flips
-    and the pairs of chips — for the compare control a card whose services
+    """A TITLE'S CARDS DRAWN WHOLE — every service's value beside the winner, the
+    flips and the pairs of chips — for the compare control a card whose services
     disagree carries (_card.html says why a card is drawn without them). The
-    answer replaces the card that asked.
+    answer replaces the card that asked, and every other card of its title on
+    the month that has something to compare is sent out of band
+    (_compared_cards.html) — comparing a show compares it everywhere the page
+    holds it, as a mark marks it everywhere. And the page FILES the title as
+    compared (`_FiledMonth.compared`), so a day it draws later draws the title's
+    cards compared too.
 
-    THE CARD IS READ AS A MARK READS ITS TITLE: its title's own rows, every
+    THE CARDS ARE READ AS A MARK READS ITS TITLE: its title's own rows, every
     listing of them whole (calendar/query.py's `titles`), placed and judged for
-    this viewer — their filters, their source selection, their order — and only
-    the card the address names is drawn. A card this read does not draw any more
-    (a refill moved it, a description filtered it) answers 204 and the page is
-    left as it is; the month-changed sentence is what says the page went stale.
+    this viewer — their filters, their source selection, their order. A card the
+    address names that this read does not draw any more (a refill moved it, a
+    description filtered it) answers 204 and the page is left as it is; the
+    month-changed sentence is what says the page went stale.
 
-    WHAT THE CARD IS WEARING IS THE PAGE'S: whether it is marked, from this
+    WHAT THE CARDS ARE WEARING IS THE PAGE'S: whether one is marked, from this
     viewer's marks now; whether it is new, from the shell's filed answer (the
     `new` token, `_new_marks`); its mark button recounts the page's filed month
     (`page`)."""
@@ -1699,7 +1713,7 @@ async def calendar_card(request: Request):
     airing = request.query_params.get("airing") or ""
     if not _CARD_REF.fullmatch(card) or not _AIRING.fullmatch(airing):
         return JSONResponse({"ok": False, "error": "Invalid card"}, status_code=400)
-    title_key, _bar, unit = card.rpartition("|")
+    title_key, _bar, _unit = card.rpartition("|")
     tz = _resolve_viewer_tz(user, settings)
     selection = await _viewer_source_selection(request, user, endpoint.media)
     viewer = calendar_query.Viewer(
@@ -1708,27 +1722,37 @@ async def calendar_card(request: Request):
     first = date(year, month, 1)
     last = date(year, month, _calendar.monthrange(year, month)[1])
     placed = await calendar_query.titles(viewer, {title_key})
-    views = [view for view in placed.views if view.card.unit == unit
-             and first <= date.fromisoformat(view.air_date) <= last]
+    views = sorted((view for view in placed.views
+                    if first <= date.fromisoformat(view.air_date) <= last),
+                   key=lambda view: (view.air_date, view.air_ts))
     items = await calendar_query.present(viewer, views)
     found = next((item for item in items if item.airing_key == airing), None)
     if found is None:
         return Response(status_code=204)
+    # THE TITLE'S OTHER CARDS, where drawing them whole changes anything: one
+    # with nothing to compare draws the same either way.
+    others = [item for item in items if item is not found
+              and (item.alternatives or item.air_choices)]
+    page = _page_token(request)
+    filed = _filed_month(user.user_id, page, endpoint.key, year, month)
+    if filed is not None:
+        filed.compared.add(title_key)
     not_watching = await calendar_state.not_watching_ids(user.user_id)
-    return await templating.drawn(request, "_card.html", {
-        "request": request, "item": found, "expanded": True,
-        "not_watching": ({found.mark_key} if calendar_state.marked(not_watching, found)
-                         else set()),
+    drawn = [found, *others]
+    return await templating.drawn(request, "_compared_cards.html", {
+        "request": request, "item": found, "others": others, "expanded": True,
+        "not_watching": {item.mark_key for item in drawn
+                         if calendar_state.marked(not_watching, item)},
         "new_ids": await _new_marks(user.user_id, endpoint.key, year, month,
                                     request.query_params.get("new") or ""),
         "can_filter": True, "badge_modes": vocab.BadgeModes(prefs),
         "card_pictures": await _card_pictures(user, settings),
         "settings": settings, "is_admin": bool(user and user.is_admin),
         "library": _library(user, settings),
-        "logo_networks": await _logo_networks(settings, [found]),
-        "season_lines": await _season_lines(settings, [found]),
+        "logo_networks": await _logo_networks(settings, drawn),
+        "season_lines": await _season_lines(settings, drawn),
         "month": month, "year": year, "endpoint": endpoint,
-        "page_token": _page_token(request),
+        "page_token": page,
     })
 
 
@@ -2611,6 +2635,7 @@ async def _marked_cards(request: Request, user, settings, prefs, endpoint, year:
     two counts a mark moves, out of band (_marked_cards.html)."""
     logo_networks = await _logo_networks(settings, items)
     season_lines = await _season_lines(settings, items)
+    filed = _filed_month(user.user_id, _page_token(request), endpoint.key, year, month)
     completed = [item for item in items if season is None or item.season == season]
     replaces: dict = {}
     moved = None
@@ -2639,6 +2664,8 @@ async def _marked_cards(request: Request, user, settings, prefs, endpoint, year:
         # card by the browser — see `_logo_networks`.
         "logo_networks": logo_networks,
         "season_lines": season_lines,
+        # A title this page compared is redrawn compared.
+        "compared": frozenset(filed.compared) if filed is not None else frozenset(),
         "month": month, "year": year, "endpoint": endpoint,
         # The redrawn cards' marks recount the same filed month.
         "page_token": _page_token(request),

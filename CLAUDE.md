@@ -597,7 +597,12 @@ each field's winning value and no flip or pair of chips; a card with
 the card drawn whole (`expanded`) from `calendar_card`
 (`/calendar/fragments/card`, references only — the card's store row
 `Record.card`, its `airing_key`, the page's tokens, built by `_card_url`) and
-swaps it in for itself. MEASURED, October All Episodes: every one of a filtered
+swaps it in for itself — and with it EVERY OTHER CARD OF ITS TITLE on the month
+that has something to compare, out of band by airing (`_compared_cards.html`, as
+a mark redraws its title's cards), and the title is FILED AS COMPARED on the
+page (`_FiledMonth.compared`), so a late day, a big day's rest and a mark's
+redraw draw it whole too (`_card.html`'s `compared`); a reload compares nothing.
+MEASURED, October All Episodes: every one of a filtered
 month's 1,334 cards carried a flip and a pair of chips; this took 4.9 KB and 39
 elements off each card's 18.2 KB / 134. The answer reads the title's own rows
 like a mark (~30 ms); a card the store no longer draws answers 204. A surface

@@ -102,7 +102,9 @@
    disagree it carries ONE control, on the poster where its flip's mark sits,
    that fetches this same card drawn `expanded` — the flips and the pairs of
    chips above — and swaps it in for itself (calendar/routes.py's
-   `calendar_card`). Most cards had something to compare and nobody compares
+   `calendar_card`), with every other card of its title on the page redrawn the
+   same way out of band and the title filed as compared for the days the page
+   draws later (`compared`). Most cards had something to compare and nobody compares
    most cards: MEASURED on one October's All Episodes, every one of a filtered
    month's 1,334 cards carried a flip and a pair of chips, 4.9 KB and 39
    elements of each card's 18.2 KB and 134. The first press waits one short
@@ -111,7 +113,12 @@
    card, which never compares. #}
 {% import '_source_logo.html' as src with context %}
 {% import '_filter_badge.html' as fb with context %}
-{%- set full = expanded is defined and expanded -%}
+{#- Drawn whole when the answer is a compare's (`expanded`), or when the page
+    has compared this card's title (`compared`, title-store keys — a card's
+    `card` is "{title key}|{episode row}"), so a day or a mark drawn after the
+    press draws the title compared as well. -#}
+{%- set full = (expanded is defined and expanded)
+    or (compared is defined and (item.card or '').rpartition('|')[0] in compared) -%}
 {#- What this drawing of the card compares: everything, expanded; nothing,
     otherwise — the one switch the three flips and the chips below read. -#}
 {%- set alts = item.alternatives if full else {} -%}
