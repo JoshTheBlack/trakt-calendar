@@ -859,20 +859,34 @@ class ASimklOnlyRosterRowOpensItsModalTests(AppTestCase):
             "kind": distrakt_store.RecordKind.KEEPUP,
         }))
         trakt_asked: list = []
+        simkl_asked: list = []
 
         async def _trakt(settings, media, source_id, season, *, cache_only=False, fresh=False):
             trakt_asked.append(str(source_id))
-            return {"title": "Both", "episodes": []}
+            # AN ANSWER THAT HOLDS THE SEASON, as Trakt's does for a title it
+            # lists. One holding nothing of it is handed to the next service the
+            # title names (detail_source.for_season) — which is Simkl, and is
+            # not this test's case.
+            return {**self.SIMKL_DETAIL, "title": "Both", "overview": "Trakt describes it."}
 
-        async def _simkl(*args, **kwargs):
-            raise AssertionError("Simkl was asked about a title Trakt can describe")
+        async def _simkl(settings, media, source_id, season, *, cache_only=False, fresh=False):
+            simkl_asked.append(str(source_id))
+            return dict(self.SIMKL_DETAIL)
+
+        async def _simkl_videos(settings, media, source_id, *, cache_only=False):
+            # NOT A DESCRIPTION: a panel pools every service's videos, each asked
+            # by its own id (app/metadata/panel.py's describe_panel).
+            return []
 
         with patch("app.providers.trakt.detail.fetch_details", _trakt), \
-                patch("app.providers.simkl.detail.fetch_details", _simkl):
+                patch("app.providers.simkl.detail.fetch_details", _simkl), \
+                patch("app.providers.simkl.detail.fetch_videos", _simkl_videos):
             resp = self.client.get(
                 "/distrakt/fragments/details?key=show:tmdb:56&season=1")
         self.assertEqual(trakt_asked, ["7"])
+        self.assertEqual(simkl_asked, [], "Simkl was asked to describe a title Trakt describes")
         self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIn("Trakt describes it.", resp.text)
 
 
 class ASimklOnlyAccountGetsAMonthAtAllTests(AppTestCase):
