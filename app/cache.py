@@ -21,6 +21,7 @@ import json
 import logging
 import shutil
 import zlib
+from typing import NamedTuple
 
 from . import db
 from .config import DATA_DIR
@@ -292,6 +293,92 @@ async def record_source_file(url: str, source: str, month: str, *, etag: str,
          entries, 1 if changed else 0))
 
 
+# HOW MUCH ONE TURN OF THE SWEEP DELETES. A deleted row's payload pages are
+# walked to be freed, so a turn's cost follows the bytes it removes as well as the
+# rows; both are capped, and a single row larger than the byte cap is a turn of
+# its own. MEASURED on a copy of dev (88,295 rows, 204 MB): see `sweep`.
+SWEEP_TURN_ROWS = 500
+SWEEP_TURN_BYTES = 4 * 1024 * 1024
+
+# A row past its own ttl and the grace — the first pass. Rows written with no ttl
+# never match: they leave only by the size cap.
+_DUE = "ttl_seconds IS NOT NULL AND cached_at + ttl_seconds + :grace <= :now"
+
+
+class _Turn(NamedTuple):
+    """One turn of a sweep: the JSON array of [rowid, cached_at] it deletes, and
+    how many rows and bytes that is."""
+    victims: str
+    rows: int
+    bytes: int
+
+
+def _plan_sweep(conn: db.Connection, now: int, max_bytes: int | None) -> list[_Turn]:
+    """Every row a sweep at `now` deletes, oldest first and cut into turns —
+    read and decided and NOT written.
+
+    THE FIRST READ ANSWERS IN ONE ROW, and almost always with nothing: whether
+    any row is past its ttl, and the table's total against the cap. Only when
+    something is due are the rows themselves read: every row past its ttl, then,
+    of the rest, the least-recently stored until the total fits — the running
+    total a window over the order the eviction walks, so a row goes when the rows
+    before it have not yet freed enough.
+
+    THE TURNS ARE SPELLED HERE, on the worker thread, so what crosses back to the
+    event loop is one string per turn rather than a Python object per row: halving
+    a copy of dev's table plans 40,538 rows."""
+    params = {"grace": TTL_GRACE_SECONDS, "now": now}
+    (total, expired, expired_bytes), = conn.execute(
+        f"SELECT COALESCE(SUM(byte_size), 0), COALESCE(SUM({_DUE}), 0), "
+        f"COALESCE(SUM(CASE WHEN {_DUE} THEN byte_size END), 0) FROM api_cache",
+        params).fetchall()
+    excess = (total - expired_bytes - max_bytes
+              if max_bytes is not None and max_bytes >= 0 else 0)
+    if not expired and excess <= 0:
+        return []
+    reads = []
+    if expired:
+        reads.append((f"SELECT rowid, cached_at, byte_size FROM api_cache WHERE {_DUE} "
+                      f"ORDER BY cached_at, cache_key", params))
+    if excess > 0:
+        reads.append((
+            f"SELECT rowid, cached_at, byte_size FROM ("
+            f"  SELECT rowid, cached_at, byte_size, cache_key, SUM(byte_size) OVER ("
+            f"    ORDER BY cached_at ASC, cache_key ASC "
+            f"    ROWS UNBOUNDED PRECEDING) - byte_size AS freed_before "
+            f"  FROM api_cache WHERE NOT ({_DUE})) "
+            f"WHERE freed_before < :excess ORDER BY cached_at, cache_key",
+            {**params, "excess": excess}))
+    turns: list[_Turn] = []
+    victims: list[str] = []
+    size = 0
+    for sql, bound in reads:
+        cursor = conn.cursor()
+        cursor.row_factory = None
+        for rowid, cached_at, byte_size in cursor.execute(sql, bound):
+            # A turn is full at its row cap, or when this row would take it past
+            # its byte cap — and a row larger than the cap is a turn of its own.
+            if victims and (len(victims) >= SWEEP_TURN_ROWS
+                            or size + byte_size > SWEEP_TURN_BYTES):
+                turns.append(_Turn(f"[{','.join(victims)}]", len(victims), size))
+                victims, size = [], 0
+            victims.append(f"[{rowid},{cached_at}]")
+            size += byte_size
+    if victims:
+        turns.append(_Turn(f"[{','.join(victims)}]", len(victims), size))
+    return turns
+
+
+# One turn's delete: the planned rows that are still what the plan saw. A row
+# stored again since (`set` keeps the rowid and moves `cached_at`) is recent now,
+# and stays.
+_DELETE_TURN = (
+    "DELETE FROM api_cache WHERE rowid IN ("
+    "  SELECT a.rowid FROM json_each(?) v CROSS JOIN api_cache a"
+    "  WHERE a.rowid = json_extract(v.value, '$[0]')"
+    "    AND a.cached_at = json_extract(v.value, '$[1]'))")
+
+
 async def sweep(now: int | None = None, max_bytes: int | None = None) -> int:
     """Evict from api_cache and return how many rows were deleted.
 
@@ -305,37 +392,45 @@ async def sweep(now: int | None = None, max_bytes: int | None = None) -> int:
     from Trakt, so cached_at tracks the last time it was actually (re)fetched.
     There is deliberately no separate last-access column — maintaining one would
     mean a write on every cache read.
+
+    DECIDED BEFORE THE LOCK, NOTHING DUE TAKES NO LOCK, AND WHAT IS DUE GOES IN
+    BOUNDED TURNS. The heartbeat runs this every minute and nearly every minute
+    nothing is due, yet it used to scan the whole table twice inside its write
+    transaction — a column after the payload is read by walking the payload's
+    pages — and delete everything due in that same hold. MEASURED on a copy of dev
+    (88,295 rows, 204 MB, nothing due): the lock held 0.56–0.68 s a minute alone
+    and 0.91–1.02 s beside a month read, 3.54 s on dev at a start; halving the
+    table, one 2.05 s hold; 25,575 rows past their ttl, 2.15 s — and every other
+    writer waited the whole of it. Now the plan is a read on a worker thread
+    (`_plan_sweep`), which waits for no writer and holds nobody up; and each turn
+    of at most SWEEP_TURN_ROWS rows / SWEEP_TURN_BYTES bytes is a transaction of
+    its own, one statement, taking its place in the writer queue behind whatever
+    arrived meanwhile. MEASURED on the same copy: nothing due takes no lock at
+    all; halving the table is 85 turns of a median 13 ms and a p95 of 0.1 s — a
+    turn whose commit crosses SQLite's automatic WAL checkpoint pays for the
+    checkpoint, as any writer's does (0.07–0.14 s, and 0.3 s for the first one
+    on a freshly copied file) — and a one-row write beside it waits a median
+    2–10 ms.
+
+    A TURN DELETES ONLY WHAT THE PLAN SAW: a row stored again since the plan was
+    made is recent now and stays (`_DELETE_TURN`). Rows written after the plan
+    are not counted against the cap until the next sweep, a minute later — the
+    cap is a budget the sweep restores, never a wall a write is refused at.
     """
     ts = db.now() if now is None else now
+    turns = await db.run(lambda conn: _plan_sweep(conn, ts, max_bytes))
+    if not turns:
+        return 0
+    deleted = 0
+    for turn in turns:
+        def _sweep_turn(conn: db.Connection, victims: str = turn.victims) -> int:
+            return conn.execute(_DELETE_TURN, (victims,)).rowcount
 
-    def _work(conn: db.Connection) -> int:
-        deleted = conn.execute(
-            "DELETE FROM api_cache WHERE ttl_seconds IS NOT NULL "
-            "AND (cached_at + ttl_seconds + ?) <= ?",
-            (TTL_GRACE_SECONDS, ts),
-        ).rowcount
-        if max_bytes is not None and max_bytes >= 0:
-            total = conn.execute("SELECT COALESCE(SUM(byte_size), 0) FROM api_cache").fetchone()[0]
-            if total > max_bytes:
-                # Oldest first until enough bytes are freed: a row goes when the
-                # rows before it have not yet freed enough. ONE STATEMENT, the
-                # running total a window over the order the eviction walks — it
-                # used to read every row into Python and delete each victim on
-                # its own, inside this write transaction: MEASURED, 28,045
-                # statements and 1.3 s holding the write lock to halve the
-                # development copy's 65,837 rows, with nothing else running.
-                deleted += conn.execute(
-                    "DELETE FROM api_cache WHERE cache_key IN ("
-                    "  SELECT cache_key FROM ("
-                    "    SELECT cache_key, SUM(byte_size) OVER ("
-                    "      ORDER BY cached_at ASC, cache_key ASC "
-                    "      ROWS UNBOUNDED PRECEDING) - byte_size AS freed_before "
-                    "    FROM api_cache)"
-                    "  WHERE freed_before < ?)",
-                    (total - max_bytes,)).rowcount
-        return deleted
-
-    return await db.transaction(_work)
+        deleted += await db.transaction(_sweep_turn)
+    logger.info("response cache: removed %d row(s) of %d planned (%.1f MB) in %d turn(s).",
+                deleted, sum(turn.rows for turn in turns),
+                sum(turn.bytes for turn in turns) / 1e6, len(turns))
+    return deleted
 
 
 def discard_legacy_dir() -> None:

@@ -1873,6 +1873,77 @@ class EvictionTests(CacheTestCase):
         await cache.sweep(now=10 ** 9, max_bytes=10_000)
         self.assertEqual(await self._keys(), {"a", "b"})
 
+    async def test_what_the_ttl_pass_frees_counts_before_the_size_pass(self):
+        """The two passes are one plan: the bytes of rows past their ttl are
+        already freed when the cap is weighed, so the cap takes nothing more
+        than it would have after deleting them."""
+        now = 1_000_000_000
+        await self._insert("expired", cached_at=now - 600 - cache.TTL_GRACE_SECONDS - 1,
+                           byte_size=100, ttl_seconds=600)
+        await self._insert("older", cached_at=now - 100, byte_size=100)
+        await self._insert("newer", cached_at=now - 50, byte_size=100)
+        self.assertEqual(await cache.sweep(now=now, max_bytes=200), 1)
+        self.assertEqual(await self._keys(), {"older", "newer"})
+
+
+class SweepLockTests(CacheTestCase):
+    """The sweep runs every minute on the heartbeat, and nearly every minute
+    nothing is due: it decides on a read, takes no lock when nothing is due, and
+    deletes what is due in bounded turns of one statement each, so no writer
+    waits behind a whole table's eviction."""
+
+    NOW = 1_000_000_000
+
+    async def _expired(self, count: int, *, byte_size: int = 10, prefix: str = "x") -> None:
+        at = self.NOW - 600 - cache.TTL_GRACE_SECONDS - 1
+        await db.executemany(
+            "INSERT INTO api_cache (cache_key, payload, cached_at, ttl_seconds, byte_size) "
+            "VALUES (?, x'78', ?, 600, ?)",
+            [(f"{prefix}{n}", at - n, byte_size) for n in range(count)])
+
+    async def test_nothing_due_takes_no_lock(self):
+        await db.execute(
+            "INSERT INTO api_cache (cache_key, payload, cached_at, ttl_seconds, byte_size) "
+            "VALUES ('fresh', x'78', ?, 600, 10)", (self.NOW - 60,))
+        with support.statements_per_transaction() as counts:
+            self.assertEqual(await cache.sweep(now=self.NOW, max_bytes=10_000), 0)
+        self.assertEqual(counts, [])
+
+    async def test_each_turn_is_one_statement_however_many_rows_are_due(self):
+        for count in (10, 2 * cache.SWEEP_TURN_ROWS + 7):
+            with self.subTest(count=count):
+                await self._expired(count, prefix=f"n{count}-")
+                with support.statements_per_transaction() as counts:
+                    self.assertEqual(await cache.sweep(now=self.NOW), count)
+                self.assertEqual(counts, [1] * -(-count // cache.SWEEP_TURN_ROWS))
+
+    async def test_a_turn_holds_no_more_bytes_than_its_budget(self):
+        """A row's payload pages are walked to be freed, so a turn is bounded by
+        bytes as well as rows — and one row larger than the budget is a turn of
+        its own rather than a reason to stall."""
+        await self._expired(3, byte_size=cache.SWEEP_TURN_BYTES // 2 + 1)
+        await self._expired(1, byte_size=cache.SWEEP_TURN_BYTES * 3, prefix="huge")
+        with support.statements_per_transaction() as counts:
+            self.assertEqual(await cache.sweep(now=self.NOW), 4)
+        self.assertEqual(counts, [1, 1, 1, 1])
+
+    async def test_a_row_stored_again_after_the_plan_stays(self):
+        """Between the plan and a turn, a lookup can store its answer again: the
+        row keeps its rowid and its clock moves, so it is recent now and the
+        turn leaves it."""
+        await self._expired(2)
+        real = cache._plan_sweep
+
+        def plan_then_restore(conn, now, max_bytes):
+            planned = real(conn, now, max_bytes)
+            conn.execute("UPDATE api_cache SET cached_at = ? WHERE cache_key = 'x0'", (self.NOW,))
+            return planned
+
+        with patch.object(cache, "_plan_sweep", plan_then_restore):
+            self.assertEqual(await cache.sweep(now=self.NOW), 1)
+        self.assertEqual({r["cache_key"] for r in await db.fetch_all(
+            "SELECT cache_key FROM api_cache")}, {"x0"})
+
 
 # ---------------------------------------------------------------------------
 # the detail-lookup cache (app/cache) round trips through api_cache

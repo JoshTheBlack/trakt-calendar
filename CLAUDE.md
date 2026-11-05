@@ -122,8 +122,12 @@ each writer to the same count for ten rows as for a hundred
 (tests/calendar/test_write_statements.py, tests/metadata/test_write_statements.py,
 tests/calendar/test_enrich.py's `APassWritesItsBatchOnceTests`), the retention
 sweep included — which decides before its lock what is due, each read one
-aggregated row, and takes no lock at all when nothing is (`entries.sweep`),
-and `db.transaction` logs a WARNING naming its body whenever the lock was held
+aggregated row, and takes no lock at all when nothing is (`entries.sweep`) —
+and the response cache's sweep the same, deleting what is due in BOUNDED TURNS
+of one statement each (`app/cache.py`'s `sweep`, SWEEP_TURN_ROWS /
+SWEEP_TURN_BYTES; it scanned its whole table inside the lock every minute, up
+to 3.54 s on dev at a start, and halving the table was one 2 s hold), and
+`db.transaction` logs a WARNING naming its body whenever the lock was held
 over `db.LOCK_HELD_WARN_SECONDS` (1 s), so the next long hold names itself.
 WRITES TAKE TURNS: every `db.transaction`, `db.execute` and `db.executemany`
 waits in ONE in-process queue per event loop (`db._writer_queue`) and only then
