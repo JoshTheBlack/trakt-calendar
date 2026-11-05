@@ -30,9 +30,9 @@ from fastapi.testclient import TestClient
 
 from app import auth, db, providers
 from app.calendar import cache as calendar_cache, routes as calendar_routes
-from app.calendar import state as calendar_state
+from app.calendar import entries as calendar_entries, state as calendar_state
 from app.calendar import vocab
-from app.endpoints import ENDPOINTS
+from app.endpoints import ENDPOINTS, get_endpoint
 from app.metadata import refresh as metadata_refresh
 from app.providers.base import Capabilities, Reach
 from app.providers.trakt import TraktError
@@ -40,6 +40,7 @@ from app.config import Settings
 from tests.support import save_settings, settling
 from app.sources import prefs as source_prefs
 from app.main import app
+from tests import support
 from tests.support import ORIGIN, migrated_db, window_fetch
 
 
@@ -1467,6 +1468,91 @@ class RouteSplitTests(CalendarRouteTestCase):
         pill = re.search(r'<button[^>]*class="stats-pill"[^>]*>', html).group(0)
         self.assertIn('popovertarget="statsBar"', pill)
         self.assertRegex(html, r'(?s)class="stats-pill".*?</button>\s*<div id="statsBar" class="stats-bar" popover>')
+
+
+class TheMonthChangedNoticeTests(CalendarRouteTestCase):
+    """A month drawn and then refilled under the page says so — asked once a
+    minute by the page, and at once by a late day that draws something else."""
+
+    PAGE = "/calendar?year=2026&month=7&endpoint=shows"
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in_as(self._make_user("changed_viewer"))
+        # More days than the shell draws inline, so the 10th is a late day.
+        self.entries = [_entry(f"show-{day}", f"Show {day}", f"2026-07-{day:02d}T20:00:00Z")
+                        for day in range(1, 11)]
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch(self.entries))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _changed_url(self, html: str) -> str:
+        found = re.search(r'id="monthChanged" hidden hx-get="([^"]+)" hx-trigger="every 60s"',
+                          html)
+        self.assertIsNotNone(found, "the page draws no month-changed check")
+        return found.group(1).replace("&amp;", "&")
+
+    def _refill(self, day: int) -> None:
+        """The week holding `day` refilled from whatever the fetch answers now."""
+        window = calendar_cache.window_start(date(2026, 7, day))
+        asyncio.run(support.load_window(get_endpoint("shows"), _configured_settings(), window,
+                                        force=True))
+
+    def test_the_page_asks_about_the_month_it_filed(self):
+        html = self.client.get(self.PAGE).text
+        url = self._changed_url(html)
+        token = re.search(r"&page=([A-Za-z0-9_-]+)", _day_urls(html)[0]).group(1)
+        self.assertEqual(url, f"/calendar/changed?endpoint=shows&year=2026&month=7&page={token}")
+
+    def test_a_month_nothing_has_rewritten_answers_nothing(self):
+        url = self._changed_url(self.client.get(self.PAGE).text)
+        self.assertEqual(self.client.get(url).status_code, 204)
+        # A refill whose answer is what is stored rewrites no row, so it is not
+        # a change either — and the month is not read again to find that out.
+        self._refill(8)
+        with patch.object(calendar_cache, "assemble_range") as read:
+            self.assertEqual(self.client.get(url).status_code, 204)
+        read.assert_not_called()
+
+    def test_a_refill_that_changes_the_month_raises_the_sentence(self):
+        url = self._changed_url(self.client.get(self.PAGE).text)
+        self.entries.append(_entry("show-late", "Show Late", "2026-07-08T21:00:00Z"))
+        self._refill(8)
+        answer = self.client.get(url)
+        self.assertEqual(answer.status_code, 200)
+        self.assertIn("This month has changed since the page was drawn", answer.text)
+        # The sentence replaces the asker, so the page stops asking.
+        self.assertNotIn("hx-trigger", answer.text)
+        self.assertIn('href="/calendar?year=2026&amp;month=7&amp;endpoint=shows"', answer.text)
+
+    def test_rows_rewritten_without_changing_what_this_viewer_sees_raise_nothing(self):
+        """A store changed the week's rows, but the month this viewer draws is
+        card for card what the page filed: read once, then quiet again."""
+        url = self._changed_url(self.client.get(self.PAGE).text)
+        calendar_entries._note_changed("shows", [calendar_cache.window_start(
+            date(2026, 7, 8)).isoformat()])
+        self.assertEqual(self.client.get(url).status_code, 204)
+        with patch.object(calendar_cache, "assemble_range") as read:
+            self.assertEqual(self.client.get(url).status_code, 204)
+        read.assert_not_called()
+
+    def test_a_late_day_that_draws_something_else_says_so_at_once(self):
+        html = self.client.get(self.PAGE).text
+        day = next(url for url in _day_urls(html) if "date=2026-07-10" in url)
+        self.assertNotIn("monthChanged", self.client.get(day).text)
+        self.entries.append(_entry("show-late", "Show Late", "2026-07-10T19:00:00Z"))
+        self._refill(10)
+        late = self.client.get(day).text
+        self.assertIn("Show Late", late)
+        self.assertIn('id="monthChanged" class="warning-banner" role="status" '
+                      'hx-swap-oob="true"', late)
+
+    def test_a_token_that_names_nothing_stops_the_asking(self):
+        answer = self.client.get(
+            "/calendar/changed?endpoint=shows&year=2026&month=7&page=nothing-filed")
+        self.assertEqual(answer.status_code, 200)
+        self.assertIn('id="monthChanged" hidden', answer.text)
+        self.assertNotIn("hx-get", answer.text)
 
 
 class CalendarShellTests(CalendarRouteTestCase):

@@ -27,7 +27,7 @@ import secrets
 import time
 from collections import OrderedDict
 from typing import NamedTuple
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -36,7 +36,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from markupsafe import Markup
 
 from . import (cache as calendar_cache, enrich as calendar_enrich,
-               filter as calendar_filter, query as calendar_query,
+               entries as calendar_entries, filter as calendar_filter, query as calendar_query,
                resolve as calendar_resolve, search as calendar_search,
                share_links, state as calendar_state, vocab)
 from .. import (auth, authz, cache, chrome, clock, db, details_panel, metadata,
@@ -876,6 +876,13 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
         "new_ids": month_view.new_ids,
         # Which month a mark pressed on this page recounts (`_file_month`).
         "page_token": page_token,
+        # AND WHAT THE PAGE ASKS, ONCE A MINUTE, ABOUT THAT MONTH: whether the
+        # store still draws it (`calendar_changed`, _month_changed.html).
+        "changed_url": (_changed_url(endpoint.key, year, month, page_token,
+                                     source=request.query_params.get("source"))
+                        if page_token else ""),
+        "month_url": _month_url(endpoint.key, year, month,
+                                source=request.query_params.get("source")),
         "stats": {"total": month_view.total, "watching": month_view.watching,
                   "not_watching": month_view.not_watching_count},
         "delta": month_view.delta,
@@ -1064,6 +1071,14 @@ class _FiledMonth(NamedTuple):
     month: int
     cards: tuple
     at: float
+    # When the store's rows were last known to draw exactly these cards — the
+    # filing, or a month-changed check that read the month again and found it
+    # the same (`calendar_changed`).
+    checked: float
+
+    def drawn(self) -> list[tuple[str, str]]:
+        """(day, mark key) of every card, in the order the page drew them."""
+        return [(card.air_date, card.mark_key) for card in self.cards]
 
 
 _pages: OrderedDict = OrderedDict()
@@ -1082,7 +1097,7 @@ def _file_month(user_id: int, endpoint_key: str, year: int, month: int,
         endpoint_key, year, month,
         tuple(_FiledCard(group["date"], item.mark_key, item.title_key,
                          calendar_state.item_spellings(item))
-              for group in grouped for item in group["items"]), moment)
+              for group in grouped for item in group["items"]), moment, moment)
     return token
 
 
@@ -1168,6 +1183,21 @@ def _page_token(request: Request) -> str:
 
 
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{1,32}")
+
+
+def _month_url(endpoint_key: str, year: int, month: int, *, source: str | None = None) -> str:
+    """The month's own page — what the month-changed sentence reloads."""
+    url = f"/calendar?year={year}&month={month}&endpoint={quote(endpoint_key)}"
+    return url + (f"&source={quote(source)}" if source else "")
+
+
+def _changed_url(endpoint_key: str, year: int, month: int, page: str, *,
+                 source: str | None = None) -> str:
+    """The month-changed check for the month `page` filed (`calendar_changed`),
+    asking with the same source selection the page was drawn with."""
+    url = (f"/calendar/changed?endpoint={quote(endpoint_key)}&year={year}&month={month}"
+           f"&page={quote(page, safe='')}")
+    return url + (f"&source={quote(source)}" if source else "")
 
 
 def _day_url(endpoint_key: str, day: date, *, source: str | None = None,
@@ -1379,6 +1409,18 @@ async def calendar_day(request: Request):
         if grouped:
             context["chip"] = _day_chip(day, grouped[0]["items"], meta["not_watching_keys"],
                                         prefs["hide_not_watching"])
+        # WHAT THE SHELL COUNTED FOR THIS DAY, against what the day draws now. A
+        # refill can land between the two (_month_changed.html has the case), and
+        # the day draws what the store holds — the only thing it can draw — so
+        # where they differ it is the page's numbers that went stale, and the day
+        # says so for the whole page.
+        filed = _filed_month(user.user_id, _page_token(request), endpoint.key, year, month)
+        if filed is not None:
+            counted = sorted(key for on, key in filed.drawn() if on == day.isoformat())
+            context["month_changed"] = counted != sorted(
+                item.mark_key for group in grouped for item in group["items"])
+            context["month_url"] = _month_url(endpoint.key, year, month,
+                                              source=request.query_params.get("source"))
     except TraktError as exc:
         # The shell is already on screen with the month's real numbers, so one day
         # failing is a gap in the month, not a broken page. It replaces itself with
@@ -1395,6 +1437,62 @@ async def calendar_day(request: Request):
         {**context, "group": grouped[0] if grouped else None,
          "error": None, "partial": meta["partial"]},
     )
+
+
+@guard.get("/calendar/changed", AuthLevel.CALENDAR_APPROVED)
+async def calendar_changed(request: Request):
+    """Whether the month a page drew is still the month the store holds — what
+    the page asks once a minute (_month_changed.html says why it asks).
+
+    CHEAP UNTIL SOMETHING CHANGED: a store notes the windows whose rows it
+    rewrote (entries.changed_since), and a month none of whose windows has been
+    rewritten since the page last knew it answers 204 with nothing read. Only
+    then is the month read again — keys and days only, asking nobody, the read
+    the shell made — and compared card for card with what the page filed, so a
+    refill that changed rows this viewer does not see (another viewer's genre,
+    a description's words) raises nothing.
+
+    The page's filed month is the account's own (`_filed_month`): a token from
+    somebody else's page, or one that has expired, names nothing, and the answer
+    is the quiet element, which stops the asking."""
+    user = await auth.current_user(request)
+    settings = await load_settings()
+    prefs = await auth.get_user_prefs(user.user_id)
+    today = clock.today()
+    year = route_params.valid_year(request.query_params.get("year"), today.year)
+    month = route_params.valid_month(request.query_params.get("month"), today.month)
+    endpoint = _requested_endpoint(request, prefs, settings)
+    token = _page_token(request)
+    filed = _filed_month(user.user_id, token, endpoint.key, year, month)
+    if filed is None:
+        return templates.TemplateResponse(request, "_month_changed.html", {"request": request})
+    first = date(year, month, 1)
+    after = date(year, month, _calendar.monthrange(year, month)[1]) + timedelta(days=1)
+    # A day either side: a viewer's local month reaches into the UTC day beyond
+    # each of its ends.
+    if not calendar_entries.changed_since(endpoint.key, first - timedelta(days=1),
+                                          after + timedelta(days=1), filed.checked):
+        return Response(status_code=204)
+    checked = time.monotonic()
+    try:
+        grouped, _meta = await calendar_cache.assemble_range(
+            endpoint, settings, tz=_resolve_viewer_tz(user, settings),
+            start_date=first, end_date=after - timedelta(days=1),
+            **vocab.active_specs(prefs, endpoint.media, honour_pause=True),
+            not_watching_ids=await calendar_state.not_watching_ids(user.user_id),
+            prefs=await _viewer_source_selection(request, user, endpoint.media),
+            drawn=False, allow_fetch=False)
+    except TraktError:
+        # Nothing could be read to compare with; ask again next time.
+        return Response(status_code=204)
+    if [(group["date"], view.mark_key) for group in grouped
+            for view in group["items"]] == filed.drawn():
+        _pages[(user.user_id, token)] = filed._replace(checked=checked)
+        return Response(status_code=204)
+    return templates.TemplateResponse(request, "_month_changed.html", {
+        "request": request, "month_changed": True,
+        "month_url": _month_url(endpoint.key, year, month,
+                                source=request.query_params.get("source"))})
 
 
 async def _searched_title(params, settings):

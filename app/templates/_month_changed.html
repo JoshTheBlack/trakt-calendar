@@ -1,0 +1,27 @@
+{# WHETHER THE MONTH ON SCREEN IS STILL THE MONTH THE STORE HOLDS. The shell's
+   numbers, chips and is-new marks are claims about the whole month as it was
+   read when the page was drawn, and a refill landing after that — a restart's
+   stale weeks are refilled behind the very page that found them stale — can add
+   a card, take one away or move one to another day. MEASURED (Chromium, a dev
+   copy refilling September and October behind its own month): two of 29 late
+   days drew a card more or less than the shell had counted for them.
+
+   ONE ELEMENT, THREE STATES, all the server's:
+     - asking (`changed_url`): hidden, and asks once a minute (`every 60s`, a
+       timer and no filter expression, which the CSP has no quarrel with). An
+       unchanged month answers 204, which htmx swaps nothing for, so it goes on
+       asking;
+     - changed (`month_changed`): the sentence, which replaces the asker and so
+       stops the asking. A day that arrives late and draws something other than
+       what the shell filed for it sends this out of band (`oob`), at once;
+     - quiet: a page with no filed month to compare against, or one whose filed
+       month has expired — nothing to ask about, and still the element a late
+       day's sentence lands on. #}
+{% if month_changed %}
+<div id="monthChanged" class="warning-banner" role="status"{% if oob %} hx-swap-oob="true"{% endif %}>
+    🔄 This month has changed since the page was drawn — <a href="{{ month_url }}">reload it</a> to see it whole.</div>
+{% elif changed_url %}
+<div id="monthChanged" hidden hx-get="{{ changed_url }}" hx-trigger="every 60s" hx-swap="outerHTML"></div>
+{% else %}
+<div id="monthChanged" hidden></div>
+{% endif %}

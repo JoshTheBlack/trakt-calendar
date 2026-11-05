@@ -397,7 +397,40 @@ async def _store_window(endpoint_key: str, span_start: date, span_end: date,
         written.append(planned)
     else:
         await db.transaction(_work, prepare=_plan)
+        _note_changed(endpoint_key, [first])
     metadata.complete_records(listed, written[-1])
+
+
+# WHEN A WINDOW'S ROWS LAST CHANGED, for a page asking whether the month it drew
+# is still the month the store holds (calendar/routes.py's month-changed check).
+# A store whose answer changed nothing writes no row and moves no clock here,
+# which is what makes the question cheap: an open page asks it every minute, and
+# only a window a store actually rewrote sends it to read its month again.
+#
+# IN PROCESS, as the pages it answers for are (routes' filed months, which a
+# restart forgets too); keyed by the database as every memo of rows is; pruned to
+# `_CHANGED_SECONDS`, longer than a filed page lives, as each change is noted.
+_CHANGED_SECONDS = 3 * 60 * 60
+_changed: dict[tuple[int, str, str], float] = {}
+
+
+def _note_changed(endpoint_key: str, windows) -> None:
+    """Note that a store changed rows of `windows` (each an ISO date that opens
+    a window, or lies inside the one it opens) now."""
+    moment = time.monotonic()
+    for key in [key for key, at in _changed.items() if at < moment - _CHANGED_SECONDS]:
+        del _changed[key]
+    for window in windows:
+        _changed[(db.generation(), endpoint_key, str(window))] = moment
+
+
+def changed_since(endpoint_key: str, first: date, after: date, moment: float) -> bool:
+    """Whether a store has changed the rows of any window overlapping
+    [first, after) of `endpoint_key` since `moment` (time.monotonic())."""
+    lo, hi = (first - timedelta(days=WINDOW_DAYS)).isoformat(), after.isoformat()
+    generation = db.generation()
+    return any(at > moment for (held, endpoint, window), at in _changed.items()
+               if held == generation and endpoint == endpoint_key and lo < window < hi)
 
 
 async def store_loose_airings(endpoint_key: str, records, *, now: int,
@@ -471,6 +504,9 @@ async def store_loose_airings(endpoint_key: str, records, *, now: int,
     if written:
         logger.info("calendar search filled %d listing(s) on %s that no feed listed.",
                     len(written), endpoint_key)
+        # By the day each listing airs: a day lies inside the window it opens, so
+        # a check can only be sent to confirm a change that was not one.
+        _note_changed(endpoint_key, {_utc_date(r.air_ts) for r in written})
     return written
 
 

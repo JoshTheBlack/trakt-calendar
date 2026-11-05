@@ -808,7 +808,16 @@ answer redraws it. THE SHELL FILES THE MONTH IT DREW (`_file_month`: each card's
 day, title and every spelling a mark names it by, in process, bounded) under a
 page token every mark and late day carries, and a mark recounts the month's
 numbers and chips from it while drawing its title's own rows — a mark that read
-the month again took 1.5 s. The add-to-library rule lives in one place per question:
+the month again took 1.5 s. A DAY THAT ARRIVES AFTER ITS MONTH CHANGED draws the
+store as it is now — the only thing it can draw: a card that went has no rows — and
+when what it draws is not what the shell filed for that day, it says so for the
+whole page, out of band (`_month_changed.html`). The page also asks once a minute
+(`calendar_changed`): 204, reading nothing, until a store has rewritten a window of
+the month since the page last knew it (`entries.changed_since`), and then the
+month is read keys-only and compared card for card with what was filed, so only a
+change this viewer would see raises the sentence. A timer and no filter
+expression, which is what the CSP admits; htmx 4 stops a poll only by the element
+being replaced. The add-to-library rule lives in one place per question:
 `_library` (`app/calendar/routes.py`) for WHO gets the buttons, `LibraryView`
 (`app/integrations/routes.py`) for what state each is in, `add_title` beside it
 for the add itself.
