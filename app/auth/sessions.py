@@ -15,7 +15,7 @@ from __future__ import annotations
 import secrets
 from dataclasses import dataclass
 
-from .. import db, providers
+from .. import after_response, db, providers
 
 SESSION_SLIDING_SECONDS = 14 * 24 * 3600
 SESSION_ABSOLUTE_SECONDS = 60 * 24 * 3600
@@ -188,9 +188,14 @@ async def validate_session(
         # THE SLIDE IS A WRITE, SO IT TAKES ITS TURN with every other write
         # (db.execute) rather than being made from inside the read, where it
         # waited in SQLite's busy handler and could fail a page at the busy
-        # timeout behind a run of other writes.
-        await db.execute("UPDATE sessions SET expires_at = ?, last_seen_at = ? WHERE id = ?",
-                         (user.expires_at, ts, session_id))
+        # timeout behind a run of other writes — and it is made once the answer
+        # has been sent (after_response.write): the page this request is drawing
+        # depends on the session being valid, which the read decided, not on its
+        # new expiry being stored.
+        expires_at = user.expires_at
+        after_response.write(lambda: db.execute(
+            "UPDATE sessions SET expires_at = ?, last_seen_at = ? WHERE id = ?",
+            (expires_at, ts, session_id)))
     return user
 
 

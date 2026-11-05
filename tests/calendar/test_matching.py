@@ -24,10 +24,23 @@ from datetime import date
 
 from app import db
 from app.calendar import cache as calendar_cache, enrich as calendar_enrich, entries
+from app.calendar import query as calendar_query
 from app.providers.base import Record, Source
+from tests import support
 from tests.support import as_stored, migrated_db, stored_groups
 
 # The instants below are the real ones. 2026-07-06T21:17:00Z and 21:20:00Z are
+
+
+async def _stored_span(endpoint_key, first, after):
+    """Every listing of each episode row with one in [first, after), whole —
+    the rows a span's reader works from."""
+    from app import db
+    from app.calendar import query as _query
+
+    return await db.run(lambda conn: support._stored(
+        conn, endpoint_key, _query.read_rows(conn, endpoint_key, first=first, after=after)))
+
 # what the two services published for the same premiere — three minutes apart,
 # which is why "the same instant" could never have been the test and the UTC day
 # is.
@@ -378,9 +391,9 @@ class TheFoldIsDecidedAtWriteTests(unittest.IsolatedAsyncioTestCase):
                                           sources=sources)
 
     async def cards(self):
-        records = await entries.read_span_whole("shows", self.WEEK, date(2026, 7, 20))
+        records = await _stored_span("shows", self.WEEK, date(2026, 7, 20))
         return sorted(tuple(sorted(group["by_source"]))
-                      for group in calendar_cache.group_records(records))
+                      for group in support.grouped(records))
 
     async def test_a_numbered_listing_arriving_takes_it_in(self):
         await self.store([self.loose()], ["simkl"])
@@ -393,7 +406,7 @@ class TheFoldIsDecidedAtWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.cards(), [("simkl", "trakt")])
         await self.store([], ["trakt"])
         self.assertEqual(await self.cards(), [("simkl",)])
-        records = await entries.read_span_whole("shows", self.WEEK, date(2026, 7, 20))
+        records = await _stored_span("shows", self.WEEK, date(2026, 7, 20))
         self.assertEqual([(r.season, r.episode_number, r.card) for r in records],
                          [(None, 1, "show:tmdb:9|D2026-07-15E1")])
 
@@ -431,8 +444,8 @@ class TheJoinRuleTests(unittest.TestCase):
             (date(2026, 4, 8), date(2026, 9, 16), False, "Dimension 20 S29E1"),
         ):
             with self.subTest(why):
-                self.assertEqual(calendar_cache.may_join(first, second), joins)
-                self.assertEqual(calendar_cache.may_join(second, first), joins)
+                self.assertEqual(calendar_query.may_join(first, second), joins)
+                self.assertEqual(calendar_query.may_join(second, first), joins)
 
 
 class OneEpisodeIsOneCardTests(unittest.TestCase):
@@ -535,7 +548,7 @@ class OneEpisodeIsOneCardTests(unittest.TestCase):
                    detail_url="", title="Show", air_ts=_utc(2026, 11, 29),
                    date_only=True, season=1, episode_number=1)]
         self.assertEqual([sorted(str(r.source) for r in card)
-                          for card in calendar_cache.cards_of(as_stored(listings))],
+                          for card in calendar_query.cards_of(as_stored(listings))],
                          [["simkl", "tmdb", "trakt"]])
 
     def test_the_cards_do_not_depend_on_the_order_they_were_read_in(self):
@@ -545,8 +558,8 @@ class OneEpisodeIsOneCardTests(unittest.TestCase):
             Record(source=Source.TMDB, media="show", id="117488", ids={"tmdb": 117488},
                    detail_url="", title="Yellowjackets", air_ts=_utc(2026, 11, 22),
                    date_only=True, season=4, episode_number=1)])
-        forward = calendar_cache.cards_of(listings)
-        backward = calendar_cache.cards_of(list(reversed(listings)))
+        forward = calendar_query.cards_of(listings)
+        backward = calendar_query.cards_of(list(reversed(listings)))
         self.assertEqual([[str(r.source) for r in card] for card in forward],
                          [[str(r.source) for r in card] for card in backward])
         self.assertEqual(len(forward), 1)

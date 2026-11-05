@@ -24,6 +24,9 @@ import dataclasses
 import logging
 import re
 import secrets
+import time
+from collections import OrderedDict
+from typing import NamedTuple
 from datetime import date, datetime
 from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -33,11 +36,11 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from markupsafe import Markup
 
 from . import (cache as calendar_cache, enrich as calendar_enrich,
-               filter as calendar_filter,
+               filter as calendar_filter, query as calendar_query,
                resolve as calendar_resolve, search as calendar_search,
                share_links, state as calendar_state, vocab)
 from .. import (auth, authz, cache, chrome, clock, db, details_panel, metadata,
-                route_params)
+                route_params, templating)
 from ..metadata import identity as title_identity
 from ..metadata import panel as metadata_panel, pictures as metadata_pictures
 from ..metadata import refresh as metadata_refresh
@@ -534,12 +537,15 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
         # calendar — dominated by the per-window Trakt fetch on a cold cache
         # (now concurrent across the windows, not one await at a time).
         with span("calendar.read_month", endpoint=endpoint.key, ym=f"{year}-{month:02d}") as sp:
+            # KEYS AND DAYS ONLY: every number the shell states is about the
+            # whole month and needs only each card's identity and day; the cards
+            # it draws inline are drawn once it knows which (`_month_context`).
             assembly.grouped, meta = await calendar_cache.assemble_range(
                 endpoint, settings, tz=tz,
                 start_date=date(year, month, 1), end_date=date(year, month, days),
                 **vocab.active_specs(prefs, endpoint.media, honour_pause=True),
                 not_watching_ids=not_watching,
-                prefs=source_selection,
+                prefs=source_selection, drawn=False,
             )
             sp.set(items=meta["total"])
         assembly.total = meta["total"]
@@ -802,15 +808,33 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
     # per day because it IS one answer about the month.
     new_token = await _remember_new_marks(
         user.user_id, endpoint.key, year, month, month_view.new_ids)
+    page_token = (_file_month(user.user_id, endpoint.key, year, month, month_view.grouped)
+                  if month_view.error is None else "")
+    # THE INLINE DAYS ARE DRAWN NOW, AND ONLY THEY: the month's cards were read
+    # for their identity and day alone, and a day after them is drawn when it is
+    # scrolled to (`calendar_day`). The jump's card is the drawn one, which is
+    # what the template's identity test asks about.
+    drawn = await calendar_cache.present(
+        endpoint, settings, [view for index in sorted(inline)
+                             for view in month_view.grouped[index]["items"]],
+        tz=tz, prefs=source_selection,
+        **vocab.active_specs(prefs, endpoint.media, honour_pause=True))
+    drawn_as = iter(drawn)
+    for index in sorted(inline):
+        group = month_view.grouped[index]
+        views, group["items"] = group["items"], [next(drawn_as) for _ in group["items"]]
+        if anchor is not None and any(view is anchor for view in views):
+            anchor = group["items"][[id(view) for view in views].index(id(anchor))]
     for index, group in enumerate(month_view.grouped):
         group["inline"] = index in inline
         if not group["inline"]:
             group["url"] = _day_url(
                 endpoint.key, date.fromisoformat(group["date"]),
-                source=request.query_params.get("source"), new=new_token)
+                source=request.query_params.get("source"), new=new_token, page=page_token)
 
     logo_networks = await _logo_networks(
-        settings, [item for group in month_view.grouped for item in group["items"]])
+        settings, [item for group in month_view.grouped if group["inline"]
+                   for item in group["items"]])
     return {
         "request": request,
         "settings": settings,
@@ -850,6 +874,8 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
         # while the filter went on applying.
         "badge_modes": vocab.BadgeModes(prefs),
         "new_ids": month_view.new_ids,
+        # Which month a mark pressed on this page recounts (`_file_month`).
+        "page_token": page_token,
         "stats": {"total": month_view.total, "watching": month_view.watching,
                   "not_watching": month_view.not_watching_count},
         "delta": month_view.delta,
@@ -935,11 +961,11 @@ async def calendar_page(request: Request):
         "distrakt_available": bool(user and user.distrakt_approved and user.has_tracker_identity),
     }
     # Jinja renders eagerly when the response is built, so this span is the cost of
-    # turning the shell's cards into HTML — the other half of the server's blocking
-    # time before the browser gets anything. It is now bounded by the inline day
-    # count rather than growing with the whole month.
+    # turning the shell's cards into HTML — bounded by the inline day count rather
+    # than growing with the whole month, and drawn off the event loop
+    # (templating.drawn).
     with span("calendar.render", cards=month["inline_cards"]):
-        return templates.TemplateResponse(request, "index.html", context)
+        return await templating.drawn(request, "index.html", context)
 
 
 _YMD = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -1008,6 +1034,68 @@ def _library(user, settings) -> integrations_routes.LibraryView | None:
     return integrations_routes.LibraryView(settings) if user and user.is_admin else None
 
 
+# THE MONTH A PAGE DREW, FILED FOR ITS MARKS. A mark redraws the title's cards
+# and restates the counts and chips a mark moves, which are about the WHOLE
+# month: worked out by reading the month again, a mark took 1.5 s where its
+# title's own rows take a few milliseconds. So the page files what it drew —
+# every card's day, its title, and every spelling a mark can name it by
+# (state.item_spellings) — under a token its mark buttons carry, and a mark
+# recounts from that. A REFERENCE, like the is-new token: resolved as the account
+# making the request, so a token from somebody else's page reads nothing, and a
+# token that names nothing (a restart, an old tab) reads the month as before.
+#
+# IN MEMORY AND BOUNDED, because what it saves is a read and losing it costs one:
+# the last `_PAGES_MAX` pages, none older than `_PAGE_SECONDS`, pruned as each
+# page files — the process runs for weeks.
+_PAGES_MAX = 256
+_PAGE_SECONDS = 2 * 60 * 60
+
+
+class _FiledCard(NamedTuple):
+    air_date: str
+    mark_key: str
+    title_key: str
+    spellings: frozenset
+
+
+class _FiledMonth(NamedTuple):
+    endpoint: str
+    year: int
+    month: int
+    cards: tuple
+    at: float
+
+
+_pages: OrderedDict = OrderedDict()
+
+
+def _file_month(user_id: int, endpoint_key: str, year: int, month: int,
+                grouped: list[dict]) -> str:
+    """File the month a page drew (`grouped`, its keys-only cards) and return
+    the token naming it."""
+    moment = time.monotonic()
+    while _pages and (len(_pages) >= _PAGES_MAX
+                      or moment - next(iter(_pages.values())).at > _PAGE_SECONDS):
+        _pages.popitem(last=False)
+    token = secrets.token_urlsafe(9)
+    _pages[(user_id, token)] = _FiledMonth(
+        endpoint_key, year, month,
+        tuple(_FiledCard(group["date"], item.mark_key, item.title_key,
+                         calendar_state.item_spellings(item))
+              for group in grouped for item in group["items"]), moment)
+    return token
+
+
+def _filed_month(user_id: int, token: str, endpoint_key: str, year: int,
+                 month: int) -> _FiledMonth | None:
+    """The month `token` filed for this account, when it is this month."""
+    filed = _pages.get((user_id, token)) if token else None
+    if (filed is None or (filed.endpoint, filed.year, filed.month) != (endpoint_key, year, month)
+            or time.monotonic() - filed.at > _PAGE_SECONDS):
+        return None
+    return filed
+
+
 # HOW LONG THE SHELL'S IS-NEW ANSWER OUTLIVES THE LOAD THAT MADE IT. It is read
 # by the days of ONE page as the reader scrolls through them, so its life is a
 # page's life and not a session's: half an hour is far past the longest anybody
@@ -1073,8 +1161,17 @@ async def _new_marks(user_id: int, endpoint_key: str, year: int, month: int,
     return {str(key) for key in stored} if isinstance(stored, list) else set()
 
 
+def _page_token(request: Request) -> str:
+    """The page token a request carries (`_file_month`), when it is one."""
+    token = request.query_params.get("page") or ""
+    return token if _TOKEN.fullmatch(token) else ""
+
+
+_TOKEN = re.compile(r"[A-Za-z0-9_-]{1,32}")
+
+
 def _day_url(endpoint_key: str, day: date, *, source: str | None = None,
-             new: str = "") -> str:
+             new: str = "", page: str = "") -> str:
     """The content request for one day. Built in one place because the shell's
     placeholder and the retry button on a day that failed must ask for exactly the
     same thing.
@@ -1087,13 +1184,17 @@ def _day_url(endpoint_key: str, day: date, *, source: str | None = None,
 
     `new` is the token naming where this load's is-new answer is filed — see
     `_remember_new_marks`. One short opaque word, the same one on every
-    placeholder in the page, and absent for a month with nothing new on it."""
+    placeholder in the page, and absent for a month with nothing new on it.
+    `page` names the month the page drew, for the marks the day's cards carry
+    (`_file_month`)."""
     url = (f"/calendar/day?endpoint={quote(endpoint_key)}"
           f"&year={day.year}&month={day.month}&date={day.isoformat()}")
     if source:
         url += f"&source={quote(source)}"
     if new:
         url += f"&new={quote(new, safe='')}"
+    if page:
+        url += f"&page={quote(page, safe='')}"
     return url
 
 
@@ -1237,6 +1338,8 @@ async def calendar_day(request: Request):
         "badge_modes": vocab.BadgeModes(prefs),
         # The shell's is-new answer, for the cards on this day — see the docstring.
         "new_ids": new,
+        # And the month it filed, which a mark on one of these cards recounts.
+        "page_token": _page_token(request),
         "settings": settings, "is_admin": bool(user and user.is_admin),
         # And the same add-to-library buttons, in the state they are in.
         "library": _library(user, settings),
@@ -1284,7 +1387,7 @@ async def calendar_day(request: Request):
         return templates.TemplateResponse(
             request, "_day_fragment.html", {**context, "group": None, "error": str(exc)})
 
-    return templates.TemplateResponse(
+    return await templating.drawn(
         request, "_day_fragment.html",
         # A day with nothing on it groups to nothing; the fragment then renders
         # empty and the placeholder it replaces simply disappears, which is what an
@@ -2067,14 +2170,21 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
     prefs = await auth.get_user_prefs(user.user_id)
     tz = _resolve_viewer_tz(user, settings)
     not_watching = await calendar_state.not_watching_ids(user.user_id)
+    selection = await _viewer_source_selection(request, user, endpoint.media)
+    specs = vocab.active_specs(prefs, endpoint.media, honour_pause=True)
+    filed = _filed_month(user.user_id, _page_token(request), endpoint.key, year, month)
+    if filed is not None:
+        return await _marked_from_filed(
+            request, user, settings, prefs, endpoint, year, month, item_id, filed,
+            not_watching=not_watching, selection=selection, specs=specs, tz=tz,
+            drawn_as=drawn_as, drawn_on=drawn_on, season=season)
     try:
         grouped, meta = await calendar_cache.assemble_range(
             endpoint, settings, tz=tz,
             start_date=date(year, month, 1),
             end_date=date(year, month, _calendar.monthrange(year, month)[1]),
-            **vocab.active_specs(prefs, endpoint.media, honour_pause=True),
-            not_watching_ids=not_watching,
-            prefs=await _viewer_source_selection(request, user, endpoint.media),
+            **specs, not_watching_ids=not_watching,
+            prefs=selection, drawn=False,
             # `allow_fetch=False`, WHICH IS THE WHOLE DIFFERENCE BETWEEN THIS READ
             # AND THE PAGE'S. The page asked for this month and filled whatever it
             # had to; this is redrawing cards that are ALREADY ON SCREEN, so
@@ -2099,8 +2209,11 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
     # and matching on equality then found no card and redrew nothing — the button
     # did not flip until a reload.
     covers = {item_id}
-    items = [item for group in grouped for item in group["items"]
-             if calendar_state.marked(covers, item)]
+    # ONLY THE TITLE'S CARDS ARE DRAWN — what the answer redraws.
+    items = await calendar_cache.present(
+        endpoint, settings, [view for group in grouped for view in group["items"]
+                             if calendar_state.marked(covers, view)],
+        tz=tz, prefs=selection, **specs)
     # A TITLE THIS READ NO LONGER DRAWS HAS ITS CARDS TAKEN OFF THE PAGE. The eye
     # was pressed on a card, so the title was on screen; if the month read now
     # draws none of it, something changed since the page was drawn — REPORTED:
@@ -2121,6 +2234,52 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
     chips = [_day_chip(date.fromisoformat(group["date"]), group["items"], marked,
                        prefs["hide_not_watching"])
              for group in grouped if group["date"] in days]
+    return await _marked_cards(request, user, settings, prefs, endpoint, year, month,
+                               items, chips, gone, marked,
+                               {"watching": meta["watching"], "not_watching": meta["not_watching"]},
+                               drawn_as=drawn_as, drawn_on=drawn_on, season=season)
+
+
+async def _marked_from_filed(request: Request, user, settings, prefs, endpoint, year: int,
+                             month: int, item_id: str, filed: _FiledMonth, *, not_watching,
+                             selection, specs, tz, drawn_as: str, drawn_on: str,
+                             season: int | None) -> Response:
+    """`_marked_answer` for a page that filed the month it drew: the counts and
+    chips recounted from what it filed, by the same mark rule, and the title's
+    cards drawn from the title's own rows — A MARK REDRAWS BY ITS TITLE'S ROWS.
+    The counts describe the month as the page drew it, which is the month the
+    reader is looking at."""
+    covers = {item_id}
+    covered = [card for card in filed.cards if not card.spellings.isdisjoint(covers)]
+    viewer = calendar_query.Viewer(endpoint, settings, selection, tz,
+                                   vocab.complete_specs(specs))
+    first = date(year, month, 1)
+    last = date(year, month, _calendar.monthrange(year, month)[1])
+    placed = await calendar_query.titles(viewer, {card.title_key for card in covered})
+    views = sorted((view for view in placed.views
+                    if first <= date.fromisoformat(view.air_date) <= last
+                    and calendar_state.marked(covers, view)),
+                   key=lambda view: (view.air_date, view.air_ts))
+    items = await calendar_query.present(viewer, views)
+    gone = item_id if not items and _CARD_KEY.fullmatch(item_id) else ""
+    marked = {card.mark_key for card in filed.cards if not card.spellings.isdisjoint(not_watching)}
+    days = sorted({card.air_date for card in covered})
+    chips = [_day_chip(date.fromisoformat(day), [card for card in filed.cards
+                                                 if card.air_date == day],
+                       marked, prefs["hide_not_watching"]) for day in days]
+    unwatched = sum(1 for card in filed.cards if card.mark_key in marked)
+    return await _marked_cards(request, user, settings, prefs, endpoint, year, month,
+                               items, chips, gone, marked,
+                               {"watching": len(filed.cards) - unwatched,
+                                "not_watching": unwatched},
+                               drawn_as=drawn_as, drawn_on=drawn_on, season=season)
+
+
+async def _marked_cards(request: Request, user, settings, prefs, endpoint, year: int,
+                        month: int, items, chips, gone: str, marked, stats: dict, *,
+                        drawn_as: str, drawn_on: str, season: int | None) -> Response:
+    """The mark's answer drawn: the title's cards, the chips of its days and the
+    two counts a mark moves, out of band (_marked_cards.html)."""
     logo_networks = await _logo_networks(settings, items)
     completed = [item for item in items if season is None or item.season == season]
     replaces: dict = {}
@@ -2131,11 +2290,11 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
             items = [item for item in items if item is not moved]
         else:
             replaces = {completed[0].airing_key: drawn_as}
-    return templates.TemplateResponse(request, "_marked_cards.html", {
+    return await templating.drawn(request, "_marked_cards.html", {
         "chips": chips, "gone": gone, "replaces": replaces,
         "moved": moved, "moved_from": drawn_as if moved is not None else "",
         "request": request, "items": items,
-        "not_watching": marked, "new_ids": meta.get("new_ids") or set(),
+        "not_watching": marked, "new_ids": set(),
         "can_filter": True, "badge_modes": vocab.BadgeModes(prefs),
         "card_pictures": await _card_pictures(user, settings),
         "settings": settings, "is_admin": bool(user and user.is_admin),
@@ -2144,11 +2303,12 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
         # card by the browser — see `_logo_networks`.
         "logo_networks": logo_networks,
         "month": month, "year": year, "endpoint": endpoint,
+        # The redrawn cards' marks recount the same filed month.
+        "page_token": _page_token(request),
         # THE ASSEMBLER'S OWN COUNTS, not a second tally of the same items: it
-        # already translated this viewer's stored marks into mark keys to build
-        # `grouped`, and counting them again here would be a second answer to a
-        # question that has one.
-        "stats": {"watching": meta["watching"], "not_watching": meta["not_watching"]},
+        # already translated this viewer's stored marks into mark keys, and
+        # counting them again here would be a second answer to one question.
+        "stats": stats,
     })
 
 
@@ -2457,7 +2617,7 @@ async def _view_answer(request: Request, user, endpoint, year: int, month: int,
                 **vocab.active_specs(prefs, endpoint.media, honour_pause=True),
                 not_watching_ids=await calendar_state.not_watching_ids(user.user_id),
                 prefs=await _viewer_source_selection(request, user, endpoint.media),
-                allow_fetch=False,
+                allow_fetch=False, drawn=False,
             )
         except TraktError:
             # The preference IS saved; a month that cannot be re-read leaves the
@@ -2772,7 +2932,7 @@ async def post_filters(request: Request):
     prefs = await auth.get_user_prefs(user.user_id)
     month = await _month_context(request, user, settings, prefs)
     with span("calendar.render", cards=month["inline_cards"]):
-        return templates.TemplateResponse(request, "_filters_answer.html", month)
+        return await templating.drawn(request, "_filters_answer.html", month)
 
 
 @guard.post("/calendar/filters/badge", AuthLevel.CALENDAR_APPROVED)

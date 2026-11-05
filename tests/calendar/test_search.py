@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 
 from app import db, providers
 from app.calendar import cache as calendar_cache, entries as calendar_entries
+from app.calendar import query as calendar_query
 from app.calendar import search as calendar_search
 from app.metadata import typed_search
 from app.providers import title_search
@@ -34,6 +35,7 @@ from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import SourceUnavailable, Media, Record, Source
 from app.sources import prefs as source_prefs
+from tests import support
 from tests.support import migrated_db
 
 def publishing(**ports):
@@ -44,6 +46,14 @@ def publishing(**ports):
 
 
 SHOWS = "shows/premieres"
+
+
+async def _stored_titles(endpoint_key, title_keys):
+    """Every stored listing of `title_keys` on one calendar, whole."""
+    from app import db
+
+    return await db.run(lambda conn: support.stored_records(endpoint_key, titles=title_keys))
+
 # 2026-07-08 20:00Z, mid-window and mid-month so no test is about a boundary.
 AIR = 1783540800.0
 
@@ -256,7 +266,7 @@ class WhichGroupsAQueryLoadsTests(SearchTestCase):
     more, the same earliest-airing ones the endpoint-first read always chose."""
 
     async def titles_of(self, keys, endpoint=SHOWS):
-        records = await calendar_entries.read_groups(endpoint, keys)
+        records = await _stored_titles(endpoint, keys)
         return sorted({r.title for r in records})
 
     async def test_fewer_matches_than_the_limit_are_every_match(self):
@@ -286,7 +296,7 @@ class WhichGroupsAQueryLoadsTests(SearchTestCase):
         await self.store(_record("Severance"))
         await self.store(_record("Severance", air_ts=AIR + 86400), endpoint="shows")
         keys = await calendar_entries.groups_matching(SHOWS, "severance", 40)
-        records = await calendar_entries.read_groups(SHOWS, keys)
+        records = await _stored_titles(SHOWS, keys)
         self.assertEqual([r.air_ts for r in records], [AIR])
 
     async def plan(self, sql, params):
@@ -308,7 +318,7 @@ class WhichGroupsAQueryLoadsTests(SearchTestCase):
         self.assertIn("ix_episodes_season", plan)
 
     async def test_a_group_is_read_through_its_key_and_not_the_calendars_month(self):
-        sql = calendar_entries._rows_sql("e.title_key IN (SELECT value FROM json_each(?))")
+        sql = calendar_query._keys_sql("e.title_key IN (SELECT value FROM json_each(?))")
         plan = await self.plan(sql, ('["a", "b"]',))
         self.assertIn("ix_episodes_season", plan)
         self.assertNotIn("SCAN e ", plan + " ")

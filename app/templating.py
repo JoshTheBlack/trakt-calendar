@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlencode
 
+import anyio.to_thread
 from fastapi.templating import Jinja2Templates
 from jinja2.ext import Extension
 
@@ -60,6 +61,19 @@ class Dedent(Extension):
 
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 templates.env.add_extension(Dedent)
+
+
+async def drawn(request, name: str, context: dict, **kwargs):
+    """`templates.TemplateResponse`, built on a worker thread.
+
+    JINJA RENDERS WHEN THE RESPONSE IS BUILT, so building one on the event loop
+    holds every other request while it runs: MEASURED on a copy of dev, a month's
+    shell drew its 268 inline cards in 0.26 s and the loop answered nobody else
+    meanwhile, and an unfiltered month's 718 in 1.2 s. A calendar answer —
+    a month, a late day, a mark's redraw — is drawn here instead; the loop is
+    free while it is. The response is the same object, built the same way."""
+    return await anyio.to_thread.run_sync(
+        lambda: templates.TemplateResponse(request, name, context, **kwargs))
 
 # `assets` is the module itself, so _base.html calls assets.url(assets.STYLESHEET)
 # and there is no second copy of any asset path anywhere in the templates.

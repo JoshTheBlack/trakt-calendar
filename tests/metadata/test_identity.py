@@ -18,6 +18,7 @@ from app.calendar import cache as calendar_cache
 from app.metadata import identity
 from app.metadata import ids as id_rules
 from app.providers.base import Media, Record, Source, render
+from tests import support
 from tests.support import DatabaseTestCase, migrated_db, statements_per_transaction
 
 
@@ -209,7 +210,7 @@ class OneSpellingTests(DatabaseTestCase):
         record = Record(source=Source.SIMKL, media=Media.SHOW, id="55", ids={"simkl": 55},
                         detail_url="", title="Anime", air_ts=1783540800.0)
         key = identity.per_source_key(record.source, record.id)
-        self.assertEqual(calendar_cache.group_base(record), key)
+        self.assertEqual(support.title_key_of(record), key)
         from zoneinfo import ZoneInfo
         self.assertEqual(render(record, ZoneInfo("UTC")).mark_key, key)
 

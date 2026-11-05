@@ -44,7 +44,8 @@ from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse,
 from . import (cache as calendar_cache, resolve as calendar_resolve,
                share_card, share_card_cache, share_code, share_links,
                state as calendar_state, vocab)
-from .. import after_response, auth, authz, chrome, clock, details_panel, perftrace, route_params
+from .. import (after_response, auth, authz, chrome, clock, details_panel, perftrace,
+                route_params, templating)
 from ..auth import AuthLevel
 from ..authz import Guard
 from ..config import load_settings
@@ -577,11 +578,11 @@ async def _render(request: Request, share_row) -> Response:
         # calendar.
         "logo_networks": await logos.known(item.network for item in visible if item.network),
     }
-    # Jinja renders SYNCHRONOUSLY on the event loop, and this template is one
-    # block per airing — a busy month is a lot of string building with every other
-    # request waiting behind it.
+    # This template is one block per airing — a busy month is a lot of string
+    # building — so it is drawn off the event loop (templating.drawn), where no
+    # other request waits behind it.
     with span("share.render_page", airings=len(visible)):
-        return templates.TemplateResponse(request, "share_calendar.html", context)
+        return await templating.drawn(request, "share_calendar.html", context)
 
 
 # ---------------------------------------------------------------------------

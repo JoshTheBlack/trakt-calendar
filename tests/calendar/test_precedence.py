@@ -30,9 +30,18 @@ from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Record, Source
 from app.sources import prefs as source_prefs
-from tests.support import migrated_db, stored_groups
+from tests.support import CardTestCase, listings, migrated_db, read_card, stored_groups
 
 SHOWS = get_endpoint("shows")
+
+
+def _resolve(group, prefs=None, endpoint=None, settings=None):
+    """The one card `group`'s records make for a viewer, read back through the
+    calendar's own read from a store they were written into (support.read_card)."""
+    records = list(group["records"]) if isinstance(group, dict) else list(group)
+    return read_card(records, prefs, settings=settings,
+                     endpoint=getattr(endpoint, "key", endpoint) or "shows")
+
 AIR_TS = 1784145600.0
 
 
@@ -85,16 +94,17 @@ def _prefs(*order) -> source_prefs.SourcePrefs:
     return source_prefs.SourcePrefs(user_id=1, metadata_order=list(order))
 
 
-class TheDefaultIsTheDeclaredOrderTests(unittest.TestCase):
+class TheDefaultIsTheDeclaredOrderTests(CardTestCase):
     """An account that has stated nothing gets the declared order for every
     field, which is what the app has always shown. There is no seeded table of
     per-field defaults to drift out of step with it."""
 
     def setUp(self):
+        super().setUp()
         self.group = _group(_record(Source.TRAKT), _record(Source.SIMKL))
 
     def test_every_field_comes_from_the_first_declared_source(self):
-        record = calendar_resolve.resolve(self.group)
+        record = _resolve(self.group)
         self.assertEqual(str(record.source), "trakt")
         self.assertEqual(record.title, "Trakt Title")
         self.assertEqual(record.overview, "Trakt overview.")
@@ -103,8 +113,8 @@ class TheDefaultIsTheDeclaredOrderTests(unittest.TestCase):
         self.assertEqual(record.detail_url, "https://trakt.test/show")
 
     def test_stating_nothing_and_nobody_asking_are_the_same_answer(self):
-        stated = calendar_resolve.resolve(self.group, _prefs())
-        anonymous = calendar_resolve.resolve(self.group, None)
+        stated = _resolve(self.group, _prefs())
+        anonymous = _resolve(self.group, None)
         self.assertEqual(stated.title, anonymous.title)
         self.assertEqual(str(stated.source), str(anonymous.source))
 
@@ -113,13 +123,13 @@ class TheDefaultIsTheDeclaredOrderTests(unittest.TestCase):
         nothing to say does not empty the card."""
         group = _group(_record(Source.TRAKT, certification="", runtime=None),
                        _record(Source.SIMKL, certification="TV-MA", runtime=24))
-        record = calendar_resolve.resolve(group)
+        record = _resolve(group)
         self.assertEqual(str(record.source), "trakt")
         self.assertEqual(record.certification, "TV-MA")
         self.assertEqual(record.runtime, 24)
 
 
-class ThePreferredSourceLeadsEveryFieldTests(unittest.TestCase):
+class ThePreferredSourceLeadsEveryFieldTests(CardTestCase):
     """ONE ORDER, EVERY FIELD, where this was once answerable per field.
 
     The per-field half is gone: an account could name one service for the
@@ -129,11 +139,12 @@ class ThePreferredSourceLeadsEveryFieldTests(unittest.TestCase):
     """
 
     def setUp(self):
+        super().setUp()
         self.group = _group(_record(Source.TRAKT), _record(Source.SIMKL))
-        self.baseline = calendar_resolve.resolve(self.group)
+        self.baseline = _resolve(self.group)
 
     def test_the_preferred_source_wins_every_field_it_answers_for(self):
-        record = calendar_resolve.resolve(self.group, _prefs("simkl"))
+        record = _resolve(self.group, _prefs("simkl"))
         self.assertEqual(record.title, "Simkl Title")
         self.assertEqual(record.overview, "Simkl overview.")
         self.assertEqual(record.poster, "https://simkl.test/p.jpg")
@@ -141,7 +152,7 @@ class ThePreferredSourceLeadsEveryFieldTests(unittest.TestCase):
         self.assertEqual(str(record.source), "simkl")
 
     def test_the_declared_order_stands_where_nothing_is_stated(self):
-        record = calendar_resolve.resolve(self.group, _prefs())
+        record = _resolve(self.group, _prefs())
         self.assertEqual(record.title, self.baseline.title)
         self.assertEqual(str(record.source), "trakt")
 
@@ -149,14 +160,14 @@ class ThePreferredSourceLeadsEveryFieldTests(unittest.TestCase):
         """With a third service registered, "Simkl first" would say nothing
         about the other two — which is why the whole order is stored rather than
         one promoted name."""
-        record = calendar_resolve.resolve(self.group, _prefs("simkl", "trakt"))
+        record = _resolve(self.group, _prefs("simkl", "trakt"))
         self.assertEqual(str(record.source), "simkl")
 
     def test_two_accounts_read_one_group_and_get_different_answers(self):
         """The same stored group, two opposite preferences, no copying and no
         second row anywhere."""
-        first = calendar_resolve.resolve(self.group, _prefs("trakt"))
-        second = calendar_resolve.resolve(self.group, _prefs("simkl"))
+        first = _resolve(self.group, _prefs("trakt"))
+        second = _resolve(self.group, _prefs("simkl"))
         self.assertEqual((first.title, second.title), ("Trakt Title", "Simkl Title"))
 
     def test_neither_answer_mutates_the_group_or_the_other(self):
@@ -164,13 +175,13 @@ class ThePreferredSourceLeadsEveryFieldTests(unittest.TestCase):
         would hand the next viewer the previous viewer's answer."""
         before = {name: dataclasses.asdict(record)
                   for name, record in self.group["by_source"].items()}
-        calendar_resolve.resolve(self.group, _prefs("simkl"))
+        _resolve(self.group, _prefs("simkl"))
         self.assertEqual({name: dataclasses.asdict(record)
                           for name, record in self.group["by_source"].items()}, before)
-        self.assertEqual(calendar_resolve.resolve(self.group).title, "Trakt Title")
+        self.assertEqual(_resolve(self.group).title, "Trakt Title")
 
 
-class OneSourceIsTheAnswerWhateverIsPreferredTests(unittest.TestCase):
+class OneSourceIsTheAnswerWhateverIsPreferredTests(CardTestCase):
     """A group only one service described has one answer, and no preference can
     turn it into a different one or into none."""
 
@@ -178,7 +189,7 @@ class OneSourceIsTheAnswerWhateverIsPreferredTests(unittest.TestCase):
         group = _group(_record(Source.SIMKL))
         for order in (("trakt",), ("trakt", "simkl")):
             with self.subTest(order=order):
-                record = calendar_resolve.resolve(group, _prefs(*order))
+                record = _resolve(group, _prefs(*order))
                 self.assertIsNotNone(record)
                 self.assertEqual(str(record.source), "simkl")
                 self.assertEqual(record.title, "Simkl Title")
@@ -187,12 +198,12 @@ class OneSourceIsTheAnswerWhateverIsPreferredTests(unittest.TestCase):
     def test_a_single_source_group_carries_no_provenance_at_all(self):
         """Which is what keeps this free for an instance that has only ever had
         one source: the two maps stay empty and nothing renders a badge."""
-        record = calendar_resolve.resolve(_group(_record(Source.TRAKT)))
+        record = _resolve(_group(_record(Source.TRAKT)))
         self.assertEqual(record.field_sources, {})
         self.assertEqual(record.alternatives, {})
 
 
-class TheEpisodeCoordinateTests(unittest.TestCase):
+class TheEpisodeCoordinateTests(CardTestCase):
     """THE ONE THAT SHIPS AS A VISIBLE DEFECT IF THE MODEL TREATS IT LIKE ANY
     OTHER FIELD.
 
@@ -215,7 +226,7 @@ class TheEpisodeCoordinateTests(unittest.TestCase):
     def test_the_label_survives_whichever_source_wins_the_card(self):
         for order in ((), ("simkl",), ("simkl", "trakt"), ("trakt", "simkl")):
             with self.subTest(order=order):
-                record = calendar_resolve.resolve(self.group(), _prefs(*order))
+                record = _resolve(self.group(), _prefs(*order))
                 self.assertEqual(record.season, 1)
                 self.assertEqual(record.episode_number, 1)
                 self.assertEqual(record.episode_label, "S01E01")
@@ -223,7 +234,7 @@ class TheEpisodeCoordinateTests(unittest.TestCase):
     def test_a_simkl_preference_still_moves_everything_else(self):
         """The coordinate is the exception, not an exemption for the whole
         card."""
-        record = calendar_resolve.resolve(self.group(), _prefs("simkl"))
+        record = _resolve(self.group(), _prefs("simkl"))
         self.assertEqual(str(record.source), "simkl")
         self.assertEqual(record.title, "Simkl Title")
         self.assertEqual(record.episode_label, "S01E01")
@@ -235,21 +246,22 @@ class TheEpisodeCoordinateTests(unittest.TestCase):
             _record(Source.TRAKT, season=2, episode_number=1, episode_label="S02E01"),
             _record(Source.SIMKL, season=None, episode_number=1, episode_label=None),
         )
-        record = calendar_resolve.resolve(group, _prefs("simkl"))
+        record = _resolve(group, _prefs("simkl"))
         self.assertEqual((record.season, record.episode_number), (2, 1))
         self.assertEqual(record.episode_label, "S02E01")
 
     def test_a_preference_decides_between_two_equally_complete_coordinates(self):
         """Completeness leads; where both sources said as much as each other,
         the preference is what is left to decide it."""
-        group = _forced_group(
-            _record(Source.TRAKT, season=1, episode_number=1, episode_label="S01E01"),
-            _record(Source.SIMKL, season=3, episode_number=7, episode_label="S03E07"),
-        )
-        self.assertEqual(calendar_resolve.resolve(group).episode_label, "S01E01")
-        self.assertEqual(
-            calendar_resolve.resolve(group, _prefs("simkl")).episode_label,
-            "S03E07")
+        # Two coordinates for one card is a shape the store never files (each is
+        # an episode row of its own), so the rule is asked directly: the card's
+        # listings in the viewer's order (calendar_resolve.resolve_coordinate).
+        trakt = _record(Source.TRAKT, season=1, episode_number=1, episode_label="S01E01")
+        simkl = _record(Source.SIMKL, season=3, episode_number=7, episode_label="S03E07")
+        self.assertEqual(calendar_resolve.resolve_coordinate([trakt, simkl]).episode_label,
+                         "S01E01")
+        self.assertEqual(calendar_resolve.resolve_coordinate([simkl, trakt]).episode_label,
+                         "S03E07")
 
     def test_a_movie_group_stays_uncoordinated(self):
         """Nothing invents a coordinate for a release that has none."""
@@ -259,12 +271,12 @@ class TheEpisodeCoordinateTests(unittest.TestCase):
             _record(Source.SIMKL, media="movie", season=None, episode_number=None,
                     episode_label=None),
         )
-        record = calendar_resolve.resolve(group, _prefs("simkl"))
+        record = _resolve(group, _prefs("simkl"))
         self.assertIsNone(record.season)
         self.assertIsNone(record.episode_label)
 
 
-class TheFieldsThatAreNotAContestTests(unittest.TestCase):
+class TheFieldsThatAreNotAContestTests(CardTestCase):
     """Three answers that are not "pick a winner", each for its own reason."""
 
     def test_the_ids_are_the_groups_union_whoever_wins_the_card(self):
@@ -272,7 +284,7 @@ class TheFieldsThatAreNotAContestTests(unittest.TestCase):
                        _record(Source.SIMKL, ids={"tmdb": 900, "simkl": 77, "mal": 6}))
         for order in ((), ("simkl",)):
             with self.subTest(order=order):
-                ids = calendar_resolve.resolve(group, _prefs(*order)).ids
+                ids = _resolve(group, _prefs(*order)).ids
                 self.assertEqual(ids, {"tmdb": 900, "trakt": 5, "simkl": 77, "mal": 6})
 
     def test_the_genres_are_a_union_not_a_winner(self):
@@ -280,10 +292,10 @@ class TheFieldsThatAreNotAContestTests(unittest.TestCase):
         the viewer's genre filter reads the result."""
         group = _group(_record(Source.TRAKT, genres=["drama", "comedy"]),
                        _record(Source.SIMKL, genres=["comedy", "anime"]))
-        self.assertEqual(calendar_resolve.resolve(group).genres,
+        self.assertEqual(_resolve(group).genres,
                          ["drama", "comedy", "anime"])
         self.assertEqual(
-            calendar_resolve.resolve(group, _prefs("simkl")).genres,
+            _resolve(group, _prefs("simkl")).genres,
             ["comedy", "anime", "drama"])
 
     def test_the_air_time_and_its_flag_come_from_one_source_together(self):
@@ -294,9 +306,9 @@ class TheFieldsThatAreNotAContestTests(unittest.TestCase):
             _record(Source.TRAKT, media="movie", air_ts=1000.0, date_only=True),
             _record(Source.SIMKL, media="movie", air_ts=2000.0, date_only=True),
         )
-        first = calendar_resolve.resolve(group)
+        first = _resolve(group)
         self.assertEqual((first.air_ts, first.date_only), (1000.0, True))
-        second = calendar_resolve.resolve(group, _prefs("simkl"))
+        second = _resolve(group, _prefs("simkl"))
         self.assertEqual((second.air_ts, second.date_only), (2000.0, True))
 
     def test_a_date_only_primary_borrows_a_time_that_falls_on_its_date(self):
@@ -311,7 +323,7 @@ class TheFieldsThatAreNotAContestTests(unittest.TestCase):
         )
         for order in ((), ("simkl",)):
             with self.subTest(order=order):
-                record = calendar_resolve.resolve(group, _prefs(*order))
+                record = _resolve(group, _prefs(*order))
                 self.assertEqual((record.air_ts, record.date_only), (1734318000.0, False))
 
     def test_a_time_on_another_date_is_not_borrowed(self):
@@ -322,7 +334,7 @@ class TheFieldsThatAreNotAContestTests(unittest.TestCase):
             _record(Source.TRAKT, air_ts=1734318000.0, date_only=False),
             _record(Source.SIMKL, air_ts=1734220800.0 - 2 * 86400, date_only=True),
         )
-        record = calendar_resolve.resolve(group, _prefs("simkl"))
+        record = _resolve(group, _prefs("simkl"))
         self.assertEqual((record.air_ts, record.date_only), (1734220800.0 - 2 * 86400, True))
 
     def test_the_first_service_in_the_order_says_when_even_against_a_time(self):
@@ -332,8 +344,8 @@ class TheFieldsThatAreNotAContestTests(unittest.TestCase):
         simkl_ts, trakt_ts = 1795222800.0, 1795399200.0  # 21 Nov 01:00Z, 23 Nov 02:00Z
         group = _group(_record(Source.TRAKT, air_ts=trakt_ts),
                        _record(Source.SIMKL, air_ts=simkl_ts))
-        self.assertEqual(calendar_resolve.resolve(group).air_ts, trakt_ts)
-        self.assertEqual(calendar_resolve.resolve(group, _prefs("simkl")).air_ts, simkl_ts)
+        self.assertEqual(_resolve(group).air_ts, trakt_ts)
+        self.assertEqual(_resolve(group, _prefs("simkl")).air_ts, simkl_ts)
 
     def test_falls_on_is_a_date_somewhere_on_earth(self):
         from datetime import date, datetime, timezone
@@ -352,12 +364,13 @@ class TheFieldsThatAreNotAContestTests(unittest.TestCase):
                 self.assertEqual(calendar_resolve.falls_on(instant, day), on)
 
 
-class WhatTheCardIsToldAboutProvenanceTests(unittest.TestCase):
+class WhatTheCardIsToldAboutProvenanceTests(CardTestCase):
     """`field_sources` and `alternatives`: who supplied each field, and every
     value where they supplied different ones."""
 
     def setUp(self):
-        self.record = calendar_resolve.resolve(
+        super().setUp()
+        self.record = _resolve(
             _group(_record(Source.TRAKT, rating=8.1, network="HBO"),
                    _record(Source.SIMKL, rating=7.9, network="HBO")))
 
@@ -372,7 +385,7 @@ class WhatTheCardIsToldAboutProvenanceTests(unittest.TestCase):
         self.assertNotIn("network", self.record.alternatives)
 
     def test_a_field_only_one_source_has_names_that_one(self):
-        record = calendar_resolve.resolve(
+        record = _resolve(
             _group(_record(Source.TRAKT, certification="TV-14"),
                    _record(Source.SIMKL, certification="")))
         self.assertEqual(record.field_sources["certification"], ["trakt"])
@@ -392,15 +405,16 @@ class WhatTheCardIsToldAboutProvenanceTests(unittest.TestCase):
         self.assertNotIn("alternatives", self.record.to_dict())
 
 
-class AStalePreferenceDegradesTests(unittest.TestCase):
+class AStalePreferenceDegradesTests(CardTestCase):
     """A row written by a newer version of the app, or naming something that has
     since been retired, must not stop a page rendering."""
 
     def setUp(self):
+        super().setUp()
         self.group = _group(_record(Source.TRAKT), _record(Source.SIMKL))
 
     def resolved(self, order):
-        return calendar_resolve.resolve(
+        return _resolve(
             self.group, source_prefs.SourcePrefs(user_id=1, metadata_order=order))
 
     def test_an_unknown_source_falls_back_to_the_declared_order(self):
@@ -422,7 +436,7 @@ class AStalePreferenceDegradesTests(unittest.TestCase):
 
     def test_a_source_the_group_does_not_hold_is_ignored(self):
         group = _group(_record(Source.TRAKT))
-        record = calendar_resolve.resolve(group, _prefs("simkl"))
+        record = _resolve(group, _prefs("simkl"))
         self.assertEqual(record.title, "Trakt Title")
 
 
@@ -516,8 +530,7 @@ class ChangingAPreferenceInvalidatesNothingTests(unittest.IsolatedAsyncioTestCas
         with patch("app.calendar.cache.fetch_window_records",
                    lambda *a, **k: (_ for _ in ()).throw(AssertionError("fetched"))):
             await self.read(_prefs("simkl"))
-        window, _ = await calendar_cache.read_cached_window(SHOWS.key, self.window)
-        self.assertEqual(sorted(s for g in window.groups for s in g["by_source"]),
+        self.assertEqual(sorted({listed["source"] for listed in await listings()}),
                          ["simkl", "trakt"])
 
 
@@ -562,11 +575,12 @@ class WhatEnrichmentGetsToCompeteForTests(unittest.IsolatedAsyncioTestCase):
         await calendar_enrich._upsert_success(42, "show", payload, now=999)
 
     async def resolved(self, prefs):
+        """The card, its records carrying what enrichment holds for them as a fill
+        stores them (calendar_enrich.apply_stored_enrichment), read back."""
         from app.calendar import enrich as calendar_enrich
-        group = self.group()
-        records = calendar_resolve.admitted_records(group, prefs)
+        records = list(self.group()["records"])
         await calendar_enrich.apply_stored_enrichment(records)
-        return calendar_resolve.resolve_records(group, records, prefs)
+        return read_card(records, prefs)
 
     async def test_a_preferred_sources_enriched_value_can_win_the_field(self):
         await self.enrich(overview="Simkl overview.")
@@ -598,12 +612,12 @@ class WhatEnrichmentGetsToCompeteForTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_simkl_only_group_nobody_has_looked_at_is_still_exempt(self):
         group = _group(_record(Source.SIMKL, ids={"tmdb": 900, "simkl": 43},
                                genres=[], enriched=False))
-        self.assertFalse(calendar_resolve.resolve(group).enriched)
+        self.assertFalse(_resolve(group).enriched)
 
 
 
 
-class AMarkSticksToTheTitleNotToWhoDescribesItTests(unittest.TestCase):
+class AMarkSticksToTheTitleNotToWhoDescribesItTests(CardTestCase):
     """A per-viewer MARK may not move when a per-viewer PREFERENCE does.
 
     THE LIVE CASE. One account had `the-game` marked not-watching and
@@ -619,10 +633,11 @@ class AMarkSticksToTheTitleNotToWhoDescribesItTests(unittest.TestCase):
     """
 
     def setUp(self):
+        super().setUp()
         self.group = _group(_record(Source.TRAKT), _record(Source.SIMKL))
 
     def _rendered(self, *order):
-        record = calendar_resolve.resolve(self.group, _prefs(*order))
+        record = _resolve(self.group, _prefs(*order))
         return providers_base.render(record, ZoneInfo("UTC"))
 
     def test_the_mark_key_does_not_move_when_the_preference_does(self):
@@ -639,9 +654,9 @@ class AMarkSticksToTheTitleNotToWhoDescribesItTests(unittest.TestCase):
     def test_a_title_no_shared_id_space_names_falls_back_to_its_own_source(self):
         """Safe precisely because such a title never merges: there is only one
         description of it, so there is nothing for a preference to move."""
-        lonely = _group(_record(Source.SIMKL, id="unkeyable", ids={"slug": "u"}))
+        lonely = _group(_record(Source.SIMKL, id="unkeyable", ids={"slug": "unkeyable"}))
         record = providers_base.render(
-            calendar_resolve.resolve(lonely, _prefs()), ZoneInfo("UTC"))
+            _resolve(lonely, _prefs()), ZoneInfo("UTC"))
         self.assertEqual(record.mark_key, "simkl:unkeyable")
 
     def test_a_mark_made_under_either_spelling_still_matches(self):
@@ -669,7 +684,7 @@ class AMarkSticksToTheTitleNotToWhoDescribesItTests(unittest.TestCase):
         written in is not, so every spelling the card has ever been identified by
         is accepted.
         """
-        record = calendar_resolve.resolve(
+        record = _resolve(
             _group(_record(Source.SIMKL, id="3101847",
                            ids={"tmdb": 900, "simkl": 3101847, "slug": "lovesick"})),
             _prefs())
@@ -682,7 +697,7 @@ class AMarkSticksToTheTitleNotToWhoDescribesItTests(unittest.TestCase):
         admitting them would hide a title nobody marked: one real account has a
         mark spelled `1670` — that show's slug — and tmdb 1670 is a different
         programme. A false match here leaves no trace on the page."""
-        record = calendar_resolve.resolve(
+        record = _resolve(
             _group(_record(Source.TRAKT, id="some-show",
                            ids={"tmdb": 1670, "trakt": 55, "slug": "some-show"})),
             _prefs())
@@ -700,13 +715,13 @@ class AMarkSticksToTheTitleNotToWhoDescribesItTests(unittest.TestCase):
         tmdb_only.known_ids = {"tmdb": 335194, "simkl": 2412345,
                                "simkl_slug": "magical-explorer"}
         item = providers_base.render(
-            calendar_resolve.resolve(_group(tmdb_only), _prefs()), ZoneInfo("UTC"))
+            _resolve(_group(tmdb_only), _prefs()), ZoneInfo("UTC"))
         self.assertNotIn("simkl_slug", item.ids)
         self.assertTrue(calendar_state.marked({"magical-explorer"}, item))
         self.assertFalse(calendar_state.marked({"2412345"}, item))
 
 
-class TheImdbScoreIsResolvedAsItsOwnFieldTests(unittest.TestCase):
+class TheImdbScoreIsResolvedAsItsOwnFieldTests(CardTestCase):
     """It is not a third answer to the question the ratings chip asks.
 
     Trakt's number and Simkl's are two audiences answering the same question, so
@@ -725,14 +740,14 @@ class TheImdbScoreIsResolvedAsItsOwnFieldTests(unittest.TestCase):
         the source that HAS something to say wins the field."""
         group = _group(_record(Source.TRAKT),
                        _record(Source.SIMKL, imdb_rating=7.9))
-        trakt_first = calendar_resolve.resolve(group, _prefs("trakt", "simkl"))
+        trakt_first = _resolve(group, _prefs("trakt", "simkl"))
         self.assertEqual(str(trakt_first.source), "trakt")
         self.assertEqual(trakt_first.rating, 8.1)
         self.assertEqual(trakt_first.imdb_rating, 7.9)
 
     def test_it_is_absent_when_nobody_reported_one(self):
         group = _group(_record(Source.TRAKT), _record(Source.SIMKL))
-        self.assertIsNone(calendar_resolve.resolve(group, _prefs()).imdb_rating)
+        self.assertIsNone(_resolve(group, _prefs()).imdb_rating)
 
     def test_it_does_not_join_the_ratings_the_card_draws_side_by_side(self):
         """`alternatives['rating']` is the control for two services disagreeing
@@ -742,6 +757,6 @@ class TheImdbScoreIsResolvedAsItsOwnFieldTests(unittest.TestCase):
         # agreement is not a disagreement, and `alternatives` records the second.
         group = _group(_record(Source.TRAKT),
                        _record(Source.SIMKL, rating=7.4, imdb_rating=7.9))
-        record = calendar_resolve.resolve(group, _prefs())
+        record = _resolve(group, _prefs())
         self.assertEqual(set(record.alternatives.get("rating", {})), {"trakt", "simkl"})
         self.assertNotIn("imdb", record.alternatives.get("rating", {}))

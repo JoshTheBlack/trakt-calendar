@@ -24,8 +24,10 @@ import re
 import shutil
 import threading
 import unittest
+from datetime import timedelta
 from html import unescape
 from pathlib import Path
+from typing import NamedTuple
 
 from fastapi.testclient import TestClient
 
@@ -241,6 +243,17 @@ def statements_run():
         yield run
 
 
+async def settled() -> None:
+    """Wait for every write a request owes once it has answered
+    (after_response.write) — a session's slide, a page's is-new commit — for a
+    test that reads what one stored."""
+    import asyncio
+
+    from app import after_response
+    while after_response._writes:
+        await asyncio.gather(*list(after_response._writes))
+
+
 @contextlib.contextmanager
 def statements_executed():
     """The SQL of every write made OUTSIDE a transaction while the block is open
@@ -312,22 +325,21 @@ def as_stored(records):
     shared waterfall, and its row by the store's own filing and fold
     (app/metadata/episodes.py's `Book`), run in memory on one calendar. For a
     test that builds Records by hand and groups them with no database."""
-    from app.calendar import cache
     from app.metadata import episodes
 
     records = list(records)
     book = episodes.Book()
     for record in records:
         instant = episodes.Instant(float(record.air_ts), calendars=1, entry=None)
-        book.place(cache.group_base(record), str(record.media), str(record.source),
+        book.place(title_key_of(record), str(record.media), str(record.source),
                    record.season, record.episode_number, instant)
     for record in records:
-        book.refold(cache.group_base(record), 1, episodes.utc_day(float(record.air_ts)))
+        book.refold(title_key_of(record), 1, episodes.utc_day(float(record.air_ts)))
     for record in records:
         stated = ((None, None) if str(record.media) == "movie"
                   else (record.season, record.episode_number))
         record.card = next(
-            f"{row.key}|{row.unit}" for row in book.of_title(cache.group_base(record))
+            f"{row.key}|{row.unit}" for row in book.of_title(title_key_of(record))
             if any(held.at == float(record.air_ts)
                    and (row.stated(held) if row.media != "movie" else (None, None)) == stated
                    for held in row.instants[str(record.source)]))
@@ -335,9 +347,279 @@ def as_stored(records):
 
 
 def stored_groups(records) -> list[dict]:
-    """The calendar's groups of hand-built `records`, as `as_stored` files them."""
+    """Hand-built `records` as the cards their episode rows make, in memory —
+    each {"key", "base", "ids", "by_source", "records"} — as `as_stored` files
+    them and the read's own rule splits them (query.cards_of): for a test about
+    which records are one card, or one that builds a card's records to read
+    back through the store (`read_card`)."""
+    from app.calendar import query
+
+    by_row: dict[str, list] = {}
+    for record in as_stored(records):
+        by_row.setdefault(record.card, []).append(record)
+    out = []
+    for row, listings in by_row.items():
+        for number, card in enumerate(query.cards_of(listings), 1):
+            group = {"key": f"{row}#{number}", "base": row.split("|", 1)[0], "ids": {},
+                     "by_source": {}, "records": list(card)}
+            for record in card:
+                group["by_source"][str(record.source)] = record
+                for namespace, value in (record.ids or {}).items():
+                    if value not in (None, ""):
+                        group["ids"].setdefault(namespace, value)
+            out.append(group)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# hand-built cards, through the calendar's own read
+# ---------------------------------------------------------------------------
+#
+# THE RULES OF A CARD ARE THE READ'S, AND THE READ IS SQL (app/calendar/query.py):
+# whose value a viewer sees, which filters keep a card, what a service that only
+# describes the title may say. A test about one of them builds the records a
+# card is made of, as ever, and `read_cards` writes them into this test's own
+# store the way a fill and a description leave them — every word of each in its
+# service's group, each listing filed on its episode's row by the store's own
+# fold — and reads the cards back as a viewer would, synchronously, on the test's
+# connection. Each call starts from an empty store.
+
+def title_key_of(record) -> str:
+    """The title a hand-built record is of: the shared waterfall's key, or a
+    per-service key for a title it cannot key — as the store files one."""
+    from app.metadata import identity
+    from app.providers.base import resolve_key
+
+    key = resolve_key(record.media, record.ids or {})
+    return str(key) if key is not None else identity.per_source_key(record.source, record.id)
+
+
+def _record_words(record) -> dict:
+    """A record's words, as its service's group holds them."""
+    ratings = {}
+    if record.rating is not None:
+        ratings[str(record.source)] = record.rating
+    if record.imdb_rating is not None:
+        ratings["imdb"] = record.imdb_rating
+    stated = record.keywords is not None and record.show_type is not None
+    return {"title": record.title or "", "detail_url": record.detail_url or "",
+            "year": str(record.year or ""), "network": record.network or "",
+            "country": record.country or "", "language": record.language or "",
+            "certification": record.certification or "", "status": record.status or "",
+            "overview": record.overview or "", "poster": record.poster or "",
+            "runtime": record.runtime, "genres_json": json.dumps(list(record.genres or ())),
+            "ratings_json": json.dumps(ratings), "anime_type": record.anime_type or "",
+            "release_types_json": json.dumps(record.release_types_by_country or {}),
+            "enriched": 1 if record.enriched else 0,
+            "keywords_json": json.dumps(list(record.keywords or ())),
+            "show_type": str(record.show_type or ""), "facts_known": 1 if stated else 0}
+
+
+def seed_records(conn, records, *, endpoint: str = "shows", describing=()) -> None:
+    """`records` — listings — and `describing` — services' groups of titles they
+    do not list — written into an emptied store on `conn`."""
+    from app.metadata import groups, rows, tables
+
+    for table in (tables.EPISODES, tables.TITLES, tables.SERVICE_IDS):
+        conn.execute(f"DELETE FROM {table}")
+    known: dict[str, dict] = {}
+    for record in (*records, *describing):
+        key = title_key_of(record)
+        put_title(conn, str(record.source), str(record.media), record.id, key,
+                  ids=dict(record.ids or {}), **_record_words(record))
+        for name, value in (record.known_ids or {}).items():
+            known.setdefault(key, {}).setdefault(name, value)
+    for key, ids in known.items():
+        conn.execute(f"UPDATE {tables.TITLES} SET ids_json = ? WHERE title_key = ?",
+                     (json.dumps(ids), key))
+    for record in records:
+        key = title_key_of(record)
+        # Filed under the id its group states for it (rows.own_id), so it is the
+        # title's own entry rather than a second one.
+        own = rows.own_id(str(record.source), record.id, dict(record.ids or {}))
+        put_listing(conn, str(record.source), str(record.media), own, endpoint, key,
+                    float(record.air_ts), season=record.season, number=record.episode_number,
+                    date_only=bool(record.date_only), label=str(record.episode_label or ""))
+    for record in records:
+        source = str(record.source)
+        if not (record.episode_title and groups.has(tables.EPISODES, source, "title")):
+            continue
+        row = conn.execute(
+            f"SELECT unit FROM {tables.EPISODES} WHERE title_key = ? AND ({source}_air_ts = ? "
+            f"OR EXISTS (SELECT 1 FROM json_each({source}_repeats_json) r "
+            f"WHERE json_extract(r.value, '$.at') = ?))",
+            (title_key_of(record), float(record.air_ts), float(record.air_ts))).fetchone()
+        words = {"title": record.episode_title, "fetched_at": 1}
+        if groups.has(tables.EPISODES, source, "runtime"):
+            words["runtime"] = record.runtime
+        conn.execute(f"UPDATE {tables.EPISODES} SET "
+                     + ", ".join(f"{source}_{name} = ?" for name in words)
+                     + " WHERE title_key = ? AND unit = ?",
+                     (*words.values(), title_key_of(record), row[0]))
+
+
+def read_views(records, prefs=None, *, settings=None, endpoint: str = "shows", describing=(),
+               tz=None, specs=None):
+    """`records` stored (`seed_records`) and read back as one viewer's read
+    places and judges them — query.Placed."""
+    from zoneinfo import ZoneInfo
+
+    from app import db
+    from app.calendar import query, vocab
+    from app.endpoints import get_endpoint
+
+    conn = db.connection()
+    seed_records(conn, records, endpoint=endpoint, describing=describing)
+    viewer = query.Viewer(get_endpoint(endpoint), settings, prefs, tz or ZoneInfo("UTC"),
+                          vocab.complete_specs(specs or {}))
+    listings = query.read_rows(conn, endpoint, titles={title_key_of(r) for r in records})
+    return query.judge(conn, query.views_of(listings, viewer), viewer), viewer
+
+
+def read_cards(records, prefs=None, **kwargs) -> list:
+    """`records` read back as the Records one viewer's cards show, in air order
+    (`read_views`, then the drawn cards composed)."""
+    from app import db
+    from app.calendar import query
+
+    placed, viewer = read_views(records, prefs, **kwargs)
+    views = sorted(placed.views, key=lambda view: (view.air_date, view.air_ts))
+    return query.present_rows(db.connection(), views, viewer)
+
+
+def read_kept(records, prefs=None, **kwargs) -> tuple[list, int]:
+    """(the Records one viewer's cards show, in air order, how many their own
+    filters removed) for `records` — `specs`, `settings` and the rest as
+    `read_views` takes them."""
+    from app import db
+    from app.calendar import query
+
+    placed, viewer = read_views(records, prefs, **kwargs)
+    views = sorted(placed.views, key=lambda view: (view.air_date, view.air_ts))
+    return query.present_rows(db.connection(), views, viewer), placed.filtered_out
+
+
+def read_card(records, prefs=None, **kwargs):
+    """The one card `records` make for a viewer — None when they draw none."""
+    cards = read_cards(records, prefs, **kwargs)
+    assert len(cards) <= 1, f"these records make {len(cards)} cards"
+    return cards[0] if cards else None
+
+
+def _stored(conn, endpoint_key: str, listings) -> list:
+    """Each listing as the Record the calendar composes a card from — its
+    service's words, its episode's description."""
+    from app.calendar import query
+
+    rows = {(row["title_key"], row["unit"]): row for row in conn.execute(
+        query._words_sql(), {"rows": json.dumps([[l.title_key, l.unit] for l in listings])})}
+    return [query._listing_record(listing, rows[(listing.title_key, listing.unit)])
+            for listing in listings]
+
+
+def stored_records(endpoint_key: str, first=None, after=None, *, titles=None) -> list:
+    """Every stored listing on `endpoint_key` dated in [first, after) — or every
+    listing of `titles`, at any date — as Records, in the order a fill produces
+    them: what a test reads back to see what a fill stored."""
+    from app import db
+    from app.calendar import query
+    from app.metadata import episodes
+
+    conn = db.connection()
+    if titles is not None:
+        return _stored(conn, endpoint_key, query.read_rows(conn, endpoint_key, titles=titles))
+    after = after or first + timedelta(days=7)
+    lo, hi = episodes.epoch(first), episodes.epoch(after)
+    return _stored(conn, endpoint_key, [
+        listing for listing in query.read_rows(conn, endpoint_key, first=first, after=after)
+        if lo <= listing.air_ts < hi])
+
+
+async def read_span(endpoint_key: str, first, after):
+    """(stored records dated in [first, after), who answered, who was asked,
+    when it was stored) — a window's listings and its coverage, as a test reads
+    them back."""
+    from app import db
+
+    records = await db.run(lambda conn: stored_records(endpoint_key, first, after))
+    return (records, *await span_coverage(endpoint_key, first))
+
+
+async def span_coverage(endpoint_key: str, first):
+    """(who answered, who was asked, the earliest reply) for one window."""
+    from app.calendar import entries
+
+    held = await entries.source_coverage(endpoint_key, first)
+    asked = tuple(source for source, row in held.items() if row.asked)
+    answered = tuple(source for source, row in held.items() if row.answered)
+    stored_at = min((row.stored_at for row in held.values() if row.answered),
+                    default=min((row.stored_at for row in held.values()), default=None))
+    return answered, asked, stored_at
+
+
+class StoredWindow(NamedTuple):
+    """One window as a test reads it back: its cards (`stored_groups`' shape),
+    who ANSWERED and who was ASKED."""
+    groups: list
+    sources: tuple
+    asked: tuple = ()
+
+
+def grouped(records) -> list[dict]:
+    from app.calendar import query
+
+    by_row: dict[str, list] = {}
+    for record in records:
+        by_row.setdefault(record.card, []).append(record)
+    out = []
+    for row, listings in by_row.items():
+        for number, card in enumerate(query.cards_of(listings), 1):
+            group = {"key": f"{row}#{number}", "base": row.split("|", 1)[0], "ids": {},
+                     "by_source": {}, "records": list(card)}
+            for record in card:
+                group["by_source"][str(record.source)] = record
+                for namespace, value in (record.ids or {}).items():
+                    if value not in (None, ""):
+                        group["ids"].setdefault(namespace, value)
+            out.append(group)
+    return out
+
+
+async def read_cached_window(endpoint_key: str, start):
+    """(the window as stored, when it was stored) — None for a window nothing has
+    filled."""
+    records, answered, asked, stored_at = await read_span(
+        endpoint_key, start, start + timedelta(days=7))
+    if stored_at is None:
+        return None
+    return StoredWindow(grouped(records), tuple(answered), tuple(asked)), int(stored_at)
+
+
+async def load_window(endpoint, settings, start, *, allow_fetch: bool = True,
+                      force: bool = False, now: int | None = None):
+    """(the window, cached_at): `ensure_window` and then the window's stored
+    cards, as a test reads them — an empty window and None where nothing is
+    stored and nothing could be fetched."""
     from app.calendar import cache
-    return cache.group_records(as_stored(records))
+
+    coverage = await cache.ensure_window(endpoint, settings, start, allow_fetch=allow_fetch,
+                                         force=force, now=now)
+    if coverage.cached_at is None:
+        return StoredWindow([], coverage.sources, coverage.asked), None
+    records, *_coverage = await read_span(endpoint.key, start, start + timedelta(days=7))
+    return StoredWindow(grouped(records), coverage.sources, coverage.asked), coverage.cached_at
+
+
+class CardTestCase(unittest.TestCase):
+    """A freshly migrated store per test, for a synchronous test of what a card
+    shows (`read_card`)."""
+
+    def setUp(self):
+        migrated_db(type(self).__name__.lower())
+
+    def tearDown(self):
+        from app import db
+        db.close_thread_connection()
 
 
 def _title_columns() -> tuple[str, ...]:

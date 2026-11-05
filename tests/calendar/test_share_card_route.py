@@ -37,6 +37,7 @@ from app.media import posters, user_images
 # The real warm, kept before ShareCardTestCase stubs it out, for the tests that
 # have to run the whole chain.
 REAL_ENSURE_POSTERS = posters.ensure_posters
+from tests import support
 from tests.support import APP_DIR, AppTestCase, ORIGIN, calendar_records
 
 # Artwork with the frequency content of a real poster, which is what the encoded
@@ -896,7 +897,7 @@ class TheOwnersSourcePreferenceReachesBothSurfacesTests(ShareCardTestCase):
         different owner's link still finds everything the fill stored."""
         self.narrow_the_owner_to("trakt")
         self.page_total(self.query)
-        window, _ = asyncio.run(calendar_cache.read_cached_window(
+        window, _ = asyncio.run(support.read_cached_window(
             "shows/new", calendar_cache.window_start(date(2026, 8, 12))))
         self.assertEqual(sorted(s for g in window.groups for s in g["by_source"]),
                          ["simkl", "trakt"])
@@ -1083,7 +1084,7 @@ class ALinkThatNamesItsOwnSourcesTests(ShareCardTestCase):
         """Applied at read over the shared row, like every other narrowing: what
         one link says must never reach what everybody else reads."""
         self.page(f"{self.query}&source=trakt")
-        window, _ = asyncio.run(calendar_cache.read_cached_window(
+        window, _ = asyncio.run(support.read_cached_window(
             "shows/new", calendar_cache.window_start(date(2026, 8, 12))))
         self.assertEqual(sorted(s for g in window.groups for s in g["by_source"]),
                          ["simkl", "trakt"])

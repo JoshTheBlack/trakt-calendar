@@ -21,9 +21,10 @@ that starts it before it has answered.
 """
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,36 @@ def later(start: Callable[[], object]) -> bool:
         return False
     owed.append(start)
     return True
+
+
+# The writes `write` has started and not yet seen end — held, because asyncio
+# keeps only a weak reference to a task and one nobody holds can be collected
+# halfway. Each leaves as it ends, so this holds no more than the writes in flight.
+_writes: set[asyncio.Task] = set()
+
+
+def write(make: Callable[[], Awaitable[object]]) -> bool:
+    """`later`, for a WRITE the answer does not depend on: `make()` started, once
+    the response has been sent, as a task of its own, held until it ends, and a
+    failure logged rather than lost. Returns what `later` does.
+
+    A PAGE'S OWN BOOKKEEPING WAITS FOR ITS ANSWER. A write takes its turn in the
+    writer queue behind every write ahead of it (db._writer_queue), so one made
+    inside a request made the request wait out a refill's turn as well:
+    MEASURED on a copy of dev during a restart's refills, a month's is-new
+    commit waited 0.75–1.17 s and a session's slide up to 0.17 s, on pages that
+    drew nothing from either."""
+    def start() -> None:
+        task = asyncio.ensure_future(make())
+        _writes.add(task)
+        task.add_done_callback(_ended)
+    return later(start)
+
+
+def _ended(task: asyncio.Task) -> None:
+    _writes.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.error("a write owed after a response failed", exc_info=task.exception())
 
 
 class AfterResponseMiddleware:

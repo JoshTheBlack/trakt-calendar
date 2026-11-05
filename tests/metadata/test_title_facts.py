@@ -17,9 +17,21 @@ from zoneinfo import ZoneInfo
 from app.calendar import entries
 from app.metadata import descriptions
 from app.providers.base import Record, Source
+from tests import support
 from tests.support import DatabaseTestCase, title_groups
 
 UTC = ZoneInfo("UTC")
+
+
+async def _stored_span(endpoint_key, first, after):
+    """Every listing of each episode row with one in [first, after), whole —
+    the rows a span's reader works from."""
+    from app import db
+    from app.calendar import query as _query
+
+    return await db.run(lambda conn: support._stored(
+        conn, endpoint_key, _query.read_rows(conn, endpoint_key, first=first, after=after)))
+
 AIR_TS = datetime(2026, 10, 7, 12, tzinfo=timezone.utc).timestamp()
 SPAN = (date(2026, 10, 5), date(2026, 10, 12))
 
@@ -73,7 +85,7 @@ class AListingTests(DatabaseTestCase):
     async def store(self, *records):
         await entries.store_span("shows/new", *SPAN, list(records), sources=["tmdb"],
                                  asked=["tmdb"], now=1000, stale_after=2000)
-        return await entries.read_span_whole("shows/new", *SPAN)
+        return await _stored_span("shows/new", *SPAN)
 
     async def test_a_sparse_listing_says_nothing_and_its_read_says_so(self):
         [record] = await self.store(_listing(enriched=False))

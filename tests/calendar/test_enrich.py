@@ -28,6 +28,7 @@ from app.endpoints import get_endpoint
 from app.providers.base import Media, Record, Source
 from app.providers.simkl import titles as simkl_titles
 from app.providers.simkl import transport as simkl_transport
+from tests import support
 from tests.support import migrated_db, statements_per_transaction, put_title, title_groups
 
 SHOWS = get_endpoint("shows")
@@ -103,7 +104,7 @@ class EnrichmentReachesTheStoredRowTests(EnrichTestCase):
     """
 
     async def _one(self, simkl_id=1):
-        records, *_ = await calendar_entries.read_span(
+        records, *_ = await support.read_span(
             SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
         return records[0]
 
@@ -185,7 +186,7 @@ class EnrichmentReachesTheStoredRowTests(EnrichTestCase):
             airings.append(record)
         await self._stored(airings)
         await calendar_enrich._upsert_success(1, "show", {"genres": ["drama"]}, now=1000)
-        records, *_ = await calendar_entries.read_span(
+        records, *_ = await support.read_span(
             SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
         self.assertEqual(len(records), 20)
         self.assertTrue(all(r.enriched for r in records))
@@ -210,7 +211,7 @@ class EnrichmentReachesTheStoredRowTests(EnrichTestCase):
         await self._stored([_simkl_record(1)])
         spy = AsyncMock(side_effect=AssertionError("must not fetch"))
         with patch("app.providers.simkl.titles.fetch_title", spy):
-            await calendar_entries.read_span(
+            await support.read_span(
                 SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
         spy.assert_not_awaited()
 
@@ -442,7 +443,7 @@ class DrainTests(EnrichTestCase):
             "ids": {"tvdb": "999"},
         }, now=1000)
         await self._stored([_simkl_record(1)])
-        records, *_ = await calendar_entries.read_span(
+        records, *_ = await support.read_span(
             SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
         got = records[0]
         self.assertTrue(got.enriched)
@@ -551,7 +552,7 @@ class AnAnswerThatArrivedAfterTheRowStillReachesItTests(EnrichTestCase):
                                simkl_catalogue_configured=True)
 
     async def _one(self):
-        records, *_ = await calendar_entries.read_span(
+        records, *_ = await support.read_span(
             SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
         return records[0]
 
@@ -622,7 +623,7 @@ class AnAnswerAlreadyPaidForGoesInWithTheFillTests(EnrichTestCase):
                                simkl_catalogue_configured=True)
 
     async def _one(self):
-        records, *_ = await calendar_entries.read_span(
+        records, *_ = await support.read_span(
             SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
         return records[0]
 
@@ -1214,7 +1215,7 @@ class BothWritersReadThePayloadTheSameWayTests(EnrichTestCase):
         self.assertEqual(
             (await title_group_of_simkl())["ratings_json"],
             '{"simkl": 8.4}')
-        records, *_ = await calendar_entries.read_span(
+        records, *_ = await support.read_span(
             SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
         self.assertEqual(records[0].rating, 8.4)
 

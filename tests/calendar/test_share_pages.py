@@ -1164,7 +1164,6 @@ class ASharePageDrawsEachEpisodeOnTheOwnersDayTests(SharePageTestCase):
             asyncio.run(calendar_cache.store_window(
                 "shows", start, [record], 10**9, db.now(),
                 sources=[str(source)], asked=[str(source)]))
-        calendar_cache._forget_spans()
 
     def _days_drawing_it(self) -> list[str]:
         """The headings of the share page's day blocks that draw the episode."""
@@ -1178,7 +1177,6 @@ class ASharePageDrawsEachEpisodeOnTheOwnersDayTests(SharePageTestCase):
     def _owner_prefers(self, *order):
         asyncio.run(self.source_prefs.save(self.source_prefs.SourcePrefs(
             user_id=self.user_id, metadata_order=list(order))))
-        calendar_cache._forget_spans()
 
     def test_the_owners_order_decides_the_one_day_it_is_drawn_on(self):
         self._owner_prefers("trakt", "simkl")
@@ -1217,7 +1215,6 @@ class ASharePageKeepsTheOwnersNewerFiltersTests(SharePageTestCase):
             asyncio.run(calendar_cache.store_window(
                 "shows/new", start, [record], 10**9, db.now(),
                 sources=[str(source)], asked=[str(source)]))
-        calendar_cache._forget_spans()
 
     def _page(self) -> str:
         resp = self.client.get(f"/s/{self.token}?year=2026&month=11&endpoint=shows/new&tz=UTC")
@@ -1228,14 +1225,12 @@ class ASharePageKeepsTheOwnersNewerFiltersTests(SharePageTestCase):
         self.assertIn("Lonely Listing", self._page())
         asyncio.run(auth.update_user_prefs(self.user_id, tv_single_service=True,
                                            filters_paused=True))
-        calendar_cache._forget_spans()
         page = self._page()
         self.assertIn("Listed Twice", page)
         self.assertNotIn("Lonely Listing", page)
 
     def test_the_no_network_rule_reaches_it_too(self):
         asyncio.run(auth.update_user_prefs(self.user_id, tv_sparse_no_network=True))
-        calendar_cache._forget_spans()
         page = self._page()
         self.assertIn("Listed Twice", page)
         self.assertNotIn("Lonely Listing", page)

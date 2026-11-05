@@ -23,7 +23,7 @@ from app.providers.tmdb import normalize as tmdb_normalize
 from app.sources import prefs as source_prefs
 from app.templating import templates
 
-from tests.support import stored_groups
+from tests.support import CardTestCase, read_card, stored_groups
 
 AIR_TS = 1784145600.0
 
@@ -46,7 +46,7 @@ def _resolved(*records: Record, order=()) -> Record:
     groups = stored_groups(list(records))
     assert len(groups) == 1, "these records do not match; the matcher would draw two cards"
     prefs = source_prefs.SourcePrefs(user_id=1, metadata_order=list(order)) if order else None
-    return calendar_resolve.resolve(groups[0], prefs)
+    return _resolve(groups[0], prefs)
 
 
 def _card(*records: Record, order=()) -> str:
@@ -136,7 +136,7 @@ class OneStatusVocabularyTests(unittest.TestCase):
                          {"tmdb": "returning series", "trakt": "in production"})
 
 
-class RatingsAreAlwaysSideBySideTests(unittest.TestCase):
+class RatingsAreAlwaysSideBySideTests(CardTestCase):
 
     def test_two_services_giving_the_same_score_are_both_shown(self):
         trakt, simkl = _record(Source.TRAKT, rating=8.0), _record(Source.SIMKL, rating=8.0)
@@ -158,3 +158,12 @@ class RatingsAreAlwaysSideBySideTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _resolve(group, prefs=None, endpoint=None, settings=None):
+    """The one card `group`'s records make for a viewer, read back through the
+    calendar's own read from a store they were written into (support.read_card)."""
+    records = list(group["records"]) if isinstance(group, dict) else list(group)
+    return read_card(records, prefs, settings=settings,
+                     endpoint=getattr(endpoint, "key", endpoint) or "shows")
+

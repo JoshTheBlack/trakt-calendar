@@ -39,7 +39,6 @@ not make, and nobody waits on one to see what their own calendar already holds.
 """
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import logging
 from dataclasses import dataclass
@@ -51,6 +50,7 @@ from zoneinfo import ZoneInfo
 from . import cache as calendar_cache
 from . import enrich as calendar_enrich
 from . import entries
+from . import query as calendar_query
 from . import vocab
 from .. import cache, db, metadata, providers
 from ..endpoints import get_endpoint
@@ -182,9 +182,10 @@ async def stored(query: str, *, settings, prefs, tz: ZoneInfo,
     across `endpoints`.
 
     CONFIRMED BY THE READ PATH, NEVER BY THIS MODULE'S OWN OPINION. The matching
-    groups are run through `cache.visible_records` — the very pipeline
-    `assemble_range` runs, with this viewer's own filters and source selection —
-    and a row is offered only if it comes back out. Deciding here what a filter
+    titles are read through the calendar's own read (app/calendar/query.py) —
+    the very cards, judged by the very statement, a month draws, with this
+    viewer's own filters and source selection — and a row is offered only if it
+    comes back out. Deciding here what a filter
     would have done would be a second implementation of the six reasons a title
     is absent, and it would be wrong the first time any of them changed.
 
@@ -212,20 +213,18 @@ async def stored(query: str, *, settings, prefs, tz: ZoneInfo,
             keys = await entries.groups_matching(endpoint.key, query, GROUP_LIMIT)
             if not keys:
                 continue
-            records = await entries.read_groups(endpoint.key, keys)
-            groups = calendar_cache.group_records(records)
             # NARROWED PER ENDPOINT, INSIDE THE LOOP, because a search across
             # every calendar spans both media: the film endpoint answers under
             # the film filters and the film services, the show endpoints under
-            # theirs. Resolving either once outside the loop would apply one
+            # theirs. Reading either once outside the loop would apply one
             # medium's answers to the other's results.
-            # WHERE IT AIRS IS WHERE THE CALENDAR DRAWS IT (cache.placed): the
-            # day the viewer's own first service gives, and one row per card
+            # WHERE IT AIRS IS WHERE THE CALENDAR DRAWS IT (query's placement):
+            # the day the viewer's own first service gives, and one row per card
             # however many services list the episode.
-            items, _narrowed = await calendar_cache.placed(
-                groups, endpoint, tz=tz,
-                **_filters(prefs, endpoint.media),
-                prefs=source_selection.for_media(endpoint.media), settings=settings)
+            viewer = _viewer(endpoint, settings, prefs,
+                             source_selection.for_media(endpoint.media), tz)
+            items = await calendar_query.present(
+                viewer, (await calendar_query.titles(viewer, keys)).views)
             for item in items:
                 # THE TITLE IS CHECKED AGAIN AFTER RESOLUTION, because a group is
                 # loaded whole and the card may end up carrying the OTHER
@@ -252,6 +251,13 @@ def _filters(prefs, media) -> dict:
     what makes "would this viewer's calendar draw it" this module's question
     asked the calendar's way."""
     return vocab.active_specs(prefs, media, honour_pause=True)
+
+
+def _viewer(endpoint, settings, prefs, selection, tz: ZoneInfo) -> calendar_query.Viewer:
+    """This viewer on `endpoint`, as the calendar's read takes them: their
+    filters for its medium and their source selection for it."""
+    return calendar_query.Viewer(endpoint, settings, selection, tz,
+                                 vocab.complete_specs(_filters(prefs, endpoint.media)))
 
 
 def landing_url(endpoint_key: str, item: Item) -> str:
@@ -458,18 +464,22 @@ async def _drawn(endpoint_key: str, title_key: str, season: int | None, media: M
     """
     if not await entries.sources_airing(endpoint_key, title_key, season):
         return None
-    records = [record for record in await entries.read_groups(endpoint_key, [title_key])
-               if media is Media.MOVIE or record.season == season]
-    groups = calendar_cache.group_records(records)
     named = {(str(r.source), str(r.id), float(r.air_ts)) for r in written}
-    holding = [group for group in groups
-               if any((name, str(stored.id), float(stored.air_ts)) in named
-                      for name, stored in group["by_source"].items())]
+
+    def holding(cards: list) -> list:
+        held = [card for card in cards
+                if any((listing.source, str(listing.id), float(listing.air_ts)) in named
+                       for listing in card.listings)]
+        return held or cards
+
     endpoint = get_endpoint(endpoint_key)
-    items, _narrowed = await calendar_cache.placed(
-        holding or groups, endpoint, tz=tz, **_filters(prefs, endpoint.media),
-        prefs=source_selection.for_media(endpoint.media) if source_selection else None,
-        settings=settings)
+    viewer = _viewer(endpoint, settings, prefs,
+                     source_selection.for_media(endpoint.media) if source_selection else None,
+                     tz)
+    placed = await calendar_query.titles(
+        viewer, [title_key], narrow=holding,
+        keep=lambda listing: media is Media.MOVIE or listing.season == season)
+    items = await calendar_query.present(viewer, placed.views)
     return sorted(items, key=lambda item: (item.air_date, item.air_ts))
 
 
@@ -489,37 +499,26 @@ async def _title_kept(endpoint_key: str, title_key: str, media: Media, *, prefs,
     network filtered out, the seasons already on the calendar were refused and
     the ones not on it were offered, judged by TMDB's word.
     """
-    records = await entries.read_groups(endpoint_key, [title_key])
-    if not records:
-        return None
     endpoint = get_endpoint(endpoint_key)
-    items, filtered = await calendar_cache.placed(
-        calendar_cache.group_records(records), endpoint, tz=tz,
-        **_filters(prefs, endpoint.media),
-        prefs=source_selection.for_media(endpoint.media) if source_selection else None,
-        settings=settings)
-    if items:
+    placed = await calendar_query.titles(
+        _viewer(endpoint, settings, prefs,
+                source_selection.for_media(endpoint.media) if source_selection else None, tz),
+        [title_key])
+    if placed.views:
         return True
-    return False if filtered else None
+    return False if placed.filtered_out else None
 
 
 async def _kept_by_filters(record, media: Media, specs, settings) -> bool:
     """Whether this viewer's filters keep a record a service has just described,
     for a title the calendar does not hold yet (`_drawn` answers one it does) —
-    EVERY filter the calendar applies, through the calendar's own
-    (cache.narrow_for_viewer): the release narrowing, the instance's floor and
-    every one of the viewer's own, handed over whole as `vocab.active_specs`
-    answers them so a dimension added there cannot be left out here. No source
-    admission: the calendar would draw another service's record of the title.
-    Judged as the one service describing it lists it — which is what the card
-    the jump writes would be, so "only one service lists it" refuses it the way
-    the calendar would hide it — with what the store's describing services say
-    of the title beside it, as that card would have (cache.with_title_only)."""
-    group = calendar_cache.group_records([record])[0]
-    parsed = await calendar_cache.with_title_only([(group, [record])], settings)
-    kept, _release, _resolved = calendar_cache.narrow_for_viewer(
-        parsed, media, settings=settings, **specs)
-    return bool(kept)
+    EVERY filter the calendar applies, by the statement the calendar judges every
+    card with (query.described_kept): the release narrowing, the instance's floor
+    and every one of the viewer's own, handed over whole as `vocab.active_specs`
+    answers them so a dimension added there cannot be left out here."""
+    viewer = calendar_query.Viewer(get_endpoint(_endpoint_for(media)), settings, None,
+                                   ZoneInfo("UTC"), vocab.complete_specs(specs))
+    return await calendar_query.described_kept(viewer, record)
 
 
 def _jump_writer(hit, endpoint_key: str):
@@ -666,8 +665,6 @@ async def _complete_known_seasons(rows: list[Elsewhere]) -> int:
             continue
         written = await entries.store_loose_airings(
             row.endpoint_key, [row.record], now=now, stale_after=now + TITLE_STALE_SECONDS)
-        if written:
-            calendar_cache.forget_endpoint_spans(row.endpoint_key)
         stored += len(written)
     if stored:
         logger.info("calendar search: completed %d stored season(s) with a source's "
@@ -743,11 +740,8 @@ async def fill_one_gap(settings, *, source, source_id: str, media: Media,
     # An episode the service's own feed already lists is not written — its card
     # is already there (entries.store_loose_airings) — so what comes back is what
     # was, and a jump then lands on whichever card the month draws for it.
-    written = await entries.store_loose_airings(
+    return await entries.store_loose_airings(
         endpoint_key, records, now=now, stale_after=now + TITLE_STALE_SECONDS)
-    if written:
-        calendar_cache.forget_endpoint_spans(endpoint_key)
-    return written
 
 
 # THE CALENDARS WHERE A CARD IS A SEASON'S PREMIERE OR A FILM'S RELEASE — the one

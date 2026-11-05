@@ -23,15 +23,26 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from app import db
-from app.calendar import cache as calendar_cache, resolve as calendar_resolve
+from app.calendar import cache as calendar_cache, entries as calendar_entries, resolve as calendar_resolve
 from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Record, Source, render
 from app.providers.trakt import calendar as trakt_calendar
 from app.sources import prefs as source_prefs
-from tests.support import calendar_records, migrated_db, window_fetch, stored_groups
+from tests.support import (CardTestCase, calendar_records, listings, migrated_db, read_card,
+                           read_kept, stored_groups, window_fetch)
 
 SHOWS = get_endpoint("shows")
+
+
+def _resolve(group, prefs=None, endpoint=None, settings=None):
+    """The one card `group`'s records make for a viewer, read back through the
+    calendar's own read from a store they were written into (support.read_card)."""
+    records = (list(group.get("records") or group["by_source"].values())
+               if isinstance(group, dict) else list(group))
+    return read_card(records, prefs, settings=settings,
+                     endpoint=getattr(endpoint, "key", endpoint) or "shows")
+
 MOVIES = get_endpoint("movies")
 
 # One rich entry, in the shape Trakt really returns it, carrying every field a
@@ -257,7 +268,7 @@ class AReleaseDateIsNotAnInstantTests(unittest.TestCase):
         self.assertTrue(Record.from_dict(stored).date_only)
 
 
-class ResolvingOneSourceTests(unittest.TestCase):
+class ResolvingOneSourceTests(CardTestCase):
     """With one source behind a group there is one answer, and the seam still has
     to hand it back with the group's own ids rather than that source's."""
 
@@ -266,7 +277,7 @@ class ResolvingOneSourceTests(unittest.TestCase):
         return stored_groups(records)[0]
 
     def test_the_record_comes_back_whole(self):
-        record = calendar_resolve.resolve(self.group())
+        record = _resolve(self.group())
         self.assertEqual(record.title, "Rich Show")
         self.assertEqual(record.source, Source.TRAKT)
 
@@ -275,14 +286,14 @@ class ResolvingOneSourceTests(unittest.TestCase):
         tracker and the ranker read. Narrowing it to the winning source's own map
         is how a merged card would quietly lose the other service's ids."""
         group = self.group()
-        group["ids"]["mal"] = 4242
-        self.assertEqual(calendar_resolve.resolve(group).ids["mal"], 4242)
+        group["records"][-1].ids["mal"] = 4242
+        self.assertEqual(_resolve(group).ids["mal"], 4242)
 
     def test_a_group_holding_no_record_resolves_to_nothing(self):
         """A group holds each source's Record itself (cache.group_records), built
         from a stored row, so an unreadable record cannot reach one; what is left
         is a group with nothing in it, which draws nothing."""
-        self.assertIsNone(calendar_resolve.resolve({"key": "x", "ids": {}, "by_source": {}}))
+        self.assertIsNone(_resolve({"key": "x", "ids": {}, "by_source": {}}))
 
 
 def _record(source, slug, *, tmdb=None, title=None, air_ts=1784145600.0):
@@ -297,7 +308,7 @@ def _record(source, slug, *, tmdb=None, title=None, air_ts=1784145600.0):
     )
 
 
-class WhichSourceAViewerReadsTests(unittest.TestCase):
+class WhichSourceAViewerReadsTests(CardTestCase):
     """The per-viewer half: one stored window, several viewers, different
     answers out of the same rows.
 
@@ -322,7 +333,7 @@ class WhichSourceAViewerReadsTests(unittest.TestCase):
     def read(self, selection):
         prefs = source_prefs.SourcePrefs(user_id=1, calendar_source=selection)
         return [(r.title, str(r.source))
-                for r in (calendar_resolve.resolve(g, prefs) for g in self.groups())
+                for r in (_resolve(g, prefs) for g in self.groups())
                 if r is not None]
 
     def test_naming_one_source_drops_the_groups_only_the_other_describes(self):
@@ -357,11 +368,11 @@ class WhichSourceAViewerReadsTests(unittest.TestCase):
 
     def test_no_account_asking_reads_everything(self):
         """A public share page has no viewer to have a preference."""
-        titles = [calendar_resolve.resolve(g).title for g in self.groups()]
+        titles = [_resolve(g).title for g in self.groups()]
         self.assertEqual(titles, ["Shared", "Trakt-Only", "Simkl-Only"])
 
 
-class WhatTheInstanceAdmitsAtReadTests(unittest.TestCase):
+class WhatTheInstanceAdmitsAtReadTests(CardTestCase):
     """The OTHER exclusion, and it is the operator's rather than a viewer's:
     whether a service is on this instance's calendar at all.
 
@@ -385,7 +396,7 @@ class WhatTheInstanceAdmitsAtReadTests(unittest.TestCase):
         prefs = (source_prefs.SourcePrefs(user_id=1, calendar_source=selection)
                  if selection is not None else None)
         return [(r.title, str(r.source)) for r in
-                (calendar_resolve.resolve(g, prefs, None, settings) for g in self.groups())
+                (_resolve(g, prefs, None, settings) for g in self.groups())
                 if r is not None]
 
     def test_a_source_the_instance_switched_off_is_read_by_nobody(self):
@@ -462,8 +473,8 @@ class ASourceChoiceNeverChangesWhatTheFiltersJudgeTests(unittest.IsolatedAsyncio
     async def read(self, selection, *, order=(), **filters):
         prefs = source_prefs.SourcePrefs(user_id=1, calendar_source=selection,
                                          metadata_order=list(order))
-        kept, filtered = await calendar_cache.visible_records(
-            self.groups(), SHOWS, prefs=prefs, **filters)
+        kept, filtered = read_kept([r for g in self.groups() for r in g["records"]], prefs,
+                                   specs=filters)
         return [(r.title, str(r.source), list(r.genres)) for r in kept], filtered
 
     async def test_a_genre_only_another_service_states_still_hides_the_title(self):
@@ -535,11 +546,12 @@ class TwoViewersOneWindowTests(unittest.IsolatedAsyncioTestCase):
         that week."""
         ids, _ = await self.fill_and_read("simkl")
         self.assertEqual(ids, ["simkl-only"])
-        window, _ = await calendar_cache.read_cached_window(
+        held = await calendar_entries.source_coverage(
             SHOWS.key, calendar_cache.window_start(date(2026, 7, 15)))
-        self.assertEqual(sorted(window.sources), ["simkl", "trakt"])
-        self.assertEqual(
-            sorted(s for g in window.groups for s in g["by_source"]), ["simkl", "trakt"])
+        self.assertEqual(sorted(name for name, row in held.items() if row.answered),
+                         ["simkl", "trakt"])
+        self.assertEqual(sorted({listed["source"] for listed in await listings()}),
+                         ["simkl", "trakt"])
 
     async def test_the_next_viewer_reads_their_own_answer_out_of_that_window(self):
         """No fetch is permitted for the second read, so whatever it finds was

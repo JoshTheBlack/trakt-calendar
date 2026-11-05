@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 from app import db
 from app.calendar import cache as calendar_cache
 from app.calendar import entries
+from app.calendar import query
 from app.calendar import resolve as calendar_resolve
 from app.calendar import search as calendar_search
 from app.calendar import vocab
@@ -85,7 +86,6 @@ class TitleOnlyTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         migrated_db(type(self).__name__.lower())
         self.settings = Settings()
-        calendar_cache._forget_spans()
 
     async def asyncTearDown(self):
         db.close_thread_connection()
@@ -240,17 +240,18 @@ class OneReadAndNothingWrittenTests(TitleOnlyTestCase):
         await self.store(SHOWS, [simkl_episode(5), simkl_episode(6), simkl_episode(7)])
 
     async def test_a_span_is_one_read_of_the_store(self):
-        with mock.patch.object(entries, "title_only_records",
-                               wraps=entries.title_only_records) as read:
+        """Every card of the span is judged by ONE statement, and the drawn cards'
+        words — the describing group's among them — are ONE more read."""
+        with mock.patch.object(query, "_verdicts", wraps=query._verdicts) as judged, \
+                mock.patch.object(query, "_words_sql", wraps=query._words_sql) as words:
             items = await self.october()
         self.assertEqual([item.episode_label for item in items], ["S02E05", "S02E06", "S02E07"])
-        self.assertEqual(read.call_count, 1)
-        self.assertEqual(set(read.call_args.args[1]), {f"show:tmdb:{TMDB_ID}"})
+        self.assertEqual((judged.call_count, words.call_count), (1, 1))
         self.assertTrue(all(item.certification == "TV-MA" for item in items))
 
     async def test_two_viewers_read_the_same_rows_and_nothing_is_written(self):
         async def snapshot():
-            return [tuple(row) for table in ("title_metadata", "calendar_airings",
+            return [tuple(row) for table in ("titles", "episodes",
                                              "calendar_coverage", "metadata_refresh")
                     for row in await db.fetch_all(f"SELECT * FROM {table} ORDER BY 1, 2, 3")]
         before = await snapshot()
@@ -289,8 +290,9 @@ class AFilmTests(TitleOnlyTestCase):
         self.assertIsNotNone(await self.card(endpoint=MOVIES, movie_release_countries="us"))
 
     async def test_the_record_carries_no_airing_episode_or_release(self):
-        found = await entries.title_only_records(["tmdb"], ["movie:tmdb:99"])
-        record = found[("tmdb", "movie", "movie:tmdb:99")]
+        row = await db.run(lambda conn: conn.execute(
+            query._words_sql(), {"rows": json.dumps([["movie:tmdb:99", "film"]])}).fetchone())
+        record = query._title_only_record(row, "tmdb", "movie")
         self.assertEqual((record.air_ts, record.season, record.episode_number,
                           record.release_types_by_country, record.anime_type),
                          (0.0, None, None, {}, ""))

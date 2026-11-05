@@ -135,7 +135,9 @@ def instants_of(row: Mapping[str, Any], source: str) -> list[Instant]:
                    int(row[f"{source}_calendars"] or 0), int(row[f"{source}_searched"] or 0),
                    int(row[f"{source}_unstated"] or 0), str(row[f"{source}_label"] or ""),
                    int(row[f"{source}_listed_at"] or 0), entry)]
-    for repeat in groups.loads(row[f"{source}_repeats_json"], []):
+    repeats = row[f"{source}_repeats_json"]
+    # Most rows hold no repeat, and a month's read parses tens of thousands.
+    for repeat in (groups.loads(repeats, []) if repeats and repeats != "[]" else ()):
         out.append(Instant(float(repeat["at"]), int(repeat.get("date_only") or 0),
                            int(repeat.get("calendars") or 0), int(repeat.get("searched") or 0),
                            int(repeat.get("unstated") or 0), str(repeat.get("label") or ""),

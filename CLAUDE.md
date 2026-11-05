@@ -152,6 +152,10 @@ logo look-ups ran beside its 718-card render. The tracker's watchlist pass is
 the one exception and says why: it rides on Starlette's background task, which
 attaches only to an answer the route gave, so a request its access check refuses
 starts nothing. `tests/kernel/test_after_response.py` holds every starter to it.
+A WRITE THE ANSWER DOES NOT DEPEND ON goes the same way (`after_response.write`):
+a session's slide and a month's is-new commit waited their turn in the writer
+queue behind a restart's refills, up to 1.17 s, on pages that drew nothing from
+either.
 
 **The session ROW is the authority on expiry, not the cookie.**
 `app/auth/cookies.py` issues it HttpOnly, SameSite=Lax, Path=/, no Domain, and
@@ -417,10 +421,11 @@ airing would draw merged in the span that had been refilled and split in the one
 that had not, on the same page. Per-viewer filtering — and
 per-viewer source selection — happen at READ time, so one viewer excluding a
 genre or narrowing to one service does not poison what another sees from the
-same rows (`app/calendar/cache.py` owns the envelope and the read path;
-`app/calendar/resolve.py` owns which source answers each field). A VIEWER'S SOURCE
+same rows (`app/calendar/cache.py` owns the envelope and the fill;
+`app/calendar/query.py` owns the read; `app/calendar/resolve.py` composes what a
+drawn card shows). A VIEWER'S SOURCE
 CHOICE DECIDES WHICH LISTINGS A CARD IS DRAWN FROM, NEVER WHAT THEIR FILTERS JUDGE:
-`cache.narrow_for_viewer` — the one implementation of every filter, the network
+`query.judge` — the one implementation of every filter, the network
 lists included — judges a title as every service the INSTANCE admits describes it,
 in the viewer's order, and draws the card from the viewer's own services alone;
 otherwise narrowing to TMDB took Simkl's "talk-show" with Simkl's listing and a
@@ -476,30 +481,33 @@ switch, both operator decisions taken once for every viewer, and both also
 applied at read so unticking is immediate over windows already stored. A
 PER-VIEWER preference reaching a fill is the bug this shape exists to prevent
 (`tests/calendar/test_resolve.py`'s `TwoViewersOneWindowTests`).
-THE READ PATH HOLDS A MEMO, AND ITS KEY IS WHERE "FILTERED AT READ" IS NOW KEPT
-OR BROKEN. `_assembled_span` in `app/calendar/cache.py` keeps the half of a span
-that does not depend on the viewer's marks, in process, served while a rebuild
-runs behind the reader and retired when its endpoint's rows are written — so a
-span built for one viewer is served to any later request whose key matches. That
-key is `_span_memo_key`'s, and its docstring says why each part is there: every
-per-viewer narrowing (built from `vocab.SPEC_KEYS`, so a dimension added there is
-in the key without anybody adding it), `repr(prefs)`, the operator's floor as
-`vocab.floor_specs` answers it for both media, `instance_sources`, and
-`db.generation()`. Anything a viewer or `settings` decides on the read path
-belongs in it, and a key missing one does not fail loudly — it hands one reader
-somebody else's month. `tests/calendar/test_span_memo.py` holds every spec key
-and every `vocab.FLOOR_FIELDS` field to moving it.
-A READ JUDGES EVERY CARD AND RESOLVES ONLY THE CARDS IT DRAWS.
-`cache.narrow_for_viewer` judges each card on its `resolve.Facts` — the fields a
-filter reads, by the same rules `resolve_records` resolves them with
-(`_arrange`, `_first_present`, `_merged_genres`, `_title_facts`) — and resolves
-in full (provenance, buttons, airing) only the survivors, one `resolve.Orders`
-per read answering every card's service order; a group holds each source's
-`Record` itself, never a dict copy. The grouping (`_span_groups`) and the
-narrowing run on a worker thread, so the loop serves other requests while a
-month is built. MEASURED on a copy of dev, user 1's October All Episodes: the
-loop's CPU per read 7.2 s → 0.5 s, the read 8.3 s → 2.9 s, with no card's field
-moving across three service orders, every calendar, October and November.
+THE READ IS ONE MODULE, `app/calendar/query.py`, AND EVERY READER ASKS IT: the
+month and a late day, the search's stored half and its season picker, the share
+page and its preview card, the tracker's calendar import and a mark's redraw. Four
+steps, each said once (its docstring): the rows a reader names, whole, with each
+service's listings and the ids it files them under and none of the words
+(`read_rows`); the cards, and each viewer's placement of them, in Python
+(`cards_of`, `place`); THE JUDGING, one SQL statement for the whole read
+(`judge`), over the few thousand title-and-services combinations a month's cards
+share — each judged field the first service in the viewer's order that states it
+(`_winner`), the operator's floor and then the viewer's specs through ONE predicate
+builder (`_keeps`); and, for the cards a page DRAWS alone, the winning service per
+field in one more statement and those rows' words (`present`), composed by
+`resolve.compose`. A READ JUDGES EVERY CARD AND DRAWS ONLY THE CARDS IT SHOWS: the
+shell asks the whole month for keys and days (`assemble_range(drawn=False)`) and
+draws its inline days; a late day reads its own day; a mark redraws its title's
+rows (`query.titles`). NOTHING OF A READ IS KEPT BETWEEN REQUESTS. A span memo was
+here, holding a month per viewer key in process, and its key was where "filtered
+at read" could quietly break — a key missing one thing a viewer decides hands one
+reader somebody else's month; it went with this module, and comes back only for a
+measured need, with that key's whole burden. The reading runs on a worker thread
+(`db.run`), and the drawing too (`templating.drawn`), so the loop serves other
+requests while a month is built. MEASURED on a copy of dev, user 1's October All
+Episodes, against the memo's read: the cold shell 3.45–4.66 s → 1.93–2.29 s, a late
+day 0.88–0.95 s → 0.32–0.35 s, the longest loop block 0.49–1.67 s → 0.09–0.10 s;
+the warm shell, which the memo served, 0.44–0.62 s → 1.75–2.14 s; every drawn
+field of 52,794 cards identical across five calendars, two months, four service
+orders, filters off and one service alone.
 
 **One episode is ONE card, drawn on the day the viewer's first service gives
 it.** Which listings are one card is decided twice, both times the same for every
@@ -511,7 +519,7 @@ UTC day, exactly ONE episode agrees with what it did state and its own service
 has no listing of that episode there yet — otherwise it is a row of its own
 (`D{day}…`) — and the halves it left out are kept (`unstated`), so the fold is
 RE-DECIDED BOTH WAYS whenever that day's listings change (`Book.refold`). HOW A
-ROW SPLITS INTO CARDS, AT READ (`cache.cards_of`): a listing joins a card when it
+ROW SPLITS INTO CARDS, AT READ (`query.cards_of`): a listing joins a card when it
 is in the same calendar month as EVERY listing already in the card, or at most a
 week from it across a month's edge (`may_join`, a date-ordered scan, one listing
 per service per card), and then cards sharing no service are one card, each
@@ -521,22 +529,22 @@ ONE LISTING PER SERVICE
 IS ALSO WHAT STORAGE PROMISES: an instant a search or a tracker add wrote (its
 calendar's `searched` bit) fills a gap in its service's feed and stands down the
 moment that feed lists the same episode, at whatever instant — dropped at read
-(`entries._records`), taken off by the fill (`episodes.plan_fill`), never
+(`query._row_listings`), taken off by the fill (`episodes.plan_fill`), never
 written beside a listed one (`store_loose_airings`). A date-only searched
 instant and the feed's timed one were otherwise two listings of one service, and
 the scan drew two cards. Which day
 the card is drawn on is the viewer's: the first service in their order describes
 it, DATE AND TIME INCLUDED, and a date-only one borrows a time only from an
 instant that falls on its date somewhere on earth (`app/calendar/resolve.py`'s
-`_resolve_airing`, `falls_on`); the others' days are kept (`Record.listed_airings`)
+`resolve_airing`, `falls_on`); the others' days are kept (`Record.listed_airings`)
 and the card draws them where they differ (`Item.air_choices`). Because the scan's
 units depend on every listing of an episode, A READ NEVER GROUPS PART OF ONE: a
 span makes its windows current coverage-only (`ensure_window`) and reads each
 episode row with a listing in it once, whole — every service's listings at any
-date (`entries.read_span_whole`) — and the search reads a title whole
-(`entries.read_groups`). And there is ONE PLACEMENT FUNCTION, `cache.placed`
-(resolution, render, both network lists): the month, a late day, a share page and
-its card, the tracker's calendar import (all through `assemble_range`), the
+date (`query.read_rows`) — and the search reads a title whole
+(`query.titles`). And there is ONE PLACEMENT FUNCTION, `query.place`: the month,
+a late day, a share page and its card, the tracker's calendar import, a mark's
+redraw (all through `query.span` or `query.titles`), the
 search's "where it airs", its season picker and the card its jump lands on
 (`calendar/search.py`'s `_drawn`) all ask it, and none works a day out from one
 listing. `tests/calendar/test_placement.py` holds the readers to one answer — a
@@ -544,21 +552,24 @@ day against its month, two viewers on one span, a month's edge, the search.
 
 **A service that describes a title it does not list joins the card as a
 TITLE-ONLY record, which is an opinion on facts and never a listing.**
-`app/calendar/cache.py`'s `with_title_only` owns the rules, and
-`resolve.resolve_records` takes those records apart from the listings
+`app/calendar/query.py` owns the rules — such a group speaks for a card it does
+not list (`_speaks`) and is drawn as a record of its own (`_title_only_record`) —
+and `resolve.compose` takes those records apart from the listings
 (`describing`), so no choice that names a listing can reach one. A service
 declaring `Capabilities.describes_every_card` (TMDB) has its group of the title's
-row read ONCE PER SPAN (`entries.title_only_records`, one `json_each` statement, no
-call and no write) for every card of a title it describes and does not list.
+row read with the listings' own groups — judged in the read's one statement, drawn
+in its words read (`present_rows`), no call and no write — for every card of a
+title it describes and does not list.
 The record competes for every scalar field in the viewer's order and joins the
 genres, keywords and show type (those two only where `facts_known`), its ids
 add the service's greyed button — and it NEVER wins attribution, the airing or
 the coordinate, so a TMDB-first viewer's card stays on the day a listing gave
 (the Yellowjackets fixture holds it); it never makes a card alone, so a viewer
 narrowed to TMDB sees only what TMDB lists; a viewer's source choice narrows it
-as it narrows a listing; it is not in `filter.Judged.listed_by`; and the
-release narrowing and the disguised-film prune never see it. It carries no
-airing, coordinate or release schedule at all (`entries._title_only_from_row`).
+as it narrows a listing; it is not among the services a card's combination
+counts as listing it (`query._combo`); and the release narrowing and the
+disguised-film prune never see it. It carries no airing, coordinate or release
+schedule at all (`query._title_only_record`).
 `tests/calendar/test_title_only.py` holds each rule on every reader, the search
 picker's `_kept_by_filters` included.
 
@@ -592,11 +603,11 @@ THE READ PATH TAKES THOSE KEYWORDS AS ONE SET (`vocab.SPEC_KEYS`, checked by
 `vocab.complete_specs`, which refuses a keyword it does not name), and THE
 OPERATOR'S FLOOR IS THE SAME SHAPE (`vocab.floor_specs`, the one place a
 Settings field becomes something a read applies; `vocab.FLOOR_FIELDS` lists
-every field it reads). `cache.narrow_for_viewer` hands the floor and then the
-viewer's specs to ONE function, `filter.filter_titles` (`keep_title` the
-predicate), so a viewer can only narrow what the floor left and the floor is
-never counted as their filtering. Each dimension's treatment of a card nobody
-has described is `keep_title`'s and is the instance owner's decision, not a
+every field it reads). `query.judge` hands the floor and then the viewer's
+specs to ONE predicate builder, `query._keeps`, in one statement, so a viewer can
+only narrow what the floor left and the floor is never counted as their
+filtering. Each dimension's treatment of a card nobody
+has described is `_keeps`'s and is the instance owner's decision, not a
 default: genres, countries, certifications, networks, language and missing data
 show an undescribed card unjudged (`enriched`); keywords and show type wait for
 the catalogue that states them (`Record.keywords is None` — TMDB alone, whether
@@ -791,7 +802,11 @@ new; its chip is redrawn out of band (`_day_chip.html`); and its add-to-library
 buttons arrive in their state. The page keeps no marks of its own — a mark posts
 and its answer redraws every card for that title — so a day landing while a mark
 is in flight is drawn from whichever reached the database first, and the other's
-answer redraws it. The add-to-library rule lives in one place per question:
+answer redraws it. THE SHELL FILES THE MONTH IT DREW (`_file_month`: each card's
+day, title and every spelling a mark names it by, in process, bounded) under a
+page token every mark and late day carries, and a mark recounts the month's
+numbers and chips from it while drawing its title's own rows — a mark that read
+the month again took 1.5 s. The add-to-library rule lives in one place per question:
 `_library` (`app/calendar/routes.py`) for WHO gets the buttons, `LibraryView`
 (`app/integrations/routes.py`) for what state each is in, `add_title` beside it
 for the add itself.
@@ -1034,10 +1049,11 @@ on the rankings board the picker UNFOLDS UNDER ITS ROW: the row is the `<summary
 inside it, so a new search takes it down with the list and no slot beside the
 list needs resetting out of band. The calendar's picker is where a title is
 described, and the viewer's filters refuse a season with the reason — EVERY
-filter the calendar applies, through `calendar/cache.py`'s `narrow_for_viewer`,
-the one implementation `visible_records` also calls, and BEFORE a stored season
-is offered as a link to its day. A season the calendar ALREADY HOLDS is judged
-by the record it holds, through `visible_records` itself with the viewer's source
+filter the calendar applies, through the read's own judging (`query.described_kept`,
+the described record standing in for its service's group in `query.judge`), and
+BEFORE a stored season is offered as a link to its day. A season the calendar
+ALREADY HOLDS is judged by the record it holds, through the calendar's read itself
+(`query.titles`) with the viewer's source
 choice (`calendar/search.py`'s `_drawn`), never by the describing service's
 answer: the two can disagree on a filter (a stored record with no country under
 a country filter), and a link judged by the description opens a day that draws
@@ -1155,4 +1171,7 @@ test reaching the network; `tests/support.py` owns the database, the client, the
 base classes and the synchronous `load_settings` / `save_settings` a test calls
 (the app's are coroutines over `db.run` / `db.transaction`, and nothing outside
 app/db.py takes a connection itself — DriverIsolationTests). A new test file
-should need no setup of its own.
+should need no setup of its own. A test about what the calendar READS stores its
+records and reads them back through the app's own read (`seed_records`,
+`read_views` / `read_cards` / `read_kept`, `CardTestCase`), so the read under test
+is the one every page uses and not a copy of its rules.

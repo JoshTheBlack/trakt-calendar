@@ -16,6 +16,7 @@ No network.
 """
 from __future__ import annotations
 
+import dataclasses
 import unittest
 from datetime import date, datetime, timezone
 
@@ -27,7 +28,7 @@ from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Media, Record, Source
 from app.sources import prefs as source_prefs
-from tests.support import migrated_db, stored_groups
+from tests.support import CardTestCase, migrated_db, read_kept, stored_groups
 
 SHOWS = get_endpoint("shows/new")
 MOVIES = get_endpoint("movies")
@@ -48,11 +49,26 @@ def _record(source=Source.TMDB, slug="t", *, tmdb=100, media="show", **fields) -
 
 
 def _kept(record, listed_by=("tmdb",), **specs) -> bool:
-    rules = calendar_filter.TitleRules.parse(**specs)
-    return calendar_filter.keep_title(record, frozenset(listed_by), rules, SPARSE)
+    """Whether a card of `record` that the `listed_by` services list survives
+    `specs` — judged by the calendar's own statement over a store holding it
+    (support.read_kept), each other service listing it with nothing to say. A
+    description states a title's keywords and its show type together
+    (rows.facts_values), so a record stating one says "none" of the other."""
+    if (record.keywords is None) != (record.show_type is None):
+        record = dataclasses.replace(record, keywords=record.keywords or [],
+                                     show_type=record.show_type or "")
+    others = [Record(source=Source(name), media=record.media, id=f"{name}-also",
+                     ids={name: f"{name}-also", "tmdb": record.ids["tmdb"]}, detail_url="",
+                     title="", air_ts=record.air_ts, season=record.season,
+                     episode_number=record.episode_number, episode_label=record.episode_label,
+                     enriched=record.enriched)
+              for name in listed_by if name != str(record.source)]
+    endpoint = "movies" if str(record.media) == "movie" else "shows"
+    kept, _filtered = read_kept([record, *others], endpoint=endpoint, specs=specs)
+    return bool(kept)
 
 
-class EachRuleTests(unittest.TestCase):
+class EachRuleTests(CardTestCase):
 
     def test_language_includes_and_excludes_like_a_country(self):
         english, japanese = _record(language="EN"), _record(language="JA")
@@ -117,7 +133,7 @@ class EachRuleTests(unittest.TestCase):
         self.assertTrue(_kept(_record(country=""), missing="genre"))
 
 
-class WhatAnUndescribedCardIsJudgedOnTests(unittest.TestCase):
+class WhatAnUndescribedCardIsJudgedOnTests(CardTestCase):
     """The three answers, side by side."""
 
     def undescribed(self, **fields):
@@ -166,8 +182,8 @@ class TheReadTests(unittest.IsolatedAsyncioTestCase):
 
     async def read(self, selection="auto", settings=None, **specs):
         prefs = source_prefs.SourcePrefs(user_id=1, calendar_source=selection)
-        kept, filtered = await calendar_cache.visible_records(
-            self.groups(), SHOWS, prefs=prefs, settings=settings, **specs)
+        kept, filtered = read_kept([r for g in self.groups() for r in g["records"]], prefs,
+                                   settings=settings, specs=specs)
         return sorted(r.title for r in kept), filtered
 
     async def test_a_source_choice_never_changes_who_lists_a_card(self):
@@ -269,9 +285,8 @@ class ANetworkFloorLeavesFilmsAloneTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([r.id for r in records], ["a-film"])
 
     async def test_the_read_keeps_a_film(self):
-        groups = stored_groups([self.film()])
-        kept, filtered = await calendar_cache.visible_records(
-            groups, MOVIES, settings=Settings(network_filter=["HBO"]))
+        kept, _filtered = read_kept([self.film()], endpoint="movies",
+                                    settings=Settings(network_filter=["HBO"]))
         self.assertEqual([r.id for r in kept], ["a-film"])
 
     def test_a_show_calendar_still_takes_the_floor(self):

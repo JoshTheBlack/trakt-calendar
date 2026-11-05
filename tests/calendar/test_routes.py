@@ -1492,9 +1492,14 @@ class CalendarShellTests(CalendarRouteTestCase):
         # Every later day stands there as itself and fetches only itself, so no day
         # is fetched twice, none is missed, and one nobody reaches costs nothing.
         self.assertEqual(_placeholder_dates(html), later)
+        # Each names the month the page filed for its marks (`_file_month`) —
+        # one token for the page, on every day and every card's mark.
+        token = re.search(r"&page=([A-Za-z0-9_-]+)", _day_urls(html)[0]).group(1)
         self.assertEqual(
             _day_urls(html),
-            [f"/calendar/day?endpoint=shows&year=2026&month=7&date={day}" for day in later])
+            [f"/calendar/day?endpoint=shows&year=2026&month=7&date={day}&page={token}"
+             for day in later])
+        self.assertIn(f"&amp;page={token}", html)
 
     def test_a_placeholder_carries_what_the_page_needs_before_its_cards_exist(self):
         """Its heading, its anchor, the reserved height, and what this viewer would

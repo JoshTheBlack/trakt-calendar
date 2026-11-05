@@ -565,7 +565,7 @@ class Record:
 
     # {source: {"air_ts", "date_only"}} — WHEN EACH SERVICE THAT DESCRIBED THIS
     # AIRING SAYS IT AIRS. The card is drawn on ONE service's day — the viewer's
-    # first, app/calendar/resolve.py's `_resolve_airing` — and this is what lets
+    # first, app/calendar/resolve.py's `resolve_airing` — and this is what lets
     # it say that the others gave a different one (`render`'s `air_choices`).
     # Not stored, for the reason the maps above are not.
     listed_airings: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -872,7 +872,7 @@ def render(record: Record, tz: ZoneInfo) -> Item:
     longer say where a picture came from. Proxying here reaches the browser and
     nothing else.
     """
-    moment = _local_moment(record.air_ts, record.date_only, tz)
+    moment = local_moment(record.air_ts, record.date_only, tz)
     values = {f.name: getattr(record, f.name) for f in fields(Record)}
     slugs = [str(g) for g in record.genres]
     values["genres"] = [genre_label(g) for g in slugs]
@@ -905,9 +905,11 @@ def render(record: Record, tz: ZoneInfo) -> Item:
     )
 
 
-def _local_moment(air_ts, date_only: bool, tz: ZoneInfo) -> datetime:
+def local_moment(air_ts, date_only: bool, tz: ZoneInfo) -> datetime:
     """An instant in the viewer's zone — or, for a date, the date itself, read
-    back in UTC where it was pinned and never converted (see Record.date_only)."""
+    back in UTC where it was pinned and never converted (see Record.date_only).
+    THE ONE ANSWER TO WHICH LOCAL DAY A CARD IS: `render` draws it, and
+    app/calendar/query.py places a card on it before anything is drawn."""
     moment = epoch_moment(air_ts)
     return moment if date_only else moment.astimezone(tz)
 
@@ -923,7 +925,7 @@ def _air_choices(listed: Mapping[str, Mapping[str, Any]], tz: ZoneInfo) -> list[
     shown = []
     for name, airing in listed.items():
         date_only = bool(airing.get("date_only"))
-        moment = _local_moment(airing.get("air_ts") or 0, date_only, tz)
+        moment = local_moment(airing.get("air_ts") or 0, date_only, tz)
         shown.append((name, moment.strftime("%a %d %b"),
                       "" if date_only else moment.strftime("%H:%M")))
     days = {day for _name, day, _time in shown}

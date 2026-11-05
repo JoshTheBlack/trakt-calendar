@@ -217,7 +217,7 @@
            no month in it — it is a statement about the show — but which cards
            have to be redrawn is exactly a question about the month on screen. #}
         <button type="button" class="watch-toggle" title="Toggle watching"
-                hx-post="/api/state?{{ {'month': month, 'year': year, 'endpoint': endpoint.key} | urlencode }}"
+                hx-post="/api/state?{{ {'month': month, 'year': year, 'endpoint': endpoint.key} | urlencode }}{% if page_token %}&amp;page={{ page_token }}{% endif %}"
                 hx-json-enc hx-boost="false" hx-swap="none"
                 hx-vals='{{ {"item_id": item.mark_key,
                              "not_watching": item.mark_key not in not_watching} | tojson }}'>

@@ -93,7 +93,6 @@ from __future__ import annotations
 
 import asyncio
 import calendar as _calendar
-import functools
 import logging
 import time
 from collections import Counter
@@ -103,24 +102,22 @@ from itertools import groupby
 from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
-import anyio.to_thread
 
 from . import enrich as calendar_enrich
 from . import entries
 from . import filter as calendar_filter
-from . import resolve as calendar_resolve
+from . import query
 from . import state as calendar_state
 from . import vocab
 from .. import after_response
 from .. import db
 from .. import providers
 from ..media import artwork
-from ..metadata import identity as title_identity
 from ..perftrace import activity, detach, job, span
 from ..endpoints import ENDPOINTS, Endpoint
 from ..providers.base import (
-    Item, Media, Provider, Record, Source, SourceNotModified, SourcePending,
-    SourceUnavailable, epoch_moment, render, resolve_key)
+    Item, Provider, Record, Source, SourceNotModified, SourcePending,
+    SourceUnavailable, epoch_moment)
 
 logger = logging.getLogger(__name__)
 # Same "app.perf" logger the Trakt transport's cached_get already uses for its own
@@ -263,200 +260,23 @@ def dedupe_records(records: list[Record]) -> list[Record]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# grouping — one entry per real title, each source's record kept whole
-# ---------------------------------------------------------------------------
-#
-# THERE IS NO PRUNING ANY MORE, and its disappearance is the point rather than a
-# side effect. Pruning existed to whitelist which of a raw payload's fields were
-# worth storing; a Record already IS that whitelist, per source, by construction.
-# The whitelist also carried a trap a second source would have walked straight
-# into: it named the id keys it kept, so any id namespace it had not been taught
-# about — a second service's own id, an anime title's `mal` — would have been
-# silently dropped on the way in, and the symptom would have been a matcher that
-# never matched.
-
-
-def group_base(record: Record) -> str:
-    """The TITLE a record that names no stored row is of — a record a service
-    has just described, never stored (a stored listing's title is its row's,
-    `Record.card`).
-
-    The cross-source waterfall (app/providers/base.py's resolve_key), never a
-    service's own id — keying on one of those would make the same title arriving
-    from two services two titles for ever. It stringifies whatever id it lands
-    on, which is the whole of this app's defence against the type mismatch that
-    matters most here: Simkl reports a tmdb id as the string "285652" and Trakt
-    reports the same one as the int 285652, and a comparison that did not coerce
-    would match NOTHING while looking exactly like sparse coverage from one
-    service. Nothing downstream may compare a raw id value for identity.
-
-    A TITLE THE WATERFALL CANNOT KEY GETS A PER-SOURCE BASE and so can never
-    merge with anything. That is deliberate: a visible duplicate is safer than a
-    wrong merge, and a title nobody can name in a shared id space is one there is
-    no honest way to recognize. The title store files such a title under the same
-    spelling (app/metadata/identity.py's per_source_key).
-    """
-    identity = resolve_key(record.media, record.ids)
-    return str(identity) if identity is not None else title_identity.per_source_key(
-        record.source, record.id)
-
-
-_SOURCE_RANK = {str(source): rank for rank, source in enumerate(Source)}
-
-
-def _listing_order(record: Record) -> tuple:
-    """Date order, and a total one: a tie on the instant goes to the registry's
-    declared order and then the service's own id, so the same listings make the
-    same cards however a reader happened to fetch them."""
-    return (float(record.air_ts), _SOURCE_RANK.get(str(record.source), len(_SOURCE_RANK)),
-            str(record.id))
-
-
-# HOW FAR APART, ACROSS A MONTH'S EDGE, ONE SERVICE'S REPEATED LISTING AND
-# ANOTHER SERVICE'S LISTING OF THE SAME EPISODE MAY BE AND STILL BE DRAWN AS ONE
-# CARD. Inside one calendar month any distance joins.
-JOIN_ACROSS_MONTHS_DAYS = 7
-
-
-def may_join(first: date, second: date) -> bool:
-    """Whether two listings of ONE episode, on these UTC days, are drawn
-    together where one of their services lists the episode more than once: the
-    same calendar month, or at most a week apart across a month's edge (a
-    premiere dated the 31st by one service and the 2nd by another).
-
-    WHERE NO SERVICE LISTS IT TWICE, ANY DISTANCE JOINS (`cards_of`): two
-    services disagreeing about which day an episode airs on — Dimension 20's
-    season 29 premiere is 8 April on Trakt and 16 September on Simkl — are one
-    episode said twice, drawn once on the viewer's own service's day with the
-    other day beside it."""
-    return ((first.year, first.month) == (second.year, second.month)
-            or abs((first - second).days) <= JOIN_ACROSS_MONTHS_DAYS)
-
-
-def cards_of(listings: list[Record]) -> list[list[Record]]:
-    """ONE EPISODE's listings — every service's listing of one stored episode
-    row — as the cards a calendar draws. Pure, and deterministic in its input.
-
-    ONE CARD, WHATEVER THE DATES, UNLESS ONE SERVICE LISTS THE EPISODE TWICE.
-    Which listings are one episode is the row (`Record.card`), decided as they
-    were written. One service saying the episode airs twice is a repeat the
-    calendar has always drawn twice, so in date order a listing joins the
-    current card when its service is not in it yet and it may join every
-    listing already there (`may_join`), and otherwise starts the next — folding
-    a service into its own other listing would collapse it rather than
-    reconcile two services. Then cards that share no service are one card, each
-    joining the nearest earlier one: two services' dates for one episode,
-    however far apart, are one episode.
-
-    HANDED EVERY STORED LISTING OF THE EPISODE, NEVER A RANGE'S SHARE OF THEM.
-    Each card's membership depends on the listings before it, so a listing far
-    outside a reader's range can still decide where a card inside it closes. A
-    month, a day, a search and a share page all read an episode whole
-    (entries.read_span_whole, entries.read_groups), which is what makes them
-    draw the same cards on the same days by construction.
-    """
-    day_of = {id(record): record_utc_date(record) for record in listings}
-    units: list[list[Record]] = []
-    for record in sorted(listings, key=_listing_order):
-        current = units[-1] if units else None
-        if (current is not None
-                and all(str(held.source) != str(record.source) for held in current)
-                and all(may_join(day_of[id(held)], day_of[id(record)]) for held in current)):
-            current.append(record)
-        else:
-            units.append([record])
-    cards: list[list[Record]] = []
-    for unit in units:
-        services = {str(record.source) for record in unit}
-        apart = [card for card in cards if not services & {str(r.source) for r in card}]
-        if apart:
-            min(apart, key=lambda card: min(abs(float(a.air_ts) - float(b.air_ts))
-                                            for a in card for b in unit)).extend(unit)
-        else:
-            cards.append(list(unit))
-    return cards
-
-
-def group_records(records: list[Record]) -> list[dict]:
-    """The read path's groups: one per card, each source's record kept whole
-    under its own name.
-
-    WHICH RECORDS ARE ONE CARD IS THE STORE'S ANSWER: the episode row each
-    listing is filed on (`Record.card`), split only where one service lists the
-    episode twice (`cards_of`). A record that names no row is a card of its own.
-
-    PROVENANCE IS RECORDED FOR EVERY FIELD, not only for the ones that disagree,
-    because "both sources agreed" and "only one source had it" must be able to
-    render differently and the second is not recoverable from a de-duplicated
-    blob.
-
-    `ids` IS HOISTED onto the group because it is the MATCH RESULT rather than
-    any one source's value, and it is what the arr/Seerr buttons, the tracker and
-    the ranker read. First writer wins per namespace, which with records visited
-    in date order and then the declared order means the earlier listing's
-    spelling of an id is the one kept.
-
-    EACH SOURCE'S RECORD IS HELD AS ITSELF, not as `Record.to_dict()`: the group
-    is a read's own structure and never stored, and turning every record into a
-    dict here and back into a Record at resolution cost a month a second and a
-    half for nothing (MEASURED, profiled). Nothing writes into a record a group
-    holds.
-
-    `base` IS THE TITLE the card is of — its row's title key — kept so that what
-    reads a group by its title need not work it out again.
-    """
-    by_row: dict[str, list[Record]] = {}
-    for record in records:
-        by_row.setdefault(record.card or f"#{id(record)}", []).append(record)
-    out: list[dict] = []
-    for row, listings in by_row.items():
-        base = row.split("|", 1)[0] if listings[0].card else group_base(listings[0])
-        for number, card in enumerate(cards_of(listings), 1):
-            group = {"key": f"{row}#{number}", "base": base, "ids": {}, "by_source": {}}
-            for record in card:
-                group["by_source"][str(record.source)] = record
-                for namespace, value in (record.ids or {}).items():
-                    if value not in (None, ""):
-                        group["ids"].setdefault(namespace, value)
-            out.append(group)
-    return out
-
-
-class CachedWindow(NamedTuple):
-    """One stored window: its groups, who was ASKED for them, and who ANSWERED.
+class WindowCoverage(NamedTuple):
+    """One window's coverage and nothing else: who ANSWERED and who was ASKED,
+    and when it was stored — None for a window nothing has filled.
 
     THE TWO LISTS ARE DIFFERENT FACTS AND CONFLATING THEM IS WHAT MADE THE
-    "incomplete data" banner permanent. A source in `asked` but not in `sources`
-    was reached for and could not answer — that is the only thing "partial"
-    should ever mean. A source in neither was not in play when this window was
-    filled: either it did not exist on the instance yet, or its declared reach
-    does not cover this window at all. That is not a failure to report, it is a
-    window that predates the question — and the read path treats it as a MISS to
-    be refilled, exactly as a payload from an older shape version is a miss
-    rather than an error.
+    "incomplete data" banner permanent. A source asked and not answered was
+    reached for and could not answer — the only thing "partial" should mean. A
+    source in neither was not in play when the window was filled — it did not
+    exist on the instance yet, or its reach does not cover the window — which is
+    not a failure to report but a window that predates the question, and the
+    read treats it as a MISS to be refilled (`ensure_window`).
 
-    Storing only "who answered" left the reader with no way to tell those two
-    apart, so it had to guess by measuring TODAY'S sources against a window
-    filled possibly weeks ago; every window then read as partial the moment a
-    source was added, and a window outside a source's reach read as partial for
-    ever, because refilling it changed nothing.
-    """
-    groups: list[dict]
-    sources: tuple[str, ...]
-    asked: tuple[str, ...] = ()
-
-
-class WindowCoverage(NamedTuple):
-    """One window's coverage and nothing else: who ANSWERED and who was ASKED —
-    the two facts `CachedWindow` explains — and when it was stored, None for a
-    window nothing has filled.
-
-    WHAT A SPAN READ ASKS OF EACH WINDOW IT COVERS, because the airings are no
-    longer read window by window: whether two services' listings are one card
-    depends on dates either side of any window's edge, so the span's airings are
-    read once, whole (`_assembled_span`), and a window contributes only whether
-    it is fresh, partial or missing.
+    WHAT A SPAN READ ASKS OF EACH WINDOW IT COVERS, because the airings are not
+    read window by window: whether two services' listings are one card depends
+    on dates either side of any window's edge, so the span's rows are read once,
+    whole (`_span_views`, app/calendar/query.py), and a window contributes only
+    whether it is fresh, partial or missing.
     """
     sources: tuple[str, ...]
     asked: tuple[str, ...]
@@ -716,35 +536,6 @@ async def _answers(asked_of: list[Provider], endpoint: Endpoint, settings, start
     return dedupe_records(bridged), answered, unchanged, pending
 
 
-async def read_cached_window(endpoint_key: str, start: date) -> tuple[CachedWindow, int] | None:
-    """The stored (window, cached_at) for one window, or None when nothing has
-    been stored for it.
-
-    THE WINDOW IS NO LONGER A STORED THING — it is a date range over rows, and
-    this function is the seam that keeps that true without every caller learning
-    it. What used to happen here was a zlib inflate plus a json.loads of a whole
-    seven-day payload, on the event loop, five or six times per month read; what
-    happens now is an indexed range scan and a grouping pass.
-
-    ABSENT MEANS NO COVERAGE ROW, NOT NO AIRINGS. A span nobody has fetched and a
-    span a source truthfully reported as empty are the same query result and
-    completely different facts, and answering the second as a miss would refetch
-    an empty month on every read for ever.
-
-    THE GROUPS ARE THIS WINDOW'S ROWS ALONE, for a caller that wants one window
-    by itself. The calendar does not draw from them: an episode two services
-    date either side of the window's edge is half here, and only a read of the
-    episode whole (`_assembled_span`) makes it the one card it is.
-    """
-    records, answered, asked, stored_at = await entries.read_span(
-        endpoint_key, start, start + timedelta(days=WINDOW_DAYS))
-    if stored_at is None:
-        return None
-    with span("calcache.group", records=len(records)):
-        groups = group_records(records)
-    return CachedWindow(groups, tuple(answered), tuple(asked)), int(stored_at)
-
-
 async def stored_window_signature() -> str:
     """A short value that changes whenever the stored calendar might name a title
     it did not name before. Cheap: no payload leaves the database.
@@ -802,12 +593,6 @@ async def store_window(endpoint_key: str, start: date, records: list[Record],
         sources=sources, asked=(sources if asked is None else asked),
         unchanged=unchanged, spans=answer_spans(sources, start),
         now=now, stale_after=now + max(0, int(ttl_seconds)))
-    # THE ROWS A MEMOISED SPAN WAS ASSEMBLED FROM HAVE JUST MOVED. This is the
-    # one write that can change what a span holds, so it is the one place the
-    # memo has to give one up — otherwise a refilled month would go on being
-    # served from before the refill for the length of its TTL. Named, because
-    # this window belongs to one endpoint and the others are untouched.
-    _forget_spans(endpoint_key)
 
 
 # HOW STALE A SPAN MAY BE BEFORE A READ REFILLS IT, by how far its own dates are
@@ -1373,32 +1158,6 @@ def _failed_retry_due(endpoint: Endpoint, start: date, cached: WindowCoverage,
     return True
 
 
-async def load_window(endpoint: Endpoint, settings, start: date, *,
-                      allow_fetch: bool = True, force: bool = False,
-                      now: int | None = None,
-                      ) -> tuple[CachedWindow, int | None]:
-    """(window, cached_at) for ONE window by itself: `ensure_window`, then that
-    window's own rows grouped (see `read_cached_window` for why those groups are
-    not what the calendar draws). An empty window, None, when nothing is stored
-    and nothing could be fetched.
-
-    SERVED FROM THE ROWS, NEVER FROM WHAT WAS FETCHED — see store_window for
-    what a fetch alone leaves out. The sharpest case: every source said
-    "unchanged", so a fill brought no records at all while the stored rows are
-    perfectly good, and serving what was fetched would blank the window on the
-    very read that confirmed it was current.
-    """
-    coverage = await ensure_window(endpoint, settings, start, allow_fetch=allow_fetch,
-                                   force=force, now=now)
-    if coverage.cached_at is None:
-        return CachedWindow([], coverage.sources, coverage.asked), None
-    records, _answered, _asked, _stored_at = await entries.read_span(
-        endpoint.key, start, start + timedelta(days=WINDOW_DAYS))
-    with span("calcache.group", records=len(records)):
-        groups = group_records(records)
-    return CachedWindow(groups, coverage.sources, coverage.asked), coverage.cached_at
-
-
 # ---------------------------------------------------------------------------
 # the assembled read path
 # ---------------------------------------------------------------------------
@@ -1430,600 +1189,25 @@ def _local_span_utc_range(tz: ZoneInfo, start_date: date, end_date: date) -> tup
     return utc_start, utc_end
 
 
-async def with_title_only(parsed, settings=None) -> list[tuple[dict, list[Record], list[Record]]]:
-    """`parsed` — `[(group, every record of it the INSTANCE admits)]` — with each
-    group's TITLE-ONLY records beside its listings: `[(group, listings,
-    title-only)]`.
+async def _span_views(endpoint: Endpoint, settings, *, tz: ZoneInfo, start_date: date,
+                      end_date: date, allow_fetch: bool, now, prefs, specs: dict):
+    """One span's cards for one viewer, placed and judged, nothing drawn yet:
+    (views in air order, as_of, partial, filtered_out). `specs` are the
+    viewer's filters, complete (`vocab.complete_specs`).
 
-    WHAT ONE IS. A service that describes every card (Capabilities.
-    describes_every_card — TMDB) and does not list this airing may still have
-    said what the title is: its group on the title's row in the title store
-    holds the certification, language, network, genres and keywords the services
-    that list the card often do not state — measured on one October's All
-    Episodes, 10,899 of 16,997 cards had no certification and 15,038 no
-    language. That row joins the card as a record of its own, built by
-    entries.title_only_records from the store and nothing else.
-
-    WHAT IT MAY DO, each rule held where it applies and by a test of its own:
-      - it may win any SCALAR field and joins the genres, keywords and show type
-        (resolve.resolve_records), so what it states reaches the card and every
-        filter judges it;
-      - its keywords and show type are an answer only where a description stated
-        them (rows.facts_of, read by entries._words) — a row nobody has
-        described says nothing about either, and is not judged by them;
-      - it adds a button to the service's page, drawn as a service that knows
-        the title without listing this airing (detail_source.service_links).
-    WHAT IT MAY NOT:
-      - be the card's PRIMARY: it never wins attribution, the airing (date and
-        time) or the episode coordinate, which are chosen among the listings
-        alone (resolve.resolve_records) — or a viewer whose first service only
-        describes the title would see the card move to a day no listing gave;
-      - admit a card by itself: a group none of a viewer's services lists is not
-        theirs to draw however much a describing service says, so a viewer
-        narrowed to the describing service sees only what that service LISTS
-        (`narrow_for_viewer`);
-      - count as listing it: "only one service lists it" and "only a sparse
-        catalogue lists it" count the listings (filter.Judged.listed_by), and a
-        description joined to every card would make no card single-listed;
-      - reach the release narrowing or the disguised-film prune, which judge the
-        records that list a card.
-
-    ONE READ FOR THE WHOLE SPAN, of the store's rows only — nothing is asked of
-    any service and nothing is written, so a read for one viewer leaves every
-    row exactly as the next viewer finds it. A group that already holds a
-    listing from the describing service gains nothing: that listing carries the
-    same group's words. One record per title, shared by every card of it in the
-    span — nothing downstream writes to a record it is handed.
-    `settings` is the operator's admission (resolve.describing_sources): a
-    service this instance keeps off its calendar describes none of its cards.
+    NOTHING IS HELD BETWEEN READS. A span used to be memoised whole, its key
+    carrying every per-viewer narrowing so one reader was never handed another's
+    month; the read is now cheap enough to make every time (app/calendar/
+    query.py), so there is no memo and no key to keep complete.
     """
-    describers = calendar_resolve.describing_sources(settings)
-    wanted: dict[int, tuple[str, str, list[str]]] = {}
-    for index, (group, listings) in enumerate(parsed):
-        if not listings:
-            continue
-        listed = {str(r.source) for r in listings}
-        missing = [name for name in describers if name not in listed]
-        if missing:
-            wanted[index] = (str(listings[0].media), group["base"], missing)
-    found = await entries.title_only_records(
-        describers, {key for _media, key, _missing in wanted.values()}) if wanted else {}
-    out = []
-    for index, (group, listings) in enumerate(parsed):
-        media, key, missing = wanted.get(index, ("", "", ()))
-        out.append((group, listings,
-                    [record for name in missing
-                     if (record := found.get((name, media, key))) is not None]))
-    return out
-
-
-async def visible_records(groups, endpoint, *, prefs=None, settings=None,
-                          **specs) -> tuple[list, int]:
-    """`groups` reduced to the records THIS viewer's calendar would draw, and
-    how many this viewer's filters removed on the way. `specs` are the viewer's
-    filters, `vocab.active_specs`' keywords.
-
-    EXTRACTED SO THE SEARCH RUNS THE SAME PIPELINE RATHER THAN A SECOND ONE.
-    A search has to answer "would this viewer's calendar actually draw this
-    card", and six independent reasons a title is absent live in these lines;
-    a second implementation of them would be wrong the first time any one
-    changed. What a search does NOT want is a whole month — it knows which
-    groups matched, so it hands over those and pays for those. Measured
-    before the split: one `shows` month held 12,880 airings and a search of
-    five months took eleven seconds, nearly all of it in here.
-
-    NOTHING BELOW WAS REWRITTEN. It is the block that sat inline in
-    `assemble_range`, with the values it read from that function's scope made
-    into arguments. The order of the steps is the substance and each comment
-    says why it is where it is.
-    """
-    with span("calcache.filter", entries=len(groups)) as sp:
-        # RESOLUTION IN TWO HALVES WITH THE ENRICHMENT OVERLAY BETWEEN THEM, and
-        # the order is the point. The overlay fills in the fields one source's
-        # calendar files do not carry, and it has to act on that source's OWN
-        # record — before anything picks between the sources — or a merged group
-        # whose other source supplies the card would never have its enrichment
-        # considered, and a genre only that source knows could not win however
-        # the viewer set their preference.
-        # `settings` IS THE OPERATOR'S ADMISSION AND THE ONLY ONE APPLIED HERE —
-        # a source this instance has switched off its calendar is off for
-        # everybody, and a window filled while it was still in play is still
-        # sitting in the cache holding its records. Reading it here is what makes
-        # that switch take effect immediately instead of one TTL from now.
-        # THE VIEWER'S SOURCE CHOICE IS APPLIED IN `narrow_for_viewer`, NOT HERE:
-        # it decides which listings a card is drawn from, and the filters judge
-        # every record the instance admits — see there.
-        parsed = calendar_resolve.instance_admitted(groups, settings)
-        # THE SIMKL OVERLAY IS GONE FROM HERE, AND ITS ABSENCE IS THE POINT.
-        # What used to happen on this line was a batched read of `simkl_titles`
-        # to paint genres, network, country and certification onto this read's
-        # Simkl records, because the stored window could not hold them: a fill
-        # replaced the whole blob with a fresh, unenriched payload, so anything
-        # written into it was erased on the next refill. Rows do not have that
-        # problem — the drain writes the title store's row and a refill is
-        # forbidden to demote it (app/metadata/rows.py) — so the fields are already on
-        # the records read_span handed back, and `enriched` is a statement about
-        # what the row CONTAINS rather than about what a reader must look up.
-        flat = [r for _, rs in parsed for r in rs]
-        # AND THE OTHER SERVICE'S HALF OF THE SAME QUESTION. Trakt's calendar
-        # payload carries no release schedule either, so without this a film
-        # Trakt listed reached the release rule below with nothing to be judged
-        # on — and a record that cannot answer is kept, which meant the filter
-        # could never drop a film Trakt also listed. Same promise as the overlay
-        # above: it reads what is stored and fetches nothing.
-        await calendar_enrich.overlay_releases(flat)
-        # AND WHAT A SERVICE THAT DESCRIBES EVERY CARD SAYS ABOUT A TITLE IT DOES
-        # NOT LIST HERE, read from the store once for the span and kept apart
-        # from the listings (`with_title_only` holds what it may do).
-        parsed = await with_title_only(parsed, settings)
-        # THE RELEASE NARROWING RUNS HERE, BEFORE THE PICK, AND ON THE GROUP.
-        # A films calendar that lists every release in every market needs a way
-        # to say "the ones out here, in the formats I watch"; the per-country
-        # release schedule only exists on the records of whichever source
-        # published one, so asking after resolution would ask the winner alone
-        # and asking per record would strip a service off a merged card to
-        # enforce a rule about release formats. Counted rather than silently
-        # applied, so a month this empties can say so — see meta below.
-        # ON A WORKER THREAD, as the grouping is (`_assembled_span` says why):
-        # judging every card and resolving the drawn ones is the month's
-        # largest share of pure CPU, and it reads nothing but what it is handed.
-        kept, release_filtered, resolved = await anyio.to_thread.run_sync(
-            functools.partial(narrow_for_viewer, parsed, endpoint.media, prefs=prefs,
-                              settings=settings, **specs))
-        sp.set(kept=len(kept))
-
-    # EVERY PER-VIEWER REMOVAL, IN ONE NUMBER. The release rule and the
-    # genre/country/certification rule are different questions with different
-    # vocabularies, but the reader's question is one: how much of this month am I
-    # not being shown. Counted here rather than inferred from a total, because
-    # the instance-wide floor and `prune_disguised_films` also remove records and
-    # neither is this viewer's doing — attributing those to a filter somebody set
-    # would send them looking for a setting that would not bring the title back.
-    return kept, release_filtered + (resolved - len(kept))
-
-
-async def placed(groups, endpoint, *, tz: ZoneInfo,
-                 **narrowing) -> tuple[list[Item], int]:
-    """Every card `groups` make for ONE viewer, each rendered on the day it is
-    PLACED on, and how many their filters removed. `narrowing` is
-    `visible_records`' keywords — the viewer's filters (`vocab.active_specs`),
-    their source selection (`prefs`) and the operator's `settings`.
-
-    THE ONE PLACEMENT FUNCTION, and every path that says where a card is drawn
-    asks it: a month, a day that arrives late, a share page and its card, the
-    tracker's calendar import (all through `assemble_range`), and the calendar
-    search's "where it airs", its season picker and the card its jump lands on
-    (calendar/search.py). WHICH DAY is decided by which of a card's services
-    describes it — the first in this viewer's order (resolve.py), date and time
-    included — and the day is that description rendered into the viewer's zone.
-    So two viewers with different orders, reading the very same rows, see one
-    card each, each on their own service's day; and no path works a day out from
-    one listing, which would put a card where some service said rather than
-    where this viewer's calendar draws it.
-
-    The network lists are judged with every other filter, in `narrow_for_viewer`:
-    the search, its season picker and the card its jump lands on read through this
-    too, and while the lists were applied only to a month they offered a title the
-    viewer's network filter hides, linking to a day that could not draw it.
-    """
-    kept, filtered_out = await visible_records(groups, endpoint, **narrowing)
-    with span("calcache.normalize", entries=len(kept)) as sp:
-        items = [render(record, tz) for record in kept]
-        sp.set(items=len(items))
-    return items, filtered_out
-
-
-def narrow_for_viewer(parsed, media, *, prefs=None, settings=None,
-                      **specs) -> tuple[list, int, int]:
-    """Every filter a calendar applies, in the order it applies them: `(the
-    records this viewer's cards are drawn from, how many groups the release
-    narrowing removed, how many cards reached the rest)`. `parsed` is
-    `[(group, every listing of it the INSTANCE admits, its title-only records)]`
-    (`with_title_only`); `specs` are the viewer's filters, `vocab.active_specs`'
-    keywords (vocab.complete_specs refuses any other).
-
-    ONE IMPLEMENTATION OF "WOULD THIS VIEWER'S FILTERS HIDE IT", called by
-    `visible_records` for the stored calendar and by the search's season picker
-    (calendar/search.py's `picker`) for a title a service has just described —
-    which no source admission applies to, since the calendar would draw another
-    service's record of it, but every filter does: a picker that checked genre,
-    country and certification alone offered films the release narrowing hides
-    (measured: Sinners, under a US-releases-only filter).
-
-    THE VIEWER'S SOURCE CHOICE DECIDES WHICH LISTINGS A CARD IS DRAWN FROM, AND
-    NEVER WHAT THEIR FILTERS JUDGE. A group none of this viewer's services lists
-    is not theirs to draw, and drops out uncounted. A group they do draw is
-    judged as every service the instance admits describes it — resolved in this
-    viewer's order, as a viewer reading every service would see it — and drawn
-    from their own services' records alone. REPORTED: Sam Pang Tonight, a talk
-    show by Simkl's account and a comedy by TMDB's, was hidden by a viewer's
-    "no talk shows" filter until they narrowed the calendar to TMDB and Simkl's
-    genre went with Simkl's listing. A title somebody hid stays hidden whichever
-    services they read. So "only one service lists it" counts the services the
-    INSTANCE admits, never the viewer's narrowing of them — and never a service
-    that only describes the card.
-
-    A TITLE-ONLY RECORD IS NARROWED BY THE SOURCE CHOICE AS A LISTING IS: a viewer
-    who left a service off their calendar draws none of its words, on a card it
-    lists or one it only describes, and is judged by them like everybody else.
-    Being narrowed to that service alone draws nothing it does not list
-    (resolve.resolve_records makes no card without a listing).
-
-    EVERY CARD IS JUDGED, AND ONLY THE CARDS THAT SURVIVE ARE DRAWN. A card is
-    judged on its `resolve.Facts` — the few fields a filter reads, by the rules
-    that resolve them — and resolved in full, provenance, buttons, airing and
-    all, only once it has survived every filter: MEASURED, one viewer's October
-    All Episodes resolved 18,759 cards in full to draw 1,263.
-    """
-    specs = vocab.complete_specs(specs)
-    orders = calendar_resolve.Orders(prefs)
-    # Which services this viewer reads, None for every one — the ordinary case,
-    # where a card's own listings are all of them.
-    reads = (None if prefs is None
-             else frozenset(str(source) for source in Source if prefs.admits_calendar(source)))
-    if reads is not None and len(reads) == len(Source):
-        reads = None
-    # (group, every listing, its title-only records, the viewer's own of each)
-    pairs: list = []
-    for group, every, describing in parsed:
-        own = every if reads is None else [r for r in every if str(r.source) in reads]
-        if not own:
-            continue
-        own_describing = (describing if reads is None
-                          else [r for r in describing if str(r.source) in reads])
-        pairs.append((group, every, describing, own, own_describing))
-    narrowed = calendar_filter.filter_release_groups(
-        pairs, media, specs["movie_release_countries"], specs["movie_release_types"])
-    release_filtered = len(pairs) - len(narrowed)
-    pair_of: dict[int, tuple] = {}
-    cards: list[calendar_filter.Judged] = []
-    for pair in narrowed:
-        _group, every, describing, _own, _own_describing = pair
-        facts = calendar_resolve.judged_facts(every, describing, orders=orders)
-        pair_of[id(facts)] = pair
-        cards.append(calendar_filter.Judged(facts, frozenset(str(r.source) for r in every)))
-    # A Simkl entry Simkl's OWN enrichment marks as a film (`anime_type ==
-    # "movie"`) does not belong on a series endpoint — see
-    # filter.prune_disguised_films for the measured rule and why this is
-    # a read-time exclusion rather than something fetch_window_records can
-    # do at fill. Same reasoning as the exemption below: it can only act
-    # on what enrichment has already found, so it runs right beside it.
-    kept_records = {id(r) for r in calendar_filter.prune_disguised_films(
-        [card.record for card in cards], media)}
-    cards = [card for card in cards if id(card.record) in kept_records]
-    # THE INSTANCE FLOOR, AND IT RUNS BEFORE THIS VIEWER'S OWN SPECS.
-    # It is applied at FILL as well (fetch_window_records), where it is a
-    # HARD exclusion — a floored title never enters the shared rows, so no
-    # per-account filter can bring it back, and that promise is the reason
-    # the fill keeps it. But the fill is the only moment that copy acts, so
-    # an operator who tightened the floor went on seeing a month that was
-    # already stored until its TTL ran out. Applying it here too is what
-    # makes the change reach windows already held — the shape the instance's
-    # "include Simkl results" switch already has, and for the same reason:
-    # it is one decision taken for every viewer, so it can narrow the shared
-    # rows without deciding anything on one viewer's behalf.
-    # THE OPERATOR'S SPEC IS NOT MERGED INTO THE VIEWER'S. They are two
-    # answers to the same question and either may be empty; applying them in
-    # turn is also what keeps the count below honest.
-    # THE NETWORK LISTS JUDGE THE RESOLVED RECORD, because a network only exists
-    # on what resolution chose — the fill's floor cannot judge a merged card's.
-    # The operator's list with the rest of the floor, not counted as this
-    # viewer's; the viewer's own with their specs, counted, so a page it emptied
-    # can say so.
-    # BOTH ARE ONE FUNCTION'S WORK (filter.filter_titles), handed the floor and
-    # then the viewer's filters, so a viewer can only ever narrow what the
-    # floor left: a rule the operator set cannot be loosened by an account, and
-    # nothing about the two is judged differently. Every exemption a read gives
-    # a card nothing has described is filter.keep_title's, and never the fill's.
-    sparse = calendar_resolve.sparse_sources()
-    if settings is not None:
-        cards = calendar_filter.filter_titles(
-            cards, vocab.title_rules(vocab.floor_specs(settings, media), media), sparse)
-    floored = len(cards)
-    kept = calendar_filter.filter_titles(cards, vocab.title_rules(specs, media), sparse)
-    drawn = []
-    for card in kept:
-        group, _every, _describing, own, own_describing = pair_of[id(card.record)]
-        drawn.append(calendar_resolve.resolve_records(group, own, prefs, own_describing,
-                                                      orders=orders))
-    return drawn, release_filtered, floored
-
-
-# ---------------------------------------------------------------------------
-# the mark-independent half of a span, and the short memo over it
-# ---------------------------------------------------------------------------
-
-# HOW OLD A SPAN MAY BE BEFORE IT IS REFRESHED BEHIND WHOEVER ASKED FOR IT, and
-# how old it may be before nobody is served it at all.
-#
-# SERVE, THEN REBUILD. A reader is answered from what is here and the rebuild
-# happens after them, so the only request that ever waits for a month is the
-# first one on a cold process. Everything after it is a dictionary lookup, and
-# the copy in hand keeps up because serving it is what schedules its replacement.
-#
-# THE SOFT AGE IS NOT THE ONLY TRIGGER — a write bumps the endpoint's generation
-# and that schedules a refresh immediately, so a refill shows up in seconds
-# rather than at the end of this clock. The age is the backstop for the writers
-# that cannot bump anything: a background enrichment landing between two reads is
-# the one that matters, because cache.py cannot be called from enrich.py without
-# an import cycle.
-#
-# THE HARD MAX IS A SAFETY RAIL, NOT THE DESIGN. Reaching it means refreshes have
-# been failing for a quarter of an hour, and at that point a slow honest answer
-# beats a fast old one. It stays well under the shortest staleness tier so that
-# serving from here can never outlast the point at which the ROWS were due to be
-# refetched; a test holds that.
-_SPAN_SOFT_AGE = 120
-_SPAN_MEMO_TTL = 900
-# AT MOST THIS MANY REBUILDS AT ONCE, ACROSS THE WHOLE PROCESS. A rebuild is
-# seconds of pure Python, which the GIL keeps on the one core the event loop
-# needs — so letting these pile up would spend on refreshing months what the
-# readers they exist for are waiting to be served. One key is refreshed once at a
-# time (`_span_refreshing`) and the process runs at most two.
-_SPAN_REFRESH_LIMIT = 2
-_span_refreshing: set = set()
-# HOW MANY SPANS ARE HELD, AND A MONTH VIEW IS NOT ONE OF THEM — it is
-# THIRTY-ONE. The shell asks for the whole month and then every day block asks
-# for its own day, each a span of its own with its own key, and all of them worth
-# holding: measured on a real All Episodes September, scrolling the month a
-# second time went from 23.9 seconds to 260ms, almost all of it the day entries.
-#
-# At 64 that left room for two month views. A third evicted, and so did reading
-# one month on two endpoints — which is the ordinary thing to do. The key still
-# carries the viewer's own filters, so this stays bounded: an entry is a list of
-# references to Items that already exist, and a caller asking for a hundred
-# months still cannot hold them all.
-_SPAN_MEMO_MAX = 192
-_span_memo: dict = {}
-
-
-# HOW MANY TIMES EACH ENDPOINT'S STORED ROWS HAVE MOVED. The memo key carries
-# its endpoint's number, so writing a window makes every span built from the old
-# rows UNREACHABLE without touching anybody else's — which is the difference
-# between invalidating what changed and invalidating everything.
-_endpoint_generation: dict[str, int] = {}
-
-
-def _forget_spans(endpoint_key: str | None = None) -> None:
-    """Give up the spans a write has just invalidated.
-
-    PER ENDPOINT, AND THE FIRST SHAPE HERE WAS NOT. It cleared the whole memo on
-    any window write, on the reasoning that a written window carries none of the
-    viewer filters a key does — true, but it made the memo useless on exactly the
-    instance that needs it. A live calendar WRITES while it reads: a month opened
-    on stale windows fills them, and each fill threw away every span for every
-    endpoint, including the one the page had just built. The reader then paid full
-    price for every mark until the refresh happened to finish. It only looked
-    correct in development, where nothing can reach a provider and so nothing is
-    ever written.
-
-    A WINDOW BELONGS TO ONE ENDPOINT, which is the part the old reasoning missed.
-    The filters decide what a span makes OF the rows; the endpoint decides WHICH
-    rows, and that is knowable at the write. So bumping one number retires every
-    span built from the rows that moved and leaves the rest alone.
-
-    `endpoint_key=None` still drops everything, for a caller that cannot say.
-    """
-    if endpoint_key is None:
-        _span_memo.clear()
-        _endpoint_generation.clear()
-        return
-    _endpoint_generation[endpoint_key] = _endpoint_generation.get(endpoint_key, 0) + 1
-
-
-def forget_endpoint_spans(endpoint_key: str) -> None:
-    """Drop every held span of `endpoint_key` outright, for a write that did not
-    come through a window fill.
-
-    NOT _forget_spans, which only moves the endpoint's number: a span that is
-    behind is still SERVED while its replacement builds behind the reader, which
-    is right for a refill nobody is watching and wrong for a write somebody has
-    just asked for. A gap filled from a search, a premiere a tracker add wrote,
-    or a card's missing service answering on its panel is a single airing whose
-    reader expects to see it on the very next read — the search jumps to it and
-    the panel's answer redraws the card. With only the number moved, the read
-    that follows is handed the span from before the write. These are single
-    clicks, so the rebuild they cost is one month's, once.
-    """
-    _forget_spans(endpoint_key)
-    for key in [key for key in _span_memo if key[1] == endpoint_key]:
-        _span_memo.pop(key, None)
-
-
-def _span_memo_key(endpoint, settings, *, tz, start_date, end_date, prefs,
-                   **specs) -> tuple:
-    """Everything that shapes a span EXCEPT the viewer's marks. `specs` are the
-    viewer's filters (`vocab.active_specs`' keywords).
-
-    MARKS ARE THE ONE INPUT LEFT OUT, and leaving them out is the entire point:
-    they are applied after this, so a mark does not change what is memoised -
-    which is what lets the redraw that ANSWERS a mark hit the entry the page's
-    own read just filled. Putting them in the key would make every mark a miss,
-    and marking is the case this exists for.
-
-    EVERY PER-VIEWER NARROWING IS IN HERE BY NAME. The stored windows are shared
-    and viewer-independent; this is the first point at which one account's
-    answer differs from another's, so a key missing a dimension would serve one
-    viewer's filtered month to somebody who filtered differently. That is the
-    failure tests/calendar/test_resolve.py's TwoViewersOneWindowTests exists to
-    catch, and it is why `prefs` and the operator's own network list are both in
-    the key rather than assumed constant.
-    """
-    # THE OPERATOR'S HALF IS SPELLED OUT, NOT ASSUMED CONSTANT. The instance
-    # floor and the instance's source admission are applied at READ as well as at
-    # fill, precisely so that tightening or loosening either reaches windows
-    # already stored (see visible_records). A memo that left them out would
-    # defeat that promise for as long as its TTL, and the suite says so:
-    # test_cache.py's InstanceFloorAtReadTests change the floor between two reads
-    # and require the second to answer differently.
-    # ANYTHING ADDED TO THE READ PATH THAT `settings` DECIDES BELONGS HERE TOO.
-    # The floor is carried as `vocab.floor_specs` answers it — both media's, so a
-    # change to either retires every span — because that function is the only
-    # way a read consults the floor (narrow_for_viewer); test_span_memo.py holds
-    # every field it reads (vocab.FLOOR_FIELDS) to moving this key.
-    floor = (_hashable(vocab.floor_specs(settings, Media.SHOW)),
-             _hashable(vocab.floor_specs(settings, Media.MOVIE)),
-             tuple(sorted(calendar_resolve.instance_sources(settings) or ())))
-    return (
-        # WHICH DATABASE THIS CAME FROM. A memo is per PROCESS and the rows are
-        # per FILE, so a process re-pointed at another database would otherwise
-        # serve the first one's calendar out of the second.
-        db.generation(),
-        endpoint.key, str(tz), start_date.isoformat(), end_date.isoformat(),
-        # EVERY FILTER KEYWORD, from the one tuple naming them (vocab.SPEC_KEYS),
-        # so a dimension added there is in the key without being added here.
-        _hashable(vocab.complete_specs(specs)), floor, repr(prefs),
-    )
-
-
-def _hashable(specs: dict) -> tuple:
-    """A spec set as a key: every keyword in vocab.SPEC_KEYS' order, lists as
-    tuples."""
-    return tuple((key, tuple(value) if isinstance(value, list) else value)
-                 for key, value in ((key, specs[key]) for key in vocab.SPEC_KEYS))
-
-
-def _refresh_span_later(key, endpoint: Endpoint, settings, **kwargs) -> None:
-    """Rebuild one span behind whoever was just served the old one.
-
-    THE ONE IN FLIGHT PER KEY IS THE WHOLE GUARD. Every read of a stale span
-    would otherwise start its own rebuild of the same month — a busy page is
-    thirty requests — and they would all do the identical work while the reader
-    waited on a loop none of them had left alone. A key already being rebuilt is
-    simply not scheduled again; the refresh in flight will publish for everyone.
-
-    AND AT MOST TWO ACROSS THE PROCESS. A rebuild is seconds of pure Python, and
-    the GIL keeps that on the one core the event loop needs, so the cap is what
-    stops refreshes from becoming the thing readers wait behind. Anything turned
-    away here is picked up by the next read of that span, which is a moment away.
-
-    IT FILLS AS WELL AS ASSEMBLES (`allow_fetch=True`), and that is the point
-    rather than a detail. The fill is where the real seconds were — paced calls
-    to a provider — so leaving it on the reader's path would have moved the
-    cheap half of the work and left the expensive half exactly where it was. The
-    reader is answered from what is stored; going and getting what is NOT stored
-    happens behind them.
-
-    NOTHING IS AWAITED AND NOTHING IS RAISED AT THE CALLER. This is scheduled by
-    a request that has already been answered, so a failure must not reach it —
-    the stale span simply stays, and the next read schedules another attempt.
-    """
-    if key in _span_refreshing or len(_span_refreshing) >= _SPAN_REFRESH_LIMIT:
-        return
-    _span_refreshing.add(key)
-
-    async def _run():
-        try:
-            await _assembled_span(endpoint, settings, allow_fetch=True,
-                                  rebuild=True, **kwargs)
-        except Exception:
-            logger.exception("calendar span refresh failed for %s", endpoint.key)
-        finally:
-            _span_refreshing.discard(key)
-
-    asyncio.create_task(_run())
-
-
-def _span_groups(records: list[Record], first: date, last: date, covered: set[date],
-                 utc_start: date, utc_end: date) -> list[dict]:
-    """The cards a span's airings make (`group_records`) that could be drawn
-    inside it. Pure, for a worker thread (`_assembled_span`).
-
-    A WINDOW NOTHING HAS FILLED CONTRIBUTES NO AIRINGS of its own — what sits in
-    one is only what a search or a tracker wrote there, and a read that may not
-    fill serves it as the empty span it is — while every other stored listing of
-    an episode the span holds stays, at whatever date, because it can decide
-    where a card inside the span is drawn.
-
-    ONLY A CARD THAT COULD BE DRAWN INSIDE THE SPAN IS RESOLVED. A card is drawn
-    at one of its own listings' instants (its describing service's, or the time
-    it borrowed), and a zone moves an instant by less than a day — so a card none
-    of whose listings falls inside the span padded a day each side cannot land in
-    it. The windows a span reads hold up to a week either side of it, which for
-    one day was every card of the week resolved and thrown away: measured, a day
-    read resolved ~2,500 groups to draw ~350.
-    """
-    held = [record for record in records
-            if not first <= (day := record_utc_date(record)) < last
-            or window_start(day) in covered]
-    return [group for group in group_records(held)
-            if any(utc_start <= record_utc_date(listing) <= utc_end
-                   for listing in group["by_source"].values())]
-
-
-async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
-                          start_date: date, end_date: date, allow_fetch: bool, now, prefs,
-                          rebuild: bool = False, **specs):
-    """One span's items in air order, with nothing about the reader's marks in
-    them: (items, as_of, partial, filtered_out). `specs` are the viewer's
-    filters, `vocab.active_specs`' keywords.
-
-    SPLIT OUT OF `assemble_range` SO THAT IT CAN BE MEMOISED, and the split is
-    exactly where a viewer's marks first matter. Everything here - reading the
-    windows, resolving each group to the record this viewer sees, applying their
-    filters, rendering into their timezone - costs about two seconds on a busy
-    month (measured: 2,308 items over five windows, roughly half in
-    deserialising rows and half in resolving them). None of it depends on which
-    titles they are not watching, so redrawing a month because ONE mark changed
-    was paying for all of it a second time.
-
-    ONLY AN `allow_fetch=False` READ IS MEMOISED, OR SERVED FROM THE MEMO. Those
-    are the reads that redraw something already on screen - a mark's answer, a
-    view preference, a share page - where whatever is stored is by definition
-    what drew it. A read that may FILL is left alone in both directions: it is
-    the one that goes and gets new rows, and its answer is the fresh one
-    everybody else's memo is then cleared for.
-    """
-    specs = vocab.complete_specs(specs)
-    key = _span_memo_key(endpoint, settings, tz=tz, start_date=start_date,
-                         end_date=end_date, prefs=prefs, **specs)
-    # WHATEVER IS HERE IS WHAT THE READER GETS, and the rebuild happens after
-    # them. The first shape served only the cheap reads and left opening a month
-    # as slow as ever; the second made a filling read wait whenever the rows had
-    # moved, which on a live instance is most of the time, because a calendar
-    # WRITES while it reads — a month opened on stale windows fills them as its
-    # day blocks arrive. Measured on a real instance: marking 5s, switching
-    # endpoints 30s, settling only once the refresh finished.
-    #
-    # So nobody waits for a month twice. A span that is behind, or simply old, is
-    # still the answer — it is what the page in front of the reader was drawn
-    # from — and asking for it is what schedules the fresh one.
-    # `rebuild` IS THE REFRESHER SAYING "NOT YOU". Without it the background job
-    # asks the same question its own reader just asked, is handed the very entry
-    # it was scheduled to replace, and returns having done nothing — so the span
-    # never moves and every read forever schedules another refresh that does not
-    # happen. Found by watching the entry's generation stay at 0 while the
-    # endpoint's went to 1.
-    hit = None if rebuild else _span_memo.get(key)
-    if hit is not None:
-        age = time.monotonic() - hit[1]
-        current = _endpoint_generation.get(endpoint.key, 0)
-        if age < _SPAN_MEMO_TTL:
-            if hit[2] != current or age >= _SPAN_SOFT_AGE:
-                _refresh_span_later(key, endpoint, settings, tz=tz,
-                                    start_date=start_date, end_date=end_date,
-                                    now=now, prefs=prefs, **specs)
-            with span("calcache.memo_hit", items=len(hit[3]),
-                      behind=current - hit[2], age=int(age)):
-                # THE LIST IS COPIED AND THE ITEMS ARE NOT. `grouped` is built
-                # fresh by the caller and a caller may write onto ITS dicts
-                # (routes._count_visible puts a per-viewer count on each day), so
-                # the structure has to be per-request. An Item is a value nothing
-                # in app/ ever assigns to, so sharing one is safe - and copying
-                # two thousand of them would give back what this saves.
-                return list(hit[3]), hit[4], hit[5], hit[6]
-        _span_memo.pop(key, None)
-
     utc_start, utc_end = _local_span_utc_range(tz, start_date, end_date)
     windows = aligned_windows(utc_start, utc_end)
 
     # return_exceptions=True both lets a single window fail without aborting the
     # span and stops a still-running sibling fetch from surfacing as an
-    # "exception was never retrieved" warning.
-    # THE FIRST OF TWO AWAITED PHASES, which is what makes it worth its own span:
-    # a read_month slow HERE was waiting on Trakt, Simkl or the database, and one
-    # slow in the CPU phases below was blocking every other request while it
-    # worked.
+    # "exception was never retrieved" warning. THE FIRST OF TWO AWAITED PHASES,
+    # which is what makes it worth its own span: a read slow HERE was waiting on
+    # a service or the database, one slow below was the read itself.
     with span("calcache.load_windows", n=len(windows), fetch=allow_fetch):
         results = await asyncio.gather(
             *(ensure_window(endpoint, settings, start, allow_fetch=allow_fetch, now=now)
@@ -2035,7 +1219,6 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     as_of: int | None = None
     errored = 0
     incomplete = False
-    waiting = False
     first_error: SourceUnavailable | None = None
     for start, result in zip(windows, results):
         if isinstance(result, SourceUnavailable):
@@ -2053,23 +1236,15 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         if result.cached_at is not None:
             covered.add(start)
             as_of = result.cached_at if as_of is None else min(as_of, result.cached_at)
-        # THE WINDOW CARRIES ITS OWN VERDICT, and it is the only honest place for
-        # it: a source it names as asked but not as having answered was reached
-        # for at fill time and could not be read, which is the one thing this
-        # flag exists to say. Measuring today's sources against it instead — the
-        # shape this replaced — could not tell that apart from a window that
-        # simply predates a source, and so reported a failure nobody had.
-        # A window nobody filled (an uncached one on a public page) asked nothing
-        # and therefore stays quiet, rather than reporting every source missing.
-        # A SOURCE STILL WORKING ITS ANSWER OUT IS NOT A FAILURE either: the
-        # window waits on it (`_pending`) and says nothing — its answer arrives
-        # as a fill of its own, and the stats box counts the weeks it is owed.
+        # THE WINDOW CARRIES ITS OWN VERDICT: a source it names as asked but not
+        # as having answered was reached for and could not be read, which is the
+        # one thing this flag exists to say. A window nobody filled (an uncached
+        # one on a public page) asked nothing and stays quiet. A SOURCE STILL
+        # WORKING ITS ANSWER OUT IS NOT A FAILURE either: the window waits on it
+        # (`_pending`), and its answer arrives as a fill of its own.
         missing = set(result.asked) - set(result.sources)
-        owed = missing & pending_sources(endpoint.key, start)
-        if missing - owed:
+        if missing - pending_sources(endpoint.key, start):
             incomplete = True
-        if owed:
-            waiting = True
 
     if errored and errored == len(windows):
         # Every window failed and none had a cached copy: there is no degraded
@@ -2077,103 +1252,47 @@ async def _assembled_span(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         raise first_error
     partial = errored > 0 or incomplete
 
-    # THE SPAN'S LISTINGS, READ ONCE AND WHOLE, and both halves of that are the
-    # point. ONCE: windows are where a fill is decided, not where a card is —
-    # read window by window, one episode two services dated either side of a
-    # Monday drew as two cards. WHOLE: every other stored listing of each
-    # episode the span holds comes with it, at whatever date, because it is the
-    # same card and decides which day this viewer's card is drawn on
-    # (entries.read_span_whole).
-    # A WINDOW NOTHING HAS FILLED CONTRIBUTES NO AIRINGS of its own, exactly as
-    # when it was read by itself: what sits in one is only what a search or a
-    # tracker wrote there, and a read that may not fill serves it as the empty
-    # span it is. The second awaited phase.
+    # THE SPAN'S LISTINGS, READ ONCE AND WHOLE, and both halves are the point.
+    # ONCE: windows are where a fill is decided, not where a card is — read window
+    # by window, one episode two services dated either side of a Monday drew as
+    # two cards. WHOLE: every other stored listing of each episode the span holds
+    # comes with it, at whatever date, because it is the same card and decides
+    # which day this viewer's card is drawn on (query.read_rows). A WINDOW NOTHING
+    # HAS FILLED CONTRIBUTES NO LISTINGS of its own: what sits in one is only what
+    # a search or a tracker wrote there, and a read that may not fill serves it
+    # as the empty span it is.
+    # READ BY THE DAYS THE SPAN CAN DRAW, NOT BY THE WEEKS IT COVERS: a card is
+    # drawn at one of its own listings' instants, at most a day from the span in
+    # any zone (`_local_span_utc_range`), so the rows with a listing in those
+    # days are every row that can make a card here — read whole. A day read
+    # used to read its one or two whole weeks of rows to draw one day.
     first, last = windows[0], windows[-1] + timedelta(days=WINDOW_DAYS)
+    viewer = query.Viewer(endpoint, settings, prefs, tz, specs)
     with span("calcache.read", windows=len(windows)) as sp:
-        records = await entries.read_span_whole(endpoint.key, first, last)
-        sp.set(records=len(records))
-
-    # THE PHASES BELOW ARE PURE CPU, and they are timed separately because they
-    # scale with different things and are fixed in different places. The
-    # grouping is a sort plus a walk; the filter is per-viewer work over the
-    # cards' facts and the drawn cards' resolution; the render is per-entry
-    # object building and timezone arithmetic. The first two RUN ON A WORKER
-    # THREAD, so the event loop serves every other request while a month is
-    # built (`_span_groups`, `visible_records`) — the GIL is shared, so this
-    # costs the month nothing and gives the loop its turns.
-    with span("calcache.group", records=len(records)) as sp:
-        groups = await anyio.to_thread.run_sync(
-            _span_groups, records, first, last, covered, utc_start, utc_end)
-        sp.set(groups=len(groups))
-    placed_items, filtered_out = await placed(
-        groups, endpoint, tz=tz, prefs=prefs, settings=settings, **specs)
+        placed = await query.span(
+            viewer, utc_start, utc_end + timedelta(days=1), near=(utc_start, utc_end),
+            held=lambda day: not first <= day < last or window_start(day) in covered)
+        sp.set(cards=len(placed.views))
     # KEPT WHEN IT IS PLACED INSIDE THE SPAN, which is a question about the
     # CARD, not about any one listing: a card's other services may list it
     # outside the span, and a listing inside the span may belong to a card
     # placed outside it — which is then drawn there, once, and not here.
-    items = [item for item in placed_items
-             if start_date <= date.fromisoformat(item.air_date) <= end_date]
+    views = [view for view in placed.views
+             if start_date <= date.fromisoformat(view.air_date) <= end_date]
+    # Sorted on the LOCAL DAY first and the instant second. The two agree for
+    # anything converted through one timezone, but a date-only release is pinned
+    # to its own calendar date rather than to an offset from an instant — and a
+    # day's cards must be contiguous, or one day arrives in two pieces.
+    views.sort(key=lambda view: (view.air_date, view.air_ts))
+    return views, as_of, partial, placed.filtered_out
 
-    with span("calcache.trim", items=len(items)):
-        # Sorted on the LOCAL DAY first and the instant second. The two agree for
-        # anything converted through one timezone, but a date-only release is
-        # pinned to its own calendar date rather than to an offset from an
-        # instant — and groupby below needs each day's items contiguous, or one
-        # day arrives in two pieces and draws two headings for itself.
-        items.sort(key=lambda i: (i.air_date, i.air_ts))
 
-    # ONLY A READ THAT WAS ALLOWED TO FILL MAY WRITE, AND THIS ASYMMETRY IS THE
-    # WHOLE CORRECTNESS OF THE MEMO.
-    #
-    # A `allow_fetch=False` read is not merely cheaper — it can be SHORT. A window
-    # with nothing stored returns EMPTY to it rather than raising (see
-    # ensure_window), so such a read can legitimately produce a month with days
-    # missing from it and no `partial` flag to say so. Memoising that would let
-    # the first mark, share view or view toggle on a month nobody has opened yet
-    # publish an under-filled span, which the next page load — the read that
-    # would have gone and FILLED it — would then be served instead of filling.
-    # Caught by tests/calendar/test_routes.py's DayLayoutTests, where marking a
-    # title before the page was ever read left every day block empty.
-    #
-    # So: a read that may fill WRITES and reads; a read that may not only READS.
-    # The page load populates, everything cheap rides on it, and nothing that
-    # could be short ever gets in.
-    #
-    # A PARTIAL READ IS NOT KEPT EITHER. `partial` means a window had nothing
-    # stored AND its fetch failed. Keeping that would turn one service being
-    # briefly unreachable into five minutes of a month that stays wrong however
-    # often it is reloaded — and a reload is exactly how somebody expects to
-    # recover from it.
-    #
-    # NOR ONE WAITING ON A SOURCE'S ANSWER, for the same reload: the answer lands
-    # in seconds, and the read after it must draw it rather than be served this
-    # one while a rebuild runs behind it.
-    if partial or waiting or not allow_fetch:
-        return items, as_of, partial, filtered_out
-    # WHAT IS PAST THE HARD MAX GOES FIRST, ON EVERY WRITE, and none of it would go
-    # otherwise: an entry is only ever dropped when somebody reads that exact key,
-    # so a month nobody returns to holds its Items until something evicts it.
-    # Measured on real data, one All Episodes month view is ~35MB of the 37MB five
-    # endpoints cost between them — so reclaiming the dead ones is worth more than
-    # any plausible raising of the cap. It used to wait until the memo was FULL,
-    # which on a quiet instance that runs for weeks between restarts meant dead
-    # months held for all of them; a sweep of at most `_SPAN_MEMO_MAX` entries per
-    # write is nothing beside the assembly that write just paid for.
-    for dead in [k for k, v in _span_memo.items()
-                 if time.monotonic() - v[1] >= _SPAN_MEMO_TTL]:
-        _span_memo.pop(dead, None)
-    if key not in _span_memo and len(_span_memo) >= _SPAN_MEMO_MAX:
-        # THE OLDEST BY WHEN IT WAS BUILT, not by when its key first appeared,
-        # and the difference threw away the best entry first. The shell's
-        # whole-month span is written BEFORE the thirty day spans that follow it,
-        # and re-writing a key does not move it in a dict — so a month refreshed
-        # seconds ago still looked like the oldest thing held, and went while the
-        # days it had been read with stayed.
-        _span_memo.pop(min(_span_memo, key=lambda k: _span_memo[k][1]), None)
-    _span_memo[key] = (key, time.monotonic(),
-                       _endpoint_generation.get(endpoint.key, 0),
-                       list(items), as_of, partial, filtered_out)
-    return items, as_of, partial, filtered_out
+async def present(endpoint: Endpoint, settings, views, *, tz: ZoneInfo, prefs=None,
+                  **specs) -> list[Item]:
+    """`views` — a read's cards, placed and judged — as the Items their cards
+    draw: the drawn cards' words read for their own rows alone (query.present)."""
+    return await query.present(
+        query.Viewer(endpoint, settings, prefs, tz, vocab.complete_specs(specs)), views)
 
 
 class Exempting(NamedTuple):
@@ -2234,9 +1353,12 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
                          start_date: date, end_date: date,
                          not_watching_ids: set[str] | None = None,
                          allow_fetch: bool = True, now: int | None = None,
-                         prefs=None, **specs,
+                         prefs=None, drawn: bool = True, **specs,
                          ) -> tuple[list[dict], dict]:
     """Assemble one viewer's calendar for the local day span [start_date, end_date].
+
+    `drawn=False` answers with each card's identity and day alone (query.View) —
+    what a month's shell counts — and `present` draws the ones it shows.
 
     The single place the cache is turned into view-ready days. It reads ONLY the
     aligned windows that cover the span — not the whole month — normalizes ONLY
@@ -2307,9 +1429,14 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     those are per-request view concerns, not part of the data model returned.
     """
     specs = vocab.complete_specs(specs)
-    items, as_of, partial, filtered_out = await _assembled_span(
+    views, as_of, partial, filtered_out = await _span_views(
         endpoint, settings, tz=tz, start_date=start_date, end_date=end_date,
-        allow_fetch=allow_fetch, now=now, prefs=prefs, **specs)
+        allow_fetch=allow_fetch, now=now, prefs=prefs, specs=specs)
+    # DRAWN, OR KEYS AND DAYS ONLY: a month's shell states every day's count,
+    # chips and is-new marks, which a card's identity and day answer, and draws
+    # a few days' cards (`present`, for those).
+    items = (await query.present(query.Viewer(endpoint, settings, prefs, tz, specs), views)
+             if drawn else views)
 
     with span("calcache.group", items=len(items)):
 

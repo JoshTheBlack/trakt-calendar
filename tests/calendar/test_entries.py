@@ -23,10 +23,22 @@ from app.metadata import rows as title_rows
 from app.providers.base import Media, Record, Source
 from app.config import Settings
 from app.endpoints import get_endpoint
+from tests import support
 from tests.support import (episode_groups, listings, migrated_db, put_listing,
                            statements_per_transaction, title_groups)
 
 SHOWS = "shows"
+
+
+async def _stored_span(endpoint_key, first, after):
+    """Every listing of each episode row with one in [first, after), whole —
+    the rows a span's reader works from."""
+    from app import db
+    from app.calendar import query as _query
+
+    return await db.run(lambda conn: support._stored(
+        conn, endpoint_key, _query.read_rows(conn, endpoint_key, first=first, after=after)))
+
 # 2026-07-06 12:00Z, the start of the aligned window these are stored under.
 AIR = 1783425600.0
 
@@ -85,7 +97,7 @@ class RetentionTests(unittest.IsolatedAsyncioTestCase):
                           start=date(2026, 7, 13), now=self.new)
         await calendar_entries.sweep(now=self.new)
         self.assertEqual(len(await title_groups()), 1)
-        records, *_ = await calendar_entries.read_span(
+        records, *_ = await support.read_span(
             SHOWS, date(2026, 7, 13), date(2026, 7, 20))
         self.assertEqual([r.title for r in records], ["Still"])
 
@@ -326,7 +338,7 @@ class ASourceReportingUnchangedTests(unittest.IsolatedAsyncioTestCase):
     async def _fill(self, result, *, now, force=False):
         with patch("app.calendar.cache.fetch_window_records",
                    AsyncMock(return_value=result)):
-            return await calendar_cache.load_window(
+            return await support.load_window(
                 get_endpoint("shows"), self.settings, date(2026, 7, 6),
                 now=now, force=force)
 
@@ -367,7 +379,7 @@ class ASourceReportingUnchangedTests(unittest.IsolatedAsyncioTestCase):
         pass must not treat the span as overdue and ask again immediately."""
         await self._fill(([self._record()], ["trakt"], []), now=1000)
         await self._fill(([], [], ["trakt"]), now=999_999, force=True)
-        _answered, _asked, stored_at = await calendar_entries.span_coverage(
+        _answered, _asked, stored_at = await support.span_coverage(
             "shows", calendar_cache.window_start(date(2026, 7, 6)))
         self.assertEqual(stored_at, 999_999)
 
@@ -415,7 +427,7 @@ class EpisodeLevelTests(unittest.IsolatedAsyncioTestCase):
              {"number": 2, "title": "Sweet Vitriol", "runtime": 38, "rating": 8.4}],
             now=2000)
         self.assertEqual(written, 2)
-        records, *_ = await calendar_entries.read_span(
+        records, *_ = await support.read_span(
             SHOWS, date(2026, 7, 6), date(2026, 7, 13))
         self.assertEqual([(r.episode_title, r.runtime) for r in records],
                          [("Chikhai Bardo", 82), ("Sweet Vitriol", 38)])
@@ -429,7 +441,7 @@ class EpisodeLevelTests(unittest.IsolatedAsyncioTestCase):
         trakt_id = abs(hash("severance")) % 9999
         await calendar_entries.store_episodes(
             "trakt", trakt_id, "show", 1, [{"number": 1, "runtime": 82}], now=2000)
-        records, *_ = await calendar_entries.read_span(
+        records, *_ = await support.read_span(
             SHOWS, date(2026, 7, 6), date(2026, 7, 13))
         self.assertEqual(records[0].runtime, 82)
 
@@ -447,7 +459,7 @@ class EpisodeLevelTests(unittest.IsolatedAsyncioTestCase):
         await self._store(1)
         trakt_id = abs(hash("severance")) % 9999
         await calendar_entries.store_episodes("trakt", trakt_id, "show", 1, [], now=2000)
-        records, *_ = await calendar_entries.read_span(
+        records, *_ = await support.read_span(
             SHOWS, date(2026, 7, 6), date(2026, 7, 13))
         self.assertEqual(records[0].episode_title, "S01E01 title")
 
@@ -532,7 +544,7 @@ class ASiblingEndpointStillGetsItsRowsTests(unittest.IsolatedAsyncioTestCase):
 
     async def _fill(self, key, client, *, now, force=False):
         with patch("app.providers.simkl.transport.cdn_client", return_value=client):
-            await calendar_cache.load_window(
+            await support.load_window(
                 get_endpoint(key), self.settings,
                 calendar_cache.window_start(date(2026, 7, 8)), now=now, force=force)
         return len([listed for listed in await listings(key) if listed["source"] == "simkl"])
@@ -596,7 +608,7 @@ class ARefillDoesNotUndoTheEpisodeDrainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             await calendar_entries.owed_episodes("trakt", "trakt", 10, 3000), [],
             "a refill put an answered episode back on the owed list")
-        records, *_ = await calendar_entries.read_span(
+        records, *_ = await support.read_span(
             SHOWS, date(2026, 7, 6), date(2026, 7, 13))
         self.assertEqual(records[0].episode_title, "Chikhai Bardo")
         self.assertEqual(records[0].runtime, 82)
@@ -765,7 +777,7 @@ class AirningsWrittenWithoutAFeedTests(unittest.IsolatedAsyncioTestCase):
         the rows beside it."""
         written = await self._write([_record("halfman", 1, 1, AIR)])
         self.assertEqual(len(written), 1)
-        back, _asked, _answered, _at = await calendar_entries.read_span(
+        back, _asked, _answered, _at = await support.read_span(
             SHOWS, date(2026, 7, 6), date(2026, 7, 13))
         self.assertEqual([r.title for r in back], ["Halfman"])
         self.assertEqual(back[0].air_ts, AIR)
@@ -802,7 +814,7 @@ class AirningsWrittenWithoutAFeedTests(unittest.IsolatedAsyncioTestCase):
             SHOWS, calendar_cache.window_start(date(2026, 7, 6)),
             [_record("somethingelse", 1, 1, AIR)], 600, 2_000_000,
             sources=["trakt"], asked=["trakt"])
-        back, _asked, _answered, _at = await calendar_entries.read_span(
+        back, _asked, _answered, _at = await support.read_span(
             SHOWS, date(2026, 7, 6), date(2026, 7, 13))
         self.assertEqual(sorted(r.title for r in back),
                          ["Halfman", "Somethingelse"])
@@ -828,7 +840,7 @@ class AirningsWrittenWithoutAFeedTests(unittest.IsolatedAsyncioTestCase):
             SHOWS, calendar_cache.window_start(date(2026, 7, 6)),
             [_record("somethingelse", 1, 1, AIR)], 600, 3_000_000,
             sources=["trakt"], asked=["trakt"])
-        back, _asked, _answered, _at = await calendar_entries.read_span(
+        back, _asked, _answered, _at = await support.read_span(
             SHOWS, date(2026, 7, 6), date(2026, 7, 13))
         self.assertEqual([r.title for r in back], ["Somethingelse"])
 
@@ -882,7 +894,7 @@ class AServiceListsAnEpisodeOnceTests(unittest.IsolatedAsyncioTestCase):
         return sorted((listed["air_ts"], listed["from_search"]) for listed in await listings())
 
     async def _read(self):
-        return await calendar_entries.read_span_whole(
+        return await _stored_span(
             "shows/premieres", self.WEEK, self.WEEK + timedelta(days=7))
 
     async def test_a_read_draws_the_feeds_listing_and_not_the_searched_one(self):
@@ -963,7 +975,7 @@ class AReadCarriesWhatTheStoreKnowsTests(unittest.IsolatedAsyncioTestCase):
         await db.transaction(lambda conn: title_identity.settle(
             conn, Media.SHOW, {"tmdb": 258165, "trakt": 99, "trakt_slug": "a-premiere"},
             now=1001))
-        read, = await calendar_entries.read_span_whole(
+        read, = await _stored_span(
             "shows/premieres", self.WEEK, self.WEEK + timedelta(days=7))
         self.assertEqual(read.known_ids["trakt"], 99)
         self.assertEqual(read.known_ids["trakt_slug"], "a-premiere")

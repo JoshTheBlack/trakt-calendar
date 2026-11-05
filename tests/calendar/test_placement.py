@@ -86,7 +86,6 @@ class PlacementTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         migrated_db(type(self).__name__.lower())
         self.settings = Settings()
-        calendar_cache._forget_spans()
         self.assertEqual(calendar_resolve.instance_sources(self.settings), EVERY_SOURCE,
                          "the instance does not admit every service that lists a calendar")
 

@@ -16,9 +16,21 @@ from app import db
 from app.calendar import cache as calendar_cache, entries
 from app.metadata import rows as title_rows
 from app.providers.base import Media, Record, Source
+from tests import support
 from tests.support import DatabaseTestCase, listings, title_groups
 
 DAY = 1783540800.0  # 2026-07-08 20:00Z
+
+
+async def _stored_span(endpoint_key, first, after):
+    """Every listing of each episode row with one in [first, after), whole —
+    the rows a span's reader works from."""
+    from app import db
+    from app.calendar import query as _query
+
+    return await db.run(lambda conn: support._stored(
+        conn, endpoint_key, _query.read_rows(conn, endpoint_key, first=first, after=after)))
+
 WEEK = (date(2026, 7, 6), date(2026, 7, 13))
 
 
@@ -42,8 +54,8 @@ class TwoServicesOneEpisodeTests(DatabaseTestCase):
     async def test_a_tvdb_only_listing_and_a_tmdb_listing_of_one_episode_are_one_card(self):
         await store(listing(Source.TRAKT, {"trakt": 7, "tmdb": 900, "tvdb": 4321}),
                     listing(Source.SIMKL, {"simkl": 55, "tvdb": 4321}))
-        records, *_ = await entries.read_span("shows", *WEEK)
-        groups = calendar_cache.group_records(records)
+        records, *_ = await support.read_span("shows", *WEEK)
+        groups = support.grouped(records)
         self.assertEqual(len(groups), 1)
         self.assertEqual(set(groups[0]["by_source"]), {"trakt", "simkl"})
         self.assertTrue(groups[0]["key"].startswith("show:tmdb:900"))
@@ -53,8 +65,8 @@ class TwoServicesOneEpisodeTests(DatabaseTestCase):
         await store(listing(Source.TRAKT, {"trakt": 7, "tmdb": 900, "tvdb": 4321}))
         keys = {listed["title_key"] for listed in await listings()}
         self.assertEqual(keys, {"show:tmdb:900"})
-        records, *_ = await entries.read_span("shows", *WEEK)
-        self.assertEqual(len(calendar_cache.group_records(records)), 1)
+        records, *_ = await support.read_span("shows", *WEEK)
+        self.assertEqual(len(support.grouped(records)), 1)
 
     async def test_the_service_row_keeps_what_the_service_said(self):
         """The store knows the tmdb id; Simkl did not state it, and its row says
@@ -78,16 +90,16 @@ class TwoServicesOneEpisodeTests(DatabaseTestCase):
         airings = {listed["title_key"] for listed in await listings()}
         described = {group["title_key"] for group in await title_groups()}
         self.assertEqual((airings, described), ({"show:tmdb:900"}, {"show:tmdb:900"}))
-        records, *_ = await entries.read_span("shows", *WEEK)
+        records, *_ = await support.read_span("shows", *WEEK)
         self.assertEqual({group["key"].split("|")[0][:13]
-                          for group in calendar_cache.group_records(records)},
+                          for group in support.grouped(records)},
                          {"show:tmdb:900"})
 
     async def test_two_tmdb_titles_sharing_a_tvdb_id_stay_two_cards(self):
         await store(listing(Source.TRAKT, {"trakt": 7, "tmdb": 900, "tvdb": 4321}),
                     listing(Source.SIMKL, {"simkl": 55, "tmdb": 901, "tvdb": 4321}))
-        records, *_ = await entries.read_span("shows", *WEEK)
-        self.assertEqual(len(calendar_cache.group_records(records)), 2)
+        records, *_ = await support.read_span("shows", *WEEK)
+        self.assertEqual(len(support.grouped(records)), 2)
 
 
 class AFillThatReKeysTests(DatabaseTestCase):
@@ -122,8 +134,8 @@ class AFillThatReKeysTests(DatabaseTestCase):
         await store(listing(Source.TRAKT, {"trakt": 7, "tmdb": 900, "tvdb": 4321}))
         found = sorted((listed["source"], listed["title_key"]) for listed in await listings())
         self.assertEqual(found, [("simkl", "show:tmdb:900"), ("trakt", "show:tmdb:900")])
-        records, *_ = await entries.read_span("shows", *WEEK)
-        self.assertEqual(len(calendar_cache.group_records(records)), 1)
+        records, *_ = await support.read_span("shows", *WEEK)
+        self.assertEqual(len(support.grouped(records)), 1)
 
 
 class AReadHoldsTheWholeEpisodeTests(DatabaseTestCase):
@@ -136,9 +148,9 @@ class AReadHoldsTheWholeEpisodeTests(DatabaseTestCase):
         later = (date(2026, 7, 13), date(2026, 7, 20))
         await store(listing(Source.TRAKT, {"trakt": 7, "tmdb": 900, "tvdb": 4321},
                             air_ts=DAY + 6 * 86400), span=later)
-        records = await entries.read_span_whole("shows", *WEEK)
+        records = await _stored_span("shows", *WEEK)
         self.assertEqual({str(r.source) for r in records}, {"simkl", "trakt"})
-        self.assertEqual(len(calendar_cache.group_records(records)), 1)
+        self.assertEqual(len(support.grouped(records)), 1)
 
 
 class EnrichmentThatTeachesAHigherIdTests(DatabaseTestCase):
