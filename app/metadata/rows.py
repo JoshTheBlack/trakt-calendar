@@ -737,7 +737,6 @@ def _update_enriched_sql(source: str) -> str:
     rather than given another entry's answer."""
     columns = [name for name in _ENRICHED_COLUMNS if groups.has(tables.TITLES, source, name)]
     at = {name: i for i, name in enumerate(_ENRICHED_COLUMNS, start=1)}
-    learned, stated = len(_ENRICHED_COLUMNS) + 1, len(_ENRICHED_COLUMNS) + 2
     clock = groups.spelled(ceiling_clock(tables.TITLES, source, dict.fromkeys(columns), new=":now"),
                     tables.TITLES, source)
     table = tables.TITLES
@@ -745,11 +744,41 @@ def _update_enriched_sql(source: str) -> str:
         f"UPDATE {table} SET "
         + ", ".join(f"{source}_{name} = json_extract(j.value, '$[{at[name]}]')"
                     for name in columns)
-        + f", {source}_ids_json = json_patch(json_extract(j.value, '$[{learned}]'), "
-        f"{table}.{source}_ids_json), {source}_enriched = 1, {source}_fetched_at = {clock}, "
-        f"{source}_failed_at = NULL, {source}_fail_count = 0 "
-        f"FROM json_each(:rows) j WHERE {table}.title_key = json_extract(j.value, '$[0]') "
-        f"AND {table}.{source}_id = json_extract(j.value, '$[{stated}]')")
+        + f", {source}_ids_json = {_patched_ids(source, table)}, {source}_enriched = 1, "
+        f"{source}_fetched_at = {clock}, {source}_failed_at = NULL, {source}_fail_count = 0 "
+        f"FROM json_each(:rows) j WHERE {_answered_by(source, table)}")
+
+
+# Where in an answer's row (`_enrichment_row`, then the entry) the learned ids
+# and the entry it is for sit.
+_LEARNED, _STATED = len(_ENRICHED_COLUMNS) + 1, len(_ENRICHED_COLUMNS) + 2
+
+
+def _patched_ids(source: str, table: str) -> str:
+    """SQL: the group's ids once an answer (`j`) is written — what the UPDATE
+    sets, and what the settle after it is planned from (`_settlings_sql`), in
+    one spelling so the two cannot disagree."""
+    return f"json_patch(json_extract(j.value, '$[{_LEARNED}]'), {table}.{source}_ids_json)"
+
+
+def _answered_by(source: str, table: str) -> str:
+    """SQL: the answer (`j`) is for this group — its title's key, and the entry
+    the group must still be."""
+    return (f"{table}.title_key = json_extract(j.value, '$[0]') "
+            f"AND {table}.{source}_id = json_extract(j.value, '$[{_STATED}]')")
+
+
+def _settlings_sql(source: str) -> str:
+    """Every title a pass's answers (`:rows`) name, as the UPDATE leaves it: its
+    key, media, this service's ids — patched where an answer is for its group —
+    and the entry. One row, read BEFORE the lock (`apply_enrichment_many`)."""
+    table = tables.TITLES
+    return (f"SELECT json_group_array(json_array({table}.title_key, {table}.media, "
+            f"CASE WHEN j.value IS NULL THEN {table}.{source}_ids_json "
+            f"ELSE {_patched_ids(source, table)} END, {table}.{source}_id)) "
+            f"FROM {table} LEFT JOIN json_each(:rows) j ON {_answered_by(source, table)} "
+            f"WHERE {table}.title_key IN (SELECT json_extract(value, '$[0]') "
+            f"FROM json_each(:rows))")
 
 
 # Where each answered entry's group is: its title's key, through `service_ids`
@@ -840,9 +869,18 @@ async def apply_enrichment(source: str, service_id: int, media: str, fields: dic
     await apply_enrichment_many(source, [(service_id, media, fields)], now)
 
 
+# A PASS'S ANSWERS ARE WRITTEN IN BOUNDED TURNS of this many titles: every write
+# in the process waits its turn behind the one writing (app/db.py's
+# `_writer_queue`), and the Simkl drain's whole pass in one turn held the lock
+# 1.30-1.94 s beside a restart's refills (MEASURED, a harness copy in a browser
+# pass) — the settle inside it, and its reads, as well as the update.
+ENRICHMENT_TURN = 50
+
+
 async def apply_enrichment_many(source: str, items, now: int) -> int:
-    """The same write for many titles, in ONE transaction of a fixed number of
-    statements, however many there are. Returns how many answers were handed in.
+    """The same write for many titles, in bounded turns (`ENRICHMENT_TURN`) of a
+    fixed number of statements each, however many there are. Returns how many
+    answers were handed in.
 
     FOR THE REBUILD as well as the fetch: titles whose answers are already stored
     and whose groups have not been given them, which happens in bulk.
@@ -862,6 +900,11 @@ async def apply_enrichment_many(source: str, items, now: int) -> int:
     stored titles in that state, each one a card that could not join another
     service's listing of the same show. Settling the group's ids against its key
     re-keys the title at the moment it learns enough to, everywhere it is held.
+    THE SETTLE IS DECIDED BEFORE THE LOCK (db.transaction's `prepare`): the ids
+    each group will hold once the update is written are read by the update's own
+    expression (`_settlings_sql`), the settle planned from them
+    (identity.plan_settles), and only the update and the settle's writes are made
+    under the lock.
     """
     items = list(items)
     # One answer per title: a pass names each once, and should one arrive twice
@@ -876,27 +919,36 @@ async def apply_enrichment_many(source: str, items, now: int) -> int:
     targets = sorted(((str(key), str(media), str(own)) for key, media, own
                       in json.loads(found or "[]") if (str(own), str(media)) in answers),
                      key=lambda target: (order[(target[2], target[1])], target[0]))
-    if not targets:
-        return len(items)
-    written = json.dumps([[key, *answers[(own, media)], own] for key, media, own in targets])
-    ids_column = f"{source}_ids_json"
-
-    def _work(conn) -> None:
-        conn.execute(_update_enriched_sql(source), {"rows": written, "now": now})
-        (rows,) = conn.execute(
-            f"SELECT json_group_array(json_array(title_key, media, {ids_column}, {source}_id)) "
-            f"FROM {tables.TITLES} WHERE title_key IN (SELECT value FROM json_each(?))",
-            (json.dumps(sorted({key for key, _m, _o in targets})),)).fetchone()
-        by_key = {str(key): (media, ids_json, own) for key, media, ids_json, own
-                  in json.loads(rows)}
-        identity.settle_many(conn, [
-            identity.Settling(str(media), json.loads(ids_json or "{}"), key,
-                              identity.per_source_key(source, own))
-            for key in dict.fromkeys(key for key, _m, _o in targets) if key in by_key
-            for media, ids_json, own in (by_key[key],) if own is not None], now=now)
-
-    await db.transaction(_work)
+    for at in range(0, len(targets), ENRICHMENT_TURN):
+        turn = json.dumps([[key, *answers[(own, media)], own]
+                           for key, media, own in targets[at:at + ENRICHMENT_TURN]])
+        await db.transaction(
+            lambda conn, settles, turn=turn: _write_enrichment(conn, source, turn, settles, now),
+            prepare=lambda conn, turn=turn: _plan_enrichment(conn, source, turn, now))
     return len(items)
+
+
+def _plan_enrichment(conn: db.Connection, source: str, written: str,
+                     now: int) -> identity.SettlePlan:
+    """The settle a turn of answers (`written`, `_update_enriched_sql`'s rows)
+    makes once its update is written — reads only — each title in its answer's
+    order, which is the order a settle decides them in."""
+    (rows,) = conn.execute(_settlings_sql(source), {"rows": written}).fetchone()
+    # A PATCHED GROUP'S IDS ARRIVE AS AN OBJECT, an unpatched one's as text:
+    # json_patch's answer is JSON to SQLite, and json_array nests it as such.
+    by_key = {str(key): (media, ids if isinstance(ids, dict) else json.loads(ids or "{}"), own)
+              for key, media, ids, own in json.loads(rows or "[]")}
+    return identity.plan_settles(conn, [
+        identity.Settling(str(media), ids, key, identity.per_source_key(source, own))
+        for key in dict.fromkeys(str(row[0]) for row in json.loads(written)) if key in by_key
+        for media, ids, own in (by_key[key],) if own is not None], now=now)
+
+
+def _write_enrichment(conn: db.Connection, source: str, written: str,
+                      settles: identity.SettlePlan, now: int) -> None:
+    """A turn of answers written, and the settle `_plan_enrichment` decided."""
+    conn.execute(_update_enriched_sql(source), {"rows": written, "now": now})
+    settles.apply(conn)
 
 
 async def _service_titles(source: str, id_namespace: str, media: tuple[str, ...] | None, *,

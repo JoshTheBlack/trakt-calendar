@@ -777,11 +777,12 @@ async def drain(settings, *, now: int | None = None) -> int:
     `_writer_queue`), a viewer's own included. MEASURED on a copy of the
     development database, draining a backlog of TMDB titles at its six hundred a
     minute: 3,700 turns in 65 s of passes, 57 a second, and a filter save went
-    from 0.36 s between passes to 0.52 s during one. Now a pass's answers are one
-    transaction of a fixed number of statements (descriptions.store_many) and its
-    dequeues and failures another, so they reach the store together once the
-    pass has asked them all — and a pass a restart interrupts has written
-    nothing: its rows are still queued, and the next pass asks them again.
+    from 0.36 s between passes to 0.52 s during one. Now a pass's answers are filed
+    once the pass has asked them all, in a few bounded turns of a fixed number of
+    statements each (descriptions.store_many — one turn for the whole pass held
+    the lock 1.3–1.6 s on the development server's restart), and its dequeues and
+    failures in one more — and a pass a restart interrupts before it files has
+    written nothing: its rows are still queued, and the next pass asks them again.
     """
     ts = db.now() if now is None else now
     askable = dict(_askable(settings))
@@ -857,9 +858,9 @@ async def drain(settings, *, now: int | None = None) -> int:
         try:
             filed = await descriptions.store_many([found for _e, _r, found in answered],
                                                   tz=ZoneInfo(settings.timezone))
-        # THE PASS'S WRITE FAILED AS A WHOLE, and each answer in it with it: their
-        # entries go, as a fault's does, so a broken write is not retried every
-        # pass, and a view queues each again while it is still due.
+        # A TURN OF THE PASS'S WRITE FAILED, the turns before it written: every
+        # answer's entry goes, as a fault's does, so a broken write is not
+        # retried every pass, and a view queues each again while it is still due.
         except Exception:
             logger.warning("title store: a refresh pass could not file its %d answer(s)",
                            len(answered), exc_info=True)

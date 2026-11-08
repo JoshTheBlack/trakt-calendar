@@ -117,7 +117,16 @@ waiting 29.7 s — so a pass looks up first and writes its batch once
 `metadata/refresh.py`'s `drain`, files every answer through
 `descriptions.store_many` — `plan` decides each answer as if the ones before it had
 been written, `apply` writes them in a fixed count — and takes its entries off the
-queue in one more). `tests/support.py`'s `statements_per_transaction` holds
+queue in one more). AND A BATCH IS WRITTEN IN BOUNDED TURNS, each a transaction
+of that fixed count, planned in its own turn (`descriptions.turns`:
+`TURN_ANSWERS` / `TURN_ROWS`; `rows.ENRICHMENT_TURN`, whose settle is planned
+before its lock from the ids its update leaves, `rows._settlings_sql`): one turn
+for a whole pass held the lock 1.3–1.6 s on the development server's restart
+(316 and 257 answers) and 1.3–1.9 s for the Simkl drain's batch, and every other
+write waited behind it. A turn is never planned ahead of its turn — a write
+between would leave it filing rows under a key a re-key has retired. The commit
+that crosses SQLite's 1,000-page WAL mark also runs its checkpoint, 0.07–0.33 s
+(MEASURED), inside whichever writer's turn crosses it. `tests/support.py`'s `statements_per_transaction` holds
 each writer to the same count for ten rows as for a hundred
 (tests/calendar/test_write_statements.py, tests/metadata/test_write_statements.py,
 tests/calendar/test_enrich.py's `APassWritesItsBatchOnceTests`), the retention

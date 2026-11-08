@@ -49,6 +49,29 @@ class ADescriptionsStatementsDoNotGrowWithItsSeasonTests(DatabaseTestCase):
                              for g in await season_groups()), 30)
 
 
+class APassIsCutIntoTurnsTests(DatabaseTestCase):
+    """descriptions.turns: in the order given, at most TURN_ANSWERS answers a
+    turn and as many as keep its rows under TURN_ROWS."""
+
+    @staticmethod
+    def _answer(episodes: int) -> descriptions.Answer:
+        return descriptions.Answer("tmdb", "show", "1", {"episodes": [{}] * episodes}, 1)
+
+    def test_answers_and_rows_both_bound_a_turn(self):
+        with (mock.patch.object(descriptions, "TURN_ANSWERS", 3),
+              mock.patch.object(descriptions, "TURN_ROWS", 20)):
+            sizes = [len(turn) for turn in descriptions.turns(
+                [self._answer(1) for _ in range(7)])]
+            self.assertEqual(sizes, [3, 3, 1])
+            heavy = descriptions.turns([self._answer(8), self._answer(8), self._answer(30),
+                                        self._answer(1)])
+        self.assertEqual([[len(a.answer["episodes"]) for a in turn] for turn in heavy],
+                         [[8, 8], [30], [1]])
+
+    def test_nothing_is_no_turn(self):
+        self.assertEqual(descriptions.turns([]), [])
+
+
 class AnEnrichmentPassesStatementsDoNotGrowWithItsAnswersTests(DatabaseTestCase):
 
     async def _listed(self, ids: range) -> None:
@@ -72,6 +95,16 @@ class AnEnrichmentPassesStatementsDoNotGrowWithItsAnswersTests(DatabaseTestCase)
             "AND simkl_network = 'Tokyo MX'"),
             33)
 
+    async def test_a_pass_is_written_in_bounded_turns(self):
+        await self._listed(range(1, 11))
+        with mock.patch.object(title_rows, "ENRICHMENT_TURN", 4):
+            counted = await self._answer(range(1, 11))
+            one = await self._answer(range(1, 2))
+        self.assertEqual(len(counted), 3)
+        self.assertEqual(set(counted), set(one))
+        self.assertEqual(await db.fetch_value(
+            "SELECT COUNT(*) FROM titles WHERE simkl_enriched = 1"), 10)
+
     async def test_an_answer_still_teaches_its_title_the_ids_it_learned(self):
         """Its rows found by one read before the write, the answer is written by
         rowid — and the title is re-keyed by what it learned, in the same write."""
@@ -80,6 +113,21 @@ class AnEnrichmentPassesStatementsDoNotGrowWithItsAnswersTests(DatabaseTestCase)
             "simkl", [(1, "show", {"ids": {"simkl": 1, "tvdb": 4321}})], db.now())
         self.assertEqual([listed["title_key"] for listed in await listings()],
                          ["show:tvdb:4321"])
+
+    async def test_every_turn_teaches_its_titles_the_ids_they_learned(self):
+        """The settle is planned before each turn's lock from the ids the turn's
+        update leaves — every title of every turn re-keyed, the ids it already
+        held kept beside the ones it learned."""
+        await self._listed(range(1, 6))
+        with mock.patch.object(title_rows, "ENRICHMENT_TURN", 2):
+            await title_rows.apply_enrichment_many(
+                "simkl", [(n, "show", {"ids": {"simkl": n, "tvdb": 4320 + n}})
+                          for n in range(1, 6)], db.now())
+        self.assertEqual(sorted(listed["title_key"] for listed in await listings()),
+                         [f"show:tvdb:{4320 + n}" for n in range(1, 6)])
+        held = json.loads(await db.fetch_value(
+            "SELECT simkl_ids_json FROM titles WHERE title_key = 'show:tvdb:4323'"))
+        self.assertEqual(held, {"simkl": 3, "tvdb": 4323})
 
     async def test_a_row_whose_id_moved_after_it_was_found_is_left_alone(self):
         await self._listed(range(1, 2))
@@ -125,9 +173,10 @@ class _Port:
 
 
 class ARefreshPassesStatementsDoNotGrowWithItsAnswersTests(DatabaseTestCase):
-    """A pass asks every row it takes, then files every answer in one transaction
-    and takes its entries off the queue — marking the rows of those that failed —
-    in one more (refresh.drain)."""
+    """A pass asks every row it takes, then files its answers in bounded turns
+    (descriptions.turns), each a transaction of a fixed number of statements, and
+    takes its entries off the queue — marking the rows of those that failed — in
+    one more (refresh.drain)."""
 
     async def asyncSetUp(self):
         await super().asyncSetUp()
@@ -136,7 +185,7 @@ class ARefreshPassesStatementsDoNotGrowWithItsAnswersTests(DatabaseTestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
-    async def _pass(self, ids: range) -> list[int]:
+    async def _pass(self, ids: range, *, turn: int = 1_000) -> list[int]:
         for n in ids:
             # Described already, so a failure has rows to mark.
             await descriptions.store("tmdb", "show", str(n), _answer("tmdb", str(n), 1),
@@ -146,19 +195,36 @@ class ARefreshPassesStatementsDoNotGrowWithItsAnswersTests(DatabaseTestCase):
             "SELECT 'tmdb', 'show', json_extract(value, '$[0]'), json_extract(value, '$[1]'), "
             "1, 'viewed' FROM json_each(?)",
             (json.dumps([[str(n), season] for n in ids for season in (refresh.TITLE, 1)]),))
-        with statements_per_transaction() as counted:
+        with (mock.patch.object(descriptions, "TURN_ANSWERS", turn),
+              mock.patch.object(descriptions, "TURN_ROWS", 1_000_000),
+              statements_per_transaction() as counted):
             refreshed = await refresh.drain(SimpleNamespace(timezone="UTC"), now=2)
         self.assertEqual(refreshed, 2 * sum(1 for n in ids if n % 3))
-        self.assertEqual(len(counted), 2, "one write for the answers, one for the entries")
         return counted
 
-    async def test_a_pass_of_thirty_costs_what_a_pass_of_three_does(self):
-        self.assertEqual(await self._pass(range(1, 4)), await self._pass(range(4, 34)))
+    async def _settled(self) -> None:
         self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM metadata_refresh"), 0)
         self.assertEqual(sum(g["fail_count"] == 1 for g in await title_groups()), 11)
         self.assertEqual(sum(g["season"] == 1 and g["fail_count"] == 1
                              for g in await season_groups()), 11)
         self.assertEqual(sum(g["season"] == 2 for g in await season_groups()), 22)
+
+    async def test_a_turn_of_thirty_costs_what_a_turn_of_three_does(self):
+        three, thirty = await self._pass(range(1, 4)), await self._pass(range(4, 34))
+        self.assertEqual(len(three), 2, "one write for the answers, one for the entries")
+        self.assertEqual(three, thirty)
+        await self._settled()
+
+    async def test_a_pass_is_filed_in_bounded_turns(self):
+        """Forty answers, four to a turn: ten turns, each no more statements than
+        a turn holding every kind of answer, then the entries."""
+        one_turn = await self._pass(range(34, 37))
+        counted = await self._pass(range(1, 31), turn=4)
+        self.assertEqual(len(counted), 40 // 4 + 1)
+        self.assertTrue(all(count <= one_turn[0] for count in counted[:-1]), counted)
+        self.assertEqual(counted[-1], one_turn[-1])
+        self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM metadata_refresh"), 0)
+        self.assertEqual(sum(g["season"] == 2 for g in await season_groups()), 20 + 2)
 
 
 class APassThatCannotFileAnAnswerTests(DatabaseTestCase):

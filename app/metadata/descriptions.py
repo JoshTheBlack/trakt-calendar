@@ -41,7 +41,7 @@ from datetime import date, datetime, timezone
 from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
-from .. import db
+from .. import db, perftrace
 from ..media import artwork
 from ..providers import season as season_rules
 from ..providers.base import Media, Video, VideoKind, genre_label, status_label
@@ -1006,8 +1006,12 @@ def apply(conn: db.Connection, planned: Planned) -> list[Written | None | Except
 
     EVERY GROUP IS FILED UNDER THE KEY ITS TITLE ANSWERS TO ONCE THE BATCH IS
     DONE (identity.settle_many says why), and its picture with it — the order a
-    calendar fill writes in (app/metadata/__init__.py's `write_records`)."""
-    planned.settles.apply(conn)
+    calendar fill writes in (app/metadata/__init__.py's `write_records`).
+
+    ONE DEBUG LINE SAYS WHERE THE HOLD WENT (perftrace.Laps), as a calendar
+    store's does."""
+    laps = perftrace.Laps()
+    planned.settles.apply(conn, laps=laps)
     keys = [found.key if found is not None else None for found in planned.settles.identities]
 
     def final(settled: int, fallback: str) -> str:
@@ -1017,6 +1021,7 @@ def apply(conn: db.Connection, planned: Planned) -> list[Written | None | Except
                                        final(settled, fallback))
                              for source, media, own, old, settled, fallback in planned.moves],
                       now=planned.now)
+    laps.lap("moves")
     for source, written in planned.titles.items():
         names = [name for name in _WRITTEN if groups.has(tables.TITLES, source, name)]
         conn.execute(_described_sql(source, names), {
@@ -1024,17 +1029,20 @@ def apply(conn: db.Connection, planned: Planned) -> list[Written | None | Except
                                  *(row[name] for name in names)] for _s, _f, row in written]),
             "keys": json.dumps([final(settled, fallback) for settled, fallback, _r in written]),
             "now": planned.now})
+    laps.lap("titles")
     rows.file_ids(conn, [[source, media, spelling, own, final(settled, fallback)]
                      for source, media, spelling, own, settled, fallback in planned.created])
     artwork.file_sightings(conn, [
         (media, identity.tmdb_of(key), key, source, url)
         for settled, fallback, media, source, url in planned.sightings
         for key in (final(settled, fallback),)], planned.now)
+    laps.lap("ids and pictures")
     for source, written in planned.seasons.items():
         conn.execute(_season_upsert_sql(source, _SEASON_WRITES, _SEASON_REWRITES), {
             "rows": json.dumps([_season_row(source, _SEASON_WRITES, final(settled, fallback),
                                             season, values, planned.now)
                                 for settled, fallback, season, values in written])})
+    laps.lap("seasons")
     for source, written in planned.episodes.items():
         names = rows.episode_written(source, _EPISODE_WRITES)
         conn.execute(rows.episode_upsert_sql(source, _EPISODE_WRITES, _EPISODE_REWRITES), {
@@ -1042,14 +1050,22 @@ def apply(conn: db.Connection, planned: Planned) -> list[Written | None | Except
                                  str(Media.SHOW), season, number,
                                  *(values[name] for name in names), planned.now]
                                 for settled, fallback, season, number, values in written])})
+    laps.lap("episodes")
     for source, written in planned.listed.items():
         conn.execute(_season_upsert_sql(source, _LISTED_SEASON_WRITES, _LISTED_SEASON_REWRITES), {
             "rows": json.dumps([_season_row(source, _LISTED_SEASON_WRITES,
                                             final(settled, fallback), season, values, planned.now)
                                 for settled, fallback, season, values in written])})
+    laps.lap("season lists")
     for source, written in planned.named.items():
         write_named(conn, source, [(final(settled, fallback), own, season)
                                    for settled, fallback, own, season in written])
+    laps.lap("named")
+    logger.debug(
+        "description store held the lock %.3f s for %d answer(s) — %d title, %d season, "
+        "%d episode, %d listed row(s): %s", laps.total, len(planned.filed),
+        sum(map(len, planned.titles.values())), sum(map(len, planned.seasons.values())),
+        sum(map(len, planned.episodes.values())), sum(map(len, planned.listed.values())), laps)
     return [Written(final(found.settled, found.fallback), found.previous_key, found.poster,
                     found.previous_poster, found.ids, found.previous_ids)
             if isinstance(found, _Filed) else found
@@ -1564,17 +1580,62 @@ async def store(source: str, media: str, own_id: Any, answer: Mapping[str, Any],
     return filed
 
 
+# A PASS IS FILED IN BOUNDED TURNS: at most `TURN_ANSWERS` answers, and as many
+# more as keep the rows a turn writes — a title, a season, each episode, each
+# season its list names — under `TURN_ROWS`. Every write in the process waits
+# its turn behind the one writing (app/db.py's `_writer_queue`), deciding
+# included, and one pass in one turn grew with the pass: MEASURED on the
+# development server's restart, a pass of 316 answers held the lock 1.34 s and
+# one of 257 1.62 s, and on a harness copy 266 TMDB answers (5,804 episode rows)
+# took 0.71 s a turn; 25 answers a turn, 33 ms (median) and 1,141 rows at most.
+TURN_ANSWERS = 25
+TURN_ROWS = 1_000
+
+
+def _rows_of(item: Answer) -> int:
+    """How many rows filing `item` writes, near enough to bound a turn by: its
+    title, its season, each of the season's episodes, each season its list
+    names."""
+    listed = item.seasons if item.seasons is not None else item.answer.get("seasons")
+    return 2 + len(item.answer.get("episodes") or ()) + len(listed or ())
+
+
+def turns(answers: list[Answer]) -> list[list[Answer]]:
+    """`answers` in the order given, cut into the turns `store_many` files them
+    in (`TURN_ANSWERS`, `TURN_ROWS`); an answer bigger than a turn is a turn of
+    its own."""
+    out: list[list[Answer]] = []
+    weight = 0
+    for item in answers:
+        rows_of = _rows_of(item)
+        if not out or len(out[-1]) >= TURN_ANSWERS or weight + rows_of > TURN_ROWS:
+            out.append([])
+            weight = 0
+        out[-1].append(item)
+        weight += rows_of
+    return out
+
+
 async def store_many(answers: Iterable[Answer], *, tz: ZoneInfo
                      ) -> list[Written | None | Exception]:
-    """`write_many` in one transaction of its own, every read and decision made
-    before it takes the write lock (`plan`, as db.transaction's `prepare`) — a
-    refresh pass's answers in one turn of the writer queue, rather than a
-    transaction per answer."""
-    answers = list(answers)
-    if not answers:
-        return []
-    now = db.now()
-    return await db.transaction(apply, prepare=lambda conn: plan(conn, answers, tz=tz, now=now))
+    """`write_many` in bounded turns (`turns`), each a transaction of its own
+    with every read and decision made before it takes the write lock (`plan`,
+    as db.transaction's `prepare`) — so a refresh pass's answers are a handful
+    of short turns of the writer queue, not a transaction per answer, nor one
+    turn as long as the pass.
+
+    EACH TURN IS PLANNED IN ITS OWN TURN, never ahead: a plan names the key a
+    title is filed under, and a write landing between a plan and its turn — a
+    calendar store re-keying the title — would leave it filing rows under a key
+    nothing answers to. Turn by turn, every answer is filed exactly as if the
+    ones before it had been written (`plan`), which is what one turn promised.
+    A turn that fails raises, and the turns before it stay written."""
+    out: list[Written | None | Exception] = []
+    for turn in turns(list(answers)):
+        now = db.now()
+        out.extend(await db.transaction(
+            apply, prepare=lambda conn, turn=turn, now=now: plan(conn, turn, tz=tz, now=now)))
+    return out
 
 
 async def stored(source: str, media: str, own_id: Any, season: int | None, *,
