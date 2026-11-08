@@ -44,7 +44,7 @@ import weakref
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, NamedTuple, TypeVar
 
 import anyio.to_thread
 
@@ -283,8 +283,69 @@ async def run(fn: Callable[[sqlite3.Connection], T]) -> T:
     return await anyio.to_thread.run_sync(lambda: fn(connection()))
 
 
+class Decided(NamedTuple):
+    """What a `prepare` decided outside the writer queue (`decide`), and every
+    read it made to decide it: (statement, parameters, the rows it returned)."""
+    value: Any
+    reads: tuple
+
+
+class _Fetched:
+    """A statement's rows, read to the end, as a cursor hands them out."""
+
+    def __init__(self, rows: list):
+        self._rows, self._at = rows, 0
+
+    def fetchone(self):
+        if self._at >= len(self._rows):
+            return None
+        self._at += 1
+        return self._rows[self._at - 1]
+
+    def fetchall(self) -> list:
+        rest, self._at = self._rows[self._at:], len(self._rows)
+        return rest
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+
+class _Recording:
+    """A connection whose every statement is read to its last row and kept —
+    for a `prepare`, which only reads (`transaction` says so)."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+        self.reads: list[tuple[str, Any, list]] = []
+
+    def execute(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> _Fetched:
+        rows = self._conn.execute(sql, params).fetchall()
+        self.reads.append((sql, params, rows))
+        return _Fetched(rows)
+
+    def __getattr__(self, name: str):
+        return getattr(self._conn, name)
+
+
+async def decide(prepare: Callable[[sqlite3.Connection], T]) -> Decided:
+    """`prepare(conn)` on a worker thread, outside the writer queue, every read
+    it makes kept — for a `transaction` given it as `decided`, which uses the
+    decision in its turn when those reads still read the same."""
+    def _work() -> Decided:
+        recording = _Recording(connection())
+        return Decided(prepare(recording), tuple(recording.reads))
+    return await anyio.to_thread.run_sync(_work)
+
+
+def _reads_the_same(conn: sqlite3.Connection, reads: tuple) -> bool:
+    """Whether every read a decision was made from returns the same rows now,
+    stopping at the first that does not."""
+    return all(conn.execute(sql, params).fetchall() == rows for sql, params, rows in reads)
+
+
 async def transaction(fn: Callable[..., T], *,
-                      prepare: Callable[[sqlite3.Connection], Any] | None = None) -> T:
+                      prepare: Callable[[sqlite3.Connection], Any] | None = None,
+                      decided: Decided | None = None) -> T:
     """Run `fn(conn)` inside BEGIN IMMEDIATE / COMMIT, rolling back on any error.
 
     IMMEDIATE rather than DEFERRED takes the write lock up front, so a
@@ -305,32 +366,83 @@ async def transaction(fn: Callable[..., T], *,
     inside the transaction — so `fn` always acts on what the database held once
     the lock was taken. `prepare` must therefore only read.
 
+    `decided`, A DECISION MADE BEFORE THE TURN (`decide`, the same `prepare`
+    run outside the writer queue), IS USED IN THE TURN WHEN EVERY READ IT WAS
+    MADE FROM READS THE SAME, and `prepare` runs only where one does not. A
+    decision is a function of what it was handed and what it read — nothing
+    else (deciding writes nothing and asks no clock) — so the same reads decide
+    the same rows, and the turn costs the reads alone instead of the deciding.
+    MEASURED on a copy of dev: a changing calendar window decided its rows for
+    0.5–1.0 s of Python in its turn, of which its reads were 0.05–0.3 s, and 5 s
+    beside a restart's refills, every other write waiting behind it. A write
+    that changed what was read — another store of the window's titles — is
+    found by its own rows, and the turn decides again, as before; one committed
+    after the reads and before the lock moves `PRAGMA data_version`, as above.
+    A guard that asked only whether anything at all had been written was tried
+    and never held: a restart's refills write every second.
+
+    A DECISION FOUND STALE IS MADE AGAIN OUTSIDE THE QUEUE, the turn given up
+    meanwhile, up to `REDECIDE_OUTSIDE` times — and only after that in the turn.
+    A restart's refills rewrite one another's titles and episode rows within
+    seconds, and MEASURED on a copy of dev, 11 of 15 window stores found the rows
+    under their decision rewritten by the time their turn came: deciding again
+    in the turn put the deciding back in front of every waiting write.
+
     A HOLD OVER `LOCK_HELD_WARN_SECONDS` IS LOGGED as a WARNING naming `fn`, from
     the lock's taking to its release, whether the body committed or not.
     """
-    def _work() -> T:
-        conn = connection()
-        if prepare is not None:
-            seen = conn.execute("PRAGMA data_version").fetchone()[0]
-            prepared = prepare(conn)
-        conn.execute("BEGIN IMMEDIATE")
-        held_from = time.perf_counter()
-        try:
-            if prepare is None:
-                result = fn(conn)
-            else:
-                if conn.execute("PRAGMA data_version").fetchone()[0] != seen:
-                    prepared = prepare(conn)
-                result = fn(conn, prepared)
-        except BaseException:
-            conn.execute("ROLLBACK")
-            _report_hold(fn, held_from)
-            raise
-        conn.execute("COMMIT")
-        _report_hold(fn, held_from)
-        return result
+    if decided is not None and prepare is None:
+        raise ValueError("a decision is checked against the prepare it came from")
+    for _attempt in range(REDECIDE_OUTSIDE):
+        if decided is None:
+            break
+        done = await _in_turn(_named(fn), lambda decided=decided: anyio.to_thread.run_sync(
+            lambda: _transact(fn, prepare, decided, last=False)))
+        if done is not _STALE:
+            return done
+        decided = await decide(prepare)
+    return await _in_turn(_named(fn), lambda: anyio.to_thread.run_sync(
+        lambda: _transact(fn, prepare, decided, last=True)))
 
-    return await _in_turn(_named(fn), lambda: anyio.to_thread.run_sync(_work))
+
+# HOW MANY TIMES A STALE DECISION IS MADE AGAIN OUTSIDE THE QUEUE before a turn
+# decides for itself (`transaction`). Bounded so a window whose rows are
+# rewritten faster than it can decide still gets written.
+REDECIDE_OUTSIDE = 2
+# What a turn hands back when the decision it was given no longer reads the same.
+_STALE = object()
+
+
+def _transact(fn: Callable, prepare: Callable | None, decided: Decided | None, *,
+              last: bool):
+    """`transaction`'s turn, on a worker thread: `fn` written inside BEGIN
+    IMMEDIATE / COMMIT — or `_STALE`, writing nothing, for a decision that no
+    longer reads the same when this is not the `last` turn it may have."""
+    conn = connection()
+    if prepare is not None:
+        seen = conn.execute("PRAGMA data_version").fetchone()[0]
+        if decided is not None and _reads_the_same(conn, decided.reads):
+            prepared = decided.value
+        elif decided is not None and not last:
+            return _STALE
+        else:
+            prepared = prepare(conn)
+    conn.execute("BEGIN IMMEDIATE")
+    held_from = time.perf_counter()
+    try:
+        if prepare is None:
+            result = fn(conn)
+        else:
+            if conn.execute("PRAGMA data_version").fetchone()[0] != seen:
+                prepared = prepare(conn)
+            result = fn(conn, prepared)
+    except BaseException:
+        conn.execute("ROLLBACK")
+        _report_hold(fn, held_from)
+        raise
+    conn.execute("COMMIT")
+    _report_hold(fn, held_from)
+    return result
 
 
 def _report_hold(fn: Callable, held_from: float) -> None:

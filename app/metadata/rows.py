@@ -922,9 +922,14 @@ async def apply_enrichment_many(source: str, items, now: int) -> int:
     for at in range(0, len(targets), ENRICHMENT_TURN):
         turn = json.dumps([[key, *answers[(own, media)], own]
                            for key, media, own in targets[at:at + ENRICHMENT_TURN]])
+
+        def prepare(conn, turn=turn) -> identity.SettlePlan:
+            return _plan_enrichment(conn, source, turn, now)
+        # Decided before its turn, and used in it while what it read reads the
+        # same (db.transaction's `decided`).
         await db.transaction(
             lambda conn, settles, turn=turn: _write_enrichment(conn, source, turn, settles, now),
-            prepare=lambda conn, turn=turn: _plan_enrichment(conn, source, turn, now))
+            prepare=prepare, decided=await db.decide(prepare))
     return len(items)
 
 

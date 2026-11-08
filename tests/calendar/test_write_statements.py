@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from datetime import date
 from unittest import mock
 
@@ -128,6 +129,107 @@ class ARefillWritesOnlyWhatChangedTests(DatabaseTestCase):
         # statement's payload.
         self.assertNotIn("Trakt 4", written)
         self.assertNotIn("Simkl 3", written)
+
+
+class AChangingWindowDecidesBeforeItsTurnTests(DatabaseTestCase):
+    """A window whose answer changes its rows decides them on a plain read, and
+    its turn uses that decision when what it was decided from reads the same
+    there (db.transaction's `decided`) — so the deciding is not a turn every
+    other write waits behind — and decides again when a write landed in
+    between, ending in the rows the two writes make one after the other."""
+
+    async def _changed(self) -> list[Record]:
+        await store(listings(40))
+        changed = listings(40)
+        changed[2].title = "Renamed"
+        changed[1].air_ts += 3600
+        return changed
+
+    async def test_its_turn_uses_the_decision_made_before_it(self):
+        changed = await self._changed()
+        real, planned = metadata.plan_records, []
+
+        def counted(conn, listed):
+            planned.append(conn.in_transaction)
+            return real(conn, listed)
+
+        with mock.patch.object(metadata, "plan_records", counted):
+            await store(changed)
+        self.assertEqual(planned, [False], "decided once, outside the writer queue")
+        self.assertEqual(await db.fetch_value(
+            "SELECT trakt_title FROM titles WHERE trakt_id = '102'"), "Renamed")
+
+    async def _trakt_store_with_a_write_between(self, sql: str, params=()) -> int:
+        """Trakt's changed answer stored, a write landing between its decision
+        and its turn; how many times Trakt's store decided."""
+        changed = await self._changed()
+        real_decide, planned = db.decide, []
+        real = metadata.plan_records
+
+        def counted(conn, listed):
+            planned.append(listed.records[0].source)
+            return real(conn, listed)
+
+        async def then_a_write(prepare):
+            decided = await real_decide(prepare)
+            if len(planned) == 1:
+                await db.execute(sql, params)
+            return decided
+
+        with (mock.patch.object(metadata, "plan_records", counted),
+              mock.patch.object(db, "decide", then_a_write)):
+            trakt = [record for record in changed if str(record.source) == "trakt"]
+            now = db.now()
+            await entries.store_span("shows", *WEEK, trakt, sources=["trakt"], asked=["trakt"],
+                                     now=now, stale_after=now + 86400)
+        self.assertEqual(await db.fetch_value(
+            "SELECT trakt_title FROM titles WHERE trakt_id = '102'"), "Renamed")
+        return len(planned)
+
+    async def test_a_write_in_between_it_did_not_read_leaves_its_decision_standing(self):
+        """Simkl's own name for a title is no input to Trakt's decision."""
+        self.assertEqual(await self._trakt_store_with_a_write_between(
+            "UPDATE titles SET simkl_title = 'Renamed by Simkl' WHERE simkl_id = '5001'"), 1)
+        self.assertEqual(await db.fetch_value(
+            "SELECT simkl_title FROM titles WHERE simkl_id = '5001'"), "Renamed by Simkl")
+
+    async def test_a_write_in_between_to_what_it_read_decides_it_again(self):
+        """Simkl's airing of an episode in the window moved under it: the
+        window's episode rows decide its fold."""
+        moved_to = listings(40)[1].air_ts + 1800
+        self.assertEqual(await self._trakt_store_with_a_write_between(
+            "UPDATE episodes SET simkl_air_ts = ? WHERE simkl_air_ts = ?",
+            (moved_to, listings(40)[1].air_ts)), 2)
+        self.assertEqual(await db.fetch_value(
+            "SELECT COUNT(*) FROM episodes WHERE simkl_air_ts = ?", (moved_to,)), 1)
+
+    async def test_stores_decide_one_at_a_time(self):
+        """Side by side, each store's decision was made stale by the other's
+        write; one at a time, each decides from what the one before wrote."""
+        await store(listings(40))
+        real, deciding, most = metadata.plan_records, [0], [0]
+
+        def counted(conn, listed):
+            deciding[0] += 1
+            most[0] = max(most[0], deciding[0])
+            try:
+                time.sleep(0.05)
+                return real(conn, listed)
+            finally:
+                deciding[0] -= 1
+
+        changed = listings(40)
+        changed[2].title = "Renamed"
+        week_after = [Record(**{**record.__dict__, "air_ts": record.air_ts + 7 * 86400})
+                      for record in listings(40)]
+        with mock.patch.object(metadata, "plan_records", counted):
+            now = db.now()
+            await asyncio.gather(
+                store(changed, now=now),
+                entries.store_span("shows", date(2026, 7, 13), date(2026, 7, 20), week_after,
+                                   sources=["simkl", "trakt"], asked=["simkl", "trakt"],
+                                   now=now, stale_after=now + 86400))
+        self.assertEqual(most[0], 1)
 
 
 class TheRetentionSweepsStatementsDoNotGrowWithWhatItSweepsTests(DatabaseTestCase):

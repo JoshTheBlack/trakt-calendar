@@ -102,6 +102,8 @@ from itertools import groupby
 from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
+import anyio.to_thread
+
 
 from . import enrich as calendar_enrich
 from . import entries
@@ -485,7 +487,18 @@ async def _answers(asked_of: list[Provider], endpoint: Endpoint, settings, start
         records.extend(got)
     if asked and not answered and not unchanged and not pending:
         raise refusal
+    # WHAT IS KEPT OF THE ANSWERS IS WORKED OUT ON A WORKER THREAD (`_kept`), the
+    # bridge's read included: it is a pass over every record — a Simkl month is
+    # eighteen thousand — and the records are this fill's own.
+    kept = await db.run(lambda conn: _kept(conn, records, endpoint, settings, answered, start))
+    return kept, answered, unchanged, pending
 
+
+def _kept(conn: db.Connection, records: list[Record], endpoint: Endpoint, settings,
+          answered: list[str], start: date) -> list[Record]:
+    """What a fill keeps of what its services answered (`_answers`): the floor
+    applied, each service's records trimmed to its span, the ids the matcher
+    needs bridged in, and repeats dropped."""
     # The instance-wide content floor: an operator who excludes a genre, country,
     # or certification here means it never enters the shared cache for ANY
     # viewer, not just their own. It is the ONE filter applied before storage,
@@ -532,8 +545,7 @@ async def _answers(asked_of: list[Provider], endpoint: Endpoint, settings, start
     # reach it. This is a batched DB read and never a network call; see
     # enrich.overlay_match_ids for why only the IDS are taken and what its
     # realistic ceiling is.
-    bridged = await calendar_enrich.overlay_match_ids(trimmed)
-    return dedupe_records(bridged), answered, unchanged, pending
+    return dedupe_records(calendar_enrich.match_ids(conn, trimmed))
 
 
 async def stored_window_signature() -> str:
@@ -583,8 +595,8 @@ async def store_window(endpoint_key: str, start: date, records: list[Record],
     # unenriched by construction, so storing it as-is would blank every title the
     # drain has already answered for until the next drain tick noticed and put it
     # back. Applying first means a refilled month renders enriched on the very
-    # read that refilled it.
-    await calendar_enrich.apply_stored_enrichment(records)
+    # read that refilled it. On a worker thread, read and applied both.
+    await db.run(lambda conn: calendar_enrich.give_stored_enrichment(conn, records))
     # EACH SERVICE THAT ANSWERED WITH LISTINGS IS STORED OVER ITS WHOLE SPAN
     # (`answer_span`): one Simkl month file fills, confirms and takes listings
     # off its month's every window, not the one week that asked.
@@ -927,7 +939,9 @@ async def _after_fill(settings, records: list[Record]) -> None:
     cost on the hot render path.
     """
     calendar_enrich.schedule_drain(settings)
-    sightings = (s for s in (_poster_sighting(r) for r in records) if s is not None)
+    # A pass over every record a fill stored, so on a worker thread.
+    sightings = await anyio.to_thread.run_sync(
+        lambda: [s for s in (_poster_sighting(r) for r in records) if s is not None])
     await artwork.record_poster_urls(sightings)
 
 
@@ -1273,18 +1287,27 @@ async def _span_views(endpoint: Endpoint, settings, *, tz: ZoneInfo, start_date:
             viewer, utc_start, utc_end + timedelta(days=1), near=(utc_start, utc_end),
             held=lambda day: not first <= day < last or window_start(day) in covered)
         sp.set(cards=len(placed.views))
-    # KEPT WHEN IT IS PLACED INSIDE THE SPAN, which is a question about the
-    # CARD, not about any one listing: a card's other services may list it
-    # outside the span, and a listing inside the span may belong to a card
-    # placed outside it — which is then drawn there, once, and not here.
-    views = [view for view in placed.views
-             if start_date <= date.fromisoformat(view.air_date) <= end_date]
-    # Sorted on the LOCAL DAY first and the instant second. The two agree for
-    # anything converted through one timezone, but a date-only release is pinned
-    # to its own calendar date rather than to an offset from an instant — and a
-    # day's cards must be contiguous, or one day arrives in two pieces.
-    views.sort(key=lambda view: (view.air_date, view.air_ts))
+    views = await anyio.to_thread.run_sync(lambda: _in_day_order(placed.views, start_date,
+                                                                 end_date))
     return views, as_of, partial, placed.filtered_out
+
+
+def _in_day_order(views: list, start_date: date, end_date: date) -> list:
+    """The cards of `views` placed on a local day of [start_date, end_date], in
+    day order — pure, for a worker thread (a month's read is thousands).
+
+    KEPT WHEN IT IS PLACED INSIDE THE SPAN, which is a question about the CARD,
+    not about any one listing: a card's other services may list it outside the
+    span, and a listing inside the span may belong to a card placed outside it
+    — which is then drawn there, once, and not here. Sorted on the LOCAL DAY
+    first and the instant second. The two agree for anything converted through
+    one timezone, but a date-only release is pinned to its own calendar date
+    rather than to an offset from an instant — and a day's cards must be
+    contiguous, or one day arrives in two pieces."""
+    first, last = start_date.isoformat(), end_date.isoformat()
+    kept = [view for view in views if first <= view.air_date <= last]
+    kept.sort(key=lambda view: (view.air_date, view.air_ts))
+    return kept
 
 
 async def present(endpoint: Endpoint, settings, views, *, tz: ZoneInfo, prefs=None,
@@ -1445,9 +1468,20 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # a few days' cards (`present`, for those).
     items = (await query.present(query.Viewer(endpoint, settings, prefs, tz, specs), views)
              if drawn else views)
+    # GROUPED AND COUNTED ON A WORKER THREAD: passes over every card of the read
+    # — an unfiltered month is twenty thousand, and its marks alone took 0.26 s
+    # on the event loop beside a restart's refills (MEASURED, the span below).
+    return await anyio.to_thread.run_sync(lambda: _assembled(
+        endpoint, settings, items, specs, not_watching_ids, as_of=as_of, partial=partial,
+        filtered_out=filtered_out))
 
+
+def _assembled(endpoint: Endpoint, settings, items: list, specs: dict,
+               not_watching_ids: set[str] | None, *, as_of, partial: bool,
+               filtered_out: int) -> tuple[list[dict], dict]:
+    """`assemble_range`'s answer from a read's cards in day order: (grouped by
+    local day, the read's numbers) — pure, for a worker thread."""
     with span("calcache.group", items=len(items)):
-
         grouped = [
             {"date": day,
              "label": day_label(date.fromisoformat(day)),

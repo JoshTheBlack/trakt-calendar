@@ -32,6 +32,7 @@ from datetime import date, datetime, timedelta
 from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import anyio.to_thread
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from markupsafe import Markup
@@ -754,10 +755,12 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
     # description has passed its clock, is re-read behind the page
     # (app/metadata/refresh.py).
     with span("calendar.viewed"):
+        # A title for every card of the month, spelled on a worker thread.
         metadata_refresh.viewed(
             settings,
-            [metadata_refresh.Wanted(str(item.media), item.ids, item.season)
-             for group in month_view.grouped for item in group["items"]],
+            await anyio.to_thread.run_sync(lambda: [
+                metadata_refresh.Wanted(str(item.media), item.ids, item.season)
+                for group in month_view.grouped for item in group["items"]]),
             budget=metadata_refresh.MONTH_BUDGET, missing=False)
 
     # Measured at 4.7ms against 31,358 stored airings, which is why it rides the
@@ -817,7 +820,9 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
     new_token = _remember_new_marks(user.user_id, endpoint.key, year, month,
                                     month_view.new_ids)
     with span("calendar.file_month"):
-        page_token = (_file_month(user.user_id, endpoint.key, year, month, month_view.grouped)
+        page_token = (_file_cards(user.user_id, endpoint.key, year, month,
+                                  await anyio.to_thread.run_sync(
+                                      lambda: _filed_cards(month_view.grouped)))
                       if month_view.error is None else "")
     # THE CHIPS COUNT THE WHOLE MONTH, so they are worked out before the inline
     # days are swapped for what they draw — which, for a big day, is its first
@@ -1191,7 +1196,14 @@ def _prune_pages(moment: float, *, room: int = 0) -> None:
 def _file_month(user_id: int, endpoint_key: str, year: int, month: int,
                 grouped: list[dict]) -> str:
     """File the month a page drew (`grouped`, its keys-only cards) and return
-    the token naming it — or no token, for a page larger than the whole store.
+    the token naming it — or no token, for a page larger than the whole store."""
+    return _file_cards(user_id, endpoint_key, year, month, _filed_cards(grouped))
+
+
+def _filed_cards(grouped: list[dict]) -> tuple:
+    """What `_file_month` files of a page's cards — pure, so a page spells it on
+    a worker thread (a mark's every spelling, for every card: 0.33 s for an
+    unfiltered month on the event loop beside a restart's refills, MEASURED).
 
     EQUAL VALUES ARE ONE OBJECT FOR THE PAGE (`shared`): every card of a title
     spells its marks alike, so the page holds each distinct spelling set, day and
@@ -1199,14 +1211,19 @@ def _file_month(user_id: int, endpoint_key: str, year: int, month: int,
     October All Episodes: 0.8 -> 0.2 MB a page with their filters (1,334 cards),
     13.4 -> 3.8 MB with them paused (18,490 cards, 3,383 spelling sets for 3,339
     titles) — so the whole store tops out near 40 MB at `_FILED_CARDS_MAX`."""
-    moment = time.monotonic()
     shared: dict = {}
-    cards = tuple(_FiledCard(shared.setdefault(group["date"], group["date"]),
-                             shared.setdefault(item.mark_key, item.mark_key),
-                             shared.setdefault(item.title_key, item.title_key),
-                             shared.setdefault(spelled := calendar_state.item_spellings(item),
-                                               spelled))
-                  for group in grouped for item in group["items"])
+    return tuple(_FiledCard(shared.setdefault(group["date"], group["date"]),
+                            shared.setdefault(item.mark_key, item.mark_key),
+                            shared.setdefault(item.title_key, item.title_key),
+                            shared.setdefault(spelled := calendar_state.item_spellings(item),
+                                              spelled))
+                 for group in grouped for item in group["items"])
+
+
+def _file_cards(user_id: int, endpoint_key: str, year: int, month: int, cards: tuple) -> str:
+    """File `cards` (`_filed_cards`) as a page's month, here on the event loop,
+    which is the one place `_pages` is touched."""
+    moment = time.monotonic()
     if len(cards) > _FILED_CARDS_MAX:
         return ""
     _prune_pages(moment, room=max(len(cards), 1))

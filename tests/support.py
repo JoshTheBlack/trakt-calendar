@@ -316,7 +316,7 @@ def _transactions_traced(done):
 
     real = db.transaction
 
-    async def traced(fn, *, prepare=None):
+    async def traced(fn, *, prepare=None, decided=None):
         def body(conn, *prepared):
             seen: list[str] = []
             conn.set_trace_callback(seen.append)
@@ -325,7 +325,7 @@ def _transactions_traced(done):
             finally:
                 conn.set_trace_callback(None)
                 done(seen)
-        return await real(body, prepare=prepare)
+        return await real(body, prepare=prepare, decided=decided)
 
     with mock.patch.object(db, "transaction", traced):
         yield

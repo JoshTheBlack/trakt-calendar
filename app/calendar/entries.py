@@ -18,13 +18,17 @@ their filters hide it, is decided at READ against their own preferences.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import json
 import logging
 import time
+import weakref
 from datetime import date, timedelta
 from typing import NamedTuple
+
+import anyio.to_thread
 
 from .. import db, endpoints, metadata, perftrace
 from ..metadata import episodes as episode_rows
@@ -166,48 +170,73 @@ async def store_span(endpoint_key: str, span_start: date, span_end: date,
     answered = [str(s) for s in sources]
     reach = {source: tuple((spans or {}).get(source) or (span_start, span_end))
              for source in answered}
-
-    # NOTHING OUTSIDE ITS SERVICE'S SPAN IS STORED, here as well as at the fetch,
-    # because a listing is FILED BY ITS OWN DATE: one landing in a window with no
-    # coverage row would never be read, and the next fill of its own window would
-    # take it off unseen. A source may treat the `days` bound as a floor rather
-    # than a ceiling — Trakt has returned entries two months past a seven-day
-    # window — and those are no answer about the later weeks. Dropping them
-    # loudly is the honest failure; the window they belong to fetches them
-    # properly when asked.
-    def _inside(record: Record) -> bool:
-        lo, hi = reach.get(str(record.source), (span_start, span_end))
-        return lo.isoformat() <= _utc_date(record.air_ts) < hi.isoformat()
-
-    inside = [r for r in records if _inside(r)]
-    if len(inside) != len(records):
+    # FILED BY WINDOW ON A WORKER THREAD — every record's day, and each window's
+    # digest of what each service said (`_said`): a pass over a Simkl month's
+    # thousands of records, 0.25 s on the event loop (MEASURED). What is claimed
+    # and checked (`_storing`, `_stored_from_the_same`) stays here, on the loop.
+    filing = await anyio.to_thread.run_sync(
+        lambda: _file_by_window(records, answered, reach, span_start, span_end))
+    if filing.dropped:
         logger.debug("%d %s entr(ies) fell outside the span their answer speaks for, "
                      "from the window starting %s; trimmed.",
-                     len(records) - len(inside), endpoint_key, span_start)
-    later = sorted({window for lo, hi in reach.values() for window in _windows(lo, hi)
-                    if not span_start <= window < span_end})
-    windows = [(span_start, span_end), *((window, window + timedelta(days=WINDOW_DAYS))
-                                         for window in later)]
-    filed: dict[date, list[Record]] = {window: [] for window, _end in windows}
-    for record in inside:
-        day = _utc_date(record.air_ts)
-        filed[next(window for window, end in windows
-                   if window.isoformat() <= day < end.isoformat())].append(record)
-    said = {source: _said(filed[span_start], source) for source in answered}
-    with _storing(endpoint_key, span_start, said, now):
-        await _store_window(endpoint_key, span_start, span_end, filed[span_start],
+                     filing.dropped, endpoint_key, span_start)
+    with _storing(endpoint_key, span_start, filing.said[span_start], now):
+        await _store_window(endpoint_key, span_start, span_end, filing.filed[span_start],
                             sources=answered, asked=asked, unchanged=unchanged,
                             now=now, stale_after=stale_after)
-    for window, end in windows[1:]:
-        said = {source: _said(filed[window], source) for source in answered
-                if reach[source][0] <= window < reach[source][1]}
-        speaking = {source: saying for source, saying in said.items()
+    for window, end in filing.windows[1:]:
+        speaking = {source: saying for source, saying in filing.said[window].items()
                     if not _stored_from_the_same(endpoint_key, window, source, saying, now)}
         if not speaking:
             continue
         with _storing(endpoint_key, window, speaking, now):
-            await _store_window(endpoint_key, window, end, filed[window], sources=list(speaking),
-                                asked=list(speaking), now=now, stale_after=stale_after)
+            await _store_window(endpoint_key, window, end, filing.filed[window],
+                                sources=list(speaking), asked=list(speaking), now=now,
+                                stale_after=stale_after)
+
+
+class _Filing(NamedTuple):
+    """A store's records filed by window (`_file_by_window`): the windows, the
+    window asked first; each window's records; each window's digest of what each
+    service whose span reaches it said (`_said`); and how many records fell
+    outside their service's span."""
+    windows: list[tuple[date, date]]
+    filed: dict[date, list[Record]]
+    said: dict[date, dict[str, str]]
+    dropped: int
+
+
+def _file_by_window(records: list[Record], answered: list[str],
+                    reach: dict[str, tuple[date, date]], span_start: date,
+                    span_end: date) -> _Filing:
+    """`store_span`'s records filed by window — pure, for a worker thread.
+
+    NOTHING OUTSIDE ITS SERVICE'S SPAN IS STORED, here as well as at the fetch,
+    because a listing is FILED BY ITS OWN DATE: one landing in a window with no
+    coverage row would never be read, and the next fill of its own window would
+    take it off unseen. A source may treat the `days` bound as a floor rather
+    than a ceiling — Trakt has returned entries two months past a seven-day
+    window — and those are no answer about the later weeks. Dropping them
+    loudly is the honest failure; the window they belong to fetches them
+    properly when asked."""
+    later = sorted({window for lo, hi in reach.values() for window in _windows(lo, hi)
+                    if not span_start <= window < span_end})
+    windows = [(span_start, span_end), *((window, window + timedelta(days=WINDOW_DAYS))
+                                         for window in later)]
+    bounds = [(window.isoformat(), end.isoformat(), window) for window, end in windows]
+    filed: dict[date, list[Record]] = {window: [] for window, _end in windows}
+    dropped = 0
+    for record in records:
+        day = _utc_date(record.air_ts)
+        lo, hi = reach.get(str(record.source), (span_start, span_end))
+        if not lo.isoformat() <= day < hi.isoformat():
+            dropped += 1
+            continue
+        filed[next(window for first, end, window in bounds if first <= day < end)].append(record)
+    said = {window: {source: _said(filed[window], source) for source in answered
+                     if window == span_start or reach[source][0] <= window < reach[source][1]}
+            for window, _end in windows}
+    return _Filing(windows, filed, said, dropped)
 
 
 # A WINDOW ONE ANSWER HAS JUST STORED IS NOT STORED AGAIN FROM AN OVERLAPPING
@@ -299,8 +328,10 @@ async def _store_window(endpoint_key: str, span_start: date, span_end: date,
     answered = [str(s) for s in sources]
     bit = _bit(endpoint_key)
     replied = sorted({*answered, *(str(s) for s in unchanged)})
-    # EVERYTHING THE STATEMENTS CARRY, SPELLED BEFORE THE LOCK IS TAKEN.
-    listed = metadata.listings(inside, now=now, stale_after=stale_after)
+    # EVERYTHING THE STATEMENTS CARRY, SPELLED BEFORE THE LOCK IS TAKEN — and on a
+    # worker thread: a week of Simkl's listings is 0.15 s of spelling (MEASURED).
+    listed = await anyio.to_thread.run_sync(
+        lambda: metadata.listings(inside, now=now, stale_after=stale_after))
     coverage = json.dumps([[first, name, 1 if name in replied else 0]
                            for name in sorted({*map(str, asked), *replied})])
 
@@ -383,22 +414,53 @@ async def _store_window(endpoint_key: str, span_start: date, span_end: date,
     # NOTHING THE QUEUE'S ORDER DID NOT ALREADY: a write landing in between is
     # one the window's rows take either way — another answer's store, a merge
     # moving its titles' rows with their listings, a description's words — and
-    # the coverage row says only that this service replied. A window that DOES
-    # change decides again in its turn, as every transaction's `prepare` does,
-    # so what it writes is decided from what the database holds once nobody
-    # else can write.
-    planned, fill = await db.run(_plan)
-    if planned.empty and fill.empty:
-        await db.execute(_UPSERT_COVERAGE, {"endpoint": endpoint_key, "rows": coverage,
-                                            "now": now, "stale_after": stale_after})
-        logger.debug("calendar store: %s from %s changed nothing in %d listing(s); its "
-                     "coverage alone written, decided in %.3f s", endpoint_key, first,
-                     len(inside), planning[0][0])
-        written.append(planned)
-    else:
-        await db.transaction(_work, prepare=_plan)
-        _note_changed(endpoint_key, [first])
-    metadata.complete_records(listed, written[-1])
+    # the coverage row says only that this service replied. A WINDOW THAT DOES
+    # CHANGE USES THAT DECISION IN ITS TURN WHEN WHAT IT WAS DECIDED FROM READS
+    # THE SAME there (db.transaction's `decided`: its reads made again, the
+    # deciding not) and decides again where it does not — so what it writes is
+    # always what the database holds once nobody else can write decides, and
+    # its turn is the reads, not the 0.5–1.0 s of deciding.
+    async with _deciding():
+        decided = await db.decide(_plan)
+        planned, fill = decided.value
+        if planned.empty and fill.empty:
+            await db.execute(_UPSERT_COVERAGE, {"endpoint": endpoint_key, "rows": coverage,
+                                                "now": now, "stale_after": stale_after})
+            logger.debug("calendar store: %s from %s changed nothing in %d listing(s); its "
+                         "coverage alone written, decided in %.3f s", endpoint_key, first,
+                         len(inside), planning[0][0])
+            written.append(planned)
+        else:
+            await db.transaction(_work, prepare=_plan, decided=decided)
+            _note_changed(endpoint_key, [first])
+            logger.debug("calendar store: %s from %s decided its rows %d time(s) for its "
+                         "turn — again each time a write rewrote what a decision read",
+                         endpoint_key, first, len(planning))
+    await anyio.to_thread.run_sync(lambda: metadata.complete_records(listed, written[-1]))
+
+
+# CALENDAR STORES DECIDE ONE AT A TIME — one per event loop, as the writer queue
+# is per loop, and weakly, so a finished loop's lock goes with it — and WRITE
+# BEFORE THE NEXT DECIDES. A store's decision is used in its turn only while what
+# it was decided from reads the same (db.transaction's `decided`), and stores of
+# a restart's burst rewrite one another's rows: one Simkl month's weeks, every
+# service's listings on one episode's row, a weekly show's group in each week.
+# Deciding side by side, 11 of 15 found their rows rewritten by the time their
+# turn came, and three decided four times, the last in their turn while every
+# write waited (MEASURED on a copy of dev). Deciding is Python on worker threads
+# sharing one interpreter lock, so side by side was never faster — it only made
+# each decision stale. The writer queue is not held while a store decides:
+# every other write goes on between.
+_deciding_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
+    weakref.WeakKeyDictionary())
+
+
+def _deciding() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _deciding_locks.get(loop)
+    if lock is None:
+        lock = _deciding_locks[loop] = asyncio.Lock()
+    return lock
 
 
 # WHEN A WINDOW'S ROWS LAST CHANGED, for a page asking whether the month it drew

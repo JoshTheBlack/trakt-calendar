@@ -1624,17 +1624,22 @@ async def store_many(answers: Iterable[Answer], *, tz: ZoneInfo
     of short turns of the writer queue, not a transaction per answer, nor one
     turn as long as the pass.
 
-    EACH TURN IS PLANNED IN ITS OWN TURN, never ahead: a plan names the key a
-    title is filed under, and a write landing between a plan and its turn — a
-    calendar store re-keying the title — would leave it filing rows under a key
-    nothing answers to. Turn by turn, every answer is filed exactly as if the
-    ones before it had been written (`plan`), which is what one turn promised.
-    A turn that fails raises, and the turns before it stay written."""
+    EACH TURN IS PLANNED JUST BEFORE IT, once the turn before has been written,
+    and the plan is used in the turn only while what it read reads the same
+    there (db.transaction's `decided`) — planned again where it does not: a plan
+    names the key a title is filed under, and a write landing between a plan and
+    its turn — a calendar store re-keying the title — would leave it filing rows
+    under a key nothing answers to. Turn by turn, every answer is filed exactly
+    as if the ones before it had been written (`plan`), which is what one turn
+    promised. A turn that fails raises, and the turns before it stay written."""
     out: list[Written | None | Exception] = []
     for turn in turns(list(answers)):
         now = db.now()
-        out.extend(await db.transaction(
-            apply, prepare=lambda conn, turn=turn, now=now: plan(conn, turn, tz=tz, now=now)))
+
+        def prepare(conn, turn=turn, now=now) -> Planned:
+            return plan(conn, turn, tz=tz, now=now)
+        out.extend(await db.transaction(apply, prepare=prepare,
+                                        decided=await db.decide(prepare)))
     return out
 
 

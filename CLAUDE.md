@@ -123,8 +123,9 @@ of that fixed count, planned in its own turn (`descriptions.turns`:
 before its lock from the ids its update leaves, `rows._settlings_sql`): one turn
 for a whole pass held the lock 1.3–1.6 s on the development server's restart
 (316 and 257 answers) and 1.3–1.9 s for the Simkl drain's batch, and every other
-write waited behind it. A turn is never planned ahead of its turn — a write
-between would leave it filing rows under a key a re-key has retired. The commit
+write waited behind it. A turn's plan is made just before it and used only
+while what it read reads the same (below) — a write between could leave it
+filing rows under a key a re-key has retired. The commit
 that crosses SQLite's 1,000-page WAL mark also runs its checkpoint, 0.07–0.33 s
 (MEASURED), inside whichever writer's turn crosses it. `tests/support.py`'s `statements_per_transaction` holds
 each writer to the same count for ten rows as for a hundred
@@ -155,7 +156,48 @@ EVERY WRITE SAYS HOW LONG IT WAITED FOR ITS TURN (`db._in_turn`): one `db.write`
 line naming its body or its statement (never its parameters) with `queued` and
 `turn`, DEBUG until slow, both put into its request's breakdown (`db.queue`,
 `db.turn`) — a filter save on the development server's restart spent ten
-seconds in the queue with nothing logged between two of its spans.
+seconds in the queue with nothing logged between two of its spans. A TURN IS
+DECIDED BEFORE IT COMES, AND THE DECISION IS USED WHILE WHAT IT READ READS THE
+SAME: a writer whose deciding is expensive hands its `prepare` to `db.decide`
+(run on a worker thread outside the queue, every read it makes kept) and the
+decision to `transaction(decided=)`, whose turn makes those reads again and uses
+the decision only if every one returns the same rows — a decision is a function
+of its inputs and its reads, so the same reads decide the same writes — and
+otherwise gives the turn up, decides again outside the queue
+(`db.REDECIDE_OUTSIDE` times) and only then decides in its turn. A guard that
+asked only whether anything had been written never held (a restart writes every
+second); this one is the rows. The calendar store (`entries._store_window`), the
+description store's turns and the enrichment writer's turns use it. AND
+CALENDAR STORES DECIDE ONE AT A TIME (`entries._deciding`, one lock per event
+loop, never the writer queue): deciding is Python on threads sharing one
+interpreter lock, so side by side was never faster, and stores of one burst
+rewrite each other's rows — side by side, 11 of 15 decisions were stale by their
+turn and three decided four times, the last in their turn. MEASURED on a copy
+of dev's restart burst: the longest background turn 5.2–9.5 s → 1.4–1.55 s, a
+viewer's write's wait 5–7.4 s → 0.04–0.69 s, a one-row write's p95 4.1–7.6 s →
+0.46–0.51 s. A window's span is read in one aggregated row
+(`episodes.read_span`), because a read stepping thousands of rows wins the
+interpreter lock back at every step.
+
+**The event loop runs no pass over a fill's records or a month's cards.** The
+loop serves every request, so Python that walks thousands of things runs on a
+worker thread (`anyio.to_thread.run_sync`, or `db.run` where it reads), and the
+loop only awaits it: Simkl's file parsed, de-duped and made Records
+(app/providers/simkl/calendar.py — a real October was 345 ms); a fill's floor,
+trim, id bridge and de-dupe (`cache._kept`, `enrich.match_ids`), its stored
+enrichment (`enrich.give_stored_enrichment`), its filing by window and digests
+(`entries._file_by_window`), its listings and completed ids (`metadata.listings`,
+`complete_records`), its picture sightings; a read's day trim and order
+(`cache._in_day_order`), its grouping, marks and counts (`cache._assembled`), a
+page's filed month (`routes._filed_cards`) and its viewed titles. WHAT STAYS ON
+THE LOOP is every in-process structure those feed — `_storing` /
+`_stored_from`, `_note_changed`, `cache._pending`, the refill latches,
+`routes._pages` and `_new_answers`, `refresh.viewed`'s queueing, the pacers —
+so each is touched by one thread only, and the work moved touches none of them:
+it is handed its own records and returns values. MEASURED, the restart burst:
+the longest loop block 1.85–3.46 s → 0.30–0.34 s; what is left lines up with
+full garbage collections (up to ~0.3 s) and the interpreter lock shared with
+the threads.
 
 **A slow request's log line accounts for its whole time.** `app/perftrace.py`
 owns it: every SLOW request line ends with `unspanned=` — the part of the
@@ -163,7 +205,7 @@ request no span covers, nested and concurrent spans counted once — so a gap in
 the instrumentation names itself instead of reading as a fast request. A route
 that spends time between two spans is the next thing to span; every step
 between a calendar read and its render has one (`calendar.view_state`,
-`calendar.viewed`, `calendar.backlog`, `calendar.new_marks`,
+`calendar.viewed`, `calendar.backlog`,
 `calendar.file_month`, `calendar.day_chips`, `calendar.first_page`,
 `query.rows` / `query.judge` / `query.present`, `calendar.season_lines`,
 `calendar.logos`, `calendar.card_pictures`). A span is DEBUG until slow

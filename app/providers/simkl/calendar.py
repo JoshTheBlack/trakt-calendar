@@ -28,6 +28,14 @@ cache instead of the cache growing a branch per source.
 NOTHING IN THIS MODULE FILTERS. Filtering is the calendar feature's job and
 happens on the far side of the cache — see trakt/calendar.py's docstring, which
 says the same thing for the same reason.
+
+A FILE IS READ ON A WORKER THREAD once it has arrived — parsed, de-duped and
+turned into Records there, never on the event loop that serves every request.
+MEASURED on Simkl's real October: 7.9 MB of tv.json and 0.4 MB of anime.json
+parsed in 85 ms, de-duped in 25 ms and made 18,290 Records in 235 ms — a third of
+a second the loop served nobody, twice that for a week reading two months, and
+twice again beside a restart's other refills. The work is pure: the entries are
+this read's own, and nothing else holds them while the thread has them.
 """
 from __future__ import annotations
 
@@ -36,6 +44,8 @@ import logging
 import time as _time
 from datetime import date, datetime, timedelta
 from urllib.parse import quote
+
+import anyio.to_thread
 
 from ... import perftrace
 from ...config import Settings
@@ -218,7 +228,7 @@ async def _conditional_get(url: str, *, consumer: str, revalidate: bool = True) 
         raise SimklError(
             f"Simkl's calendar CDN returned HTTP {resp.status_code} for {url}.", resp.status_code)
     try:
-        data = resp.json()
+        data = await anyio.to_thread.run_sync(resp.json)
     except ValueError:
         raise SimklError(f"Simkl's calendar CDN returned an unreadable response for {url}.")
     if not isinstance(data, list):
@@ -243,7 +253,8 @@ async def _fetch_file(year: int, month: int, filename: str,
                                      consumer=consumer, revalidate=revalidate)
     if entries is None:
         return None
-    return _dedupe_file_entries([e for e in entries if isinstance(e, dict)])
+    return await anyio.to_thread.run_sync(
+        lambda: _dedupe_file_entries([e for e in entries if isinstance(e, dict)]))
 
 
 async def _read_files(wanted: list[tuple[int, int, str]], *, consumer: str,
@@ -735,12 +746,7 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
                   + [(year, month, _ANIME_FILE) for year, month in months])
         read = await _read_files(wanted, consumer=_consumer(endpoint, start),
                                  revalidate=revalidate)
-        movie_results, anime_results = read[:len(months)], read[len(months):]
-        raw = [e for batch in movie_results for e in batch]
-        films = [e for batch in anime_results for e in batch if is_anime_film(e)]
-        records = [to_movie_record(e) for e in raw]
-        records += [to_anime_film_record(e) for e in films]
-        return [r for r in records if r is not None]
+        return await anyio.to_thread.run_sync(lambda: _movie_records(read, len(months)))
 
     if endpoint.key not in _SHOW_DERIVATIONS:
         # 'shows/finales' and anything else this source has not declared in
@@ -753,7 +759,24 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
               + [(year, month, _ANIME_FILE) for year, month in months])
     read = await _read_files(wanted, consumer=_consumer(endpoint, start),
                              revalidate=revalidate)
-    tv_results, anime_results = read[:len(months)], read[len(months):]
+    return await anyio.to_thread.run_sync(lambda: _show_records(endpoint.key, read, len(months)))
+
+
+def _movie_records(read: list[list[dict]], months: int) -> list[Record]:
+    """The movies calendar's Records from its files (`read`: the months' movie
+    files, then their anime files) — pure, for a worker thread."""
+    movie_results, anime_results = read[:months], read[months:]
+    raw = [e for batch in movie_results for e in batch]
+    films = [e for batch in anime_results for e in batch if is_anime_film(e)]
+    records = [to_movie_record(e) for e in raw]
+    records += [to_anime_film_record(e) for e in films]
+    return [r for r in records if r is not None]
+
+
+def _show_records(endpoint_key: str, read: list[list[dict]], months: int) -> list[Record]:
+    """A show calendar's Records from its files (`read`: the months' tv files,
+    then their anime files) — pure, for a worker thread."""
+    tv_results, anime_results = read[:months], read[months:]
     tv_entries = [e for batch in tv_results for e in batch]
     # THE OTHER HALF OF THE SPLIT ABOVE, AND IT HAS TO BE THE OTHER HALF OF THE
     # SAME PREDICATE. A film the movies branch claims must leave the show
@@ -765,9 +788,9 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
     # and only enrichment turns out to call a film.
     anime_entries = [e for batch in anime_results for e in batch if not is_anime_film(e)]
 
-    if endpoint.key == "shows":
+    if endpoint_key == "shows":
         raw = tv_entries + anime_entries
-    elif endpoint.key == "shows/premieres":
+    elif endpoint_key == "shows/premieres":
         raw = _premieres(tv_entries) + _premieres(anime_entries)
     else:  # "shows/new"
         raw = _tv_new(tv_entries) + _anime_new(anime_entries)

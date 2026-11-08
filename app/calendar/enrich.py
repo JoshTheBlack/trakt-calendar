@@ -232,31 +232,34 @@ async def _read_rows(keys) -> dict[tuple[int, str], dict]:
     250–350 ms on every heartbeat, and every one of those stalls, sampled from a
     second thread, was in `_decompress` here.
     """
+    keys = list(keys)
+    if not keys:
+        return {}
+    return await db.run(lambda conn: _stored_rows(conn, keys))
+
+
+def _stored_rows(conn: db.Connection, keys) -> dict[tuple[int, str], dict]:
+    """`_read_rows`, on the connection given — for a caller already on a
+    worker thread."""
     by_media: dict[str, list[int]] = {}
     for simkl_id, media in keys:
         by_media.setdefault(media, []).append(simkl_id)
-
-    def _work(conn) -> dict[tuple[int, str], dict]:
-        out: dict[tuple[int, str], dict] = {}
-        for media, ids in by_media.items():
-            placeholders = ",".join("?" for _ in ids)
-            rows = conn.execute(
-                f"SELECT simkl_id, payload, fetched_at, failed_at, fail_count "
-                f"FROM simkl_titles WHERE media = ? AND simkl_id IN ({placeholders})",
-                (media, *ids),
-            )
-            for row in rows:
-                out[(int(row["simkl_id"]), media)] = {
-                    "fields": _decompress(row["payload"]),
-                    "fetched_at": int(row["fetched_at"]),
-                    "failed_at": int(row["failed_at"]) if row["failed_at"] is not None else None,
-                    "fail_count": int(row["fail_count"]),
-                }
-        return out
-
-    if not by_media:
-        return {}
-    return await db.run(_work)
+    out: dict[tuple[int, str], dict] = {}
+    for media, ids in by_media.items():
+        placeholders = ",".join("?" for _ in ids)
+        rows = conn.execute(
+            f"SELECT simkl_id, payload, fetched_at, failed_at, fail_count "
+            f"FROM simkl_titles WHERE media = ? AND simkl_id IN ({placeholders})",
+            (media, *ids),
+        )
+        for row in rows:
+            out[(int(row["simkl_id"]), media)] = {
+                "fields": _decompress(row["payload"]),
+                "fetched_at": int(row["fetched_at"]),
+                "failed_at": int(row["failed_at"]) if row["failed_at"] is not None else None,
+                "fail_count": int(row["fail_count"]),
+            }
+    return out
 
 
 # HOW MANY ANSWERS ONE STATEMENT CARRIES. An answer's payload is compressed
@@ -465,11 +468,20 @@ async def overlay_match_ids(records: list[Record]) -> list[Record]:
     enrichment held an external id for 6 of 98. The other 92 are titles Trakt
     simply does not have, which is a catalogue difference no matching can close.
     Single-digit gains are the honest expectation.
+
+    ON A WORKER THREAD, read and merged both (`match_ids`): a month of Simkl's
+    records is thousands of them, and this is a fill's own list.
     """
+    return await db.run(lambda conn: match_ids(conn, records))
+
+
+def match_ids(conn: db.Connection, records: list[Record]) -> list[Record]:
+    """`overlay_match_ids`, on the connection given — for a fill already on a
+    worker thread (app/calendar/cache.py's `_answers`)."""
     candidates = _simkl_candidates(records)
     if not candidates:
         return records
-    rows = await _read_rows(candidates.keys())
+    rows = _stored_rows(conn, list(candidates.keys()))
     for key, group in candidates.items():
         row = rows.get(key)
         if row is None:
@@ -549,11 +561,20 @@ async def apply_stored_enrichment(records: list[Record]) -> list[Record]:
     answer sat in the next table along. `overlay_match_ids` stays separate and
     stays ids-only: it has to run before the group keys are derived, which is a
     different job at a different moment.
+
+    ON A WORKER THREAD, read and applied both (`give_stored_enrichment`), as
+    `overlay_match_ids` is.
     """
+    return await db.run(lambda conn: give_stored_enrichment(conn, records))
+
+
+def give_stored_enrichment(conn: db.Connection, records: list[Record]) -> list[Record]:
+    """`apply_stored_enrichment`, on the connection given — for a caller already
+    on a worker thread."""
     candidates = _simkl_candidates(records)
     if not candidates:
         return records
-    rows = await _read_rows(candidates.keys())
+    rows = _stored_rows(conn, list(candidates.keys()))
     for key, group in candidates.items():
         fields = (rows.get(key) or {}).get("fields")
         if not fields:

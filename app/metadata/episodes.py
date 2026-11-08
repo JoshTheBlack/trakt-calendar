@@ -478,12 +478,6 @@ def span_rowids(*, titles: bool = False) -> str:
     return " UNION ".join(arms)
 
 
-def span_sql(*, select: str = "e.*", titles: bool = False) -> str:
-    """`span_rowids`' rows themselves."""
-    return (f"SELECT {select} FROM {tables.EPISODES} e "
-            f"WHERE e.rowid IN ({span_rowids(titles=titles)})")
-
-
 def listing_select(alias: str = "e") -> str:
     """The columns of an episode row that say which row it is and every
     service's listing of it — what a reader of listings selects, rather than
@@ -524,14 +518,15 @@ def _aggregated(conn: db.Connection, source_sql: str, params) -> list[dict]:
 def read_span(conn: db.Connection, bit: int, lo: float, hi: float, *,
               titles: Collection[str] | None = None) -> list:
     """The stored rows with an instant on calendar `bit` inside [lo, hi) — of
-    the `titles` named alone, when they are, read in one aggregated row."""
+    the `titles` named alone, when they are — read in one aggregated row
+    (`_aggregated`): a window's span is thousands of rows, and read a row at a
+    time while a restart's other refills kept the interpreter lock busy, the
+    read that decides a window's store took seconds to step through them."""
     params = {"lo": lo, "hi": hi, "bit": bit}
-    if titles is None:
-        found = conn.execute(span_sql(), params).fetchall()
-    else:
+    if titles is not None:
         params["titles"] = json.dumps(sorted(titles))
-        found = _aggregated(conn, f"FROM {tables.EPISODES} e WHERE e.rowid IN "
-                                  f"({span_rowids(titles=True)})", params)
+    found = _aggregated(conn, f"FROM {tables.EPISODES} e WHERE e.rowid IN "
+                              f"({span_rowids(titles=titles is not None)})", params)
     return [row for row in found if in_span(Row.read(row), bit, lo, hi)]
 
 
