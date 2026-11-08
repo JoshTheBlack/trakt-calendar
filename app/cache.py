@@ -17,9 +17,12 @@ down with it.
 """
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import logging
 import shutil
+import weakref
 import zlib
 from typing import NamedTuple
 
@@ -202,23 +205,136 @@ async def set(key: str, value, retain_seconds: int | None = RETAIN_SECONDS) -> N
     AND COMPRESSED BEFORE THE TURN, on a worker thread: the encoding reads
     nothing, and done in the turn (as a `prepare`) it held every other write
     behind it — MEASURED, a restart's first two minutes on a harness copy with
-    live services made 275 cache writes whose wait and turn passed 0.75 s, turns
-    to 0.46 s and one of 1.34 s, and a viewer's mark waited 2.2 s behind them.
+    live services: 368 cache writes whose wait and turn passed 0.75 s, turns to
+    1.34 s, and a viewer's mark waited 2.2 s behind them.
+
+    AND THE ANSWERS THAT ARRIVE TOGETHER ARE WRITTEN TOGETHER (`_Unwritten`):
+    this answer joins the ones waiting to be written, and one writer per event
+    loop writes everything waiting in one statement when its turn comes
+    (db.execute_gathered), at most `WRITE_TURN_ROWS` / `WRITE_TURN_BYTES` a turn —
+    so the cache never has more than one turn in the writer queue, however many
+    answers land at once. Each answer as its own turn was the queue's largest
+    tenant: MEASURED, the same restart wrote 2,690 answers in two minutes (1,215
+    of them TMDB's /tv/{id}, 448 discover pages — Season Premieres derived),
+    up to 123 slow ones in ten seconds, their turns adding up to 19.7 s against
+    the calendar stores' 6.4 s, and a viewer's unmark waited 3.3 s behind them.
+    This still returns only once the row has been written (or the write has
+    failed), so nothing reading the table sees anything it did not before.
     """
     try:
         blob = await anyio.to_thread.run_sync(_encode, value)
     except (TypeError, ValueError):
         return
-    try:
-        await db.execute(
-            "INSERT INTO api_cache (cache_key, payload, cached_at, ttl_seconds, byte_size) "
-            "VALUES (?, ?, ?, ?, ?) "
+    state = _unwritten()
+    loop = asyncio.get_running_loop()
+    landed = loop.create_future()
+    # A later answer for a key still waiting replaces the earlier one.
+    state.rows[key] = (blob, db.now(), retain_seconds)
+    state.landing.setdefault(key, []).append(landed)
+    if state.writer is None:
+        state.writer = loop.create_task(_write_unwritten(state))
+    # Shielded: a caller that gives up waiting must not take the write with it.
+    await asyncio.shield(landed)
+
+
+# AT MOST THIS MUCH IN ONE TURN of the cache's writer: its rows' bytes are what
+# the turn writes to the log, and one statement's values are five a row.
+WRITE_TURN_ROWS = 100
+WRITE_TURN_BYTES = 4 * 1024 * 1024
+
+
+class _Unwritten:
+    """One event loop's answers waiting to be written (`rows`, by key, in the
+    order they arrived), who is waiting for each (`landing`), and the one task
+    writing them (`writer`). Touched on that loop alone."""
+
+    __slots__ = ("rows", "landing", "writer")
+
+    def __init__(self) -> None:
+        self.rows: dict[str, tuple[bytes, int, int | None]] = {}
+        self.landing: dict[str, list[asyncio.Future]] = {}
+        self.writer: asyncio.Task | None = None
+
+
+# Per event loop, as the writer queue is (db._writer_queue): a test's loop and
+# the server's never share a writer.
+_unwritten_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _Unwritten] = (
+    weakref.WeakKeyDictionary())
+
+
+def _unwritten() -> _Unwritten:
+    loop = asyncio.get_running_loop()
+    state = _unwritten_by_loop.get(loop)
+    if state is None:
+        state = _unwritten_by_loop[loop] = _Unwritten()
+    return state
+
+
+def _landed(futures: list[asyncio.Future]) -> None:
+    for future in futures:
+        if not future.done():
+            future.set_result(None)
+
+
+def _take(state: _Unwritten) -> list[tuple[str, bytes, int, int | None, list[asyncio.Future]]]:
+    """The answers one turn writes, oldest first, within the turn's bounds — a
+    single answer larger than the byte budget is a turn of its own."""
+    taken: list[tuple[str, bytes, int, int | None, list[asyncio.Future]]] = []
+    size = 0
+    for key, (blob, cached_at, retain) in list(state.rows.items()):
+        if taken and (len(taken) >= WRITE_TURN_ROWS or size + len(blob) > WRITE_TURN_BYTES):
+            break
+        del state.rows[key]
+        taken.append((key, blob, cached_at, retain, state.landing.pop(key, [])))
+        size += len(blob)
+    return taken
+
+
+@functools.lru_cache(maxsize=None)
+def _insert_sql(rows: int) -> str:
+    """One statement writing `rows` answers — one step of the driver however
+    many rows, so a turn's statement count does not grow with what it writes."""
+    return ("INSERT INTO api_cache (cache_key, payload, cached_at, ttl_seconds, byte_size) "
+            "VALUES " + ", ".join(["(?, ?, ?, ?, ?)"] * rows) + " "
             "ON CONFLICT(cache_key) DO UPDATE SET "
             "payload = excluded.payload, cached_at = excluded.cached_at, "
-            "ttl_seconds = excluded.ttl_seconds, byte_size = excluded.byte_size",
-            (key, blob, db.now(), retain_seconds, len(blob)))
-    except db.DatabaseError:
-        pass
+            "ttl_seconds = excluded.ttl_seconds, byte_size = excluded.byte_size")
+
+
+async def _write_unwritten(state: _Unwritten) -> None:
+    """Write what is waiting, a turn at a time, until nothing is. Every answer
+    that arrives while a turn waits is taken by that turn when it comes."""
+    try:
+        while state.rows:
+            taken: list[tuple[str, bytes, int, int | None, list[asyncio.Future]]] = []
+
+            def take():
+                taken.extend(_take(state))
+                if not taken:
+                    return None
+                values = [value for key, blob, cached_at, retain, _ in taken
+                          for value in (key, blob, cached_at, retain, len(blob))]
+                return _insert_sql(len(taken)), values
+
+            try:
+                await db.execute_gathered("INSERT api_cache", take)
+            except db.DatabaseError:
+                pass
+            except Exception:
+                # Best-effort like every cache write, and the writer must go on:
+                # a caller waits on each answer it took.
+                logger.exception("writing %d cached answer(s) failed", len(taken))
+            finally:
+                for *_, futures in taken:
+                    _landed(futures)
+    finally:
+        # Only a cancelled writer (the loop shutting down) leaves anything here;
+        # nobody is left to write it for.
+        for futures in state.landing.values():
+            _landed(futures)
+        state.rows.clear()
+        state.landing.clear()
+        state.writer = None
 
 
 async def delete(key: str) -> None:
@@ -228,8 +344,12 @@ async def delete(key: str) -> None:
     this table is a copy of somebody else's answer, and leaving it for the sweep
     costs nothing but bytes. A short-lived handshake is different: once it has
     ended its row describes nothing, and the sweep's grace period would keep it
-    for months. In turn, like `set`.
+    for months. In turn, like `set` — and an answer for `key` still waiting to be
+    written goes too, which is the order the two were asked in.
     """
+    state = _unwritten()
+    state.rows.pop(key, None)
+    _landed(state.landing.pop(key, []))
     try:
         await db.execute("DELETE FROM api_cache WHERE cache_key = ?", (key,))
     except db.DatabaseError:

@@ -19,6 +19,8 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import secrets
+import threading
 import unittest
 import zlib
 from datetime import date, datetime, timedelta, timezone
@@ -1906,6 +1908,112 @@ class ACachedAnswerIsCompressedBeforeItsTurnTests(CacheTestCase):
     async def test_a_value_that_does_not_encode_writes_nothing(self):
         await cache.set("k", {"bad": object()})
         self.assertIsNone(await cache.get("k", 600))
+
+
+class AnswersArrivingTogetherShareATurnTests(CacheTestCase):
+    """Answers that land while the cache's write waits for its turn are written
+    by that turn, in one statement, so the cache holds at most one turn in the
+    writer queue however many answers arrive at once — and each `set` still
+    returns only once its row is there."""
+
+    def setUp(self):
+        super().setUp()
+        self.turns: list[int] = []
+        real = db.execute_gathered
+
+        async def counted(writer, take):
+            def counting():
+                taken = take()
+                if taken is not None:
+                    self.turns.append(len(taken[1]) // 5)
+                return taken
+            return await real(writer, counting)
+
+        patcher = patch.object(db, "execute_gathered", counted)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def _while_the_queue_is_held(self, starts, *, waiting: int):
+        """Start `starts` (coroutines) while another write holds the writer
+        queue, let it go once `waiting` answers wait to be written, and return
+        the started tasks' results."""
+        release = threading.Event()
+        holder = asyncio.ensure_future(db.transaction(lambda conn: release.wait(10)))
+        queue = db._writer_queue()
+        while not queue.locked():
+            await asyncio.sleep(0.005)
+        tasks = [asyncio.ensure_future(start) for start in starts]
+        for _ in range(2000):
+            if len(cache._unwritten().rows) >= waiting:
+                break
+            await asyncio.sleep(0.005)
+        release.set()
+        await holder
+        return await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def test_answers_that_arrive_while_it_waits_ride_in_one_turn(self):
+        await self._while_the_queue_is_held(
+            [cache.set(f"k{n}", {"n": n}) for n in range(30)], waiting=30)
+        self.assertEqual(self.turns, [30])
+        for n in range(30):
+            self.assertEqual(await cache.get(f"k{n}", 600), {"n": n})
+
+    async def test_a_turn_is_bounded_by_rows(self):
+        count = 2 * cache.WRITE_TURN_ROWS + 7
+        await self._while_the_queue_is_held(
+            [cache.set(f"k{n}", {"n": n}) for n in range(count)], waiting=count)
+        self.assertEqual(self.turns, [cache.WRITE_TURN_ROWS, cache.WRITE_TURN_ROWS, 7])
+        self.assertEqual(await cache.get(f"k{count - 1}", 600), {"n": count - 1})
+
+    async def test_a_turn_is_bounded_by_bytes_and_a_big_answer_goes_alone(self):
+        # Hex text compresses about two to one: each of these is ~600 bytes stored.
+        with patch.object(cache, "WRITE_TURN_BYTES", 1000):
+            await self._while_the_queue_is_held(
+                [cache.set(f"big{n}", {"v": secrets.token_hex(600)}) for n in range(3)]
+                + [cache.set("huge", {"v": secrets.token_hex(3000)})], waiting=4)
+        self.assertEqual(self.turns, [1, 1, 1, 1])
+
+    async def test_a_later_answer_for_a_waiting_key_replaces_it(self):
+        results = await self._while_the_queue_is_held(
+            [cache.set("k", {"v": 1}), cache.set("k", {"v": 2})], waiting=1)
+        self.assertEqual(results, [None, None])
+        self.assertEqual(self.turns, [1])
+        self.assertEqual(await cache.get("k", 600), {"v": 2})
+
+    async def test_deleting_a_key_drops_its_answer_still_waiting(self):
+        """Asked in that order, a set and then a delete leave no row — as they
+        did when each was a turn of its own."""
+        await db.execute(
+            "INSERT INTO api_cache (cache_key, payload, cached_at, ttl_seconds, byte_size) "
+            "VALUES ('k', x'78', 1, 600, 1)")
+        release = threading.Event()
+        holder = asyncio.ensure_future(db.transaction(lambda conn: release.wait(10)))
+        while not db._writer_queue().locked():
+            await asyncio.sleep(0.005)
+        writing = asyncio.ensure_future(cache.set("k", {"v": 1}))
+        while "k" not in cache._unwritten().rows:
+            await asyncio.sleep(0.005)
+        deleting = asyncio.ensure_future(cache.delete("k"))
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(holder, writing, deleting)
+        self.assertEqual(self.turns, [])
+        self.assertIsNone(await cache.get_stale("k"))
+
+    async def test_a_caller_that_stops_waiting_leaves_its_answer_written(self):
+        async def given_up():
+            writing = asyncio.ensure_future(cache.set("k", {"v": 1}))
+            while "k" not in cache._unwritten().rows:
+                await asyncio.sleep(0.005)
+            writing.cancel()
+            return writing
+
+        await self._while_the_queue_is_held([given_up()], waiting=1)
+        for _ in range(200):
+            if not self.turns:
+                await asyncio.sleep(0.01)
+        self.assertEqual(self.turns, [1])
+        self.assertEqual(await cache.get("k", 600), {"v": 1})
 
 
 class SweepLockTests(CacheTestCase):

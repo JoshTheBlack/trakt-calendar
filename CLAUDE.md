@@ -139,8 +139,8 @@ SWEEP_TURN_BYTES; it scanned its whole table inside the lock every minute, up
 to 3.54 s on dev at a start, and halving the table was one 2 s hold), and
 `db.transaction` logs a WARNING naming its body whenever the lock was held
 over `db.LOCK_HELD_WARN_SECONDS` (1 s), so the next long hold names itself.
-WRITES TAKE TURNS: every `db.transaction`, `db.execute` and `db.executemany`
-waits in ONE in-process queue per event loop (`db._writer_queue`) and only then
+WRITES TAKE TURNS: every `db.transaction`, `db.execute`, `db.executemany` and
+`db.execute_gathered` waits in ONE in-process queue per event loop (`db._writer_queue`) and only then
 prepares, takes the lock and writes. SQLite does not queue writers — a waiter
 sleeps and retries, and a later writer can take the lock first — so on the
 development server's first minute after a restart a refresh pass lost to three
@@ -151,9 +151,15 @@ them again under the lock (the response cache's writes did: 0.17–0.70 s of loc
 per store, MEASURED on a harness copy) — so a write belongs in `transaction` or
 `execute`, `app/cache.py`'s included. A `prepare` RUNS IN THE TURN, so work that
 reads nothing is done before it: the response cache compresses a value on a
-worker thread and its turn is one INSERT (`cache.set` — compressing in its
-`prepare`, a restart's 275 cache writes in two minutes held a viewer's mark 2.2 s,
-MEASURED with live services). A STORE'S TURN IS ONE WINDOW'S
+worker thread before its turn (`cache.set` — compressing in its `prepare`, a
+restart's slow cache writes held a viewer's mark 2.2 s, MEASURED with live
+services). AND ANSWERS LANDING TOGETHER ARE WRITTEN TOGETHER: every answer that
+arrives while the cache's write waits rides in that turn, one statement of up to
+`cache.WRITE_TURN_ROWS` rows, its values taken as the turn starts
+(`db.execute_gathered`), so the cache never has more than one turn in the queue —
+as a turn each, a restart's first two minutes wrote 2,690 answers (mostly TMDB's
+Season Premieres derivation and lookups), their turns adding up to 19.7 s against
+the stores' 6.4 s, and an unmark waited 3.3 s. A STORE'S TURN IS ONE WINDOW'S
 (`entries.store_span`): every other write waits behind a turn's deciding, and a
 Simkl month decided in one turn kept a one-row write waiting 3.2–3.4 s. AND
 EVERY WRITE SAYS HOW LONG IT WAITED FOR ITS TURN (`db._in_turn`): one `db.write`

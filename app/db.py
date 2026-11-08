@@ -565,6 +565,30 @@ async def executemany(sql: str, rows: Iterable[Sequence[Any]]) -> Result:
     return await _in_turn(_statement(sql), lambda: run(_work))
 
 
+async def execute_gathered(writer: str,
+                           take: Callable[[], tuple[str, Sequence[Any]] | None]) -> Result | None:
+    """One write statement whose SQL and values are TAKEN WHEN ITS TURN COMES:
+    `take()` is called on the event loop the moment this write's turn starts,
+    and returns the statement to run, or None to write nothing. For a writer
+    that gathers what arrives while it waits (app/cache.py's answers), so that
+    everything which arrived by then rides in this one turn rather than queueing
+    a turn of its own behind it. `take` runs inside the turn and must be quick:
+    no reading, no encoding — what it hands over is already values."""
+    async def _work() -> Result | None:
+        taken = take()
+        if taken is None:
+            return None
+        sql, params = taken
+
+        def _write(conn: sqlite3.Connection) -> Result:
+            cur = conn.execute(sql, params)
+            return Result(lastrowid=cur.lastrowid, rowcount=cur.rowcount)
+
+        return await run(_write)
+
+    return await _in_turn(writer, _work)
+
+
 # ---------------------------------------------------------------------------
 # migrations
 # ---------------------------------------------------------------------------
