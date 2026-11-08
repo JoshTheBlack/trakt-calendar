@@ -234,8 +234,12 @@ copies a held lock), started and warmed by the lifespan (`query.ready`), write n
 log file, ignore Ctrl+C, are rebuilt by the next read when one dies, and LEAVE WHEN
 THE WEB PROCESS DOES, however it ended (`read_pool._leave_with_the_web_process`,
 waiting on the parent's sentinel): a web process stopped by force says nothing,
-and every one of its workers ran on. A worker holds ~106 MB. A script that starts the app's lifespan must keep its own top
-level out of a spawned worker (guard it, or the worker re-runs it).
+and every one of its workers ran on. A worker holds ~106 MB. A spawned worker
+first imports its parent's main module, so a script that starts the app's
+lifespan keeps its own top level out of it — run.py does everything from
+`main()` — or every worker re-runs it: with run.py's steps at its top level,
+each worker attached the log file the web process rotates and imported the whole
+app (`tests/kernel/test_read_pool.py`'s `AWorkerWritesNoLogFileTests`).
 
 **A slow request's log line accounts for its whole time.** `app/perftrace.py`
 owns it: every SLOW request line ends with `unspanned=` — the part of the

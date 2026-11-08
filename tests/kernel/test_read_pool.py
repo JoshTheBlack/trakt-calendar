@@ -203,5 +203,35 @@ class AWorkerLeavesWithItsWebProcessTests(unittest.TestCase):
         self.assertTrue(worker.gone_within(15), "the worker outlived its web process")
 
 
+class AWorkerWritesNoLogFileTests(unittest.TestCase):
+    """The web process owns the log file and rotates it, so a worker never opens
+    it. A spawned worker first imports its parent's main module, which on the
+    development server is run.py — so the stand-in web process here names run.py
+    as its main module, as `python run.py` does, with the log file switched on."""
+
+    STAND_IN = (
+        "import __main__, os, sys\n"
+        "__main__.__file__ = sys.argv[1]\n"
+        "os.environ['READ_PROCESSES'] = '1'\n"
+        "from app import read_pool\n"
+        "read_pool.start()\n"
+        "read_pool._pool.submit(os.getpid).result(60)\n"
+        "read_pool.stop()\n"
+    )
+
+    def test_a_worker_spawned_under_the_dev_runner_opens_no_log_file(self):
+        import tempfile
+        logs = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, logs, True)
+        log_file = logs / "app.log"
+        subprocess.run([sys.executable, "-c", self.STAND_IN, str(ROOT / "run.py")],
+                       cwd=ROOT, env={**os.environ, "LOG_FILE": str(log_file)},
+                       check=True, timeout=120)
+        self.assertFalse(
+            log_file.exists(),
+            "a read worker opened the web process's log file: "
+            + (log_file.read_text(encoding="utf-8") if log_file.exists() else ""))
+
+
 if __name__ == "__main__":
     unittest.main()

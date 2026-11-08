@@ -22,34 +22,44 @@ Environment:
 """
 import os
 
-# Loads a gitignored .env file in the project root, if present, before anything
-# reads os.environ — in particular ENCRYPTION_KEY, which app/secrets_box.py
-# caches from the environment on first use. Docker never runs this file (its
-# CMD invokes hypercorn directly), so a real environment variable is still the
-# only way in there; this is purely a non-Docker dev convenience. A variable
-# already set in the actual environment wins over the .env file either way.
-from dotenv import load_dotenv
-load_dotenv()
 
-import hypercorn.asyncio
-from hypercorn.config import Config
-
-# Quiet third-party libs (WARNING) but surface our own app.* diagnostics at
-# LOG_LEVEL, to the console and — with LOG_FILE — a rolling file (see the module
-# docstring and app/logging_setup.py). Fires before `from app.main import app`
-# below, so the app's own import-time lines are caught too; app/main.py calls the
-# same setup again, which is a no-op.
-from app import logging_setup
-logging_setup.configure()
-# Nothing here quiets hypercorn's per-request access log, and nothing can: it
-# overwrites that logger's level from its own config after this runs (see the note
-# in app/main.py). What actually decides it is config.accesslog below.
-
-from app.main import app
-from app import chrome
-
-
+# NOTHING HAPPENS WHEN THIS FILE IS IMPORTED: every step is `main()`'s, which
+# only running the file calls. A calendar read worker (app/read_pool.py) is a
+# SPAWNED process, and a spawned process imports its parent's main module — this
+# file — before it does anything else. With these steps at the top level, every
+# worker loaded the .env, attached the log file the web process rotates (one
+# "Writing logs to" line a worker on the development server's start, the file
+# held open by each) and imported the whole app before its first read.
 def main() -> None:
+    # Loads a gitignored .env file in the project root, if present, before
+    # anything reads os.environ — in particular ENCRYPTION_KEY, which
+    # app/secrets_box.py caches from the environment on first use. Docker never
+    # runs this file (its CMD invokes hypercorn directly), so a real environment
+    # variable is still the only way in there; this is purely a non-Docker dev
+    # convenience. A variable already set in the actual environment wins over the
+    # .env file either way.
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    import asyncio
+
+    import hypercorn.asyncio
+    from hypercorn.config import Config
+
+    # Quiet third-party libs (WARNING) but surface our own app.* diagnostics at
+    # LOG_LEVEL, to the console and — with LOG_FILE — a rolling file (see the
+    # module docstring and app/logging_setup.py). Fires before `from app.main
+    # import app` below, so the app's own import-time lines are caught too;
+    # app/main.py calls the same setup again, which is a no-op.
+    from app import logging_setup
+    logging_setup.configure()
+    # Nothing here quiets hypercorn's per-request access log, and nothing can: it
+    # overwrites that logger's level from its own config after this runs (see the
+    # note in app/main.py). What actually decides it is config.accesslog below.
+
+    from app.main import app
+    from app import chrome
+
     config = Config()
     host = os.environ.get("HOST", "0.0.0.0")
     port = os.environ.get("PORT", "8000")
@@ -59,7 +69,6 @@ def main() -> None:
     # default — set ACCESS_LOG=1 to enable. App INFO diagnostics are unaffected.
     config.accesslog = "-" if os.environ.get("ACCESS_LOG") else None
     print(f">> {chrome.PRODUCT_NAME} running at http://localhost:{port}  (Ctrl+C to stop)")
-    import asyncio
     asyncio.run(hypercorn.asyncio.serve(app, config))
 
 
