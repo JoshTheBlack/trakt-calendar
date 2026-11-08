@@ -23,6 +23,8 @@ import shutil
 import zlib
 from typing import NamedTuple
 
+import anyio.to_thread
+
 from . import db
 from .config import DATA_DIR
 
@@ -191,26 +193,31 @@ async def set(key: str, value, retain_seconds: int | None = RETAIN_SECONDS) -> N
     nothing has asked for. What expires is precisely the orphans, plus titles
     genuinely untouched for half a year — and those simply get fetched again.
 
-    IN TURN, LIKE EVERY WRITE (db.transaction): a write made around the writer
+    IN TURN, LIKE EVERY WRITE (db.execute): a write made around the writer
     queue commits while a calendar store is deciding its rows in its turn, and
     the store must then decide them again under the lock. MEASURED on a harness
     copy while a month's refills and the background lookups ran together: six
-    stores re-decided, holding the lock 0.17–0.70 s each to do it. The payload
-    is compressed before the lock is taken (`prepare`).
+    stores re-decided, holding the lock 0.17–0.70 s each to do it.
+
+    AND COMPRESSED BEFORE THE TURN, on a worker thread: the encoding reads
+    nothing, and done in the turn (as a `prepare`) it held every other write
+    behind it — MEASURED, a restart's first two minutes on a harness copy with
+    live services made 275 cache writes whose wait and turn passed 0.75 s, turns
+    to 0.46 s and one of 1.34 s, and a viewer's mark waited 2.2 s behind them.
     """
-    def _write(conn: db.Connection, blob: bytes) -> None:
-        conn.execute(
+    try:
+        blob = await anyio.to_thread.run_sync(_encode, value)
+    except (TypeError, ValueError):
+        return
+    try:
+        await db.execute(
             "INSERT INTO api_cache (cache_key, payload, cached_at, ttl_seconds, byte_size) "
             "VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(cache_key) DO UPDATE SET "
             "payload = excluded.payload, cached_at = excluded.cached_at, "
             "ttl_seconds = excluded.ttl_seconds, byte_size = excluded.byte_size",
-            (key, blob, db.now(), retain_seconds, len(blob)),
-        )
-
-    try:
-        await db.transaction(_write, prepare=lambda conn: _encode(value))
-    except (db.DatabaseError, TypeError, ValueError):
+            (key, blob, db.now(), retain_seconds, len(blob)))
+    except db.DatabaseError:
         pass
 
 

@@ -149,7 +149,11 @@ the helpers (a body handed to `db.run`) skips the queue and keeps that failure �
 and commits while a store decides its rows in its turn, so the store decides
 them again under the lock (the response cache's writes did: 0.17–0.70 s of lock
 per store, MEASURED on a harness copy) — so a write belongs in `transaction` or
-`execute`, `app/cache.py`'s included. A STORE'S TURN IS ONE WINDOW'S
+`execute`, `app/cache.py`'s included. A `prepare` RUNS IN THE TURN, so work that
+reads nothing is done before it: the response cache compresses a value on a
+worker thread and its turn is one INSERT (`cache.set` — compressing in its
+`prepare`, a restart's 275 cache writes in two minutes held a viewer's mark 2.2 s,
+MEASURED with live services). A STORE'S TURN IS ONE WINDOW'S
 (`entries.store_span`): every other write waits behind a turn's deciding, and a
 Simkl month decided in one turn kept a one-row write waiting 3.2–3.4 s. AND
 EVERY WRITE SAYS HOW LONG IT WAITED FOR ITS TURN (`db._in_turn`): one `db.write`

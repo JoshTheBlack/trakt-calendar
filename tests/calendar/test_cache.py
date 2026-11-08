@@ -1886,6 +1886,28 @@ class EvictionTests(CacheTestCase):
         self.assertEqual(await self._keys(), {"older", "newer"})
 
 
+class ACachedAnswerIsCompressedBeforeItsTurnTests(CacheTestCase):
+    """A response is encoded with the writer queue free: its turn is the
+    insert alone, so no other write waits behind the compressing."""
+
+    async def test_the_queue_is_free_while_a_value_is_encoded(self):
+        queue_held: list[bool] = []
+        real, queue = cache._encode, db._writer_queue()
+
+        def watched(value):
+            queue_held.append(queue.locked())
+            return real(value)
+
+        with patch.object(cache, "_encode", watched):
+            await cache.set("k", {"big": "x" * 10_000})
+        self.assertEqual(queue_held, [False])
+        self.assertEqual(await cache.get("k", 600), {"big": "x" * 10_000})
+
+    async def test_a_value_that_does_not_encode_writes_nothing(self):
+        await cache.set("k", {"bad": object()})
+        self.assertIsNone(await cache.get("k", 600))
+
+
 class SweepLockTests(CacheTestCase):
     """The sweep runs every minute on the heartbeat, and nearly every minute
     nothing is due: it decides on a read, takes no lock when nothing is due, and
