@@ -199,6 +199,32 @@ the longest loop block 1.85–3.46 s → 0.30–0.34 s; what is left lines up wi
 full garbage collections (up to ~0.3 s) and the interpreter lock shared with
 the threads.
 
+**The calendar's reads run in a pool of worker processes; everything else in the
+web process.** `app/read_pool.py` owns it. Threads share one interpreter lock, so
+reads asked at once ran one after another: MEASURED on a copy of dev, six of a
+filtered month's late days at once took 1.97–2.02 s each on threads and
+1.01–1.11 s in a pool of four, and under a restart's refill burst a mark answered
+in 2.0–2.4 s instead of 4.9–5.6 s. WHAT A WORKER RUNS IS A READ: a module-level
+function of a connection and values (`read_pool.read(fn, ...)`), on the worker's
+own READ-ONLY connection (`db.become_read_only`, `db.worker_read` — which refuses
+to run in a process that has not become a reader, so the web process can never be
+made one), handed values and returning values, pickled across. It touches no
+in-process state — a page's filed month, `_new_answers`, the refill latches, the
+pacers, the month-changed clocks, `refresh.viewed` all stay in the web process,
+which is why this shape needed no latch moved; every write stays in the one
+writer queue. A read whose callers pass their own functions (`query.titles`'
+`keep` / `narrow`) stays on a thread. A MONTH NOBODY FILTERS IS READ IN PLACE
+(`query._answered_in_place`): its answer is the whole calendar, and handing
+20,277 cards back cost 0.86 s, more than the read; a filtered month's 1,470 cost
+~60 ms. `READ_PROCESSES` sets how many workers (default: the cores less one, at
+most `read_pool.DEFAULT_MOST`; 0 reads on threads, which the suite does —
+tests/conftest.py — and tests/kernel/test_read_pool.py runs a real one). Workers
+are SPAWNED on every platform (the web process has threads by then, and a fork
+copies a held lock), started and warmed by the lifespan (`query.ready`), write no
+log file, ignore Ctrl+C, and are rebuilt by the next read when one dies. A worker
+holds ~106 MB. A script that starts the app's lifespan must keep its own top
+level out of a spawned worker (guard it, or the worker re-runs it).
+
 **A slow request's log line accounts for its whole time.** `app/perftrace.py`
 owns it: every SLOW request line ends with `unspanned=` — the part of the
 request no span covers, nested and concurrent spans counted once — so a gap in
@@ -207,8 +233,9 @@ that spends time between two spans is the next thing to span; every step
 between a calendar read and its render has one (`calendar.view_state`,
 `calendar.viewed`, `calendar.backlog`,
 `calendar.file_month`, `calendar.day_chips`, `calendar.first_page`,
-`query.rows` / `query.judge` / `query.present`, `calendar.season_lines`,
-`calendar.logos`, `calendar.card_pictures`). A span is DEBUG until slow
+`query.span` / `query.titles` / `query.present`, `calendar.season_lines`,
+`calendar.logos`, `calendar.card_pictures`, and every off-loop render's
+`templating.drawn`). A span is DEBUG until slow
 (`SLOW_SPAN_MS`) and spells its fields only when its line is printed: 2.6 µs at
 INFO, ~31 µs at DEBUG to a file (MEASURED).
 
@@ -575,14 +602,26 @@ rows (`query.titles`). NOTHING OF A READ IS KEPT BETWEEN REQUESTS. A span memo w
 here, holding a month per viewer key in process, and its key was where "filtered
 at read" could quietly break — a key missing one thing a viewer decides hands one
 reader somebody else's month; it went with this module, and comes back only for a
-measured need, with that key's whole burden. The reading runs on a worker thread
-(`db.run`), and the drawing too (`templating.drawn`), so the loop serves other
-requests while a month is built. MEASURED on a copy of dev, user 1's October All
+measured need, with that key's whole burden. THE READING RUNS IN A READ WORKER
+PROCESS (`app/read_pool.py`; `query.span` and `query.present` hand their pure
+halves, `placed_span` and `present_items`, to `read_pool.read`), the drawing on a
+worker thread (`templating.drawn`), so the loop serves other requests while a
+month is built and reads asked at once run side by side — below. MEASURED on a copy of dev, user 1's October All
 Episodes, against the memo's read: the cold shell 3.45–4.66 s → 1.93–2.29 s, a late
 day 0.88–0.95 s → 0.32–0.35 s, the longest loop block 0.49–1.67 s → 0.09–0.10 s;
 the warm shell, which the memo served, 0.44–0.62 s → 1.75–2.14 s; every drawn
 field of 52,794 cards identical across five calendars, two months, four service
-orders, filters off and one service alone.
+orders, filters off and one service alone. ITS READS COME BACK IN ONE AGGREGATED
+ROW (`db.aggregated`: the month's rows, its titles' identities, the judging's
+verdicts — a row a step, each step winning the interpreter lock back, read a
+month's 19,607 rows in 5.6–7.0 s beside a restart's refills, 0.14 s idle; one row
+is one step, in the same order), and every connection reads the file through a
+memory map (`db.MMAP_BYTES`: the rows' SQL 235 → 126 ms). With a card one service
+lists placed without asking the resolvers (`query.place`) and a row's instants
+read by column names spelled once (`episodes.instants_of`), MEASURED on a copy
+of dev against the tree before: the cold shell 2.0–2.2 s → 1.7–1.8 s, the warm
+1.9–2.2 s → 1.5–1.7 s, a late day 0.33–0.35 s → 0.28–0.29 s, and the 60-view card
+dump 74 → 49 s with every drawn field of 56,900 cards identical.
 
 **One episode is ONE card, drawn on the day the viewer's first service gives
 it.** Which listings are one card is decided twice, both times the same for every

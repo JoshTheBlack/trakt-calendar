@@ -48,6 +48,13 @@ if os.environ.get("PYTEST_XDIST_WORKER"):
 else:
     os.environ.setdefault("TRAKT_DATA_DIR", tempfile.mkdtemp(prefix="tns-test-"))
 
+# THE CALENDAR'S READS RUN ON A WORKER THREAD IN THE SUITE (app/read_pool.py with
+# no pool): every test client's lifespan would otherwise start processes of its
+# own, a few per client across thousands of clients. The functions a pool runs
+# are the same functions either way; tests/kernel/test_read_pool.py runs them in
+# a real pool.
+os.environ["READ_PROCESSES"] = "0"
+
 ORIGIN = "https://testserver"
 _db_counter = itertools.count(1)
 

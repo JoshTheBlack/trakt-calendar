@@ -40,7 +40,7 @@ from datetime import date
 from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
-from .. import db, endpoints, perftrace, providers
+from .. import db, endpoints, perftrace, providers, read_pool
 from ..metadata import episodes as episode_rows
 from ..metadata import groups
 from ..metadata import identity as title_identity
@@ -1182,25 +1182,95 @@ def present_rows(conn: db.Connection, views: Sequence[View], viewer: Viewer) -> 
 # the read, as its callers ask it
 # ---------------------------------------------------------------------------
 #
-# ON A WORKER THREAD, every step but the awaiting: the rows are read, the cards
-# placed and judged, and the drawn ones composed and rendered on the thread that
-# read them, so the event loop serves every other request while a month is
-# built — and only the drawn cards' words are ever read.
+# IN A READ WORKER, every step but the awaiting (app/read_pool.py): a span's rows
+# are read, its cards placed and judged, and the drawn ones composed and rendered
+# in a process of its own — or on a worker thread where the instance runs no
+# pool — so the event loop serves every other request while a month is built,
+# reads asked at once run side by side, and only the drawn cards' words are ever
+# read. What crosses to a worker is values (`Viewer`, `Held`, dates, `View`s)
+# and the functions it runs are this module's own, taking a connection first.
 
-async def span(viewer: Viewer, first: date, after: date, *, held: Callable[[date], bool],
-               near: tuple[date, date]) -> Placed:
-    """The cards `viewer` sees of the rows with a listing dated in [first,
-    after) — those whose every listing `held` keeps (a window nothing has filled
-    contributes no listings of its own), and that could be drawn inside the UTC
-    days `near` (`views_of`)."""
-    key = viewer.endpoint.key
-    with perftrace.span("query.rows") as sp:
-        listings = await db.run(lambda conn: read_rows(conn, key, first=first, after=after))
-        sp.set(listings=len(listings))
-    listings = [listing for listing in listings if held(utc_day(listing))]
+class Held(NamedTuple):
+    """Which of a span's listings a read keeps by where they are filed: every
+    one but those dated in a window nothing has filled (`gaps`, [first, after)
+    each) — what is in one is only what a search or a tracker wrote there, and a
+    read that may not fill serves it as the empty span it is. A value, so it
+    crosses to a read worker."""
+    gaps: tuple[tuple[date, date], ...] = ()
+
+    def __call__(self, day: date) -> bool:
+        return not any(first <= day < after for first, after in self.gaps)
+
+
+def in_day_order(views: list[View], start_date: date, end_date: date) -> list[View]:
+    """The cards of `views` placed on a local day of [start_date, end_date], in
+    day order.
+
+    KEPT WHEN IT IS PLACED INSIDE THE SPAN, which is a question about the CARD,
+    not about any one listing: a card's other services may list it outside the
+    span, and a listing inside the span may belong to a card placed outside it
+    — which is then drawn there, once, and not here. Sorted on the LOCAL DAY
+    first and the instant second. The two agree for anything converted through
+    one timezone, but a date-only release is pinned to its own calendar date
+    rather than to an offset from an instant — and a day's cards must be
+    contiguous, or one day arrives in two pieces."""
+    first, last = start_date.isoformat(), end_date.isoformat()
+    kept = [view for view in views if first <= view.air_date <= last]
+    kept.sort(key=lambda view: (view.air_date, view.air_ts))
+    return kept
+
+
+def placed_span(conn: db.Connection, viewer: Viewer, first: date, after: date, *,
+                held: Held, near: tuple[date, date],
+                days: tuple[date, date] | None = None) -> Placed:
+    """`span`'s answer, read on `conn` — what a read worker runs."""
+    listings = [listing for listing in read_rows(conn, viewer.endpoint.key, first=first,
+                                                 after=after)
+                if held(utc_day(listing))]
     lo, hi = near
-    return await _judged(viewer, listings,
-                         lambda card: any(lo <= utc_day(l) <= hi for l in card.listings))
+    placed = judged(conn, viewer, listings,
+                    lambda card: any(lo <= utc_day(l) <= hi for l in card.listings))
+    if days is None:
+        return placed
+    return Placed(in_day_order(placed.views, *days), placed.filtered_out)
+
+
+def ready() -> None:
+    """What a read worker runs as it starts (read_pool.start): nothing, in this
+    module — which is the point: unpickling it imports what a read needs."""
+
+
+async def span(viewer: Viewer, first: date, after: date, *, held: Held,
+               near: tuple[date, date], days: tuple[date, date] | None = None) -> Placed:
+    """The cards `viewer` sees of the rows with a listing dated in [first,
+    after) — those whose every listing `held` keeps — that could be drawn inside
+    the UTC days `near` (`views_of`); and with `days`, only those placed on a
+    local day of [first, last] of them, in day order (`in_day_order`)."""
+    with perftrace.span("query.span") as sp:
+        if _answered_in_place(viewer, first, after):
+            placed = await db.run(lambda conn: placed_span(
+                conn, viewer, first, after, held=held, near=near, days=days))
+        else:
+            placed = await read_pool.read(placed_span, viewer, first, after, held=held,
+                                          near=near, days=days)
+        sp.set(cards=len(placed.views))
+    return placed
+
+
+# How many days a span may cover and still go to a read worker however much it
+# answers with: a day's read, padded a day each side, and its week.
+_ALWAYS_IN_A_WORKER_DAYS = 9
+
+
+def _answered_in_place(viewer: Viewer, first: date, after: date) -> bool:
+    """Whether a span's read is made here rather than in a read worker: a span
+    longer than a few days whose viewer judges nothing (no filter of theirs
+    set, or theirs paused), whose answer is then the whole calendar. Its cards
+    cross to this process pickled, and MEASURED on a copy of dev, October All
+    Episodes' 20,277 cost 0.86 s to hand back — more than the read itself; a
+    filtered month's 1,470 cost ~60 ms, a day's tens of milliseconds."""
+    return ((after - first).days > _ALWAYS_IN_A_WORKER_DAYS
+            and not any(value for value in viewer.specs.values()))
 
 
 async def titles(viewer: Viewer, title_keys: Iterable[str], *,
@@ -1215,11 +1285,16 @@ async def titles(viewer: Viewer, title_keys: Iterable[str], *,
     if not keys:
         return Placed([], 0)
     endpoint = viewer.endpoint.key
-    with perftrace.span("query.rows", titles=len(keys)):
-        listings = await db.run(lambda conn: read_rows(conn, endpoint, titles=keys))
-    if keep is not None:
-        listings = [listing for listing in listings if keep(listing)]
-    return await _judged(viewer, listings, None, narrow)
+
+    # On a worker thread rather than a read worker: `keep` and `narrow` are the
+    # caller's own functions, and a title's rows are few.
+    def _read(conn) -> Placed:
+        listings = read_rows(conn, endpoint, titles=keys)
+        if keep is not None:
+            listings = [listing for listing in listings if keep(listing)]
+        return judged(conn, viewer, listings, None, narrow)
+    with perftrace.span("query.titles", titles=len(keys)):
+        return await db.run(_read)
 
 
 # What the judging reads of a title's groups — the columns a described record
@@ -1282,17 +1357,21 @@ async def described_kept(viewer: Viewer, record: Record) -> bool:
     return await db.run(_kept)
 
 
-async def _judged(viewer: Viewer, listings: list[Listing], near, narrow=None) -> Placed:
+def judged(conn: db.Connection, viewer: Viewer, listings: list[Listing], near,
+           narrow=None) -> Placed:
+    """`listings`' cards placed and judged for `viewer`, on `conn`."""
     if str(viewer.endpoint.media) == str(Media.MOVIE):
         # A TRAKT FILM'S RELEASE SCHEDULE is its own releases read's, kept apart
         # from the title store (calendar_enrich.overlay_releases) — what the
         # release narrowing judges it by, read, never fetched.
         from . import enrich as calendar_enrich
-        with perftrace.span("query.releases"):
-            await calendar_enrich.overlay_releases(listings)
-    with perftrace.span("query.judge", listings=len(listings)):
-        return await db.run(lambda conn: judge(
-            conn, views_of(listings, viewer, near=near, narrow=narrow), viewer))
+        calendar_enrich.give_releases(conn, listings)
+    return judge(conn, views_of(listings, viewer, near=near, narrow=narrow), viewer)
+
+
+def present_items(conn: db.Connection, viewer: Viewer, views: list[View]) -> list[Item]:
+    """`present`'s answer, read on `conn` — what a read worker runs."""
+    return [render(record, viewer.tz) for record in present_rows(conn, views, viewer)]
 
 
 async def present(viewer: Viewer, views: Sequence[View]) -> list[Item]:
@@ -1301,5 +1380,4 @@ async def present(viewer: Viewer, views: Sequence[View]) -> list[Item]:
     if not views:
         return []
     with perftrace.span("query.present", cards=len(views)):
-        return await db.run(lambda conn: [render(record, viewer.tz)
-                                          for record in present_rows(conn, views, viewer)])
+        return await read_pool.read(present_items, viewer, views)

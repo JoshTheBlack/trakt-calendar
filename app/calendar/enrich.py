@@ -965,12 +965,20 @@ async def _read_release_rows(trakt_ids) -> dict[int, dict]:
     ids = [int(i) for i in trakt_ids]
     if not ids:
         return {}
+    return await db.run(lambda conn: _release_rows(conn, ids))
+
+
+def _release_rows(conn: db.Connection, ids: list[int]) -> dict[int, dict]:
+    """`_read_release_rows`, on the connection given — read and decompressed on
+    the thread or process that asked."""
+    if not ids:
+        return {}
     placeholders = ",".join("?" for _ in ids)
-    rows = await db.fetch_all(
+    rows = conn.execute(
         f"SELECT trakt_id, payload, fetched_at, failed_at, fail_count "
         f"FROM trakt_releases WHERE trakt_id IN ({placeholders})",
         tuple(ids),
-    )
+    ).fetchall()
     return {
         int(row["trakt_id"]): {
             "fields": _decompress(row["payload"]),
@@ -1040,10 +1048,16 @@ async def overlay_releases(records: list[Record]) -> list[Record]:
     app/calendar/filter.py reads as "this record cannot answer" and keeps, so a
     film waiting on its first lookup is never dropped by a filter.
     """
+    return await db.run(lambda conn: give_releases(conn, records))
+
+
+def give_releases(conn: db.Connection, records: list) -> list:
+    """`overlay_releases`, on the connection given — for a read already on a
+    worker thread or in a worker process (app/calendar/query.py)."""
     candidates = _trakt_film_candidates(records)
     if not candidates:
         return records
-    rows = await _read_release_rows(candidates.keys())
+    rows = _release_rows(conn, [int(i) for i in candidates.keys()])
     for trakt_id, group in candidates.items():
         row = rows.get(trakt_id)
         if row is None or not row["fields"]:

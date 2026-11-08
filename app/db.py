@@ -220,6 +220,8 @@ def _drop_local_connection() -> None:
 
 
 def _new_connection(path: Path) -> sqlite3.Connection:
+    if _read_only:
+        return _read_only_connection(path)
     ensure_data_dir()
     path.parent.mkdir(parents=True, exist_ok=True)
     fresh = not path.exists()
@@ -243,6 +245,45 @@ def _new_connection(path: Path) -> sqlite3.Connection:
         except OSError:  # pragma: no cover — no-op on filesystems without modes
             pass
     return conn
+
+
+# WHETHER THIS PROCESS ONLY READS: a read pool's worker (app/read_pool.py), set
+# as the worker starts (`become_read_only`) and never in the web process. Its
+# connections are opened read-only, so nothing a worker runs can write — every
+# write stays in the web process, in its one queue (`_writer_queue`).
+_read_only = False
+
+
+def become_read_only() -> None:
+    """Make this process a reader: every connection it opens from now on is
+    read-only. For a read pool's worker as it starts, and nothing else."""
+    global _read_only
+    _read_only = True
+    _drop_local_connection()
+
+
+def _read_only_connection(path: Path) -> sqlite3.Connection:
+    """A read-only connection to `path`: the connection policy's reading half.
+    The journal mode is the file's, already WAL, and a read-only connection
+    reads every commit another makes, and through a write in progress."""
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True,
+                           timeout=BUSY_TIMEOUT_MS / 1000, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+    conn.execute(f"PRAGMA mmap_size={MMAP_BYTES}")
+    return conn
+
+
+def worker_read(path: str, fn: Callable[..., T], args: tuple, kwargs: dict) -> T:
+    """`fn(conn, *args, **kwargs)` in a read pool's worker process, on that
+    process's own read-only connection to the database at `path` — which is the
+    web process's, named on every call so a worker follows `set_db_path`.
+    Refused in a process that has not become a reader (`become_read_only`)."""
+    if not _read_only:
+        raise RuntimeError("worker_read runs in a read pool's worker process only")
+    if db_path() != Path(path):
+        set_db_path(path)
+    return fn(connection(), *args, **kwargs)
 
 
 def connection() -> sqlite3.Connection:

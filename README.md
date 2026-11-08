@@ -78,6 +78,14 @@ directory (`/data/logs/app.log` in the container), or any other value for a path
 It rolls over at 10 MB and keeps five old files, so it never passes about 60 MB. `LOG_LEVEL`
 (default `INFO`) sets how much is written to both.
 
+### Calendar read workers — `READ_PROCESSES`
+
+The calendar reads its months and days in a few worker processes beside the web process, so
+several days loading at once (as a page scrolls) are read side by side instead of one after
+another. By default there is one worker per CPU core less one, at most four; each holds
+about 100 MB. Set `READ_PROCESSES` to a smaller number on a machine short of memory, or to
+`0` to read everything in the web process as earlier versions did.
+
 ## Serving over HTTPS
 
 Three settings decide whether the app behaves correctly behind a reverse proxy. All three

@@ -36,6 +36,7 @@ from . import db
 from . import http_pool
 from . import logging_setup
 from . import perftrace
+from . import read_pool
 from . import secrets_box
 from . import settings_routes
 from .auth import admin_routes
@@ -51,6 +52,7 @@ from .calendar import cache as calendar_cache
 from .calendar import enrich as calendar_enrich
 from .calendar import entries as calendar_entries
 from .calendar import completion as calendar_completion
+from .calendar import query as calendar_query
 from .calendar import routes as calendar_routes
 from .calendar import share_card_cache
 from .calendar import share_routes
@@ -268,6 +270,10 @@ async def lifespan(_app: FastAPI):
     await _warn_on_key_state(health)
     if health != encryption_flow.KEY_MISMATCH:
         await integrations_routes.refresh_integration_health()
+    # The calendar's read workers, started now and warmed behind the start-up
+    # (app/read_pool.py), so the first month opened after a restart does not
+    # wait for a process to start.
+    read_pool.start(warm=calendar_query.ready)
     task = asyncio.create_task(_heartbeat_loop())
     # Observes the loop it runs on and is depended on by nothing — see
     # perftrace.watch_event_loop for what its one log line is able to say that
@@ -278,6 +284,7 @@ async def lifespan(_app: FastAPI):
     finally:
         watchdog.cancel()
         task.cancel()
+        read_pool.stop()
         # Every pooled client at once, rather than naming each service here — a
         # list in the composition root is one a new provider would silently fall
         # out of, leaving its connections open at shutdown.

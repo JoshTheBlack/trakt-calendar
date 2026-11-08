@@ -1279,35 +1279,17 @@ async def _span_views(endpoint: Endpoint, settings, *, tz: ZoneInfo, start_date:
     # drawn at one of its own listings' instants, at most a day from the span in
     # any zone (`_local_span_utc_range`), so the rows with a listing in those
     # days are every row that can make a card here — read whole. A day read
-    # used to read its one or two whole weeks of rows to draw one day.
-    first, last = windows[0], windows[-1] + timedelta(days=WINDOW_DAYS)
+    # used to read its one or two whole weeks of rows to draw one day. IN A READ
+    # WORKER (query.span), kept to the span's local days and in their order there.
     viewer = query.Viewer(endpoint, settings, prefs, tz, specs)
+    gaps = tuple((window, window + timedelta(days=WINDOW_DAYS))
+                 for window in windows if window not in covered)
     with span("calcache.read", windows=len(windows)) as sp:
         placed = await query.span(
             viewer, utc_start, utc_end + timedelta(days=1), near=(utc_start, utc_end),
-            held=lambda day: not first <= day < last or window_start(day) in covered)
+            held=query.Held(gaps), days=(start_date, end_date))
         sp.set(cards=len(placed.views))
-    views = await anyio.to_thread.run_sync(lambda: _in_day_order(placed.views, start_date,
-                                                                 end_date))
-    return views, as_of, partial, placed.filtered_out
-
-
-def _in_day_order(views: list, start_date: date, end_date: date) -> list:
-    """The cards of `views` placed on a local day of [start_date, end_date], in
-    day order — pure, for a worker thread (a month's read is thousands).
-
-    KEPT WHEN IT IS PLACED INSIDE THE SPAN, which is a question about the CARD,
-    not about any one listing: a card's other services may list it outside the
-    span, and a listing inside the span may belong to a card placed outside it
-    — which is then drawn there, once, and not here. Sorted on the LOCAL DAY
-    first and the instant second. The two agree for anything converted through
-    one timezone, but a date-only release is pinned to its own calendar date
-    rather than to an offset from an instant — and a day's cards must be
-    contiguous, or one day arrives in two pieces."""
-    first, last = start_date.isoformat(), end_date.isoformat()
-    kept = [view for view in views if first <= view.air_date <= last]
-    kept.sort(key=lambda view: (view.air_date, view.air_ts))
-    return kept
+    return placed.views, as_of, partial, placed.filtered_out
 
 
 async def present(endpoint: Endpoint, settings, views, *, tz: ZoneInfo, prefs=None,
