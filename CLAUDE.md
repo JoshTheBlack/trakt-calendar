@@ -225,8 +225,10 @@ most `read_pool.DEFAULT_MOST`; 0 reads on threads, which the suite does —
 tests/conftest.py — and tests/kernel/test_read_pool.py runs a real one). Workers
 are SPAWNED on every platform (the web process has threads by then, and a fork
 copies a held lock), started and warmed by the lifespan (`query.ready`), write no
-log file, ignore Ctrl+C, and are rebuilt by the next read when one dies. A worker
-holds ~106 MB. A script that starts the app's lifespan must keep its own top
+log file, ignore Ctrl+C, are rebuilt by the next read when one dies, and LEAVE WHEN
+THE WEB PROCESS DOES, however it ended (`read_pool._leave_with_the_web_process`,
+waiting on the parent's sentinel): a web process stopped by force says nothing,
+and every one of its workers ran on. A worker holds ~106 MB. A script that starts the app's lifespan must keep its own top
 level out of a spawned worker (guard it, or the worker re-runs it).
 
 **A slow request's log line accounts for its whole time.** `app/perftrace.py`

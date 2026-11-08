@@ -3,8 +3,9 @@
 THE PROMISES: a read run in a worker answers exactly what it answers on a
 thread, from the web process's own database; a worker cannot write; the web
 process can never be made a reader by running a worker's entry point; a worker
-that dies is replaced by the next read, which still answers; and how many
-workers there are is `READ_PROCESSES`, else a share of the cores.
+that dies is replaced by the next read, which still answers; a worker leaves
+when its web process is killed; and how many workers there are is
+`READ_PROCESSES`, else a share of the cores.
 
 THESE START REAL PROCESSES (spawned, as the app's are), so they are few: the
 rest of the suite reads on threads (tests/conftest.py's READ_PROCESSES=0), which
@@ -13,9 +14,15 @@ runs the very functions a worker runs.
 from __future__ import annotations
 
 import asyncio
+import multiprocessing.connection
 import os
+import signal
+import subprocess
+import sys
+import time
 import unittest
 from datetime import date, datetime, timezone
+from pathlib import Path
 from unittest import mock
 from zoneinfo import ZoneInfo
 
@@ -26,6 +33,7 @@ from app.providers.base import Media, Record, Source
 from tests.support import CardTestCase, seed_records
 
 AIRS = datetime(2026, 7, 8, 20, tzinfo=timezone.utc).timestamp()
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _records() -> list[Record]:
@@ -130,6 +138,69 @@ class AReadInAWorkerTests(CardTestCase):
             process.kill()
             process.join(10)
         self.assertEqual(len(self._span().views), 6)
+
+
+class _Watched:
+    """Another process's lifetime, held from before anything is killed so a
+    reused pid cannot answer for it; `end` takes it down if it is still there."""
+
+    def __init__(self, pid: int):
+        self.pid = pid
+        self._handle = None
+        if sys.platform == "win32":
+            import _winapi
+            # SYNCHRONIZE to wait on it, PROCESS_TERMINATE to clean it up.
+            self._handle = _winapi.OpenProcess(_winapi.SYNCHRONIZE | 0x0001, False, pid)
+
+    def gone_within(self, seconds: float) -> bool:
+        if self._handle is not None:
+            return bool(multiprocessing.connection.wait([self._handle], seconds))
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            try:
+                os.kill(self.pid, 0)
+            except ProcessLookupError:
+                return True
+            time.sleep(0.1)
+        return False
+
+    def end(self) -> None:
+        if self._handle is not None:
+            import _winapi
+            if not self.gone_within(0):
+                _winapi.TerminateProcess(self._handle, 1)
+            _winapi.CloseHandle(self._handle)
+        elif not self.gone_within(0):
+            os.kill(self.pid, signal.SIGKILL)
+
+
+class AWorkerLeavesWithItsWebProcessTests(unittest.TestCase):
+    """A web process stopped by force tells its workers nothing; each must
+    leave anyway rather than run on with nobody to ask it anything. The web
+    process here is a stand-in that starts a pool of one, names its worker and
+    waits to be killed."""
+
+    STAND_IN = (
+        "import os, time\n"
+        "os.environ['READ_PROCESSES'] = '1'\n"
+        "from app import read_pool\n"
+        "read_pool.start()\n"
+        "print(read_pool._pool.submit(os.getpid).result(60), flush=True)\n"
+        "time.sleep(600)\n"
+    )
+
+    def test_a_worker_leaves_when_its_web_process_is_killed(self):
+        web = subprocess.Popen([sys.executable, "-c", self.STAND_IN], cwd=ROOT,
+                               stdout=subprocess.PIPE, text=True)
+        self.addCleanup(web.wait, 10)
+        self.addCleanup(web.kill)
+        self.addCleanup(web.stdout.close)
+        worker = _Watched(int(web.stdout.readline()))
+        self.addCleanup(worker.end)
+        self.assertFalse(worker.gone_within(0.5))
+        web.kill()
+        web.wait(10)
+        self.assertTrue(worker.gone_within(15), "the worker outlived its web process")
 
 
 if __name__ == "__main__":

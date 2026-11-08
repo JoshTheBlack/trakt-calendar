@@ -31,15 +31,19 @@ them held into a child that can never release it.
 STARTED WITH THE APP AND WARMED BEHIND IT (`start`): each worker is started and
 its read modules imported then, so the first month a viewer opens after a
 restart does not wait for a process to start. A worker that dies (a crash, a
-kill) breaks the pool; the next read builds a new one and asks again, once.
+kill) breaks the pool; the next read builds a new one and asks again, once. And
+a worker leaves when the web process does, however that ended
+(`_leave_with_the_web_process`).
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import multiprocessing
+import multiprocessing.connection
 import os
 import signal
+import threading
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
@@ -74,13 +78,39 @@ def processes() -> int:
 def _worker_started() -> None:
     """A worker's set-up, before its first read: it writes no log file — the web
     process owns the one it rotates, and a second writer could not rotate it —
-    and a console's Ctrl+C is the web process's to act on."""
+    a console's Ctrl+C is the web process's to act on, and it leaves when the web
+    process does (`_leave_with_the_web_process`)."""
     db.become_read_only()
     root = logging.getLogger()
     for handler in [h for h in root.handlers if isinstance(h, logging.FileHandler)]:
         root.removeHandler(handler)
         handler.close()
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    _leave_with_the_web_process()
+
+
+def _leave_with_the_web_process() -> None:
+    """End this worker the moment the process that started it has gone, however
+    it went. A pool told to stop lets its workers go (`stop`), but a web process
+    killed outright never says so, and a worker waiting for its next read waits
+    on a pipe it holds both ends of, so it never learns: MEASURED on Windows,
+    every worker of a web process stopped by force (what stopping a server by
+    its port does) was still running, ~106 MB each, with nobody left to ask it
+    anything. The parent's sentinel — its process handle on Windows, a pipe the
+    parent holds open elsewhere — is what the standard library hands a spawned
+    child for exactly this, and a thread waiting on it costs nothing until it
+    fires."""
+    parent = multiprocessing.parent_process()
+    if parent is None:
+        return
+
+    def watch() -> None:
+        multiprocessing.connection.wait([parent.sentinel])
+        # Nobody is left to hand an answer to, and an orderly exit would wait on
+        # the pool's own threads, which wait on the parent that has gone.
+        os._exit(0)
+
+    threading.Thread(target=watch, name="read-pool-parent", daemon=True).start()
 
 
 def _build(count: int) -> ProcessPoolExecutor:
