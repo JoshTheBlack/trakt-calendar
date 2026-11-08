@@ -3356,7 +3356,7 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 /* ---- the seed's own confirmation, and the backup's line ----
    The seed control turns into its question and back, one partial per state, the
    way the calendar's "Add all" does. */
-.ranker-seed-confirm { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ranker-seed, .ranker-seed-confirm { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ranker-restore-status { font-size: 0.78rem; color: var(--text-dim); margin-top: 6px; }
 .ranker-restore-status:empty { display: none; }
 

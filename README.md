@@ -371,6 +371,19 @@ Without a token, TMDB steps aside and the other services describe titles as befo
 search boxes say TMDB isn't configured rather than searching something else; anyone who
 has linked Trakt or Simkl can still add that service to a search.
 
+### Linking your own TMDB account
+
+Once the instance has a TMDB token **and** a [public base URL](#public_base_url--required-for-provider-login-share-links-and-self-healing-posters),
+each person can connect their own TMDB account from the **TMDB** row on their **Account**
+page: TMDB asks them to approve the app and sends them back. That reaches only what is
+theirs on TMDB — their own lists, and their ratings, which a rankings board can then be
+seeded from with **★ Seed from TMDB ratings** beside **★ Seed from Trakt ratings** (TMDB
+scores in half points; a half rounds up). It changes nothing else: TMDB was already every
+search box's catalogue, the calendar's sources stay as they were, and TMDB is never a way
+to sign in, so it cannot be anyone's last way in either. **Unlink** on the same row
+removes it and tells TMDB to forget the connection; if TMDB can't be reached, the page says
+so and the connection can be removed on themoviedb.org under **Settings ▸ Sessions**.
+
 ## Simkl — an optional second source
 
 Simkl fills the calendar alongside Trakt, can sign people in, and can read a linked

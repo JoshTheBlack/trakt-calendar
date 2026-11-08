@@ -308,9 +308,12 @@ then has one answer per module. THERE ARE NOW THREE PROVIDER TRANSPORTS
 (`app/providers/trakt/transport.py`, `app/providers/simkl/transport.py` and
 `app/providers/tmdb/transport.py`), and they differ because the services differ
 in what a request carries, not because the rule does. A change to what `private`
-MEANS belongs in the Trakt and Simkl ones; TMDB's makes only public catalogue
-reads with the instance's token and so has no `private` flag at all — a read
-made with a viewer's own TMDB token must not ride its `cached_get`.
+MEANS belongs in the Trakt and Simkl ones; TMDB's `cached_get` makes only public
+catalogue reads with the instance's token and so has no `private` flag at all — a
+read made with a viewer's own TMDB token, and every write, goes through
+`transport.send_private` instead, which shares the gate and the circuit and
+caches nothing (`app/providers/tmdb/account.py` and `watchlist.py` are its
+callers).
 `tests/providers/test_protocol_conformance.py` is what holds the packages to one
 shape. EVERY TRAKT READ IS PACED IN ONE OF TWO KINDS OF BUCKET, because Trakt
 counts two quotas — 500 GETs per five minutes for the application (client id
@@ -322,10 +325,14 @@ bucket per bearer digest, each at `GET_LIMIT` (450). A Trakt request that skips
 **A write to a person's own list at a service is read from its BODY and
 confirmed by READING THE LIST BACK, and it never blocks the tracker.**
 `WatchlistPort` in `app/providers/base.py` owns the rule and states it; each
-provider implements it (`app/providers/simkl/watchlist.py` and
+of THREE providers implements it (`app/providers/simkl/watchlist.py`,
 `app/providers/trakt/watchlist.py`, which reads its list EVERY PAGE — Trakt's
 watchlist pages at 100, and a read that stopped at one page once missed 46
-shows — and takes a full list's 420 as REFUSED, never retried). A service may
+shows — and takes a full list's 420 as REFUSED, never retried, and
+`app/providers/tmdb/watchlist.py`, a plain list of shows read every page at 20
+through v4 and written one title at a time through v3, each answer's
+`status_code` the outcome — 12 is TMDB saying the viewer listed it meanwhile, so
+it counts as theirs). A service may
 answer success to a request that did nothing — Simkl answers any `/sync/` path
 and answered a put of a title already listed with the same body as a real move —
 so an outcome comes from the answer's body, a written title is WRITTEN only when
@@ -333,7 +340,11 @@ a read of the list afterwards shows it, and what the service held BEFORE is read
 at the moment of the write and kept, because it is the only thing an undo can
 restore. A write moves a title the viewer may have put somewhere on purpose, so
 dropping never adds a title and an undo never takes what the viewer did
-themselves. The tracker is the record: a failed write is logged and counted, and
+themselves — and a drop is TOLD what the tracker's own record says was there
+before (`base.WatchlistDrop.status_before`: from a write the read-back
+confirmed, None otherwise), which a list with no statuses to set a title back to
+needs: TMDB's drop removes only a show the tracker put there and keeps any other
+(KEPT). The tracker is the record: a failed write is logged and counted, and
 the tracker action that caused it goes through.
 
 **What the tracker owes those lists is ONE module's answer, and the tracker never
@@ -356,6 +367,38 @@ finished, because a pass already running could otherwise read the tracker
 before the removal and decide it was not the last season. A show that leaves by
 any other road is forgotten, so its return is an arrival. Neither table travels
 in a tracker backup, and `app/distrakt/backup.py` says why.
+
+**A TMDB link is a viewer's own grant: never a way in, never an operator setting,
+and it changes only what asks about the viewer's account.** `app/auth/tmdb_routes.py`
+owns the round trip (`app/auth/tmdb.py` its calls): a v4 request token the
+instance asks for with `redirect_to` set to THIS instance's callback carrying the
+handshake's state — TMDB sends the browser back to that address exactly — approved
+at TMDB and exchanged once. The request token rides SEALED on the handshake row
+(`handshakes.hold_on_handshake`), so the callback trusts nothing from the URL but
+the state, and the state only beside its cookie and the session that started it.
+The grant is stored like every link (`linked_identities`, provider `tmdb`, the
+account's 24-character object id, the token sealed; `session_token` stays NULL —
+v3 takes the v4 bearer, MEASURED). `app/auth/revocation.py`'s `_LINKED` is the one
+table of linkable services and says which SIGN IN (`Linked.signs_in`): TMDB does
+not, so an unlink counts only the ways in left (`identities.unlink_identity` —
+counting every link let a TMDB row stand in for the last real one),
+`login_with_provider_identity` refuses it, and an unlink — as Trakt's and Simkl's
+do (the /me unlink route in `app/auth/routes.py`) — deletes the row and then revokes
+the grant at TMDB, saying so beside the rows when TMDB could not be told. The grant reaches code only through the viewer's Settings
+(`auth.viewer.settings_for_user`): `config.VIEWER_FIELDS` are never loaded from,
+written to or offered by the operator's settings. TMDB's `is_configured` is "this
+viewer holds a grant" (`Settings.tmdb_account_configured`) — the PRIVATE question —
+while every catalogue path (the search's default, calendar sources, details) asks
+`catalogue_is_configured` / `config.tmdb_configured`; TMDB has no sync port, so it
+is no tracker source either. Linking therefore changes no search box, calendar
+source, tracker source, access gate or sign-in (tests/auth/test_tmdb_link.py holds
+each), and appears only through `providers.for_watchlist` and the ratings sources.
+RATINGS ARE A CHOICE OF SERVICE: `app/ranker/sources.py`'s `_RATINGS` names every
+registered Source (None: keeps no ratings — Simkl), a board offers one press per
+linked service that keeps them, the press names its service, and an unknown name is
+`UnknownRatingsService`, never read as Trakt. TMDB scores in half points and a
+half rounds UP. A seed registers its titles through `metadata.ensure_many` in
+bounded turns before its own transaction (`core.REGISTER_TURN_TITLES`).
 
 **TMDB is first in `Source`, and nothing it supplies outlives six months.**
 `app/providers/base.py`'s `Source` declares TMDB first, and that ORDER is the

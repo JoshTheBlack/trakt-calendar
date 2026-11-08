@@ -318,7 +318,7 @@ class CredentialTests(StandaloneTestCase):
         with mock.patch.object(trakt_routes, "access_token_for_user",
                                _token_for(USER_TOKEN)), \
              mock.patch.object(trakt_sync, "fetch_ratings", _ratings):
-            resp = self.client.post("/rankings/boards/b1/seed", json={})
+            resp = self.client.post("/rankings/boards/b1/seed", json={"service": "trakt"})
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(seen["token"], USER_TOKEN)
         self.assertNotEqual(seen["token"], OPERATOR_TOKEN)
@@ -326,7 +326,9 @@ class CredentialTests(StandaloneTestCase):
     def test_the_seed_is_offered_once_an_account_has_something_to_read(self):
         with mock.patch.object(trakt_routes, "access_token_for_user", _token_for(USER_TOKEN)):
             sources = asyncio.run(ranker_routes._sources(self.user_id))
-        self.assertEqual(sources, {"search": True, "ratings": True})
+        # WHICH SERVICES, each a press of its own: the linked services that keep
+        # ratings (ranker_sources.ratings_services).
+        self.assertEqual(sources, {"search": True, "ratings": [("trakt", "Trakt")]})
 
 
 def _token_for(token: str):
@@ -353,14 +355,24 @@ class ProtocolTests(StandaloneTestCase):
             RatedTitle(title=a_show(1399, "Game of Thrones"), rating=7),
         ])
         asyncio.run(ranker.create_board(self.user_id, uid="b1"))
-        with mock.patch.object(ranker_sources, "ratings_source", lambda: source), \
-             mock.patch.object(ranker_sources, "ratings_available", _true()), \
+        named = []
+
+        async def _named(user_id, service):
+            named.append(service)
+            return source
+
+        with mock.patch.object(ranker_sources, "ratings_source", _named), \
              mock.patch.object(trakt_sync, "fetch_ratings", exploding("the provider was called")):
             # THE DRY RUN ANSWERS THE CONFIRMATION ITS OWN COUNTS ARE WRITTEN
-            # INTO, and pressing that is the same request with `commit` on.
-            preview = self.client.post("/rankings/boards/b1/seed", json={}).text
+            # INTO, and pressing that is the same request with `commit` on — and
+            # the same service, which the confirmation carries.
+            preview = self.client.post("/rankings/boards/b1/seed",
+                                       json={"service": "trakt"}).text
             committed = self.client.post("/rankings/boards/b1/seed",
-                                         json={"commit": "1"}).text
+                                         json={"commit": "1", "service": "trakt"}).text
+
+        self.assertEqual(named, ["trakt", "trakt"])
+        self.assertIn('"service": "trakt"', preview)
 
         self.assertEqual(source.calls, [self.user_id, self.user_id])
         self.assertIn("would add 2 title(s)", preview)
@@ -371,12 +383,6 @@ class ProtocolTests(StandaloneTestCase):
         placed = {c["uid"]: [i["title"] for i in c["items"]] for c in board["categories"]}
         self.assertEqual(placed["tier-s"], ["Breaking Bad"])
         self.assertEqual(placed["tier-c"], ["Game of Thrones"])
-
-
-def _true():
-    async def _call(*args, **kwargs):
-        return True
-    return _call
 
 
 class ModuleIsolationTests(unittest.TestCase):

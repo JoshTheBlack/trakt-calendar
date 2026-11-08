@@ -25,7 +25,9 @@ the easy mistake:
     search is made with the operator's token.
   - RATINGS are private to one person and need THEIR token. With no linked
     identity there is no such token, and the action is hidden rather than
-    offered and then failed.
+    offered and then failed. A seed reads ONE service's ratings, the one the
+    viewer pressed for (`ratings_source`), among the services they have linked
+    that keep ratings (`ratings_services`).
 """
 from __future__ import annotations
 
@@ -37,12 +39,13 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from . import item_keys
-from .. import metadata
+from .. import metadata, providers
 from ..auth import trakt_routes, viewer
 # The stored-title half of every search. See the module docstring for why the
 # ranker reads it through the title store's verb rather than a query of its own.
 from ..metadata import typed_search as stored_search
 from ..providers import title_search
+from ..providers.tmdb import account as tmdb_account, transport as tmdb_transport
 from ..providers.trakt import TraktError, detail as trakt_detail, sync as trakt_sync
 from ..config import Settings, load_settings
 # Re-exported deliberately: `sources.Media` and `sources.parse_media` are what
@@ -447,14 +450,124 @@ async def board_item(settings: Settings,
             "tmdb": int_or_none(learned.get("tmdb"))}
 
 
-def ratings_source() -> RatingsSource:
-    """The ratings seam. Resolves the caller's own credential when asked, so
-    availability and use cannot disagree about whose token is in play."""
-    return TraktRatingsSource()
+# ---------------------------------------------------------------------------
+# which service's ratings
+# ---------------------------------------------------------------------------
+# A SEED IS FROM ONE SERVICE, NAMED BY THE VIEWER. Two services' scores for one
+# title are two opinions on two scales, and a seed that mixed them — or quietly
+# read whichever service happened to be linked — would arrange a board by numbers
+# the viewer never chose between. So the control offers one press per service the
+# viewer has linked that keeps ratings, each naming its service, and a name this
+# table does not hold, or one the viewer has not linked, is refused.
+
+class UnknownRatingsService(ValueError):
+    """A seed named a service that has no ratings this viewer can read — not in
+    the table, keeping no ratings, or not linked. A REFUSAL, never read as some
+    other service."""
+
+
+class TmdbRatingsSource:
+    """`RatingsSource` over the viewer's own TMDB account (its rated shows and
+    films, app/providers/tmdb/account.py), read with THEIR TMDB grant.
+
+    TMDB SCORES IN HALF POINTS, 0.5 TO 10; a board row's rating is a whole number
+    on Trakt's 1-10 scale, which its tiers are drawn from (ranker.tier_for_rating).
+    So a half point rounds UP — 8.5 seeds as 9, 0.5 as 1 — the nearer whole score
+    a person who gave "eight and a half" would have picked between eight and nine.
+    TMDB rates a show or a film, never a season, so every title arrives whole.
+    """
+
+    async def fetch_ratings(self, user_id: int) -> list[RatedTitle]:
+        settings = await viewer.settings_for_user(user_id)
+        if not settings.tmdb_account_configured:
+            raise NoLinkedIdentity("No linked TMDB account to read ratings from.")
+        try:
+            rated = await tmdb_account.ratings(settings)
+        except tmdb_transport.TmdbError as exc:
+            raise SourceUnavailable(str(exc), getattr(exc, "status", None)) from exc
+        out = []
+        for media, item in rated:
+            ref = _ref_from_tmdb(media, item)
+            score = _whole_score((item.get("account_rating") or {}).get("value"))
+            if ref is None or score is None:
+                continue
+            out.append(RatedTitle(title=ref, rating=score,
+                                  rated_at=(item.get("account_rating") or {}).get("created_at")))
+        return out
+
+
+def _whole_score(value: Any) -> int | None:
+    """A TMDB score (0.5-10, half points) as a board's whole 1-10 one, a half
+    rounding up (see TmdbRatingsSource). None for anything that is not a score."""
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not 0 < score <= 10:
+        return None
+    return max(1, min(10, int(score + 0.5)))
+
+
+def _ref_from_tmdb(media: Media, item: Mapping[str, Any]) -> TitleRef | None:
+    """One rated TMDB item as the title a board would hold. TMDB's own `id` is
+    the title's tmdb id — the only id the item carries; the title store teaches
+    the rest when the seed registers it."""
+    tmdb = int_or_none(item.get("id"))
+    if tmdb is None:
+        return None
+    dated = item.get("first_air_date") if media is Media.SHOW else item.get("release_date")
+    return TitleRef(
+        media=media,
+        title=str(item.get("name") or item.get("title") or ""),
+        ids={"tmdb": tmdb},
+        year=int_or_none(str(dated or "")[:4]),
+    )
+
+
+# EVERY REGISTERED SERVICE HAS AN ENTRY, and a test says so: a service gaining
+# ratings is a decision written here, never one this table quietly lacks.
+#   tmdb   the viewer's rated shows and films on TMDB.
+#   trakt  the viewer's /sync/ratings (shows, seasons, films).
+#   simkl  None: this app reads no Simkl ratings.
+_RATINGS: dict[str, RatingsSource | None] = {
+    "tmdb": TmdbRatingsSource(),
+    "trakt": TraktRatingsSource(),
+    "simkl": None,
+}
+
+
+def has_ratings(service: str) -> bool:
+    """Whether `service` keeps ratings this app reads. Raises KeyError for a
+    name the table does not hold — the table is the registry's, whole."""
+    return _RATINGS[service] is not None
+
+
+async def ratings_services(user_id: int) -> list[tuple[str, str]]:
+    """(service, label) for every service this viewer has LINKED that keeps
+    ratings, in the declared order — what the seed control offers, one press
+    each. Linked means a usable grant on the viewer's own Settings
+    (`is_configured`, the private question), so an expired or revoked link is
+    not offered."""
+    settings = await viewer.settings_for_user(user_id)
+    return [(str(source), provider.label)
+            for source, provider in providers.registered().items()
+            if _RATINGS.get(str(source)) is not None and provider.is_configured(settings)]
+
+
+async def ratings_source(user_id: int, service: str) -> RatingsSource:
+    """The ratings seam for the service a seed NAMED. Raises
+    UnknownRatingsService for one the viewer cannot seed from — never another
+    service in its place."""
+    offered = {name for name, _label in await ratings_services(user_id)}
+    source = _RATINGS.get(str(service))
+    if source is None or str(service) not in offered:
+        raise UnknownRatingsService(f"There are no {service or 'such'} ratings to seed from.")
+    return source
 
 
 async def ratings_available(user_id: int) -> bool:
     """Whether to OFFER a ratings seed at all. False hides the action rather
-    than showing one that fails: an account with no linked identity has nothing
-    to seed from, and a disabled button it can never enable is just noise."""
-    return bool(await trakt_routes.access_token_for_user(user_id))
+    than showing one that fails: an account with no linked service that keeps
+    ratings has nothing to seed from, and a disabled button it can never enable
+    is just noise."""
+    return bool(await ratings_services(user_id))

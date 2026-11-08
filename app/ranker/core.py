@@ -758,21 +758,15 @@ def _filed(conn: db.Connection, row: dict[str, Any], *, register: bool) -> dict[
     how a board row's title becomes one the rest of the app can describe.
 
     `register` False decides the key WITHOUT writing anything — a seed's preview
-    must not change the store it is previewing against.
+    must not change the store it is previewing against, and a seed's commit has
+    registered its titles before its own transaction (`_register_in_turns`).
     """
-    ids = json.loads(row["ids_json"] or "{}")
-    if row.get("tmdb") is not None:
-        ids.setdefault("tmdb", row["tmdb"])
-    # THE ID THE ROW IS FILED BY IS THE ROW'S OWN STATEMENT, so it wins over an id
-    # map that disagrees: a row's key may move UP to a title its ids name above it,
-    # never sideways to a different title in the same id space.
-    ids[row["match_source"]] = metadata_ids.typed(row["match_source"], row["match_id"])
-    flat = item_keys.board_key(row["media"], row["match_source"], row["match_id"])
+    media, ids, flat = _filing(row)
     if register:
-        found = metadata.register(conn, row["media"], ids, filed_under=flat)
+        found = metadata.register(conn, media, ids, filed_under=flat)
         key = found.triple if found is not None else None
     else:
-        key = metadata.resolve_triple(conn, row["media"], ids)
+        key = metadata.resolve_triple(conn, media, ids)
     if key is None or (key.match_source, key.match_id) == (row["match_source"], row["match_id"]):
         return row
     own = metadata_ids.typed(key.match_source, key.match_id)
@@ -781,6 +775,36 @@ def _filed(conn: db.Connection, row: dict[str, Any], *, register: bool) -> dict[
     if key.match_source == "tmdb" and out.get("tmdb") is None:
         out["tmdb"] = own
     return out
+
+
+def _filing(row: Mapping[str, Any]) -> tuple[str, dict[str, Any], str]:
+    """(media, ids, the key it is filed under) — what registering `row`'s title
+    with the title store names it by."""
+    ids = json.loads(row["ids_json"] or "{}")
+    if row.get("tmdb") is not None:
+        ids.setdefault("tmdb", row["tmdb"])
+    # THE ID THE ROW IS FILED BY IS THE ROW'S OWN STATEMENT, so it wins over an id
+    # map that disagrees: a row's key may move UP to a title its ids name above it,
+    # never sideways to a different title in the same id space.
+    ids[row["match_source"]] = metadata_ids.typed(row["match_source"], row["match_id"])
+    return row["media"], ids, item_keys.board_key(row["media"], row["match_source"],
+                                                  row["match_id"])
+
+
+# HOW MANY TITLES ONE REGISTERING TURN CARRIES, for an arrival of many at once (a
+# ratings seed reads a person's whole ratings list — hundreds of titles). Each
+# turn is one transaction of metadata.ensure_many's fixed shape, so the writer
+# lock is held for a bounded time however long the list, and every other write
+# takes its turn between them (CLAUDE.md's write-transaction rule).
+REGISTER_TURN_TITLES = 200
+
+
+async def _register_in_turns(rows: list[dict[str, Any]]) -> None:
+    """Register every row's title with the title store in bounded turns, BEFORE
+    the caller's own transaction — which then only reads where each is filed."""
+    filings = [_filing(row) for row in rows]
+    for start in range(0, len(filings), REGISTER_TURN_TITLES):
+        await metadata.ensure_many(filings[start:start + REGISTER_TURN_TITLES])
 
 
 class _Arrival(NamedTuple):
@@ -1973,14 +1997,19 @@ async def seed_ratings(
     a preview shows, and — when committed — the board's new version.
     """
     rated = [(_normalize_ref(entry), _rating(entry.get("user_rating"))) for entry in entries]
+    # A COMMIT REGISTERS ITS TITLES FIRST, in bounded turns of their own: a ratings
+    # list is hundreds of titles, and registering each inside the seed's one
+    # transaction held the writer lock for all of them. A preview registers
+    # nothing — it must not change the store it is previewing against.
+    if commit:
+        await _register_in_turns([row for row, _score in rated])
 
     def _work(conn: db.Connection) -> dict[str, Any]:
         board = _resolve_board(conn, user_id, board_uid)
         board_id = int(board["id"])
         scope = board["media_scope"]
-        # Filed as every arrival is (`_filed`); a preview decides the keys without
-        # registering anything.
-        in_scope = [(_filed(conn, row, register=commit), score) for row, score in rated
+        # Filed as every arrival is (`_filed`), from what the store now says.
+        in_scope = [(_filed(conn, row, register=False), score) for row, score in rated
                     if scope == "mixed" or row["media"] == scope]
 
         placements = _item_placements(conn, board_id)

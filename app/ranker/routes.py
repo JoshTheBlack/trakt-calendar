@@ -330,8 +330,10 @@ async def _sources(user_id: int) -> dict[str, object]:
     the account cannot reach.
     """
     sources: dict[str, object] = {"search": True}
-    if await ranker_sources.ratings_available(user_id):
-        sources["ratings"] = True
+    # WHICH SERVICES' RATINGS, not whether: the seed control draws one press per
+    # linked service that keeps ratings, each naming its service.
+    if rated := await ranker_sources.ratings_services(user_id):
+        sources["ratings"] = rated
     if await ranker_import.tracker_available(user_id):
         # WHETHER, NOT WHICH YEARS. The import dialog's year list is a fragment of
         # its own now (`import_years_fragment`), asked for when a medium is chosen
@@ -2000,7 +2002,8 @@ async def import_finished_titles(board_uid: str, request: Request):
 @guard.get("/rankings/fragments/seed", AuthLevel.RANKER_APPROVED)
 async def seed_control_fragment(request: Request):
     """The seed control back in its resting state — what Cancel asks for."""
-    return _seed_answer(request, request.query_params.get("board") or "")
+    user = await auth.current_user(request)
+    return await _seed_answer(request, user.user_id, request.query_params.get("board") or "")
 
 
 @guard.post("/rankings/boards/{board_uid}/seed", AuthLevel.RANKER_APPROVED)
@@ -2014,18 +2017,26 @@ async def seed_from_ratings(board_uid: str, request: Request):
     server's sentence about its own dry run rather than one composed in the
     browser from a JSON answer, and pressing the confirmation is the same request
     with `commit` on.
+
+    FROM THE ONE SERVICE THE PRESS NAMES (`service`), among those the viewer has
+    linked that keep ratings — a name it may not seed from is refused, never read
+    as another service's ratings (ranker_sources.ratings_source).
     """
     user = await auth.current_user(request)
     data = await authz.json_body(request)
     commit = route_params.ticked(data.get("commit"))
-    if not await ranker_sources.ratings_available(user.user_id):
-        return await _rankings_response(request, user, board_uid, notice_ok=False,
-                                        notice="There are no ratings to seed from.")
-    source = ranker_sources.ratings_source()
+    service = str(data.get("service") or "")
+    try:
+        source = await ranker_sources.ratings_source(user.user_id, service)
+    except ranker_sources.UnknownRatingsService as exc:
+        if commit:
+            return await _rankings_response(request, user, board_uid, notice_ok=False,
+                                            notice=str(exc))
+        return await _seed_answer(request, user.user_id, board_uid, message=str(exc), ok=False)
     try:
         rated = await source.fetch_ratings(user.user_id)
     except ranker_sources.SourceUnavailable as exc:
-        return _seed_answer(request, board_uid, message=str(exc), ok=False)
+        return await _seed_answer(request, user.user_id, board_uid, message=str(exc), ok=False)
     entries = await _with_season_facts(await load_settings(), [
         item for rating in rated
         if (item := rating.title.as_item(user_rating=rating.rating)) is not None
@@ -2036,14 +2047,14 @@ async def seed_from_ratings(board_uid: str, request: Request):
         if commit:
             return await _rankings_response(request, user, board_uid,
                                             notice=str(exc), notice_ok=False)
-        return _seed_answer(request, board_uid, message=str(exc), ok=False)
+        return await _seed_answer(request, user.user_id, board_uid, message=str(exc), ok=False)
     if commit:
         return await _rankings_response(
             request, user, board_uid,
             notice=f"Seeded {summary['titles_placed']} title(s) into "
                    f"{summary['tiers_created']} new tier(s).")
-    return _seed_answer(
-        request, board_uid,
+    return await _seed_answer(
+        request, user.user_id, board_uid, service=service,
         confirm=f"This would add {summary['titles_added']} title(s)"
                 f"{_converted(summary['titles_converted'], 'make')}, place "
                 f"{summary['titles_placed']} and create {summary['tiers_created']} "
@@ -2061,15 +2072,19 @@ def _converted(count: int, verb: str = "made") -> str:
     return f", and {verb} {count} whole-show row{'s' if count != 1 else ''} into the season"
 
 
-def _seed_answer(request: Request, board_uid: str, *, confirm: str = "",
-                 message: str = "", ok: bool = True) -> Response:
+async def _seed_answer(request: Request, user_id: int, board_uid: str, *,
+                       service: str = "", confirm: str = "", message: str = "",
+                       ok: bool = True) -> Response:
     """The seed control in whichever of its states this answer leaves it in: the
-    button, the confirmation it turns into, or the button again with a line
-    saying why nothing happened. One partial, because each answer REPLACES the
-    element that was pressed."""
+    buttons (one per service the viewer can seed from), the confirmation one of
+    them turns into — naming that `service`, so the press that commits seeds from
+    the service the dry run read — or the buttons again with a line saying why
+    nothing happened. One partial, because each answer REPLACES the element that
+    was pressed."""
     return templates.TemplateResponse(request, "_ranker_seed.html", {
         "request": request, "board_uid": board_uid, "confirm": confirm,
-        "message": message, "ok": ok,
+        "message": message, "ok": ok, "service": service,
+        "sources": {"ratings": await ranker_sources.ratings_services(user_id)},
     })
 
 
