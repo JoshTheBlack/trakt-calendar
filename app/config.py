@@ -94,7 +94,18 @@ SECRET_FIELDS = frozenset({
     "radarr_api_key",
     "seer_api_key",
     "tmdb_api_key",
+    "tmdb_user_token",
 })
+
+# A SIGNED-IN PERSON'S OWN CREDENTIAL AND THE ACCOUNT IT NAMES, carried on a
+# Settings object only as auth.viewer.settings_for_user builds it for that person.
+# NEVER STORED AS A SETTING AND NEVER LOADED FROM ONE: `global_field_names` leaves
+# them out, `write_settings` writes no secret row for them, and load_settings
+# drops any value a hand-edited file or a stray row holds. A save of a per-viewer
+# object would otherwise file one person's grant as the instance's, and every
+# other viewer's writes would go to that person's list. The token is ALSO in
+# SECRET_FIELDS, so it is redacted wherever a Settings object is drawn.
+VIEWER_FIELDS = frozenset({"tmdb_user_token", "tmdb_account_id"})
 
 # STORED SECRETS THAT MUST NEVER REACH AN INSTANCE-WIDE Settings OBJECT.
 # `simkl_access_token` was once an operator-pasted AUTH V1 token. Under AUTH V2
@@ -275,6 +286,17 @@ class Settings:
     # A film is released on different days in different countries; TMDB's
     # release calendar is asked for one, and this is which.
     tmdb_region: str = "US"
+    # ONE SIGNED-IN PERSON'S OWN TMDB GRANT, AND NEVER AN INSTANCE SETTING. The
+    # user access token TMDB's v4 sign-in issued them, and the account it names
+    # (TMDB's 24-character account object id, which its account reads are
+    # addressed by). Both are empty on every instance-wide object and swapped in
+    # by auth.viewer.settings_for_user, exactly as a viewer's Trakt and Simkl
+    # tokens are; neither is ever loaded from storage or written to it
+    # (VIEWER_FIELDS), because the only home of a person's grant is their
+    # linked_identities row (app/auth/tmdb_routes.py). The instance's
+    # `tmdb_api_key` above is a CATALOGUE credential and answers nothing here.
+    tmdb_user_token: str = ""
+    tmdb_account_id: str = ""
     # Session cookie Secure flag: "always" (default) | "never" | "auto".
     # Deliberately not scheme detection by default — behind a TLS-terminating
     # proxy the app itself is served over plain HTTP, so detection would report
@@ -551,6 +573,24 @@ class Settings:
         """
         token = self.tmdb_api_key.strip()
         return bool(token) and tmdb_token_error(token) is None
+
+    @property
+    def tmdb_account_configured(self) -> bool:
+        """Whether this object carries ONE PERSON'S OWN TMDB grant — the private
+        question, true only on a Settings auth.viewer.settings_for_user built for
+        a viewer who linked TMDB. Never true of an instance-wide object (see
+        VIEWER_FIELDS). The instance's read token is `tmdb_configured`, a
+        different credential for a different question."""
+        return bool(self.tmdb_user_token.strip() and self.tmdb_account_id.strip())
+
+    @property
+    def tmdb_link_configured(self) -> bool:
+        """Whether "Connect TMDB" can be offered. TMDB's sign-in is started with
+        the instance's read token (a request token is asked for with it) and
+        sends the browser back to `public_base_url` — never an address worked out
+        from the request, which a forwarded Host header could make point
+        anywhere. Both are mandatory."""
+        return self.tmdb_configured and bool(self.public_base_url.strip())
 
     @property
     def tmdb_credential_problem(self) -> str:
@@ -924,6 +964,7 @@ def global_field_names() -> frozenset[str]:
     return frozenset(
         name for name in Settings.__dataclass_fields__  # type: ignore[attr-defined]
         if name not in SECRET_FIELDS and name not in RECOVERY_FIELDS
+        and name not in VIEWER_FIELDS
     )
 
 
@@ -1068,7 +1109,7 @@ def _assemble_settings(conn, open_secrets: bool,
     secrets: dict[str, str] = {}
     degraded = False
     for name, stored in stored_secrets.items():
-        if name in OPERATOR_SECRETS_NOT_LOADED:
+        if name in OPERATOR_SECRETS_NOT_LOADED or name in VIEWER_FIELDS:
             continue
         plain = secrets_box.open_(stored)
         if plain is None:
@@ -1085,7 +1126,7 @@ def _assemble_settings(conn, open_secrets: bool,
     merged = {**globals_doc, **secrets, **file_data}
     # Filtered here as well as in the decrypt loop above, so a hand-edited
     # settings.json cannot put one back either.
-    for name in OPERATOR_SECRETS_NOT_LOADED:
+    for name in OPERATOR_SECRETS_NOT_LOADED | VIEWER_FIELDS:
         merged.pop(name, None)
     settings = Settings.from_dict(merged)
     # Skipped entirely while `degraded`, because re-saving would seal the
@@ -1139,7 +1180,7 @@ def write_settings(conn, settings: Settings, *, clear_unset_secrets: bool = Fals
 
     data = settings.to_dict()
     globals_doc = {name: data[name] for name in sorted(global_field_names())}
-    secrets = {name: data.get(name, "") for name in SECRET_FIELDS}
+    secrets = {name: data.get(name, "") for name in SECRET_FIELDS - VIEWER_FIELDS}
     recovery = {name: data[name] for name in sorted(RECOVERY_FIELDS)}
 
     # While the key is missing or wrong, sealing a secret would write plaintext over

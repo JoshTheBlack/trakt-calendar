@@ -99,8 +99,9 @@ async def _admin_context(request: Request, *, section: str = "", message: str = 
         "when": lambda timestamp: spell_time(timestamp, zone),
         "invite_base": await _invite_base(request),
         # The services an administrator can unlink, from the one table that
-        # also decides what unlinking each does (app/auth/revocation.py).
-        "login_providers": revocation.LOGIN_PROVIDERS,
+        # also decides what unlinking each does (app/auth/revocation.py) —
+        # every linkable one, ways in or not.
+        "linkable_providers": revocation.LINKABLE,
         "notice": {"section": section, "message": message, "ok": ok},
         **extra,
     }
@@ -282,16 +283,17 @@ async def admin_unlink_identity(user_id: int, request: Request):
     would have raised, drawn with a second confirmation that sends `force`."""
     data = await authz.json_body(request)
     provider = str(data.get("provider") or "").strip().lower()
-    if not revocation.is_login_provider(provider):
+    if not revocation.is_linkable(provider):
         return await _shell(request, "users", "Unknown provider.")
     force = route_params.ticked(data.get("force"))
 
     # Read before the unlink (the token lives on the row it deletes), spent only
     # after one actually happened — a first call that comes back asking for
     # `force` must not kill the token and leave the identity linked to it.
-    # EVERY SIGN-IN SERVICE, from app/auth/revocation.py's one table: this
-    # route used to accept two of the three, so an administrator could not
-    # remove somebody's Simkl link at all.
+    # EVERY LINKABLE SERVICE, from app/auth/revocation.py's one table — the ones
+    # nobody signs in with as well: this route used to accept two of the three
+    # sign-in services, so an administrator could not remove somebody's Simkl
+    # link at all.
     token = await revocation.stored_token(provider, user_id)
     try:
         removed = await auth.unlink_identity(user_id, provider, force=force)

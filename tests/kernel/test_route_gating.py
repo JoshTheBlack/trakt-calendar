@@ -324,11 +324,13 @@ class CalendarTemplateTests(GatingTestCase):
         before the move to Simkl's AUTH V2 is still sealed and still redacted if
         anything ever reads it back, but no non-public Simkl call is made
         without a viewer's own token any more, so the panel offers no way to
-        set one — see config.py's own comment beside the field.
+        set one — see config.py's own comment beside the field. A person's own
+        TMDB token (config.VIEWER_FIELDS) is never an instance setting at all.
         """
         self.sign_in_as(self.admin_id)
         body = self.client.get(self.PANEL).text
-        typed = config.SECRET_FIELDS - {"trakt_refresh_token", "simkl_access_token"}
+        typed = config.SECRET_FIELDS - ({"trakt_refresh_token", "simkl_access_token"}
+                                          | config.VIEWER_FIELDS)
         for name in typed:
             with self.subTest(field=name):
                 self.assertRegex(body, rf'<input type="password" id="s_{name}" name="{name}"'
@@ -410,7 +412,8 @@ class SettingsRedactionTests(GatingTestCase):
         # simkl_access_token has no panel input any more (no instance-wide
         # Simkl token exists under AUTH V2) — see
         # test_every_credential_input_is_drawn_write_only.
-        typed = config.SECRET_FIELDS - {"trakt_refresh_token", "simkl_access_token"}
+        typed = config.SECRET_FIELDS - ({"trakt_refresh_token", "simkl_access_token"}
+                                          | config.VIEWER_FIELDS)
         body = self.client.get(self.PANEL).text
         for name in typed:
             with self.subTest(field=name):

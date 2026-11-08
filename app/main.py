@@ -47,6 +47,7 @@ from .auth import plex_routes
 from .auth import routes as auth_routes
 from .auth import secrets_backfill
 from .auth import simkl_routes
+from .auth import tmdb_routes
 from .auth import trakt_routes
 from .calendar import cache as calendar_cache
 from .calendar import enrich as calendar_enrich
@@ -333,6 +334,7 @@ app.mount("/static", _CachedStaticFiles(directory=BASE_DIR / "static"), name="st
 app.include_router(auth_routes.router)
 app.include_router(trakt_routes.router)
 app.include_router(simkl_routes.router)
+app.include_router(tmdb_routes.router)
 app.include_router(plex_routes.router)
 app.include_router(admin_routes.router)
 app.include_router(encryption_routes.router)

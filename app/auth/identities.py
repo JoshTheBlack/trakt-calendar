@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from .. import db, secrets_box
 from ..config import Settings, load_settings
 from ..media import user_images
-from . import encryption_flow, invites, prefs, users
+from . import encryption_flow, invites, prefs, revocation, users
 
 
 def insert_linked_identity(
@@ -217,6 +217,12 @@ async def login_with_provider_identity(
     is one transaction, and the invite is re-read inside it because the quota
     check before it ran without the write lock held.
     """
+    # A SERVICE NOBODY SIGNS IN WITH NEVER SIGNS ANYBODY IN, whatever route
+    # reached here: TMDB's link holds a real account id and token, and a sign-in
+    # by it would make a catalogue's account a key to this one. A programming
+    # error, not a refusal to word — no route offers it.
+    if not revocation.is_login_provider(identity.provider):
+        raise ValueError(f"{identity.provider!r} is not a service anybody signs in with")
     cfg = settings or await load_settings()
     ts = db.now()
 
@@ -298,6 +304,12 @@ async def unlink_identity(user_id: int, provider: str, *, force: bool = False) -
     screen sets it only after showing the operator the same warning and asking
     them to confirm the orphan deliberately.
     """
+    # ONLY A LINK SOMEBODY CAN SIGN IN WITH IS A WAY IN (app/auth/revocation.py).
+    # Counting every link let an account holding a TMDB link — which nobody signs
+    # in with — have its one real way in removed, and lock itself out.
+    ways_in = revocation.LOGIN_PROVIDERS
+    marks = ", ".join("?" * len(ways_in))
+
     def _work(conn: db.Connection) -> bool:
         row = conn.execute(
             "SELECT id FROM linked_identities WHERE user_id = ? AND provider = ?",
@@ -307,10 +319,12 @@ async def unlink_identity(user_id: int, provider: str, *, force: bool = False) -
             return False
         user = conn.execute("SELECT password_hash FROM users WHERE id = ?", (user_id,)).fetchone()
         remaining = int(conn.execute(
-            "SELECT COUNT(*) FROM linked_identities WHERE user_id = ? AND id != ?",
-            (user_id, row["id"]),
+            f"SELECT COUNT(*) FROM linked_identities WHERE user_id = ? AND id != ? "
+            f"AND provider IN ({marks})",
+            (user_id, row["id"], *ways_in),
         ).fetchone()[0])
-        if remaining == 0 and not (user and user["password_hash"]) and not force:
+        last_way_in = revocation.is_login_provider(provider) and remaining == 0
+        if last_way_in and not (user and user["password_hash"]) and not force:
             raise LastLoginMethod()
         conn.execute("DELETE FROM linked_identities WHERE id = ?", (row["id"],))
         return True

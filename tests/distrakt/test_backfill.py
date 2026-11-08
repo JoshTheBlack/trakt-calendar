@@ -39,7 +39,7 @@ from tests.support import ORIGIN, migrated_db, tracker_month
 # a record whose only source is unconfigured is never asked about at all. Both on
 # here, so which service answers stays decided by the record's own ids.
 SETTINGS = SimpleNamespace(configured=True, timezone="UTC",
-                           trakt_configured=True, simkl_configured=False,
+                           trakt_configured=True, simkl_configured=False, tmdb_account_configured=False,
                            trakt_catalogue_configured=True,
                            simkl_catalogue_configured=True,
                            tmdb_configured=False)

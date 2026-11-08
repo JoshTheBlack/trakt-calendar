@@ -2060,6 +2060,21 @@ class WatchlistUndo(NamedTuple):
     status_before: str
 
 
+class WatchlistDrop(NamedTuple):
+    """One show to take off a list because the viewer gave up on it, with what
+    the tracker's own record says the service held BEFORE the tracker wrote it:
+    `status_before` from a confirmed write (NOT_HELD when the tracker put it
+    there), or None when the tracker has no confirmed write of it at this service
+    — in which case whatever the list holds is the viewer's own doing.
+
+    CARRIED TO EVERY PORT, ACTED ON BY THOSE WHOSE RULE NEEDS IT. Whether "the
+    viewer put it there first" stops a drop is each service's answer (see
+    WatchlistPort.drop), and only the tracker's record knows it — a list reads the
+    same whoever added a title."""
+    title: WatchlistTitle
+    status_before: str | None
+
+
 @runtime_checkable  # see the note on SyncPort above
 class WatchlistPort(Protocol):
     """Writing the tracker's shows to a person's OWN list at a service, and
@@ -2089,10 +2104,13 @@ class WatchlistPort(Protocol):
     so a caller never records "could not ask" as a per-title outcome.
     """
 
-    def list_url(self, account_id: str) -> str:
+    def list_url(self, account_id: str, account_name: str | None) -> str | None:
         """The address of the list this port writes to, on the service's own
         site, for the linked account `account_id` names (the identity row's
-        provider_user_id). Makes no call: it gates nothing, it is a link."""
+        provider_user_id) — `account_name` is the row's display name, for a site
+        that addresses a person's pages by their name. None when the address
+        cannot be made from what is held. Makes no call: it gates nothing, it is
+        a link."""
         ...
 
     async def holdings(self, settings: Settings,
@@ -2109,12 +2127,17 @@ class WatchlistPort(Protocol):
         ...
 
     async def drop(self, settings: Settings,
-                   titles: Sequence[WatchlistTitle]) -> dict[str, WatchlistResult]:
+                   rows: Sequence[WatchlistDrop]) -> dict[str, WatchlistResult]:
         """Take each title off that list because the viewer gave up on it. What
         "off" means is the service's: a status service moves it to its own
         given-up status, which keeps the viewer's history; a plain watchlist
         removes it. A title the service holds nothing for is ALREADY — dropping
-        must never ADD a title to somebody's library."""
+        must never ADD a title to somebody's library.
+
+        WHETHER A TITLE THE VIEWER LISTED THEMSELVES COMES OFF is also the
+        service's, from each row's `status_before`: a port that keeps such a
+        title answers it KEPT (TMDB's, whose list is the one a viewer keeps by
+        hand). Results are keyed by str(row.title.key)."""
         ...
 
     async def undo(self, settings: Settings,

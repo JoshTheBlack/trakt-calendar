@@ -532,10 +532,11 @@ class AdminUnlinkTests(AdminTestCase):
         self.assertRegex(resp.text, r'id="toastHost" hx-swap-oob="beforeend">\s*<div class="toast ok[^>]*>'
                                     r'Unlinked Simkl\.')
 
-    def test_a_name_that_is_not_a_sign_in_service_is_refused(self):
+    def test_a_name_that_is_not_a_linked_service_is_refused(self):
         self.make_admin()
         self.login_as(self.client, "admin1")
-        resp = self.client.post("/admin/users/1/identities/unlink", json={"provider": "tmdb"})
+        resp = self.client.post("/admin/users/1/identities/unlink",
+                                json={"provider": "letterboxd"})
         self.assertDrawnIn(resp, "users", "Unknown provider.")
 
 

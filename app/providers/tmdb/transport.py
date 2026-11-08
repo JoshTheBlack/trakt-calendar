@@ -174,14 +174,23 @@ def url_for(settings: Settings, path: str, params: dict | None = None) -> str:
 
 
 async def _send(settings: Settings, url: str, path: str, etag: str) -> httpx.Response:
-    """One GET, through the gate and the circuit. Network failures come back as
-    TmdbError; a 429 opens the circuit and is retried once if the wait fits."""
+    """One catalogue GET with the instance's read token, through the gate and the
+    circuit (`_gated`)."""
     token = _token(settings)
     if not token:
         raise TmdbError("TMDB is not configured on this instance.")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     if etag:
         headers["If-None-Match"] = etag
+    return await _gated("GET", url, path, headers)
+
+
+async def _gated(method: str, url: str, path: str, headers: dict,
+                 body: dict | None = None) -> httpx.Response:
+    """One request through the gate and the circuit, whoever's credential its
+    headers carry. Network failures come back as TmdbError; a 429 opens the
+    circuit and is retried once if the wait fits. `path` is what a log line and a
+    span name — never the URL's query, and never a header."""
     for attempt in (1, 2):
         wait = _CIRCUIT.wait()
         if wait > _MAX_WAIT_SECONDS:
@@ -189,14 +198,18 @@ async def _send(settings: Settings, url: str, path: str, etag: str) -> httpx.Res
         if wait:
             await asyncio.sleep(wait)
         async with POOL.gate():
-            with span("tmdb.get", path=path) as sp:
+            with span(f"tmdb.{method.lower()}", path=path) as sp:
                 try:
-                    resp = await POOL.client().get(url, headers=headers)
+                    # `request` only where a body may ride: httpx's DELETE helper
+                    # takes none, and TMDB's revocation is a DELETE with one.
+                    resp = await (POOL.client().get(url, headers=headers) if method == "GET"
+                                  else POOL.client().request(method, url, headers=headers,
+                                                             json=body))
                 except httpx.HTTPError as exc:
                     # The exception's own text names the URL and never a header,
                     # so it is safe to log; it is still worded here rather than
                     # passed through, because nothing upstream needs httpx's type.
-                    logger.warning("TMDB GET %s failed: %s", path, type(exc).__name__)
+                    logger.warning("TMDB %s %s failed: %s", method, path, type(exc).__name__)
                     raise TmdbError(f"Could not reach TMDB for {path}.") from exc
                 sp.set(status=resp.status_code)
         if resp.status_code != 429:
@@ -206,6 +219,48 @@ async def _send(settings: Settings, url: str, path: str, etag: str) -> httpx.Res
         logger.warning("TMDB rate-limited %s (attempt %d); circuit open for %.1fs",
                        path, attempt, seconds)
     raise TmdbRateLimited(f"TMDB is still rate-limiting {path}.", 429)
+
+
+# TMDB's version 4 API: the account sign-in and a person's own lists. Version 3
+# above is the catalogue, and it also takes a v4 USER token as its bearer for the
+# one write this app makes (a watchlist add or removal) — MEASURED 2026-11-08,
+# so no v3 session is ever made or kept.
+API_V4 = "https://api.themoviedb.org/4"
+
+
+async def send_private(method: str, url: str, path: str, *, token: str,
+                       body: dict | None = None) -> httpx.Response:
+    """One request made WITH A PERSON'S OWN TMDB GRANT, or one step of the
+    sign-in that produces it — and so NEVER CACHED, in either direction.
+
+    The response cache is URL-keyed and shared by the whole instance (CLAUDE.md),
+    and two people reading their own watchlist ask for the same address: an
+    answer written there would be served to the next viewer. So nothing here
+    reads from `cached_get` or writes to it — the strongest form of the `private`
+    flag the other two transports carry, and why this module has no such flag.
+
+    `token` is whoever's bearer this request is: a viewer's user token for their
+    own lists, or the instance's read token for the handshake's own steps
+    (`instance_token`). It travels in the Authorization header and is never in
+    `url`, a log line or a span. Through the same gate and 429 circuit as every
+    catalogue read: TMDB's limit is per application, not per person.
+    """
+    if not token:
+        raise TmdbError(f"No TMDB credential to send {path} with.")
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    started = _time.perf_counter()
+    resp = await _gated(method, url, path, headers, body)
+    logger.debug("TMDB %s %s -> %s in %.0fms", method, path, resp.status_code,
+                 (_time.perf_counter() - started) * 1000.0)
+    return resp
+
+
+def instance_token(settings: Settings) -> str:
+    """The instance's read token, for the sign-in handshake's own steps (asking
+    for a request token, exchanging it, revoking a grant), which TMDB
+    authenticates with the APPLICATION's credential. "" when none usable is
+    stored — `tmdb_configured`'s answer."""
+    return _token(settings)
 
 
 async def cached_get(settings: Settings, path: str, params: dict | None = None, *,

@@ -39,7 +39,7 @@ from tests.support import import_offered, migrated_db
 # lookup is made at all (live.detail_source): can this instance ask that service
 # about a title, which is its client id and not anybody's token. Both true, so
 # which service answers for a record goes on being decided by the ids it carries.
-SETTINGS = SimpleNamespace(trakt_configured=True, simkl_configured=False,
+SETTINGS = SimpleNamespace(trakt_configured=True, simkl_configured=False, tmdb_account_configured=False,
                            calendar_source_configured=True,
                            trakt_catalogue_configured=True,
                            simkl_catalogue_configured=True,
@@ -357,7 +357,8 @@ class RolloverTests(RolloverTestCase):
 
     async def test_unconfigured_month_not_persisted(self):
         out = await distrakt.ensure_month(
-            self.user_id, 2026, 9, SimpleNamespace(trakt_configured=False, simkl_configured=False),
+            self.user_id, 2026, 9, SimpleNamespace(trakt_configured=False, simkl_configured=False,
+                                                   tmdb_account_configured=False),
             today=self.TODAY)
         self.assertEqual(out["shows"], [])
         self.assertIsNone(await distrakt.load_month(self.user_id, self.AHEAD))

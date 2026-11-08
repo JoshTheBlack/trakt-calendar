@@ -370,6 +370,41 @@ class DepartureTests(WatchlistTestCase):
         self.assertEqual(self.fake.held, {})
         self.assertEqual(await self.states(), {self.KEY: ("dropped", "none")})
 
+    async def test_a_drop_is_told_what_a_confirmed_write_found_before(self):
+        """WatchlistDrop.status_before: what the service held when the tracker's
+        CONFIRMED write read it — the record a list keeping a viewer's own titles
+        decides by."""
+        self.fake.held = {self.KEY: "watching"}
+        await ww.run(self.user_id)
+        await self.depart(ww.Departure.ABANDON)
+        self.assertEqual([(str(row.title.key), row.status_before) for row in self.fake.drop_rows],
+                         [(self.KEY, "watching")])
+
+    async def test_a_drop_with_no_confirmed_write_is_told_nothing(self):
+        """A write the read-back never confirmed says nothing about what was held
+        before, so the drop is told None — whatever the list holds is then the
+        viewer's own."""
+        self.fake.unconfirmed = {self.KEY}
+        await ww.run(self.user_id)
+        self.assertEqual((await self.states())[self.KEY][0], "failed")
+        ww._trouble.clear()                       # past the failure's quiet spell
+        await self.depart(ww.Departure.ABANDON)
+        self.assertEqual([row.status_before for row in self.fake.drop_rows], [None])
+
+    async def test_a_drop_the_service_keeps_is_a_departure(self):
+        """KEPT — a list leaving a title the viewer had listed first — is the
+        show having left the tracker like any drop, so its return is an arrival."""
+        from app.providers.base import WatchlistOutcome, WatchlistResult
+        await ww.run(self.user_id)
+
+        async def keeps(settings, rows):
+            return {str(row.title.key): WatchlistResult(WatchlistOutcome.KEPT, "listed",
+                                                        "listed", "1") for row in rows}
+
+        with patch.object(self.fake, "drop", keeps):
+            await self.depart(ww.Departure.ABANDON)
+        self.assertEqual(await self.states(), {self.KEY: ("dropped", "listed")})
+
     async def test_taking_it_back_writes_it_again(self):
         await ww.run(self.user_id)
         await self.depart(ww.Departure.ABANDON)

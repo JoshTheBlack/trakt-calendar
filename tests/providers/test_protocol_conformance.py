@@ -51,11 +51,12 @@ CATALOGUE_CREDENTIALS = {
 }
 
 
-# And each service's PRIVATE credential — one person's own token — where it has
-# one. TMDB holds none: nobody here links a TMDB account, so its entry is empty
-# and says so rather than being absent.
+# And each service's PRIVATE credential — one person's own grant, as
+# auth.viewer.settings_for_user swaps it onto a viewer's Settings. TMDB's is the
+# user token its v4 sign-in issues AND the account it names (its account reads
+# are addressed by that id), so both travel.
 PRIVATE_CREDENTIALS = {
-    "tmdb": {},
+    "tmdb": {"tmdb_user_token": "a-token", "tmdb_account_id": "6a5edaa7df66e2fc7c922663"},
     "trakt": {"trakt_access_token": "a-token"},
     "simkl": {"simkl_access_token": "a-token"},
 }
@@ -512,7 +513,8 @@ class EveryWatchlistPortWritesTheSameWayTests(DatabaseTestCase):
         """Every verb, every port. conftest's outbound guard is what says no
         request left: a write step that finds nothing to do must cost nothing,
         and must still get a mapping back rather than None."""
-        settings = Settings(**{f"{source}_client_id": "an-id" for source, _ in self._ports()})
+        settings = Settings(**{field: value for source, _ in self._ports()
+                               for field, value in CATALOGUE_CREDENTIALS[source].items()})
         for source, port in self._ports():
             with self.subTest(source=source):
                 self.assertEqual(await port.holdings(settings, []), {})
@@ -523,7 +525,7 @@ class EveryWatchlistPortWritesTheSameWayTests(DatabaseTestCase):
     def test_every_port_links_out_without_a_call(self):
         for source, port in self._ports():
             with self.subTest(source=source):
-                self.assertTrue(port.list_url("12345").startswith("https://"))
+                self.assertTrue(port.list_url("12345", "a-name").startswith("https://"))
 
     def test_every_port_links_to_its_own_service(self):
         """The link sits beside that service's switch; a copied port that kept
@@ -531,9 +533,9 @@ class EveryWatchlistPortWritesTheSameWayTests(DatabaseTestCase):
         from urllib.parse import urlparse
         for source, port in self._ports():
             with self.subTest(source=source):
-                host = urlparse(port.list_url("12345")).hostname or ""
-                self.assertTrue(host == f"{source}.com" or host.endswith(f".{source}.com")
-                                or host == f"{source}.tv" or host.endswith(f".{source}.tv"),
+                host = urlparse(port.list_url("12345", "a-name")).hostname or ""
+                self.assertTrue(host == SERVICE_HOSTS[source]
+                                or host.endswith("." + SERVICE_HOSTS[source]),
                                 f"{source} links to {host}")
 
     def test_the_registry_offers_a_write_only_with_the_viewers_token(self):
@@ -542,10 +544,9 @@ class EveryWatchlistPortWritesTheSameWayTests(DatabaseTestCase):
         holds. A client id alone offers nothing."""
         for source, _port in self._ports():
             with self.subTest(source=source):
-                bare = Settings(**{f"{source}_client_id": "an-id"})
+                bare = Settings(**CATALOGUE_CREDENTIALS[source])
                 self.assertNotIn(source, [str(s) for s, _ in providers.for_watchlist(bare)])
-                linked = Settings(**{f"{source}_client_id": "an-id",
-                                     f"{source}_access_token": "a-token"})
+                linked = Settings(**CATALOGUE_CREDENTIALS[source], **PRIVATE_CREDENTIALS[source])
                 self.assertIn(source, [str(s) for s, _ in providers.for_watchlist(linked)])
 
     def test_a_source_with_no_port_is_never_offered(self):

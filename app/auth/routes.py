@@ -755,11 +755,14 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
         "orders": {"metadata_order": orders.metadata},
         "trakt_login_configured": settings.trakt_login_configured,
         "simkl_login_configured": settings.simkl_login_configured,
-        # Whether unlinking is offered at all. Without a password an account's
-        # linked identities are its only way in, so the last one may not be
-        # removed — showing a button that always refuses would be worse than
-        # showing none.
-        "can_unlink": bool(account and account["password_hash"]) or len(identities) > 1,
+        "tmdb_link_configured": settings.tmdb_link_configured,
+        # WHICH LINKS AN UNLINK IS OFFERED FOR. Without a password an account's
+        # links it can sign in with are its only way in, so the last of those may
+        # not be removed — showing a button that always refuses would be worse
+        # than showing none. A link nobody signs in with (TMDB's) is never a way
+        # in, so it can always go, and never counts as the one left
+        # (app/auth/revocation.py, identities.unlink_identity).
+        "can_unlink": _unlinkable(identities, bool(account and account["password_hash"])),
         # Drives whether the password form asks for a current password, and
         # whether the "a password is your way back in" nudge is shown.
         "has_password": bool(account and account["password_hash"]),
@@ -800,6 +803,18 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
         ],
         **notes,
     }
+
+
+def _unlinkable(identities, has_password: bool) -> frozenset[str]:
+    """The linked services the account page offers Unlink for: every link that is
+    not a way in, and a way in while a password or another way in remains — the
+    same rule identities.unlink_identity enforces, asked of the same table."""
+    ways_in = [row["provider"] for row in identities
+               if revocation.is_login_provider(row["provider"])]
+    return frozenset(
+        row["provider"] for row in identities
+        if not revocation.is_login_provider(row["provider"]) or has_password
+        or len(ways_in) > 1)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -880,7 +895,7 @@ async def unlink_identity(request: Request):
     user = await auth.require_session(request)
     data = await authz.json_body(request)
     provider = str(data.get("provider") or "").strip().lower()
-    if not revocation.is_login_provider(provider):
+    if not revocation.is_linkable(provider):
         return await _card(request, user.session_id, link_message="Unknown provider.")
 
     # Read before the unlink (the token lives on the row it deletes), spent only

@@ -255,7 +255,7 @@ class ChangingTheOrderChangesWhichServiceAnswersARowsTotalTests(_SettingsCase):
     """End to end through the live pass: the same row, the same ids, two viewers'
     orders, two different services asked — and a frozen month's record unchanged."""
 
-    ALL = SimpleNamespace(trakt_configured=True, simkl_configured=True, tmdb_configured=True,
+    ALL = SimpleNamespace(trakt_configured=True, simkl_configured=True, tmdb_account_configured=False, tmdb_configured=True,
                           trakt_catalogue_configured=True, simkl_catalogue_configured=True)
     TOTALS = {"tmdb": 10, "trakt": 8, "simkl": 9}
 

@@ -23,7 +23,7 @@ from tests.support import migrated_db, statements_per_transaction
 # usable credential for it, so a fake settings object has to be able to answer —
 # see app/auth/viewer.py's settings_for_user, which is what fills these in
 # with one person's own tokens.
-SETTINGS = SimpleNamespace(configured=True, trakt_configured=True, simkl_configured=False)
+SETTINGS = SimpleNamespace(configured=True, trakt_configured=True, simkl_configured=False, tmdb_account_configured=False)
 
 
 def _ep_event(tid, season, number, watched_at="2026-07-10T00:00:00.000Z"):

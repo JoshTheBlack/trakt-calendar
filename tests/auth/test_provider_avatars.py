@@ -240,13 +240,25 @@ class EveryHostListedProviderHasAnAccountLookupTests(unittest.TestCase):
 
 
 class RevocationTableTests(unittest.IsolatedAsyncioTestCase):
-    """app/auth/revocation.py — which sign-in services revoke on unlink."""
+    """app/auth/revocation.py — which linked services revoke on unlink, and which
+    of them are a way to sign in."""
 
     def test_an_unknown_provider_is_refused_not_read_as_another(self):
         from app.auth import revocation
-        self.assertFalse(revocation.is_login_provider("tmdb"))
+        self.assertFalse(revocation.is_linkable("letterboxd"))
+        self.assertFalse(revocation.is_login_provider("letterboxd"))
         with self.assertRaises(ValueError):
-            revocation.revoker("tmdb")
+            revocation.revoker("letterboxd")
+
+    def test_tmdb_is_linked_and_revoked_but_never_a_way_in(self):
+        """A TMDB link lets the tracker write a person's TMDB watchlist and a
+        board seed from their TMDB ratings; nobody signs in with it."""
+        from app.auth import revocation, tmdb_routes
+        self.assertTrue(revocation.is_linkable("tmdb"))
+        self.assertFalse(revocation.is_login_provider("tmdb"))
+        self.assertNotIn("tmdb", revocation.LOGIN_PROVIDERS)
+        self.assertIs(revocation.revoker("tmdb"), tmdb_routes)
+        self.assertEqual(set(revocation.LOGIN_PROVIDERS), {"trakt", "simkl", "plex"})
 
     async def test_plex_has_nothing_to_revoke(self):
         from app.auth import revocation

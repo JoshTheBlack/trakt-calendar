@@ -22,7 +22,7 @@ import asyncio
 import dataclasses
 
 from ..config import load_settings
-from . import simkl_routes, trakt_routes
+from . import simkl_routes, tmdb_routes, trakt_routes
 
 
 async def settings_for_user(user_id: int):
@@ -63,11 +63,18 @@ async def settings_for_user(user_id: int):
     `settings` is deliberate — there is no longer an app-wide value for a caller
     to reach for by mistake.
     """
-    trakt_token, simkl_token = await asyncio.gather(
+    trakt_token, simkl_token, tmdb_grant = await asyncio.gather(
         trakt_routes.access_token_for_user(user_id),
         simkl_routes.access_token_for_user(user_id),
+        tmdb_routes.grant_for_user(user_id),
     )
+    # TMDB'S GRANT RIDES HERE TOO, as the token and the account it names — the
+    # account object id its reads are addressed by. Only ever on this object:
+    # config.VIEWER_FIELDS keeps both out of every stored or loaded Settings, so
+    # no instance-wide object can carry one person's TMDB account.
     return dataclasses.replace(
         await load_settings(), trakt_access_token=trakt_token or "", trakt_refresh_token="",
         simkl_access_token=simkl_token or "",
+        tmdb_user_token=tmdb_grant.access_token if tmdb_grant else "",
+        tmdb_account_id=tmdb_grant.account_id if tmdb_grant else "",
     )

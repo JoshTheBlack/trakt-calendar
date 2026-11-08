@@ -8,6 +8,7 @@ asked RAISES (so a tracker row keeps its last-known numbers).
 """
 from __future__ import annotations
 
+import dataclasses
 import unittest
 from datetime import date
 from unittest import mock
@@ -203,7 +204,10 @@ class TheProviderTests(unittest.TestCase):
         self.assertEqual(provider.capabilities.endpoints,
                          {"shows/new", "shows/premieres", "movies"})
         self.assertTrue(provider.capabilities.describes_sparse_listings)
-        self.assertEqual((provider.sync_port, provider.watchlist_port), (None, None))
+        # A linked viewer's TMDB watchlist is written through its list port; it
+        # keeps no watch history, so it has no sync port and never backs the tracker.
+        self.assertIsNone(provider.sync_port)
+        self.assertIsNotNone(provider.watchlist_port)
         self.assertFalse(provider.capabilities.private_user_data)
 
     def test_its_calendar_is_the_instance_token(self):
@@ -216,6 +220,18 @@ class TheProviderTests(unittest.TestCase):
         self.assertTrue(provider.catalogue_is_configured(SETTINGS))
         self.assertFalse(provider.is_configured(SETTINGS))
         self.assertFalse(provider.catalogue_is_configured(Settings()))
+
+    def test_its_private_question_is_a_viewers_own_grant(self):
+        """`is_configured` is true only where a Settings carries a viewer's TMDB
+        token AND the account it names — what auth.viewer.settings_for_user
+        swaps in for somebody who linked TMDB — never on the instance's read
+        token, and never on half a grant."""
+        provider = tmdb_provider._TmdbProvider()
+        linked = dataclasses.replace(SETTINGS, tmdb_user_token="a-user-token",
+                                     tmdb_account_id="6a5edaa7df66e2fc7c922663")
+        self.assertTrue(provider.is_configured(linked))
+        self.assertFalse(provider.is_configured(dataclasses.replace(linked, tmdb_account_id="")))
+        self.assertFalse(provider.is_configured(dataclasses.replace(linked, tmdb_user_token="")))
 
     def test_its_pages(self):
         provider = tmdb_provider._TmdbProvider()

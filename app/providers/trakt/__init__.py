@@ -256,7 +256,7 @@ class _TraktWatchlistPort:
     and what was measured before any of it was written, is that module's to
     say."""
 
-    def list_url(self, account_id: str) -> str:
+    def list_url(self, account_id: str, account_name: str | None) -> str:
         return watchlist.list_url(account_id)
 
     async def holdings(self, settings: Settings, titles):
@@ -265,8 +265,11 @@ class _TraktWatchlistPort:
     async def put(self, settings: Settings, titles):
         return await watchlist.put(settings, titles)
 
-    async def drop(self, settings: Settings, titles):
-        return await watchlist.drop(settings, titles)
+    async def drop(self, settings: Settings, rows):
+        # A SHOW GIVEN UP ON COMES OFF TRAKT'S WATCHLIST WHOEVER LISTED IT —
+        # Trakt's drop as it has always been — so what was held before the
+        # tracker's write changes nothing here.
+        return await watchlist.drop(settings, [row.title for row in rows])
 
     async def undo(self, settings: Settings, rows):
         return await watchlist.undo(settings, rows)

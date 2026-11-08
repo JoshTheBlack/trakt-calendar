@@ -56,9 +56,9 @@ from tests.support import AppTestCase, ORIGIN, migrated_db, tracker_month
 # take the row out of the question they ask.
 _CATALOGUE = {"trakt_catalogue_configured": True, "simkl_catalogue_configured": True,
               "tmdb_configured": False}
-TRAKT_ONLY = SimpleNamespace(trakt_configured=True, simkl_configured=False, **_CATALOGUE)
-SIMKL_ONLY = SimpleNamespace(trakt_configured=False, simkl_configured=True, **_CATALOGUE)
-BOTH = SimpleNamespace(trakt_configured=True, simkl_configured=True, **_CATALOGUE)
+TRAKT_ONLY = SimpleNamespace(trakt_configured=True, simkl_configured=False, tmdb_account_configured=False, **_CATALOGUE)
+SIMKL_ONLY = SimpleNamespace(trakt_configured=False, simkl_configured=True, tmdb_account_configured=False, **_CATALOGUE)
+BOTH = SimpleNamespace(trakt_configured=True, simkl_configured=True, tmdb_account_configured=False, **_CATALOGUE)
 
 LABELS = {"trakt": "Trakt", "simkl": "Simkl"}
 ORDER = ("trakt", "simkl")
@@ -492,7 +492,7 @@ def _trakt_only_record(tid, season=1, **fields) -> dict:
 # services, but only Simkl's catalogue can be asked about a title. This is the
 # question live.detail_source puts, and the state the reported row was in.
 SIMKL_CATALOGUE_ONLY = SimpleNamespace(
-    trakt_configured=True, simkl_configured=True,
+    trakt_configured=True, simkl_configured=True, tmdb_account_configured=False,
     trakt_catalogue_configured=False, simkl_catalogue_configured=True,
     tmdb_configured=False)
 

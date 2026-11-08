@@ -11,7 +11,8 @@
    service's own site.
 
    "GET PICTURE" ANSWERS WITH THE PICTURE SECTION, which is where its result shows. #}
-{% macro service_row(provider, label, login_configured, link_path) %}
+{% macro service_row(provider, label, login_configured, link_path,
+                     needs='client ID, client secret, and public base URL') %}
 <div class="row">
   <span class="label">{{ label }}</span>
   {% if provider in linked %}
@@ -40,7 +41,7 @@
             hx-target="#accountAvatar" hx-swap="outerHTML"
             title="Use this account's picture">Get picture</button>
     {% endif %}
-    {% if can_unlink %}
+    {% if provider in can_unlink %}
     {% call confirm_box.ask('unlink-' ~ provider, 'Unlink your ' ~ label ~ ' account from this login?',
                             'Unlink', danger=true, face='btn-ghost tiny') %}
     <button type="button" class="btn-primary small" hx-post="/me/identities/unlink" hx-json-enc
@@ -58,7 +59,7 @@
   {% else %}
   {# Not a dead end: say who can fix it, so this doesn't read as "linking
      is broken". Only an administrator can, and only they are told how. #}
-  <span class="auth-badge off" title="{{ ('Set the ' ~ label ~ ' client ID, client secret, and public base URL in Settings.') if user.is_admin else ('An administrator has to finish setting up ' ~ label ~ ' sign-in on this instance.') }}">Unavailable</span>
+  <span class="auth-badge off" title="{{ ('Set the ' ~ label ~ ' ' ~ needs ~ ' in Settings.') if user.is_admin else ('An administrator has to finish setting up ' ~ label ~ ' on this instance.') }}">Unavailable</span>
   {% endif %}
 </div>
 {% endmacro %}
@@ -69,5 +70,11 @@
      offered — as the popup flow rather than a link (_plex_signin.html). #}
   {{ service_row('plex', 'Plex', true, none) }}
   {{ plex.slot() }}
+  {# A LINK, NOT A SIGN-IN: connecting TMDB lets the tracker write to your TMDB
+     watchlist and a rankings board seed from your TMDB ratings. Its "configured"
+     is the instance's TMDB read token and public base URL, which an
+     administrator sets (Settings.tmdb_link_configured). #}
+  {{ service_row('tmdb', 'TMDB', tmdb_link_configured, '/auth/tmdb/link',
+                needs='API Read Access Token and public base URL') }}
   <p class="auth-error{{ ' is-ok' if link_ok }}" role="{{ 'status' if link_ok else 'alert' }}">{{ link_message }}</p>
 </div>

@@ -46,7 +46,8 @@ from .cookies import (COOKIE_NAME, COOKIE_NAME_SECURE, COOKIE_PROBE, browser_sch
 from .handshakes import (HANDSHAKE_COOKIE, HANDSHAKE_COOKIE_SECURE, HANDSHAKE_REJECTED,
                          HANDSHAKE_TTL_SECONDS, HandshakeError, clear_handshake_cookie,
                          consume_handshake, create_handshake, handshake_cookie_matches,
-                         peek_handshake, read_handshake_cookie, set_handshake_cookie)
+                         held_on_handshake, hold_on_handshake, peek_handshake,
+                         read_handshake_cookie, set_handshake_cookie)
 from .identities import (REFRESH_LEASE_SECONDS, AccountUnavailable, IdentityInUse,
                          IdentityWritesBlocked, LastLoginMethod, LoginOutcome, ProviderIdentity,
                          RegistrationRefused, claim_identity_refresh, find_identity,
@@ -96,6 +97,7 @@ __all__ = [
     "delete_user", "detect_cookie_secure", "display_name_error", "display_name_for",
     "find_identity", "find_invite_by_token", "find_user_by_username", "get_user",
     "get_user_prefs", "handshake_cookie_matches", "handshake_start_limited", "hash_password",
+    "held_on_handshake", "hold_on_handshake",
     "identifier_error", "identifier_is_retired", "insert_linked_identity", "insert_user",
     "insert_user_prefs", "invite_is_usable", "is_locked_out", "link_provider_identity",
     "list_identities", "list_invite_redemptions", "list_invites", "list_retired_identifiers",

@@ -47,8 +47,9 @@ from typing import NamedTuple
 
 from .. import auth, clock, db, providers
 from ..auth import viewer
-from ..providers.base import (NOT_HELD, ItemKey, Media, SourceUnavailable, WatchlistOutcome,
-                              WatchlistResult, WatchlistTitle, WatchlistUndo, parse_item_key)
+from ..providers.base import (NOT_HELD, ItemKey, Media, SourceUnavailable, WatchlistDrop,
+                              WatchlistOutcome, WatchlistResult, WatchlistTitle, WatchlistUndo,
+                              parse_item_key)
 from . import store
 
 logger = logging.getLogger(__name__)
@@ -95,10 +96,13 @@ _PUT_STATES = {WatchlistOutcome.WRITTEN: WriteState.WRITTEN,
                WatchlistOutcome.NOT_FOUND: WriteState.NOT_FOUND,
                WatchlistOutcome.REFUSED: WriteState.REFUSED}
 # A drop answered ALREADY is the service holding it as given up, or not holding
-# it at all — the port never ADDS a title in order to drop it. Either way the
-# show has left, and DROPPED is what makes its return an arrival.
+# it at all — the port never ADDS a title in order to drop it — and one answered
+# KEPT is a title the viewer had listed themselves, which that service leaves
+# where it is (WatchlistPort.drop). Either way the show has left, and DROPPED is
+# what makes its return an arrival.
 _DROP_STATES = {WatchlistOutcome.WRITTEN: WriteState.DROPPED,
                 WatchlistOutcome.ALREADY: WriteState.DROPPED,
+                WatchlistOutcome.KEPT: WriteState.DROPPED,
                 WatchlistOutcome.NOT_FOUND: WriteState.NOT_FOUND,
                 WatchlistOutcome.REFUSED: WriteState.REFUSED}
 # KEPT and ALREADY are an undo's final answers, not failures: the first is the
@@ -266,6 +270,15 @@ def _filed(result: WatchlistResult | None, states: Mapping[WatchlistOutcome, Wri
                     result.status_before, states.get(result.outcome, WriteState.FAILED))
 
 
+def _held_before(row: WriteRow | None) -> str | None:
+    """What the service held before the tracker's write, as a drop is told it:
+    known only from a write the read-back CONFIRMED. A failed or refused write may
+    have been read before at a moment that no longer says anything, and with no
+    row the tracker never wrote the show at all — so whatever the list holds then
+    is the viewer's own, which is None (WatchlistDrop)."""
+    return row.status_before if row is not None and row.state is WriteState.WRITTEN else None
+
+
 def _departed_title(key: str, source: str, row: WriteRow | None) -> WatchlistTitle:
     """A show that has LEFT the tracker, as a port is to find it: by the shared
     id the tracker filed it under, and by the service's own id where a write
@@ -311,7 +324,7 @@ async def switches(user_id: int, settings) -> list[Switch]:
     """
     on = set(await switched_on(user_id))
     linked = {str(source): port for source, port in providers.for_watchlist(settings)}
-    accounts = {row["provider"]: row["provider_user_id"]
+    accounts = {row["provider"]: (row["provider_user_id"], row["display_name"])
                 for row in await auth.list_identities(user_id)}
     tracked = await on_tracker(user_id) if on else {}
     out = []
@@ -325,7 +338,8 @@ async def switches(user_id: int, settings) -> list[Switch]:
         found = trouble(user_id, name)
         out.append(Switch(
             source=name, label=provider.label, on=name in on, linked=port is not None,
-            list_url=port.list_url(str(account)) if port is not None and account else None,
+            list_url=port.list_url(str(account[0]), account[1])
+            if port is not None and account else None,
             written=sum(1 for key in tracked if key in held
                         and held[key].state is WriteState.WRITTEN),
             waiting=sum(1 for key in tracked if key not in held
@@ -535,7 +549,8 @@ async def _depart(user_id: int, source: str, port, settings,
     unfinished: set[str] = set()
     for keys, states, send in (
             (drops, _DROP_STATES, lambda: port.drop(
-                settings, [_departed_title(key, source, held.get(key)) for key in drops])),
+                settings, [WatchlistDrop(_departed_title(key, source, held.get(key)),
+                                         _held_before(held.get(key))) for key in drops])),
             (undos, _UNDO_STATES, lambda: port.undo(
                 settings, [WatchlistUndo(_departed_title(key, source, held[key]),
                                          held[key].status_before) for key in undos]))):

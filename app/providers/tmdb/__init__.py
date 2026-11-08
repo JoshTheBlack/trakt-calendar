@@ -10,10 +10,12 @@ module it needs says which half of TMDB it depends on.
 
 WHAT TMDB IS TO THIS APP TODAY: the first describer of every title it knows (it
 is first in `Source`, see base.py for why), through its DetailPort; the
-catalogue every search box asks, through its SearchPort; and a calendar source
-for Series, Season and Movie Premieres, through its CalendarPort. Its list port
-is None until it is built; the registry asks for a port and finds none, so
-nothing reaches for a half TMDB does not have yet.
+catalogue every search box asks, through its SearchPort; a calendar source for
+Series, Season and Movie Premieres, through its CalendarPort; and, for a viewer
+who linked their TMDB account on their account page, the watchlist the tracker
+writes to (`watchlist`, over `account`'s reads of that person's own lists) and
+the ratings a rankings board can be seeded from. NEVER A TRACKER SOURCE (no sync
+port: TMDB keeps no watch history) and NEVER A WAY TO SIGN IN.
 """
 from __future__ import annotations
 
@@ -24,7 +26,7 @@ from .. import register
 from ..base import (EPISODE_KEEPING, EPISODE_LISTING, SEASON_KEEPING, TITLE_KEEPING,
                     Capabilities, Media, Reach, Record, SearchCatalogue, SearchPage,
                     SeasonsAnswer, Source, StoreColumns, TitleFacts, Video, status_spoken)
-from . import calendar, detail, normalize, search, transport
+from . import calendar, detail, normalize, search, transport, watchlist
 from .transport import TmdbError, TmdbNotFound, TmdbRateLimited
 
 __all__ = ["TmdbError", "TmdbNotFound", "TmdbRateLimited"]
@@ -109,6 +111,29 @@ class _TmdbSearchPort:
         return await search.find_by_shared_id(settings, media, ids)
 
 
+class _TmdbWatchlistPort:
+    """TMDB's answer to "write this person's list" (base.py's WatchlistPort) — a
+    linked viewer's own TMDB watchlist. A thin delegator over watchlist.py,
+    through the MODULE object, as the ports above are over theirs: what a write
+    to TMDB means, and what was measured before any of it was written, is that
+    module's to say."""
+
+    def list_url(self, account_id: str, account_name: str | None) -> str | None:
+        return watchlist.list_url(account_id, account_name)
+
+    async def holdings(self, settings: Settings, titles):
+        return await watchlist.holdings(settings, titles)
+
+    async def put(self, settings: Settings, titles):
+        return await watchlist.put(settings, titles)
+
+    async def drop(self, settings: Settings, rows):
+        return await watchlist.drop(settings, rows)
+
+    async def undo(self, settings: Settings, rows):
+        return await watchlist.undo(settings, rows)
+
+
 class _TmdbProvider:
     """TMDB as the registry sees it."""
 
@@ -176,14 +201,24 @@ class _TmdbProvider:
     calendar_port = _TmdbCalendarPort()
     detail_port = _TmdbDetailPort()
     search_port = _TmdbSearchPort()
-    watchlist_port = None
+    watchlist_port = _TmdbWatchlistPort()
 
     def is_configured(self, settings: Settings) -> bool:
-        # THE PRIVATE QUESTION, and nobody on this instance can have linked a
-        # TMDB account yet: there is no per-person TMDB credential to hold. The
-        # instance's read token is a CATALOGUE credential and answers
-        # `catalogue_is_configured` below, never this.
-        return False
+        # THE PRIVATE QUESTION: does this Settings carry a VIEWER's own TMDB
+        # grant — true only on the object auth.viewer.settings_for_user builds
+        # for somebody who linked TMDB on their account page. The instance's read
+        # token is a CATALOGUE credential and answers `catalogue_is_configured`
+        # below, never this.
+        #
+        # WHAT A LINK CHANGES, AND WHAT IT DOES NOT, follows from who asks this.
+        # The registry's watchlist question (`for_watchlist`) does, and is the
+        # point: a linked viewer's tracker can write to their TMDB watchlist. The
+        # tracker's sources do not move — TMDB has no sync port and keeps no watch
+        # history (`private_user_data=False`), so neither the access gate nor
+        # `for_tracker_ports` can admit it. The search does not move — TMDB is
+        # `searched_by_default`, and `for_search` asks this question only of a
+        # service that is not. The calendar never asks it.
+        return settings.tmdb_account_configured
 
     def catalogue_is_configured(self, settings: Settings) -> bool:
         return settings.tmdb_configured
