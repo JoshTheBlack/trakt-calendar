@@ -249,7 +249,19 @@ between a calendar read and its render has one (`calendar.view_state`,
 `calendar.logos`, `calendar.card_pictures`, and every off-loop render's
 `templating.drawn`). A span is DEBUG until slow
 (`SLOW_SPAN_MS`) and spells its fields only when its line is printed: 2.6 µs at
-INFO, ~31 µs at DEBUG to a file (MEASURED).
+INFO, ~31 µs at DEBUG to a file (MEASURED). EVERY READ IS COUNTED TOO: `db.run`
+TALLIES itself (`perftrace.tally` — one summed entry, `db.run=812ms×9`, each
+read still counted toward what is covered, no line of its own), because beside
+a restart's refills a read waits for a thread and the interpreter lock, and a
+mark's eleven small reads were 2.6 s its line could only call unspanned. AND SO
+IS THE MIDDLEWARE: a marker INNERMOST of the stack (`perftrace._StackCrossing`,
+appended by `install`) times the way in (`asgi.in`), each body read through the
+layers (`asgi.receive`) and the answer's way out (`asgi.out`) — every
+`@app.middleware("http")` layer is a task and a stream, a turn of a busy loop per
+hand-over, MEASURED at up to 1.18 s in and 1.11 s out on a live restart. A gap
+of 50 ms or more says where it fell (`unspanned=…ms (longest …, after X, before
+Y)`), which is what to span next; on the restart that closed these, the slow
+requests left 4–36 ms unaccounted.
 
 **Work a request starts behind itself starts once its answer has been sent.**
 `app/after_response.py` owns it: `later(start)` holds a starter until the

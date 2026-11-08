@@ -332,7 +332,27 @@ async def run(fn: Callable[[sqlite3.Connection], T]) -> T:
     multi-statement read. A write that spans more than one statement belongs in
     transaction() instead, so a failure halfway through can't leave the database
     half-updated.
+
+    ITS TIME IS IN THE REQUEST'S BREAKDOWN, summed as `db.run` (perftrace.tally,
+    no line of its own: a page makes dozens). Beside a restart's refills a read
+    waits for a worker thread and then for the interpreter lock at every step,
+    and a request whose small reads waited that way could only call it
+    unspanned — a mark's, on a harness copy's restart, 2.6 s of its 4.1. MEASURED
+    with this tally under the frozen restart burst: a mark's eleven reads took
+    1.79 s of its 1.94, and what it could not account for fell from 0.4-3.9 s to
+    11-22 ms.
     """
+    started = time.perf_counter()
+    try:
+        return await _on_a_thread(fn)
+    finally:
+        ended = time.perf_counter()
+        perftrace.tally("db.run", (ended - started) * 1000.0, ended=ended)
+
+
+async def _on_a_thread(fn: Callable[[sqlite3.Connection], T]) -> T:
+    """`run` without its tally, for a write's own statement — whose time is its
+    turn's (`_in_turn`)."""
     return await anyio.to_thread.run_sync(lambda: fn(connection()))
 
 
@@ -551,7 +571,7 @@ async def execute(sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> R
         cur = conn.execute(sql, params)
         return Result(lastrowid=cur.lastrowid, rowcount=cur.rowcount)
 
-    return await _in_turn(_statement(sql), lambda: run(_work))
+    return await _in_turn(_statement(sql), lambda: _on_a_thread(_work))
 
 
 async def executemany(sql: str, rows: Iterable[Sequence[Any]]) -> Result:
@@ -562,7 +582,7 @@ async def executemany(sql: str, rows: Iterable[Sequence[Any]]) -> Result:
         cur = conn.executemany(sql, materialized)
         return Result(lastrowid=cur.lastrowid, rowcount=cur.rowcount)
 
-    return await _in_turn(_statement(sql), lambda: run(_work))
+    return await _in_turn(_statement(sql), lambda: _on_a_thread(_work))
 
 
 async def execute_gathered(writer: str,
@@ -584,7 +604,7 @@ async def execute_gathered(writer: str,
             cur = conn.execute(sql, params)
             return Result(lastrowid=cur.lastrowid, rowcount=cur.rowcount)
 
-        return await run(_write)
+        return await _on_a_thread(_write)
 
     return await _in_turn(writer, _work)
 

@@ -43,6 +43,7 @@ from contextlib import contextmanager
 from functools import wraps
 
 import anyio.to_thread
+from starlette.middleware import Middleware
 
 logger = logging.getLogger("app.perf")
 
@@ -65,6 +66,13 @@ LOOP_STALL_MS = _env_ms("LOOP_STALL_MS", 250.0)
 # memory problem, and the first few dozen labels have always already said which
 # phase ran long.
 MAX_SPANS_PER_REQUEST = 48
+# How many tallied steps (`tally`) one request counts toward what its spans
+# cover. Their sums are kept whatever the count; past this, a step's time is
+# still in its sum and only its place in the timeline goes.
+MAX_TALLIED_PER_REQUEST = 1024
+# A stretch of a request no timing covers is placed — the timings either side
+# of the longest one named — once it is this long.
+UNSPANNED_NAMED_MS = 50.0
 
 
 # ---------------------------------------------------------------------------
@@ -76,9 +84,11 @@ MAX_SPANS_PER_REQUEST = 48
 # so a log line can name one.
 
 class _Request:
-    """One in-flight request, and the spans that have finished inside it."""
+    """One in-flight request, the spans that have finished inside it, and the
+    steps it took many times (`tally`)."""
 
-    __slots__ = ("rid", "method", "path", "spans", "t0", "dropped")
+    __slots__ = ("rid", "method", "path", "spans", "t0", "dropped", "tallies", "tallied",
+                 "answered")
 
     def __init__(self, rid: str, method: str, path: str):
         self.rid = rid
@@ -89,6 +99,12 @@ class _Request:
         self.spans: list[tuple[str, float, float]] = []
         self.t0 = time.perf_counter()
         self.dropped = 0
+        # label -> [ms, times]: one entry in the breakdown however many times.
+        self.tallies: dict[str, list] = {}
+        # (label, ms, ended at) of each tallied step, for what is covered alone.
+        self.tallied: list[tuple[str, float, float]] = []
+        # When the routes handed back the answer's start (`_StackCrossing`).
+        self.answered: float | None = None
 
     def record(self, label: str, dt_ms: float, ended: float | None = None) -> None:
         if len(self.spans) < MAX_SPANS_PER_REQUEST:
@@ -96,29 +112,61 @@ class _Request:
         else:
             self.dropped += 1
 
+    def tally(self, label: str, dt_ms: float, ended: float) -> None:
+        entry = self.tallies.get(label)
+        if entry is None:
+            self.tallies[label] = [dt_ms, 1]
+        else:
+            entry[0] += dt_ms
+            entry[1] += 1
+        if len(self.tallied) < MAX_TALLIED_PER_REQUEST:
+            self.tallied.append((label, dt_ms, ended))
+
     def unspanned_ms(self, until: float) -> float:
         """How much of the request, from its start to `until`, no recorded span
-        covers — the union of the spans, which overlap wherever one nests in
-        another or several run at once."""
-        covered, reach = 0.0, self.t0
-        for start, end in sorted((max(self.t0, ended - dt / 1000.0), min(until, ended))
-                                 for _label, dt, ended in self.spans):
+        or tallied step covers — the union of them all, which overlap wherever
+        one nests in another or several run at once."""
+        return self._gaps(until)[0]
+
+    def _gaps(self, until: float) -> tuple[float, float, str, str]:
+        """(uncovered ms in all, the longest uncovered stretch's ms, what ended
+        just before it, what began just after it) — "the start" and "the end"
+        for a stretch at either edge."""
+        uncovered, longest, before, after = 0.0, 0.0, "", ""
+        reach, reached_by = self.t0, "the start"
+        for start, end, label in sorted(
+                (min(until, max(self.t0, ended - dt / 1000.0)), min(until, ended), label)
+                for label, dt, ended in [*self.spans, *self.tallied]):
             if end <= reach:
                 continue
-            covered += end - max(start, reach)
-            reach = end
-        return max(0.0, (until - self.t0) - covered) * 1000.0
+            if start > reach:
+                uncovered += start - reach
+                if start - reach > longest:
+                    longest, before, after = start - reach, reached_by, label
+            reach, reached_by = end, label
+        if until > reach:
+            uncovered += until - reach
+            if until - reach > longest:
+                longest, before, after = until - reach, reached_by, "the end"
+        return uncovered * 1000.0, longest * 1000.0, before, after
 
     def breakdown(self, until: float | None = None) -> str:
         """The spans this request finished, longest first — which is the order the
-        question "where did the time go" is actually asked in — then the time no
-        span accounts for, so a gap in the instrumentation names itself rather
-        than reading as a fast request."""
-        if not self.spans:
+        question "where did the time go" is actually asked in — each tallied
+        step summed among them (`db.run=812ms×9`), then the time none of them
+        accounts for, so a gap in the instrumentation names itself rather than
+        reading as a fast request."""
+        if not self.spans and not self.tallies:
             return "(no spans)"
-        ranked = sorted(self.spans, key=lambda entry: entry[1], reverse=True)
-        out = " ".join(f"{label}={dt:.0f}ms" for label, dt, _ended in ranked)
-        out += f" | unspanned={self.unspanned_ms(time.perf_counter() if until is None else until):.0f}ms"
+        entries = [(label, dt, "") for label, dt, _ended in self.spans]
+        entries += [(label, ms, f"×{times}") for label, (ms, times) in self.tallies.items()]
+        ranked = sorted(entries, key=lambda entry: entry[1], reverse=True)
+        out = " ".join(f"{label}={dt:.0f}ms{times}" for label, dt, times in ranked)
+        uncovered, longest, before, after = self._gaps(time.perf_counter() if until is None else until)
+        out += f" | unspanned={uncovered:.0f}ms"
+        if longest >= UNSPANNED_NAMED_MS:
+            # WHERE THE LONGEST GAP FELL, so the line says what to span next.
+            out += f" (longest {longest:.0f}ms, after {before}, before {after})"
         if self.dropped:
             out += f" (+{self.dropped} spans past the {MAX_SPANS_PER_REQUEST} kept)"
         return out
@@ -253,6 +301,17 @@ def attribute(label: str, dt_ms: float, *, ended: float | None = None) -> None:
         req.record(label, dt_ms, ended)
 
 
+def tally(label: str, dt_ms: float, *, ended: float) -> None:
+    """Add `dt_ms` to the request's sum under `label`, without a log line —
+    for a step a request takes MANY times, which a span apiece would crowd out
+    of its breakdown (`MAX_SPANS_PER_REQUEST`): db.run, every read a page makes.
+    The sum is ONE entry in the breakdown, and each step still counts toward
+    what the request's spans cover, so a request that waited in its reads says
+    so rather than calling it unspanned."""
+    if (req := _current.get()) is not None:
+        req.tally(label, dt_ms, ended)
+
+
 def report(label: str, dt_ms: float, **fields) -> None:
     """One timed block's log line: DEBUG, or a WARNING once it is SLOW_SPAN_MS
     — the line a span prints, for a block timed some other way. The fields are
@@ -349,6 +408,8 @@ class RequestTimingMiddleware:
         finally:
             _current.reset(token)
             ended = time.perf_counter()
+            if req.answered is not None:
+                req.record("asgi.out", (ended - req.answered) * 1000.0, ended)
             dt_ms = (ended - req.t0) * 1000.0
             if dt_ms >= SLOW_REQUEST_MS:
                 logger.warning(
@@ -361,15 +422,67 @@ class RequestTimingMiddleware:
                 )
 
 
-def install(app) -> None:
-    """Add the request timer outside every middleware that works on a request.
+class _StackCrossing:
+    """INNERMOST of the stack, just outside the routes: how long a request took
+    to cross every middleware on its way in (`asgi.in`, from the timer's start
+    to here), each read of its body through them (`asgi.receive`, tallied), and
+    its answer's way back out (`asgi.out`, from the routes handing back the
+    answer's start to the timer's end).
 
-    Starlette reverses registration order, so this must be added after them —
-    see the class docstring for why being outermost is the whole point. The one
-    middleware added after it, app/after_response.py's, does nothing until the
-    response has been sent, so it adds nothing to what this measures.
+    THE CROSSING IS NOT FREE, AND NOTHING ELSE COULD SAY SO. Every
+    `@app.middleware("http")` layer runs what is inside it as a task of its own
+    and hands each message across a stream, and each hand-over is a turn of the
+    event loop — which, while a restart's refills and their upstream answers
+    keep it busy, is a turn behind everything else waiting. MEASURED on a harness
+    copy's live restart, after every read and write had its timing: a mark's
+    longest unaccounted stretch (1.6 s) lay between its session read and its
+    write, where the only step is reading its body; an unmark's (0.9 s) and a
+    late day's (0.7 s) after the page was drawn, before the answer had gone.
+    With this, the next restart's slow requests left 4-36 ms unaccounted, and
+    named the crossing: a mark's body 1.18 s in, a filter save's answer
+    0.79-1.11 s out, a late day's up to 0.81 s."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        req = _current.get()
+        if scope["type"] != "http" or req is None:
+            await self.app(scope, receive, send)
+            return
+        entered = time.perf_counter()
+        req.record("asgi.in", (entered - req.t0) * 1000.0, entered)
+
+        async def _receive():
+            asked = time.perf_counter()
+            try:
+                return await receive()
+            finally:
+                ended = time.perf_counter()
+                req.tally("asgi.receive", (ended - asked) * 1000.0, ended)
+
+        async def _send(message):
+            if message["type"] == "http.response.start" and req.answered is None:
+                req.answered = time.perf_counter()
+            await send(message)
+
+        await self.app(scope, _receive, _send)
+
+
+def install(app) -> None:
+    """Add the request timer outside every middleware that works on a request,
+    and the crossing's marker inside them all (`_StackCrossing`).
+
+    Starlette reverses registration order, so the timer must be added after
+    them — see the class docstring for why being outermost is the whole point.
+    The one middleware added after it, app/after_response.py's, does nothing
+    until the response has been sent, so it adds nothing to what this measures.
+    The marker goes at the far end of the list Starlette builds the stack from
+    (`user_middleware`, outermost first), which is the innermost place, whatever
+    was registered before this.
     """
     app.add_middleware(RequestTimingMiddleware)
+    app.user_middleware.append(Middleware(_StackCrossing))
 
 
 # ---------------------------------------------------------------------------
