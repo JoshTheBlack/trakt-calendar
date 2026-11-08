@@ -497,9 +497,7 @@ def listing_select(alias: str = "e") -> str:
     """The columns of an episode row that say which row it is and every
     service's listing of it — what a reader of listings selects, rather than
     every description beside them."""
-    return ", ".join([*(f"{alias}.{name}" for name in groups.IDENTITY[tables.EPISODES]),
-                      *(f"{alias}.{source}_{name}" for source in groups.sources()
-                        for name in groups.LISTING if groups.has(tables.EPISODES, source, name))])
+    return ", ".join(f"{alias}.{name}" for name in listing_names())
 
 
 def in_span(row: Row, bit: int, lo: float, hi: float) -> bool:
@@ -517,17 +515,20 @@ def _whole_rows() -> list[str]:
 
 
 def _aggregated(conn: db.Connection, source_sql: str, params) -> list[dict]:
-    """The episode rows `source_sql` (a FROM … clause over `e`) finds, read in
-    ONE aggregated row. These are the reads a write makes INSIDE its lock (a
-    merge, the titles a merge reshaped): the driver lets go of the GIL around
-    every statement step and has to win it back — up to a switch interval each
-    time while another thread is busy — so a row per episode cost a switch per
-    episode, and one row costs one."""
+    """The episode rows `source_sql` (a FROM … clause over `e`) finds, whole,
+    read in ONE aggregated row (db.aggregated says why) — the reads a write
+    makes inside its lock (a merge, the titles a merge reshaped) and a window's
+    span its store decides from."""
     names = _whole_rows()
-    (found,) = conn.execute(
-        f"SELECT json_group_array(json_array({', '.join(f'e.{n}' for n in names)})) "
-        f"{source_sql}", params).fetchone()
-    return [dict(zip(names, values)) for values in json.loads(found)]
+    return [dict(zip(names, values))
+            for values in db.aggregated(conn, [f"e.{n}" for n in names], source_sql, params)]
+
+
+def listing_names() -> list[str]:
+    """`listing_select`'s columns, by name."""
+    return [*groups.IDENTITY[tables.EPISODES],
+            *(f"{source}_{name}" for source in groups.sources()
+              for name in groups.LISTING if groups.has(tables.EPISODES, source, name))]
 
 
 def read_span(conn: db.Connection, bit: int, lo: float, hi: float, *,

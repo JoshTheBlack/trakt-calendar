@@ -10,7 +10,7 @@ resolved — and the month's cost was those Records: MEASURED on a copy of dev,
 October All Episodes read 23,785 of them to draw 1,410 cards.
 
 FOUR STEPS, EACH WHERE IT IS CHEAPEST AND SAID ONCE:
-  1. THE ROWS (`_keys_sql`): the episode rows a reader names — a span's, or a
+  1. THE ROWS (`_keys`): the episode rows a reader names — a span's, or a
      title's — with each service's listings and the ids it files them under,
      and none of the words. A `Listing` is what a card is made of.
   2. THE CARDS (`cards_of`), in Python over those rows: which listings of one
@@ -72,24 +72,36 @@ def _mask(names: Iterable[str]) -> int:
 # 1. the rows
 # ---------------------------------------------------------------------------
 
-def _keys_sql(where: str) -> str:
+def _keys(conn: db.Connection, where: str, params) -> list[dict]:
     """Episode rows `where` names (a condition on the row, aliased `e`): which
     row each is and every service's listings of it — what a card is made of,
-    and nothing it says."""
-    return f"SELECT {episode_rows.listing_select('e')} FROM {tables.EPISODES} e WHERE {where}"
+    and nothing it says — in one aggregated row (db.aggregated)."""
+    names = episode_rows.listing_names()
+    return [dict(zip(names, values)) for values in db.aggregated(
+        conn, [f"e.{name}" for name in names], _keys_from(where), params)]
 
 
-def _identities_sql() -> str:
-    """For each title `:keys` names, the id and ids each service files it under
-    and every id the store knows of it — read ONCE PER TITLE rather than joined
-    to every one of its episode rows: a title row holds every service's words,
-    and a month's episode rows are ten times its titles."""
-    identity = ", ".join(
-        f"{groups.column(tables.TITLES, source, 'id', 't')} AS t_{source}_id, "
-        f"{groups.column(tables.TITLES, source, 'ids_json', 't')} AS t_{source}_ids_json"
-        for source in groups.sources())
-    return (f"SELECT t.title_key, t.ids_json AS known_ids, {identity} FROM {tables.TITLES} t "
-            f"WHERE t.title_key IN (SELECT value FROM json_each(:keys))")
+def _keys_from(where: str) -> str:
+    """`_keys`' FROM clause."""
+    return f"FROM {tables.EPISODES} e WHERE {where}"
+
+
+def _identities(conn: db.Connection, keys: Iterable[str]) -> dict[str, dict]:
+    """{title key: its identity} for each title `keys` names — the id and ids each
+    service files it under and every id the store knows of it — read ONCE PER
+    TITLE rather than joined to every one of its episode rows (a title row holds
+    every service's words, and a month's episode rows are ten times its titles),
+    in one aggregated row (db.aggregated)."""
+    names = ["title_key", "known_ids"]
+    columns = ["t.title_key", "t.ids_json"]
+    for source in groups.sources():
+        names += [f"t_{source}_id", f"t_{source}_ids_json"]
+        columns += [groups.column(tables.TITLES, source, "id", "t"),
+                    groups.column(tables.TITLES, source, "ids_json", "t")]
+    found = db.aggregated(conn, columns, f"FROM {tables.TITLES} t "
+                          "WHERE t.title_key IN (SELECT value FROM json_each(:keys))",
+                          {"keys": json.dumps(sorted(keys))})
+    return {row["title_key"]: row for row in (dict(zip(names, values)) for values in found)}
 
 
 class Listing:
@@ -200,18 +212,17 @@ def read_rows(conn: db.Connection, endpoint_key: str, *, first: date | None = No
     bit = endpoints.ENDPOINTS[endpoint_key].bit
     decoded: dict = {}
     if titles is not None:
-        found = conn.execute(_keys_sql("e.title_key IN (SELECT value FROM json_each(:titles))"),
-                             {"titles": json.dumps(sorted({str(k) for k in titles}))}).fetchall()
+        found = _keys(conn, "e.title_key IN (SELECT value FROM json_each(:titles))",
+                      {"titles": json.dumps(sorted({str(k) for k in titles}))})
         parsed = [(row, episode_rows.Row.read(row)) for row in found]
     else:
         lo, hi = episode_rows.epoch(first), episode_rows.epoch(after)
-        found = conn.execute(_keys_sql(f"e.rowid IN ({episode_rows.span_rowids()})"),
-                             {"lo": lo, "hi": hi, "bit": bit}).fetchall()
+        found = _keys(conn, f"e.rowid IN ({episode_rows.span_rowids()})",
+                      {"lo": lo, "hi": hi, "bit": bit})
         parsed = [(row, stored) for row, stored in
                   ((row, episode_rows.Row.read(row)) for row in found)
                   if episode_rows.in_span(stored, bit, lo, hi)]
-    identities = {row["title_key"]: row for row in conn.execute(
-        _identities_sql(), {"keys": json.dumps(sorted({stored.key for _row, stored in parsed}))})}
+    identities = _identities(conn, {stored.key for _row, stored in parsed})
     listings = [listing for _row, stored in parsed
                 for listing in _row_listings(None, stored, bit, identities.get(stored.key),
                                              decoded)]
@@ -852,11 +863,12 @@ def _verdicts(conn: db.Connection, combos: Sequence[tuple], viewer: Viewer, *,
              _keeps(vocab.title_rules(vocab.floor_specs(viewer.settings, media), media),
                     "floor", params, sparse))
     mine = _keeps(vocab.title_rules(specs, media), "viewer", params, sparse)
-    return {int(row["k"]): _Verdict(bool(row["release_ok"]), bool(row["pruned"]),
-                                    bool(row["floor_ok"]), bool(row["viewer_ok"]),
-                                    bool(row["own_enriched"]), bool(row["own_stated"]))
-            for row in conn.execute(_judge_sql(media, release, floor, mine, params, titles),
-                                    params).fetchall()}
+    # One aggregated row (db.aggregated): a month's combinations are thousands.
+    return {int(k): _Verdict(*(bool(value) for value in verdict))
+            for k, *verdict in db.aggregated(
+                conn, ("k", "release_ok", "pruned", "floor_ok", "viewer_ok", "own_enriched",
+                       "own_stated"),
+                f"FROM ({_judge_sql(media, release, floor, mine, params, titles)})", params)}
 
 
 def _completeness_sql() -> str:

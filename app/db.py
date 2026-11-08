@@ -466,6 +466,28 @@ def _report_hold(fn: Callable, held_from: float) -> None:
                        BUSY_TIMEOUT_MS)
 
 
+def aggregated(conn: sqlite3.Connection, columns: Sequence[str], source_sql: str,
+               params: Sequence[Any] | Mapping[str, Any] = ()) -> list[list]:
+    """The rows `source_sql` (a FROM … clause) finds, as lists of `columns`
+    (SQL expressions) in the order a plain SELECT would return them — read in
+    ONE aggregated row.
+
+    BECAUSE THE DRIVER STEPS ROW BY ROW: it lets go of the interpreter lock
+    around every step and has to win it back, up to a switch interval each time
+    another thread is busy. MEASURED on a copy of dev's restart burst, a month's
+    19,607 episode rows took 5.6–7.0 s to read that way and 0.14 s idle; read
+    as one row it is one step, and the parse of its 3 MB holds the lock 54 ms.
+    A REAL keeps the 15 significant digits SQLite's JSON spells it with — whole
+    epoch seconds and ratings are exact."""
+    (found,) = conn.execute(aggregated_sql(columns, source_sql), params).fetchone()
+    return json.loads(found) if found else []
+
+
+def aggregated_sql(columns: Sequence[str], source_sql: str) -> str:
+    """The one statement `aggregated` runs."""
+    return f"SELECT json_group_array(json_array({', '.join(columns)})) {source_sql}"
+
+
 async def fetch_one(sql: str, params: Sequence[Any] = ()) -> sqlite3.Row | None:
     return await run(lambda conn: conn.execute(sql, params).fetchone())
 

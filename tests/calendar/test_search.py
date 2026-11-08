@@ -318,7 +318,8 @@ class WhichGroupsAQueryLoadsTests(SearchTestCase):
         self.assertIn("ix_episodes_season", plan)
 
     async def test_a_group_is_read_through_its_key_and_not_the_calendars_month(self):
-        sql = calendar_query._keys_sql("e.title_key IN (SELECT value FROM json_each(?))")
+        sql = db.aggregated_sql(["e.title_key"], calendar_query._keys_from(
+            "e.title_key IN (SELECT value FROM json_each(?))"))
         plan = await self.plan(sql, ('["a", "b"]',))
         self.assertIn("ix_episodes_season", plan)
         self.assertNotIn("SCAN e ", plan + " ")
