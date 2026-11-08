@@ -28,6 +28,7 @@ what let it leave.
 """
 from __future__ import annotations
 
+import functools
 import json
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field, replace
@@ -125,17 +126,31 @@ def _compared(instants: Iterable[Instant]) -> list[tuple]:
                   for i in instants if i.calendars)
 
 
+@functools.cache
+def _instant_columns(source: str) -> tuple[str, ...] | None:
+    """`source`'s listing columns on an episode row, in `Instant`'s order then
+    its entry and repeats — spelled once, since a month's read asks for them of
+    tens of thousands of rows — or None for a service with no listings."""
+    if not groups.has(tables.EPISODES, source, "air_ts"):
+        return None
+    names = ("air_ts", "date_only", "calendars", "searched", "unstated", "label", "listed_at")
+    return (*(f"{source}_{name}" for name in names),
+            f"{source}_entry" if groups.has(tables.EPISODES, source, "entry") else "",
+            f"{source}_repeats_json")
+
+
 def instants_of(row: Mapping[str, Any], source: str) -> list[Instant]:
     """`source`'s instants on a stored episode row, earliest first — none where
     it does not list the episode."""
-    if not groups.has(tables.EPISODES, source, "air_ts") or row[f"{source}_air_ts"] is None:
+    columns = _instant_columns(source)
+    if columns is None or row[columns[0]] is None:
         return []
-    entry = row[f"{source}_entry"] if groups.has(tables.EPISODES, source, "entry") else None
-    out = [Instant(float(row[f"{source}_air_ts"]), int(row[f"{source}_date_only"] or 0),
-                   int(row[f"{source}_calendars"] or 0), int(row[f"{source}_searched"] or 0),
-                   int(row[f"{source}_unstated"] or 0), str(row[f"{source}_label"] or ""),
-                   int(row[f"{source}_listed_at"] or 0), entry)]
-    repeats = row[f"{source}_repeats_json"]
+    at, date_only, calendars, searched, unstated, label, listed_at, entry_column, repeats = columns
+    entry = row[entry_column] if entry_column else None
+    out = [Instant(float(row[at]), int(row[date_only] or 0), int(row[calendars] or 0),
+                   int(row[searched] or 0), int(row[unstated] or 0), str(row[label] or ""),
+                   int(row[listed_at] or 0), entry)]
+    repeats = row[repeats]
     # Most rows hold no repeat, and a month's read parses tens of thousands.
     for repeat in (groups.loads(repeats, []) if repeats and repeats != "[]" else ()):
         out.append(Instant(float(repeat["at"]), int(repeat.get("date_only") or 0),

@@ -476,16 +476,27 @@ def place(card: Card, *, instance, reads, orders: calendar_resolve.Orders,
     each on their own service's day; and no reader works a day out from one
     listing. THE ONE PLACEMENT, for a month, a late day, a share page, the
     tracker's import and every card the search names."""
-    every = tuple(card.by_source[name] for name in _declared(card.by_source)
-                  if instance is None or name in instance)
-    own = every if reads is None else tuple(l for l in every if l.source in reads)
-    if not own:
-        return None
-    listed = tuple(card.by_source[name] for name in orders(_declared(l.source for l in own)))
-    primary = listed[0]
-    air_ts, date_only = calendar_resolve.resolve_airing(listed)
-    coordinate = calendar_resolve.resolve_coordinate(listed)
-    stated = coordinate if coordinate is not None else primary
+    if len(card.listings) == 1:
+        # ONE SERVICE LISTS IT — most cards of a month: its own instant and its
+        # own coordinate are the card's, which is what resolve_airing and
+        # resolve_coordinate answer for one listing, without asking them.
+        (primary,) = card.listings
+        if (instance is not None and primary.source not in instance) or (
+                reads is not None and primary.source not in reads):
+            return None
+        every = listed = (primary,)
+        air_ts, date_only, stated = primary.air_ts, primary.date_only, primary
+    else:
+        every = tuple(card.by_source[name] for name in _declared(card.by_source)
+                      if instance is None or name in instance)
+        own = every if reads is None else tuple(l for l in every if l.source in reads)
+        if not own:
+            return None
+        listed = tuple(card.by_source[name] for name in orders(_declared(l.source for l in own)))
+        primary = listed[0]
+        air_ts, date_only = calendar_resolve.resolve_airing(listed)
+        coordinate = calendar_resolve.resolve_coordinate(listed)
+        stated = coordinate if coordinate is not None else primary
     # THE CARD'S IDENTITY, by the waterfall (base.resolve_key), which reads the
     # shared namespaces alone — so the card's whole id union is not built here.
     ids = card.ids(MATCH_SOURCES) or primary.ids or {}
