@@ -1462,7 +1462,8 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # grid, the day chips, the client's own bookkeeping — then asks the plain
     # question. The expanded set travels in `meta` so the caller uses the same
     # answer rather than expanding it a second time and possibly differently.
-    nw = calendar_state.marked_keys(not_watching_ids or set(), items)
+    with span("calcache.marks", items=len(items)):
+        nw = calendar_state.marked_keys(not_watching_ids or set(), items)
     not_watching_count = sum(1 for i in items if i.mark_key in nw)
     exempting = exempts_undescribed(endpoint.media, settings, **specs)
     meta = {

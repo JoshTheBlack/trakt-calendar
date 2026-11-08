@@ -141,7 +141,25 @@ them again under the lock (the response cache's writes did: 0.17–0.70 s of loc
 per store, MEASURED on a harness copy) — so a write belongs in `transaction` or
 `execute`, `app/cache.py`'s included. A STORE'S TURN IS ONE WINDOW'S
 (`entries.store_span`): every other write waits behind a turn's deciding, and a
-Simkl month decided in one turn kept a one-row write waiting 3.2–3.4 s.
+Simkl month decided in one turn kept a one-row write waiting 3.2–3.4 s. AND
+EVERY WRITE SAYS HOW LONG IT WAITED FOR ITS TURN (`db._in_turn`): one `db.write`
+line naming its body or its statement (never its parameters) with `queued` and
+`turn`, DEBUG until slow, both put into its request's breakdown (`db.queue`,
+`db.turn`) — a filter save on the development server's restart spent ten
+seconds in the queue with nothing logged between two of its spans.
+
+**A slow request's log line accounts for its whole time.** `app/perftrace.py`
+owns it: every SLOW request line ends with `unspanned=` — the part of the
+request no span covers, nested and concurrent spans counted once — so a gap in
+the instrumentation names itself instead of reading as a fast request. A route
+that spends time between two spans is the next thing to span; every step
+between a calendar read and its render has one (`calendar.view_state`,
+`calendar.viewed`, `calendar.backlog`, `calendar.new_marks`,
+`calendar.file_month`, `calendar.day_chips`, `calendar.first_page`,
+`query.rows` / `query.judge` / `query.present`, `calendar.season_lines`,
+`calendar.logos`, `calendar.card_pictures`). A span is DEBUG until slow
+(`SLOW_SPAN_MS`) and spells its fields only when its line is printed: 2.6 µs at
+INFO, ~31 µs at DEBUG to a file (MEASURED).
 
 **Work a request starts behind itself starts once its answer has been sent.**
 `app/after_response.py` owns it: `later(start)` holds a starter until the

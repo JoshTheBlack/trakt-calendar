@@ -40,7 +40,7 @@ from datetime import date
 from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
-from .. import db, endpoints, providers
+from .. import db, endpoints, perftrace, providers
 from ..metadata import episodes as episode_rows
 from ..metadata import groups
 from ..metadata import identity as title_identity
@@ -1171,7 +1171,9 @@ async def span(viewer: Viewer, first: date, after: date, *, held: Callable[[date
     contributes no listings of its own), and that could be drawn inside the UTC
     days `near` (`views_of`)."""
     key = viewer.endpoint.key
-    listings = await db.run(lambda conn: read_rows(conn, key, first=first, after=after))
+    with perftrace.span("query.rows") as sp:
+        listings = await db.run(lambda conn: read_rows(conn, key, first=first, after=after))
+        sp.set(listings=len(listings))
     listings = [listing for listing in listings if held(utc_day(listing))]
     lo, hi = near
     return await _judged(viewer, listings,
@@ -1190,7 +1192,8 @@ async def titles(viewer: Viewer, title_keys: Iterable[str], *,
     if not keys:
         return Placed([], 0)
     endpoint = viewer.endpoint.key
-    listings = await db.run(lambda conn: read_rows(conn, endpoint, titles=keys))
+    with perftrace.span("query.rows", titles=len(keys)):
+        listings = await db.run(lambda conn: read_rows(conn, endpoint, titles=keys))
     if keep is not None:
         listings = [listing for listing in listings if keep(listing)]
     return await _judged(viewer, listings, None, narrow)
@@ -1262,9 +1265,11 @@ async def _judged(viewer: Viewer, listings: list[Listing], near, narrow=None) ->
         # from the title store (calendar_enrich.overlay_releases) — what the
         # release narrowing judges it by, read, never fetched.
         from . import enrich as calendar_enrich
-        await calendar_enrich.overlay_releases(listings)
-    return await db.run(lambda conn: judge(
-        conn, views_of(listings, viewer, near=near, narrow=narrow), viewer))
+        with perftrace.span("query.releases"):
+            await calendar_enrich.overlay_releases(listings)
+    with perftrace.span("query.judge", listings=len(listings)):
+        return await db.run(lambda conn: judge(
+            conn, views_of(listings, viewer, near=near, narrow=narrow), viewer))
 
 
 async def present(viewer: Viewer, views: Sequence[View]) -> list[Item]:
@@ -1272,5 +1277,6 @@ async def present(viewer: Viewer, views: Sequence[View]) -> list[Item]:
     views = list(views)
     if not views:
         return []
-    return await db.run(lambda conn: [render(record, viewer.tz)
-                                      for record in present_rows(conn, views, viewer)])
+    with perftrace.span("query.present", cards=len(views)):
+        return await db.run(lambda conn: [render(record, viewer.tz)
+                                          for record in present_rows(conn, views, viewer)])

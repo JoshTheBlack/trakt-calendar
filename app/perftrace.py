@@ -78,26 +78,50 @@ MAX_SPANS_PER_REQUEST = 48
 class _Request:
     """One in-flight request, and the spans that have finished inside it."""
 
-    __slots__ = ("rid", "method", "path", "spans", "t0")
+    __slots__ = ("rid", "method", "path", "spans", "t0", "dropped")
 
     def __init__(self, rid: str, method: str, path: str):
         self.rid = rid
         self.method = method
         self.path = path
-        self.spans: list[tuple[str, float]] = []
+        # (label, ms, ended at): when each ended, so the breakdown can say how
+        # much of the request no span covers (`unspanned_ms`).
+        self.spans: list[tuple[str, float, float]] = []
         self.t0 = time.perf_counter()
+        self.dropped = 0
 
-    def record(self, label: str, dt_ms: float) -> None:
+    def record(self, label: str, dt_ms: float, ended: float | None = None) -> None:
         if len(self.spans) < MAX_SPANS_PER_REQUEST:
-            self.spans.append((label, dt_ms))
+            self.spans.append((label, dt_ms, time.perf_counter() if ended is None else ended))
+        else:
+            self.dropped += 1
 
-    def breakdown(self) -> str:
+    def unspanned_ms(self, until: float) -> float:
+        """How much of the request, from its start to `until`, no recorded span
+        covers — the union of the spans, which overlap wherever one nests in
+        another or several run at once."""
+        covered, reach = 0.0, self.t0
+        for start, end in sorted((max(self.t0, ended - dt / 1000.0), min(until, ended))
+                                 for _label, dt, ended in self.spans):
+            if end <= reach:
+                continue
+            covered += end - max(start, reach)
+            reach = end
+        return max(0.0, (until - self.t0) - covered) * 1000.0
+
+    def breakdown(self, until: float | None = None) -> str:
         """The spans this request finished, longest first — which is the order the
-        question "where did the time go" is actually asked in."""
+        question "where did the time go" is actually asked in — then the time no
+        span accounts for, so a gap in the instrumentation names itself rather
+        than reading as a fast request."""
         if not self.spans:
             return "(no spans)"
-        ranked = sorted(self.spans, key=lambda pair: pair[1], reverse=True)
-        return " ".join(f"{label}={dt:.0f}ms" for label, dt in ranked)
+        ranked = sorted(self.spans, key=lambda entry: entry[1], reverse=True)
+        out = " ".join(f"{label}={dt:.0f}ms" for label, dt, _ended in ranked)
+        out += f" | unspanned={self.unspanned_ms(time.perf_counter() if until is None else until):.0f}ms"
+        if self.dropped:
+            out += f" (+{self.dropped} spans past the {MAX_SPANS_PER_REQUEST} kept)"
+        return out
 
 
 _current: contextvars.ContextVar[_Request | None] = contextvars.ContextVar(
@@ -214,15 +238,36 @@ def span(label: str, **fields):
     try:
         yield sp
     finally:
-        dt_ms = (time.perf_counter() - t0) * 1000.0
-        if (req := _current.get()) is not None:
-            req.record(label, dt_ms)
-        extra = " ".join(f"{k}={v}" for k, v in sp.fields.items())
-        rid = f"[{req.rid}] " if req is not None else ""
-        if dt_ms >= SLOW_SPAN_MS:
-            logger.warning("%s⏱ SLOW %-26s %7.1fms  %s", rid, label, dt_ms, extra)
-        else:
-            logger.debug("%s⏱ %-26s %7.1fms  %s", rid, label, dt_ms, extra)
+        ended = time.perf_counter()
+        dt_ms = (ended - t0) * 1000.0
+        attribute(label, dt_ms, ended=ended)
+        report(label, dt_ms, **sp.fields)
+
+
+def attribute(label: str, dt_ms: float, *, ended: float | None = None) -> None:
+    """Put `dt_ms` into the breakdown of the request this task serves, under
+    `label`, without a log line of its own — for a block whose one line says
+    more than a line per part would (db.py's write, which is a wait for its
+    turn and then the turn)."""
+    if (req := _current.get()) is not None:
+        req.record(label, dt_ms, ended)
+
+
+def report(label: str, dt_ms: float, **fields) -> None:
+    """One timed block's log line: DEBUG, or a WARNING once it is SLOW_SPAN_MS
+    — the line a span prints, for a block timed some other way. The fields are
+    spelled only when the line is printed, so a running instance at INFO pays
+    for none of it."""
+    slow = dt_ms >= SLOW_SPAN_MS
+    if not logger.isEnabledFor(logging.WARNING if slow else logging.DEBUG):
+        return
+    req = _current.get()
+    extra = " ".join(f"{k}={v}" for k, v in fields.items())
+    rid = f"[{req.rid}] " if req is not None else ""
+    if slow:
+        logger.warning("%s⏱ SLOW %-26s %7.1fms  %s", rid, label, dt_ms, extra)
+    else:
+        logger.debug("%s⏱ %-26s %7.1fms  %s", rid, label, dt_ms, extra)
 
 
 class Laps:
@@ -303,11 +348,12 @@ class RequestTimingMiddleware:
             await self.app(scope, receive, _send)
         finally:
             _current.reset(token)
-            dt_ms = (time.perf_counter() - req.t0) * 1000.0
+            ended = time.perf_counter()
+            dt_ms = (ended - req.t0) * 1000.0
             if dt_ms >= SLOW_REQUEST_MS:
                 logger.warning(
                     "[%s] SLOW %s %s -> %s in %.0fms | %s",
-                    req.rid, req.method, path, status or "-", dt_ms, req.breakdown(),
+                    req.rid, req.method, path, status or "-", dt_ms, req.breakdown(ended),
                 )
             else:
                 logger.debug(

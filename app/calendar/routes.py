@@ -571,10 +571,11 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
         # the cards, over the SERVER's full id list. Skipped on the error
         # paths: committing an empty month as the baseline would make the whole
         # month look new the next time it loads properly.
-        view_state = await calendar_state.resolve_view(
-            user.user_id, endpoint.key, year, month,
-            show_ids=meta["show_ids"], total=assembly.total, now=datetime.now(tz),
-        )
+        with span("calendar.view_state", ids=len(meta["show_ids"])):
+            view_state = await calendar_state.resolve_view(
+                user.user_id, endpoint.key, year, month,
+                show_ids=meta["show_ids"], total=assembly.total, now=datetime.now(tz),
+            )
         assembly.new_ids = view_state["new_ids"]
         assembly.delta = view_state["delta"]
         assembly.history = view_state["history"]
@@ -735,12 +736,13 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
     # (app/sources/prefs.py). What they have LINKED is deliberately not part of
     # it: a calendar needs no viewer credential, so linkage narrows the tracker
     # and nothing here (app/sources/prefs.py's `admits_calendar`).
-    source_selection = await _viewer_source_selection(request, user, endpoint.media)
-
-    # This viewer's marks, read ONCE and handed to the assembly so the cards come
-    # out of the template already carrying the class. The client used to add it
-    # after the page had painted, which is what made hidden items visibly pop out.
-    not_watching = await calendar_state.not_watching_ids(user.user_id)
+    with span("calendar.viewer"):
+        source_selection = await _viewer_source_selection(request, user, endpoint.media)
+        # This viewer's marks, read ONCE and handed to the assembly so the cards
+        # come out of the template already carrying the class. The client used to
+        # add it after the page had painted, which is what made hidden items
+        # visibly pop out.
+        not_watching = await calendar_state.not_watching_ids(user.user_id)
     month_view = await assemble_month(
         user, settings, prefs, endpoint, tz, year, month, not_watching,
         source_selection)
@@ -751,19 +753,21 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
     # described for being on a calendar — but one that has been, and whose
     # description has passed its clock, is re-read behind the page
     # (app/metadata/refresh.py).
-    metadata_refresh.viewed(
-        settings,
-        [metadata_refresh.Wanted(str(item.media), item.ids, item.season)
-         for group in month_view.grouped for item in group["items"]],
-        budget=metadata_refresh.MONTH_BUDGET, missing=False)
+    with span("calendar.viewed"):
+        metadata_refresh.viewed(
+            settings,
+            [metadata_refresh.Wanted(str(item.media), item.ids, item.season)
+             for group in month_view.grouped for item in group["items"]],
+            budget=metadata_refresh.MONTH_BUDGET, missing=False)
 
     # Measured at 4.7ms against 31,358 stored airings, which is why it rides the
     # page render rather than a poll: a number a reader can refresh to is worth
     # more than one that ticks, and it costs the page less than asking for it
     # would. The weeks a service is still working out are held in process and
     # cost nothing to count.
-    backlog_titles, backlog_seasons = await calendar_enrich.backlog()
-    backlog_weeks = calendar_cache.pending_windows()
+    with span("calendar.backlog"):
+        backlog_titles, backlog_seasons = await calendar_enrich.backlog()
+        backlog_weeks = calendar_cache.pending_windows()
 
     _count_visible(month_view.grouped, month_view.not_watching_keys)
 
@@ -810,15 +814,18 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
     # day fetched afterwards could never work it out again; pointed at the answer,
     # the day route draws the marks itself. Written once per load rather than once
     # per day because it IS one answer about the month.
-    new_token = await _remember_new_marks(
-        user.user_id, endpoint.key, year, month, month_view.new_ids)
-    page_token = (_file_month(user.user_id, endpoint.key, year, month, month_view.grouped)
-                  if month_view.error is None else "")
+    with span("calendar.new_marks", n=len(month_view.new_ids)):
+        new_token = await _remember_new_marks(
+            user.user_id, endpoint.key, year, month, month_view.new_ids)
+    with span("calendar.file_month"):
+        page_token = (_file_month(user.user_id, endpoint.key, year, month, month_view.grouped)
+                      if month_view.error is None else "")
     # THE CHIPS COUNT THE WHOLE MONTH, so they are worked out before the inline
     # days are swapped for what they draw — which, for a big day, is its first
     # page alone.
-    day_chips = _day_chips(month_view, year, month, days, month_view.not_watching_keys,
-                           view["hide_not_watching"], anchor)
+    with span("calendar.day_chips"):
+        day_chips = _day_chips(month_view, year, month, days, month_view.not_watching_keys,
+                               view["hide_not_watching"], anchor)
     # THE INLINE DAYS ARE DRAWN NOW, AND ONLY THEY: the month's cards were read
     # for their identity and day alone, and a day after them is drawn when it is
     # scrolled to (`calendar_day`). The jump's card is the drawn one, which is
@@ -861,6 +868,7 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
     logo_networks = await _logo_networks(
         settings, [item for group in month_view.grouped if group["inline"]
                    for item in group["items"]])
+    card_pictures = await _card_pictures(user, settings)
     return {
         "request": request,
         "settings": settings,
@@ -948,7 +956,7 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
         # card by the browser — see `_logo_networks`.
         "logo_networks": logo_networks,
         # WHAT EACH CARD'S PICTURE IS DRAWN AS — see `_card_pictures`.
-        "card_pictures": await _card_pictures(user, settings),
+        "card_pictures": card_pictures,
         # THE LINE UNDER EACH DRAWN CARD, from the title store — `_season_lines`.
         "season_lines": season_lines,
         # WHERE A CARD'S COMPARE CONTROL ASKS FOR IT DRAWN WHOLE — see `_card_url`.
@@ -1044,7 +1052,8 @@ async def _logo_networks(settings, items) -> dict[str, logos.Logo]:
     than delaying this one.
     """
     roster = {(item.network, item.ids.get("tmdb")) for item in items if item.network}
-    return await logos.for_page(settings, roster)
+    with span("calendar.logos", networks=len(roster)):
+        return await logos.for_page(settings, roster)
 
 
 async def _card_pictures(user, settings) -> metadata_pictures.CardPictures:
@@ -1054,8 +1063,9 @@ async def _card_pictures(user, settings) -> metadata_pictures.CardPictures:
     the one every surface draws pictures in (posters.order_for). Every route that
     draws a viewer's own cards hands this to the card template; the share page
     does not, and keeps the static fallback chain."""
-    order = posters.order_for(
-        (await source_prefs.load(user.user_id)).source_order(list(Source)))
+    with span("calendar.card_pictures"):
+        order = posters.order_for(
+            (await source_prefs.load(user.user_id)).source_order(list(Source)))
     return metadata_pictures.CardPictures(settings, order)
 
 
@@ -1082,13 +1092,14 @@ async def _season_lines(settings, items) -> dict[str, dict]:
     if not wanted:
         return {}
     today = clock.today()
-    lines = await db.run(lambda conn: metadata_panel.season_lines(conn, settings, wanted,
-                                                                  today=today))
-    metadata_refresh.viewed(
-        settings, [metadata_refresh.Wanted(asked.media, asked.ids, asked.season,
-                                           source=str(found.owed.source))
-                   for asked, found in zip(wanted, lines) if found.owed is not None],
-        budget=metadata_refresh.MONTH_BUDGET)
+    with span("calendar.season_lines", seasons=len(wanted)):
+        lines = await db.run(lambda conn: metadata_panel.season_lines(conn, settings, wanted,
+                                                                      today=today))
+        metadata_refresh.viewed(
+            settings, [metadata_refresh.Wanted(asked.media, asked.ids, asked.season,
+                                               source=str(found.owed.source))
+                       for asked, found in zip(wanted, lines) if found.owed is not None],
+            budget=metadata_refresh.MONTH_BUDGET)
     return {key: found.line for key, found in zip(keys, lines) if found.line}
 
 
@@ -1275,9 +1286,10 @@ async def _new_marks(user_id: int, endpoint_key: str, year: int, month: int,
     """
     if not token:
         return set()
-    stored = await cache.get(
-        _new_marks_key(user_id, endpoint_key, year, month, token),
-        _NEW_MARKS_TTL_SECONDS)
+    with span("calendar.new_marks_read"):
+        stored = await cache.get(
+            _new_marks_key(user_id, endpoint_key, year, month, token),
+            _NEW_MARKS_TTL_SECONDS)
     return {str(key) for key in stored} if isinstance(stored, list) else set()
 
 
@@ -1340,10 +1352,12 @@ async def _first_page(endpoint, settings, views, *, tz, selection, specs,
     the day ranked (day_pages.first_page) once each card's completeness has been
     read: asked here alone, for the days that are paged, never by the month's
     read."""
-    if len(views) > day_pages.DAY_PAGE_CARDS:
+    if len(views) <= day_pages.DAY_PAGE_CARDS:
+        return day_pages.first_page(views, anchor_at)
+    with span("calendar.first_page", cards=len(views)):
         views = await calendar_cache.ranked(endpoint, settings, views, tz=tz, prefs=selection,
                                             **specs)
-    return day_pages.first_page(views, anchor_at)
+        return day_pages.first_page(views, anchor_at)
 
 
 def _rest_url(user_id: int, endpoint_key: str, day: date, views, drawn: tuple[int, ...], *,
@@ -3293,15 +3307,16 @@ async def post_filters(request: Request):
     if "filters_on" in data:
         updates["filters_paused"] = not route_params.ticked(data["filters_on"])
     if updates:
-        await auth.update_user_prefs(user.user_id, **updates)
-        # Mirrored into share_links exactly as the badge route does -- that
-        # table's owner-default columns are seeded from user_prefs and have no
-        # editor of their own. The PAUSE is deliberately not among them: it is a
-        # private look at your own calendar, and a share link keeps filtering
-        # whatever the owner is currently looking at.
-        if await share_links.get(user.user_id) is not None:
-            await share_links.update_owner_defaults(
-                user.user_id, **{k: v for k, v in updates.items() if k != "filters_paused"})
+        with span("filters.save", fields=len(updates)):
+            await auth.update_user_prefs(user.user_id, **updates)
+            # Mirrored into share_links exactly as the badge route does -- that
+            # table's owner-default columns are seeded from user_prefs and have
+            # no editor of their own. The PAUSE is deliberately not among them:
+            # it is a private look at your own calendar, and a share link keeps
+            # filtering whatever the owner is currently looking at.
+            if await share_links.get(user.user_id) is not None:
+                await share_links.update_owner_defaults(
+                    user.user_id, **{k: v for k, v in updates.items() if k != "filters_paused"})
 
     prefs = await auth.get_user_prefs(user.user_id)
     month = await _month_context(request, user, settings, prefs)

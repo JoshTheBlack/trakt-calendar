@@ -48,6 +48,7 @@ from typing import Any, TypeVar
 
 import anyio.to_thread
 
+from . import perftrace
 from .config import DATA_DIR, ensure_data_dir
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,53 @@ def _writer_queue() -> asyncio.Lock:
     if queue is None:
         queue = _writer_queues[loop] = asyncio.Lock()
     return queue
+
+
+async def _in_turn(writer: str, work: Callable[[], Any]) -> Any:
+    """`await work()` once this write's turn comes (`_writer_queue`) — and how
+    long it waited for the turn and how long the turn took, put into the
+    request's breakdown as `db.queue` and `db.turn` and logged as ONE line
+    naming `writer` (perftrace: DEBUG, a WARNING once slow).
+
+    THE WAIT IS THE NUMBER NOTHING ELSE CAN GIVE. A write that waited ten
+    seconds behind a restart's refills looked, in a request's own spans, like
+    ten seconds of nothing between two of them — a filter save's on the
+    development server, MEASURED, before this was logged."""
+    asked = time.perf_counter()
+    async with _writer_queue():
+        took = time.perf_counter()
+        try:
+            return await work()
+        finally:
+            done = time.perf_counter()
+            queued_ms, turn_ms = (took - asked) * 1000.0, (done - took) * 1000.0
+            perftrace.attribute("db.queue", queued_ms, ended=took)
+            perftrace.attribute("db.turn", turn_ms, ended=done)
+            perftrace.report("db.write", queued_ms + turn_ms, writer=writer,
+                             queued=f"{queued_ms:.0f}ms", turn=f"{turn_ms:.0f}ms")
+
+
+def _named(fn: Callable) -> str:
+    """A transaction body's name, for a line about its write."""
+    return f"{getattr(fn, '__module__', '?')}.{getattr(fn, '__qualname__', repr(fn))}"
+
+
+def _statement(sql: str) -> str:
+    """A write statement named by what it does and to which table — "INSERT
+    api_cache" — for a line about its write: the statement's words, never its
+    parameters."""
+    words = sql.replace("(", " ").split()
+    if not words:
+        return "?"
+    upper = [word.upper() for word in words]
+    if upper[0] == "UPDATE":
+        # UPDATE [OR <conflict>] <table>
+        at = 3 if len(upper) > 2 and upper[1] == "OR" else 1
+        return f"UPDATE {words[at]}" if at < len(words) else "UPDATE"
+    for marker in ("INTO", "FROM"):
+        if marker in upper[:-1]:
+            return f"{upper[0]} {words[upper.index(marker) + 1]}"
+    return upper[0]
 
 # Bumped by set_db_path() so a thread still holding a connection to the OLD path
 # drops it on next use rather than silently reading a stale database.
@@ -282,8 +330,7 @@ async def transaction(fn: Callable[..., T], *,
         _report_hold(fn, held_from)
         return result
 
-    async with _writer_queue():
-        return await anyio.to_thread.run_sync(_work)
+    return await _in_turn(_named(fn), lambda: anyio.to_thread.run_sync(_work))
 
 
 def _report_hold(fn: Callable, held_from: float) -> None:
@@ -317,8 +364,7 @@ async def execute(sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> R
         cur = conn.execute(sql, params)
         return Result(lastrowid=cur.lastrowid, rowcount=cur.rowcount)
 
-    async with _writer_queue():
-        return await run(_work)
+    return await _in_turn(_statement(sql), lambda: run(_work))
 
 
 async def executemany(sql: str, rows: Iterable[Sequence[Any]]) -> Result:
@@ -329,8 +375,7 @@ async def executemany(sql: str, rows: Iterable[Sequence[Any]]) -> Result:
         cur = conn.executemany(sql, materialized)
         return Result(lastrowid=cur.lastrowid, rowcount=cur.rowcount)
 
-    async with _writer_queue():
-        return await run(_work)
+    return await _in_turn(_statement(sql), lambda: run(_work))
 
 
 # ---------------------------------------------------------------------------
