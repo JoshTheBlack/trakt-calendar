@@ -1559,6 +1559,60 @@ class TheMonthChangedNoticeTests(CalendarRouteTestCase):
         self.assertNotIn("hx-get", answer.text)
 
 
+class TheIsNewAnswerIsHeldInProcessTests(unittest.TestCase):
+    """The shell's is-new answer is filed in process for its late days — never
+    written to the database, where it waited its turn behind a restart's refills
+    before the page could draw — and the process runs for weeks: answers go by
+    age whenever the store is touched, and the store holds no more than
+    `_NEW_LOADS_MAX` loads and `_NEW_KEYS_MAX` keys in all."""
+
+    def setUp(self):
+        calendar_routes._new_answers.clear()
+        self.addCleanup(calendar_routes._new_answers.clear)
+        self.now = 1_000.0
+        clock = patch.object(calendar_routes.time, "monotonic", lambda: self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def _file(self, *keys: str) -> str:
+        return calendar_routes._remember_new_marks(1, "shows", 2026, 7, set(keys))
+
+    def _read(self, token: str) -> frozenset:
+        return calendar_routes._new_marks(1, "shows", 2026, 7, token)
+
+    def test_it_reads_back_for_its_own_account_calendar_and_month(self):
+        token = self._file("show:tmdb:1")
+        self.assertEqual(self._read(token), {"show:tmdb:1"})
+        for other in ((2, "shows", 2026, 7), (1, "movies", 2026, 7), (1, "shows", 2026, 8)):
+            with self.subTest(other=other):
+                self.assertEqual(calendar_routes._new_marks(*other, token), frozenset())
+
+    def test_an_answer_past_its_life_goes_when_the_store_is_read(self):
+        token = self._file("show:tmdb:1")
+        self.now += calendar_routes._NEW_MARKS_TTL_SECONDS + 1
+        self.assertEqual(self._read(token), frozenset())
+        self.assertEqual(len(calendar_routes._new_answers), 0)
+
+    def test_the_oldest_answers_go_past_the_loads_held(self):
+        with patch.object(calendar_routes, "_NEW_LOADS_MAX", 3):
+            tokens = [self._file(f"show:tmdb:{n}") for n in range(5)]
+        self.assertEqual(len(calendar_routes._new_answers), 3)
+        self.assertEqual([bool(self._read(token)) for token in tokens],
+                         [False, False, True, True, True])
+
+    def test_the_oldest_answers_go_once_the_keys_held_would_pass_the_bound(self):
+        with patch.object(calendar_routes, "_NEW_KEYS_MAX", 10):
+            first = self._file(*(f"a{n}" for n in range(6)))
+            second = self._file(*(f"b{n}" for n in range(6)))
+            self.assertEqual(self._read(first), frozenset())
+            self.assertEqual(len(self._read(second)), 6)
+            self.assertEqual(self._file(*(f"c{n}" for n in range(11))), "")
+
+    def test_nothing_new_files_nothing(self):
+        self.assertEqual(self._file(), "")
+        self.assertEqual(len(calendar_routes._new_answers), 0)
+
+
 class TheFiledMonthIsBoundedTests(unittest.TestCase):
     """The month a page drew is filed in process for its marks and late days, and
     the process runs for weeks: the store lets go of a page by age whenever it
@@ -2565,8 +2619,7 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         find the shell's own commit and conclude nothing is new. The shell FILES
         its answer and the day resolves the token naming it."""
         drama = _mark_key("the-drama")
-        token = asyncio.run(calendar_routes._remember_new_marks(
-            self.user_id, "shows", 2026, 7, {drama}))
+        token = calendar_routes._remember_new_marks(self.user_id, "shows", 2026, 7, {drama})
         marked = self.client.get(f"{self.DAY}&new={token}").text
         self.assertIn("is-new", _card_class(marked, drama))
         # Re-reading the baseline is not how it decides: with no token, nothing is
@@ -2590,15 +2643,14 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         resolves to nothing rather than to their answer."""
         drama = _mark_key("the-drama")
         stranger = self._make_user("is_new_stranger")
-        token = asyncio.run(calendar_routes._remember_new_marks(
-            stranger, "shows", 2026, 7, {drama}))
+        token = calendar_routes._remember_new_marks(stranger, "shows", 2026, 7, {drama})
         self.assertNotIn("is-new", self.client.get(f"{self.DAY}&new={token}").text)
 
     def test_an_is_new_key_naming_nothing_on_the_day_marks_nothing(self):
         """The day's cards ask whether THEIR key is among the answer, so a key for
         a title on another day marks no card here."""
-        token = asyncio.run(calendar_routes._remember_new_marks(
-            self.user_id, "shows", 2026, 7, {_mark_key("the-comedy")}))
+        token = calendar_routes._remember_new_marks(
+            self.user_id, "shows", 2026, 7, {_mark_key("the-comedy")})
         text = self.client.get(f"{self.DAY}&new={token}").text
         self.assertIn("The Drama", text)
         self.assertNotIn("is-new", text)
@@ -2608,8 +2660,8 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         survive a failure — and it is the whole of what a retry carries forward
         now, which is one opaque word instead of a list of keys rebuilt into the
         page."""
-        token = asyncio.run(calendar_routes._remember_new_marks(
-            self.user_id, "shows", 2026, 7, {_mark_key("the-drama")}))
+        token = calendar_routes._remember_new_marks(
+            self.user_id, "shows", 2026, 7, {_mark_key("the-drama")})
 
         def fake(endpoint, start):
             raise TraktError("Trakt unreachable", 503)

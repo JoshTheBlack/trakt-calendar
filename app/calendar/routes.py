@@ -41,7 +41,7 @@ from . import (cache as calendar_cache, enrich as calendar_enrich,
                entries as calendar_entries, filter as calendar_filter, query as calendar_query,
                resolve as calendar_resolve, search as calendar_search,
                share_links, state as calendar_state, vocab)
-from .. import (auth, authz, cache, chrome, clock, db, details_panel, metadata,
+from .. import (auth, authz, chrome, clock, db, details_panel, metadata,
                 route_params, templating)
 from ..metadata import identity as title_identity
 from ..metadata import panel as metadata_panel, pictures as metadata_pictures
@@ -814,9 +814,8 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
     # day fetched afterwards could never work it out again; pointed at the answer,
     # the day route draws the marks itself. Written once per load rather than once
     # per day because it IS one answer about the month.
-    with span("calendar.new_marks", n=len(month_view.new_ids)):
-        new_token = await _remember_new_marks(
-            user.user_id, endpoint.key, year, month, month_view.new_ids)
+    new_token = _remember_new_marks(user.user_id, endpoint.key, year, month,
+                                    month_view.new_ids)
     with span("calendar.file_month"):
         page_token = (_file_month(user.user_id, endpoint.key, year, month, month_view.grouped)
                       if month_view.error is None else "")
@@ -1233,23 +1232,40 @@ def _filed_month(user_id: int, token: str, endpoint_key: str, year: int,
 # spends scrolling a month, and short enough that an abandoned tab's answer is
 # gone rather than sitting in the store indefinitely.
 _NEW_MARKS_TTL_SECONDS = 30 * 60
+# IN PROCESS AND BOUNDED, like the filed month below: the answer is read back
+# only by this process's own late days, so writing it to the database bought
+# nothing a page uses — and cost one: it waited its turn in the writer queue
+# before the shell could draw, 3.2 s behind a restart's refills (MEASURED, a
+# filter save on a harness copy). The last `_NEW_LOADS_MAX` loads' answers, none
+# older than `_NEW_MARKS_TTL_SECONDS`, never more than `_NEW_KEYS_MAX` keys in
+# all — a month's answer is at most its titles, a few thousand with filters off.
+_NEW_LOADS_MAX = 256
+_NEW_KEYS_MAX = 200_000
+# (account, calendar, year, month, token) -> (filed at, the new mark keys). THE
+# ACCOUNT IS IN THE KEY, not only the token, so a token guessed or copied from
+# somebody else's page reads nothing — it names which titles were new to ONE
+# account, and the day route looks it up as the account making the request.
+# The month and calendar are in it for the ordinary reason: one reader can have
+# two tabs open on two months.
+_new_answers: OrderedDict = OrderedDict()
 
 
-def _new_marks_key(user_id: int, endpoint_key: str, year: int, month: int,
-                   token: str) -> str:
-    """Where one page load's is-new answer is filed in the shared cache.
+def _prune_new_answers(moment: float, *, room: int = 0) -> None:
+    """Let go of every answer past `_NEW_MARKS_TTL_SECONDS`, then of the oldest
+    until `room` more keys fit under `_NEW_KEYS_MAX` and one more answer under
+    `_NEW_LOADS_MAX`. Answers are filed in time order, so the oldest is first."""
+    while _new_answers and moment - next(iter(_new_answers.values()))[0] > _NEW_MARKS_TTL_SECONDS:
+        _new_answers.popitem(last=False)
+    if not room:
+        return
+    held = sum(len(keys) for _at, keys in _new_answers.values())
+    while _new_answers and (len(_new_answers) >= _NEW_LOADS_MAX or held + room > _NEW_KEYS_MAX):
+        _key, (_at, gone) = _new_answers.popitem(last=False)
+        held -= len(gone)
 
-    THE USER IS IN THE KEY, not only the token, so a token guessed or copied from
-    somebody else's page reads nothing — this names which titles were new to ONE
-    account, and the day route looks it up as the account making the request. The
-    month and calendar are in it for the ordinary reason: one reader can have two
-    tabs open on two months.
-    """
-    return f"calendar:new:{user_id}:{endpoint_key}:{year}-{month:02d}:{token}"
 
-
-async def _remember_new_marks(user_id: int, endpoint_key: str, year: int,
-                              month: int, new_ids: set[str]) -> str:
+def _remember_new_marks(user_id: int, endpoint_key: str, year: int,
+                        month: int, new_ids: set[str]) -> str:
     """File this load's is-new answer and return the token naming it.
 
     THE ANSWER IS THE SERVER'S, SO THE SERVER KEEPS IT. A day fetched after the
@@ -1264,18 +1280,20 @@ async def _remember_new_marks(user_id: int, endpoint_key: str, year: int,
 
     NO ANSWER IS NOT WORTH A KEY. A month with nothing new on it — much the
     commonest case, since every load commits the baseline the next one is diffed
-    against — writes nothing and hands back no token.
+    against — files nothing and hands back no token, and so does an answer
+    bigger than the whole store.
     """
-    if not new_ids:
+    if not new_ids or len(new_ids) > _NEW_KEYS_MAX:
         return ""
+    moment = time.monotonic()
+    _prune_new_answers(moment, room=len(new_ids))
     token = secrets.token_urlsafe(9)
-    await cache.set(_new_marks_key(user_id, endpoint_key, year, month, token),
-                    sorted(new_ids), retain_seconds=_NEW_MARKS_TTL_SECONDS)
+    _new_answers[(user_id, endpoint_key, year, month, token)] = (moment, frozenset(new_ids))
     return token
 
 
-async def _new_marks(user_id: int, endpoint_key: str, year: int, month: int,
-                     token: str) -> set[str]:
+def _new_marks(user_id: int, endpoint_key: str, year: int, month: int,
+               token: str) -> frozenset[str]:
     """The is-new keys a day may mark, read back from what the shell filed.
 
     A TOKEN THAT NAMES NOTHING MEANS NO MARKS, and that is honest rather than
@@ -1285,12 +1303,10 @@ async def _new_marks(user_id: int, endpoint_key: str, year: int, month: int,
     something is new that stopped being new hours ago.
     """
     if not token:
-        return set()
-    with span("calendar.new_marks_read"):
-        stored = await cache.get(
-            _new_marks_key(user_id, endpoint_key, year, month, token),
-            _NEW_MARKS_TTL_SECONDS)
-    return {str(key) for key in stored} if isinstance(stored, list) else set()
+        return frozenset()
+    _prune_new_answers(time.monotonic())
+    filed = _new_answers.get((user_id, endpoint_key, year, month, token))
+    return filed[1] if filed is not None else frozenset()
 
 
 def _page_token(request: Request) -> str:
@@ -1581,7 +1597,7 @@ async def _draw_day(request: Request, user, settings, prefs, endpoint, year: int
         # baseline commit are a whole-month decision the shell already made and
         # wrote; this reads the answer it filed back as the account making the
         # request (`_new_marks`), and a token naming nothing marks nothing.
-        "new_ids": await _new_marks(user.user_id, endpoint.key, year, month, new),
+        "new_ids": _new_marks(user.user_id, endpoint.key, year, month, new),
         # And the month it filed, which a mark on one of these cards recounts.
         "page_token": page,
         "settings": settings, "is_admin": bool(user and user.is_admin),
@@ -1767,8 +1783,8 @@ async def calendar_card(request: Request):
         "request": request, "item": found, "others": others, "expanded": True,
         "not_watching": {item.mark_key for item in drawn
                          if calendar_state.marked(not_watching, item)},
-        "new_ids": await _new_marks(user.user_id, endpoint.key, year, month,
-                                    request.query_params.get("new") or ""),
+        "new_ids": _new_marks(user.user_id, endpoint.key, year, month,
+                              request.query_params.get("new") or ""),
         "can_filter": True, "badge_modes": vocab.BadgeModes(prefs),
         "card_pictures": await _card_pictures(user, settings),
         "settings": settings, "is_admin": bool(user and user.is_admin),

@@ -864,7 +864,10 @@ another day is not drawn here), and: whether a
 card is new comes from the SHELL's answer, filed once per load and named by a
 token on the day's own address (`_remember_new_marks` / `_new_marks`), because
 re-diffing from a fragment would read the shell's own commit and find nothing
-new; its chip is redrawn out of band (`_day_chip.html`); and its add-to-library
+new — filed IN PROCESS, bounded like the filed month (`_NEW_LOADS_MAX`,
+`_NEW_KEYS_MAX`, half an hour), because only this process's late days read it and
+written to the database it waited its turn before the shell could draw (3.2 s
+behind a restart's refills, MEASURED); its chip is redrawn out of band (`_day_chip.html`); and its add-to-library
 buttons arrive in their state. The page keeps no marks of its own — a mark posts
 and its answer redraws every card for that title — so a day landing while a mark
 is in flight is drawn from whichever reached the database first, and the other's
