@@ -21,8 +21,9 @@ from app.providers.base import Media, Record, Source
 from app.sources import prefs as source_prefs
 from tests.support import CardTestCase, read_views
 
-REST = day_pages.Rest(7, "shows", date(2026, 10, 14), (0, 3, 4, 250, 611), "trakt",
-                      "newtoken123", "pagetoken12", 1_793_700_000)
+REST = day_pages.Rest(7, "shows", date(2026, 10, 14), (0, 3, 4, 250, 611),
+                      bytes(range(day_pages.DIGEST_BYTES)), "trakt", "newtoken123",
+                      "pagetoken12", 1_793_700_000)
 
 
 class _View(NamedTuple):
@@ -192,6 +193,10 @@ class TheControlsTokenTests(unittest.TestCase):
                 spelled = base64.urlsafe_b64encode(bytes(edited)).rstrip(b"=").decode()
                 self.assertIsNone(day_pages.read(spelled, user_id=7, now=REST.issued_at))
 
+    def test_a_digest_that_is_not_a_days_is_never_sealed(self):
+        with self.assertRaises(ValueError):
+            day_pages.token(REST._replace(counted=b"short"))
+
     def test_a_picture_token_is_not_a_day_token(self):
         """Each kind of token is sealed with a key of its own purpose."""
         from app.metadata import pictures
@@ -201,6 +206,40 @@ class TheControlsTokenTests(unittest.TestCase):
                                  REST.issued_at)
         self.assertIsNone(day_pages.read(pictures.token(report), user_id=7,
                                          now=REST.issued_at))
+
+
+class _Card(NamedTuple):
+    title_key: str
+    unit: str
+
+
+class _Placed(NamedTuple):
+    card: _Card
+
+
+def _cards(*names: str) -> list[_Placed]:
+    return [_Placed(_Card(*name.split("|"))) for name in names]
+
+
+class TheDaysDigestTests(unittest.TestCase):
+    """What a press checks its places against (`cards_digest`): the day's
+    cards by their rows in the title store, in the day's order."""
+
+    def test_the_same_day_digests_the_same(self):
+        self.assertEqual(day_pages.cards_digest(_cards("show:tmdb:1|S1E1", "show:tmdb:2|film")),
+                         day_pages.cards_digest(_cards("show:tmdb:1|S1E1", "show:tmdb:2|film")))
+        self.assertEqual(len(day_pages.cards_digest([])), day_pages.DIGEST_BYTES)
+
+    def test_a_card_added_taken_off_or_moved_changes_it(self):
+        day = day_pages.cards_digest(_cards("a|S1E1", "b|S1E1", "c|S1E1"))
+        for changed in (("a|S1E1", "b|S1E1"), ("a|S1E1", "b|S1E1", "c|S1E1", "d|S1E1"),
+                        ("b|S1E1", "a|S1E1", "c|S1E1"), ("a|S1E1", "b|S1E2", "c|S1E1")):
+            with self.subTest(changed=changed):
+                self.assertNotEqual(day_pages.cards_digest(_cards(*changed)), day)
+
+    def test_a_name_is_not_read_across_its_halves(self):
+        self.assertNotEqual(day_pages.cards_digest(_cards("ab|c")),
+                            day_pages.cards_digest(_cards("a|bc")))
 
 
 if __name__ == "__main__":

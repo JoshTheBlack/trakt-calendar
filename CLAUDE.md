@@ -875,7 +875,10 @@ token shares) naming the account, the day, WHICH PLACES IN THE DAY were drawn
 and the page's references — the places, not the ranking again, because the
 ranking reads descriptions the page's own view queues, and ranked again at the
 press a card described meanwhile could be drawn twice or not at all; another
-account's or an edited one draws nothing but a sentence. A jump's card is drawn
+account's or an edited one draws nothing but a sentence. AND THE DAY THE PLACES
+WERE COUNTED IN (`day_pages.cards_digest`, its cards' rows in order): the token
+lives a day and the filed month hours, so a press on a day that has changed
+since says the month changed by its own digest, whatever is still filed. A jump's card is drawn
 wherever it ranks in its day. A DAY THAT ARRIVES AFTER ITS MONTH CHANGED draws the
 store as it is now — the only thing it can draw: a card that went has no rows — and
 when what it draws is not what the shell filed for that day, it says so for the

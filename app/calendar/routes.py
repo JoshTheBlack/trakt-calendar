@@ -849,7 +849,7 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
             group["more"] = {
                 "count": len(views) - len(pages[index]),
                 "url": _rest_url(user.user_id, endpoint.key, date.fromisoformat(group["date"]),
-                                 pages[index], source=request.query_params.get("source"),
+                                 views, pages[index], source=request.query_params.get("source"),
                                  new=new_token, page=page_token)}
     for index, group in enumerate(month_view.grouped):
         group["inline"] = index in inline
@@ -1346,15 +1346,16 @@ async def _first_page(endpoint, settings, views, *, tz, selection, specs,
     return day_pages.first_page(views, anchor_at)
 
 
-def _rest_url(user_id: int, endpoint_key: str, day: date, drawn: tuple[int, ...], *,
+def _rest_url(user_id: int, endpoint_key: str, day: date, views, drawn: tuple[int, ...], *,
               source: str | None = None, new: str = "", page: str = "") -> str:
     """The address a big day's "show the rest" control asks (`calendar_day_rest`):
     one signed token (app/calendar/day_pages.py) naming this account, the
-    calendar and day, which of its cards were drawn (their places in the day),
-    and the same references a late day carries."""
+    calendar and day, which of its cards were drawn (their places in `views`,
+    the day's every card in its order), the digest of the day those places
+    were counted in, and the same references a late day carries."""
     return "/calendar/day/rest?t=" + day_pages.token(day_pages.Rest(
-        user_id, endpoint_key, day, tuple(drawn), source or "", new or "", page or "",
-        db.now()))
+        user_id, endpoint_key, day, tuple(drawn), day_pages.cards_digest(views),
+        source or "", new or "", page or "", db.now()))
 
 
 def _card_url(endpoint_key: str, year: int, month: int, item, *, source: str | None = None,
@@ -1525,18 +1526,19 @@ class _DayFailed(Exception):
 
 async def _draw_day(request: Request, user, settings, prefs, endpoint, year: int, month: int,
                     day: date, *, source: str | None, new: str, page: str,
-                    drawn: tuple[int, ...] | None = None
+                    rest: day_pages.Rest | None = None
                     ) -> tuple[dict, dict | None, dict]:
-    """ONE DAY READ AND DRAWN for a viewer — what a late day draws (`drawn`
+    """ONE DAY READ AND DRAWN for a viewer — what a late day draws (`rest`
     None: its first page, app/calendar/day_pages.py) and what a big day's "show
-    the rest" control draws (every card but the places `drawn` names, which its
-    page drew). (context, the day's group or None for a day holding nothing,
-    the read's numbers); raises _DayFailed.
+    the rest" control draws (every card but the places `rest.drawn` names,
+    which its page drew). (context, the day's group or None for a day holding
+    nothing, the read's numbers); raises _DayFailed.
 
     THE DAY IS READ WHOLE AND DRAWN IN PART: its chip, and whether it is still
     the day the shell counted (`month_changed`), are about every card on it,
     which a page of it cannot answer; only the cards drawn are worked out in
-    full (calendar_cache.present).
+    full (calendar_cache.present). A press is also checked against the day its
+    places were counted in (`rest.counted`), which outlives the filed month.
 
     Everything that decides WHAT this viewer may see comes from their session:
     the per-user filters and their not-watching marks are read here, never taken
@@ -1618,11 +1620,19 @@ async def _draw_day(request: Request, user, settings, prefs, endpoint, year: int
         context["month_url"] = _month_url(endpoint.key, year, month, source=source)
         # The titles this page has compared draw compared here too.
         context["compared"] = frozenset(filed.compared)
-    if drawn is None:
+    if rest is None:
         places = await _first_page(endpoint, settings, views, tz=tz,
                                    selection=source_selection, specs=specs)
     else:
-        before = set(drawn)
+        # THE PLACES ARE PLACES IN THE DAY THE PAGE COUNTED. Where the day now
+        # holds other cards, or the same in another order, they name other cards
+        # than the page drew: what follows draws its best reading of them, and
+        # the page says the month changed — whether or not its filed month is
+        # still here to say so (day_pages.py says why the token carries it).
+        if day_pages.cards_digest(views) != rest.counted:
+            context["month_changed"] = True
+            context["month_url"] = _month_url(endpoint.key, year, month, source=source)
+        before = set(rest.drawn)
         places = tuple(at for at in range(len(views)) if at not in before)
     items = await calendar_cache.present(endpoint, settings, [views[at] for at in places],
                                          tz=tz, prefs=source_selection, **specs)
@@ -1631,9 +1641,9 @@ async def _draw_day(request: Request, user, settings, prefs, endpoint, year: int
     if not grouped:
         return context, None, meta
     group = {**grouped[0], "items": items}
-    if drawn is None and len(places) < len(views):
+    if rest is None and len(places) < len(views):
         group["more"] = {"count": len(views) - len(places),
-                         "url": _rest_url(user.user_id, endpoint.key, day, places,
+                         "url": _rest_url(user.user_id, endpoint.key, day, views, places,
                                           source=source, new=new, page=page)}
     return context, group, meta
 
@@ -1664,7 +1674,7 @@ async def calendar_day_rest(request: Request):
     try:
         context, group, _meta = await _draw_day(
             request, user, settings, prefs, endpoint, day.year, day.month, day,
-            source=rest.source or None, new=rest.new, page=rest.page, drawn=rest.drawn)
+            source=rest.source or None, new=rest.new, page=rest.page, rest=rest)
     except _DayFailed as failed:
         return templates.TemplateResponse(request, "_day_rest.html", {
             **failed.context, "refused": False, "error": failed.message, "group": None})

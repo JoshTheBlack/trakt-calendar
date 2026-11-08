@@ -2420,6 +2420,25 @@ class BigDaysArePagedTests(CalendarRouteTestCase):
         rest = self.client.get(self._rest_url(html)).text
         self.assertIn('id="monthChanged" class="warning-banner"', rest)
 
+    def test_a_day_changed_since_the_page_says_so_once_its_filed_month_has_gone(self):
+        """The control outlives what the shell filed: its own digest of the day
+        is what tells its places are no longer places in it."""
+        html = self._late_day()
+        self.entries.insert(0, _entry("show-early", "Show Early", "2026-07-15T09:30:00Z"))
+        asyncio.run(support.load_window(get_endpoint("shows"), _configured_settings(),
+                                        calendar_cache.window_start(date(2026, 7, 15)),
+                                        force=True))
+        calendar_routes._pages.clear()
+        rest = self.client.get(self._rest_url(html)).text
+        self.assertIn('id="monthChanged" class="warning-banner"', rest)
+
+    def test_an_unchanged_day_says_nothing_once_its_filed_month_has_gone(self):
+        html = self._late_day()
+        calendar_routes._pages.clear()
+        rest = self.client.get(self._rest_url(html))
+        self.assertEqual(len(re.findall(r'data-airing="[0-9a-f]{16}"', rest.text)), 3)
+        self.assertNotIn("monthChanged", rest.text)
+
     def test_an_inline_big_day_is_paged_too(self):
         self.entries = [_entry(f"show-{n}", f"Show {n}", f"2026-07-01T{10 + n:02d}:00:00Z")
                         for n in range(5)]
