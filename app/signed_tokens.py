@@ -24,7 +24,11 @@ compared in constant time.
 THE SPELLING is base64url with no padding, and ONE spelling: the default
 decoder skips characters outside its alphabet and accepts padding past the end,
 so one token would otherwise read the same under many. Text outside the alphabet
-or past `MAX_TEXT` is refused before anything is decoded.
+or past `MAX_TEXT` is refused before anything is decoded, and what is decoded
+must spell back as exactly the text it came from: the last character of a token
+whose length is not a multiple of three bytes carries bits no byte uses, which
+the decoder ignores, so without that check one token opens under four
+spellings.
 """
 from __future__ import annotations
 
@@ -57,9 +61,14 @@ def sign(purpose: str, payload: bytes) -> bytes:
     return hmac.new(_key(purpose), payload, hashlib.sha256).digest()[:SIGNATURE_BYTES]
 
 
+def _spelled(data: bytes) -> str:
+    """`data`'s one spelling: base64url, no padding."""
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
 def seal(purpose: str, payload: bytes) -> str:
     """`payload` and its signature, spelled for an address."""
-    return base64.urlsafe_b64encode(payload + sign(purpose, payload)).rstrip(b"=").decode("ascii")
+    return _spelled(payload + sign(purpose, payload))
 
 
 def opened(purpose: str, text: str) -> bytes | None:
@@ -71,6 +80,8 @@ def opened(purpose: str, text: str) -> bytes | None:
     try:
         data = base64.b64decode(raw + "=" * (-len(raw) % 4), altchars=b"-_", validate=True)
     except ValueError:
+        return None
+    if _spelled(data) != raw:
         return None
     payload, signature = data[:-SIGNATURE_BYTES], data[-SIGNATURE_BYTES:]
     if not payload or not hmac.compare_digest(signature, sign(purpose, payload)):

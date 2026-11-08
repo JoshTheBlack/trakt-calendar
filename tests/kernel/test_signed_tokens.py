@@ -37,6 +37,24 @@ class SealingTests(unittest.TestCase):
             with self.subTest(spelled=spelled[:20]):
                 self.assertIsNone(signed_tokens.opened("p", spelled))
 
+    def test_the_last_characters_unused_bits_are_part_of_the_spelling(self):
+        # A token of 3n+1 bytes ends in a character carrying 4 bits no byte uses,
+        # one of 3n+2 bytes in one carrying 2; the decoder ignores them, so every
+        # other value of those bits is another spelling of the same bytes.
+        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        for payload in (b"payload", b"payload!", b"payload!?"):
+            text = signed_tokens.seal("p", payload)
+            spare = {1: 4, 2: 2}.get((len(payload) + signed_tokens.SIGNATURE_BYTES) % 3, 0)
+            with self.subTest(length=len(payload)):
+                self.assertEqual(signed_tokens.opened("p", text), payload)
+                last = alphabet.index(text[-1])
+                others = [alphabet[(last & ~((1 << spare) - 1)) | bits]
+                          for bits in range(1 << spare)]
+                others.remove(text[-1])
+                self.assertEqual(len(others), (1 << spare) - 1)
+                for other in others:
+                    self.assertIsNone(signed_tokens.opened("p", text[:-1] + other))
+
 
 class LayoutPiecesTests(unittest.TestCase):
 
