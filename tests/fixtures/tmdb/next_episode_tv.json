@@ -1,0 +1,19 @@
+{
+ "id": 125988,
+ "name": "Silo",
+ "next_episode_to_air": {
+  "id": 7768410,
+  "name": "Episode 1",
+  "overview": "",
+  "vote_average": 0.0,
+  "vote_count": 0,
+  "air_date": "2027-07-08",
+  "episode_number": 1,
+  "episode_type": "standard",
+  "production_code": "",
+  "runtime": null,
+  "season_number": 4,
+  "show_id": 125988,
+  "still_path": null
+ }
+}

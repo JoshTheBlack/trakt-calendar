@@ -65,6 +65,14 @@ _IMAGE_PARAMS = "q=90&w=440&we"
 # predictable format is one less thing for it to negotiate.
 POSTER_PARAMS = "w=500&h=750&fit=contain&cbg=000000&output=jpg&q=88"
 
+# WHAT A TITLE'S LOGO IS ASKED FOR, for a details panel's header. `output=png`
+# because a logo is lettering on transparency and the card's params let the proxy
+# pick a format — and because TMDB serves some logos as SVG, which the proxy
+# rasterises (MEASURED: an SVG asked with no output came back image/png, and
+# 8 KB at this size). Bounded on both sides, twice the header's drawn size, and
+# never enlarged: a logo is often several times wider than it is tall.
+LOGO_PARAMS = "w=600&h=160&fit=inside&we&output=png"
+
 
 def proxied_image(url: str | None, params: str | None = None, *,
                   fallbacks: Sequence[str] = (), report: str = "") -> str | None:
@@ -830,6 +838,15 @@ def status_spoken(status: str) -> frozenset[str]:
     folded, and nothing else — a word outside the vocabulary means only itself."""
     word = " ".join(str(status or "").split()).casefold()
     return frozenset({word}) if word else frozenset()
+
+
+# AN EPISODE'S PLACE IN ITS SEASON THAT A DETAILS PANEL MARKS, and how each
+# reads. Services word it differently — TMDB's `episode_type` says "finale" and
+# "mid_season", Trakt's "season_finale", "series_finale" and "mid_season_finale"
+# — so each says which of these its own word is (`Provider.episode_mark`), and a
+# word a service has not mapped marks nothing rather than being read as another
+# service's.
+EPISODE_MARKS: dict[str, str] = {"finale": "Finale", "mid_season_finale": "Mid-season finale"}
 
 
 # WHAT KIND OF SHOW A TITLE IS — this app's slugs and how each reads. A catalogue
@@ -1682,6 +1699,14 @@ class DetailPort(Protocol):
         a service that states them — empty when the title has none — and None
         from one that does not, so the store can tell "described, none" from
         "never said" (app/metadata/descriptions.py's `facts_known`).
+
+        Four more only TMDB states today, each empty from a service that does
+        not: `logo` (the title's name as artwork, an ORIGIN address, ""),
+        `collection` (the film series a film belongs to, {"id", "name"}, {}),
+        `next_episode` (the episode the service says airs next, {season, number,
+        title, first_aired, episode_type} — a snapshot of when it answered — or
+        None) and `season_videos` (the season's OWN videos beside the title's
+        `videos`, [] without a season).
         """
         ...
 
@@ -2267,6 +2292,15 @@ class Provider(Protocol):
         measured on one October's All Episodes, 1,478 of the 1,603 cards whose
         services disagreed about a status disagreed about nothing else.
         """
+        ...
+
+    def episode_mark(self, episode_type: str) -> str:
+        """Which of EPISODE_MARKS this service's word for an episode's place in
+        its season (an episode's `episode_type`) is — "" for every word that is
+        none of them, and for a service that states no such word. Answered
+        without a call; what a details panel's finale badge reads
+        (app/metadata/panel.py's `presented`). On the provider for the reason
+        `status_means` is."""
         ...
 
     def catalogue_is_configured(self, settings: Settings) -> bool:

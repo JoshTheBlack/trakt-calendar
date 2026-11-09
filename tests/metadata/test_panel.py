@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import date
 from unittest import mock
 from zoneinfo import ZoneInfo
 
@@ -42,7 +43,8 @@ def _answer(source: str, own_id: str, season, *, videos=(), episodes=True, **fie
         "poster": f"https://{source}.example/p.jpg", "runtime": 50, "genres": ["Drama"],
         "genre_slugs": ["drama"], "rating": 7.5, "imdb_rating": None, "certification": "",
         "videos": list(videos), "first_aired": "", "homepage": "", "season": season,
-        "season_title": "", "season_count": 2, "cast": [],
+        "season_title": "", "season_count": 2, "cast": [], "logo": "", "collection": {},
+        "next_episode": None, "season_videos": [],
         "episodes": ([{"number": 1, "title": "One", "first_aired": "2026-07-15T02:00:00Z",
                        "rating": None, "overview": "", "episode_type": "", "runtime": None}]
                      if episodes and season is not None else []),
@@ -94,11 +96,16 @@ class _Registry:
         self.ports = ports
 
     def __enter__(self):
+        # Each service's own answer for its words (Provider.episode_mark), which
+        # a panel's episodes are presented with.
+        real = providers.get
         self._patches = [
             mock.patch.object(detail_source, "ports",
                               lambda: [(s, p) for s, p in self.ports.items()]),
             mock.patch.object(providers, "get",
-                              lambda source: mock.Mock(detail_port=self.ports[Source(source)])),
+                              lambda source: mock.Mock(
+                                  detail_port=self.ports[Source(source)],
+                                  episode_mark=real(Source(source)).episode_mark)),
         ]
         for patch in self._patches:
             patch.start()
@@ -309,7 +316,7 @@ class PresentedTests(DatabaseTestCase):
             "episodes": [{"number": 1, "first_aired": "2026-07-15T02:00:00Z"},
                          {"number": 2, "first_aired": "2026-07-22"},
                          {"number": 3, "first_aired": ""}],
-        }, settings)
+        }, settings, Source.TRAKT)
         self.assertTrue(shown["poster"].startswith("https://wsrv.nl/?url="))
         self.assertTrue(shown["cast"][0]["headshot"].startswith("https://wsrv.nl/?url="))
         self.assertIsNone(shown["cast"][1]["headshot"])
@@ -369,3 +376,72 @@ class AWholeTitleGoesToWhoCanDescribeItTests(DatabaseTestCase):
         await self._describe({"tmdb": self.EMPTY, "trakt": {**self.EMPTY, "title": "Silo"}})
         stored = {row["source"]: json.loads(row["ids_json"]) for row in await title_groups()}
         self.assertNotIn("tmdb", stored)
+
+
+class TheExtrasArePresentedTests(DatabaseTestCase):
+    """`presented`: the logo through the proxy, the next episode only while it is
+    ahead, and each episode's mark by its own service's word."""
+
+    def test_the_logo_goes_through_the_proxy_as_a_png(self):
+        shown = panel.presented({"logo": "https://image.tmdb.org/t/p/w500/a.svg"},
+                                Settings(), Source.TMDB)
+        self.assertTrue(shown["logo"].startswith("https://wsrv.nl/?url="))
+        self.assertIn("output=png", shown["logo"])
+        self.assertEqual(panel.presented({"logo": ""}, Settings(), Source.TMDB)["logo"], "")
+
+    def test_the_next_episode_is_drawn_while_it_is_ahead_and_never_after(self):
+        def next_on(day):
+            return panel.presented({"next_episode": {
+                "season": 2, "number": 5, "title": "Five", "first_aired": day,
+                "episode_type": "finale"}}, Settings(timezone="UTC"), Source.TMDB)["next_episode"]
+
+        with mock.patch.object(panel.clock, "today", return_value=date(2026, 11, 8)):
+            today, later, before, undated = (next_on("2026-11-08"), next_on("2026-11-20"),
+                                             next_on("2026-11-07"), next_on(""))
+        self.assertEqual((today["air_display"], today["mark_label"]), ("08 Nov 2026", "Finale"))
+        self.assertEqual(later["number"], 5)
+        self.assertIsNone(before, "a date in the past is never drawn as next")
+        self.assertEqual(undated["air_display"], "")
+        self.assertIsNone(panel.presented({"next_episode": None}, Settings(),
+                                          Source.TMDB)["next_episode"])
+
+    def test_each_episode_is_marked_by_its_own_services_word(self):
+        def marks(source, words):
+            shown = panel.presented({"episodes": [
+                {"number": n, "first_aired": "", "episode_type": word}
+                for n, word in enumerate(words, 1)]}, Settings(), source)
+            return [e["mark_label"] for e in shown["episodes"]]
+
+        self.assertEqual(marks(Source.TMDB, ["standard", "mid_season", "finale"]),
+                         ["", "Mid-season finale", "Finale"])
+        self.assertEqual(marks(Source.TRAKT, ["season_premiere", "mid_season_finale",
+                                              "season_finale", "series_finale"]),
+                         ["", "Mid-season finale", "Finale", "Finale"])
+        # One service's word is never read as another's.
+        self.assertEqual(marks(Source.TRAKT, ["finale", "mid_season"]), ["", ""])
+        self.assertEqual(marks(Source.TMDB, ["season_finale"]), [""])
+
+
+class ASeasonsOwnVideosLeadTheMenuTests(DatabaseTestCase):
+    """Opened on a season, the panel's menu leads with that season's own videos,
+    then every service's for the title."""
+
+    async def test_the_seasons_own_trailer_plays_first(self):
+        season_trailer = _video("seasontrailer", "tmdb")
+
+        class _WithSeasonVideos(_DetailPort):
+            async def fetch_details(self, settings, media, source_id, season, *,
+                                    cache_only=False, fresh=False):
+                return {**await super().fetch_details(settings, media, source_id, season),
+                        "season_videos": [season_trailer]}
+
+        # TMDB is the service that lists a season's own videos, and the one whose
+        # group keeps them (its store columns).
+        ports = {Source.TMDB: _WithSeasonVideos("tmdb", [_video("titletrailer", "tmdb")]),
+                 Source.SIMKL: _DetailPort("simkl", [_video("simklteaser", "simkl", "teaser")])}
+        chosen = detail_source.Answerer(Source.TMDB, "1", stored_only=False)
+        with _Registry(ports):
+            _who, details = await panel.describe_panel(Settings(), chosen,
+                                                       {"tmdb": "1", "simkl": "2"}, "show", 1)
+        self.assertEqual([v.video_id for v in details["videos"]],
+                         ["seasontrailer", "titletrailer", "simklteaser"])

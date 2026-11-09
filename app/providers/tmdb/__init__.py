@@ -237,5 +237,13 @@ class _TmdbProvider:
         # (normalize.STATUS_WORDS), so a stored one is already one of its words.
         return status_spoken(status)
 
+    # TMDB's `episode_type`: standard, finale, mid_season (its documented three,
+    # all found among the development copy's episodes). Its "mid_season" is the
+    # episode before a season's break — a mid-season finale.
+    _EPISODE_MARKS = {"finale": "finale", "mid_season": "mid_season_finale"}
+
+    def episode_mark(self, episode_type: str) -> str:
+        return self._EPISODE_MARKS.get(str(episode_type or ""), "")
+
 
 register(_TmdbProvider())

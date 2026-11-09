@@ -12,6 +12,8 @@ them — and compares.
 """
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from app import db
@@ -168,3 +170,84 @@ class AnAnswerThatCannotBeReadCostsTheBatchNothingElseTests(DatabaseTestCase):
         broken = {**_answer("tmdb", "8", 1), "episodes": [{"number": "eight"}]}
         with self.assertRaises(ValueError):
             await descriptions.store("tmdb", "show", "8", broken, asked_season=1, tz=UTC)
+
+
+class TheExtrasAreKeptTests(DatabaseTestCase):
+    """A TMDB description's logo, collection, next episode and a season's own
+    videos are filed in TMDB's group and read back as the same answer — and a
+    service that does not declare them keeps none."""
+
+    async def test_a_titles_extras_round_trip(self):
+        upcoming = {"season": 2, "number": 5, "title": "Five", "first_aired": "2026-12-01",
+                    "episode_type": "finale"}
+        answer = _answer("tmdb", "5", None, logo="https://image.tmdb.org/t/p/w500/l.png",
+                         collection={"id": 9, "name": "Nine"}, next_episode=upcoming)
+        await descriptions.store("tmdb", "show", "5", answer, asked_season=None, tz=UTC)
+        read = await descriptions.stored("tmdb", "show", "5", None)
+        self.assertEqual((read["logo"], read["collection"], read["next_episode"]),
+                         (answer["logo"], {"id": 9, "name": "Nine"}, upcoming))
+        group = await title_group("show:tmdb:5", "tmdb")
+        self.assertEqual(json.loads(group["next_episode_json"]), upcoming)
+
+    async def test_nothing_stated_reads_back_as_nothing(self):
+        await descriptions.store("tmdb", "show", "5", _answer("tmdb", "5", None),
+                                 asked_season=None, tz=UTC)
+        read = await descriptions.stored("tmdb", "show", "5", None)
+        self.assertEqual((read["logo"], read["collection"], read["next_episode"]),
+                         ("", {}, None))
+
+    async def test_a_seasons_own_videos_round_trip(self):
+        from tests.metadata.test_panel import _video
+        season = {**_answer("tmdb", "5", 1), "episodes": _episodes(1, 2),
+                  "season_videos": [_video("s1trailer", "tmdb")]}
+        await descriptions.store("tmdb", "show", "5", season, asked_season=1, tz=UTC)
+        read = await descriptions.stored("tmdb", "show", "5", 1)
+        self.assertEqual([v.video_id for v in read["season_videos"]], ["s1trailer"])
+        # Asked with no season, a show answers with the one season it has
+        # described — that season's own videos with it.
+        whole = await descriptions.stored("tmdb", "show", "5", None)
+        self.assertEqual((whole["season"], [v.video_id for v in whole["season_videos"]]),
+                         (1, ["s1trailer"]))
+
+    async def test_a_service_that_states_none_of_them_keeps_none(self):
+        answer = _answer("trakt", "7", None, logo="https://x.example/l.png",
+                         collection={"id": 1, "name": "x"})
+        await descriptions.store("trakt", "show", "7", answer, asked_season=None, tz=UTC)
+        read = await descriptions.stored("trakt", "show", "7", None)
+        self.assertEqual((read["logo"], read["collection"], read["next_episode"]), ("", {}, None))
+
+
+class ADescriptionNamingANextEpisodeFallsDueOnceItAirsTests(DatabaseTestCase):
+    """descriptions.title_stale_after: the ordinary clock, or the local midnight
+    after the episode named as next — whichever comes first."""
+
+    NOW = int(datetime(2026, 11, 8, 15, tzinfo=timezone.utc).timestamp())
+    NY = ZoneInfo("America/New_York")
+
+    def due(self, day, tz=UTC):
+        return descriptions.title_stale_after({"first_aired": day} if day is not None else None,
+                                              tz=tz, now=self.NOW)
+
+    def test_no_next_episode_is_the_ordinary_clock(self):
+        regular = self.NOW + descriptions.TITLE_REFRESH_SECONDS
+        self.assertEqual((self.due(None), self.due("")), (regular, regular))
+
+    def test_an_episode_airing_tomorrow_falls_due_the_midnight_after_it(self):
+        self.assertEqual(self.due("2026-11-09"),
+                         int(datetime(2026, 11, 10, tzinfo=timezone.utc).timestamp()))
+        self.assertEqual(self.due("2026-11-09", self.NY),
+                         int(datetime(2026, 11, 10, tzinfo=self.NY).timestamp()))
+
+    def test_an_episode_further_off_than_the_clock_keeps_the_clock(self):
+        self.assertEqual(self.due("2027-07-08"), self.NOW + descriptions.TITLE_REFRESH_SECONDS)
+
+    def test_a_snapshot_already_past_is_no_reason_to_re_read_at_once(self):
+        self.assertEqual(self.due("2026-11-01"), self.NOW + descriptions.TITLE_REFRESH_SECONDS)
+
+    async def test_the_stored_group_carries_it(self):
+        await db.transaction(lambda conn: descriptions.write(
+            conn, "tmdb", "show", "5", _answer("tmdb", "5", None, next_episode={
+                "season": 1, "number": 2, "title": "", "first_aired": "2026-11-09",
+                "episode_type": ""}), asked_season=None, tz=UTC, now=self.NOW))
+        group = await title_group("show:tmdb:5", "tmdb")
+        self.assertEqual(group["stale_after"], self.due("2026-11-09"))

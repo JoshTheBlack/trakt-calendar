@@ -150,6 +150,61 @@ class VideosTests(unittest.TestCase):
         self.assertEqual(normalize.videos_from(payload), [])
 
 
+class TheExtrasTests(unittest.TestCase):
+    """The logo, a film's collection, the next episode and a season's own
+    videos — read from real answers (tests/fixtures/tmdb: Severance's `images`
+    asked in English, Silo's `next_episode_to_air`, Dune: Part Two's
+    `belongs_to_collection`, a Stranger Things season's `videos`)."""
+
+    def test_the_logo_is_the_first_listed_as_an_origin_address(self):
+        payload = {**SEVERANCE, "images": fixture("images_tv_severance")}
+        self.assertEqual(normalize.logo_of(payload),
+                         "https://image.tmdb.org/t/p/w500/yyS1tALk7t3YdTNMOvR5gsnXINA.png")
+
+    def test_an_svg_logo_keeps_its_own_address(self):
+        logos = fixture("images_tv_severance")["logos"]
+        self.assertTrue(normalize.logo_of({"images": {"logos": logos[1:]}}).endswith(".svg"))
+
+    def test_no_images_and_no_logos_are_no_logo(self):
+        self.assertEqual(normalize.logo_of(SEVERANCE), "")
+        self.assertEqual(normalize.logo_of({"images": {"logos": []}}), "")
+
+    def test_a_films_collection(self):
+        self.assertEqual(normalize.collection_of(DUNE, Media.MOVIE),
+                         {"id": 726871, "name": "Dune Collection"})
+
+    def test_a_show_and_a_film_in_none_have_no_collection(self):
+        self.assertEqual(normalize.collection_of({**DUNE, "belongs_to_collection": None},
+                                                 Media.MOVIE), {})
+        self.assertEqual(normalize.collection_of(DUNE, Media.SHOW), {})
+
+    def test_the_next_episode(self):
+        silo = fixture("next_episode_tv")
+        entry = silo["next_episode_to_air"]
+        got = normalize.next_episode_of(silo, Media.SHOW)
+        self.assertEqual(got, {"season": entry["season_number"],
+                               "number": entry["episode_number"],
+                               "title": " ".join(entry["name"].split()),
+                               "first_aired": entry["air_date"],
+                               "episode_type": entry["episode_type"]})
+
+    def test_nothing_scheduled_or_no_episode_named_is_none(self):
+        self.assertIsNone(normalize.next_episode_of(SEVERANCE, Media.SHOW))
+        self.assertIsNone(normalize.next_episode_of(
+            {"next_episode_to_air": {"air_date": "2026-12-01"}}, Media.SHOW))
+        self.assertIsNone(normalize.next_episode_of(fixture("next_episode_tv"), Media.MOVIE))
+
+    def test_an_undated_next_episode_has_no_day(self):
+        got = normalize.next_episode_of({"next_episode_to_air": {
+            "season_number": 3, "episode_number": 1, "air_date": None}}, Media.SHOW)
+        self.assertEqual(got["first_aired"], "")
+
+    def test_a_seasons_own_videos_are_read_as_a_titles_are(self):
+        videos = normalize.videos_from(fixture("season_videos_tv"))
+        self.assertTrue(videos)
+        self.assertTrue(all(v.sources == (str(Source.TMDB),) for v in videos))
+
+
 class CastTests(unittest.TestCase):
     """normalize.cast_from — both of TMDB's cast shapes, as the panel's keys."""
 

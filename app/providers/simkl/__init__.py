@@ -356,6 +356,11 @@ class _SimklProvider:
     def status_means(self, status: str) -> frozenset[str]:
         return titles.status_means(status)
 
+    def episode_mark(self, episode_type: str) -> str:
+        # Simkl states no episode's place in its season (detail.py answers every
+        # `episode_type` empty), so it marks nothing.
+        return ""
+
     def catalogue_is_configured(self, settings: Settings) -> bool:
         # NOT THE SAME QUESTION `_SimklDetailPort.catalogue_configured` ASKS,
         # not any more. Under Simkl's v2 API, search and /redirect require a

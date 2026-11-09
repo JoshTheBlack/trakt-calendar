@@ -69,11 +69,39 @@ class TheDetailsPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(path for path, _, _ in tmdb.asked),
                          ["tv/95396", "tv/95396/season/2",
                           "tv/95396/season/2/aggregate_credits"])
-        appended = {path: params for path, params, _ in tmdb.asked}["tv/95396"]["append_to_response"]
-        self.assertEqual(appended, "external_ids,content_ratings,videos,keywords")
+        asked = {path: params for path, params, _ in tmdb.asked}
+        self.assertEqual(asked["tv/95396"], {
+            "append_to_response": "external_ids,content_ratings,videos,keywords,images",
+            # The logo's language is the instance's, and no other.
+            "include_image_language": "en"})
+        self.assertEqual(asked["tv/95396/season/2"], {"append_to_response": "videos"})
         # The two facts only TMDB states, from that same one call.
         self.assertEqual(got["keywords"][:2], ["office", "workplace"])
         self.assertEqual(got["show_type"], "scripted")
+
+    async def test_the_extras_ride_on_the_same_two_calls(self):
+        show = {**SEVERANCE, "images": fixture("images_tv_severance"),
+                "next_episode_to_air": fixture("next_episode_tv")["next_episode_to_air"]}
+        season = {**SEASON_2, "videos": fixture("season_videos_tv")["videos"]}
+        _tmdb, patched = answering(tv__95396=show, tv__95396__season__2=season)
+        with patched:
+            got = await detail.fetch_details(SETTINGS, Media.SHOW, "95396", 2)
+        self.assertTrue(got["logo"].endswith("/yyS1tALk7t3YdTNMOvR5gsnXINA.png"))
+        self.assertEqual(got["next_episode"]["first_aired"],
+                         show["next_episode_to_air"]["air_date"])
+        self.assertEqual(got["collection"], {})
+        self.assertTrue(got["season_videos"])
+        self.assertNotEqual([v.key for v in got["season_videos"]],
+                            [v.key for v in got["videos"]])
+
+    async def test_the_image_language_follows_the_instances(self):
+        tmdb, patched = answering(tv__95396=SEVERANCE)
+        with patched:
+            await detail.fetch_details(dataclasses.replace(SETTINGS, tmdb_language="de-DE"),
+                                       Media.SHOW, "95396", None)
+        asked = {path: params for path, params, _ in tmdb.asked}
+        self.assertEqual(asked["tv/95396"]["include_image_language"], "de")
+
 
     async def test_an_answer_asked_without_keywords_states_neither_fact(self):
         """An answer that carries no keyword list — one cached before they were

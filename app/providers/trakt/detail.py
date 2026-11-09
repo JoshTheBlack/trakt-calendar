@@ -343,6 +343,14 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         # is the lookup that already had it.
         "first_aired": info.get("first_aired") or "",
         "homepage": info.get("homepage") or "",
+        # NOT IN TRAKT'S DESCRIPTION: no logo artwork, no film series, and the
+        # episode airing next is a call of its own (/shows/{id}/next_episode)
+        # nothing here makes. Its season video lists were empty for every show
+        # probed (templates/_details.html says so), so none are asked for.
+        "logo": "",
+        "collection": {},
+        "next_episode": None,
+        "season_videos": [],
         "season": season,
         # WHAT THIS SEASON IS CALLED, where that is a name rather than a number.
         # Trakt titles an anthology's seasons properly — Murder House, Asylum,

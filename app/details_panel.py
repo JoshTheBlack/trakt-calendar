@@ -156,6 +156,10 @@ def panel(request: Request, details: dict, *, media: str, season: int | None,
         "request": request, "d": details, "media": media, "season": shown,
         "title": title, "poster": poster, "progress": progress, "links": links,
         "note": note, "actions": actions, "overview": overview, "follow_up": follow_up,
+        # The season the panel opens on has its own videos at the head of the
+        # video menu (metadata/panel.py's describe_panel), so its pane does not
+        # draw them again; a tab's pane (`season_pane`) does.
+        "season_videos_in_menu": True,
         # `shown` rather than the asked-for season, so the tab that reads as
         # current is the one whose rows are actually below it.
         #

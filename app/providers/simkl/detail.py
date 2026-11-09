@@ -561,6 +561,12 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         # Simkl's catalogue record carries no homepage field; the card's own
         # outbound button already offers this title's Simkl page.
         "homepage": "",
+        # Nor logo artwork, a film series or a next episode, and its videos hang
+        # off the title alone (see the season keys below).
+        "logo": "",
+        "collection": {},
+        "next_episode": None,
+        "season_videos": [],
         "season": answered,
         # TWO KEYS THIS SERVICE HAS NO SEASON-LEVEL ANSWER FOR, present and
         # honest. Checked against Simkl's own documentation rather than inferred:

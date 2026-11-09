@@ -305,3 +305,41 @@ class TheEpisodeDrainsStatementsDoNotGrowWithTheSeasonTests(DatabaseTestCase):
 
     async def test_thirty_episodes_cost_what_three_do(self):
         self.assertEqual(await self._season(3, 11), await self._season(30, 12))
+
+
+class ATmdbGroupItsDescriptionFilledTests(DatabaseTestCase):
+    """TMDB's description fills words its discover listing never states — the
+    logo, the next episode, a season's own videos — and the listing's refill
+    must still write nothing: a TMDB group's clock is its OLDEST word's
+    (rows.ceiling_clock), and a listing leaving the description's words in place
+    neither re-stamps the group nor reads as a change."""
+
+    WEEK = (date(2026, 11, 2), date(2026, 11, 9))
+
+    def listing(self) -> list[Record]:
+        return [Record(source=Source.TMDB, media=Media.SHOW, id="4242", ids={"tmdb": 4242},
+                       detail_url="", title="Listed", air_ts=1793836800.0, date_only=True,
+                       season=2, episode_number=1, episode_label="S02E01", enriched=False)]
+
+    async def store(self) -> None:
+        now = db.now()
+        await entries.store_span("shows/premieres", *self.WEEK, self.listing(),
+                                 sources=["tmdb"], asked=["tmdb"], now=now,
+                                 stale_after=now + 86400)
+
+    async def test_an_unchanged_refill_writes_its_coverage_and_nothing_else(self):
+        from zoneinfo import ZoneInfo
+        from app.metadata import descriptions
+        from tests.metadata.test_panel import _answer, _video
+        await self.store()
+        await descriptions.store("tmdb", "show", "4242", {
+            **_answer("tmdb", "4242", 2, title="Listed",
+                      logo="https://image.tmdb.org/t/p/w500/logo.png",
+                      next_episode={"season": 2, "number": 2, "title": "", "episode_type": "",
+                                    "first_aired": "2026-11-09"}),
+            "season_videos": [_video("seasonvideo", "tmdb")]},
+            asked_season=2, tz=ZoneInfo("UTC"))
+        with statements_run() as run, statements_executed() as executed:
+            await self.store()
+        self.assertEqual(run, [])
+        self.assertEqual([sql.split()[2] for sql in executed], ["calendar_coverage"])

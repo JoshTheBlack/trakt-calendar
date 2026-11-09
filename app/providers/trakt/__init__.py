@@ -380,6 +380,16 @@ class _TraktProvider:
         # Trakt's words ARE the vocabulary (base.STATUS_WORDS is spelled in them).
         return status_spoken(status)
 
+    # Trakt's `episode_type` words, measured on the development copy's episodes:
+    # standard, series_premiere, season_premiere, mid_season_premiere,
+    # mid_season_finale, season_finale, series_finale. A series' last episode is
+    # its season's finale too.
+    _EPISODE_MARKS = {"season_finale": "finale", "series_finale": "finale",
+                      "mid_season_finale": "mid_season_finale"}
+
+    def episode_mark(self, episode_type: str) -> str:
+        return self._EPISODE_MARKS.get(str(episode_type or ""), "")
+
     def catalogue_is_configured(self, settings: Settings) -> bool:
         # The client id alone, same question `_TraktDetailPort.catalogue_configured`
         # asks and for the same reason: a catalogue search authenticates with

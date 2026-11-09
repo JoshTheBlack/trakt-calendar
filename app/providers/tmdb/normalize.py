@@ -314,6 +314,62 @@ def poster_of(payload: dict) -> str:
     return transport.image_url(payload.get("poster_path"))
 
 
+# A logo at TMDB's 500-pixel width: wide enough for a panel header drawn at twice
+# its size, and an SVG is served as itself whatever size is named (measured).
+_LOGO_SIZE = "w500"
+
+
+def logo_of(payload: dict) -> str:
+    """The title's own logo — its name as artwork — as an ORIGIN address, "" for
+    none or for an answer asked without `images` (detail.py's `_APPENDS`).
+
+    THE FIRST TMDB LISTS, among the logos in the instance's own language alone
+    (detail.py asks for no other), so the logo spells the title the way every
+    other word TMDB hands this instance does. TMDB lists them best-voted first.
+    About one show in three on the development copy has one, and fewer films;
+    a title with none draws its name as text."""
+    for entry in (payload.get("images") or {}).get("logos") or ():
+        if isinstance(entry, dict) and entry.get("file_path"):
+            return transport.image_url(entry["file_path"], _LOGO_SIZE)
+    return ""
+
+
+def collection_of(payload: dict, media: Media) -> dict:
+    """The film series a film belongs to — {"id", "name"} — or {} for a film in
+    none, and for every show (TMDB groups only films). Every `/movie/{id}`
+    answer carries `belongs_to_collection`; what the collection holds is a call
+    of its own (detail.py's `fetch_collection`)."""
+    block = payload.get("belongs_to_collection") if media is Media.MOVIE else None
+    if not isinstance(block, dict) or not isinstance(block.get("id"), int):
+        return {}
+    return {"id": int(block["id"]), "name": " ".join(str(block.get("name") or "").split())}
+
+
+def next_episode_of(payload: dict, media: Media) -> dict | None:
+    """The episode TMDB says airs next — {season, number, title, first_aired,
+    episode_type} — or None for a film, a show with nothing scheduled, and an
+    entry that names no episode.
+
+    A SNAPSHOT, TRUE WHEN TMDB ANSWERED. `next_episode_to_air` is what TMDB
+    held at that moment and is wrong the day that episode airs, so a reader
+    draws it only while its day is still ahead (app/metadata/panel.py's
+    `presented`), and a description naming one falls due again once it has aired
+    (app/metadata/descriptions.py). MEASURED across 148 airing shows: 65 named
+    one, every one dated today or later. `first_aired` is TMDB's own day, "" when
+    it has not dated the episode yet."""
+    entry = payload.get("next_episode_to_air") if media is Media.SHOW else None
+    if not isinstance(entry, dict):
+        return None
+    season, number = entry.get("season_number"), entry.get("episode_number")
+    if not isinstance(season, int) or not isinstance(number, int):
+        return None
+    aired = _date(entry.get("air_date"))
+    return {"season": season, "number": number,
+            "title": " ".join(str(entry.get("name") or "").split()),
+            "first_aired": aired.isoformat() if aired else "",
+            "episode_type": str(entry.get("episode_type") or "")}
+
+
 # ---------------------------------------------------------------------------
 # Videos
 # ---------------------------------------------------------------------------

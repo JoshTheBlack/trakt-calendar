@@ -7,7 +7,7 @@ from __future__ import annotations
 import unittest
 
 from app.providers.base import Video, VideoKind
-from app.providers.videos import pool
+from app.providers.videos import pool, season_first
 
 
 def _yt(video_id, kind=VideoKind.TRAILER, *, source="trakt", official=None,
@@ -105,3 +105,30 @@ class WhatPlaysTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ASeasonsOwnVideosComeFirstTests(unittest.TestCase):
+    """videos.season_first: a panel opened on a season offers that season's own
+    videos ahead of the title's, by pool's own order, each video once."""
+
+    def test_the_seasons_trailer_leads_and_the_titles_follow(self):
+        season = [_yt("s1teaser111", VideoKind.TEASER, source="tmdb"),
+                  _yt("s1trailer11", source="tmdb")]
+        title = [_yt("s5trailer11", source="tmdb"), _yt("traktclip11", VideoKind.CLIP)]
+        self.assertEqual(_ids(season_first(season, title, "tmdb")),
+                         ["s1trailer11", "s1teaser111", "s5trailer11", "traktclip11"])
+
+    def test_a_video_both_list_is_offered_once_where_the_season_put_it(self):
+        shared = _yt("sharedtrail", source="tmdb")
+        self.assertEqual(_ids(season_first([shared], [_yt("titletraile"), shared], "tmdb")),
+                         ["sharedtrail", "titletraile"])
+
+    def test_a_season_whose_own_cannot_play_here_plays_the_titles_first(self):
+        vimeo = Video(site="vimeo", video_id="", url="https://vimeo.com/1", title="",
+                      kind=VideoKind.TRAILER, official=None, published=None, sources=("tmdb",))
+        self.assertEqual(_ids(season_first([vimeo], [_yt("titletraile")], "tmdb")),
+                         ["titletraile", "https://vimeo.com/1"])
+
+    def test_no_season_videos_is_the_titles_list(self):
+        title = [_yt("titletraile"), _yt("titleteaser", VideoKind.TEASER)]
+        self.assertEqual(_ids(season_first([], title, "trakt")), _ids(title))

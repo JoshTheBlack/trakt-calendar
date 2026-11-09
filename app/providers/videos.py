@@ -64,8 +64,31 @@ def pool(lists: Iterable[Sequence[Video]], describer: str) -> list[Video]:
     ordered.sort(key=lambda v: (_KIND_RANK.get(v.kind, 2),
                                 describer not in v.sources,
                                 v.official is not True))
+    return _playable_first(ordered)
+
+
+def _playable_first(ordered: list[Video]) -> list[Video]:
     playable = next((v for v in ordered if v.embeddable), None)
     if playable is not None:
         ordered.remove(playable)
         ordered.insert(0, playable)
     return ordered
+
+
+def season_first(season: Sequence[Video], title: Sequence[Video],
+                 describer: str) -> list[Video]:
+    """What the panel offers when it opens on one season: that season's OWN
+    videos first, ordered by `pool`'s rule, then the title's pooled list less any
+    the season already named.
+
+    A SEASON'S OWN TRAILER IS THE ONE A READER LOOKING AT THAT SEASON WANTS, and
+    the title's list leads with whatever the newest trailer is — usually the
+    latest season's, which is the wrong one on an earlier season's panel. Only
+    TMDB lists a season's videos (Trakt's season lists were empty for every show
+    probed and Simkl's hang off the title), so `season` is one service's list.
+
+    The first that can play in the panel's frame still goes to the front: a
+    season whose own videos are all links out plays the title's first trailer."""
+    own = pool([season], describer)
+    held = {video.key for video in own}
+    return _playable_first([*own, *(video for video in title if video.key not in held)])

@@ -29,8 +29,9 @@ import unittest
 
 from app import providers
 from app.config import Settings
-from app.providers.base import (EPISODE_KEEPING, EPISODE_LISTING, SEASON_KEEPING,
-                                STATUS_WORDS, TITLE_KEEPING, CalendarPort, DetailPort,
+from app.providers.base import (EPISODE_KEEPING, EPISODE_LISTING, EPISODE_MARKS,
+                                SEASON_KEEPING, STATUS_WORDS, TITLE_KEEPING, CalendarPort,
+                                DetailPort,
                                 LibraryPort, Media, PlayCountPort, Provider, SearchPort, Source,
                                 SyncPort, WatchlistPort)
 from app.providers.trakt import detail as trakt_detail
@@ -770,6 +771,38 @@ class EveryServiceSaysWhichIdAListingIsFiledUnderTests(unittest.TestCase):
         for source, provider in providers.registered().items():
             with self.subTest(source=str(source)):
                 self.assertEqual(provider.listing_id({"imdb": "tt1", "tvdb": 4321}), "")
+
+
+class EveryServiceSaysWhichEpisodesItMarksTests(unittest.TestCase):
+    """Provider.episode_mark: each service's own word for an episode's place in
+    its season as one of base.EPISODE_MARKS, or nothing — every registered
+    service answering, and no word read as another service's."""
+
+    # Each registered service's words a details panel marks, measured from what
+    # the service states (the store's `{source}_episode_type` on the development
+    # copy, and each package's detail reader). A service registered without an
+    # entry here fails, so its words are a decision rather than a fallthrough.
+    MARKED = {
+        "tmdb": {"finale": "finale", "mid_season": "mid_season_finale"},
+        "trakt": {"season_finale": "finale", "series_finale": "finale",
+                  "mid_season_finale": "mid_season_finale"},
+        "simkl": {},
+    }
+    UNMARKED = ("", "standard", "season_premiere", "series_premiere", "mid_season_premiere",
+                "FINALE", "pilot")
+
+    def test_every_service_has_an_entry(self):
+        self.assertEqual(set(self.MARKED), {str(s) for s in providers.registered()})
+
+    def test_each_services_words(self):
+        for source, provider in providers.registered().items():
+            marked = self.MARKED[str(source)]
+            words = {*marked, *self.UNMARKED, *(w for m in self.MARKED.values() for w in m)}
+            for word in words:
+                with self.subTest(source=str(source), word=word):
+                    got = provider.episode_mark(word)
+                    self.assertEqual(got, marked.get(word, ""))
+                    self.assertIn(got, {"", *EPISODE_MARKS})
 
 
 class EveryServiceSaysWhatItsStatusMeansTests(unittest.TestCase):

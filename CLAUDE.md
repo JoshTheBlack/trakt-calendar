@@ -458,7 +458,20 @@ window the same fill covers — and a coverage row's `stored_at` is when its
 service LAST REPLIED, a failure marking it answered = 0 and leaving the time, or
 a service whose token stopped working would keep its last listings for as long
 as anybody asked. A SEARCHED listing — a per-title lookup — goes by its own
-`listed_at`.
+`listed_at`. TMDB'S DESCRIPTION CARRIES FOUR WORDS NO LISTING STATES, each in
+`groups.WORDS` and so under the same ceiling and clock: the title's `logo` (the
+`images` append, narrowed to the instance's language alone — `detail._image_params`,
+measured +23% on a show's cached answer where "lang,null" was +47%), a film's
+`collection_json`, the `next_episode_json` snapshot and a season's own `videos_json`
+(the season call's `videos` append). All ride on the calls a description already
+makes, so the refresh budget is unchanged; changing an append changes the cached
+answer's URL, so each title's next read is a full answer once. THE NEXT EPISODE IS
+A SNAPSHOT, wrong the day after it airs: a panel draws it only while its day is
+today or later (`panel._still_next`) and a description naming one falls due the
+local midnight after it (`descriptions.title_stale_after`), so the next view
+re-reads it. A group described before these words existed gains them when it is
+next re-read — on a view, past its three-day clock — and nothing re-reads every
+group to fill them.
 The credential is the v4 read token,
 sent only in the Authorization header (`config.tmdb_token_error` refuses the
 short key, `tmdb_configured` reads a stored one as unset). NO SERVICE IS
@@ -1014,7 +1027,21 @@ what every surface calls for a whole panel, a season tab calling
 BOUND ids, so a service asked for its list is asked about a title the link
 shows. The panel plays them in ONE iframe that every choice in its popover menu
 targets by name, so a pick replaces what was playing with no request; the one
-line of script closes the menu afterwards. ITS OUTBOUND BUTTONS AND A CARD'S ARE
+line of script closes the menu afterwards. A SEASON'S OWN VIDEOS (only TMDB lists
+any) lead the menu of a panel opened on that season (`videos.season_first`); a tab
+pressed later draws its season's own in its pane, aimed at the same one player,
+because a tab is fetched once and a menu it swapped would name the wrong season
+when an earlier tab is pressed again. WHAT THE DESCRIBER SAYS ABOUT EPISODES IS
+PRESENTED ONCE (`panel.presented`, which takes the answering service): the episode
+airing next under the show's description, only while it is still ahead, and a
+Finale / Mid-season finale mark on an episode by that service's OWN word
+(`Provider.episode_mark` into `base.EPISODE_MARKS`; Trakt says "season_finale",
+TMDB "finale" — one never read as the other). THE TITLE'S LOGO is the panel's
+heading where the describer has one: out of band into the shell's `#detailsTitle`
+through the image proxy (`base.LOGO_PARAMS`, `output=png` — TMDB serves some logos
+as SVG, which the proxy rasterises, measured in Chromium and Firefox), alt the
+title; a title with none keeps the text heading the opening click wrote. Nothing
+of it is on a calendar card. ITS OUTBOUND BUTTONS AND A CARD'S ARE
 ONE WALK OVER THE REGISTRY (`detail_source.service_links`), over every id the store
 knows: a card draws in colour the services it was drawn from and greys (`.unlisted`)
 one that only knows the title; a panel draws them all. The browser's half is one delegated listener in

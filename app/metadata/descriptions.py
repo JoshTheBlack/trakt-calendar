@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Iterable, Mapping
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
@@ -66,7 +66,8 @@ ANSWER_KEYS = frozenset({
     "language", "anime_type", "release_types_by_country", "ids", "poster", "runtime",
     "genres", "genre_slugs", "rating", "imdb_rating", "certification", "videos",
     "first_aired", "homepage", "season", "season_title", "season_count", "seasons",
-    "cast", "episodes", "keywords", "show_type",
+    "cast", "episodes", "keywords", "show_type", "logo", "collection", "next_episode",
+    "season_videos",
 })
 
 
@@ -651,7 +652,8 @@ def season_stale_after(days: list[date | None], now: int) -> int:
 _DESCRIBED = ("ids_json", "year", "network", "country", "language", "certification",
               "status", "overview", "runtime", "genres_json", "ratings_json", "anime_type",
               "release_types_json", "first_aired", "homepage", "season_count", "videos_json",
-              "keywords_json", "show_type", "facts_known")
+              "keywords_json", "show_type", "facts_known", "logo", "collection_json",
+              "next_episode_json")
 _WRITTEN = (*_DESCRIBED, "title", "title_fold", "poster", "cast_json", "enriched",
             "fetched_at", "stale_after", "failed_at", "fail_count")
 
@@ -679,9 +681,38 @@ def _title_values(answer: Mapping[str, Any], source: str, ids: dict) -> dict:
         "first_aired": str(answer.get("first_aired") or ""),
         "homepage": str(answer.get("homepage") or ""),
         "season_count": int(answer.get("season_count") or 0),
-        "videos_json": json.dumps([_video_record(v) for v in answer.get("videos") or []
-                                   if isinstance(v, Video)]),
+        "videos_json": _videos_json(answer.get("videos")),
+        "logo": str(answer.get("logo") or ""),
+        "collection_json": json.dumps(dict(answer.get("collection") or {}), sort_keys=True),
+        "next_episode_json": json.dumps(dict(answer.get("next_episode") or {}), sort_keys=True),
     }
+
+
+def _videos_json(videos) -> str:
+    return json.dumps([_video_record(v) for v in videos or [] if isinstance(v, Video)])
+
+
+def title_stale_after(next_episode: Mapping[str, Any] | None, *, tz: ZoneInfo,
+                      now: int) -> int:
+    """When a just-described title falls due again: `TITLE_REFRESH_SECONDS` on,
+    or sooner — the local midnight after the episode its description names as
+    airing next.
+
+    A NEXT EPISODE IS A SNAPSHOT that is wrong the day after it airs, and the
+    panel stops drawing it then (app/metadata/panel.py's `presented`). Falling
+    due at that same moment is what has the next view of the title re-read it
+    (app/metadata/refresh.py queues a description past its clock), so the line
+    comes back naming the episode after it rather than staying away until the
+    ordinary clock runs out. A snapshot already past when it was written — TMDB
+    has never answered one, MEASURED — is not a reason to re-read at once, or
+    every view would."""
+    regular = now + TITLE_REFRESH_SECONDS
+    try:
+        day = date.fromisoformat(str((next_episode or {}).get("first_aired") or "")[:10])
+    except ValueError:
+        return regular
+    after = int(datetime.combine(day + timedelta(days=1), time(), tzinfo=tz).timestamp())
+    return min(regular, after) if after > now else regular
 
 
 class Written(NamedTuple):
@@ -776,6 +807,8 @@ class _Spelled(NamedTuple):
     season: tuple[int, dict, list[tuple[int, dict]]] | None
     # Each season the list beside it names: (season, values).
     listed: list[tuple[int, dict]]
+    # When the title falls due again (`title_stale_after`).
+    stale_after: int
 
 
 def _spell(item: Answer, *, tz: ZoneInfo, now: int) -> _Spelled:
@@ -796,7 +829,8 @@ def _spell(item: Answer, *, tz: ZoneInfo, now: int) -> _Spelled:
         # itself (DetailPort's `seasons`): a description keeps its list, so a
         # stored answer offers the seasons a fresh one does.
         listed=_listed_tails(item.seasons if item.seasons is not None
-                             else list(answer.get("seasons") or []), now))
+                             else list(answer.get("seasons") or []), now),
+        stale_after=title_stale_after(answer.get("next_episode"), tz=tz, now=now))
 
 
 class _Filed(NamedTuple):
@@ -937,8 +971,7 @@ def plan(conn: db.Connection, answers: Iterable[Answer], *, tz: ZoneInfo,
         if moved:
             before["title_key"] = key
         changes = {**words.values, "title_key": key, "enriched": 1,
-                   "stale_after": now + TITLE_REFRESH_SECONDS, "failed_at": None,
-                   "fail_count": 0}
+                   "stale_after": words.stale_after, "failed_at": None, "fail_count": 0}
         if words.title:
             changes.update(title=words.title, title_fold=rows.fold_title(words.title))
         if words.poster:
@@ -1093,9 +1126,10 @@ def _described_sql(source: str, names: list[str]) -> str:
 # applied in the batch's order.
 _SEASON_WRITES = {name: f"given.{name}" for name in (
     "name", "overview", "episode_count", "premiere", "air_dates_json", "cast_json",
-    "stale_after")} | {"failed_at": "NULL", "fail_count": "0"}
+    "videos_json", "stale_after")} | {"failed_at": "NULL", "fail_count": "0"}
 _SEASON_REWRITES: dict[str, str | None] = dict.fromkeys(
-    ("name", "overview", "episode_count", "premiere", "air_dates_json", "cast_json"))
+    ("name", "overview", "episode_count", "premiere", "air_dates_json", "cast_json",
+     "videos_json"))
 
 
 # AN EPISODE'S DESCRIPTION, over whatever group a listing or the episode drain
@@ -1138,6 +1172,7 @@ def _season_tails(season: int, answer: Mapping[str, Any], *, tz: ZoneInfo,
         "premiere": str(premiere.get("first_aired") or "") if premiere else "",
         "air_dates_json": json.dumps([day.isoformat() if day else None for day in days]),
         "cast_json": json.dumps(list(answer.get("cast") or [])),
+        "videos_json": _videos_json(answer.get("season_videos")),
         "stale_after": season_stale_after(days, now), "failed_at": None, "fail_count": 0}
     each = []
     for episode, day in zip(episodes, days):
@@ -1452,6 +1487,10 @@ def _loads_list(text: Any) -> list:
     return value if isinstance(value, list) else []
 
 
+def _videos_of(text: Any) -> list[Video]:
+    return [video for video in (_video_from(v) for v in _loads_list(text)) if video is not None]
+
+
 def season_row(conn: db.Connection, row, season: int):
     """The season's group of `row`'s service — None where it has none."""
     return conn.execute(_season_sql(row["source"], "AND season = ?"),
@@ -1531,12 +1570,16 @@ def read(conn: db.Connection, source: str, media: str, own_id: Any,
         "rating": ratings.get(str(source)),
         "imdb_rating": ratings.get("imdb"),
         "certification": str(row["certification"] or ""),
-        "videos": [video for video in (_video_from(v) for v in _loads_list(row["videos_json"]))
-                   if video is not None],
+        "videos": _videos_of(row["videos_json"]),
         "first_aired": str(row["first_aired"] or ""),
         "homepage": str(row["homepage"] or ""),
+        "logo": str(row["logo"] or ""),
+        "collection": _loads(row["collection_json"]),
+        "next_episode": _loads(row["next_episode_json"]) or None,
         "season": season,
         "season_title": str(of_season["name"] or "") if of_season is not None else "",
+        "season_videos": (_videos_of(of_season["videos_json"]) if of_season is not None
+                          else []),
         "season_count": int(row["season_count"] or 0),
         # THE SEASON LIST, in base.SeasonsAnswer's shape: every season this
         # service's groups hold episodes of — the list its own answers stated,

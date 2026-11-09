@@ -32,7 +32,8 @@ from zoneinfo import ZoneInfo
 from .. import clock, db, providers
 from ..providers import detail_source, videos
 from ..providers import season as season_rules
-from ..providers.base import AIR_DISPLAY, Media, Source, SourceUnavailable, Video, proxied_image
+from ..providers.base import (AIR_DISPLAY, EPISODE_MARKS, LOGO_PARAMS, Media, Source,
+                              SourceUnavailable, Video, proxied_image)
 from . import descriptions, groups, tables
 
 logger = logging.getLogger(__name__)
@@ -55,22 +56,52 @@ def _air_display(first_aired, tz: ZoneInfo) -> str:
     return moment.astimezone(tz).strftime(AIR_DISPLAY)
 
 
-def presented(answer: dict | None, settings) -> dict | None:
-    """A service's answer as a page draws it: its poster and every headshot
-    through the image proxy (the only picture host the Content-Security-Policy
-    admits, and the services' own terms ask that their CDNs not be hotlinked),
-    and each episode's day written for a reader (`air_display`)."""
+def presented(answer: dict | None, settings, source) -> dict | None:
+    """`source`'s answer as a page draws it: its poster, its logo and every
+    headshot through the image proxy (the only picture host the
+    Content-Security-Policy admits, and the services' own terms ask that their
+    CDNs not be hotlinked), each episode's day written for a reader
+    (`air_display`) with the mark its place in the season earns (`mark`, one of
+    base.EPISODE_MARKS by the service's own word — Provider.episode_mark), and
+    the episode airing next only while it still is (`_still_next`)."""
     if answer is None:
         return None
     tz = ZoneInfo(settings.timezone)
+    provider = providers.get(Source(source))
+
+    def episode(row: Mapping[str, Any]) -> dict:
+        mark = provider.episode_mark(str(row.get("episode_type") or ""))
+        return {**row, "air_display": _air_display(row.get("first_aired"), tz),
+                "mark": mark, "mark_label": EPISODE_MARKS.get(mark, "")}
+
+    upcoming = _still_next(answer.get("next_episode"), clock.today())
     return {
         **answer,
         "poster": proxied_image(answer.get("poster")) or "",
+        "logo": proxied_image(answer.get("logo"), LOGO_PARAMS) or "",
         "cast": [{**member, "headshot": proxied_image(member.get("headshot")) or None}
                  for member in answer.get("cast") or []],
-        "episodes": [{**episode, "air_display": _air_display(episode.get("first_aired"), tz)}
-                     for episode in answer.get("episodes") or []],
+        "episodes": [episode(row) for row in answer.get("episodes") or []],
+        "next_episode": episode(upcoming) if upcoming else None,
     }
+
+
+def _still_next(next_episode: Mapping[str, Any] | None, today: date) -> Mapping | None:
+    """The episode an answer names as airing next, while it still does: dated
+    today or later, or not dated yet. A SNAPSHOT of when the service answered
+    (normalize.next_episode_of in TMDB's package), so a stored one is wrong from
+    the day after its episode aired — never drawn then as "next", and the
+    description falls due that same night (descriptions.title_stale_after) so the
+    next view re-reads it."""
+    if not next_episode:
+        return None
+    text = str(next_episode.get("first_aired") or "")[:10]
+    if not text:
+        return next_episode
+    try:
+        return next_episode if date.fromisoformat(text) >= today else None
+    except ValueError:
+        return None
 
 
 def says_anything(details: dict | None) -> bool:
@@ -351,7 +382,7 @@ async def describe_season(settings, chosen: detail_source.Answerer, ids, media,
     links, so it is told which one that was."""
     answerer, details = await _describe_season(settings, chosen, ids, media, season,
                                                cache_only=cache_only)
-    return answerer, presented(details, settings)
+    return answerer, presented(details, settings, answerer.source)
 
 
 async def describe_panel(settings, chosen: detail_source.Answerer, ids, media,
@@ -423,7 +454,13 @@ async def describe_panel(settings, chosen: detail_source.Answerer, ids, media,
     order = [source for source, _port in detail_source.ports()]
     pooled = videos.pool([by_source[source] for source in order if source in by_source],
                          str(answerer.source))
-    return answerer, presented({**details, "videos": pooled, **seasons}, settings)
+    # OPENED ON A SEASON, the menu leads with that season's own videos
+    # (videos.season_first says why); a tab pressed later draws its season's in
+    # its own pane, beside the same one player (templates/_details_season.html).
+    if details.get("season_videos"):
+        pooled = videos.season_first(details["season_videos"], pooled, str(answerer.source))
+    return answerer, presented({**details, "videos": pooled, **seasons}, settings,
+                               answerer.source)
 
 
 def _widened(own, others) -> list[dict]:

@@ -1,0 +1,56 @@
+{
+ "id": 66732,
+ "season_number": 5,
+ "videos": {
+  "results": [
+   {
+    "iso_639_1": "en",
+    "iso_3166_1": "US",
+    "name": "The Cast Looks Back On 10 Years Of Memories",
+    "key": "VpPhzdwk6Ac",
+    "site": "YouTube",
+    "size": 1080,
+    "type": "Featurette",
+    "official": true,
+    "id": "6a57bd0e0e37c5856d722769",
+    "published_at": "2026-07-15T17:00:00.000Z"
+   },
+   {
+    "iso_639_1": "en",
+    "iso_3166_1": "US",
+    "name": "A Momentous Farewell",
+    "key": "09fDddQhlxw",
+    "site": "YouTube",
+    "size": 1080,
+    "type": "Behind the Scenes",
+    "official": true,
+    "id": "6a025afb73410b6b1a846709",
+    "published_at": "2026-05-11T16:00:00.000Z"
+   },
+   {
+    "iso_639_1": "en",
+    "iso_3166_1": "US",
+    "name": "Stranger Things 5 - Sadie Sink Reads Fan Letter",
+    "key": "jSB1O0A8_dY",
+    "site": "YouTube",
+    "size": 1080,
+    "type": "Featurette",
+    "official": true,
+    "id": "696f03ed1e7f40342aabcea9",
+    "published_at": "2026-01-12T01:09:25.000Z"
+   },
+   {
+    "iso_639_1": "en",
+    "iso_3166_1": "US",
+    "name": "Stranger Things 5 - Finn Wolfhard Reads Fan Letter",
+    "key": "8RtnDm6M49k",
+    "site": "YouTube",
+    "size": 1080,
+    "type": "Featurette",
+    "official": true,
+    "id": "696f03f55b7a221319fe0f5e",
+    "published_at": "2026-01-09T16:00:00.000Z"
+   }
+  ]
+ }
+}

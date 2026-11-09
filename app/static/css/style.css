@@ -1978,6 +1978,45 @@ button.search-row { width: 100%; background: none; font: inherit; text-align: le
 .ep-row .ep-title { flex: 1; font-size: 0.85rem; }
 .ep-row .ep-date { color: var(--text-faint); font-size: 0.76rem; white-space: nowrap; }
 .ep-row .ep-rating { color: var(--gold-soft); font-size: 0.76rem; }
+/* AN EPISODE'S PLACE IN ITS SEASON, where the describing service names one that
+   matters (base.EPISODE_MARKS): beside the episode's name, small, in the gold the
+   panel's other facts are marked in. Not `.ep-badge`, which is a card's own
+   episode label, positioned over its poster. */
+.ep-place { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+            border: 1px solid var(--gold-soft); color: var(--gold-soft); font-size: 0.68rem;
+            font-weight: 600; letter-spacing: 0.3px; vertical-align: 1px; white-space: nowrap; }
+/* What airs next, under the show's description. */
+.details-next { margin-top: 10px; color: var(--text-dim); font-size: 0.84rem; }
+.details-next .ep-num { color: var(--accent-blue); font-weight: 700; }
+/* A season's own videos in its pane: one row of choices, each aimed at the
+   panel's one player. */
+.season-videos { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 0; padding: 0; }
+/* THE TITLE'S LOGO IN THE HEADING, at the heading's own scale: a stacked or
+   square logo no taller than about a line and a half of it, a wide one no wider
+   than a short title would run — at 56px by 360px most logos were the largest
+   thing in the panel.
+   A LIGHT HALO, because a logo is lettering made for whatever background its
+   studio chose and nothing says which: MEASURED through the proxy, 60 of 75
+   shows' English logos were light, 11 mid-toned and 4 dark — Last Week Tonight's
+   black lettering all but vanished on this panel. The halo outlines dark
+   lettering and is lost in the edge of light lettering, so no picture has to be
+   fetched and measured to choose a frame (the network badges' `.is-light` is
+   measured, and costs a download per network). It is an OUTLINE more than a
+   glow — a half-pixel line at full white, then a short soft edge — because the
+   thin strokes of a dark logo need a line to be read by, and a wide glow bright
+   enough to give one bloomed around every coloured logo (compared side by side
+   in Chromium and Firefox over Last Week Tonight, Stranger Things and Dark
+   Winds). */
+/* THE HEADING IS AS TALL AS THE LOGO MAY BE, text or not, because the head
+   centres what it holds: the logo arrives after the text heading the opening
+   click wrote, and a heading growing under it moved the add-to-library buttons
+   beside it as it landed. */
+#detailsTitle { min-height: 36px; display: flex; align-items: center; }
+.details-logo { display: block; max-height: 36px; max-width: min(100%, 220px); width: auto;
+                height: auto;
+                filter: drop-shadow(0 0 0.5px #fff)
+                        drop-shadow(0 0 1px rgba(255,255,255,0.9))
+                        drop-shadow(0 0 4px rgba(255,255,255,0.4)); }
 .d-empty { color: var(--text-faint); font-size: 0.84rem; }
 @media (max-width: 520px) { .details-hero img { width: 90px; } }
 
