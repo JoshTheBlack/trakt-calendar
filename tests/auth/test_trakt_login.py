@@ -676,6 +676,21 @@ class ReconnectNoticeTests(TraktOAuthTestCase):
         # And it is still up, because this login is still unlinked.
         self.assertTrue(self.notice_shown())
 
+    def test_adopting_a_token_of_another_account_than_the_one_linked_is_refused(self):
+        """One account of a service per login: an administrator who linked one
+        Trakt account is not given the app-wide token's other one beside it."""
+        self.sign_in_as(self.admin_id)
+        self.link_identity(self.admin_id, "trakt", TRAKT_ID)
+        with patch.object(trakt_auth, "fetch_account",
+                          return_value={"id": OTHER_TRAKT_ID, "name": "Other"}):
+            linked, why = asyncio.run(trakt_routes.adopt_app_token(
+                self.admin_id, load_settings()))
+        self.assertFalse(linked)
+        self.assertIn("different Trakt account", why)
+        rows = asyncio.run(db.fetch_all(
+            "SELECT provider_user_id FROM linked_identities WHERE user_id = ?", (self.admin_id,)))
+        self.assertEqual([row["provider_user_id"] for row in rows], [str(TRAKT_ID)])
+
     def test_a_token_trakt_will_not_resolve_reports_that_instead(self):
         asyncio.run(db.set_meta(auth_routes.TRAKT_RECONNECT_NOTICE, "1"))
         self.sign_in_as(self.admin_id)

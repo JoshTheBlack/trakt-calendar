@@ -590,6 +590,17 @@ class LinkOutcomeTests(PlexAuthTestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["user_id"], owner)
 
+    def test_a_second_plex_account_is_refused_while_one_is_linked(self):
+        user = self.make_user("linker", calendar_approved=True)
+        self.sign_in_as(user)
+        self.assertSignedInTo(self.poll(self.start("/auth/plex/link")), "/me")
+        self.assertStopped(self.poll(self.start("/auth/plex/link", pin=_pin(pin_id=PIN_ID + 1)),
+                                     account={"id": OTHER_PLEX_ID, "name": "second"}),
+                           plex_routes.HOLDS_ANOTHER)
+        rows = self.identities()
+        self.assertEqual([(row["user_id"], row["provider_user_id"]) for row in rows],
+                         [(user, str(PLEX_ID))])
+
     def test_relinking_refreshes_the_token(self):
         user = self.make_user("linker", calendar_approved=True)
         self.sign_in_as(user)

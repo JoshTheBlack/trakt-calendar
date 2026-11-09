@@ -48,9 +48,10 @@ from .handshakes import (HANDSHAKE_COOKIE, HANDSHAKE_COOKIE_SECURE, HANDSHAKE_RE
                          consume_handshake, create_handshake, handshake_cookie_matches,
                          held_on_handshake, hold_on_handshake, peek_handshake,
                          read_handshake_cookie, set_handshake_cookie)
-from .identities import (REFRESH_LEASE_SECONDS, AccountUnavailable, IdentityInUse,
-                         IdentityWritesBlocked, LastLoginMethod, LoginOutcome, ProviderIdentity,
-                         RegistrationRefused, claim_identity_refresh, find_identity,
+from .identities import (REFRESH_LEASE_SECONDS, AccountUnavailable, AnotherAccountHeld,
+                         IdentityInUse, IdentityWritesBlocked, LastLoginMethod, LoginOutcome,
+                         ProviderIdentity, RegistrationRefused, claim_identity_refresh,
+                         find_identity,
                          insert_linked_identity, link_provider_identity, list_identities,
                          login_with_provider_identity, release_identity_refresh,
                          store_identity_tokens, unlink_identity)
@@ -78,8 +79,8 @@ from .users import (DISPLAY_NAME_MAX, IDENTIFIER_RE, MIN_PASSWORD_LENGTH, RESERV
                     update_password_hash, user_count, username_availability_error)
 
 __all__ = [
-    "ATTEMPT_RETENTION_SECONDS", "AccountUnavailable", "AuthError", "AuthLevel",
-    "COOKIE_NAME", "COOKIE_NAME_SECURE", "COOKIE_PROBE", "CannotDeleteSelf", "CurrentUser",
+    "ATTEMPT_RETENTION_SECONDS", "AccountUnavailable", "AnotherAccountHeld", "AuthError",
+    "AuthLevel", "COOKIE_NAME", "COOKIE_NAME_SECURE", "COOKIE_PROBE", "CannotDeleteSelf", "CurrentUser",
     "DEPENDENCY_FOR_LEVEL", "DISPLAY_NAME_MAX",
     "HANDSHAKE_COOKIE", "HANDSHAKE_COOKIE_SECURE", "HANDSHAKE_MAX_ATTEMPTS",
     "HANDSHAKE_REJECTED", "HANDSHAKE_TTL_SECONDS", "HANDSHAKE_WINDOW_SECONDS",

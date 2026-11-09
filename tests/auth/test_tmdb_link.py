@@ -299,6 +299,26 @@ class OneLinkPerAccountTests(TmdbLinkTestCase):
             (self.user_id,)))
         self.assertEqual(len(rows), 1)
 
+    def test_a_second_account_past_both_checks_is_refused_at_the_write_and_revoked(self):
+        """The rule every service's link is held to stands behind TMDB's own:
+        a second TMDB account that raced past the route's checks is refused
+        where the row would be written, and its fresh grant ended at TMDB."""
+        state, _ = self.start()
+        asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
+            conn, user_id=self.user_id, provider="tmdb",
+            provider_user_id="0123456789abcdef01234567", display_name="Other",
+            access_token="another-grant")))
+        with patch.object(tmdb_routes, "_holds_a_link", return_value=False):
+            resp = self.callback(state)
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn(tmdb_routes.ALREADY_CONNECTED, resp.text)
+        self.assertIn(USER_TOKEN, self.tmdb.revoked)
+        rows = asyncio.run(db.fetch_all(
+            "SELECT provider_user_id FROM linked_identities WHERE user_id = ? "
+            "AND provider = 'tmdb'", (self.user_id,)))
+        self.assertEqual([row["provider_user_id"] for row in rows],
+                         ["0123456789abcdef01234567"])
+
     def test_after_an_unlink_connect_works_again(self):
         self.link()
         self.client.post("/me/identities/unlink", json={"provider": "tmdb"})

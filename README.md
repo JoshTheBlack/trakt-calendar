@@ -384,6 +384,11 @@ to sign in, so it cannot be anyone's last way in either. **Unlink** on the same 
 removes it and tells TMDB to forget the connection; if TMDB can't be reached, the page says
 so and the connection can be removed on themoviedb.org under **Settings ▸ Sessions**.
 
+**Approve only a link you started yourself.** TMDB ties an approval to the link, not to
+the browser that opened it, so whoever started a link gets the TMDB account of whoever
+approves it — approving somebody else's link connects your TMDB account to *their* account
+here. TMDB's approval page names this instance's TMDB application.
+
 ## Simkl — an optional second source
 
 Simkl fills the calendar alongside Trakt, can sign people in, and can read a linked

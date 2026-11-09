@@ -96,6 +96,18 @@ class IdentityInUse(Exception):
     """
 
 
+class AnotherAccountHeld(Exception):
+    """The signed-in account already holds a DIFFERENT account of this service.
+
+    A second link would add a second row for the service beside the first —
+    linked_identities is unique on the service's account, not on whose it is —
+    and every reader of that service's grant (a tracker read, a watchlist write,
+    a token refresh, an unlink) would then pick between the two by whichever row
+    it happened to read first. Refused, never replaced: which account a person
+    means to keep is theirs to say, by unlinking the one they do not.
+    """
+
+
 class RegistrationRefused(Exception):
     """A provider sign-in would have created an account, and may not.
 
@@ -159,11 +171,15 @@ async def link_provider_identity(*, identity: ProviderIdentity, user_id: int) ->
     """Attach a provider account to the signed-in account, or refuse.
 
     Raises IdentityInUse when the provider account already belongs to someone
-    else here. Re-linking one this account already holds is not an error — it
-    just refreshes the stored token, which is what a user clicking "reconnect"
-    is asking for — which is exactly why IdentityWritesBlocked is checked here
-    first: that refresh overwrites the row's existing tokens unconditionally,
-    so it is refused up front rather than partway through, the same guard
+    else here, and AnotherAccountHeld when this account already holds a
+    different account of the same service — ONE ACCOUNT OF A SERVICE PER
+    ACCOUNT HERE, decided at this one write so every link route, and the
+    app-wide Trakt token's adoption, are held to it alike. Re-linking the
+    account this one already holds is not an error — it just refreshes the
+    stored token, which is what a user clicking "reconnect" is asking for —
+    which is exactly why IdentityWritesBlocked is checked here first: that
+    refresh overwrites the row's existing tokens unconditionally, so it is
+    refused up front rather than partway through, the same guard
     save_settings() already applies to app-level secrets.
     """
     if encryption_flow.secret_writes_blocked():
@@ -185,6 +201,12 @@ async def link_provider_identity(*, identity: ProviderIdentity, user_id: int) ->
                 raise IdentityInUse()
             _refresh_identity(conn, int(existing["id"]), identity, ts)
         else:
+            # Read inside the write, so two links finishing at once cannot both
+            # find the account holding none of this service and both insert.
+            if conn.execute(
+                    "SELECT 1 FROM linked_identities WHERE user_id = ? AND provider = ?",
+                    (user_id, identity.provider)).fetchone() is not None:
+                raise AnotherAccountHeld()
             insert_linked_identity(
                 conn, user_id=user_id, provider=identity.provider,
                 provider_user_id=identity.provider_user_id,

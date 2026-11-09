@@ -79,6 +79,7 @@ logger = logging.getLogger(__name__)
 THROTTLED = "throttled"
 REGISTRATION_REFUSED = "registration_refused"
 IDENTITY_IN_USE = "identity_in_use"
+ANOTHER_ACCOUNT_HELD = "another_account_held"
 ACCOUNT_UNAVAILABLE = "account_unavailable"
 NO_SESSION = "no_session"
 KEY_UNHEALTHY = "key_unhealthy"
@@ -192,15 +193,19 @@ async def complete_provider_link(
     identity: auth.ProviderIdentity,
     current,
     already_linked: str,
+    holds_another: str,
     key_unhealthy: str,
 ) -> LinkResult | Refusal:
     """Attach a provider identity to the account already in session.
 
     The same shape one layer smaller: no registration, so no throttle and no
-    invite, but the same refusals with the same meanings. There is one extra —
-    IdentityWritesBlocked — because linking WRITES a token pair, and a link is
+    invite, but the same refusals with the same meanings. There are two extra.
+    IdentityWritesBlocked, because linking WRITES a token pair, and a link is
     the only one of the two paths that can be asked to overwrite tokens that are
-    already sealed at rest.
+    already sealed at rest. And ANOTHER_ACCOUNT_HELD: the account in session
+    already holds a different account of this service (auth.AnotherAccountHeld
+    says why that is refused rather than added), and `holds_another` is the
+    service's sentence telling the person to unlink that one first. 409.
 
     `current` is the signed-in user. None means the handshake was consumed
     without one, which the consumption itself already required, so it is refused
@@ -212,6 +217,8 @@ async def complete_provider_link(
         await auth.link_provider_identity(identity=identity, user_id=current.user_id)
     except auth.IdentityInUse:
         return Refusal(IDENTITY_IN_USE, already_linked, 409)
+    except auth.AnotherAccountHeld:
+        return Refusal(ANOTHER_ACCOUNT_HELD, holds_another, 409)
     except auth.AccountUnavailable:
         return Refusal(ACCOUNT_UNAVAILABLE, auth.HANDSHAKE_REJECTED, 403)
     except auth.IdentityWritesBlocked:

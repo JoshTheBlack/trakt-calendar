@@ -62,6 +62,10 @@ NOT_CONFIGURED = (
 ALREADY_LINKED = (
     "That Trakt account is already linked to another user on this instance."
 )
+HOLDS_ANOTHER = (
+    "A different Trakt account is already linked to yours. Unlink it on your "
+    "account page first, then connect this one."
+)
 
 UPSTREAM_FAILED = (
     "Trakt could not complete the sign-in. Please try again in a moment."
@@ -97,6 +101,7 @@ _LOGIN_NOTICES = {
 _LINK_NOTICES = {
     provider_login.NO_SESSION: ("Sign-in link not valid", {}),
     provider_login.IDENTITY_IN_USE: ("Already linked", _BACK_TO_ACCOUNT),
+    provider_login.ANOTHER_ACCOUNT_HELD: ("Already connected", _BACK_TO_ACCOUNT),
     provider_login.ACCOUNT_UNAVAILABLE: ("Sign-in failed", {}),
     provider_login.KEY_UNHEALTHY: ("Encryption needs attention", _BACK_TO_ACCOUNT),
 }
@@ -277,7 +282,8 @@ async def _finish_link(request: Request, settings: Settings,
     """
     outcome = await provider_login.complete_provider_link(
         identity=identity, current=current,
-        already_linked=ALREADY_LINKED, key_unhealthy=KEY_UNHEALTHY,
+        already_linked=ALREADY_LINKED, holds_another=HOLDS_ANOTHER,
+        key_unhealthy=KEY_UNHEALTHY,
     )
     if isinstance(outcome, provider_login.Refusal):
         return await _refusal_notice(request, outcome, _LINK_NOTICES)
@@ -377,6 +383,16 @@ async def adopt_app_token(user_id: int, settings: Settings) -> tuple[bool, str |
             "The Trakt account this token belongs to is already linked to "
             f"{await _identity_owner_label(str(account['id']))} on this instance. "
             "Unlink it there first, then try again."
+        )
+    except auth.AnotherAccountHeld:
+        # This login already holds a DIFFERENT Trakt account: one account of a
+        # service per login, so the app-wide one is not added beside it.
+        logger.warning("This login already holds a different Trakt account than the "
+                       "app-wide token's.")
+        return False, (
+            "This login already has a different Trakt account linked than the one "
+            "this token belongs to. Unlink that one on your account page first, then "
+            "try again."
         )
     except auth.AccountUnavailable:
         return False, "This login can't be linked to right now."

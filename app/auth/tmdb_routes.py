@@ -30,6 +30,16 @@ TMDB, and both follow from what was measured:
     trades THAT one. A callback cannot hand over a request token somebody else
     approved and so link their TMDB account to this one.
 
+WHAT NOTHING HERE CAN TELL: WHO APPROVED. TMDB binds an approval to the REQUEST
+TOKEN, not to a browser or a person — whoever opens the approval address while
+signed in to TMDB and presses Approve grants their own account to whoever started
+the link. So the person who starts a link receives the grant of whichever TMDB
+account approves its token: somebody persuaded to approve someone else's approval
+link would link THEIR TMDB account to that someone's account here (starting one
+needs an account on this instance). TMDB's approval page names this instance's
+TMDB application, which is the only warning anybody gets; the exchange answers
+with the approving account's id and nothing that says who pressed the button.
+
 THE GRANT IS SEALED AT REST like every token (linked_identities.access_token,
 enc:v1: when a key is set), opened only where it is sent, and never logged,
 cached or put in an address. TMDB issues no refresh token and its grant has no
@@ -90,6 +100,7 @@ _BACK_TO_ACCOUNT = {"back": "/me", "back_label": "Back to your account"}
 _LINK_TITLES = {
     provider_login.NO_SESSION: "Link not valid",
     provider_login.IDENTITY_IN_USE: "Already linked",
+    provider_login.ANOTHER_ACCOUNT_HELD: "Already connected",
     provider_login.ACCOUNT_UNAVAILABLE: "Link failed",
     provider_login.KEY_UNHEALTHY: "Encryption needs attention",
 }
@@ -190,7 +201,7 @@ async def tmdb_callback(request: Request):
     )
     outcome = await provider_login.complete_provider_link(
         identity=identity, current=current, already_linked=ALREADY_LINKED,
-        key_unhealthy=KEY_UNHEALTHY)
+        holds_another=ALREADY_CONNECTED, key_unhealthy=KEY_UNHEALTHY)
     if isinstance(outcome, provider_login.Refusal):
         # The grant was minted for a link that did not happen: end it at TMDB
         # rather than leave a connection standing that nothing here will use.
@@ -205,13 +216,17 @@ async def tmdb_callback(request: Request):
 async def _holds_a_link(user_id: int) -> bool:
     """Whether `user_id` already has a TMDB link — of ANY TMDB account.
 
-    ONE TMDB LINK PER ACCOUNT, refused rather than replaced. Linking a provider
-    account this user already holds is a "reconnect" elsewhere — it refreshes a
-    token with a clock (auth.link_provider_identity) — but a TMDB grant has no
-    clock, so there is nothing to refresh: re-linking would only overwrite a
-    grant nothing here then revokes, leaving a session standing at TMDB, and
-    linking a SECOND TMDB account would give this one two rows that every reader
-    of the grant (`grant_for_user`) and the unlink would have to choose between.
+    ONE TMDB LINK PER ACCOUNT, refused rather than replaced — and STRICTER than
+    the rule every service's link is held to at the one write
+    (auth.link_provider_identity refuses a DIFFERENT account of a service the
+    account already holds, auth.AnotherAccountHeld). There, re-linking the SAME
+    account is a "reconnect" that refreshes a token with a clock; a TMDB grant
+    has no clock, so there is nothing to refresh: re-linking would only overwrite
+    a grant nothing here then revokes, leaving a session standing at TMDB. So
+    TMDB refuses the same account too, and asks BEFORE the exchange, because a
+    grant minted for a link that is then refused has to be revoked again. Two
+    rules, not one: the shared one still stands behind this, for a second TMDB
+    link racing the first past both of these checks.
     """
     row = await db.fetch_one(
         "SELECT 1 FROM linked_identities WHERE user_id = ? AND provider = ?",

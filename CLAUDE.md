@@ -376,6 +376,16 @@ handshake's state — TMDB sends the browser back to that address exactly — ap
 at TMDB and exchanged once. The request token rides SEALED on the handshake row
 (`handshakes.hold_on_handshake`), so the callback trusts nothing from the URL but
 the state, and the state only beside its cookie and the session that started it.
+WHAT NOTHING CAN TELL IS WHO APPROVED: TMDB binds an approval to the request token,
+not to a browser, so whoever starts a link receives the grant of whichever TMDB
+account approves its token — a person persuaded to approve someone else's approval
+link links their TMDB account to that someone's account here (starting one needs an
+account on this instance); TMDB's approval page naming this instance's application
+is the only warning. ONE ACCOUNT OF A SERVICE PER ACCOUNT HERE, for every link:
+`identities.link_provider_identity` refuses a different account of a service the
+account already holds (`AnotherAccountHeld`, told to unlink first) and keeps
+reconnect of the same one; TMDB is stricter (`tmdb_routes._holds_a_link`, the same
+account too and before the exchange, since its grant has no clock to refresh).
 The grant is stored like every link (`linked_identities`, provider `tmdb`, the
 account's 24-character object id, the token sealed; `session_token` stays NULL —
 v3 takes the v4 bearer, MEASURED). `app/auth/revocation.py`'s `_LINKED` is the one

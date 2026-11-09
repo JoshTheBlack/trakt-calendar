@@ -91,6 +91,10 @@ NOT_CONFIGURED = (
 ALREADY_LINKED = (
     "That Simkl account is already linked to another user on this instance."
 )
+HOLDS_ANOTHER = (
+    "A different Simkl account is already linked to yours. Unlink it on your "
+    "account page first, then connect this one."
+)
 
 UPSTREAM_FAILED = (
     "Simkl could not complete the sign-in. Please try again in a moment."
@@ -135,6 +139,7 @@ _LOGIN_NOTICES = {
 _LINK_NOTICES = {
     provider_login.NO_SESSION: ("Sign-in link not valid", {}),
     provider_login.IDENTITY_IN_USE: ("Already linked", _BACK_TO_ACCOUNT),
+    provider_login.ANOTHER_ACCOUNT_HELD: ("Already connected", _BACK_TO_ACCOUNT),
     provider_login.ACCOUNT_UNAVAILABLE: ("Sign-in failed", {}),
     provider_login.KEY_UNHEALTHY: ("Encryption needs attention", _BACK_TO_ACCOUNT),
 }
@@ -344,7 +349,8 @@ async def _finish_link(request: Request, settings: Settings,
     """Render provider_login's link completion as a browser redirect."""
     outcome = await provider_login.complete_provider_link(
         identity=identity, current=current,
-        already_linked=ALREADY_LINKED, key_unhealthy=KEY_UNHEALTHY,
+        already_linked=ALREADY_LINKED, holds_another=HOLDS_ANOTHER,
+        key_unhealthy=KEY_UNHEALTHY,
     )
     if isinstance(outcome, provider_login.Refusal):
         return await _refusal_notice(request, outcome, _LINK_NOTICES)

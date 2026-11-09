@@ -303,14 +303,46 @@ class SharedRedirectSignInTests(_RedirectProvider):
         self.assertEqual(rows[0]["display_name"], "After")
         self.assertEqual(rows[0]["provider_user_id"], str(self.ACCOUNT_ID))
 
-    def test_a_different_numeric_id_is_a_different_identity(self):
+    def test_a_second_account_of_the_service_is_refused_while_one_is_linked(self):
+        """One account of a service per account here: a second row beside the
+        first would leave every reader of the grant picking between them. The
+        link already held is kept exactly as it was, and the person is told to
+        unlink it first."""
         user = self.make_user("collector", calendar_approved=True)
         self.sign_in_as(user)
         self.callback(self.start(self.path("link")), account_id=self.ACCOUNT_ID,
                       name="Same Name")
+        resp = self.callback(self.start(self.path("link")), account_id=self.OTHER_ACCOUNT_ID,
+                             name="Same Name")
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn(self.routes_module.HOLDS_ANOTHER, resp.text)
+        rows = self.identities()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["provider_user_id"], str(self.ACCOUNT_ID))
+
+    def test_after_an_unlink_a_different_account_links(self):
+        user = self.make_user("collector", calendar_approved=True)
+        self.sign_in_as(user)
+        self.insert_identity(user)
+        asyncio.run(db.execute("DELETE FROM linked_identities WHERE user_id = ?", (user,)))
+        resp = self.callback(self.start(self.path("link")), account_id=self.OTHER_ACCOUNT_ID)
+        self.assertEqual(resp.status_code, 303)
+        self.assertEqual([row["provider_user_id"] for row in self.identities()],
+                         [str(self.OTHER_ACCOUNT_ID)])
+
+    def test_a_different_numeric_id_is_a_different_identity(self):
+        """Two people, two accounts of the service: two identities, each its own."""
+        first = self.make_user("first", calendar_approved=True)
+        self.sign_in_as(first)
+        self.callback(self.start(self.path("link")), account_id=self.ACCOUNT_ID,
+                      name="Same Name")
+        second = self.make_user("second", calendar_approved=True)
+        self.sign_in_as(second)
         self.callback(self.start(self.path("link")), account_id=self.OTHER_ACCOUNT_ID,
                       name="Same Name")
-        self.assertEqual(len(self.identities()), 2)
+        self.assertEqual(sorted((int(row["user_id"]), row["provider_user_id"])
+                                for row in self.identities()),
+                         [(first, str(self.ACCOUNT_ID)), (second, str(self.OTHER_ACCOUNT_ID))])
 
     def test_an_account_response_without_a_numeric_id_is_refused(self):
         state = self.start()
