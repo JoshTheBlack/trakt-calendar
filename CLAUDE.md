@@ -408,7 +408,11 @@ registered Source (None: keeps no ratings — Simkl), a board offers one press p
 linked service that keeps them, the press names its service, and an unknown name is
 `UnknownRatingsService`, never read as Trakt. TMDB scores in half points and a
 half rounds UP. A seed registers its titles through `metadata.ensure_many` in
-bounded turns before its own transaction (`core.REGISTER_TURN_TITLES`).
+bounded turns before its own transaction (`core.REGISTER_TURN_TITLES`), and so does
+a film's WHOLE COLLECTION, added from that film's board panel
+(`add_titles(..., in_turns=True)`): the request names the board row alone, and
+which collection and which films are TMDB's word (`ranker_sources.film_collection`
+from its stored description, `collection_items` from one cached `/collection/{id}`).
 
 **TMDB is first in `Source`, and nothing it supplies outlives six months.**
 `app/providers/base.py`'s `Source` declares TMDB first, and that ORDER is the

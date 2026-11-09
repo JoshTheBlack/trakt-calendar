@@ -30,6 +30,7 @@ import anyio.to_thread
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import (HTMLResponse, JSONResponse, RedirectResponse,
                                Response)
+from markupsafe import Markup
 
 from . import (core as ranker, exports as ranker_export, grid_builder,
                imports as ranker_import, item_keys, seasons as ranker_seasons,
@@ -812,7 +813,68 @@ async def _item_details(request: Request, *, season_only: bool) -> Response:
         # store knows for it (identity.every_id).
         links=detail_source.outbound_links(await title_identity.every_id(
             media, {**item["ids"], **(details.get("ids") or {})}), media),
-        carry=("board", "key"))
+        carry=("board", "key"),
+        actions=_collection_action(params.get("board") or "", item, chosen, details))
+
+
+def _collection_action(board_uid: str, item: dict, chosen, details: dict) -> str:
+    """The panel's "add the whole collection" button, for a film TMDB described
+    as one of a collection (ranker_sources.film_collection says why only TMDB's
+    word counts); "" otherwise."""
+    collection = details.get("collection") or {}
+    if item["media"] != Media.MOVIE or chosen.source != Source.TMDB or not collection:
+        return ""
+    return Markup(templates.get_template("_ranker_collection.html").render(
+        board_uid=board_uid, key=item["key"], collection=collection))
+
+
+@guard.post("/rankings/boards/{board_uid}/items/collection", AuthLevel.RANKER_APPROVED)
+async def add_film_collection(board_uid: str, request: Request):
+    """Add every film of the collection a board's film row belongs to, and answer
+    with the page and a sentence saying what arrived.
+
+    THE REQUEST NAMES A ROW, NEVER A TITLE: the row's key on this board. Which
+    collection that film is in comes from TMDB's description of it, and which
+    films the collection holds from TMDB's own list (ranker_sources), so the
+    films the board receives are what TMDB said. They arrive through the board's
+    one add path and its arrival rule (ranker.add_titles), registered with the
+    title store in bounded turns before that transaction, so a long series does
+    not hold the write lock for every film at once. A film the board holds
+    already — the one the panel was opened on, at least — adds nothing.
+
+    ALWAYS 200 WITH THE OUTCOME SAID ON THE PAGE, as a search add answers: this
+    answer replaces the page."""
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+    notice, ok = "", True
+    try:
+        notice = await _add_collection(user.user_id, board_uid, data.get("key"))
+    except ranker.RankerError as exc:
+        notice, ok = str(exc), False
+    return await _rankings_response(request, user, board_uid, notice=notice, notice_ok=ok)
+
+
+async def _add_collection(user_id: int, board_uid: str, key: Any) -> str:
+    """What adding the collection of the film `key` names did, in a sentence.
+    Raises RankerError with the sentence to show when it cannot."""
+    item = await ranker.fetch_item(user_id, board_uid, key)
+    settings = await load_settings()
+    try:
+        collection = await ranker_sources.film_collection(settings, item)
+        if not collection:
+            raise ranker.ValidationError("TMDB doesn't list this film as part of a collection.")
+        films = await ranker_sources.collection_items(settings, collection)
+    except SourceUnavailable:
+        raise ranker.ValidationError(
+            "Couldn't reach TMDB for the collection just now — try again in a moment.") from None
+    name = collection.get("name") or "the collection"
+    if not films:
+        raise ranker.ValidationError(f"TMDB lists no films in {name}.")
+    added, _converted = await ranker.add_titles(user_id, board_uid, films, added_from="manual",
+                                                in_turns=True)
+    if not added:
+        return f"Every film of {name} is already on this board."
+    return f"Added {added} film{'s' if added != 1 else ''} of {name} to the pool."
 
 
 async def _described_by_the_board(request: Request, user_id: int, item: dict,

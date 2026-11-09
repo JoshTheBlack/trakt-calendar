@@ -297,6 +297,11 @@ title in the details panel, gives the tracker its season totals (in an order tha
 own settings can change), supplies posters and network logos, and adds its videos to the
 panel's menu. Trakt and Simkl answer what TMDB
 doesn't know, and a season TMDB has no episodes of goes to the next service that does.
+A panel TMDB describes also shows the show's own logo as its heading, the episode airing
+next (while it is still to come), finales and mid-season finales in the episode list, and a
+season's own trailers ahead of the show's; a film TMDB files in a collection can add the
+whole collection to a rankings board from its panel there. A title described before you
+upgraded gains these the next time it's re-read, which happens when it is looked at.
 Anyone who set their own service order on their **Account** page keeps it; TMDB comes after
 the services they named.
 

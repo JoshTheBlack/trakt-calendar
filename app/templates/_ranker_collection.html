@@ -1,0 +1,14 @@
+{#- ADD THE WHOLE FILM SERIES, from a board film's details panel: one button in the
+    panel's header slot (_details_modal.html's #detailsActions, delivered out of
+    band by _details.html), offered only for a film TMDB files under a collection.
+
+    A BUTTON POSTING ITSELF, as taking a row off is (_ranker_row.html): it names
+    the board ROW it was opened from and nothing else, and the server reads which
+    collection that film is in from TMDB's description and which films the
+    collection holds from TMDB — so a page cannot hand the board a list of titles.
+    The answer is the board redrawn with a sentence saying what arrived, which
+    also takes the panel down. -#}
+<button type="button" class="arr-btn"
+        hx-post="/rankings/boards/{{ board_uid }}/items/collection"
+        hx-json-enc hx-vals='{{ {"key": key} | tojson }}'
+        hx-trigger="click" hx-target="body" hx-swap="innerHTML">＋ Add all of {{ collection.name or 'this collection' }}</button>

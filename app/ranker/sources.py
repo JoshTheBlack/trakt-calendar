@@ -43,9 +43,10 @@ from .. import metadata, providers
 from ..auth import trakt_routes, viewer
 # The stored-title half of every search. See the module docstring for why the
 # ranker reads it through the title store's verb rather than a query of its own.
-from ..metadata import typed_search as stored_search
-from ..providers import title_search
-from ..providers.tmdb import account as tmdb_account, transport as tmdb_transport
+from ..metadata import panel as metadata_panel, typed_search as stored_search
+from ..providers import detail_source, title_search
+from ..providers.tmdb import (account as tmdb_account, detail as tmdb_detail,
+                              transport as tmdb_transport)
 from ..providers.trakt import TraktError, detail as trakt_detail, sync as trakt_sync
 from ..config import Settings, load_settings
 # Re-exported deliberately: `sources.Media` and `sources.parse_media` are what
@@ -57,6 +58,7 @@ from ..config import Settings, load_settings
 # re-exported: the tracker keys its own rows on the same waterfall's answer, so a
 # second copy would be two definitions of what makes two titles the same one.
 from ..providers.base import Media, parse_media, resolve_identity  # noqa: F401
+from ..providers.base import Source
 
 logger = logging.getLogger(__name__)
 
@@ -448,6 +450,47 @@ async def board_item(settings: Settings,
     return {**item, "match_source": known.triple.match_source,
             "match_id": known.triple.match_id, "ids": learned,
             "tmdb": int_or_none(learned.get("tmdb"))}
+
+
+# ---------------------------------------------------------------------------
+# a film's whole collection
+# ---------------------------------------------------------------------------
+# A FILM SERIES IS TMDB'S WORD: its description of a film names the collection
+# the film belongs to (`belongs_to_collection`), and only TMDB groups films so.
+# What the board offers is therefore asked of TMDB by name — never of whichever
+# service describes the row — and a film with no tmdb id has no collection here.
+
+async def film_collection(settings: Settings, item: Mapping[str, Any]) -> dict:
+    """The collection a board's film row belongs to — {"id", "name"} — as TMDB's
+    description of it states, or {} for a show, a film in none, and a film TMDB
+    cannot describe.
+
+    FROM THE TITLE STORE, which holds the description the row's own details panel
+    drew (the panel is where the add is offered): asked of TMDB, and kept, only
+    where it holds none — app/metadata/panel.py's `describe`, the one way a
+    description is read."""
+    tmdb = int_or_none((item.get("ids") or {}).get("tmdb")) or int_or_none(item.get("tmdb"))
+    if str(item.get("media")) != str(Media.MOVIE) or tmdb is None:
+        return {}
+    chosen = detail_source.choose(settings, {"tmdb": tmdb})
+    if chosen is None or chosen.source != Source.TMDB:
+        return {}
+    described = await metadata_panel.describe(settings, chosen, Media.MOVIE, None,
+                                              ids=item.get("ids") or {"tmdb": tmdb})
+    return dict((described or {}).get("collection") or {})
+
+
+async def collection_items(settings: Settings, collection: Mapping[str, Any]
+                           ) -> list[dict[str, Any]]:
+    """Every film TMDB files under `collection`, as board items, in the order they
+    came out — the instance's catalogue credential, one cached request
+    (providers/tmdb/detail.py's `fetch_collection`). Raises SourceUnavailable
+    when TMDB could not be asked."""
+    parts = await tmdb_detail.fetch_collection(settings, int(collection["id"]))
+    refs = (TitleRef(media=Media.MOVIE, title=part.title, ids={"tmdb": part.tmdb_id},
+                     year=part.year if isinstance(part.year, int) else None)
+            for part in parts)
+    return [item for item in (ref.as_item() for ref in refs) if item is not None]
 
 
 # ---------------------------------------------------------------------------

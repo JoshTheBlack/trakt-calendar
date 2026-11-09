@@ -705,6 +705,7 @@ async def add_titles(
     refs: list[Mapping[str, Any]],
     *,
     added_from: str = "manual",
+    in_turns: bool = False,
 ) -> Arrivals:
     """Add titles to a board's pool, saying how many rows were created and how
     many whole-show rows became the season that arrived.
@@ -717,16 +718,25 @@ async def add_titles(
     `refs` are mappings carrying the item fields; the provider adapters that
     produce them convert their own value type into this shape, so nothing in
     this module knows which service a title came from.
+
+    `in_turns` registers the titles with the title store BEFORE the add's own
+    transaction, in bounded turns (`_register_in_turns`), which then only reads
+    where each is filed — for an add of many titles at once (a whole film
+    collection), whose registering would otherwise hold the write lock for all
+    of them in one transaction. An add of one title registers it inside, as it
+    always has.
     """
     if added_from not in ADDED_FROM_VALUES:
         raise ValidationError(f"Unknown source {added_from!r}.")
     rows = [_normalize_ref(ref) for ref in refs]
+    if in_turns:
+        await _register_in_turns(rows)
     ts = db.now()
 
     def _work(conn: db.Connection) -> Arrivals:
         board = _resolve_board(conn, user_id, board_uid)
         board_id = int(board["id"])
-        filed = [_filed(conn, row, register=True) for row in rows]
+        filed = [_filed(conn, row, register=not in_turns) for row in rows]
         plan = _plan_arrivals(filed, _item_ids(conn, board_id))
         # Counted against the cap before anything is written, so a request that
         # would overflow is refused whole rather than half applied.

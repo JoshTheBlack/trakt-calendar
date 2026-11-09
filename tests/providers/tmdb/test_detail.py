@@ -190,6 +190,35 @@ class TheSeasonSummaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tmdb.asked, [])
 
 
+class TheCollectionTests(unittest.IsolatedAsyncioTestCase):
+
+    async def test_a_collections_films_in_the_order_they_came_out(self):
+        tmdb, patched = answering(collection__726871=fixture("collection_dune"))
+        with patched:
+            parts = await detail.fetch_collection(SETTINGS, 726871)
+        self.assertEqual([part.title for part in parts],
+                         ["Dune", "Dune: Part Two", "Dune: Part Three"])
+        self.assertEqual(parts[0], detail.CollectionPart(438631, "Dune", 2021))
+        self.assertEqual([path for path, _, _ in tmdb.asked], ["collection/726871"])
+
+    async def test_an_undated_film_goes_last(self):
+        body = {"parts": [{"id": 2, "title": "Later", "release_date": ""},
+                          {"id": 1, "title": "First", "release_date": "2001-01-01"}]}
+        _tmdb, patched = answering(collection__9=body)
+        with patched:
+            parts = await detail.fetch_collection(SETTINGS, 9)
+        self.assertEqual([(p.tmdb_id, p.year) for p in parts], [(1, 2001), (2, "")])
+
+    async def test_a_collection_tmdb_does_not_hold_is_empty(self):
+        _tmdb, patched = answering()
+        with patched:
+            self.assertEqual(await detail.fetch_collection(SETTINGS, 1), [])
+
+    async def test_a_tmdb_that_cannot_be_asked_raises(self):
+        with mock.patch.object(transport, "cached_get", _Tmdb(down=True)):
+            with self.assertRaises(transport.TmdbError):
+                await detail.fetch_collection(SETTINGS, 726871)
+
 class ThePickerFactsAndRecordsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_season_picker(self):

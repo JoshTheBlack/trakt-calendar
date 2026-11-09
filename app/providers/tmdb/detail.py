@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date
+from typing import NamedTuple
 
 from ...config import Settings
 from .. import season as season_rules
@@ -259,6 +260,41 @@ async def fetch_title_facts(settings: Settings, tmdb_id, media) -> TitleFacts:
     info = await title_payload(settings, tmdb_id, media) or {}
     return TitleFacts(normalize.title_of(info, media),
                       normalize.network_of(info) if media is Media.SHOW else "")
+
+
+class CollectionPart(NamedTuple):
+    """One film of a TMDB collection: its tmdb id, its name and its year ("" when
+    TMDB has not dated it)."""
+    tmdb_id: int
+    title: str
+    year: int | str
+
+
+async def fetch_collection(settings: Settings, collection_id: int) -> list[CollectionPart]:
+    """Every film TMDB files under the collection `collection_id` (a film's
+    `belongs_to_collection`, normalize.collection_of), in release order with the
+    undated last; [] for a collection TMDB does not hold (404).
+
+    PUBLIC CATALOGUE DATA like every read here: the instance's token, the shared
+    response cache, under the six-month ceiling (transport.py). One request
+    however many films the collection holds. Raises TmdbError when TMDB could not
+    be asked."""
+    try:
+        payload = await transport.cached_get(settings, f"collection/{int(collection_id)}")
+    except transport.TmdbNotFound:
+        return []
+    dated = []
+    for part in (payload or {}).get("parts") or ():
+        if not isinstance(part, dict) or not isinstance(part.get("id"), int):
+            continue
+        if part.get("media_type") not in (None, "movie"):
+            continue
+        dated.append((normalize.first_aired(part, Media.MOVIE),
+                      CollectionPart(int(part["id"]), normalize.title_of(part, Media.MOVIE),
+                                     normalize.year_of(part, Media.MOVIE))))
+    # The order the films came out in, the undated after them.
+    dated.sort(key=lambda pair: (not pair[0], pair[0]))
+    return [part for _day, part in dated]
 
 
 async def records_for(settings: Settings, tmdb_id, media, moments) -> list[Record]:

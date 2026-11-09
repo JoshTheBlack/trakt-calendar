@@ -1,0 +1,31 @@
+{
+ "id": 726871,
+ "name": "Dune Collection",
+ "poster_path": "/lxIGYkpvYjLtYtZH684AQft0FhD.jpg",
+ "parts": [
+  {
+   "id": 438631,
+   "title": "Dune",
+   "release_date": "2021-09-15",
+   "media_type": "movie",
+   "poster_path": "/v1tRXZ4JtD2Iv6fjkPvT4GiwslV.jpg",
+   "original_language": "en"
+  },
+  {
+   "id": 693134,
+   "title": "Dune: Part Two",
+   "release_date": "2024-02-27",
+   "media_type": "movie",
+   "poster_path": "/6izwz7rsy95ARzTR3poZ8H6c5pp.jpg",
+   "original_language": "en"
+  },
+  {
+   "id": 1170608,
+   "title": "Dune: Part Three",
+   "release_date": "2026-12-15",
+   "media_type": "movie",
+   "poster_path": "/glt0v4I89rMWstDNCaFXc5SNyO1.jpg",
+   "original_language": "en"
+  }
+ ]
+}
