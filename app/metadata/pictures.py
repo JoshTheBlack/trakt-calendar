@@ -31,8 +31,15 @@ registry, never taken from the request, and asked with a HEAD:
     the one resolution, which re-keys the title if a service now names it
     differently. The refreshed rows file the services' current addresses (a
     CHANGED address starts with no failures; the same dead one stays capped).
-  - 5xx, 403, a timeout: TRANSIENT. When, and nothing else; no refresh.
-  - Anything an image: ALIVE, and nothing changes.
+  - 5xx, 403, a timeout: TRANSIENT, which alone says nothing certain — but the
+    same address failing so on `TRANSIENT_STRIKES` checks, each at least
+    `STRIKES_APART_SECONDS` after the last one counted, is DEAD (a host answering
+    403 for a deleted file never says 404). Each counted failure is the row's
+    `fail_count` and `last_failed_at` (artwork.strike); the last reaches the cap
+    and the title is healed as for any death.
+  - Anything an image: ALIVE, and the failures counted against it are forgotten
+    (artwork.clear_strikes) — three strikes are three failures with no success
+    between them — and nothing else changes.
 Bounded three ways: a report is checked at most once per address in
 `DEDUPE_SECONDS`, at most `CONFIRMS_PER_MINUTE` a minute, and a title is healed
 at most once in `HEAL_EVERY_SECONDS` however many of its pictures report.
@@ -91,6 +98,15 @@ DEDUPE_SECONDS = 10 * 60
 CONFIRMS_PER_MINUTE = 30
 # One heal per title per this long, however many of its pictures report.
 HEAL_EVERY_SECONDS = 6 * 60 * 60
+# A TRANSIENT ANSWER REPEATED IS AN ANSWER: the same address failing this many
+# checks, each at least STRIKES_APART_SECONDS after the last one counted, is dead.
+# A host that answers 403 for a file it has deleted (S3 or CloudFront behind a
+# private bucket do) never says 404, and every view of the picture paid the
+# proxy's failed fetch — 2.5–5.6 s, MEASURED — for as long as the address was
+# held. A day apart, so an outage of an afternoon is never three strikes; three,
+# the registry's own cap (artwork.MAX_FAIL_COUNT), which the third strike reaches.
+STRIKES_APART_SECONDS = 24 * 60 * 60
+TRANSIENT_STRIKES = artwork.MAX_FAIL_COUNT
 
 # What the signing key is derived for (app/signed_tokens.py).
 _PURPOSE = "picture report token"
@@ -364,8 +380,18 @@ async def confirm(settings, report: Report) -> str:
                         t.key, report.source, refresh.shortened(url))
         await heal(settings, report)
     elif outcome == "transient":
-        await artwork.note_failure(t.media, t.tmdb, t.title_key, report.season,
-                                   report.source, url)
+        strikes = await artwork.strike(t.media, t.tmdb, t.title_key, report.season,
+                                       report.source, url, apart=STRIKES_APART_SECONDS)
+        if strikes is not None and strikes >= TRANSIENT_STRIKES:
+            # The row is at the cap by its own count; what is left of a death is
+            # the heal.
+            logger.info("pictures: %s's %s picture %s failed %d checks a day or more apart "
+                        "— counted dead", t.key, report.source, refresh.shortened(url), strikes)
+            await heal(settings, report)
+            return "dead"
+    else:
+        await artwork.clear_strikes(t.media, t.tmdb, t.title_key, report.season,
+                                    report.source, url)
     return outcome
 
 

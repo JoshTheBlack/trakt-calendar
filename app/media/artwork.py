@@ -375,14 +375,46 @@ async def cap(media: str, tmdb: int | None, title_key: str, season: int | None,
     return result.rowcount > 0
 
 
-async def note_failure(media: str, tmdb: int | None, title_key: str, season: int | None,
-                       source: str, url: str) -> None:
-    """A picture that failed for a reason that says nothing about the picture —
-    its host erring, refusing or slow: when, and nothing else."""
+async def strike(media: str, tmdb: int | None, title_key: str, season: int | None,
+                 source: str, url: str, *, apart: int, now: int | None = None) -> int | None:
+    """Count one failure of `url` that said nothing certain about the picture —
+    its host erring, refusing or slow — when the last failure counted against it
+    is at least `apart` seconds old: `fail_count` up by one and `last_failed_at`
+    now. Returns the count after, or None when nothing was counted (a failure
+    sooner than `apart`, or a row no longer holding `url`).
+
+    A FAILURE SOONER THAN `apart` LEAVES THE CLOCK WHERE IT WAS, or a picture
+    reported every hour would push its own clock forward for ever and never be
+    counted again. The count lives on the row and goes with the address: a
+    service stating a new one starts it fresh (`_upsert`), and reaching
+    MAX_FAIL_COUNT is the cap itself. One statement, read back in the turn it is
+    written in."""
+    ts = db.now() if now is None else now
     table, columns, key = _row_of(media, tmdb, title_key, season, source)
     match = " AND ".join(f"{column} = ?" for column in columns)
-    await db.execute(f"UPDATE {table} SET last_failed_at = ? WHERE {match} AND url = ?",
-                     (db.now(), *key, url))
+
+    def _work(conn: db.Connection) -> int | None:
+        found = conn.execute(
+            f"UPDATE {table} SET fail_count = fail_count + 1, last_failed_at = ? "
+            f"WHERE {match} AND url = ? AND (last_failed_at IS NULL OR last_failed_at <= ?) "
+            f"RETURNING fail_count", (ts, *key, url, ts - apart)).fetchone()
+        return None if found is None else int(found[0])
+
+    return await db.transaction(_work)
+
+
+async def clear_strikes(media: str, tmdb: int | None, title_key: str, season: int | None,
+                        source: str, url: str) -> None:
+    """A check found `url` loading: the failures counted against it (`strike`)
+    are forgotten, so only failures with no success between them add up to a
+    death. A row at the cap is left there — nothing draws it to be checked — and
+    a row with nothing counted is not written at all."""
+    table, columns, key = _row_of(media, tmdb, title_key, season, source)
+    match = " AND ".join(f"{column} = ?" for column in columns)
+    await db.execute(
+        f"UPDATE {table} SET fail_count = 0, last_failed_at = NULL "
+        f"WHERE {match} AND url = ? AND fail_count BETWEEN 1 AND ?",
+        (*key, url, MAX_FAIL_COUNT - 1))
 
 
 @dataclass

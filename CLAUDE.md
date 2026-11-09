@@ -947,7 +947,12 @@ hops has not tried (so two dead pictures never bounce a browser between them),
 and confirms BEHIND the answer: a HEAD of the registry's address, never the
 request's. Dead caps it (`artwork.cap`; the same address re-stated stays capped,
 a new one starts fresh) and queues the WHOLE TITLE from every service at the
-front of the refresh queue; transient notes when and nothing else. Deduped per
+front of the refresh queue. Transient (5xx, 403, a timeout) is a STRIKE, counted
+only a day or more after the last one (`artwork.strike`, the row's own
+`fail_count` / `last_failed_at`, sooner leaving the clock where it was), and the
+third (`pictures.TRANSIENT_STRIKES`, the registry's cap) is a death and heals —
+a host answering 403 for a deleted file never says 404; alive forgets the strikes
+(`artwork.clear_strikes`). Deduped per
 address, bounded per minute, one heal per title per few hours, and every step
 logged at INFO by the title's key. A share page keeps the static chain, and an
 instance with no public base URL has no absolute address to report to.

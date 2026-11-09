@@ -7,8 +7,9 @@ THE PROMISES:
   - THE ANSWER IS AT ONCE AND IS THE SERVER'S: the next picture the registry
     holds in the viewer's order, itself reporting, or the placeholder.
   - THE CONFIRMATION READS THE ADDRESS BACK FROM THE REGISTRY and HEADs it: dead
-    caps it and heals the whole title at the front of the queue; transient notes
-    when and changes nothing else; alive changes nothing; an address replaced
+    caps it and heals the whole title at the front of the queue; transient counts
+    a strike when the last was a day or more before, and the third strike is a
+    death; alive forgets the strikes; an address replaced
     since the page was drawn is not checked. Once per address per few minutes,
     a bounded number a minute, one heal per title per few hours.
   - THE ROUTE IS PUBLIC, AND ONLY AN IMAGE MAY ASK.
@@ -298,8 +299,65 @@ class TheConfirmationTests(DatabaseTestCase):
                 pictures._checked.clear()
                 self.assertEqual(await self.confirm(head), "transient")
         row = await self.trakt_row()
-        self.assertEqual(row["fail_count"], 0)
+        # Counted once: the other two came within the day after it.
+        self.assertEqual(row["fail_count"], 1)
         self.assertIsNotNone(row["last_failed_at"])
+        self.assertEqual(self.healed, [])
+        self.assertIn("trakt", await artwork.urls_for("show", 500), "still drawn")
+
+    async def confirm_on(self, day: int, head=None) -> str:
+        """A check made `day` days after DAY_ZERO, as a fresh report of the address."""
+        pictures._checked.clear()
+        with mock.patch.object(db, "now", return_value=self.DAY_ZERO + day * 86400):
+            return await self.confirm(head or _Head(403))
+
+    DAY_ZERO = 1_800_000_000
+
+    async def test_three_transient_answers_a_day_apart_are_dead(self):
+        """A host answering 403 for a file it deleted never says 404: the third
+        such answer, each a day or more after the last one counted, is a death."""
+        self.assertEqual([await self.confirm_on(day) for day in (0, 1, 2)],
+                         ["transient", "transient", "dead"])
+        row = await self.trakt_row()
+        self.assertEqual(row["fail_count"], artwork.MAX_FAIL_COUNT)
+        self.assertEqual(row["last_failed_at"], self.DAY_ZERO + 2 * 86400)
+        self.assertEqual(self.healed, ["show:tmdb:500"])
+        self.assertEqual(await artwork.urls_for("show", 500), {"simkl": LIVE})
+
+    async def test_failures_sooner_than_a_day_count_once_and_leave_the_clock(self):
+        """An afternoon's outage is one strike, and checks inside the day never
+        push the clock on — or a picture reported hourly would never be counted
+        again."""
+        outcomes = [await self.confirm_on(day) for day in (0, 0.25, 0.5, 0.99)]
+        self.assertEqual(outcomes, ["transient"] * 4)
+        row = await self.trakt_row()
+        self.assertEqual((row["fail_count"], row["last_failed_at"]), (1, self.DAY_ZERO))
+        self.assertEqual(await self.confirm_on(1), "transient")
+        self.assertEqual((await self.trakt_row())["fail_count"], 2)
+        self.assertEqual(self.healed, [])
+
+    async def test_a_new_address_starts_its_count_fresh(self):
+        await self.confirm_on(0)
+        await self.confirm_on(1)
+        renewed = "https://media.trakt.tv/images/shows/500/posters/renewed.jpg"
+        await artwork.record_poster_url("show", 500, "trakt", renewed)
+        pictures._checked.clear()
+        with mock.patch.object(db, "now", return_value=self.DAY_ZERO + 2 * 86400):
+            with mock.patch.object(pictures, "POOL", _Head(403)):
+                outcome = await pictures.confirm(SETTINGS, _report(url=renewed))
+        self.assertEqual(outcome, "transient")
+        self.assertEqual((await self.trakt_row())["fail_count"], 1)
+        self.assertEqual(self.healed, [])
+
+    async def test_a_check_that_finds_it_loading_clears_its_strikes(self):
+        """Three strikes mean three failures with no success between: a host that
+        errs once a day and serves the picture in between is not a dead one."""
+        await self.confirm_on(0)
+        await self.confirm_on(1)
+        self.assertEqual(await self.confirm_on(2, _Head(200, "image/jpeg")), "alive")
+        row = await self.trakt_row()
+        self.assertEqual((row["fail_count"], row["last_failed_at"]), (0, None))
+        self.assertEqual(await self.confirm_on(3), "transient")
         self.assertEqual(self.healed, [])
 
     async def test_a_picture_that_loads_changes_nothing(self):
