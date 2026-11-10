@@ -72,11 +72,12 @@ def _mask(names: Iterable[str]) -> int:
 # 1. the rows
 # ---------------------------------------------------------------------------
 
-def _keys(conn: db.Connection, where: str, params) -> list[dict]:
+def _keys(conn: db.Connection, where: str, params, extra: Sequence[str] = ()) -> list[dict]:
     """Episode rows `where` names (a condition on the row, aliased `e`): which
     row each is and every service's listings of it — what a card is made of,
-    and nothing it says — in one aggregated row (db.aggregated)."""
-    names = episode_rows.listing_names()
+    and nothing it says — in one aggregated row (db.aggregated). `extra`: more
+    columns of the row, by name (the episode words a marked calendar reads)."""
+    names = [*episode_rows.listing_names(), *extra]
     return [dict(zip(names, values)) for values in db.aggregated(
         conn, [f"e.{name}" for name in names], _keys_from(where), params)]
 
@@ -111,7 +112,7 @@ class Listing:
     coordinate) read it as they read a Record."""
     __slots__ = ("source", "air_ts", "date_only", "id", "ids", "known", "label", "season",
                  "episode_number", "title_key", "unit", "media", "instant",
-                 "release_types_by_country")
+                 "release_types_by_country", "mark")
 
     def __init__(self, source: str, air_ts: float, date_only: bool, listing_id: str,
                  ids: dict, known: dict, label: str | None, season: int | None,
@@ -124,6 +125,47 @@ class Listing:
         # A Trakt film's release schedule, from its own releases read
         # (calendar_enrich.overlay_releases) — None where nothing was read.
         self.release_types_by_country: dict | None = None
+        # Which finale the episode is (base.EPISODE_MARKS' key), on a calendar
+        # whose cards say so (`Endpoint.marked`) — "" everywhere else.
+        self.mark = ""
+
+
+class _Reads(NamedTuple):
+    """How one service's listings are read on one calendar."""
+    bit: int               # the calendar bit its listings carry there
+    marker: str | None     # whose word about the episode marks it, if anyone's
+    kept: bool             # a listing stays only where `marker` marks the episode
+
+
+def _calendar_reads(endpoint_key: str) -> dict[str, _Reads]:
+    """{service: how its listings are read on this calendar}. A service that
+    publishes the calendar is read by its bit, and marked by its own word where
+    the calendar's cards say which finale they are; a service that DRAWS it
+    (base.DrawnFrom) is read by the bit of the calendar it draws from and kept
+    where the service it names marks the episode. From the registry alone, so a
+    read worker and the web process answer alike."""
+    endpoint = endpoints.ENDPOINTS[endpoint_key]
+    registered = providers.registered()
+    out = {}
+    for source in groups.sources():
+        provider = registered.get(Source(source))
+        how = provider.capabilities.drawn(endpoint_key) if provider is not None else None
+        if how is not None:
+            out[source] = _Reads(endpoints.ENDPOINTS[how.listings_of].bit,
+                                 str(how.marked_by), True)
+        else:
+            own = source if (endpoint.marked
+                             and groups.has(tables.EPISODES, source, "episode_type")) else None
+            out[source] = _Reads(endpoint.bit, own, False)
+    return out
+
+
+def _mark(stored: episode_rows.Row, marker: str | None) -> str:
+    """Which finale `marker` says the row's episode is, or ""."""
+    if marker is None:
+        return ""
+    word = (stored.stored or {}).get(f"{marker}_episode_type") or ""
+    return providers.registered()[Source(marker)].episode_mark(str(word)) if word else ""
 
 
 class _Identity(NamedTuple):
@@ -169,10 +211,12 @@ def _typed(own: str):
     return int(own) if own.isdigit() else own
 
 
-def _row_listings(row, stored: episode_rows.Row, bit: int, identity,
+def _row_listings(row, stored: episode_rows.Row, reads: dict[str, _Reads], identity,
                   decoded: dict) -> list[Listing]:
-    """Every listing a stored episode row holds on calendar `bit` — less every
-    searched instant whose service's feed lists the same episode there.
+    """Every listing a stored episode row holds on the calendar `reads`
+    describes — less every searched instant whose service's feed lists the same
+    episode there, and every listing of a service drawing the calendar whose
+    episode its marker does not mark.
 
     A SEARCHED LISTING STANDS DOWN FOR ITS FEED HERE TOO, not only when a fill
     takes it off (entries.store_span): a fill reaches a span only when it is
@@ -180,6 +224,10 @@ def _row_listings(row, stored: episode_rows.Row, bit: int, identity,
     not be filled with data for weeks, nor ever by a share page."""
     out = []
     for source in groups.sources():
+        bit, marker, kept = reads[source]
+        mark = _mark(stored, marker)
+        if kept and not mark:
+            continue
         held = [i for i in stored.instants[source] if i.calendars & bit]
         fed = {(i.entry, i.unstated) for i in held if i.fed & bit}
         title = None
@@ -194,10 +242,12 @@ def _row_listings(row, stored: episode_rows.Row, bit: int, identity,
                 listing_id = instant.entry
             else:
                 ids, listing_id = title.ids, title.listing_id
-            out.append(Listing(source, float(instant.at), bool(instant.date_only),
-                               str(listing_id), ids, title.known, instant.label or None,
-                               season, number, stored.key, stored.unit, stored.media,
-                               instant))
+            listing = Listing(source, float(instant.at), bool(instant.date_only),
+                              str(listing_id), ids, title.known, instant.label or None,
+                              season, number, stored.key, stored.unit, stored.media,
+                              instant)
+            listing.mark = mark
+            out.append(listing)
     return out
 
 
@@ -208,23 +258,32 @@ def read_rows(conn: db.Connection, endpoint_key: str, *, first: date | None = No
 
     WHOLE IS THE POINT. One episode is one row, and the row is one card whatever
     dates its services give it — so a listing outside the range is part of a
-    card inside it, and decides which day the card is drawn on (`cards_of`)."""
-    bit = endpoints.ENDPOINTS[endpoint_key].bit
+    card inside it, and decides which day the card is drawn on (`cards_of`).
+
+    A CALENDAR ONE SERVICE DRAWS FROM ANOTHER (base.DrawnFrom — Simkl's finales,
+    its All Episodes listings TMDB marks) is read here, by each service's own
+    bit (`_calendar_reads`), the marked rows found in SQL and the mark decided by the
+    marking service's own word (`Provider.episode_mark`)."""
+    reads = _calendar_reads(endpoint_key)
+    markers = sorted({r.marker for r in reads.values() if r.marker})
+    extra = [f"{marker}_episode_type" for marker in markers]
     decoded: dict = {}
     if titles is not None:
         found = _keys(conn, "e.title_key IN (SELECT value FROM json_each(:titles))",
-                      {"titles": json.dumps(sorted({str(k) for k in titles}))})
+                      {"titles": json.dumps(sorted({str(k) for k in titles}))}, extra)
         parsed = [(row, episode_rows.Row.read(row)) for row in found]
     else:
         lo, hi = episode_rows.epoch(first), episode_rows.epoch(after)
-        found = _keys(conn, f"e.rowid IN ({episode_rows.span_rowids()})",
-                      {"lo": lo, "hi": hi, "bit": bit})
+        bits = {source: r.bit for source, r in reads.items()}
+        typed = {source: r.marker for source, r in reads.items() if r.kept}
+        found = _keys(conn, f"e.rowid IN ({episode_rows.span_rowids(bits=bits, typed=typed)})",
+                      {"lo": lo, "hi": hi}, extra)
         parsed = [(row, stored) for row, stored in
                   ((row, episode_rows.Row.read(row)) for row in found)
-                  if episode_rows.in_span(stored, bit, lo, hi)]
+                  if _in_span(stored, reads, lo, hi)]
     identities = _identities(conn, {stored.key for _row, stored in parsed})
     listings = [listing for _row, stored in parsed
-                for listing in _row_listings(None, stored, bit, identities.get(stored.key),
+                for listing in _row_listings(None, stored, reads, identities.get(stored.key),
                                              decoded)]
     # IN THE ORDER A FILL PRODUCES THEM: air time, then the registry's declared
     # order, the rows' own order kept beneath — a stable sort. It is the order
@@ -232,6 +291,19 @@ def read_rows(conn: db.Connection, endpoint_key: str, *, first: date | None = No
     # list is kept in.
     listings.sort(key=lambda listing: (listing.air_ts, _SOURCE_RANK.get(listing.source, 99)))
     return listings
+
+
+def _in_span(stored: episode_rows.Row, reads: dict[str, _Reads], lo: float,
+             hi: float) -> bool:
+    """Whether any service lists an instant of the row inside [lo, hi) on the
+    calendar, as `reads` reads it."""
+    for source, held in stored.instants.items():
+        bit, marker, kept = reads[source]
+        if kept and not _mark(stored, marker):
+            continue
+        if any(instant.calendars & bit and lo <= instant.at < hi for instant in held):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1118,7 +1190,7 @@ def _listing_record(listing: Listing, row) -> Record:
         # double-length finale is not the show's nominal runtime.
         runtime=(episode_runtime if episode_runtime is not None
                  else row[f"t_{source}_runtime"]),
-        episode_label=listing.label,
+        episode_label=listing.label, episode_mark=listing.mark,
         episode_title=(str(row[f"e_{source}_title"] or "") if described else ""),
         season=listing.season, episode_number=listing.episode_number,
         anime_type=str(row[f"t_{source}_anime_type"] or ""),

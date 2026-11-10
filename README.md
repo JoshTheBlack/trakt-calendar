@@ -312,7 +312,8 @@ each week — the shows on air that week that had nothing on air in the four wee
 each checked against TMDB's own season dates. That takes a few hundred requests a week, so
 it runs in the background: the first time a week is opened, Trakt's and Simkl's cards show
 at once and TMDB's join them within a minute, and the stats box counts the **weeks being
-worked out**. Season Finales and All Episodes stay Trakt's and Simkl's.
+worked out**. TMDB does not fill Season Finales or All Episodes itself, but its episode
+lists are what put Simkl's finales on Season Finales (below).
 
 TMDB gives dates, not times. A card TMDB describes — every card, for anyone whose service
 order starts with TMDB, which is the default — sits on TMDB's day and shows a time only when
@@ -418,7 +419,11 @@ their own account from their **Account** page, and the link refreshes itself.
 
 - It reaches roughly **three years back and three months forward**; outside that, the app
   says the source does not go there rather than drawing an empty month.
-- It has **no season-finale listing**, so the Season Finales calendar is Trakt's alone.
+- It has **no season-finale listing** of its own. Its Season Finales are the episodes on its
+  All Episodes that **TMDB** marks as a finale or a mid-season finale, so they need a TMDB
+  token, and a finale appears once TMDB has been asked about its season (done in the
+  background, a few minutes' worth after an upgrade). A mid-season finale says so on its
+  card.
 - Its records arrive without genres, countries, certifications or networks. The app looks
   those up afterwards and shows how many titles are still waiting; until then a title is
   shown rather than filtered out.

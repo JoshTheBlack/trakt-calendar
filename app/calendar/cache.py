@@ -96,7 +96,7 @@ import calendar as _calendar
 import logging
 import time
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from datetime import date, datetime, timedelta, timezone
 from itertools import groupby
 from typing import Any, NamedTuple
@@ -388,6 +388,23 @@ def _window_sources(endpoint: Endpoint, settings, start: date) -> list[Provider]
     return [p for p in providers.calendar_sources(settings=settings)
             if p.capabilities.answers(endpoint.key) and _covers(p, start)
             and p.calendar_port.calendar_configured(settings)]
+
+
+def drawn_sources(endpoint: Endpoint, settings, start: date) -> list[tuple[str, Endpoint]]:
+    """[(service, the calendar it draws `endpoint` from)] for every service that
+    lists this window of `endpoint` without publishing it (base.DrawnFrom) —
+    under `_window_sources`' own conditions, asked of the calendar it draws
+    from, and only where this instance can read the catalogue whose word keeps
+    its listings (`providers.drawn`). A read of `endpoint` makes those
+    services' windows of that calendar current (`_span_views`); nothing is
+    fetched or stored for `endpoint` itself."""
+    out = []
+    for p in providers.calendar_sources(settings=settings):
+        how = providers.drawn(p, endpoint.key, settings)
+        if (how is not None and p.capabilities.answers(how.listings_of) and _covers(p, start)
+                and p.calendar_port.calendar_configured(settings)):
+            out.append((str(p.source), ENDPOINTS[how.listings_of]))
+    return out
 
 
 async def fetch_window_records(endpoint: Endpoint, settings, start: date, *,
@@ -765,7 +782,8 @@ async def _still_lapsed(endpoint: Endpoint, settings, start: date,
 
 async def ensure_window(endpoint: Endpoint, settings, start: date, *,
                         allow_fetch: bool = True, force: bool = False,
-                        now: int | None = None) -> WindowCoverage:
+                        now: int | None = None,
+                        only: Collection[str] | None = None) -> WindowCoverage:
     """Make one window as current as this read may, and say what it holds.
 
     Fetches and caches when the window is missing, past its TTL, or was filled
@@ -806,16 +824,23 @@ async def ensure_window(endpoint: Endpoint, settings, start: date, *,
         on nobody but Trakt's own clock.
     `force` asks every service in play again, now. Nothing overrides
     allow_fetch, so a share page cannot be made to fetch by anything.
+
+    `only` narrows all of it to those services — a calendar another one DRAWS
+    from (`drawn_sources`) is made current for the drawing service alone.
     """
     ts = db.now() if now is None else now
     ttl = _ttl_seconds(settings, start, ts)
-    in_play = [str(p.source) for p in _window_sources(endpoint, settings, start)]
+    in_play = [str(p.source) for p in _window_sources(endpoint, settings, start)
+               if only is None or str(p.source) in only]
     held = await entries.source_coverage(endpoint.key, start)
     cached = _held_coverage(held)
     if not allow_fetch:
         return cached or WindowCoverage((), (), None)
+    if only is not None and not in_play:
+        return cached or WindowCoverage((), (), None)
     if force or cached is None:
-        return await fill_sources(endpoint, settings, start, None, now=ts)
+        return await fill_sources(endpoint, settings, start,
+                                  None if only is None else in_play, now=ts)
     unasked, behind = _due(endpoint, start, in_play, held, cached, ts, max_age=ttl,
                            failure_after=_FAILED_RETRY_SECONDS)
     if behind:
@@ -1222,12 +1247,31 @@ async def _span_views(endpoint: Endpoint, settings, *, tz: ZoneInfo, start_date:
     # "exception was never retrieved" warning. THE FIRST OF TWO AWAITED PHASES,
     # which is what makes it worth its own span: a read slow HERE was waiting on
     # a service or the database, one slow below was the read itself.
-    with span("calcache.load_windows", n=len(windows), fetch=allow_fetch):
+    # A SERVICE THAT DRAWS THIS CALENDAR FROM ANOTHER OF ITS OWN (base.DrawnFrom
+    # — Simkl's finales are its All Episodes listings TMDB marks) is current
+    # when its windows of THAT calendar are, so those are made current here,
+    # for that service alone, beside the calendar's own.
+    drawn = [(start, source, of) for start in windows
+             for source, of in drawn_sources(endpoint, settings, start)]
+    with span("calcache.load_windows", n=len(windows) + len(drawn), fetch=allow_fetch):
         results = await asyncio.gather(
             *(ensure_window(endpoint, settings, start, allow_fetch=allow_fetch, now=now)
               for start in windows),
+            *(ensure_window(of, settings, start, allow_fetch=allow_fetch, now=now,
+                            only=(source,))
+              for start, source, of in drawn),
             return_exceptions=True,
         )
+    results, drawn_results = results[:len(windows)], results[len(windows):]
+    drawn_incomplete = False
+    for (start, source, of), result in zip(drawn, drawn_results):
+        if isinstance(result, SourceUnavailable):
+            drawn_incomplete = True
+        elif isinstance(result, BaseException):
+            raise result
+        elif (source in result.asked and source not in result.sources
+              and source not in pending_sources(of.key, start)):
+            drawn_incomplete = True
 
     covered: set[date] = set()
     as_of: int | None = None
@@ -1264,7 +1308,7 @@ async def _span_views(endpoint: Endpoint, settings, *, tz: ZoneInfo, start_date:
         # Every window failed and none had a cached copy: there is no degraded
         # span to render, so surface it as the caller's hard error.
         raise first_error
-    partial = errored > 0 or incomplete
+    partial = errored > 0 or incomplete or drawn_incomplete
 
     # THE SPAN'S LISTINGS, READ ONCE AND WHOLE, and both halves are the point.
     # ONCE: windows are where a fill is decided, not where a card is — read window

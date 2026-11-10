@@ -40,6 +40,11 @@ class Endpoint:
     # full `label` stays everywhere else a calendar is named (search results,
     # titles, the picker's own tooltip). Empty falls back to the label.
     short: str = ""
+    # WHETHER A CARD SAYS WHICH FINALE IT IS — "Mid-season finale" — read from
+    # the episode's own word at read (app/calendar/query.py's `read_rows`). On
+    # the finales calendar alone: the owner kept it off All Episodes, whose
+    # cards are heavy enough.
+    marked: bool = False
 
 
 # Order here is the order shown in the UI dropdown.
@@ -70,6 +75,7 @@ ENDPOINTS: dict[str, Endpoint] = {
         has_episode=True,
         description="Season/series finales airing this month.",
         short="Finales",
+        marked=True,
     ),
     "shows": Endpoint(
         key="shows",

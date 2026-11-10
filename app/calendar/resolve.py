@@ -196,7 +196,7 @@ def answering_services(endpoint, settings) -> list[tuple[str, str]]:
     admitted = instance_sources(settings)
     services = [(str(source), provider.label)
                 for source, provider in providers.registered().items()
-                if provider.capabilities.answers(endpoint.key)
+                if providers.lists_calendar(provider, endpoint.key, settings)
                 and (admitted is None or str(source) in admitted)
                 and (settings is None or provider.calendar_port.calendar_configured(settings))]
     return services if len(services) >= 2 else []
@@ -521,6 +521,11 @@ def compose(listed: Sequence[Record], describing: Sequence[Record],
                           else "" if any(r.show_type is not None for r in ordered) else None)
     resolved.season, resolved.episode_number, resolved.episode_label = coordinate
     resolved.air_ts, resolved.date_only = airing
+    # WHICH FINALE, as the first of the card's listings in the viewer's order
+    # that says. Where two services both mark one episode they have agreed every
+    # time it was measured (82 of 82 on a copy of dev), so this is never a
+    # contest, and a listing the calendar marks nothing on says nothing.
+    resolved.episode_mark = next((r.episode_mark for r in listed if r.episode_mark), "")
 
     # ENRICHED IS A PROPERTY OF THE CARD, NOT OF ITS SOURCE. The flag exists so
     # a filter can tell "empty because there is nothing to say" from "empty

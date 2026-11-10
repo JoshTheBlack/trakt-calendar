@@ -768,6 +768,27 @@ search's "where it airs", its season picker and the card its jump lands on
 listing. `tests/calendar/test_placement.py` holds the readers to one answer — a
 day against its month, two viewers on one span, a month's edge, the search.
 
+**A service may LIST a calendar it does not publish, by another service's word.**
+`app/providers/base.py`'s `DrawnFrom` declares it (`Capabilities.drawn_from`):
+Simkl's Season Finales are its All Episodes listings whose episode TMDB's season
+list marks a finale or a mid-season finale. Nothing is fetched or stored for the
+calendar: the read takes each service's listings by its own bit and keeps a
+drawing service's only where its marker's word says so (`query._calendar_reads`,
+`episodes.span_rowids(bits=, typed=)`); a read of the calendar makes the drawing
+service's windows of the calendar it draws from current, for it alone
+(`cache.drawn_sources`, `ensure_window(only=)`); the heartbeat queues the
+marker's reads of the seasons those listings need (`refresh.queue_marks`, a
+season the marker's own description lists, inside `_background_room`). A
+service is OFFERED on a calendar by `providers.lists_calendar` — publishing it,
+or drawing it where the marker's catalogue can be read — and ASKED by
+`capabilities.answers` alone. On a calendar whose cards say which finale they are
+(`Endpoint.marked`, Season Finales only) every listing carries its marker's mark —
+a drawing service's by the service it names, a publishing one's by its own word
+— and the card the first in the viewer's order that states one
+(`Record.episode_mark`, the MID-SEASON FINALE tag). The month-changed check
+watches the calendar's own windows, so a mark landing or the drawn calendar
+refilling shows on the next load, not as the notice.
+
 **A service that describes a title it does not list joins the card as a
 TITLE-ONLY record, which is an opinion on facts and never a listing.**
 `app/calendar/query.py` owns the rules — such a group speaks for a card it does

@@ -106,6 +106,28 @@ def registered() -> dict[Source, Provider]:
     return {source: _REGISTRY[source] for source in Source if source in _REGISTRY}
 
 
+
+def drawn(provider: Provider, endpoint_key: str, settings=None):
+    """How `provider` lists a calendar it does not publish (base.DrawnFrom), or
+    None — and None too where this instance cannot read the catalogue whose word
+    keeps its listings, since then no mark could ever arrive and the calendar
+    would be offered empty. `settings=None` asks about the declaration alone."""
+    how = provider.capabilities.drawn(endpoint_key)
+    if how is None or settings is None:
+        return how
+    marker = registered().get(how.marked_by)
+    return how if marker is not None and marker.catalogue_is_configured(settings) else None
+
+
+def lists_calendar(provider: Provider, endpoint_key: str, settings=None) -> bool:
+    """Whether a viewer can see `provider`'s cards on the calendar: it publishes
+    it, or draws it (`drawn`). THE QUESTION EVERY OFFER OF A SERVICE ON A
+    CALENDAR ASKS; a fill asks `capabilities.answers`, which a drawn calendar
+    never satisfies."""
+    return (provider.capabilities.answers(endpoint_key)
+            or drawn(provider, endpoint_key, settings) is not None)
+
+
 def calendar_sources(*, prefs=None, settings=None) -> list[Provider]:
     """Every source that could put something on this account's calendar, in
     declared order. THE SET THE CACHE FILL ASKS.

@@ -473,20 +473,29 @@ def epoch(day: date) -> float:
     return (day - date(1970, 1, 1)).days * 86400.0
 
 
-def span_rowids(*, titles: bool = False) -> str:
+def span_rowids(*, titles: bool = False, bits: Mapping[str, int] | None = None,
+                typed: Mapping[str, str] | None = None) -> str:
     """The rowids of the episode rows on which some service lists an instant
     inside [:lo, :hi) — the rows a span's reader or writer works on, and some
     more: each service's first instants through its own air-time index, and
     every row holding repeats through theirs (a few hundred), so which instant
     is inside the span, and on which calendar, is the caller's to test.
-    `titles`: only the rows of the titles :titles (a JSON array) names."""
+    `titles`: only the rows of the titles :titles (a JSON array) names.
+
+    `bits`: each service's calendar bit, where services read different calendars
+    — a calendar one of them DRAWS from another (base.DrawnFrom) — in place of
+    the one :bit; `typed`: {service: the service whose word keeps its listings},
+    which narrows that service's arm to rows that word states anything about."""
     of_titles = " AND title_key IN (SELECT value FROM json_each(:titles))" if titles else ""
     arms = []
     for source in groups.sources():
         if not groups.has(tables.EPISODES, source, "air_ts"):
             continue
+        bit = ":bit" if bits is None else str(int(bits[source]))
+        kept = (f" AND {typed[source]}_episode_type != ''"
+                if typed and source in typed else "")
         arms.append(f"SELECT rowid FROM {tables.EPISODES} WHERE {source}_calendars != 0 "
-                    f"AND {source}_calendars & :bit "
+                    f"AND {source}_calendars & {bit}{kept} "
                     f"AND {source}_air_ts >= :lo AND {source}_air_ts < :hi{of_titles}")
         arms.append(f"SELECT rowid FROM {tables.EPISODES} WHERE {source}_repeats_json != '[]'"
                     f"{of_titles}")

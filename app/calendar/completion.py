@@ -151,6 +151,10 @@ async def run(settings, *, today: date | None = None) -> int:
     # Every calendar's titles, not only the premieres and films asked about below:
     # a description is wanted wherever a card is drawn.
     await metadata_refresh.queue_cards(settings, first, last, today=today)
+    # And the seasons a drawn calendar's listings are kept by (Simkl's finales,
+    # by TMDB's marks), after the titles: a season is asked only once its
+    # title's description has listed it.
+    await metadata_refresh.queue_marks(settings, first, last, today=today)
     cards = await entries.listed_cards(calendar_search.COMPLETABLE_ENDPOINTS, first, last)
     if not cards:
         return 0

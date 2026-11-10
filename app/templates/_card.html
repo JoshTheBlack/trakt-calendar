@@ -208,6 +208,11 @@
         <div class="premiere-badge{% if item.season == 1 %} first-season{% endif %}">
             {{ 'SERIES PREMIERE' if item.season == 1 else 'RETURNING' }}</div>
         {% endif %}
+        {# A MID-SEASON FINALE SAYS SO, in the same place and for the same reason:
+           it qualifies the episode label. Only the finales calendar marks an
+           episode (endpoints.Endpoint.marked), so this draws nowhere else, and a
+           season's own finale needs no label on a calendar of finales. #}
+        {% if item.episode_mark == 'mid_season_finale' %}<div class="premiere-badge">MID-SEASON FINALE</div>{% endif %}
         {% if item.runtime %}<div class="runtime-badge">⏱️ {{ item.runtime }}m</div>{% endif %}
         {# THE LOGO IS DRAWN ONLY WHERE THERE IS ONE, and `logo_networks` is how
            this page knows — {network: Logo}, asked once per response by

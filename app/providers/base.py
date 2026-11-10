@@ -470,6 +470,10 @@ class Record:
     episode_title: str = ""
     season: int | None = None
     episode_number: int | None = None
+    # WHICH FINALE THE EPISODE IS (an EPISODE_MARKS key), on a calendar whose
+    # cards say so (endpoints.Endpoint.marked) — "" everywhere else, and on
+    # every record a service hands over: it is read from the title store.
+    episode_mark: str = ""
 
     # SIMKL'S OWN "IS THIS ACTUALLY A FILM" ANSWER, carried on the record so
     # app/calendar/filter.py's read-time prune can act on it — see
@@ -1019,6 +1023,34 @@ class Reach(StrEnum):
     MONTHS = "months"
 
 
+
+@dataclass(frozen=True)
+class DrawnFrom:
+    """A calendar a source LISTS WITHOUT PUBLISHING IT: its listings on another
+    of its own calendars, kept where a second service's word about the episode
+    says it belongs.
+
+    Simkl publishes no finales — nothing in its calendar or catalogue flags one
+    — but every episode it lists is on its All Episodes, and TMDB's season
+    lists say which episode ends a season (`episode_type`). So Simkl's Season
+    Finales are its All Episodes listings whose episode TMDB marks a finale or a
+    mid-season finale (`Provider.episode_mark` into EPISODE_MARKS), read from
+    the title store at READ (app/calendar/query.py's `read_rows`): nothing is
+    fetched or stored for the calendar itself, and a mark learned later puts the
+    card on the next read. The source fetches nothing for `endpoint`
+    (`answers` stays False — no fill asks it, no coverage row is written for
+    it); a read of `endpoint` makes the source's `listings_of` windows current
+    instead (app/calendar/cache.py's `_span_views`).
+
+    A DECLARATION, NEVER A FALLBACK: which service's word keeps a listing is
+    named here, it keeps the listing whoever else lists the episode, and the
+    source answers for its own listings alone.
+    """
+    endpoint: str        # the calendar listed this way
+    listings_of: str     # the source's own calendar its listings come from
+    marked_by: Source    # whose word about the episode keeps a listing
+
+
 @dataclass(frozen=True)
 class Capabilities:
     """What a source can be asked for, so a route can check instead of guessing.
@@ -1087,9 +1119,23 @@ class Capabilities:
     # REGISTERED source declares a set for every table, which the conformance
     # test holds it to.
     store_columns: StoreColumns = StoreColumns()
+    # CALENDARS THIS SOURCE LISTS WITHOUT PUBLISHING THEM (`DrawnFrom`), each
+    # from another of its own calendars by another service's word. Never among
+    # `endpoints`: nothing fetches them.
+    drawn_from: tuple[DrawnFrom, ...] = ()
 
     def answers(self, endpoint_key: str) -> bool:
+        """Whether this source PUBLISHES the calendar: a fill asks it."""
         return endpoint_key in self.endpoints
+
+    def drawn(self, endpoint_key: str) -> DrawnFrom | None:
+        """How this source lists a calendar it does not publish, or None."""
+        return next((d for d in self.drawn_from if d.endpoint == endpoint_key), None)
+
+    def lists(self, endpoint_key: str) -> bool:
+        """Whether a viewer can see this source's cards on the calendar: it
+        publishes it, or draws it from another of its own."""
+        return self.answers(endpoint_key) or self.drawn(endpoint_key) is not None
 
     def authoritative(self, start: date, days: int) -> tuple[date, date]:
         """[first, after) — every day an answer for [start, start + days) is

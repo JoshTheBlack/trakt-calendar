@@ -18,7 +18,7 @@ from ...config import Settings
 from ...endpoints import Endpoint
 from .. import register
 from ..base import (EPISODE_KEEPING, EPISODE_LISTING, SEASON_KEEPING, TITLE_KEEPING,
-                    Capabilities, Media, Reach, Record, SearchCatalogue, SearchPage,
+                    Capabilities, DrawnFrom, Media, Reach, Record, SearchCatalogue, SearchPage,
                     SeasonsAnswer, Source, StoreColumns, TitleFacts, Video)
 from . import by_id, calendar, detail, search, sync, titles, watchlist
 from .transport import SimklBlockedError, SimklError, SimklRateLimitError
@@ -256,13 +256,19 @@ class _SimklProvider:
     source = Source.SIMKL
     label = "Simkl"
     capabilities = Capabilities(
-        # 'shows/finales' is deliberately absent — nothing in Simkl's calendar
-        # or catalog flags a season or series finale, and deriving one from
-        # the per-title episode lists is future work that needs its own
-        # enrichment drain. The other four are what the CDN archive can
-        # answer today; see app/providers/simkl/calendar.py for the
-        # derivation each one uses.
+        # 'shows/finales' is not PUBLISHED — nothing in Simkl's calendar or
+        # catalog flags a season or series finale — so it is DRAWN (below).
+        # The four here are what the CDN archive answers; see
+        # app/providers/simkl/calendar.py for the derivation each one uses.
         endpoints=frozenset({"shows/new", "shows/premieres", "shows", "movies"}),
+        # SIMKL'S FINALES: its All Episodes listings whose episode TMDB's
+        # season list marks a finale or a mid-season finale (base.DrawnFrom
+        # says how). MEASURED on a copy of dev, October and November 2026:
+        # where TMDB had typed an episode Trakt's finales calendar lists and
+        # Simkl's All Episodes lists too, TMDB called it a finale 82 times of
+        # 82; and it marked 61 finales on Simkl's list that Trakt's calendar
+        # does not carry.
+        drawn_from=(DrawnFrom("shows/finales", "shows", Source.TMDB),),
         # Measured against Simkl's calendar archive, and re-verified live
         # against the same CDN files: it reaches roughly 37-42 months back
         # (growing month by month as the archive extends) and 3-4 months

@@ -451,7 +451,8 @@ def _coverage_gap(prefs: source_prefs.SourcePrefs,
     alternatives = [p for p in providers.calendar_sources(settings=settings)
                     if str(p.source) not in named_sources
                     and p.calendar_port.calendar_configured(settings)
-                    and (endpoint is None or p.capabilities.answers(endpoint.key))
+                    and (endpoint is None
+                         or providers.lists_calendar(p, endpoint.key, settings))
                     and calendar_cache.month_covered(p, year, month)]
     switch_url = None
     if alternatives:

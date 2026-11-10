@@ -53,7 +53,7 @@ from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from .. import after_response, db, providers
+from .. import after_response, db, endpoints, providers
 from ..providers import detail_source
 from ..providers.base import Media, SourceUnavailable
 from . import descriptions, episodes, groups, holders, identity, rows, tables
@@ -68,6 +68,7 @@ REASON_DEAD_PICTURE = "dead picture"
 REASON_CEILING = "ceiling"
 REASON_LISTED = "listed"
 REASON_CARD = "card"
+REASON_MARK = "mark"
 
 # HOW MANY ROWS ONE VIEW MAY QUEUE. A panel is one title: every service that
 # knows it, its row and the season on screen. A page of rows is a tracker month
@@ -559,13 +560,14 @@ async def queue_listed(settings, *, now: int | None = None) -> int:
 
 
 # WHAT THE HEARTBEAT QUEUES ON ITS OWN, rather than for a viewer: sparse listings
-# (`queue_listed`) and the calendar's titles a service has no description of yet
-# (`queue_cards`). TOGETHER they keep no more than a service's minute
+# (`queue_listed`), the calendar's titles a service has no description of yet
+# (`queue_cards`) and the seasons whose episodes a drawn calendar is kept by
+# (`queue_marks`). TOGETHER they keep no more than a service's minute
 # (`PER_MINUTE`) waiting, so whatever a viewer queues is never more than a
 # minute's drain behind them; a minute each would put it two minutes behind. The
 # sparse listings, queued first each tick, are the ones a card draws with no
 # words at all.
-_BACKGROUND_REASONS = (REASON_LISTED, REASON_CARD)
+_BACKGROUND_REASONS = (REASON_LISTED, REASON_CARD, REASON_MARK)
 
 
 def _background_room(conn: db.Connection, source: str) -> int:
@@ -664,6 +666,101 @@ async def queue_cards(settings, first: date, last: date, *, today: date,
     queued = await db.transaction(_work)
     if queued:
         logger.info("title store: queued %d calendar title(s) for a description", queued)
+    return queued
+
+
+def _marked_calendars() -> list[tuple[str, int, str]]:
+    """(service drawing a calendar, the bit of the calendar it draws from, the
+    service whose word keeps its listings) for every calendar a registered
+    service lists without publishing (base.DrawnFrom), from the registry."""
+    out = []
+    for source, provider in providers.registered().items():
+        for how in provider.capabilities.drawn_from:
+            out.append((str(source), endpoints.ENDPOINTS[how.listings_of].bit,
+                        str(how.marked_by)))
+    return out
+
+
+def _marks_owed_sql(drawer: str, bit: int, marker: str) -> str:
+    """The (media, `marker`'s own id, season) of every season `drawer` lists an
+    episode of on calendar `bit` in [:lo, :hi) whose episodes `marker` has
+    stated no place for — or stated longer ago than its episode clock allows —
+    nearest :today first, at most :limit, none already queued.
+
+    ONLY A SEASON THE MARKER'S OWN DESCRIPTION OF THE TITLE LISTS (its group on
+    the season row, which the title's description files), so a season it does
+    not have is never asked about, and a season read that fails is recorded on
+    that row (descriptions.plan_failures), backed off a day and given up after
+    LISTED_GIVE_UP_AFTER like every owed group. A title it has not described yet
+    is `queue_cards`' to queue first."""
+    own = f"CAST(json_extract(i.ids_json, '$.{rows.ID_NAMESPACE[marker]}') AS TEXT)"
+    return (
+        f"SELECT d.media, {own} AS own_id, d.season FROM ("
+        "  SELECT e.title_key, e.media, e.season, "
+        f"         MIN(ABS(julianday(date(e.{drawer}_air_ts, 'unixepoch')) "
+        "                 - julianday(:today))) AS distance "
+        f"  FROM {tables.EPISODES} e "
+        f"  WHERE e.{drawer}_calendars != 0 AND e.{drawer}_calendars & {int(bit)} "
+        f"    AND e.{drawer}_air_ts >= :lo AND e.{drawer}_air_ts < :hi AND e.season > 0 "
+        "  GROUP BY e.title_key, e.season) d "
+        f"JOIN {tables.TITLES} i ON i.title_key = d.title_key "
+        f"JOIN {tables.SEASONS} s ON s.title_key = d.title_key AND s.season = d.season "
+        f"WHERE {own} IS NOT NULL AND s.{marker}_fetched_at IS NOT NULL "
+        f"  AND COALESCE(s.{marker}_fail_count, 0) < :give_up "
+        f"  AND (s.{marker}_failed_at IS NULL OR s.{marker}_failed_at < :retry_before) "
+        f"  AND NOT EXISTS (SELECT 1 FROM {tables.EPISODES} t "
+        "                  WHERE t.title_key = d.title_key AND t.season = d.season "
+        f"                   AND t.{marker}_episode_type != '' "
+        f"                   AND (t.{marker}_stale_after IS NULL OR t.{marker}_stale_after > :now)) "
+        "  AND NOT EXISTS (SELECT 1 FROM metadata_refresh q "
+        f"                  WHERE q.source = '{marker}' AND q.media = d.media "
+        f"                    AND q.source_id = {own} AND q.season = d.season) "
+        "ORDER BY d.distance LIMIT :limit")
+
+
+async def queue_marks(settings, first: date, last: date, *, today: date,
+                      now: int | None = None) -> int:
+    """Queue a read of each season whose episodes keep a drawn calendar's
+    listings (base.DrawnFrom — Simkl's finales are its All Episodes listings
+    TMDB's season lists mark) and that the marking service has not typed, for
+    airings dated in [first, last), nearest `today` first, with reason
+    `REASON_MARK`, inside what the heartbeat may keep waiting
+    (`_background_room`). Returns how many were queued.
+
+    WHY: a mark is in the title store only where something read the season — a
+    details panel opened on it — so without this a finale reaches the calendar
+    only once somebody has looked at the show. MEASURED on a copy of dev,
+    October and November 2026: Simkl's All Episodes listed 3,674 (title, season)
+    pairs, TMDB had typed the episodes of 508; a season read is one request, so
+    the backlog is a few minutes of TMDB's background allowance after a deploy,
+    then each season as it comes due on the episode clock."""
+    ts = db.now() if now is None else now
+    askable = {source for source, _port in _askable(settings)}
+    calendars = [c for c in _marked_calendars() if c[2] in askable]
+    if not calendars:
+        return 0
+
+    def _owed(conn) -> list[tuple[str, list[Entry]]]:
+        return [(marker, [Entry(marker, str(row["media"]), str(row["own_id"]),
+                                int(row["season"]))
+                          for row in conn.execute(_marks_owed_sql(drawer, bit, marker), {
+                              "lo": episodes.epoch(first), "hi": episodes.epoch(last),
+                              "today": today.isoformat(), "now": ts,
+                              "give_up": LISTED_GIVE_UP_AFTER,
+                              "retry_before": ts - _BACKOFF_MAX_SECONDS,
+                              "limit": PER_MINUTE[marker]})])
+                for drawer, bit, marker in calendars]
+
+    owed = await db.run(_owed)
+
+    def _work(conn) -> int:
+        return sum(_queue(conn, entries, now=ts, reason=REASON_MARK,
+                          limit=_background_room(conn, marker))
+                   for marker, entries in owed)
+
+    queued = await db.transaction(_work)
+    if queued:
+        logger.info("title store: queued %d season(s) whose episodes keep a calendar", queued)
     return queued
 
 
