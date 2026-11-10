@@ -203,9 +203,8 @@ async def tmdb_callback(request: Request):
         identity=identity, current=current, already_linked=ALREADY_LINKED,
         holds_another=ALREADY_CONNECTED, key_unhealthy=KEY_UNHEALTHY)
     if isinstance(outcome, provider_login.Refusal):
-        # The grant was minted for a link that did not happen: end it at TMDB
-        # rather than leave a connection standing that nothing here will use.
-        await _revoke_quietly(settings, grant.access_token)
+        # The grant was minted for a link that did not happen, and the refusal
+        # has ended it at TMDB already (provider_login.end_unkept_grant).
         return await _notice(request, _LINK_TITLES[outcome.kind], outcome.message,
                              status=outcome.status)
     response = RedirectResponse(outcome.redirect_target, status_code=303)

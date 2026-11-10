@@ -386,6 +386,10 @@ is the only warning. ONE ACCOUNT OF A SERVICE PER ACCOUNT HERE, for every link:
 account already holds (`AnotherAccountHeld`, told to unlink first) and keeps
 reconnect of the same one; TMDB is stricter (`tmdb_routes._holds_a_link`, the same
 account too and before the exchange, since its grant has no clock to refresh).
+EVERY REFUSED LINK OR SIGN-IN REVOKES THE TOKEN IT WAS HANDED, at the service,
+unless a row of that service account or the instance itself holds that very token
+or a row cannot be read (`provider_login.end_unkept_grant`) — stored nowhere, it
+could never be revoked later.
 The grant is stored like every link (`linked_identities`, provider `tmdb`, the
 account's 24-character object id, the token sealed; `session_token` stays NULL —
 v3 takes the v4 bearer, MEASURED). `app/auth/revocation.py`'s `_LINKED` is the one

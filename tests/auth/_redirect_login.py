@@ -320,6 +320,46 @@ class SharedRedirectSignInTests(_RedirectProvider):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["provider_user_id"], str(self.ACCOUNT_ID))
 
+    # -- a refusal ends the grant it was handed ------------------------------
+
+    def test_a_refused_link_revokes_the_token_it_was_handed(self):
+        """Refused, the fresh token is stored nowhere, so nothing here could
+        revoke it later; it would stand at the service under the person's
+        connected apps. The link already held keeps its own."""
+        user = self.make_user("collector", calendar_approved=True)
+        self.sign_in_as(user)
+        self.callback(self.start(self.path("link")), account_id=self.ACCOUNT_ID)
+        resp = self.callback(self.start(self.path("link")), account_id=self.OTHER_ACCOUNT_ID,
+                             token=self.Token(access=self.access("fresh"),
+                                              refresh=self.REFRESH_PREFIX + "fresh-r"))
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(self.revoked, [self.access("fresh")])
+
+    def test_a_refused_sign_in_revokes_the_token_it_was_handed(self):
+        self.sign_out()
+        resp = self.callback(self.start(invite="never-existed"),
+                             token=self.Token(access=self.access("fresh"),
+                                              refresh=self.REFRESH_PREFIX + "fresh-r"))
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self.revoked, [self.access("fresh")])
+
+    def test_a_refusal_keeps_a_token_another_account_here_holds(self):
+        """A service may answer a second authorization with the token it already
+        issued. Revoking it then would end the owner's working link."""
+        owner = self.make_user("owner", calendar_approved=True)
+        self.insert_identity(owner, access_token=self.access("shared"))
+        self.sign_in_as(self.make_user("interloper", calendar_approved=True))
+        resp = self.callback(self.start(self.path("link")),
+                             token=self.Token(access=self.access("shared"),
+                                              refresh=self.REFRESH_PREFIX + "shared-r"))
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(self.revoked, [])
+
+    def test_a_completed_link_revokes_nothing(self):
+        self.sign_in_as(self.make_user("linker", calendar_approved=True))
+        self.callback(self.start(self.path("link")))
+        self.assertEqual(self.revoked, [])
+
     def test_after_an_unlink_a_different_account_links(self):
         user = self.make_user("collector", calendar_approved=True)
         self.sign_in_as(user)

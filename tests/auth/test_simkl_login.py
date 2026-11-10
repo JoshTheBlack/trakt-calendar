@@ -93,6 +93,18 @@ class SimklOAuthTestCase(AppTestCase):
         # Something has to exist or the first-run gate answers every request
         # before any of this is reached.
         self.admin_id = self.make_user("admin_user", is_admin=True, calendar_approved=True)
+        # Every revocation is recorded rather than sent: an unlink revokes, and so
+        # does every refused completion (provider_login.end_unkept_grant) —
+        # without this they reach the real api.simkl.com.
+        self.revoked: list[str] = []
+
+        async def _revoke(client_id, client_secret, access_token):
+            self.revoked.append(access_token)
+
+        self.real_revoke_token = simkl_auth.revoke_token
+        patcher = patch.object(simkl_auth, "revoke_token", side_effect=_revoke)
+        self.revoke_mock = patcher.start()
+        self.addCleanup(patcher.stop)
 
     # -- fixtures ----------------------------------------------------------
 
@@ -397,7 +409,7 @@ class IdentityKeyTests(SimklOAuthTestCase):
             return _StubResponse({})
 
         with patch("app.providers.simkl.transport.send", side_effect=_send):
-            asyncio.run(simkl_auth.revoke_token("cid", "secret", "a-token"))
+            asyncio.run(self.real_revoke_token("cid", "secret", "a-token"))
         self.assertEqual(seen["url"], simkl_auth.REVOKE_URL)
         self.assertEqual(seen["data"]["token"], "a-token")
 
@@ -595,23 +607,12 @@ class PerUserTokenTests(SimklOAuthTestCase):
 
 
 class UnlinkTests(SharedRedirectUnlinkTests, SimklOAuthTestCase):
-    """Unlinking now also asks Simkl to forget the authorization (v2 documents
-    POST /oauth2/revoke where v1 documented none), so every test here patches
-    that call — without it they reach the real api.simkl.com.
+    """Unlinking also asks Simkl to forget the authorization (v2 documents
+    POST /oauth2/revoke where v1 documented none); the base case records that
+    call in `self.revoked`.
 
     Answered with the account card at 200; the sentence, if any, sits under the
     linked services."""
-
-    def setUp(self):
-        super().setUp()
-        self.revoked: list[str] = []
-
-        async def _revoke(client_id, client_secret, access_token):
-            self.revoked.append(access_token)
-
-        patcher = patch.object(simkl_auth, "revoke_token", side_effect=_revoke)
-        self.revoke_mock = patcher.start()
-        self.addCleanup(patcher.stop)
 
     def said(self, resp) -> str:
         self.assertEqual(resp.status_code, 200, resp.text)

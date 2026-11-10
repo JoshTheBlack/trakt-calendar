@@ -83,6 +83,17 @@ class TraktOAuthTestCase(AppTestCase):
         # Something has to exist or the first-run gate answers every request
         # before any of this is reached.
         self.admin_id = self.make_user("admin_user", is_admin=True, calendar_approved=True)
+        # Every revocation is recorded rather than sent: an unlink revokes, and so
+        # does every refused completion (provider_login.end_unkept_grant) —
+        # without this they reach the real api.trakt.tv.
+        self.revoked: list[str] = []
+
+        async def _revoke(client_id, client_secret, access_token):
+            self.revoked.append(access_token)
+
+        patcher = patch.object(trakt_auth, "revoke_token", side_effect=_revoke)
+        self.revoke_mock = patcher.start()
+        self.addCleanup(patcher.stop)
 
     # -- fixtures ----------------------------------------------------------
 
@@ -494,22 +505,11 @@ class RefreshSerializationTests(TraktOAuthTestCase):
 
 
 class UnlinkTests(SharedRedirectUnlinkTests, TraktOAuthTestCase):
-    """Unlinking now also asks Trakt to forget the authorization, so every test
-    here patches that call — without it they reach the real api.trakt.tv.
+    """Unlinking also asks Trakt to forget the authorization; the base case
+    records that call in `self.revoked`.
 
     The answer is the whole account card at 200 (unlinking changes several of its
     sections), with any sentence in the line under the linked services."""
-
-    def setUp(self):
-        super().setUp()
-        self.revoked: list[str] = []
-
-        async def _revoke(client_id, client_secret, access_token):
-            self.revoked.append(access_token)
-
-        patcher = patch.object(trakt_auth, "revoke_token", side_effect=_revoke)
-        self.revoke_mock = patcher.start()
-        self.addCleanup(patcher.stop)
 
     def unlink(self, provider="trakt"):
         return self.client.post("/me/identities/unlink", json={"provider": provider})
