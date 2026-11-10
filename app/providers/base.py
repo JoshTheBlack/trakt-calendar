@@ -1132,11 +1132,6 @@ class Capabilities:
         """How this source lists a calendar it does not publish, or None."""
         return next((d for d in self.drawn_from if d.endpoint == endpoint_key), None)
 
-    def lists(self, endpoint_key: str) -> bool:
-        """Whether a viewer can see this source's cards on the calendar: it
-        publishes it, or draws it from another of its own."""
-        return self.answers(endpoint_key) or self.drawn(endpoint_key) is not None
-
     def authoritative(self, start: date, days: int) -> tuple[date, date]:
         """[first, after) — every day an answer for [start, start + days) is
         authoritative for (`reach`). An unknown reach is an error, never read as
