@@ -42,7 +42,7 @@ from fastapi.responses import Response
 from .. import auth, authz, chrome, clock, db, route_params
 from ..config import load_settings
 from ..templating import templates
-from . import revocation
+from . import passkeys, revocation
 from .levels import AuthLevel
 
 router = APIRouter()
@@ -308,6 +308,31 @@ async def admin_unlink_identity(user_id: int, request: Request):
     # standing on the provider's side, which only its owner can clear.
     warning = await revocation.revoke(provider, token)
     return await _shell(request, "users", warning or f"Unlinked {provider.title()}.", ok=not warning)
+
+
+@guard.post("/admin/users/{user_id}/passkeys/remove", AuthLevel.ADMIN)
+async def admin_remove_passkey(user_id: int, request: Request):
+    """Remove one of an account's passkeys. Like the unlink above, it may remove
+    the account's last way in only when the caller confirms with `force`: a first
+    request without it is answered with the warning and a second confirmation.
+    Nothing is revoked anywhere — the device still lists the passkey, and it no
+    longer signs in here."""
+    data = await authz.json_body(request)
+    try:
+        passkey_id = int(str(data.get("passkey") or ""))
+    except ValueError:
+        return await _shell(request, "users", "That passkey isn't on that account.")
+    force = route_params.ticked(data.get("force"))
+    try:
+        removed = await passkeys.remove(user_id, passkey_id, force=force)
+    except auth.LastLoginMethod:
+        return await _shell(request, "users", (
+            "This is that account's only way to sign in. Removing it will lock the "
+            "account out until a password or another way in is added."),
+            orphan_passkey={"user_id": user_id, "passkey": passkey_id})
+    if not removed:
+        return await _shell(request, "users", "That passkey isn't on that account.")
+    return await _shell(request, "users", "Passkey removed.", ok=True)
 
 
 # ---------------------------------------------------------------------------

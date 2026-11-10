@@ -54,7 +54,10 @@ templates RENDER, once per start, so there is no second copy of their text.
 logs one console line and a button silently does nothing. img-src admits one
 remote host, the image proxy: a blocked picture is a read that skipped
 `proxied_image`, fixed there, never by widening the header. There is no
-report-only header and no reporting endpoint.
+report-only header and no reporting endpoint. NOR IS THERE A
+Permissions-Policy header, so the browser's default — the credential API allowed
+to the page's own origin — is what passkeys rely on; one added later must allow
+`publickey-credentials-get` and `publickey-credentials-create` for `'self'`.
 
 **A write transaction's statement count does not grow with what it writes.**
 `db.transaction` holds SQLite's one write lock for as long as its body runs, and
@@ -308,20 +311,59 @@ app returns, cancelling such a write mid-queue, so every test client is made ove
 Secure with the `__Host-` name unless the Secure policy says otherwise; its
 Max-Age is the ABSOLUTE cap, never the sliding window (`app/auth/sessions.py`
 owns both clocks). A cookie expiring at the sliding window would log out the
-active user the sliding exists to keep signed in.
+active user the sliding exists to keep signed in. BESIDE IT RIDES THE SIGN-IN
+HINT (`tns_signin`, the session cookie's attributes and Secure policy, a year):
+whether this browser's sign-in page leads with a passkey. Every sign-in writes it
+— `set_session_cookie` takes `leads_with_passkey` as a REQUIRED keyword, so a way
+of signing in cannot be written that forgets it (tests/auth/test_passkeys.py
+holds every caller to it) — to whether the account that signed in holds a
+passkey; adding one sets it and removing an account's last clears it, in that
+browser; signing out leaves it alone. It names no account and grants nothing: it
+says how this browser signs in, not who is signed in, and the server cannot ask
+who is at the sign-in page without telling a stranger which accounts hold
+passkeys. It is taken off only where the browser sent one, so a passkey-less
+sign-in carries no second cookie header.
 
 **An account keeps a way in, and what is left without one is ONE function's
 answer.** `app/auth/identities.py`'s `ways_in` reads an account's ways in — its
-password and each link a service SIGNS IN with (`revocation._LINKED`'s
-`signs_in`: never TMDB's) — inside the caller's transaction, and `WaysIn.
+password, each link a service SIGNS IN with (`revocation._LINKED`'s `signs_in`:
+never TMDB's) and each passkey — inside the caller's transaction, and `WaysIn.
 leaves_none` says whether removing one leaves none. Every removal of a way in
-refuses by it (`unlink_identity`, `LastLoginMethod`; an administrator may pass
-`force` after a confirmation), and every control the account page draws for one
-asks it too (`routes._unlinkable`), so the page offers a button exactly where
-the removal is allowed. Both used to count the ways apart from revocation's
+refuses by it (`unlink_identity`, `passkeys.remove`, `LastLoginMethod`; an
+administrator may pass `force` after a confirmation), and every control the
+account page draws for one asks it too (`routes._unlinkable`, a passkey's
+Remove), so the page offers a button exactly where the removal is allowed — an
+account holding a passkey may unlink its last service, and its last passkey
+cannot go while nothing else remains. Both used to count the ways apart from revocation's
 table; two counts of one rule is how a page comes to draw a button that only
 refuses, or to hide one the rule allows (tests/auth/test_ways_in.py holds the
 two to one answer).
+
+**A passkey is one more way into an account that ALREADY EXISTS, made for the
+public base URL.** `app/auth/passkeys.py` owns it; the routes are app/auth/
+routes.py's. Never a second factor and never a way to make an account. THE
+RELYING PARTY IS `Settings.public_base_url`, never the Host header
+(`passkeys.relying_party`: rp id its host, the expected origin it exactly), and
+passkeys are OFFERED only where a browser makes them — https, or http on
+localhost, on a domain name — so no other setting switches them; a control is
+drawn `hidden` carrying that origin and static/js/passkey.js reveals it only
+where `location.origin` is it. THE CHALLENGE IS A HANDSHAKE (`auth_handshakes`,
+provider `passkey`), made BEFORE the press so the press is the gesture the
+browser's prompt needs, consumed once, pinned to the browser by a cookie of its
+own (`tns_passkey`, never the body), and DERIVED from the handshake's state
+(`challenge_of`) rather than stored: nothing is sealed, so a passkey signs in
+while the at-rest key is wrong, exactly as a password does (the sign-in pair is
+in `authz.KEY_MISMATCH_PATHS`). ADDING ONE NEEDS THE ACCOUNT'S CURRENT PASSWORD
+(`routes._current_password_refusal`, the check /me/password makes), because a
+stolen session could otherwise add a passkey that outlives the password change
+meant to evict it; an account with no password is drawn the control disabled.
+Signing in: one sentence for every refusal (`passkeys.REFUSED`), failures on the
+per-address counter, a locked address refused uncounted, then the end every
+first-party sign-in shares (`routes._signed_in`). The sign-in page's button is
+asked for by passkey.js, not by an htmx `load` trigger: htmx wires a page before
+the deferred json-enc extension has run, so a `load`-triggered post goes out
+form-encoded and the shape guard refuses it (415, MEASURED) — true of any
+`hx-json-enc` request a page makes at load.
 
 **Stored secrets are `enc:v1:`-prefixed ciphertext when encryption is on**, and
 plain otherwise, so sealed and legacy rows coexist in one column and a later
@@ -1246,7 +1288,7 @@ entries, never all, and a listing filed in a window no coverage row speaks for
 would never be read and would be taken off unseen by its own window's fill.
 
 **JavaScript is for what ONLY JavaScript can do, and the floor is MEASURED.**
-The whole first-party surface is **712 code lines across 15 .js files, 27 lines
+The whole first-party surface is **791 code lines across 16 .js files, 27 lines
 of inline `<script>` and NO inline `on*=` handlers** — the inline figure is
 every non-blank line inside the two blocks `csp.INLINE_BLOCKS` names
 (`_nav_head.html`'s 3, `error_lobby.html`'s 24), counted that way so the next
@@ -1259,8 +1301,9 @@ title search and a dragged result began inserting its row under the key the
 server answers with, and 708 when a dialog the server opens stopped being opened
 again by every later swap once it had been closed (static/js/ui.js takes
 `data-open-modal` off as it acts on it), and 712 when choosing a video from the
-details panel's menu began closing the menu (static/js/ui.js) — counted as the non-blank, non-comment
-lines of those 15 files, the vendored `htmx-json-enc.js` not among them; from 4,024 lines when the audit began, and from
+details panel's menu began closing the menu (static/js/ui.js), and 791 when signing
+in with a passkey arrived (static/js/passkey.js, 79) — counted as the non-blank,
+non-comment lines of those 16 files, the vendored `htmx-json-enc.js` not among them; from 4,024 lines when the audit began, and from
 1,213 / 26 / 30 at its last conversion. The WATCH TRACKER has no script of its
 own at all. Those three numbers are the point of this paragraph: they are what
 somebody adding a file is adding to, and a number that has drifted is a signal
@@ -1338,6 +1381,8 @@ rather than what was hoped for:
   - reading a local file into a request body, because the shape guard above
     admits only `application/json`;
   - the clipboard;
+  - the browser's credential API — a passkey is made and used on the device, and
+    only script in the page can ask the device for it (static/js/passkey.js);
   - input with no declarative form: a modifier-click range, a ten-key sequence,
     a run of taps, and a button that has to write a value into another field;
   - putting a `<dialog>` into the TOP layer when the server delivered it with

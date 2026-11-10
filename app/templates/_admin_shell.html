@@ -62,6 +62,14 @@
               {"provider": orphan.provider, "force": "1"}, face='btn-ghost tiny btn-danger') }}
     </div>
     {% endif %}
+    {% if orphan_passkey %}
+    {# The same second question for a passkey that is an account's last way in. #}
+    <div class="admin-reveal" role="alert">
+      <span>Remove it anyway?</span>
+      {{ post('/admin/users/' ~ orphan_passkey.user_id ~ '/passkeys/remove', 'Remove anyway',
+              {"passkey": orphan_passkey.passkey|string, "force": "1"}, face='btn-ghost tiny btn-danger') }}
+    </div>
+    {% endif %}
     <div class="admin-table-wrap">
       <table class="admin-table">
         <thead>
@@ -77,7 +85,10 @@
             <td>{{ u.display_name }}{% if u.is_bootstrap %} <span class="auth-badge off">bootstrap</span>{% endif %}</td>
             <td class="badge-row"><div class="badge-group">
               {% for p in u.providers %}<span class="auth-badge off">{{ p }}</span>{% endfor %}
-              {% if not u.providers %}&mdash;{% endif %}
+              {% for key in u.passkeys %}{% set added = when(key.created_at) %}{% set used = when(key.last_used_at) %}
+              <span class="auth-badge off" title="Added {{ added.short if added else '—' }}; last used {{ used.short if used else 'never' }}">passkey: {{ key.name }}</span>
+              {%- endfor %}
+              {% if not u.providers and not u.passkeys %}&mdash;{% endif %}
             </div></td>
             <td><span class="auth-badge {{ 'ok' if u.calendar_approved else 'pending' }}">{{ 'Yes' if u.calendar_approved else 'No' }}</span></td>
             <td><span class="auth-badge {{ 'ok' if u.distrakt_approved else 'off' }}">{{ 'Yes' if u.distrakt_approved else 'No' }}</span></td>
@@ -145,6 +156,14 @@
                                       'Unlink ' ~ provider.title() ~ ' from this account?',
                                       'Unlink ' ~ provider.title(), danger=true, face='btn-ghost tiny') %}
               {{ post(base ~ '/identities/unlink', 'Unlink', {"provider": provider}, face='btn-primary small') }}
+              {% endcall %}
+              {% endfor %}
+
+              {% for key in u.passkeys %}
+              {% call confirm_box.ask('passkey-' ~ key.id,
+                                      'Remove the passkey "' ~ key.name ~ '" from this account?',
+                                      'Remove passkey ' ~ key.name, danger=true, face='btn-ghost tiny') %}
+              {{ post(base ~ '/passkeys/remove', 'Remove', {"passkey": key.id|string}, face='btn-primary small') }}
               {% endcall %}
               {% endfor %}
 

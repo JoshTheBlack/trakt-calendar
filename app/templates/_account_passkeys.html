@@ -1,0 +1,80 @@
+{% import '_confirm.html' as confirm_box %}
+{# PASSKEYS: one more way to sign in to this account (app/auth/passkeys.py).
+
+   Every control posts itself and is answered with this section
+   (routes.ACCOUNT_SECTIONS). Each passkey is a row — its name, when it was added
+   and last used, and whether it is synced to the person's other devices or held
+   on one — with Rename, and Remove where removing it leaves a way in
+   (`passkey_removable`, identities.WaysIn's answer, the one the removal refuses
+   by): not a dead button.
+
+   ADDING IS TWO PRESSES. "Add a passkey" posts the account's current password
+   and a name (routes.begin_adding_passkey says why the password); its answer is
+   the "Create passkey" button carrying the options (`passkey_create`), and that
+   press is the gesture the browser's prompt needs. An account with no password is
+   drawn the button disabled with a line saying to set one first; setting it
+   redraws this section out of band (_account_credentials.html).
+
+   THE ADD CONTROLS ARE DRAWN `hidden` WITH THE ORIGIN THEY WORK ON, and
+   static/js/passkey.js reveals them only there — a passkey made for the public
+   base URL cannot be made from another address. The list is the server's alone,
+   and drawn everywhere. #}
+<div class="auth-list" id="accountPasskeys" hx-target="#accountPasskeys" hx-swap="outerHTML"
+     {%- if passkeys_oob %} hx-swap-oob="outerHTML"{% endif %}>
+  <div class="row"><span class="label">Passkeys</span></div>
+  {% if not passkey_origin %}
+  <p class="auth-sub">Passkeys need this instance's public base URL to be https{{ ' — set it in Settings' if user.is_admin else ', which an administrator sets' }}.</p>
+  {% else %}
+  {% for key in passkeys %}
+  <div class="row passkey-row">
+    <span class="label">{{ key.name }}</span>
+    <span class="auth-badge off" title="{{ 'Synced to your other devices' if key.backed_up else 'Held on one device' }}">{{ 'Synced' if key.backed_up else 'One device' }}</span>
+    <span class="auth-sub">Added {{ passkey_day(key.created_at) }} · {{ ('last used ' ~ passkey_day(key.last_used_at)) if key.last_used_at else 'not used yet' }}</span>
+    <span class="row-actions">
+      {% call confirm_box.ask('passkey-rename-' ~ key.id, 'A new name for this passkey', 'Rename', face='btn-ghost tiny') %}
+      <form class="auth-inline-form" hx-post="/me/passkeys/rename" hx-json-enc hx-boost="false"
+            hx-vals='{{ {"passkey": key.id} | tojson }}'>
+        <input type="text" name="name" value="{{ key.name }}" maxlength="{{ passkey_name_max }}"
+               aria-label="Passkey name" required>
+        <button class="btn-primary small" type="submit">Save</button>
+      </form>
+      {% endcall %}
+      {% if key.id in passkey_removable %}
+      {% call confirm_box.ask('passkey-remove-' ~ key.id, 'Remove “' ~ key.name ~ '”? It will no longer sign you in.',
+                              'Remove', danger=true, face='btn-ghost tiny') %}
+      <button type="button" class="btn-primary small" hx-post="/me/passkeys/remove" hx-json-enc
+              hx-vals='{{ {"passkey": key.id} | tojson }}'>Remove</button>
+      {% endcall %}
+      {% endif %}
+    </span>
+  </div>
+  {% endfor %}
+
+  {% if passkey_create %}
+  <form class="auth-inline-form passkey-add" hx-post="/me/passkeys" hx-json-enc hx-boost="false"
+        data-passkey-origin="{{ passkey_origin }}" hidden>
+    <input type="hidden" name="credential" value="">
+    <input type="hidden" name="error" value="">
+    <input type="hidden" name="name" value="{{ passkey_name }}">
+    <label>Your device will ask you to confirm it's you.</label>
+    <button class="btn-primary small" type="button" data-passkey-create="{{ passkey_create }}">Create passkey</button>
+  </form>
+  {% elif has_password %}
+  <form class="auth-inline-form passkey-add" hx-post="/me/passkeys/begin" hx-json-enc hx-boost="false"
+        data-passkey-origin="{{ passkey_origin }}" hidden>
+    <label for="passkeyName">Add a passkey</label>
+    <input type="text" id="passkeyName" name="name" value="{{ passkey_name or passkey_suggested }}"
+           maxlength="{{ passkey_name_max }}" aria-label="Passkey name" required>
+    <input type="password" id="passkeyPassword" name="current_password" autocomplete="current-password"
+           placeholder="Current password" required>
+    <button class="btn-ghost tiny" type="submit">Continue</button>
+  </form>
+  {% else %}
+  <div class="auth-inline-form passkey-add" data-passkey-origin="{{ passkey_origin }}" hidden>
+    <button class="btn-ghost tiny" type="button" disabled>Add a passkey</button>
+    <p class="auth-sub">Set a password below first — adding a passkey asks for it.</p>
+  </div>
+  {% endif %}
+  {% endif %}
+  <p class="auth-error{{ ' is-ok' if passkeys_ok }}" role="{{ 'status' if passkeys_ok else 'alert' }}">{{ passkeys_message }}</p>
+</div>

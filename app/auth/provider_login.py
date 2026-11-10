@@ -74,7 +74,7 @@ from fastapi.responses import Response
 from .. import auth, config, db, secrets_box
 from ..config import Settings
 from ..media import user_images
-from . import provider_avatars, revocation
+from . import passkeys, provider_avatars, revocation
 from .routes import INVALID_CREDENTIALS, INVALID_INVITE
 
 logger = logging.getLogger(__name__)
@@ -115,12 +115,14 @@ class LoginResult:
 
     `registered` distinguishes a brand-new account from a returning one. It is
     on here because the caller cannot re-derive it — by the time it holds this,
-    the identity exists either way.
+    the identity exists either way. `leads_with_passkey` is whether the account
+    holds a passkey, which the session cookie's sign-in hint is written from.
     """
     user_id: int
     session_id: str
     redirect_target: str
     registered: bool
+    leads_with_passkey: bool
 
 
 @dataclass(frozen=True)
@@ -201,6 +203,7 @@ async def _sign_in(*, identity: auth.ProviderIdentity, handshake, request: Reque
         # so it lands on its own account page instead of on an empty month.
         redirect_target="/" if outcome.calendar_approved else "/me",
         registered=outcome.kind == "registered",
+        leads_with_passkey=await passkeys.holds_any(outcome.user_id),
     )
 
 
@@ -366,5 +369,6 @@ def attach_session(
     route modules do that in their own notice/error helpers, because a refusal
     has no session to set and would otherwise be calling this for half of it.
     """
-    auth.set_session_cookie(response, result.session_id, settings, request)
+    auth.set_session_cookie(response, result.session_id, settings, request,
+                            leads_with_passkey=result.leads_with_passkey)
     auth.clear_handshake_cookie(response, settings, request)

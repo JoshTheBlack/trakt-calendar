@@ -1,7 +1,7 @@
 {% extends '_base.html' %}
 {% import '_head.html' as page with context %}
 {% import '_plex_signin.html' as plex %}
-{% import '_sign_in_form.html' as sign_in %}
+{% import '_password_fold.html' as password %}
 {% set body_class = 'auth-page' %}
 {% set nav_head = false %}
 {% set public = true %}
@@ -35,6 +35,25 @@
     </p>
     {% endif %}
 
+    {# THE PASSKEY BUTTON IS ASKED FOR ONCE THE PAGE HAS LOADED, never drawn with the
+       page: it is a handshake, and a visitor without script — a crawler — should
+       mint none (routes.offer_passkey_sign_in). Where this browser last signed in
+       to an account holding a passkey it LEADS, and the password form folds below
+       the service buttons; otherwise it sits under the form.
+
+       static/js/passkey.js SENDS THE REQUEST (the custom trigger), not an htmx
+       `load` trigger: htmx wires a page before the deferred json-enc extension has
+       run, so a request fired at load went out form-encoded and the shape guard
+       refused it (415, MEASURED in Chromium). The script asks only where the
+       browser has the credential API and the page is the origin the slot names,
+       so an old browser or another address mints nothing. An empty form, for
+       json-enc's sake: it reads a request's body as a form's fields. #}
+    {% macro passkey_slot() %}
+    <form id="passkeySignIn" hx-post="/login/passkey/offer" hx-json-enc hx-trigger="passkey-offer"
+          hx-swap="outerHTML" hx-boost="false" data-passkey-offer="{{ passkey_origin }}"></form>
+    {% endmacro %}
+    {% if lead_with_passkey %}{{ passkey_slot() }}{% endif %}
+
     <div class="auth-providers">
       {% if trakt_login_configured %}
       {# Leaves the app: the route 303s to trakt.tv, and a boosted link fetches
@@ -53,18 +72,14 @@
       {{ plex.button('Continue with Plex', '/auth/plex/start') }}
     </div>
     {{ plex.slot() }}
-    <div class="auth-divider">or</div>
+    {% if not lead_with_passkey %}<div class="auth-divider">or</div>{% endif %}
 
-    {% call sign_in.form('/login', 'Sign in') %}
-      <div class="field">
-        <label for="username">Username</label>
-        <input id="username" name="username" type="text" autocomplete="username" autofocus>
-      </div>
-      <div class="field">
-        <label for="password">Password</label>
-        <input id="password" name="password" type="password" autocomplete="current-password">
-      </div>
-    {% endcall %}
+    {% if lead_with_passkey %}
+    {{ password.fold(passkeys_offered) }}
+    {% else %}
+    {{ password.form(passkeys_offered) }}
+    {% if passkeys_offered %}{{ passkey_slot() }}{% endif %}
+    {% endif %}
 
     <div class="auth-links">
       <span>Have an invite link? <a href="/register">Register</a></span>

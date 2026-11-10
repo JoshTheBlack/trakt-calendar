@@ -2144,7 +2144,29 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
 .auth-provider-btn.ready { color: var(--text); cursor: pointer; text-decoration: none; }
 .auth-provider-btn.ready:hover { background: rgba(255,255,255,0.07); border-color: var(--gold-soft); }
 
+/* THE PASSKEY BUTTON, from the sign-in page's load POST (_passkey_signin.html):
+   a column like the service buttons, its divider inside it so a page with no
+   button draws no stray "or". Leading the page, it is the gold one. */
+.passkey-sign-in { display: flex; flex-direction: column; gap: 10px; }
+.passkey-sign-in.is-lead .auth-provider-btn.ready { border-color: var(--gold-soft); color: var(--gold-soft); }
+.passkey-sign-in .auth-error:empty { display: none; }
+/* "Use your password instead": the password form one press away on a page that
+   leads with a passkey (_password_fold.html). A <details>, so no script. */
+.auth-fold > summary {
+    cursor: pointer; color: var(--text-dim); font-size: 0.85rem; padding: 6px 0;
+    list-style-position: inside;
+}
+.auth-fold > summary:hover { color: var(--text); }
+.auth-fold[open] > summary { margin-bottom: 12px; }
+.auth-fold .auth-notice { margin-bottom: 12px; }
+
 .auth-list { display: flex; flex-direction: column; gap: 8px; }
+/* A passkey's row wraps: its name and badge, then when it was added and used,
+   then Rename and Remove — too many to share one line at phone width. */
+.auth-list .row.passkey-row { flex-wrap: wrap; justify-content: flex-start; }
+.auth-list .row.passkey-row .auth-sub { margin: 0; flex: 1 1 100%; }
+/* An account with no password: the button off, and the line saying why under it. */
+.passkey-add .auth-sub { margin: 0; flex: 1 1 100%; }
 .auth-list .row {
     display: flex; align-items: center; justify-content: space-between; gap: 10px;
     padding: 9px 12px; background: var(--card); border: 1px solid var(--card-border);

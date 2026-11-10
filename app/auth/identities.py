@@ -138,8 +138,9 @@ class LastLoginMethod(Exception):
 
 
 class WaysIn(NamedTuple):
-    """Every way into one account: its password, and each linked service an
-    account can sign in with (app/auth/revocation.py's table says which).
+    """Every way into one account: its password, each linked service an account
+    can sign in with (app/auth/revocation.py's table says which), and each
+    passkey (app/auth/passkeys.py).
 
     THE ONE ANSWER TO "WHAT IS LEFT WITHOUT THIS ONE". An account with no way
     in cannot be signed in to by anybody, its owner included, and there is no
@@ -151,13 +152,17 @@ class WaysIn(NamedTuple):
     """
     password: bool
     links: frozenset[str]
+    passkeys: frozenset[int] = frozenset()
 
-    def leaves_none(self, *, link: str) -> bool:
-        """Whether removing the link to `link` leaves the account no way in. A
-        link nobody signs in with (TMDB's) is never one, so it never does."""
-        if link not in self.links:
+    def leaves_none(self, *, link: str | None = None, passkey: int | None = None) -> bool:
+        """Whether removing the link to `link`, or the passkey `passkey`, leaves
+        the account no way in. A link nobody signs in with (TMDB's) is never
+        one, so removing it never does."""
+        if link is not None and link not in self.links:
             return False
-        return not self.password and not (self.links - {link})
+        if passkey is not None and passkey not in self.passkeys:
+            return False
+        return not (self.password or self.links - {link} or self.passkeys - {passkey})
 
 
 def ways_in(conn: db.Connection, user_id: int) -> WaysIn:
@@ -170,8 +175,10 @@ def ways_in(conn: db.Connection, user_id: int) -> WaysIn:
         f"SELECT provider FROM linked_identities WHERE user_id = ? "
         f"AND provider IN ({', '.join('?' * len(providers))})",
         (user_id, *providers)).fetchall()
+    passkeys = conn.execute("SELECT id FROM passkeys WHERE user_id = ?", (user_id,)).fetchall()
     return WaysIn(password=bool(user and user["password_hash"]),
-                  links=frozenset(str(row["provider"]) for row in links))
+                  links=frozenset(str(row["provider"]) for row in links),
+                  passkeys=frozenset(int(row["id"]) for row in passkeys))
 
 
 async def account_ways_in(user_id: int) -> WaysIn:

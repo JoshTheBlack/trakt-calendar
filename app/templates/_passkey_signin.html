@@ -1,0 +1,34 @@
+{% import '_password_fold.html' as password %}
+{# SIGN IN WITH A PASSKEY: the answer to the sign-in page's load POST
+   (routes.offer_passkey_sign_in), and to every refusal at the finish
+   (routes.sign_in_with_passkey), which draws a fresh button with its sentence.
+
+   THE BUTTON CARRIES ITS OPTIONS (`data-passkey-get`, the challenge a handshake
+   minted for this browser), so the press is the gesture the browser's prompt
+   needs — static/js/passkey.js asks the credential API, writes what it answered
+   (or the browser's error's name) into this form and submits it through json-enc.
+   A success is 204 with HX-Redirect; a refusal replaces this form.
+
+   DRAWN `hidden`, CARRYING THE ORIGIN IT WORKS ON: a passkey made for the public
+   base URL cannot be used from another address (a LAN IP), and which address the
+   page was reached by is something the server is deliberately not told — so
+   passkey.js reveals it only where `location.origin` is that origin and the
+   browser has the credential API.
+
+   THROTTLED, nothing is drawn — and a page that leads with a passkey opens its
+   password fold out of band, saying why. #}
+{% if throttled %}
+<div id="passkeySignIn" hidden></div>
+{% if lead %}{{ password.fold(true, fold_open=true, oob=true,
+                               fold_message='Passkey sign-in is paused for a few minutes. Use your password.') }}{% endif %}
+{% else %}
+<form id="passkeySignIn" class="passkey-sign-in{{ ' is-lead' if lead }}" method="post"
+      hx-post="/login/passkey" hx-json-enc hx-boost="false" hx-target="this" hx-swap="outerHTML"
+      data-passkey-origin="{{ origin }}" hidden>
+  {% if not lead %}<div class="auth-divider">or</div>{% endif %}
+  <input type="hidden" name="credential" value="">
+  <input type="hidden" name="error" value="">
+  <button type="button" class="auth-provider-btn ready" data-passkey-get="{{ options }}">Sign in with a passkey</button>
+  {% if message %}<p class="auth-error" role="alert">{{ message }}</p>{% endif %}
+</form>
+{% endif %}
