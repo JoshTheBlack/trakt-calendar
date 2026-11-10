@@ -110,7 +110,28 @@ def _leave_with_the_web_process() -> None:
     threading.Thread(target=watch, name="read-pool-parent", daemon=True).start()
 
 
+def _may_have_children() -> None:
+    """Let this process start the pool's workers even when whatever started it
+    made it a DAEMON.
+
+    Hypercorn serves from a worker process it spawns and marks a daemon unless
+    told to serve from its own (`--workers 0`; its `daemon` setting is true by
+    default and no command-line flag turns it off), and Python refuses a daemon
+    process children: the Docker image's start-up died in the lifespan with
+    "daemonic processes are not allowed to have children" and never served. The
+    rule exists because a daemon is ended when its parent exits, without the
+    chance to end children of its own, which would be left running — and these
+    leave with the web process however it ends (`_leave_with_the_web_process`),
+    so the reason does not apply. Clearing the flag here, rather than asking for
+    `--workers 0` in the image's command, keeps the pool starting under any
+    command an operator runs the image with."""
+    current = multiprocessing.current_process()
+    if current.daemon:
+        current.daemon = False
+
+
 def _build(count: int) -> ProcessPoolExecutor:
+    _may_have_children()
     pool = ProcessPoolExecutor(count, mp_context=multiprocessing.get_context("spawn"),
                                initializer=_worker_started)
     if _warm is not None:
@@ -134,11 +155,23 @@ def start(warm: Callable[[], None] | None = None) -> None:
 
 
 def stop() -> None:
-    """Let the pool go: its workers finish what they hold and exit."""
+    """Let the pool go, and WAIT for its workers to leave: each finishes the read
+    it holds, and none waiting is started.
+
+    WAITING IS WHAT LETS A CHILD PROCESS EXIT. A web process that is itself a
+    multiprocessing child (Hypercorn's worker) runs multiprocessing's exit hook
+    the moment it returns, and that hook closes the pool's call queue before
+    joining the workers. Not waiting, the executor's own thread queued each
+    worker's "leave" only after the queue had closed, so no worker ever read it
+    and the exit hook waited for them forever: a stopped container hung until it
+    was killed (MEASURED on Windows with a daemon web process). A main process
+    escapes it only because threading's shutdown happens to come first. Called
+    by the lifespan once the server takes no more requests, so the wait costs at
+    most the read in flight."""
     global _pool
     pool, _pool = _pool, None
     if pool is not None:
-        pool.shutdown(wait=False, cancel_futures=True)
+        pool.shutdown(wait=True, cancel_futures=True)
 
 
 async def read(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:

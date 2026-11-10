@@ -247,7 +247,14 @@ writer queue. A read whose callers pass their own functions (`query.titles`'
 most `read_pool.DEFAULT_MOST`; 0 reads on threads, which the suite does —
 tests/conftest.py — and tests/kernel/test_read_pool.py runs a real one). Workers
 are SPAWNED on every platform (the web process has threads by then, and a fork
-copies a held lock), started and warmed by the lifespan (`query.ready`), write no
+copies a held lock), from a web process that may be a DAEMON multiprocessing
+child — Hypercorn's default worker is one, under any command an operator runs the
+image with — so the pool clears that flag before it starts a worker
+(`read_pool._may_have_children`; Python refuses a daemon children, and the image's
+start-up died of it) and `stop` WAITS for its workers (a child's exit hook closes
+the call queue first, and a worker never told to leave hung the stop forever;
+tests/kernel/test_read_pool.py runs a daemon web process). They are
+started and warmed by the lifespan (`query.ready`), write no
 log file, ignore Ctrl+C, are rebuilt by the next read when one dies, and LEAVE WHEN
 THE WEB PROCESS DOES, however it ended (`read_pool._leave_with_the_web_process`,
 waiting on the parent's sentinel): a web process stopped by force says nothing,
@@ -359,7 +366,11 @@ stolen session could otherwise add a passkey that outlives the password change
 meant to evict it; an account with no password is drawn the control disabled.
 Signing in: one sentence for every refusal (`passkeys.REFUSED`), failures on the
 per-address counter, a locked address refused uncounted, then the end every
-first-party sign-in shares (`routes._signed_in`). The sign-in page's button is
+first-party sign-in shares (`routes._signed_in`). Every public passkey handshake —
+the page's offer and each refusal's fresh button — is minted by one helper
+(`routes._passkey_button`) under a budget of its own
+(`lockout.passkey_start_limited`, `passkey_ip`), never the services' sign-in
+buttons' shared one: the page asks on every load, and thirty loads spent theirs. The sign-in page's button is
 asked for by passkey.js, not by an htmx `load` trigger: htmx wires a page before
 the deferred json-enc extension has run, so a `load`-triggered post goes out
 form-encoded and the shape guard refuses it (415, MEASURED) — true of any
@@ -583,7 +594,10 @@ service's own listings (spelled before the caller's transaction by
 (a fill names hundreds of titles); `ensure` / `ensure_many` for a
 title met by its ids — a search pick, a tracker arrival, a board add, an import, a
 restore — which, handed a viewer's settings, ask each service the title has no id
-from ONCE by shared id. THAT IS THE ONE PLACE THE APP ASKS BY SHARED ID
+from ONCE by shared id; and `plan_registering` for a writer of many rows that
+each name a title — a viewer's watch history, a month's films — decided before
+its lock and applied after its rows, so a re-key takes them along, asking nobody.
+THAT IS THE ONE PLACE THE APP ASKS BY SHARED ID
 (`providers.for_shared_id_lookup`; each port keeps its own day-long clock). A
 caller spending ONE service's allowance narrows it to that service
 (`metadata.ask(..., asking=)`): the background completion

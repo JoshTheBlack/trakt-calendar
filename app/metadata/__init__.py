@@ -454,6 +454,22 @@ def register(conn: db.Connection, media: Any, ids: Mapping[str, Any] | None, *,
     return identity.settle(conn, media, ids, filed_under=filed_under, now=db.now())
 
 
+def plan_registering(conn: db.Connection,
+                     held: Iterable[tuple[Any, Mapping[str, Any] | None, str]], *,
+                     now: int) -> identity.SettlePlan:
+    """`register` for every `(media, ids, filed_under)` a batch of rows holds —
+    DECIDED, NOT WRITTEN, for a transaction's `prepare`: reads only, in a number
+    of statements that does not grow with the titles. The caller applies the plan
+    inside its transaction AFTER writing its rows, so a title that answers to
+    another key moves the rows just written with it. No service is asked.
+
+    FOR A WRITER OF MANY ROWS that each name a title — a viewer's whole watch
+    history, a month's films — where `register` would be a settle per row."""
+    return identity.plan_settles(
+        conn, [identity.Settling(str(media), dict(ids or {}), str(filed_under), None)
+               for media, ids, filed_under in held], now=now)
+
+
 def resolve_triple(conn: db.Connection, media: Any, ids: Mapping[str, Any] | None
                      ) -> ItemKey | None:
     """The key `ids` would be registered under, decided and NOT written — for a

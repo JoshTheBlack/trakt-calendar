@@ -127,7 +127,7 @@ from typing import NamedTuple
 
 from . import arrival, counts, film_snapshots, naming, removals, store
 from .store import ID_COLUMNS, IDENTITY_COLUMNS, record_key
-from .. import cache, clock, db, providers
+from .. import cache, clock, db, metadata, providers
 from ..metadata import identity as title_identity
 from ..providers.base import (ItemKey, LibraryEntry, LibraryPort, LibraryRead, Media,
                               PlayCountPort, SourceUnavailable, UnlistedSeasons,
@@ -579,8 +579,19 @@ async def _save(user_id: int, state: dict) -> None:
               (movie or {}).get("watched_at") or "", (movie or {}).get("title") or "",
               (movie or {}).get("year"), *_ids_params(movie or {})]
              for key, movie in movies.items()]
+    # EVERY TITLE THESE ROWS HOLD IS REGISTERED IN THE TITLE STORE, as every path
+    # that meets a title registers it — a show watched and never tracked
+    # included, or its rows would name a key no title answers to, and a re-key
+    # would not move them. Decided before the lock, applied after the rows are
+    # written so a title that answers to another key takes them with it.
+    held = [(_key_params(key)[0], (entry or {}).get("ids"), str(key))
+            for key, entry in (*shows.items(), *movies.items())]
+    now = db.now()
 
-    def _work(conn: db.Connection) -> None:
+    def _plan(conn: db.Connection) -> title_identity.SettlePlan:
+        return metadata.plan_registering(conn, held, now=now)
+
+    def _work(conn: db.Connection, registering: title_identity.SettlePlan) -> None:
         conn.execute(
             "INSERT INTO distrakt_watch_state "
             "(user_id, cursors_json, beacons_json, play_counts_json) "
@@ -596,8 +607,9 @@ async def _save(user_id: int, state: dict) -> None:
         conn.execute("DELETE FROM distrakt_movie_watches WHERE user_id = ?", (user_id,))
         if films:
             conn.execute(movie_sql, (json.dumps(films),))
+        registering.apply(conn)
 
-    await db.transaction(_work)
+    await db.transaction(_work, prepare=_plan)
 
 
 # ---------------------------------------------------------------------------

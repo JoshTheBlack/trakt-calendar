@@ -74,4 +74,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # Nothing diagnostic is lost — app/perftrace.py times every request, names the
 # slow ones with their phases broken down, and logs them all at DEBUG. To get the
 # raw log back for an investigation, append --access-logfile - to this command.
+#
+# Hypercorn serves from a worker process it marks a DAEMON, and the calendar's
+# read pool starts processes of its own from there — app/read_pool.py's
+# `_may_have_children` is what allows that, whatever command runs the image.
 CMD ["hypercorn", "app.main:app", "--bind", "0.0.0.0:8000"]

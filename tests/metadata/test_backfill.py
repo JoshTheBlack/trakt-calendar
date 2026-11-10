@@ -78,6 +78,25 @@ class RegisteringWhatIsStoredTests(DatabaseTestCase):
         self.assertEqual(known["show:tmdb:900"], {"tmdb": 900, "trakt": 7})
         self.assertEqual(known["movie:tmdb:550"], {"tmdb": 550, "imdb": "tt0137523"})
 
+    async def test_watch_progress_and_a_frozen_months_films_are_registered_too(self):
+        """A service's progress for a show nobody tracks, and a film a closed
+        month froze — keys nothing else names."""
+        await db.execute(
+            "INSERT INTO distrakt_show_progress (user_id, media, match_source, match_id, season, "
+            "source, watched_episodes_json, trakt_id, simkl_id) VALUES (?, 'show', 'tmdb', "
+            "'100757', 1, 'trakt', '[]', 42, NULL)", (self.user_id,))
+        films = [{"key": "movie:tmdb:550", "ids": {"tmdb": 550, "trakt": 9}, "title": "F"},
+                 {"trakt_id": 11, "title": "Before films had keys", "year": 1999},
+                 {"key": "not a key", "ids": {"tmdb": 1}}]
+        await db.execute(
+            "INSERT INTO distrakt_months (user_id, month, closed, movies_json, created_at) "
+            "VALUES (?, '2026-09', 1, ?, 1)", (self.user_id, json.dumps(films)))
+        self.assertEqual(await backfill.register_everything(), 2)
+        known = {r["title_key"]: json.loads(r["ids_json"]) for r in
+                 await db.fetch_all("SELECT title_key, ids_json FROM titles")}
+        self.assertEqual(known, {"show:tmdb:100757": {"tmdb": 100757, "trakt": 42},
+                                 "movie:tmdb:550": {"tmdb": 550, "trakt": 9}})
+
     async def test_it_runs_once(self):
         await _title_row("simkl", "55", "simkl:55", {"simkl": 55, "tvdb": 4321})
         self.assertEqual(await backfill.run_once(), 1)

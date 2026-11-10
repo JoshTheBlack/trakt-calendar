@@ -58,7 +58,7 @@ from typing import NamedTuple
 from datetime import date
 from enum import StrEnum
 
-from .. import clock, db
+from .. import clock, db, metadata
 from ..metadata import descriptions
 from ..metadata import labels as title_labels
 from ..providers.base import ItemKey, Media, collect_ids, item_key, resolve_key
@@ -742,8 +742,12 @@ async def save_month(user_id: int, doc: dict) -> None:
     for rec in records:
         _validate_kind(rec["kind"], MONTH_KINDS, "month record")
     now = db.now()
+    held = _films_held(movies)
 
-    def _work(conn: db.Connection) -> None:
+    def _plan(conn: db.Connection):
+        return metadata.plan_registering(conn, held, now=now)
+
+    def _work(conn: db.Connection, registering) -> None:
         conn.execute(
             "INSERT INTO distrakt_months "
             "(user_id, month, closed, totals_refreshed_at, movies_json, created_at) "
@@ -759,8 +763,25 @@ async def save_month(user_id: int, doc: dict) -> None:
             conn.execute(_INSERT_MONTH_SQL, _insert_params(
                 user_id, MONTH_RECORD_COLUMNS,
                 {**rec, "month": month, "created_at": rec.get("created_at") or now}))
+        registering.apply(conn)
 
-    await db.transaction(_work)
+    await db.transaction(_work, prepare=_plan)
+
+
+def _films_held(movies: list[dict] | None) -> list[tuple[str, dict, str]]:
+    """`(media, ids, key)` for every film a month's list names by key — what the
+    title store registers as the list is written (metadata.plan_registering), as
+    every path that meets a title registers it. A frozen film is otherwise named
+    by a key no title answers to, and a re-key of its title would not reach it.
+    An entry in the shape written before films had keys names none, and is keyed
+    later (app/distrakt/film_snapshots.py)."""
+    held = []
+    for film in movies or ():
+        key = film.get("key") if isinstance(film, dict) else None
+        if isinstance(key, str) and key.count(":") == 2:
+            ids = film.get("ids")
+            held.append((key.split(":", 1)[0], ids if isinstance(ids, dict) else {}, key))
+    return held
 
 
 async def list_months(user_id: int) -> list[str]:
@@ -879,11 +900,24 @@ async def set_month_movies(user_id: int, month: str, movies: list[dict]) -> None
     verdicts in it were settled and must not be rewritten, but the **Movies**
     section is a record of what was seen, and leaving it stale would make the
     month contradict the plan that just told the user what it found.
+
+    Each film's title is registered as the list is written (`_films_held`).
     """
-    await db.execute(
-        "UPDATE distrakt_months SET movies_json = ? WHERE user_id = ? AND month = ?",
-        (json.dumps(list(movies or [])), user_id, _validate_month(month)),
-    )
+    movies = list(movies or [])
+    month = _validate_month(month)
+    held = _films_held(movies)
+    now = db.now()
+
+    def _plan(conn: db.Connection):
+        return metadata.plan_registering(conn, held, now=now)
+
+    def _work(conn: db.Connection, registering) -> None:
+        conn.execute(
+            "UPDATE distrakt_months SET movies_json = ? WHERE user_id = ? AND month = ?",
+            (json.dumps(movies), user_id, month))
+        registering.apply(conn)
+
+    await db.transaction(_work, prepare=_plan)
 
 
 async def set_month_closed(user_id: int, month: str) -> None:
