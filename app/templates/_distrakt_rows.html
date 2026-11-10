@@ -27,7 +27,10 @@
    routes._emoji_context builds: `emoji_for` (network -> the code it posts as),
    `emoji_own` (whether that is its own rather than the default), `logo_for`
    (network -> its Logo, or None when it has none), `net_ref`
-   (network -> what an answer addresses its cells by) and `is_admin`. #}
+   (network -> what an answer addresses its cells by) and `is_admin`, and what
+   routes._feature_context builds: `featurable` (the titles the month premiered),
+   `featured`, `featured_count`, `featured_full`, `featured_most` and
+   `feature_ref` (title -> what an answer addresses its stars by). #}
 
 {# THE SHARED HALF OF EVERY MUTATION'S ADDRESS. The target is the show list and
    the swap is its whole contents, because every one of these routes answers
@@ -207,6 +210,57 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
 {%- endif %}
 {%- endmacro %}
 
+{# A SHOW THIS MONTH'S SHARE CARD FEATURES — or may. The card of a shared link to
+   this month's premieres draws every show starred here that the link shows, and
+   fills the rest of its grid as it always did (app/calendar/share_highlights.py).
+
+   A BUTTON POSTING ITSELF, and the answer redraws EVERY star on the month and
+   the feature line out of band (_distrakt_feature_answer.html): a show has a row
+   per season the month holds, all addressed by `data-title`, and the tenth star
+   changes every other one — at the most a month may feature, a show not
+   featured is `disabled`, and the line above the list says why, rather than the
+   press being refused after it was made. `hx-swap="none"` because the button is
+   one of the copies. The digest is routes._feature_context's: an out-of-band
+   selector must hold neither a space nor a quote.
+
+   A click on it opens no details panel: a button acts for itself inside a row
+   that opens one (static/js/ui.js's ACTS_FOR_ITSELF). #}
+{% macro feature(key, oob=false) -%}
+{%- set ref = feature_ref(key) -%}
+{%- set on = key in featured -%}
+{%- set refused = featured_full and not on -%}
+<button type="button" class="btn-ghost small distrakt-feature{{ ' is-on' if on }}" data-title="{{ ref }}"
+        {%- if oob %} hx-swap-oob="outerHTML:.distrakt-feature[data-title='{{ ref }}']"{% endif %}
+        aria-pressed="{{ 'true' if on else 'false' }}"
+        title="{{ 'Featured on this month’s share picture — click to stop featuring it' if on
+                  else ('This month’s share picture already features ' ~ featured_most ~ ' shows' if refused
+                  else 'Feature on this month’s share picture') }}"
+        {%- if refused %} disabled{% endif %}
+        hx-post="/api/distrakt/feature{{ month_query }}" hx-json-enc hx-swap="none"
+        hx-vals='{{ {"key": key, "on": not on} | tojson }}'>{{ '★' if on else '☆' }}</button>
+{%- endmacro %}
+
+{# Room for a star on a row whose show the month did not premiere, so the
+   buttons after it line up — the Abandon placeholder's shape. #}
+{% macro feature_room() -%}
+<span class="btn-ghost small distrakt-feature is-placeholder" aria-hidden="true">☆</span>
+{%- endmacro %}
+
+{# HOW MANY OF THE MONTH'S PREMIERES ITS SHARE CARD FEATURES, above the list, and
+   at the most it may say what to do next — the reason the other stars are
+   disabled, drawn rather than left to a tooltip a disabled button may not show. #}
+{% macro feature_line(oob=false) -%}
+<div id="distraktFeatured" class="distrakt-featured"{% if oob %} hx-swap-oob="outerHTML"{% endif %}>
+    {%- if featured_full -%}
+    ★ This month’s share picture features {{ featured_count }} of {{ featured_most }} shows — unstar one to feature another.
+    {%- elif featured_count -%}
+    ★ This month’s share picture features {{ featured_count }} of up to {{ featured_most }} shows, and fills the rest itself.
+    {%- else -%}
+    ☆ Star up to {{ featured_most }} of this month’s premieres to feature them on its share picture.
+    {%- endif -%}
+</div>
+{%- endmacro %}
+
 {# ROOM FOR AN ABANDON BUTTON A ROW DOES NOT HAVE (a completed row, a closed
    month, a film), so its ✕ and every column before it line up with the rows
    that do. Invisible, unreachable and the same markup as the real one, so it is
@@ -283,6 +337,11 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
     </span>
     </span>
     <span class="distrakt-row-actions">
+        {%- if show.key in featurable %}
+        {{ feature(show.key) }}
+        {%- elif featurable %}
+        {{ feature_room() }}
+        {%- endif %}
         {#- A COMPLETED ROW OFFERS NO ABANDON, and that is not a tidying-up. You
             cannot give up on something you have finished, so the control was
             offering a move that has no meaning — and it could never have worked
@@ -344,6 +403,7 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
     <span class="distrakt-counts">{{ film.year or '' }}</span>
     </span>
     <span class="distrakt-row-actions">
+        {%- if featurable %}{{ feature_room() }}{% endif %}
         {{ abandon_room() }}
         {%- if film.key %}
         {%- call confirm.ask(slot='film-' ~ film.key,

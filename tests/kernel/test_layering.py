@@ -82,7 +82,7 @@ GROUPS: dict[str, str] = {
     "after_response": KERNEL, "assets": KERNEL, "cache": KERNEL, "changelog": KERNEL,
     "chrome": KERNEL,
     "clock": KERNEL, "config": KERNEL, "csp": KERNEL, "db": KERNEL, "details_panel": KERNEL,
-    "endpoints": KERNEL, "http_pool": KERNEL, "logging_setup": KERNEL,
+    "endpoints": KERNEL, "files": KERNEL, "http_pool": KERNEL, "logging_setup": KERNEL,
     "perftrace": KERNEL, "read_pool": KERNEL, "route_params": KERNEL, "secrets_box": KERNEL,
     "signed_tokens": KERNEL, "templating": KERNEL, "timezones": KERNEL, "youtube": KERNEL,
 
@@ -377,7 +377,9 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         deferred=True),
     (DISTRAKT, CALENDAR): Edge(
         "the tracker imports a month's premieres, honours 'not watching', and "
-        "links a Discord post at the viewer's own calendar. Its name repair "
+        "links a Discord post at the viewer's own calendar; its rows choose which "
+        "of a month's premieres the share picture features (calendar/share_highlights), "
+        "and a backup carries those choices. Its name repair "
         "re-reads the title store only when the stored calendar's signature has "
         "moved. And a title added to "
         "a tracker by hand writes the premiere airing no feed carried, through "

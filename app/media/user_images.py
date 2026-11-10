@@ -39,6 +39,14 @@ synchronous body (`_store_avatar`, `_adopt`, …) through `anyio.to_thread`, and
 an account page asks for everything it draws in one (`account_pictures`). What
 stays synchronous only asks whether a file is there or when it changed — one
 stat — or builds a path.
+
+AND SO TWO OF THEM CAN RUN AT ONCE, which on the loop they never could. Two
+things follow, each kept in one place: every file here is written beside its
+final name and moved over it (app/files.py's `write_whole`), so a reader — a picture's GET, the
+names file's read — sees the old file or the new one and never a half-written
+one; and every read-change-write of the names file holds `_NAMES_LOCK`, so two
+renames from one account cannot each read the map, change one name and write
+back a map without the other's.
 """
 from __future__ import annotations
 
@@ -48,6 +56,7 @@ import json
 import logging
 import re
 import shutil
+import threading
 import uuid
 from io import BytesIO
 from pathlib import Path
@@ -56,6 +65,7 @@ from typing import NamedTuple
 import anyio.to_thread
 from PIL import Image
 
+from .. import files
 from ..config import DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -109,6 +119,7 @@ class TooManyImages(Exception):
 
 def _user_dir(user_id: int) -> Path:
     return USER_DATA_DIR / str(user_id)
+
 
 
 def avatar_path(user_id: int) -> Path:
@@ -325,7 +336,7 @@ def _delete_source(user_id: int, source: str) -> bool:
     if wearing_it:
         own = uploaded_avatar_path(user_id)
         try:
-            avatar.write_bytes(own.read_bytes())
+            files.write_whole(avatar, own.read_bytes())
         except OSError:
             avatar.unlink(missing_ok=True)
     return True
@@ -401,6 +412,13 @@ MAX_IMAGE_NAME = 40
 
 _NAMES_FILE = "images.json"
 
+# Held across every read-change-write of a names file (`_set_image_name`, a named
+# `_add_image`, `_delete_image`), every account's, because the file is read and
+# written whole: two at once each wrote back the map it read with only its own
+# change. One lock, not one per account — a write is a few hundred bytes and
+# rare, and a lock per account would be a map that only grows.
+_NAMES_LOCK = threading.Lock()
+
 
 def _names_path(user_id: int) -> Path:
     return _user_dir(user_id) / _NAMES_FILE
@@ -424,9 +442,8 @@ def _read_names(user_id: int) -> dict[str, str]:
 
 
 def _write_names(user_id: int, names: dict[str, str]) -> None:
-    path = _names_path(user_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(names, sort_keys=True), encoding="utf-8")
+    """Under `_NAMES_LOCK`, with the read it changes."""
+    files.write_whole(_names_path(user_id), json.dumps(names, sort_keys=True).encode("utf-8"))
 
 
 def clean_name(value: object) -> str:
@@ -463,12 +480,13 @@ async def set_image_name(user_id: int, image_uid: str, name: str) -> bool:
 def _set_image_name(user_id: int, image_uid: str, name: str) -> bool:
     if image_uid not in list_images(user_id):
         return False
-    names = _read_names(user_id)
-    if name:
-        names[image_uid] = name
-    else:
-        names.pop(image_uid, None)
-    _write_names(user_id, names)
+    with _NAMES_LOCK:
+        names = _read_names(user_id)
+        if name:
+            names[image_uid] = name
+        else:
+            names.pop(image_uid, None)
+        _write_names(user_id, names)
     return True
 
 
@@ -544,9 +562,8 @@ async def save_avatar(user_id: int, image_b64: str) -> Path:
 def _store_avatar(user_id: int, image_b64: str) -> Path:
     normalized = _normalize(_decode_upload(image_b64))
     path = avatar_path(user_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(normalized)
-    uploaded_avatar_path(user_id).write_bytes(normalized)
+    files.write_whole(path, normalized)
+    files.write_whole(uploaded_avatar_path(user_id), normalized)
     return path
 
 
@@ -594,9 +611,7 @@ async def save_provider_avatar(user_id: int, provider: str, raw: bytes) -> Path:
 
 
 def _store(path: Path, raw: bytes) -> Path:
-    normalized = _normalize(raw)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(normalized)
+    files.write_whole(path, _normalize(raw))
     return path
 
 
@@ -634,8 +649,7 @@ def _adopt(user_id: int, source: str, only_if_missing: bool) -> bool:
     target = avatar_path(user_id)
     if only_if_missing and target.exists():
         return False
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(stored.read_bytes())
+    files.write_whole(target, stored.read_bytes())
     return True
 
 
@@ -653,13 +667,12 @@ def _add_image(user_id: int, image_b64: str, name: str) -> str:
     label = clean_name(name)
     normalized = _normalize(_decode_upload(image_b64))
     uid = uuid.uuid4().hex
-    d = images_dir(user_id)
-    d.mkdir(parents=True, exist_ok=True)
-    image_path(user_id, uid).write_bytes(normalized)
+    files.write_whole(image_path(user_id, uid), normalized)
     if label:
-        names = _read_names(user_id)
-        names[uid] = label
-        _write_names(user_id, names)
+        with _NAMES_LOCK:
+            names = _read_names(user_id)
+            names[uid] = label
+            _write_names(user_id, names)
     return uid
 
 
@@ -677,9 +690,10 @@ def _delete_image(user_id: int, image_uid: str) -> bool:
     # The name goes with the image. Left behind it would be handed straight back
     # to the next upload that happened to reuse the uid — which cannot happen
     # with uuid4, but a stale map that only grows is its own small mess.
-    names = _read_names(user_id)
-    if names.pop(image_uid, None) is not None:
-        _write_names(user_id, names)
+    with _NAMES_LOCK:
+        names = _read_names(user_id)
+        if names.pop(image_uid, None) is not None:
+            _write_names(user_id, names)
     return True
 
 

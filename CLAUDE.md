@@ -212,7 +212,11 @@ flush lets go of the interpreter lock and waits up to a switch interval to win
 it back beside a busy thread, so every line goes onto a bounded queue and a
 listener thread writes what is waiting a batch at a time, one write and one
 flush per handler (`app/logging_setup.py`), and a picture's reads and writes run
-on a worker thread (`app/media/user_images.py`). MEASURED: dev's refresh pass
+on a worker thread (`app/media/user_images.py`). SO A FILE IS READ ON ONE THREAD
+WHILE ANOTHER WRITES IT, and every file the app keeps — a picture, the saved
+pictures' names, a poster tile, a rendered share card or export — is written
+beside its name and moved over it (`app/files.py`'s `write_whole`); a
+read-change-write of the names file holds one lock. MEASURED: dev's refresh pass
 held its loop 2,061 ms writing 558 DEBUG lines; on a harness copy beside a busy
 thread that burst was one 12.1 s block, and its per-row log calls 17.5 s → 53 ms
 in all; a 558-span burst costs the logging thread 10.1 s → 27 ms beside a busy
@@ -954,7 +958,19 @@ card is one of the TWO public paths that may make an outbound call (the details
 panel, below, is the other): it warms poster ARTWORK, bounded to what the grid
 draws and to a wall clock, for titles the calendar cache already holds. It never
 fetches the CALENDAR (`allow_fetch=False`), so an empty cached month stays an
-empty card.
+empty card. THE OWNER MAY FEATURE UP TO TEN OF A MONTH'S PREMIERES ON IT
+(`app/calendar/share_highlights.py`, chosen by a star on the tracker's rows), and
+a feature is a GUARANTEE, NEVER A NARROWING: on a premieres card alone, every
+featured title the view SHOWS takes a tile before the ranking fills the rest
+(`share_routes.tile_candidates`), the grid stays in date order, the count stays
+the page's, and a featured title the view filters, narrows or hides is not drawn —
+the rule above, not a choice. With nothing featured the card is
+`select_tile_items`' byte for byte. The page never changes. AND THE PICTURE'S
+ADDRESS NAMES WHAT IT DRAWS: an unfurler keeps a picture by its address (Discord
+kept a wrong one), so the og:image URL ends `&v=` a digest of the count and the
+wanted tiles' titles, dates and premiere marks (`share_routes.card_digest`, after
+the `p=` code), which the picture's route ignores; the file on disk is still
+addressed by everything it draws (`share_card_cache.render_key`).
 
 **A page draws a picture's ADDRESS; a tile on disk is for compositing only, and
 a title costs at most one lookup, ever.** `app/media/posters.py` owns both halves

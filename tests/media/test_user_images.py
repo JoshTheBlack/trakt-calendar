@@ -21,7 +21,7 @@ from unittest.mock import patch
 from PIL import Image, PngImagePlugin
 from fastapi.testclient import TestClient
 
-from app import auth, db
+from app import auth, db, files
 from app.media import user_images
 from app.config import Settings
 from tests.support import save_settings, settling
@@ -286,6 +286,46 @@ class ImageNameTests(unittest.TestCase):
         self.assertTrue(asyncio.run(user_images.delete_image(user_id, uid)))
         self.assertEqual(asyncio.run(user_images.describe_images(user_id)), [])
         self.assertEqual(user_images._read_names(user_id), {})
+
+    def test_two_renames_at_once_keep_both_names(self):
+        """Each rename runs on a worker thread, so two can overlap: each read the
+        names file, changed its own name and wrote back the map it read — the
+        other's name was gone. The reads are held open here until both have
+        read, which is what the lock must prevent."""
+        import threading
+        user_id = _next_user_id()
+        first = asyncio.run(user_images.add_image(user_id, _b64(_png_bytes()), "First"))
+        second = asyncio.run(user_images.add_image(user_id, _b64(_png_bytes()), "Second"))
+        real = user_images._read_names
+        both_reading = threading.Barrier(2, timeout=0.5)
+
+        def read_and_wait(owner: int) -> dict[str, str]:
+            names = real(owner)
+            try:
+                both_reading.wait()
+            except threading.BrokenBarrierError:
+                pass  # the other rename was kept out until this one wrote
+            return names
+
+        async def both() -> None:
+            await asyncio.gather(user_images.set_image_name(user_id, first, "Alpha"),
+                                 user_images.set_image_name(user_id, second, "Beta"))
+
+        with patch.object(user_images, "_read_names", read_and_wait):
+            asyncio.run(both())
+        self.assertEqual(user_images._read_names(user_id), {first: "Alpha", second: "Beta"})
+
+    def test_a_write_that_fails_leaves_the_old_file_whole(self):
+        """A file is written beside its name and moved over it, so a reader never
+        meets a half-written one and a write that fails changes nothing."""
+        user_id = _next_user_id()
+        uid = asyncio.run(user_images.add_image(user_id, _b64(_png_bytes()), "Kept"))
+        with patch.object(files.os, "replace", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                asyncio.run(user_images.set_image_name(user_id, uid, "Lost"))
+        self.assertEqual(user_images._read_names(user_id), {uid: "Kept"})
+        self.assertEqual(sorted(p.name for p in user_images._user_dir(user_id).iterdir()),
+                         ["images", "images.json"])
 
     def test_an_unreadable_sidecar_costs_the_names_and_nothing_else(self):
         """A name is a convenience. Losing the file that holds them must never

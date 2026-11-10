@@ -692,7 +692,17 @@ def _marks_owed_sql(drawer: str, bit: int, marker: str) -> str:
     not have is never asked about, and a season read that fails is recorded on
     that row (descriptions.plan_failures), backed off a day and given up after
     LISTED_GIVE_UP_AFTER like every owed group. A title it has not described yet
-    is `queue_cards`' to queue first."""
+    is `queue_cards`' to queue first.
+
+    AND ONLY WHERE THAT LIST HOLDS EPISODES OF IT AND THE SEASON'S OWN CLOCK IS
+    DUE. A season read that types nothing — TMDB has no such season (Simkl's
+    year-numbered S2026) or answers it empty — still writes the season's group,
+    so asking only "has the marker described it" and "has it typed an episode"
+    owed it again at the next tick: the same 69 seasons were read every minute
+    on dev, ~142 TMDB requests a minute for nothing. A season list leaves the
+    clock at the schema's 0 (`descriptions.write_season_list`), so a season
+    nobody has read yet is due at once, and one that was read waits for the
+    clock its answer set (`descriptions.season_stale_after`) like every read."""
     own = f"CAST(json_extract(i.ids_json, '$.{rows.ID_NAMESPACE[marker]}') AS TEXT)"
     return (
         f"SELECT d.media, {own} AS own_id, d.season FROM ("
@@ -706,6 +716,8 @@ def _marks_owed_sql(drawer: str, bit: int, marker: str) -> str:
         f"JOIN {tables.TITLES} i ON i.title_key = d.title_key "
         f"JOIN {tables.SEASONS} s ON s.title_key = d.title_key AND s.season = d.season "
         f"WHERE {own} IS NOT NULL AND s.{marker}_fetched_at IS NOT NULL "
+        f"  AND s.{marker}_episode_count > 0 "
+        f"  AND (s.{marker}_stale_after IS NULL OR s.{marker}_stale_after <= :now) "
         f"  AND COALESCE(s.{marker}_fail_count, 0) < :give_up "
         f"  AND (s.{marker}_failed_at IS NULL OR s.{marker}_failed_at < :retry_before) "
         f"  AND NOT EXISTS (SELECT 1 FROM {tables.EPISODES} t "

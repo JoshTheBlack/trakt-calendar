@@ -31,7 +31,7 @@
 - ✅ Mark shows **watching / not watching** — saved to your account, with a one-click filter to hide the ones you're not watching
 - 📥 **Add to Sonarr / Radarr / Seerr** — one click per title. Buttons appear only when configured, arrive already marked when the title is in that library, and grey out with a reason when they can't be used. "Add all" adds everything you're watching that month, after confirming
 - 🎛️ **Layout options** — poster-on-top or poster-beside cards, stacked or packed days, and a poster-only wall
-- 🔗 **Read-only share links** — a shared calendar opens each title's details and shows your watched marks (you can switch that off). Pasted into Discord, Slack or iMessage, a link unfurls into a picture of the month, drawn only from what's already cached so a stranger's link never spends your Trakt budget
+- 🔗 **Read-only share links** — a shared calendar opens each title's details and shows your watched marks (you can switch that off). Pasted into Discord, Slack or iMessage, a link unfurls into a picture of the month, drawn only from what's already cached so a stranger's link never spends your Trakt budget. The picture's address changes when what it shows does, so a link posted again after the month changed unfurls the new picture rather than the one the chat app already kept
 - 🏆 **Rankings boards** — tier-rank shows, films or single seasons by dragging, up to 2,000 titles a board. Add by search, from what you've finished, or from your Trakt ratings; move several at once, restore removals for 30 days, and export an image, Markdown or a backup
 - 📈 Tracks premiere counts over time and shows the change since your last visit
 - ⚙️ **Everything configured from the UI** — no config files to edit
@@ -515,6 +515,7 @@ app/
   details_panel.py  The one details panel every surface draws
   youtube.py        Which YouTube video a service's value names, if any
   logging_setup.py  Console logging, plus the optional LOG_FILE
+  files.py          Writing a file another thread may be reading: whole, or not at all
   ── at the root without being kernel ──
   authz.py          Route authorization: declare-or-denied, CSRF/origin rules,
                      the shared JSON body guard. Auth tier, not kernel
@@ -548,6 +549,7 @@ app/
     share_code.py     The compact ?p= code a share link is handed out as
     share_card.py     The 1200x630 picture a share link unfurls into
     share_card_cache.py  Rendered cards on disk (data/share_cards), keyed by content
+    share_highlights.py  The premieres a month's share picture is chosen to feature
   metadata/         The title store every feature reads: what each service says
                      about a title, which title a set of ids is, and the one way in
     __init__.py       ensure / store_records — registering a title, and the one

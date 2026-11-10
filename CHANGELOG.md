@@ -48,6 +48,7 @@ All notable changes to this project are documented here. Format loosely follows 
 - 🎬 **A network list in the Settings floor no longer empties the film calendar.**
 - 📡 **A network no longer borrows another's logo** (BBC Two drew Channel 4's).
 - 📥 **A show isn't marked as on Seerr because a film with the same TMDB number is.**
+- 🖼️ **A share link posted again after its month changed unfurls the new picture**, not the one Discord kept from before.
 - 🔧 **Smaller fixes:**
   - The Unenriched count includes titles nobody has looked up yet.
   - A logo or poster lookup that failed is tried again, not remembered as none.
@@ -55,6 +56,7 @@ All notable changes to this project are documented here. Format loosely follows 
   - An administrator can unlink a Simkl account.
   - A film only Simkl knows can be jumped to from the calendar search.
   - "This calendar doesn't reach that month" offers a service that does.
+  - A share link unfurled twice at once no longer shows a broken picture.
 
 ### 🥚
 - It knows a third catalogue now: asks it first how long things are, in an order you can change from a little room of its own, and can even take in something nobody else counts — marked, so you know nobody is.
@@ -62,6 +64,7 @@ All notable changes to this project are documented here. Format loosely follows 
 - It opens far sooner, keeps its boxes open while it does, and the empty ones open when pressed.
 - When one of them quietly moves something to a new address, it still finds it by the name that one gave it.
 - Switching one of them off no longer paints every line as a disagreement, and the little pictures beside the names come from where the posters do.
+- It can choose a few favourites for it to promote.
 
 ### Under the hood
 - 🗂️ **One store of what every service says about a title** — a row per title, season and episode, every service side by side; the tables it replaces are kept, unread, until a later release removes them.

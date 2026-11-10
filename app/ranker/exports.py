@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from . import item_keys, seasons
+from .. import files
 from ..media import user_images
 
 logger = logging.getLogger(__name__)
@@ -323,11 +324,11 @@ def store_render(path: Path, payload: bytes) -> None:
     """Keep a finished render, then trim the account back to the cap.
 
     Best-effort throughout. Failing to cache an image the caller is already
-    holding is not a reason to fail the export.
+    holding is not a reason to fail the export. Written whole (app/files.py),
+    so a second export of the same board reading it meanwhile never reads half.
     """
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(payload)
+        files.write_whole(path, payload)
     except OSError:
         logger.warning("Could not cache a generated grid at %s", path, exc_info=True)
         return
@@ -339,13 +340,13 @@ def _trim(generated_root: Path) -> None:
     directory, oldest evicted first. Counted across years, because the cap is
     about one account's disk rather than about any one board."""
     try:
-        files = sorted(
+        renders = sorted(
             (p for p in generated_root.rglob("*") if p.is_file()),
             key=lambda p: p.stat().st_mtime, reverse=True,
         )
     except OSError:
         return
-    for stale in files[MAX_CACHED_RENDERS:]:
+    for stale in renders[MAX_CACHED_RENDERS:]:
         try:
             stale.unlink()
         except OSError:

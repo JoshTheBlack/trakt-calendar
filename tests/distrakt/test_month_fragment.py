@@ -329,6 +329,7 @@ class EveryConvertedRouteRefusesTests(MonthFragmentTestCase):
         ("/api/distrakt/rewatch-start", {"key": str(KEY), "season": 1}),
         ("/api/distrakt/rewatch-complete", {"key": str(KEY), "season": 1}),
         ("/api/distrakt/remove-movie", {"key": "movie:tmdb:7"}),
+        ("/api/distrakt/feature", {"key": str(KEY), "on": True}),
     )
     OTHER_ROUTES = (
         # A DISMISSAL IS NOT A ROW ROUTE, and that is the point of it being here
@@ -388,6 +389,7 @@ class EveryConvertedRouteRefusesTests(MonthFragmentTestCase):
             ("/api/distrakt/acknowledge-return", {"key": "", "season": 1}),
             ("/api/distrakt/unknown-dismiss", {"key": "show:letterboxd:1", "season": 1}),
             ("/api/distrakt/remove-movie", {"key": "movie:nope:7"}),
+            ("/api/distrakt/feature", {"key": "nonsense", "on": True}),
             ("/api/distrakt/add", {"q": "x", "i": "not-a-place", "season": 1}),
             ("/api/distrakt/add-movie", {"q": "x", "i": 0, "watched_on": "the 4th"}),
             ("/api/distrakt/share-link", {"kind": "carrier-pigeon"}),

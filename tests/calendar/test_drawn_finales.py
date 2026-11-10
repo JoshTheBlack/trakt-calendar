@@ -170,12 +170,22 @@ class TheSeasonsAMarkNeedsAreQueuedTests(CardTestCase):
             f"UPDATE {tables.TITLES} SET ids_json = json_set(ids_json, '$.tmdb', ?) "
             "WHERE title_key = ?", (TMDB_ID, title_key_of(self.episode)))
 
-    def _listed_by_tmdb(self) -> None:
-        """TMDB's description of the title lists season 2."""
+    def _listed_by_tmdb(self, episode_count: int = 10) -> None:
+        """TMDB's description of the title lists season 2, with `episode_count`
+        episodes — a season list leaves the season's clock at the schema's 0."""
         db.connection().execute(
-            f"INSERT INTO {tables.SEASONS} (title_key, season, tmdb_fetched_at) VALUES (?, 2, 1) "
-            "ON CONFLICT (title_key, season) DO UPDATE SET tmdb_fetched_at = 1",
-            (title_key_of(self.episode),))
+            f"INSERT INTO {tables.SEASONS} (title_key, season, tmdb_fetched_at, "
+            "tmdb_episode_count) VALUES (?, 2, 1, ?) "
+            "ON CONFLICT (title_key, season) DO UPDATE SET tmdb_fetched_at = 1, "
+            "tmdb_episode_count = excluded.tmdb_episode_count",
+            (title_key_of(self.episode), episode_count))
+
+    def _read_typing_nothing(self, stale_after: int) -> None:
+        """TMDB's read of season 2 answered and typed no episode — its season
+        group is written with the clock the answer set, and nothing else."""
+        db.connection().execute(f"UPDATE {tables.SEASONS} SET tmdb_stale_after = ?",
+                                (stale_after,))
+        db.connection().execute("DELETE FROM metadata_refresh")
 
     def _queue(self) -> list[tuple]:
         asyncio.run(refresh.queue_marks(self.settings, date(2026, 10, 1), date(2026, 12, 1),
@@ -202,6 +212,23 @@ class TheSeasonsAMarkNeedsAreQueuedTests(CardTestCase):
         _typed(self.episode, "tmdb", "standard")
         db.connection().execute(f"UPDATE {tables.EPISODES} SET tmdb_stale_after = 1")
         self.assertEqual(len(self._queue()), 1)
+
+    def test_a_season_whose_read_typed_nothing_waits_its_own_clock(self):
+        """The heartbeat once read the same seasons every minute: an answer that
+        types nothing leaves the season untyped, and only its clock says when to
+        ask again."""
+        self._listed_by_tmdb()
+        self.assertEqual(len(self._queue()), 1)
+        self._read_typing_nothing(db.now() + 86400)
+        self.assertEqual(self._queue(), [])
+        self._read_typing_nothing(db.now() - 1)
+        self.assertEqual(len(self._queue()), 1)
+
+    def test_a_season_tmdb_holds_with_no_episodes_is_never_asked(self):
+        """What an empty answer leaves (TMDB has no such season — Simkl numbers
+        some by year — or lists none of its episodes): nothing to mark."""
+        self._listed_by_tmdb(episode_count=0)
+        self.assertEqual(self._queue(), [])
 
     def test_a_season_tmdb_gave_up_on_is_left_alone(self):
         self._listed_by_tmdb()

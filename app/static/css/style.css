@@ -2797,6 +2797,16 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .distrakt-abandon > span { grid-area: 1 / 1; text-align: center; }
 .distrakt-abandon > .alt { visibility: hidden; }
 .distrakt-abandon.is-placeholder { visibility: hidden; }
+/* A ROW'S STAR: whether this month's share picture features the show
+   (_distrakt_rows.html's `feature`). Gold when it does; at the most a month may
+   feature, the others are disabled and dimmed, and the line above the list says
+   why. A row whose show did not premiere this month holds an invisible one, so
+   the buttons after it line up. */
+.distrakt-feature { min-width: 2em; text-align: center; color: var(--text-dim); }
+.distrakt-feature.is-on { color: var(--gold); border-color: transparent; }
+.distrakt-feature:disabled { opacity: 0.35; cursor: not-allowed; }
+.distrakt-feature.is-placeholder { visibility: hidden; }
+.distrakt-featured { font-size: 0.8rem; color: var(--text-dim); margin: 0 0 4px 2px; }
 /* A NARROW LIST PUTS A ROW'S FACTS UNDER ITS TITLE. The one-line row gives
    fixed widths to the season, network, counts and dates (about 26em between
    them) plus the logo and the buttons, which at a 400px phone left the title no
@@ -2821,7 +2831,7 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     .distrakt-row-actions { grid-column: 4; grid-row: 1; }
     /* A phone's rows do not share columns across the list, so the room held for
        a missing button would only take width from the title. */
-    .distrakt-abandon.is-placeholder { display: none; }
+    .distrakt-abandon.is-placeholder, .distrakt-feature.is-placeholder { display: none; }
     /* THE FACTS ARE ONE FLEXIBLE LINE UNDER THE TITLE, reaching under the
        buttons. As grid cells they shared columns with the buttons above them,
        so the button column's width (119px with Abandon) was taken out of the
