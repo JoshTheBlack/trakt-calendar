@@ -515,6 +515,7 @@ app/
   details_panel.py  The one details panel every surface draws
   youtube.py        Which YouTube video a service's value names, if any
   logging_setup.py  Console logging, plus the optional LOG_FILE
+  files.py          Writing a file another thread may be reading: whole, or not at all
   ── at the root without being kernel ──
   authz.py          Route authorization: declare-or-denied, CSRF/origin rules,
                      the shared JSON body guard. Auth tier, not kernel

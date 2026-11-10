@@ -212,7 +212,11 @@ flush lets go of the interpreter lock and waits up to a switch interval to win
 it back beside a busy thread, so every line goes onto a bounded queue and a
 listener thread writes what is waiting a batch at a time, one write and one
 flush per handler (`app/logging_setup.py`), and a picture's reads and writes run
-on a worker thread (`app/media/user_images.py`). MEASURED: dev's refresh pass
+on a worker thread (`app/media/user_images.py`). SO A FILE IS READ ON ONE THREAD
+WHILE ANOTHER WRITES IT, and every file the app keeps — a picture, the saved
+pictures' names, a poster tile, a rendered share card or export — is written
+beside its name and moved over it (`app/files.py`'s `write_whole`); a
+read-change-write of the names file holds one lock. MEASURED: dev's refresh pass
 held its loop 2,061 ms writing 558 DEBUG lines; on a harness copy beside a busy
 thread that burst was one 12.1 s block, and its per-row log calls 17.5 s → 53 ms
 in all; a 558-span burst costs the logging thread 10.1 s → 27 ms beside a busy
