@@ -5,8 +5,9 @@ waterfall and the merge rules are code, and a second copy of them in a migration
 would be a second answer to "which title is this"). So the first heartbeat after
 the upgrade walks what is already stored and settles each title through the same
 `identity.settle` every later arrival uses: each service's title rows, the
-tracker's rows, the boards' rows, films watched, what the tracker wrote to a
-service's list. No service is asked; this is local work.
+tracker's rows, the boards' rows, films watched, each season's watch progress,
+the films a frozen month recorded, what the tracker wrote to a service's list.
+No service is asked; this is local work.
 
 IT IS ALSO WHERE THE STALE KEYS GO. Measured before this was written: 1,256 titles
 on the development copy (83 on a production copy) carried ids that key them
@@ -183,9 +184,21 @@ def _gather(conn: db.Connection) -> dict[str, tuple[str, dict]]:
     for row in conn.execute("SELECT media, match_source, match_id, tmdb, ids_json "
                             "FROM tier_items"):
         add(_key(row), row["media"], {**_loads(row["ids_json"]), "tmdb": row["tmdb"]})
-    for row in conn.execute("SELECT media, match_source, match_id, trakt_id, simkl_id "
-                            "FROM distrakt_movie_watches"):
-        add(_key(row), row["media"], {"trakt": row["trakt_id"], "simkl": row["simkl_id"]})
+    for table in ("distrakt_movie_watches", "distrakt_show_progress"):
+        for row in conn.execute(f"SELECT media, match_source, match_id, trakt_id, simkl_id "
+                                f"FROM {table}"):
+            add(_key(row), row["media"], {"trakt": row["trakt_id"], "simkl": row["simkl_id"]})
+    # A frozen month's films, each by the key and ids it froze with. An entry in
+    # the shape written before films had keys names none, and is keyed later by
+    # app/distrakt/film_snapshots.py.
+    for (document,) in conn.execute("SELECT movies_json FROM distrakt_months "
+                                    "WHERE json_valid(movies_json)"):
+        films = json.loads(document)
+        for film in films if isinstance(films, list) else ():
+            key = film.get("key") if isinstance(film, dict) else None
+            if isinstance(key, str) and key.count(":") == 2:
+                ids = film.get("ids")
+                add(key, key.split(":", 1)[0], ids if isinstance(ids, dict) else {})
     for row in conn.execute("SELECT media, match_source, match_id, ids_json "
                             "FROM distrakt_open_prompts"):
         add(_key(row), row["media"], _loads(row["ids_json"]))
