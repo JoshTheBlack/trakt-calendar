@@ -207,7 +207,17 @@ so each is touched by one thread only, and the work moved touches none of them:
 it is handed its own records and returns values. MEASURED, the restart burst:
 the longest loop block 1.85–3.46 s → 0.30–0.34 s; what is left lines up with
 full garbage collections (up to ~0.3 s) and the interpreter lock shared with
-the threads.
+the threads. AND THE LOOP WRITES NO LOG LINE AND NO PICTURE FILE: a write or a
+flush lets go of the interpreter lock and waits up to a switch interval to win
+it back beside a busy thread, so every line goes onto a bounded queue and a
+listener thread writes what is waiting a batch at a time, one write and one
+flush per handler (`app/logging_setup.py`), and a picture's reads and writes run
+on a worker thread (`app/media/user_images.py`). MEASURED: dev's refresh pass
+held its loop 2,061 ms writing 558 DEBUG lines; on a harness copy beside a busy
+thread that burst was one 12.1 s block, and its per-row log calls 17.5 s → 53 ms
+in all; a 558-span burst costs the logging thread 10.1 s → 27 ms beside a busy
+thread (113 → 18 ms idle); a listener writing a line at a time managed 52 lines
+a second beside one, and filled its queue — batched, 17,000.
 
 **The calendar's reads run in a pool of worker processes; everything else in the
 web process.** `app/read_pool.py` owns it. Threads share one interpreter lock, so
@@ -252,8 +262,10 @@ between a calendar read and its render has one (`calendar.view_state`,
 `query.span` / `query.titles` / `query.present`, `calendar.season_lines`,
 `calendar.logos`, `calendar.card_pictures`, and every off-loop render's
 `templating.drawn`). A span is DEBUG until slow
-(`SLOW_SPAN_MS`) and spells its fields only when its line is printed: 2.6 µs at
-INFO, ~31 µs at DEBUG to a file (MEASURED). EVERY READ IS COUNTED TOO: `db.run`
+(`SLOW_SPAN_MS`) and spells its fields only when its line is printed: 2–3 µs at
+INFO, ~30 µs at DEBUG to the file and console, which the log thread writes
+(MEASURED; 203 µs when the logging thread wrote them itself, 18 ms beside a busy
+thread). EVERY READ IS COUNTED TOO: `db.run`
 TALLIES itself (`perftrace.tally` — one summed entry, `db.run=812ms×9`, each
 read still counted toward what is covered, no line of its own), because beside
 a restart's refills a read waits for a thread and the interpreter lock, and a

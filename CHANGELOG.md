@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## 🏷️ [1.2.6] - UNRELEASED
+## 🏷️ [1.3.0] - UNRELEASED
 
 ### ⚠️ Upgrading
 - 🗄️ **Back up `data/app.db` first: the first start rebuilds the database** — about five seconds for a 90 MB database before the app answers, longer in proportion for a bigger one.
@@ -14,6 +14,7 @@ All notable changes to this project are documented here. Format loosely follows 
 ### Added
 - 📅 **TMDB is a third calendar service** for Series, Season and Movie Premieres, beside Trakt and Simkl. It gives dates, not times, and its season premieres are worked out in the background, joining a week within a minute of its first opening.
 - 🎬 **TMDB describes titles first** — details panels, pictures, and every calendar card of a title it knows, even ones only Trakt or Simkl list — with Trakt and Simkl answering what TMDB doesn't. Its language and film-release region are set in Settings.
+- 🏁 **Season Finales lists Simkl's shows too**, wherever TMDB marks the episode a finale, and tags mid-season finales.
 - 🎚️ **New filters**, for each viewer and as an instance-wide floor: languages, TMDB keywords, show types, missing data, **hide titles only one service lists** and **hide shows only TMDB lists that name no network**.
 - 🔗 **Titles are matched across services in the background**, and a card shows a button for every service that knows the title — greyed where that service doesn't list this airing.
 - 🔍 **Every search box searches TMDB** when you press Enter; **Also search Trakt**, **Simkl** or **Simkl Anime** adds a service you've linked.
@@ -37,6 +38,7 @@ All notable changes to this project are documented here. Format loosely follows 
 - 📅 **One episode is one card**, however far apart its services' dates: Yellowjackets' season 4 premiere showed on both Friday and Sunday.
 - 🙈 **A title your filters hide stays hidden whichever services you show.** Narrowing to one service hid the others' description of the title from your filters.
 - 🔗 **An account links one account of each service.** A second Trakt, Simkl or Plex account could be linked beside the first.
+- 🔌 **A sign-in or link the app turns down no longer leaves the app connected to your Trakt or Simkl account.**
 - 🔑 **The instance's Trakt token no longer needs re-authorizing after a while away.**
 - 🚦 **Trakt reads stay inside Trakt's real limits**, the app's own and each person's paced separately.
 - 🌐 **All Episodes holds up when Trakt is slow**, a routine refresh no longer says "some calendar data couldn't be loaded", and a week a service couldn't load is retried within a quarter of an hour, not a week.
@@ -67,6 +69,7 @@ All notable changes to this project are documented here. Format loosely follows 
 - 🚦 **Background re-reads take a fixed share of each service's allowance** (a minute's: TMDB 600, Simkl 40, Trakt 4), so pages never queue behind them.
 - 🔒 **Writes take turns and stay short**, so none gives up with "database is locked"; one that holds the lock over a second says so in the log.
 - 🔎 **A slow request's log line accounts for all of its time**, and names where any gap fell.
+- 📝 **Log lines are written by a thread of their own**, so `LOG_LEVEL=DEBUG` no longer slows the app down.
 - 📦 **`cairosvg` and `libcairo2` are gone** from the image: logos are no longer drawn on the server.
 - ⏱️ **The test suite runs in about two minutes**, across every CPU core.
 
