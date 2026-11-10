@@ -40,7 +40,6 @@ import dataclasses
 import logging
 from urllib.parse import quote
 
-import anyio.to_thread
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
 
@@ -715,6 +714,7 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
     account = await auth.get_user(user.user_id)
     orders = await _account_orders(user.user_id, settings)
     prefs = await auth.get_user_prefs(user.user_id)
+    pictures = await user_images.account_pictures(user.user_id)
     return {
         "request": request,
         # is_admin, calendar_available, ranker_available, version, build
@@ -735,7 +735,7 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
         "share_watch_history": bool(prefs["share_watch_history"]),
         # The saved-picture library, drawn with the page rather than fetched by it
         # — the same context every one of its own actions answers with.
-        "images": user_images.describe_images(user.user_id),
+        "images": await user_images.describe_images(user.user_id),
         "cap": user_images.MAX_IMAGES_PER_USER,
         "name_cap": user_images.MAX_IMAGE_NAME,
         # THE SERVICES THAT COULD SUPPLY A WATCH HISTORY AND ARE NOT LINKED, by
@@ -768,7 +768,7 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
         "has_password": bool(account and account["password_hash"]),
         "min_password_length": auth.MIN_PASSWORD_LENGTH,
         "display_name_max": auth.DISPLAY_NAME_MAX,
-        "has_avatar": user_images.has_avatar(user.user_id),
+        "has_avatar": pictures.has_avatar,
         # THE PICTURE'S OWN VERSION, SO A RELOAD CANNOT SHOW THE OLD ONE. These
         # images are served `private, max-age=86400`, which is right for a file
         # that rarely changes and wrong for the moment it does: the URL is
@@ -776,22 +776,21 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
         # goes on drawing it for a day. Carrying the file's mtime in the template
         # fixes it for every path at once — upload, adopt, refresh — rather than
         # each call site remembering.
-        "avatar_version": user_images.picture_version(
-            user_images.avatar_path(user.user_id)),
+        "avatar_version": pictures.avatar_version,
         # WHICH SERVICES HAVE GIVEN US A PICTURE, and which one (if any) the
         # account is currently wearing. The second is derived by comparing bytes
         # rather than stored, for the reason user_images.adopt_avatar_source
         # gives: the avatar is a COPY, so there is no "primary provider" field
         # and the honest answer is whether the two files match.
         "avatar_sources": [
-            {"source": name,
-             "label": "Uploaded" if name == user_images.UPLOAD_SOURCE else name.title(),
+            {"source": picture.source,
+             "label": ("Uploaded" if picture.source == user_images.UPLOAD_SOURCE
+                       else picture.source.title()),
              # Refresh means "ask them again", which only a service can answer.
-             "refreshable": name != user_images.UPLOAD_SOURCE,
-             "adopted": user_images.avatar_source_is_adopted(user.user_id, name),
-             "version": user_images.picture_version(
-                 user_images.avatar_source_path(user.user_id, name))}
-            for name in user_images.list_avatar_sources(user.user_id)
+             "refreshable": picture.source != user_images.UPLOAD_SOURCE,
+             "adopted": picture.adopted,
+             "version": picture.version}
+            for picture in pictures.sources
         ],
         # WHICH SERVICES COULD BE ASKED, as opposed to which have already
         # answered. An account linked before pictures were ever fetched has a
@@ -1144,7 +1143,7 @@ async def upload_avatar(request: Request):
 async def remove_avatar(request: Request):
     user = await auth.require_session(request)
     await authz.json_body(request)
-    user_images.delete_avatar(user.user_id)
+    await user_images.delete_avatar(user.user_id)
     return await _section(request, user.session_id, "avatar")
 
 
@@ -1166,7 +1165,9 @@ async def get_avatar(request: Request):
         return authz.error("`size` must be a whole number.")
     if not 16 <= size <= user_images.MASTER_SIZE:
         return authz.error(f"`size` must be between 16 and {user_images.MASTER_SIZE}.")
-    resized = await anyio.to_thread.run_sync(user_images.resize_master, path.read_bytes(), size)
+    resized = await user_images.resized(path, size)
+    if resized is None:
+        return Response(status_code=404)
     return Response(content=resized, media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
 
 
@@ -1212,7 +1213,9 @@ async def get_avatar_source(request: Request, source: str):
         return authz.error("`size` must be a whole number.")
     if not 16 <= size <= user_images.MASTER_SIZE:
         return authz.error(f"`size` must be between 16 and {user_images.MASTER_SIZE}.")
-    resized = await anyio.to_thread.run_sync(user_images.resize_master, path.read_bytes(), size)
+    resized = await user_images.resized(path, size)
+    if resized is None:
+        return Response(status_code=404)
     return Response(content=resized, media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
 
 
@@ -1229,7 +1232,7 @@ async def use_avatar_source(request: Request):
     name = _known_source(data.get("source"))
     if name is None:
         return await _section(request, user.session_id, "avatar", avatar_message="Unknown picture.")
-    if not user_images.adopt_avatar_source(user.user_id, name, only_if_missing=False):
+    if not await user_images.adopt_avatar_source(user.user_id, name, only_if_missing=False):
         return await _section(request, user.session_id, "avatar",
                               avatar_message="There is no saved picture of that kind.")
     return await _section(request, user.session_id, "avatar")
@@ -1255,7 +1258,7 @@ async def refresh_provider_avatar(request: Request):
     name = _known_slot(data.get("source"))
     if name is None:
         return await _section(request, user.session_id, "avatar", avatar_message="Unknown service.")
-    was_adopted = user_images.avatar_source_is_adopted(user.user_id, name)
+    was_adopted = await user_images.avatar_source_is_adopted(user.user_id, name)
     url = await provider_avatars.current_url(user.user_id, name)
     raw = await provider_avatars.fetch(name, url)
     if raw is None:
@@ -1266,7 +1269,7 @@ async def refresh_provider_avatar(request: Request):
     except user_images.ValidationError as exc:
         return await _section(request, user.session_id, "avatar", avatar_message=str(exc))
     if was_adopted:
-        user_images.adopt_avatar_source(user.user_id, name, only_if_missing=False)
+        await user_images.adopt_avatar_source(user.user_id, name, only_if_missing=False)
     return await _section(request, user.session_id, "avatar")
 
 
@@ -1277,7 +1280,7 @@ async def remove_avatar_source(request: Request):
     name = _known_source(data.get("source"))
     if name is None:
         return await _section(request, user.session_id, "avatar", avatar_message="Unknown picture.")
-    user_images.delete_avatar_source(user.user_id, name)
+    await user_images.delete_avatar_source(user.user_id, name)
     return await _section(request, user.session_id, "avatar")
 
 
@@ -1296,11 +1299,11 @@ async def remove_avatar_source(request: Request):
 # the rankings board's export picker, which chooses between them. What they share
 # is the one place the bytes are validated and stored — user_images.add_image.
 
-def _image_library(request: Request, user_id: int, message: str = "") -> Response:
+async def _image_library(request: Request, user_id: int, message: str = "") -> Response:
     """This account's saved pictures, as the account page draws them."""
     return templates.TemplateResponse(request, "_user_images.html", {
         "request": request,
-        "images": user_images.describe_images(user_id),
+        "images": await user_images.describe_images(user_id),
         "cap": user_images.MAX_IMAGES_PER_USER,
         "name_cap": user_images.MAX_IMAGE_NAME,
         "message": message,
@@ -1323,7 +1326,7 @@ async def upload_saved_image(request: Request):
                    "Remove one first.")
     except user_images.ValidationError as exc:
         message = str(exc)
-    return _image_library(request, user.user_id, message)
+    return await _image_library(request, user.user_id, message)
 
 
 @guard.post("/me/images/{image_uid}/name", AuthLevel.SESSION)
@@ -1335,19 +1338,19 @@ async def rename_saved_image(image_uid: str, request: Request):
     message = ""
     try:
         name = user_images.clean_name(data.get("name"))
-        if not user_images.set_image_name(user.user_id, image_uid, name):
+        if not await user_images.set_image_name(user.user_id, image_uid, name):
             message = "No such image."
     except user_images.ValidationError as exc:
         message = str(exc)
-    return _image_library(request, user.user_id, message)
+    return await _image_library(request, user.user_id, message)
 
 
 @guard.post("/me/images/{image_uid}/delete", AuthLevel.SESSION)
 async def remove_saved_image(image_uid: str, request: Request):
     user = await auth.require_session(request)
     await authz.json_body(request)
-    message = "" if user_images.delete_image(user.user_id, image_uid) else "No such image."
-    return _image_library(request, user.user_id, message)
+    message = "" if await user_images.delete_image(user.user_id, image_uid) else "No such image."
+    return await _image_library(request, user.user_id, message)
 
 
 @guard.get("/api/me/images/{image_uid}", AuthLevel.SESSION)

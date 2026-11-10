@@ -348,7 +348,7 @@ async def seed_provider_avatar(user_id: int, identity: auth.ProviderIdentity) ->
         return
     try:
         await user_images.save_provider_avatar(user_id, identity.provider, raw)
-        user_images.adopt_avatar_source(user_id, identity.provider, only_if_missing=True)
+        await user_images.adopt_avatar_source(user_id, identity.provider, only_if_missing=True)
     except Exception as exc:  # noqa: BLE001 — see the docstring: never fatal
         logger.debug("Could not store the %s avatar for user %s: %s",
                      identity.provider, user_id, exc)

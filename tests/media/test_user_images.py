@@ -176,12 +176,12 @@ class AvatarStorageTests(unittest.TestCase):
     def test_delete_avatar_removes_file_and_reports_it(self):
         user_id = _next_user_id()
         asyncio.run(user_images.save_avatar(user_id, _b64(_png_bytes())))
-        self.assertTrue(user_images.delete_avatar(user_id))
+        self.assertTrue(asyncio.run(user_images.delete_avatar(user_id)))
         self.assertFalse(user_images.has_avatar(user_id))
 
     def test_delete_avatar_on_an_account_with_none_is_a_no_op(self):
         user_id = _next_user_id()
-        self.assertFalse(user_images.delete_avatar(user_id))
+        self.assertFalse(asyncio.run(user_images.delete_avatar(user_id)))
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +202,7 @@ class SavedImageTests(unittest.TestCase):
         with self.assertRaises(user_images.TooManyImages):
             asyncio.run(user_images.add_image(user_id, _b64(_png_bytes())))
 
-        self.assertTrue(user_images.delete_image(user_id, uids[0]))
+        self.assertTrue(asyncio.run(user_images.delete_image(user_id, uids[0])))
         # A slot freed by the delete is usable again.
         asyncio.run(user_images.add_image(user_id, _b64(_png_bytes())))
         self.assertEqual(len(user_images.list_images(user_id)), user_images.MAX_IMAGES_PER_USER)
@@ -215,7 +215,7 @@ class SavedImageTests(unittest.TestCase):
         canary = user_images._user_dir(user_id).parent / "canary.webp"
         canary.write_bytes(b"do-not-touch")
         try:
-            self.assertFalse(user_images.delete_image(user_id, "../../canary"))
+            self.assertFalse(asyncio.run(user_images.delete_image(user_id, "../../canary")))
             self.assertTrue(canary.exists())
             # The legitimate image is untouched by the rejected attempt.
             self.assertTrue(user_images.image_path(user_id, uid).exists())
@@ -225,11 +225,11 @@ class SavedImageTests(unittest.TestCase):
     def test_delete_image_rejects_a_malformed_uid(self):
         user_id = _next_user_id()
         for bad in ("not-hex-at-all", "", "..", "a" * 31, "a" * 33):
-            self.assertFalse(user_images.delete_image(user_id, bad))
+            self.assertFalse(asyncio.run(user_images.delete_image(user_id, bad)))
 
     def test_delete_image_on_unknown_uid_returns_false(self):
         user_id = _next_user_id()
-        self.assertFalse(user_images.delete_image(user_id, "0" * 32))
+        self.assertFalse(asyncio.run(user_images.delete_image(user_id, "0" * 32)))
 
     def test_list_images_is_oldest_first(self):
         user_id = _next_user_id()
@@ -246,7 +246,7 @@ class ImageNameTests(unittest.TestCase):
     def test_an_image_uploaded_with_a_name_reports_it(self):
         user_id = _next_user_id()
         uid = asyncio.run(user_images.add_image(user_id, _b64(_png_bytes()), "Beach photo"))
-        self.assertEqual(user_images.describe_images(user_id),
+        self.assertEqual(asyncio.run(user_images.describe_images(user_id)),
                          [{"uid": uid, "name": "Beach photo"}])
 
     def test_an_unnamed_image_gets_a_positional_default(self):
@@ -255,22 +255,22 @@ class ImageNameTests(unittest.TestCase):
         user_id = _next_user_id()
         first = asyncio.run(user_images.add_image(user_id, _b64(_png_bytes())))
         second = asyncio.run(user_images.add_image(user_id, _b64(_png_bytes())))
-        self.assertEqual(user_images.describe_images(user_id),
+        self.assertEqual(asyncio.run(user_images.describe_images(user_id)),
                          [{"uid": first, "name": "Image 1"},
                           {"uid": second, "name": "Image 2"}])
 
     def test_renaming_and_clearing_a_name(self):
         user_id = _next_user_id()
         uid = asyncio.run(user_images.add_image(user_id, _b64(_png_bytes()), "First"))
-        self.assertTrue(user_images.set_image_name(user_id, uid, "Second"))
-        self.assertEqual(user_images.describe_images(user_id)[0]["name"], "Second")
+        self.assertTrue(asyncio.run(user_images.set_image_name(user_id, uid, "Second")))
+        self.assertEqual(asyncio.run(user_images.describe_images(user_id))[0]["name"], "Second")
         # Cleared falls back to the default rather than being stored as blank.
-        self.assertTrue(user_images.set_image_name(user_id, uid, ""))
-        self.assertEqual(user_images.describe_images(user_id)[0]["name"], "Image 1")
+        self.assertTrue(asyncio.run(user_images.set_image_name(user_id, uid, "")))
+        self.assertEqual(asyncio.run(user_images.describe_images(user_id))[0]["name"], "Image 1")
 
     def test_naming_an_image_this_account_does_not_have_is_refused(self):
         user_id = _next_user_id()
-        self.assertFalse(user_images.set_image_name(user_id, "0" * 32, "Nice try"))
+        self.assertFalse(asyncio.run(user_images.set_image_name(user_id, "0" * 32, "Nice try")))
 
     def test_an_over_long_name_is_refused_not_truncated(self):
         user_id = _next_user_id()
@@ -283,8 +283,8 @@ class ImageNameTests(unittest.TestCase):
     def test_a_deleted_image_takes_its_name_with_it(self):
         user_id = _next_user_id()
         uid = asyncio.run(user_images.add_image(user_id, _b64(_png_bytes()), "Gone soon"))
-        self.assertTrue(user_images.delete_image(user_id, uid))
-        self.assertEqual(user_images.describe_images(user_id), [])
+        self.assertTrue(asyncio.run(user_images.delete_image(user_id, uid)))
+        self.assertEqual(asyncio.run(user_images.describe_images(user_id)), [])
         self.assertEqual(user_images._read_names(user_id), {})
 
     def test_an_unreadable_sidecar_costs_the_names_and_nothing_else(self):
@@ -293,7 +293,7 @@ class ImageNameTests(unittest.TestCase):
         user_id = _next_user_id()
         uid = asyncio.run(user_images.add_image(user_id, _b64(_png_bytes()), "Named"))
         user_images._names_path(user_id).write_text("{not json", encoding="utf-8")
-        self.assertEqual(user_images.describe_images(user_id),
+        self.assertEqual(asyncio.run(user_images.describe_images(user_id)),
                          [{"uid": uid, "name": "Image 1"}])
 
 
@@ -493,6 +493,67 @@ class RouteTests(unittest.TestCase):
                                 json={"name": "x" * (user_images.MAX_IMAGE_NAME + 1)})
         self.assertIn(f"at most {user_images.MAX_IMAGE_NAME}", resp.text)
         self.assertIn('value="Image 1"', resp.text)
+
+
+class AFileIsReadAndWrittenOffTheLoopTests(unittest.TestCase):
+    """Every coroutine here reads and writes its files on a worker thread: its
+    caller is a request on the event loop, and a read or a write there waits a
+    switch interval for the interpreter lock at each system call while another
+    thread is busy (the module docstring)."""
+
+    def _threads_touching_files(self, work) -> set[int]:
+        import pathlib
+        import threading
+        touched: set[int] = set()
+
+        def recording(real):
+            def method(self, *args, **kwargs):
+                touched.add(threading.get_ident())
+                return real(self, *args, **kwargs)
+            return method
+
+        with patch.multiple(pathlib.Path, **{
+                name: recording(getattr(pathlib.Path, name))
+                for name in ("read_bytes", "write_bytes", "read_text", "write_text", "unlink")}):
+            asyncio.run(work())
+        return touched
+
+    def test_every_picture_coroutine_touches_its_files_off_the_calling_thread(self):
+        import threading
+        user_id = _next_user_id()
+        png = _png_bytes(size=(64, 64))
+
+        async def upload():
+            await user_images.save_avatar(user_id, _b64(png))
+
+        async def service():
+            await user_images.save_provider_avatar(user_id, "trakt", png)
+            await user_images.adopt_avatar_source(user_id, "trakt", only_if_missing=False)
+            await user_images.avatar_source_is_adopted(user_id, "trakt")
+            await user_images.account_pictures(user_id)
+
+        async def library():
+            uid = await user_images.add_image(user_id, _b64(png), "Named")
+            await user_images.set_image_name(user_id, uid, "Renamed")
+            await user_images.describe_images(user_id)
+            await user_images.delete_image(user_id, uid)
+
+        async def resize():
+            await user_images.resized(user_images.avatar_path(user_id), 32)
+
+        async def removal():
+            await user_images.delete_avatar_source(user_id, "trakt")
+            await user_images.delete_avatar(user_id)
+
+        for work in (upload, service, library, resize, removal):
+            with self.subTest(work=work.__name__):
+                touched = self._threads_touching_files(work)
+                self.assertTrue(touched, "the work touched no file at all")
+                self.assertNotIn(threading.get_ident(), touched)
+
+    def test_a_resize_of_a_picture_that_has_gone_is_none(self):
+        self.assertIsNone(asyncio.run(user_images.resized(
+            user_images.avatar_path(_next_user_id()), 32)))
 
 
 if __name__ == "__main__":

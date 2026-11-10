@@ -361,7 +361,7 @@ async def unlink_identity(user_id: int, provider: str, *, force: bool = False) -
         # later failed. If this half does not happen the row is still gone and
         # the next link simply overwrites the slot, which is why it is not worth
         # a compensating step.
-        user_images.delete_avatar_source(user_id, provider)
+        await user_images.delete_avatar_source(user_id, provider)
     return removed
 
 

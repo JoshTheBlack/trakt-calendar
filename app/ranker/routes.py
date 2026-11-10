@@ -470,7 +470,7 @@ async def _rankings_response(request: Request, user, wanted: str | None, *,
         context.update(await _removals_context(user.user_id, board["uid"]))
         if open_for and not open_tier:
             context["open_tier"] = _tier_of(board, context["removals"], open_for)
-        context.update(_export_context(user.user_id, board))
+        context.update(await _export_context(user.user_id, board))
         context["strips_url"] = _strips_url(board["uid"])
         # The bulk Move's destinations, in the order the tiers are drawn.
         context["tiers"] = _move_choices(board)
@@ -2275,8 +2275,9 @@ def _export_text(value: Any, what: str) -> str:
 
 
 def _header_bytes(user_id: int, spec: Any) -> bytes | None:
-    """The icon for the banner: this account's avatar, or one of the images it
-    has saved, or nothing.
+    """SYNCHRONOUS, so a worker thread's: it reads a picture file. The icon for
+    the banner: this account's avatar, or one of the images it has saved, or
+    nothing.
 
     A SAVED IMAGE IS NAMED, NOT UPLOADED HERE. The uid has to be one this
     account actually owns — checked against its own list rather than trusted —
@@ -2447,7 +2448,7 @@ async def _consolidated(user_id: int, board_uid: str, options: _ExportOptions):
     return board, ranked
 
 
-def _export_context(user_id: int, board: dict) -> dict:
+async def _export_context(user_id: int, board: dict) -> dict:
     """Everything the export dialog's form is drawn from.
 
     THE CHOICES ARE THE SERVER'S, ALL OF THEM: the column counts and the scales it
@@ -2471,7 +2472,7 @@ def _export_context(user_id: int, board: dict) -> dict:
                                ("jpeg", "JPEG — widest support"),
                                ("png", "PNG — lossless, largest"))
         ],
-        "export_images": user_images.describe_images(user_id),
+        "export_images": await user_images.describe_images(user_id),
         "export_providers": user_images.list_provider_avatars(user_id),
         "export_image_cap": user_images.MAX_IMAGES_PER_USER,
         "export_name_cap": user_images.MAX_IMAGE_NAME,
@@ -2510,7 +2511,7 @@ async def add_header_image(board_uid: str, request: Request):
     return templates.TemplateResponse(
         request, "_ranker_header_pick.html",
         {"request": request, "chosen": chosen, "message": message,
-         **_export_context(user.user_id, board)},
+         **await _export_context(user.user_id, board)},
         headers={"HX-Trigger": "export-changed"} if chosen else None,
     )
 
@@ -2626,7 +2627,8 @@ async def preview_grid(request: Request):
     try:
         options = _parse_export(request.query_params)
         _, ranked = await _consolidated(user.user_id, board_uid, options)
-        header = _header_bytes(user.user_id, options.header_image)
+        header = await anyio.to_thread.run_sync(_header_bytes, user.user_id,
+                                                options.header_image)
     except ranker.RankerError:
         return Response(status_code=404)
     except ranker_export.ExportError:
@@ -2665,7 +2667,8 @@ async def export_grid(board_uid: str, request: Request):
     try:
         options = _parse_export(data)
         board, ranked = await _consolidated(user.user_id, board_uid, options)
-        header = _header_bytes(user.user_id, options.header_image)
+        header = await anyio.to_thread.run_sync(_header_bytes, user.user_id,
+                                                options.header_image)
     except ranker.RankerError as exc:
         return _refusal(exc)
     except ranker_export.ExportError as exc:
