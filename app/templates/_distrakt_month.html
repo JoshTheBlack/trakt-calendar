@@ -80,11 +80,14 @@
 
 {{ posts.oob(post1, post2) }}
 
-{#- The add flow's overlays, closed and empty. Unconditional rather than
-    per-route: an answer only ever exists because somebody pressed something, and
-    every way of pressing one of these ends with the overlay having no business
-    being open — see _distrakt_modals.html. -#}
+{#- The add flow's overlays, closed and empty, on every answer to a press: every
+    way of pressing one of these ends with the overlay having no business being
+    open — see _distrakt_modals.html. The page's own load of its month is the one
+    answer nobody pressed, and it leaves them as they are (`overlays`,
+    routes.distrakt_month_fragment). -#}
+{% if overlays %}
 {{ modals.all(catalogue_sources, as_finished, film_day, film_max, month_query, oob=true) }}
+{% endif %}
 {#- The Import button's state is the month's: whether it has had anything
     imported yet (see _distrakt_import.html). -#}
 {{ imports.button(month_query, import_due, oob=true) }}

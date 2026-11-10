@@ -59,6 +59,8 @@ from datetime import date
 from enum import StrEnum
 
 from .. import clock, db
+from ..metadata import descriptions
+from ..metadata import labels as title_labels
 from ..providers.base import ItemKey, Media, collect_ids, item_key, resolve_key
 
 _MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -207,10 +209,19 @@ ID_COLUMNS = {
 # `abandoned_form`, a user record adds `came_back` — and writing the common part
 # twice is how one of them would quietly stop storing a field.
 _SHARED_COLUMNS = (
-    "kind", *IDENTITY_COLUMNS, "season", *ID_COLUMNS, "title", "network",
+    "kind", *IDENTITY_COLUMNS, "season", *ID_COLUMNS,
     "watched", "total", "cadence", "premiere", "finale",
     "started_airing", "finished_airing", "added_by", "created_at",
 )
+
+# THE WORDS A MONTH RECORD KEEPS: what the title was called and who carried it,
+# AS THE MONTH RECORDED THEM. A frozen month is a record, never recomputed, and a
+# show renamed or moved since must still read the way the month announced it —
+# so a month record stores its words, kept current from the title store while
+# its month is open and fixed from the moment it freezes. A row on the viewer's
+# OWN list stores none: it is drawn with the title store's words for its title,
+# read in the same query (app/metadata/labels.py, `_USER_SELECT` below).
+_SNAPSHOT_COLUMNS = ("title", "network")
 
 # Every distrakt_month_records column except user_id, in insert order.
 #
@@ -221,7 +232,7 @@ _SHARED_COLUMNS = (
 # recomputed on every load, from whatever the services say now. `watched` and
 # `total` beside them keep holding one number, the primary source's, so every
 # reader that asks for one still gets one.
-MONTH_RECORD_COLUMNS = ("month", *_SHARED_COLUMNS, "abandoned_form",
+MONTH_RECORD_COLUMNS = ("month", *_SHARED_COLUMNS, *_SNAPSHOT_COLUMNS, "abandoned_form",
                         "watched_by_source", "total_by_source")
 
 # Every distrakt_user_seasons column except user_id, in insert order.
@@ -297,6 +308,12 @@ def _insert_sql(table: str, columns: tuple[str, ...]) -> str:
 
 _INSERT_MONTH_SQL = _insert_sql("distrakt_month_records", MONTH_RECORD_COLUMNS)
 _INSERT_USER_SQL = _insert_sql("distrakt_user_seasons", USER_RECORD_COLUMNS)
+
+# EVERY READ OF THE VIEWER'S LIST, with the words the title store has for each
+# row's title beside it — one query for both, so no reader can be written that
+# holds a row and not what it is called (app/metadata/labels.py).
+_USER_SELECT = ("SELECT *, " + title_labels.tracker_columns("distrakt_user_seasons")
+                + " FROM distrakt_user_seasons")
 
 # The WHERE clauses that address one record. Written once each because every
 # single-record read, update and delete below shares one of them, and a mismatch
@@ -597,8 +614,11 @@ def row_to_record(row) -> dict:
         "key": item_key(row["media"], row["match_source"], row["match_id"]),
         "season": row["season"],
         "ids": ids,
-        "title": row["title"] or "",
-        "network": row["network"] or "",
+        # THE STORE'S WORDS FOR A LISTED ROW, the record's own for a month record
+        # (see _SNAPSHOT_COLUMNS above for why the two differ).
+        "title": (row["label_title"] if "label_title" in columns else row["title"]) or "",
+        "network": (row["label_network"] if "label_network" in columns
+                    else row["network"]) or "",
         "kind": str(kind),
         "bucket": str(BUCKET_OF_KIND[kind]),
         # The manual "I gave up on this" the renderers ask about. Derived from the
@@ -1071,7 +1091,7 @@ async def user_records(user_id: int,
     """
     clause, params = _kind_filter(kinds)
     rows = await db.fetch_all(
-        "SELECT * FROM distrakt_user_seasons WHERE user_id = ?" + clause + " ORDER BY rowid",
+        _USER_SELECT + " WHERE user_id = ?" + clause + " ORDER BY rowid",
         (user_id, *params),
     )
     return [row_to_record(r) for r in rows]
@@ -1084,7 +1104,7 @@ async def find_user_record(user_id: int, key: ItemKey, season: int) -> dict | No
     most once, whichever month it premiered in and whichever month is on screen.
     """
     row = await db.fetch_one(
-        f"SELECT * FROM distrakt_user_seasons {_SEASON_WHERE}",
+        f"{_USER_SELECT} {_SEASON_WHERE}",
         (user_id, key.media, key.match_source, key.match_id, int(season)),
     )
     return None if row is None else row_to_record(row)
@@ -1107,7 +1127,7 @@ async def add_user_record(user_id: int, record: dict) -> dict:
 
     def _work(conn: db.Connection) -> dict:
         existing = conn.execute(
-            f"SELECT * FROM distrakt_user_seasons {_SEASON_WHERE}", address,
+            f"{_USER_SELECT} {_SEASON_WHERE}", address,
         ).fetchone()
         if existing is None:
             conn.execute(_INSERT_USER_SQL, _insert_params(
@@ -1122,7 +1142,7 @@ async def add_user_record(user_id: int, record: dict) -> dict:
                     f"UPDATE distrakt_user_seasons SET {set_clause} {_SEASON_WHERE}",
                     [*updates.values(), *address])
         return row_to_record(conn.execute(
-            f"SELECT * FROM distrakt_user_seasons {_SEASON_WHERE}", address).fetchone())
+            f"{_USER_SELECT} {_SEASON_WHERE}", address).fetchone())
 
     return await db.transaction(_work)
 
@@ -1272,7 +1292,7 @@ async def migrate_to_month(user_id: int, key: ItemKey, season: int, *, month: st
 
     def _work(conn: db.Connection) -> dict | None:
         row = conn.execute(
-            f"SELECT * FROM distrakt_user_seasons {_SEASON_WHERE}", address).fetchone()
+            f"{_USER_SELECT} {_SEASON_WHERE}", address).fetchone()
         if row is None:
             return None
         record = {**row_to_record(row), **(by_source or {}), "kind": str(settled),
@@ -1337,12 +1357,17 @@ async def migrate_to_user(user_id: int, key: ItemKey, season: int, *, month: str
         record = {**row_to_record(row), "kind": str(listed),
                   "came_back": came_back, "missing_sources_json": "[]",
                   "created_at": now}
+        # THE MONTH RECORDED THE TITLE'S WORDS AND THE LIST KEEPS NONE: where the
+        # title store has none for it yet, the record's go there, until the
+        # title's own service describes it (descriptions.seed_words).
+        descriptions.seed_words(conn, record["media"], record["ids"],
+                                title=record["title"], network=record["network"], now=now)
         conn.execute(f"DELETE FROM distrakt_user_seasons {_SEASON_WHERE}", address)
         conn.execute(_INSERT_USER_SQL,
                      _insert_params(user_id, USER_RECORD_COLUMNS, record))
         conn.execute(f"DELETE FROM distrakt_month_records {_MONTH_ROW_WHERE}", month_address)
         return row_to_record(conn.execute(
-            f"SELECT * FROM distrakt_user_seasons {_SEASON_WHERE}", address).fetchone())
+            f"{_USER_SELECT} {_SEASON_WHERE}", address).fetchone())
 
     return await db.transaction(_work)
 
@@ -1457,17 +1482,27 @@ async def identities_owing(user_id: int) -> list[Owed]:
     # column and matches nothing — a silent empty answer that reads exactly like
     # "no work to do".
     owable = {**_OWABLE_IDS, NETWORK: NETWORK}
-    flags = ", ".join(
-        f"MAX(CASE WHEN {column} IS NULL OR {column} = '' THEN 1 ELSE 0 END) AS owes_{name}"
-        for name, column in owable.items())
-    held = ", ".join(f"MAX({column}) AS has_{name}"
-                     for name, column in {**_OWABLE_IDS, NETWORK: NETWORK}.items())
     selected = ", ".join(IDENTITY_COLUMNS)
     having = " OR ".join(f"owes_{name} = 1" for name in owable)
-    sql = " UNION ALL ".join(
-        f"SELECT {selected}, {flags}, {held} FROM {table} WHERE user_id = ? "
-        f"GROUP BY {selected} HAVING {having}"
-        for table in ("distrakt_month_records", "distrakt_user_seasons"))
+
+    def _select(table: str, columns: dict[str, str | None]) -> str:
+        # A column the table does not keep owes nothing and holds nothing.
+        flags = ", ".join(
+            (f"MAX(CASE WHEN {column} IS NULL OR {column} = '' THEN 1 ELSE 0 END)"
+             if column else "0") + f" AS owes_{name}"
+            for name, column in columns.items())
+        held = ", ".join(f"{f'MAX({column})' if column else 'NULL'} AS has_{name}"
+                         for name, column in columns.items())
+        return (f"SELECT {selected}, {flags}, {held} FROM {table} WHERE user_id = ? "
+                f"GROUP BY {selected} HAVING {having}")
+
+    # A LISTED ROW OWES NO NETWORK: it keeps no words of its own and is drawn with
+    # the title store's (_SNAPSHOT_COLUMNS says why a month record differs), and a
+    # title the store has no network for is described when it is drawn
+    # (app/metadata/refresh.py). Only a month record's own snapshot can be short.
+    sql = " UNION ALL ".join((
+        _select("distrakt_month_records", owable),
+        _select("distrakt_user_seasons", {**_OWABLE_IDS, NETWORK: None})))
     rows = await db.fetch_all(sql, (user_id, user_id))
 
     names: dict[tuple, set[str]] = {}
@@ -1488,23 +1523,21 @@ async def identities_owing(user_id: int) -> list[Owed]:
 
 
 async def learn_network(user_id: int, key: ItemKey, network: str) -> int:
-    """Fill a blank network on every row of one title. Returns rows changed.
+    """Fill a blank network on every MONTH RECORD of one title. Returns rows
+    changed.
 
     ADD-ONLY, for `learn_ids`' reason: a network already stored came off the
     payload the record was built from, and one arriving here is a join. A
     network is a fact about the SHOW, so it addresses the identity, not a season.
+    A row on the viewer's own list keeps no network to fill — it draws the title
+    store's (_SNAPSHOT_COLUMNS).
     """
     if not str(network or "").strip():
         return 0
-    address = (user_id, key.media, key.match_source, key.match_id)
-
-    def _work(conn: db.Connection) -> int:
-        return sum(conn.execute(
-            f"UPDATE {table} SET network = ? WHERE user_id = ? AND {_IDENTITY_MATCH} "
-            "AND (network IS NULL OR network = '')", (network, *address)).rowcount
-            for table in ("distrakt_month_records", "distrakt_user_seasons"))
-
-    return await db.transaction(_work)
+    return (await db.execute(
+        f"UPDATE distrakt_month_records SET network = ? WHERE user_id = ? AND {_IDENTITY_MATCH} "
+        "AND (network IS NULL OR network = '')",
+        (network, user_id, key.media, key.match_source, key.match_id))).rowcount
 
 
 async def learn_ids(user_id: int, key: ItemKey, ids: Mapping) -> int:

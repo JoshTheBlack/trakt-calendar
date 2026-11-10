@@ -36,6 +36,9 @@ NO_PREFS = {
     "tv_genres": "", "tv_countries": "", "movie_genres": "", "movie_countries": "",
     "show_certifications": "", "movie_certifications": "",
     "movie_release_countries": "", "movie_release_types": "",
+    "tv_languages": "", "movie_languages": "", "tv_keywords": [], "movie_keywords": [],
+    "tv_show_types": "", "tv_single_service": False, "movie_single_service": False,
+    "tv_sparse_no_network": False, "tv_missing": "", "movie_missing": "",
     "filters_paused": False,
 }
 

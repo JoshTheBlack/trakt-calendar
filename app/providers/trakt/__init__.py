@@ -21,8 +21,10 @@ from ...endpoints import ENDPOINTS
 from datetime import date
 
 from .. import register
-from ..base import (Capabilities, Media, Record, SearchHit, SeasonsAnswer, Source,
-                    TitleFacts, Video)
+from ..base import (EPISODE_KEEPING, EPISODE_LISTING, SEASON_KEEPING, TITLE_KEEPING,
+                    Capabilities, Media, Reach, Record, SearchCatalogue, SearchHit,
+                    SearchPage, SeasonsAnswer, Source, StoreColumns, TitleFacts, Video,
+                    status_spoken)
 from . import calendar, detail, sync, watchlist
 from .transport import TraktError, TraktRateLimitError
 
@@ -79,9 +81,10 @@ class _TraktDetailPort:
         return settings.trakt_catalogue_configured
 
     async def fetch_details(self, settings: Settings, media, source_id,
-                            season: int | None, *, cache_only: bool = False) -> dict:
+                            season: int | None, *, cache_only: bool = False,
+                            fresh: bool = False) -> dict:
         return await detail.fetch_details(settings, str(media), source_id, season,
-                                          cache_only=cache_only)
+                                          cache_only=cache_only, fresh=fresh)
 
     async def fetch_videos(self, settings: Settings, media, source_id, *,
                            cache_only: bool = False) -> list[Video]:
@@ -118,19 +121,20 @@ class _TraktDetailPort:
         return out
 
     async def fetch_season_summary(self, settings: Settings, source_id,
-                                   season: int, media: Media) -> dict:
+                                   season: int, media: Media, *,
+                                   fresh: bool = False) -> dict:
         # Movies have no seasons, and answering an empty one is what lets the
         # caller treat every media the same rather than branching first.
         if media is Media.MOVIE or str(media) == "movie":
             return season_rules.empty_season(int(season))
-        return await detail.fetch_season_detail(settings, source_id, int(season))
+        return await detail.fetch_season_detail(settings, source_id, int(season), fresh=fresh)
 
     async def fetch_title_facts(self, settings: Settings, source_id,
                                 media: Media) -> TitleFacts:
         return await detail.fetch_title_facts(settings, source_id, str(media))
 
     async def fetch_seasons(self, settings: Settings, source_id, media: Media, *,
-                            cached_only: bool = False) -> SeasonsAnswer:
+                            cached_only: bool = False, fresh: bool = False) -> SeasonsAnswer:
         """app/providers/base.py's DetailPort.fetch_seasons, over the existing
         `fetch_show_seasons` — see that function's own comment for the rule its
         answer already upholds (filtering on `episode_count` rather than
@@ -146,7 +150,7 @@ class _TraktDetailPort:
         would spend a request to restate what the caller already has.
         """
         seasons = await detail.fetch_show_seasons(settings, source_id,
-                                                  cached_only=cached_only)
+                                                  cached_only=cached_only, fresh=fresh)
         return SeasonsAnswer(seasons=seasons, named_season=None, ids={}, network="")
 
 
@@ -167,11 +171,16 @@ class _TraktSearchPort:
     lose rows the merge exists to find.
     """
 
+    catalogues = (SearchCatalogue("trakt", "Trakt"),)
+
     async def search_titles(self, settings: Settings, media: Media, query: str, *,
-                            cached_only: bool = False) -> list[SearchHit]:
-        raw = await detail.search_titles(settings, str(media), query,
-                                         cache_only=cached_only)
-        return [
+                            page: int = 1, catalogue: str | None = None,
+                            cached_only: bool = False) -> SearchPage:
+        if catalogue not in (None, "trakt"):
+            raise ValueError(f"Trakt has no catalogue {catalogue!r}.")
+        raw, more = await detail.search_titles(settings, str(media), query, page=page,
+                                               cache_only=cached_only)
+        return SearchPage([
             SearchHit(
                 source=Source.TRAKT,
                 # A Trakt search hit has always carried a Trakt id in
@@ -193,7 +202,7 @@ class _TraktSearchPort:
                 poster=entry["poster"],
             )
             for entry in raw
-        ]
+        ], more)
 
     async def find_by_shared_id(self, settings: Settings, media: Media, ids: dict) -> dict:
         return await detail.find_by_shared_id(settings, str(media), ids)
@@ -247,7 +256,7 @@ class _TraktWatchlistPort:
     and what was measured before any of it was written, is that module's to
     say."""
 
-    def list_url(self, account_id: str) -> str:
+    def list_url(self, account_id: str, account_name: str | None) -> str:
         return watchlist.list_url(account_id)
 
     async def holdings(self, settings: Settings, titles):
@@ -256,8 +265,11 @@ class _TraktWatchlistPort:
     async def put(self, settings: Settings, titles):
         return await watchlist.put(settings, titles)
 
-    async def drop(self, settings: Settings, titles):
-        return await watchlist.drop(settings, titles)
+    async def drop(self, settings: Settings, rows):
+        # A SHOW GIVEN UP ON COMES OFF TRAKT'S WATCHLIST WHOEVER LISTED IT —
+        # Trakt's drop as it has always been — so what was held before the
+        # tracker's write changes nothing here.
+        return await watchlist.drop(settings, [row.title for row in rows])
 
     async def undo(self, settings: Settings, rows):
         return await watchlist.undo(settings, rows)
@@ -288,6 +300,43 @@ class _TraktProvider:
         # records and /sync/ratings are all reachable, which is what lets the
         # tracker and the ranker's ratings import be backed by this source.
         private_user_data=True,
+        # No storage ceiling is applied to Trakt's answers: its rows go by this
+        # app's own retention, and never while a feature row holds the title
+        # (app/metadata/rows.py's sweep_unlisted).
+        retain_seconds=None,
+        # THE WINDOW ASKED AND NOTHING PAST IT. Trakt takes the `days` it is
+        # given as a floor rather than a ceiling — a 7-day window has come back
+        # with entries two months past its end (app/calendar/cache.py's
+        # `in_window` has the measurement) — and what lies beyond the bound is
+        # some of those weeks' entries, never all of them.
+        reach=Reach.WINDOW,
+        # Trakt's calendar answers with `extended=full`, so a listing arrives
+        # complete — genres, network, status, certification — and is never
+        # stored sparse; there is nothing to describe it for.
+        describes_sparse_listings=False,
+        # WHAT TRAKT STATES, read off calendar.py and detail.py: a title's
+        # description with its cast and homepage, and a film's release schedule —
+        # not in a description (detail.py), but through Trakt's own releases
+        # read, which app/calendar/enrich.py keeps in `trakt_releases`. NO ANIME
+        # FORMAT, NO KEYWORDS, NO SHOW TYPE:
+        # detail.py records why none is reachable. A season's name, words,
+        # poster and cast; an episode's words, type, runtime, rating and votes —
+        # the only service that counts votes. A listing's `entry`: Trakt files a
+        # title under its slug, and a title renamed on Trakt is listed under
+        # its new one.
+        store_columns=StoreColumns(
+            titles=TITLE_KEEPING | {
+                "title", "year", "network", "country", "language", "certification",
+                "status", "overview", "poster", "runtime", "genres_json", "ratings_json",
+                "first_aired", "season_count", "videos_json", "release_types_json",
+                "cast_json", "homepage"},
+            seasons=SEASON_KEEPING | {
+                "episode_count", "premiere", "air_dates_json", "name", "overview",
+                "poster", "cast_json"},
+            episodes=EPISODE_LISTING | EPISODE_KEEPING | {
+                "entry", "title", "overview", "first_aired", "episode_type", "runtime",
+                "rating", "votes"},
+        ),
     )
     # What makes that `private_user_data=True` checkable rather than a claim: the
     # tracker asks the registry for this and never for Trakt by name.
@@ -296,8 +345,9 @@ class _TraktProvider:
     # carrying no port would be claiming a calendar this source cannot produce.
     calendar_port = _TraktCalendarPort()
     # And the same again for the modal: it asks the registry which source can
-    # describe the title in front of it, so a card carrying a Trakt id gets
-    # Trakt's richer answer without the route naming this package.
+    # describe the title in front of it, so a card carrying a Trakt id that the
+    # service declared ahead of Trakt cannot describe gets Trakt's answer
+    # without the route naming this package.
     detail_port = _TraktDetailPort()
     # And once more for the tracker's manual add flow: it asks the registry
     # which sources can be searched and never names Trakt, so a second
@@ -311,6 +361,34 @@ class _TraktProvider:
 
     def is_configured(self, settings: Settings) -> bool:
         return settings.trakt_configured
+
+    def title_url(self, media: Media, ids) -> str:
+        # Trakt's own builder falls back to its homepage for an id-less map,
+        # which is right for a calendar record (it always has an id) and wrong
+        # for a button, which must not exist at all without one.
+        if not (ids.get("trakt") or ids.get("trakt_slug")):
+            return ""
+        return calendar.title_url(media, ids)
+
+    def episode_url(self, ids, season: int, number: int) -> str:
+        return calendar.episode_url(ids, season, number)
+
+    def listing_id(self, ids) -> str:
+        return calendar.listing_id(ids)
+
+    def status_means(self, status: str) -> frozenset[str]:
+        # Trakt's words ARE the vocabulary (base.STATUS_WORDS is spelled in them).
+        return status_spoken(status)
+
+    # Trakt's `episode_type` words, measured on the development copy's episodes:
+    # standard, series_premiere, season_premiere, mid_season_premiere,
+    # mid_season_finale, season_finale, series_finale. A series' last episode is
+    # its season's finale too.
+    _EPISODE_MARKS = {"season_finale": "finale", "series_finale": "finale",
+                      "mid_season_finale": "mid_season_finale"}
+
+    def episode_mark(self, episode_type: str) -> str:
+        return self._EPISODE_MARKS.get(str(episode_type or ""), "")
 
     def catalogue_is_configured(self, settings: Settings) -> bool:
         # The client id alone, same question `_TraktDetailPort.catalogue_configured`

@@ -26,7 +26,8 @@ from markupsafe import escape
 from app import auth, config, db
 from app.sources import prefs as source_prefs
 from app.auth import routes as auth_routes
-from app.config import Settings, load_settings, save_settings
+from app.config import Settings
+from tests.support import load_settings, save_settings, settling
 from app.main import app
 from tests.support import migrated_db
 
@@ -45,7 +46,7 @@ class RouteTestCase(unittest.TestCase):
         # The Origin header is what a browser sends on any fetch() that changes
         # something, and mutating requests without one are refused; the test
         # client sends no headers it isn't told to.
-        self.client = TestClient(app, base_url="https://testserver",
+        self.client = TestClient(settling(app), base_url="https://testserver",
                                  headers={"Origin": "https://testserver"})
 
     def tearDown(self):
@@ -783,136 +784,18 @@ class AutoApproveSettingTests(RouteTestCase):
         self.assertFalse(row["is_admin"])
 
 
-class RetiringATrackersHistoryTests(AccountTestCase):
-    """POST /me/tracker-retired — "I have moved off that service".
-
-    THE EXIT FROM A STATE THAT HAD NONE. Unlinking stops a service being ASKED and
-    always did; it could not stop the numbers it had already contributed from
-    counting, so every row it ever touched stayed amber for ever and a migrated
-    account read as permanently degraded. This route is how somebody says so.
-
-    Tested over HTTP because that is the only thing that proves the control is
-    WIRED. Twice in this branch a correct function shipped attached to nothing —
-    the tooltip's watch dates, and a removal check whose port never exposed its
-    own method — each with its own unit tests passing.
-    """
-
-    def _post(self, **counted):
-        """As the form posts: every service mentioned, a ticked box as the list
-        its hidden companion and the box make."""
-        body = {f"counted:{name}": ["0", "1"] if on else "0"
-                for name, on in {"trakt": True, "simkl": True, **counted}.items()}
-        return self.client.post("/me/tracker-retired", json=body)
+class StatingWhoseDescriptionIsReadTests(AccountTestCase):
+    """POST /me/order/metadata_order — a press moves one service a place, and the
+    server saves the list it drew. The tracker's own lists (which linked tracker
+    decides, whose numbers count, where an episode total is asked of) are moved
+    from the tracker's settings dialog, and this page no longer offers them."""
 
     def _stored(self):
         return asyncio.run(source_prefs.load(self.user_id()))
 
-    def test_a_service_can_be_retired_and_reads_back(self):
-        resp = self._post(trakt=False)
-        self.assertEqual(resp.status_code, 200)
-        self.assertNotRegex(resp.text, r'id="counted-trakt"[^>]*checked')
-        self.assertRegex(resp.text, r'id="counted-simkl"[^>]*checked')
-        self.assertFalse(self._stored().counts_tracker("trakt"))
-
-    def test_it_can_be_undone(self):
-        """The whole difference between this and deleting the numbers: switching
-        one back on has to put it straight back, which is only possible because
-        nothing was thrown away."""
-        self._post(trakt=False)
-        self._post()
-        self.assertTrue(self._stored().counts_tracker("trakt"))
-
-    def test_the_whole_set_is_what_is_stored(self):
-        """"Retire this one" says nothing about the others, so the form sends the
-        complete answer and a service ticked again is counted again."""
-        self._post(trakt=False, simkl=False)
-        self._post(simkl=False)
-        stored = self._stored()
-        self.assertTrue(stored.counts_tracker("trakt"))
-        self.assertFalse(stored.counts_tracker("simkl"))
-
-    def test_an_unknown_service_is_refused_rather_than_dropped(self):
-        """A name this app has never heard of is a bug in the page; swallowing
-        it would leave the viewer looking at a switch that stored nothing."""
-        resp = self._post(letterboxd=False)
-        self.assertIn("Unknown service: letterboxd.", resp.text)
-        self.assertEqual(self._stored().tracker_retired, [])
-
-    def test_a_service_the_body_does_not_mention_is_not_read_as_retired(self):
-        """An absent box is a page that did not draw it, not a person who
-        unticked it — the hidden "0" is what an unticked box sends."""
-        resp = self.client.post("/me/tracker-retired", json={"counted:trakt": "0"})
-        self.assertIn("Every service has to be stated", resp.text)
-        self.assertEqual(self._stored().tracker_retired, [])
-
-    def test_it_needs_a_session(self):
-        """Somebody else's preferences are not a thing an anonymous request may
-        state. The guard is the route's, not this test's — this pins that it is
-        actually on it."""
-        self.client.cookies.clear()
-        self.assertIn(self._post(trakt=False).status_code, (401, 403))
-
-    def test_the_account_page_offers_a_switch_per_tracker(self):
-        """Rendered even for a service that is NOT linked, which is the row every
-        viewer comes looking for: the service somebody wants to retire is almost
-        always one they have already unlinked."""
-        body = self.client.get("/me").text
-        self.assertIn('id="trackerRetired"', body)
-        self.assertIn('name="counted:trakt"', body)
-        self.assertIn('name="counted:simkl"', body)
-
-
-class StatingWhichTrackerDecidesTests(AccountTestCase):
-    """POST /me/order/<kind> — a press moves one service a place, and the server
-    saves the list it drew. The two lists are edited from one screen and stored in
-    one row: a save that forgot either column would silently discard whichever the
-    viewer was not editing at the time."""
-
-    def setUp(self):
-        super().setUp()
-        # The tracker order is offered only with more than one tracker linked.
-        self.link("trakt", 1)
-        self.link("simkl", 2)
-
-    def _stored(self):
-        return asyncio.run(source_prefs.load(self.user_id()))
-
-    def _move(self, source, direction, kind="tracker_order"):
+    def _move(self, source, direction, kind="metadata_order"):
         return self.client.post(f"/me/order/{kind}",
                                 json={"source": source, "direction": direction})
-
-    def test_a_move_is_stored_and_answered_with_the_list(self):
-        resp = self._move("simkl", "up")
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(self._stored().tracker_priority, ["simkl", "trakt"])
-        items = re.findall(r'data-source="(\w+)"', resp.text)
-        self.assertEqual(items, ["simkl", "trakt"])
-
-    def test_the_first_row_has_no_up_arrow_and_the_last_no_down(self):
-        resp = self._move("simkl", "up")
-        self.assertNotIn('id="tracker_order-simkl-up"', resp.text)
-        self.assertNotIn('id="tracker_order-trakt-down"', resp.text)
-        self.assertIn('id="tracker_order-simkl-down"', resp.text)
-
-    def test_the_moved_row_keeps_focus_on_the_arrow_it_still_has(self):
-        resp = self._move("simkl", "up")
-        self.assertRegex(resp.text, r'id="tracker_order-simkl-down"[^>]*autofocus')
-
-    def test_it_does_not_disturb_a_retired_service(self):
-        self.client.post("/me/tracker-retired", json={
-            "counted:trakt": "0", "counted:simkl": ["0", "1"]})
-        self._move("simkl", "up")
-        stored = self._stored()
-        self.assertEqual(stored.tracker_priority, ["simkl", "trakt"])
-        self.assertFalse(stored.counts_tracker("trakt"))
-
-    def test_a_move_that_cannot_happen_is_drawn_and_stores_nothing(self):
-        for source, direction in (("trakt", "up"), ("letterboxd", "down"), ("simkl", "sideways")):
-            with self.subTest(source=source, direction=direction):
-                resp = self._move(source, direction)
-                self.assertEqual(resp.status_code, 200)
-                self.assertIn("cannot move that way", resp.text)
-        self.assertEqual(self._stored().tracker_priority, [])
 
     def test_the_metadata_order_is_the_same_control_over_its_own_column(self):
         settings = load_settings()
@@ -922,11 +805,50 @@ class StatingWhichTrackerDecidesTests(AccountTestCase):
         names = re.findall(r'id="metadata_order-(\w+)-(?:up|down)"', page)
         if len(set(names)) < 2:
             self.skipTest("this instance offers one describing service")
-        last = re.findall(r'<ol class="tracker-priority-list">(.*?)</ol>', page, re.S)[1]
+        last = re.findall(r'<ol class="tracker-priority-list">(.*?)</ol>', page, re.S)[0]
         second = re.findall(r'data-source="(\w+)"', last)[1]
-        self._move(second, "up", kind="metadata_order")
+        self._move(second, "up")
         self.assertEqual(self._stored().metadata_order[0], second)
         self.assertEqual(self._stored().tracker_priority, [])
+
+    def test_a_move_is_answered_with_the_list(self):
+        settings = load_settings()
+        settings.simkl_public_calendar_enabled = True
+        save_settings(settings)
+        page = self.client.get("/me").text
+        if len(set(re.findall(r'id="metadata_order-(\w+)-(?:up|down)"', page))) < 2:
+            self.skipTest("this instance offers one describing service")
+        first, second = re.findall(r'data-source="(\w+)"', page)[:2]
+        resp = self._move(second, "up")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(re.findall(r'data-source="(\w+)"', resp.text)[:2], [second, first])
+        self.assertRegex(resp.text, rf'id="metadata_order-{second}-down"[^>]*autofocus')
+
+    def test_a_move_that_cannot_happen_is_drawn_and_stores_nothing(self):
+        for source, direction in (("letterboxd", "down"), ("simkl", "sideways")):
+            with self.subTest(source=source, direction=direction):
+                resp = self._move(source, direction)
+                self.assertEqual(resp.status_code, 200)
+                self.assertIn("cannot move that way", resp.text)
+        self.assertEqual(self._stored().metadata_order, [])
+
+    def test_the_trackers_lists_are_not_this_pages_to_move(self):
+        resp = self._move("simkl", "up", kind="tracker_order")
+        self.assertIn("There is no such list.", resp.text)
+        self.assertEqual(self._stored().tracker_priority, [])
+        self.assertEqual(self.client.post("/me/tracker-retired", json={}).status_code, 404)
+
+    def test_tmdb_is_in_the_metadata_order(self):
+        """TMDB describes titles and publishes no calendar: with its token here it
+        is offered in whose-description-is-read, first by default."""
+        settings = load_settings()
+        settings.tmdb_api_key = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJtZSJ9.c2ln"
+        save_settings(settings)
+        page = self.client.get("/me").text
+        self.assertIn('id="metadata_order-tmdb-down"', page)
+        self.assertNotIn('id="tracker_order-', page)
+        self._move("tmdb", "down")
+        self.assertNotEqual(self._stored().metadata_order[0], "tmdb")
 
 
 class PublishingWatchMarksOnASharedCalendarTests(AccountTestCase):

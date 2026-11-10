@@ -7,25 +7,27 @@ downstream names a provider.
 
 THE SEARCH IS THE APP'S, NOT THIS FEATURE'S. The board asks exactly what the
 calendar's and the tracker's add boxes ask: TYPING reads the titles this instance
-already stores (app/calendar/entries.py's titles_matching — the calendar owns
-those rows, so it owns the verb), and ENTER asks the services through
+already stores (app/metadata/typed_search.py's titles_matching — the title store
+owns those rows, so it owns the verb), and ENTER asks the services through
 app/providers/title_search.py, the one fan-out and merge every searching feature
 shares. What is the ranker's is what a chosen result BECOMES — a board item,
 named by reference and read back from what a service said (`named_hit`,
-`board_item`).
+`board_item`), and registered with the title store, which is what teaches it
+every service's id.
 
 CREDENTIALS ARE NOT THE SAME FOR BOTH SERVICE READS, and getting it backwards is
 the easy mistake:
   - SEARCH builds the viewer's settings (auth/viewer.py), which is how "who is
-    asked" is answered for every searching feature: Trakt authenticates a
-    catalogue search with the instance's own client id, so it answers for every
-    account — the rankings grant implies no linked account at all — while Simkl
-    searches only with the viewer's OWN token and so only for a viewer who has
-    linked one (`providers.for_catalogue_search`). Nobody's search is made with
-    the operator's token.
+    asked" is answered for every searching feature (`providers.for_search`): the
+    catalogue searched by default, with the instance's own credential, for every
+    account — the rankings grant implies no linked account at all — and a service
+    the viewer has linked only when they add it, with their own token. Nobody's
+    search is made with the operator's token.
   - RATINGS are private to one person and need THEIR token. With no linked
     identity there is no such token, and the action is hidden rather than
-    offered and then failed.
+    offered and then failed. A seed reads ONE service's ratings, the one the
+    viewer pressed for (`ratings_source`), among the services they have linked
+    that keep ratings (`ratings_services`).
 """
 from __future__ import annotations
 
@@ -37,12 +39,14 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from . import item_keys
-from .. import providers
+from .. import metadata, providers
 from ..auth import trakt_routes, viewer
 # The stored-title half of every search. See the module docstring for why the
-# ranker reads it through the calendar's verb rather than a query of its own.
-from ..calendar import entries as calendar_entries
-from ..providers import title_search
+# ranker reads it through the title store's verb rather than a query of its own.
+from ..metadata import panel as metadata_panel, typed_search as stored_search
+from ..providers import detail_source, title_search
+from ..providers.tmdb import (account as tmdb_account, detail as tmdb_detail,
+                              transport as tmdb_transport)
 from ..providers.trakt import TraktError, detail as trakt_detail, sync as trakt_sync
 from ..config import Settings, load_settings
 # Re-exported deliberately: `sources.Media` and `sources.parse_media` are what
@@ -54,6 +58,7 @@ from ..config import Settings, load_settings
 # re-exported: the tracker keys its own rows on the same waterfall's answer, so a
 # second copy would be two definitions of what makes two titles the same one.
 from ..providers.base import Media, parse_media, resolve_identity  # noqa: F401
+from ..providers.base import Source
 
 logger = logging.getLogger(__name__)
 
@@ -284,7 +289,7 @@ async def user_trakt_settings(user_id: int) -> Settings | None:
     if not token:
         return None
     return dataclasses.replace(
-        load_settings(), trakt_access_token=token, trakt_refresh_token="",
+        await load_settings(), trakt_access_token=token, trakt_refresh_token="",
     )
 
 
@@ -304,32 +309,28 @@ async def typed_search(query: str, media: Media, limit: int) -> list[title_searc
     """The stored titles matching what is being TYPED, whoever's calendar
     loaded them. UNFILTERED — adding a title is not asking where it is on
     anybody's calendar — and no service is asked and nothing is budgeted: it is
-    an index read (app/calendar/entries.py's titles_matching)."""
-    return await calendar_entries.titles_matching(query, media, limit)
+    an index read (app/metadata/typed_search.py's titles_matching)."""
+    return await stored_search.titles_matching(query, media, limit)
 
 
 def too_short(query: str) -> bool:
     """Whether a typed query is still too short to list anything for — the rule
     the stored-title search itself keeps, asked of it rather than restated."""
-    return len(calendar_entries.fold_title(query)) < calendar_entries.MIN_QUERY
+    return stored_search.too_short(query)
 
 
-def searchable(settings: Settings) -> bool:
-    """Whether any service can be asked at all with these settings."""
-    return bool(providers.for_catalogue_search(settings))
-
-
-async def catalogue_search(settings: Settings, query: str, media: Media, *,
-                           cached_only: bool = False) -> title_search.SearchMergeResult:
-    """Enter's search: every service these settings can ask, merged into one
-    list, each hit marked with who found it. The shared fan-out stores each
-    service's answer, which is what lets a pick be read back later by its place
-    in this list (`named_hit`). `cached_only` re-reads that stored answer and
-    asks nobody — how a page answering an add redraws the search it came from.
-    """
-    return await title_search.search_catalogue(
-        providers.for_catalogue_search(settings), settings, media, query,
-        cached_only=cached_only)
+async def catalogue_search(settings: Settings, media: Media, query: str,
+                           ref: title_search.SearchRef, *,
+                           cached_only: bool = False) -> title_search.SearchOutcome:
+    """Enter's search, and every widening of it: the services `ref` names for
+    this viewer, merged into one list, each hit marked with who found it — the
+    one search every box makes (title_search.search). Raises
+    providers.UnknownSearchService for a service this viewer may not add. The
+    shared fan-out stores each service's answer, which is what lets a pick be
+    read back later by its place in this list (`named_hit`); `cached_only`
+    re-reads that and asks nobody — how a page answering an add redraws the
+    search it came from."""
+    return await title_search.search(settings, media, query, ref, cached_only=cached_only)
 
 
 async def named_hit(settings: Settings, media: Media,
@@ -338,20 +339,23 @@ async def named_hit(settings: Settings, media: Media,
     when nothing this instance holds answers to that name.
 
     TWO WAYS OF NAMING, ONE PER HALF OF THE SEARCH, and neither carries a title:
-    a stored title by the identity it is stored under (`t`, a
-    calendar_titles.title_key — app/calendar/entries.py's stored_title), and a
-    service's hit by the query that found it and its place in that answer (`q`
-    and `i` — title_search.resolve_hit, which re-reads the stored search and
-    asks nobody). So what a board stores is what a service said, never fields a
-    page handed back, and a key this instance does not hold is a refusal.
+    a stored title by the identity it is stored under (`t`, a title key —
+    app/metadata/typed_search.py's stored_title), and a
+    service's hit by the query that found it, the search's own reference (the
+    services added and the pages shown, title_search.SearchRef) and its place
+    in that answer (`q`, `also`, `pages`, `i` — title_search.resolve_hit, which
+    re-reads the stored search and asks nobody). So what a board stores is what a
+    service said, never fields a page handed back, and a key this instance does
+    not hold is a refusal.
     """
     title_key = str(named.get("t") or "")
     if title_key:
-        return await calendar_entries.stored_title(title_key, media)
+        return await stored_search.stored_title(title_key, media)
     query = str(named.get("q") or "").strip()
     if not query:
         return None
-    return await title_search.resolve_hit(settings, media, query, named.get("i"))
+    return await title_search.resolve_hit(settings, media, query, named.get("i"),
+                                          title_search.SearchRef.named(named))
 
 
 def gone_sentence(named: Mapping[str, Any]) -> str:
@@ -381,8 +385,10 @@ async def season_pick(settings: Settings,
     """A show hit's season list — the per-title lookup a result's checklist is
     opened for — plus every id it surfaces and the season a season-title names.
     The shared picker verb, so a title's seasons read the same here as in the
-    tracker's add."""
-    return await title_search.pick_from_hit(settings, hit, cached_only=False)
+    tracker's add — the season it names as the title store holds it
+    (metadata.picked)."""
+    return await metadata.picked(await title_search.pick_from_hit(settings, hit,
+                                                                  cached_only=False))
 
 
 async def stored_seasons(settings: Settings,
@@ -414,6 +420,15 @@ async def board_item(settings: Settings,
     still answers, carrying the hit's own ids and so keying nothing — measured,
     that is what made the add refuse all four keyless "attack on titan" results.
     So the lookup is made whenever the stored answer cannot key the title.
+
+    EVERY SERVICE'S ID IS LEARNED HERE, through the title store (metadata.ensure,
+    with the viewer's settings — the one place the app asks a service by shared
+    id). A title found through TMDB's search arrives with its tmdb id alone, and
+    a board row holding only that offered no Trakt or Simkl button on its details
+    panel although both services list the title; asked here, each service the
+    title has no id from is asked once, its answer held for a day by its port.
+    The row is filed under the key the store answers, so a title already on the
+    board under it is recognised as held.
     """
     ids = dict(hit.ids)
     network = hit.network
@@ -424,18 +439,178 @@ async def board_item(settings: Settings,
         if pick is not None:
             ids = {**pick.ids, **ids}
             network = network or pick.network
-    return TitleRef(media=hit.media, title=hit.title, ids=ids, year=hit.year,
+    item = TitleRef(media=hit.media, title=hit.title, ids=ids, year=hit.year,
                     network=network or "", runtime=hit.runtime).as_item()
+    if item is None:
+        return None
+    known = await metadata.ensure(hit.media, ids, settings=settings)
+    if known is None or known.triple is None:
+        return item
+    learned = {**known.ids, **ids}
+    return {**item, "match_source": known.triple.match_source,
+            "match_id": known.triple.match_id, "ids": learned,
+            "tmdb": int_or_none(learned.get("tmdb"))}
 
 
-def ratings_source() -> RatingsSource:
-    """The ratings seam. Resolves the caller's own credential when asked, so
-    availability and use cannot disagree about whose token is in play."""
-    return TraktRatingsSource()
+# ---------------------------------------------------------------------------
+# a film's whole collection
+# ---------------------------------------------------------------------------
+# A FILM SERIES IS TMDB'S WORD: its description of a film names the collection
+# the film belongs to (`belongs_to_collection`), and only TMDB groups films so.
+# What the board offers is therefore asked of TMDB by name — never of whichever
+# service describes the row — and a film with no tmdb id has no collection here.
+
+async def film_collection(settings: Settings, item: Mapping[str, Any]) -> dict:
+    """The collection a board's film row belongs to — {"id", "name"} — as TMDB's
+    description of it states, or {} for a show, a film in none, and a film TMDB
+    cannot describe.
+
+    FROM THE TITLE STORE, which holds the description the row's own details panel
+    drew (the panel is where the add is offered): asked of TMDB, and kept, only
+    where it holds none — app/metadata/panel.py's `describe`, the one way a
+    description is read."""
+    tmdb = int_or_none((item.get("ids") or {}).get("tmdb")) or int_or_none(item.get("tmdb"))
+    if str(item.get("media")) != str(Media.MOVIE) or tmdb is None:
+        return {}
+    chosen = detail_source.choose(settings, {"tmdb": tmdb})
+    if chosen is None or chosen.source != Source.TMDB:
+        return {}
+    described = await metadata_panel.describe(settings, chosen, Media.MOVIE, None,
+                                              ids=item.get("ids") or {"tmdb": tmdb})
+    return dict((described or {}).get("collection") or {})
+
+
+async def collection_items(settings: Settings, collection: Mapping[str, Any]
+                           ) -> list[dict[str, Any]]:
+    """Every film TMDB files under `collection`, as board items, in the order they
+    came out — the instance's catalogue credential, one cached request
+    (providers/tmdb/detail.py's `fetch_collection`). Raises SourceUnavailable
+    when TMDB could not be asked."""
+    parts = await tmdb_detail.fetch_collection(settings, int(collection["id"]))
+    refs = (TitleRef(media=Media.MOVIE, title=part.title, ids={"tmdb": part.tmdb_id},
+                     year=part.year if isinstance(part.year, int) else None)
+            for part in parts)
+    return [item for item in (ref.as_item() for ref in refs) if item is not None]
+
+
+# ---------------------------------------------------------------------------
+# which service's ratings
+# ---------------------------------------------------------------------------
+# A SEED IS FROM ONE SERVICE, NAMED BY THE VIEWER. Two services' scores for one
+# title are two opinions on two scales, and a seed that mixed them — or quietly
+# read whichever service happened to be linked — would arrange a board by numbers
+# the viewer never chose between. So the control offers one press per service the
+# viewer has linked that keeps ratings, each naming its service, and a name this
+# table does not hold, or one the viewer has not linked, is refused.
+
+class UnknownRatingsService(ValueError):
+    """A seed named a service that has no ratings this viewer can read — not in
+    the table, keeping no ratings, or not linked. A REFUSAL, never read as some
+    other service."""
+
+
+class TmdbRatingsSource:
+    """`RatingsSource` over the viewer's own TMDB account (its rated shows and
+    films, app/providers/tmdb/account.py), read with THEIR TMDB grant.
+
+    TMDB SCORES IN HALF POINTS, 0.5 TO 10; a board row's rating is a whole number
+    on Trakt's 1-10 scale, which its tiers are drawn from (ranker.tier_for_rating).
+    So a half point rounds UP — 8.5 seeds as 9, 0.5 as 1 — the nearer whole score
+    a person who gave "eight and a half" would have picked between eight and nine.
+    TMDB rates a show or a film, never a season, so every title arrives whole.
+    """
+
+    async def fetch_ratings(self, user_id: int) -> list[RatedTitle]:
+        settings = await viewer.settings_for_user(user_id)
+        if not settings.tmdb_account_configured:
+            raise NoLinkedIdentity("No linked TMDB account to read ratings from.")
+        try:
+            rated = await tmdb_account.ratings(settings)
+        except tmdb_transport.TmdbError as exc:
+            raise SourceUnavailable(str(exc), getattr(exc, "status", None)) from exc
+        out = []
+        for media, item in rated:
+            ref = _ref_from_tmdb(media, item)
+            score = _whole_score((item.get("account_rating") or {}).get("value"))
+            if ref is None or score is None:
+                continue
+            out.append(RatedTitle(title=ref, rating=score,
+                                  rated_at=(item.get("account_rating") or {}).get("created_at")))
+        return out
+
+
+def _whole_score(value: Any) -> int | None:
+    """A TMDB score (0.5-10, half points) as a board's whole 1-10 one, a half
+    rounding up (see TmdbRatingsSource). None for anything that is not a score."""
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not 0 < score <= 10:
+        return None
+    return max(1, min(10, int(score + 0.5)))
+
+
+def _ref_from_tmdb(media: Media, item: Mapping[str, Any]) -> TitleRef | None:
+    """One rated TMDB item as the title a board would hold. TMDB's own `id` is
+    the title's tmdb id — the only id the item carries; the title store teaches
+    the rest when the seed registers it."""
+    tmdb = int_or_none(item.get("id"))
+    if tmdb is None:
+        return None
+    dated = item.get("first_air_date") if media is Media.SHOW else item.get("release_date")
+    return TitleRef(
+        media=media,
+        title=str(item.get("name") or item.get("title") or ""),
+        ids={"tmdb": tmdb},
+        year=int_or_none(str(dated or "")[:4]),
+    )
+
+
+# EVERY REGISTERED SERVICE HAS AN ENTRY, and a test says so: a service gaining
+# ratings is a decision written here, never one this table quietly lacks.
+#   tmdb   the viewer's rated shows and films on TMDB.
+#   trakt  the viewer's /sync/ratings (shows, seasons, films).
+#   simkl  None: this app reads no Simkl ratings.
+_RATINGS: dict[str, RatingsSource | None] = {
+    "tmdb": TmdbRatingsSource(),
+    "trakt": TraktRatingsSource(),
+    "simkl": None,
+}
+
+
+def has_ratings(service: str) -> bool:
+    """Whether `service` keeps ratings this app reads. Raises KeyError for a
+    name the table does not hold — the table is the registry's, whole."""
+    return _RATINGS[service] is not None
+
+
+async def ratings_services(user_id: int) -> list[tuple[str, str]]:
+    """(service, label) for every service this viewer has LINKED that keeps
+    ratings, in the declared order — what the seed control offers, one press
+    each. Linked means a usable grant on the viewer's own Settings
+    (`is_configured`, the private question), so an expired or revoked link is
+    not offered."""
+    settings = await viewer.settings_for_user(user_id)
+    return [(str(source), provider.label)
+            for source, provider in providers.registered().items()
+            if _RATINGS.get(str(source)) is not None and provider.is_configured(settings)]
+
+
+async def ratings_source(user_id: int, service: str) -> RatingsSource:
+    """The ratings seam for the service a seed NAMED. Raises
+    UnknownRatingsService for one the viewer cannot seed from — never another
+    service in its place."""
+    offered = {name for name, _label in await ratings_services(user_id)}
+    source = _RATINGS.get(str(service))
+    if source is None or str(service) not in offered:
+        raise UnknownRatingsService(f"There are no {service or 'such'} ratings to seed from.")
+    return source
 
 
 async def ratings_available(user_id: int) -> bool:
     """Whether to OFFER a ratings seed at all. False hides the action rather
-    than showing one that fails: an account with no linked identity has nothing
-    to seed from, and a disabled button it can never enable is just noise."""
-    return bool(await trakt_routes.access_token_for_user(user_id))
+    than showing one that fails: an account with no linked service that keeps
+    ratings has nothing to seed from, and a disabled button it can never enable
+    is just noise."""
+    return bool(await ratings_services(user_id))

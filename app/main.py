@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
+from . import after_response
 from . import auth
 from . import authz
 from . import cache
@@ -35,6 +36,7 @@ from . import db
 from . import http_pool
 from . import logging_setup
 from . import perftrace
+from . import read_pool
 from . import secrets_box
 from . import settings_routes
 from .auth import admin_routes
@@ -45,16 +47,21 @@ from .auth import plex_routes
 from .auth import routes as auth_routes
 from .auth import secrets_backfill
 from .auth import simkl_routes
+from .auth import tmdb_routes
 from .auth import trakt_routes
 from .calendar import cache as calendar_cache
 from .calendar import enrich as calendar_enrich
 from .calendar import entries as calendar_entries
+from .calendar import completion as calendar_completion
+from .calendar import query as calendar_query
 from .calendar import routes as calendar_routes
 from .calendar import share_card_cache
 from .calendar import share_routes
 from .distrakt import routes as distrakt_routes
 from .integrations import routes as integrations_routes
 from .media import artwork, logos, posters
+from .metadata import backfill as metadata_backfill
+from .metadata import picture_routes
 from .ranker import core as ranker_core
 from .ranker import routes as ranker_routes
 from .auth import AuthLevel
@@ -127,15 +134,16 @@ async def _sweep_auth_rows() -> None:
     await auth.sweep_login_attempts(now)
     # Age out expired cache windows and hold the shared blob table under its
     # size cap, evicting least-recently-stored first.
-    settings = load_settings()
+    settings = await load_settings()
     await cache.sweep(now, settings.api_cache_max_bytes)
     # Same idea, one table over: a Simkl enrichment row past its retention
     # window is not urgent to keep — the next read that resolves to that
     # title just queues it again (see app/calendar/enrich.py).
     await calendar_enrich.sweep(now)
     # And the calendar's own rows, which left api_cache with the window blobs and
-    # so are no longer reached by the sweep above. Six months from last store —
-    # see entries.RETAIN_SECONDS, which records what that costs a share link to a
+    # so are no longer reached by the sweep above — and after them the title
+    # store's rows no airing names any more. Six months from last store — see
+    # entries.RETAIN_SECONDS, which records what that costs a share link to a
     # months-old page.
     await calendar_entries.sweep(now)
     # Drop poster-URL sightings past their retention window, and hold the
@@ -148,10 +156,9 @@ async def _sweep_auth_rows() -> None:
     # as the poster sightings above.
     await ranker_core.sweep_removals(now)
     await anyio.to_thread.run_sync(posters.sweep, settings.poster_cache_max_bytes)
-    # And the network logos, which have no size budget of their own — there are
-    # as many as there are networks — but ARE TMDB-sourced, so the same six-month
-    # ceiling applies to them. Nothing swept them at all before this.
-    await anyio.to_thread.run_sync(logos.sweep)
+    # And the network logos: rows of a table now, TMDB-sourced, so the same
+    # six-month ceiling applies to them as to the poster registry's TMDB rows.
+    await logos.sweep(now)
     # And the rendered share cards, which age out at 90 days and are held under
     # their own byte budget behind that. Same worker-thread reason as the posters
     # above: it is a directory walk, and it is deliberately here rather than on
@@ -182,10 +189,17 @@ async def _heartbeat_tick() -> None:
     # all synchronously on the loop — because a setting somebody just saved has
     # to take effect at once. That argument is about REQUESTS; one pass of
     # background work is a single moment and has no reason to ask twice.
-    settings = load_settings()
+    settings = await load_settings()
     for job in (
         integrations_routes.refresh_integration_health,
         settings_routes.maybe_refresh_trakt_token,
+        # Once after an upgrade, then a single app_meta read per tick: every title
+        # already stored is registered with the title store and any key its own
+        # ids have outgrown is moved (app/metadata/backfill.py).
+        metadata_backfill.run_once,
+        # Then, once, the words the tracker's and boards' rows carry copies of,
+        # seeded into the store before anything drops those copies.
+        metadata_backfill.seed_words_once,
         _sweep_auth_rows,
         lambda: calendar_cache.refresh_months(settings),
         # run_drain, not drain directly — the same coalescing latch a fill
@@ -193,6 +207,11 @@ async def _heartbeat_tick() -> None:
         # landing while a fill-triggered pass is already running folds into
         # it rather than starting a second, concurrent pass of its own.
         lambda: calendar_enrich.run_drain(settings),
+        # Last, and least urgent: a few of this month's and next month's cards
+        # asked of the service that does not list them yet, at that service's
+        # slow pace (app/calendar/completion.py). A tick runs one job at a time,
+        # so one pass at a time.
+        lambda: calendar_completion.run(settings),
     ):
         try:
             await job()
@@ -211,9 +230,17 @@ async def _heartbeat_loop() -> None:
 async def lifespan(_app: FastAPI):
     # Schema first — everything after this point may touch the database.
     await db.init()
+    # Before anything builds an outbound client: the trust store is a third of a
+    # second of parsing, and read lazily it landed on the event loop in the first
+    # heartbeat, with requests already being served (http_pool.load_trust_store).
+    await http_pool.load_trust_store()
     # The detail-lookup cache moved into the api_cache table; drop the old
     # data/cache/*.json directory now that the schema that replaces it is in place.
     cache.discard_legacy_dir()
+    # The network logo tiles the old pipeline wrote to disk: badges are drawn
+    # through the image proxy from the network_logos table now, and nothing reads
+    # the files.
+    logos.discard_legacy_tiles()
     # Generated once and persisted: this UUID names the INSTALLATION to Plex,
     # not any particular user, and every PIN request needs it.
     await plex_auth.ensure_client_identifier()
@@ -223,7 +250,7 @@ async def lifespan(_app: FastAPI):
     # Also loud and once, and for the same reason: PUBLIC_BASE_URL beats the saved
     # base URL, so an operator who left it set would otherwise see a value save in
     # Settings and never take effect. Silent unless the two actually differ.
-    config.warn_if_public_base_url_overridden()
+    await config.warn_if_public_base_url_overridden()
     # And loudest of the three: an instance running on a faked date must say so
     # every single time it boots, because nothing else about it looks unusual.
     clock.warn_if_overridden()
@@ -244,6 +271,10 @@ async def lifespan(_app: FastAPI):
     await _warn_on_key_state(health)
     if health != encryption_flow.KEY_MISMATCH:
         await integrations_routes.refresh_integration_health()
+    # The calendar's read workers, started now and warmed behind the start-up
+    # (app/read_pool.py), so the first month opened after a restart does not
+    # wait for a process to start.
+    read_pool.start(warm=calendar_query.ready)
     task = asyncio.create_task(_heartbeat_loop())
     # Observes the loop it runs on and is depended on by nothing — see
     # perftrace.watch_event_loop for what its one log line is able to say that
@@ -254,6 +285,7 @@ async def lifespan(_app: FastAPI):
     finally:
         watchdog.cancel()
         task.cancel()
+        read_pool.stop()
         # Every pooled client at once, rather than naming each service here — a
         # list in the composition root is one a new provider would silently fall
         # out of, leaving its connections open at shutdown.
@@ -302,10 +334,12 @@ app.mount("/static", _CachedStaticFiles(directory=BASE_DIR / "static"), name="st
 app.include_router(auth_routes.router)
 app.include_router(trakt_routes.router)
 app.include_router(simkl_routes.router)
+app.include_router(tmdb_routes.router)
 app.include_router(plex_routes.router)
 app.include_router(admin_routes.router)
 app.include_router(encryption_routes.router)
 app.include_router(share_routes.router)
+app.include_router(picture_routes.router)
 app.include_router(ranker_routes.router)
 app.include_router(calendar_routes.router)
 app.include_router(distrakt_routes.router)
@@ -387,6 +421,11 @@ async def content_security_policy(request: Request, call_next):
 # actually waited, which includes the gates authz just installed and the gzip of
 # the response below them.
 perftrace.install(app)
+
+# OUTSIDE EVEN THAT: what a request owes once it has answered (a stale calendar
+# week's refill) starts when the response the client receives has been sent in
+# full, gzip and timing included — app/after_response.py says why.
+app.add_middleware(after_response.AfterResponseMiddleware)
 
 
 # The status codes that get a rendered page rather than Starlette's bare

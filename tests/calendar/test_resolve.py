@@ -23,15 +23,26 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from app import db
-from app.calendar import cache as calendar_cache, resolve as calendar_resolve
+from app.calendar import cache as calendar_cache, entries as calendar_entries, resolve as calendar_resolve
 from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Record, Source, render
 from app.providers.trakt import calendar as trakt_calendar
 from app.sources import prefs as source_prefs
-from tests.support import calendar_records, migrated_db, window_fetch
+from tests.support import (CardTestCase, calendar_records, listings, migrated_db, read_card,
+                           read_kept, stored_groups, window_fetch)
 
 SHOWS = get_endpoint("shows")
+
+
+def _resolve(group, prefs=None, endpoint=None, settings=None):
+    """The one card `group`'s records make for a viewer, read back through the
+    calendar's own read from a store they were written into (support.read_card)."""
+    records = (list(group.get("records") or group["by_source"].values())
+               if isinstance(group, dict) else list(group))
+    return read_card(records, prefs, settings=settings,
+                     endpoint=getattr(endpoint, "key", endpoint) or "shows")
+
 MOVIES = get_endpoint("movies")
 
 # One rich entry, in the shape Trakt really returns it, carrying every field a
@@ -122,7 +133,8 @@ class AMonthRendersExactlyAsItDidTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         migrated_db("calresolve")
-        self.settings = Settings()
+        # A TRAKT-ONLY INSTANCE: its client id, and Simkl's public calendar off.
+        self.settings = Settings(trakt_client_id="cid", simkl_public_calendar_enabled=False)
 
     async def asyncTearDown(self):
         db.close_thread_connection()
@@ -257,16 +269,16 @@ class AReleaseDateIsNotAnInstantTests(unittest.TestCase):
         self.assertTrue(Record.from_dict(stored).date_only)
 
 
-class ResolvingOneSourceTests(unittest.TestCase):
+class ResolvingOneSourceTests(CardTestCase):
     """With one source behind a group there is one answer, and the seam still has
     to hand it back with the group's own ids rather than that source's."""
 
     def group(self):
         records = calendar_records([RICH], SHOWS)
-        return calendar_cache.group_records(records)[0]
+        return stored_groups(records)[0]
 
     def test_the_record_comes_back_whole(self):
-        record = calendar_resolve.resolve(self.group())
+        record = _resolve(self.group())
         self.assertEqual(record.title, "Rich Show")
         self.assertEqual(record.source, Source.TRAKT)
 
@@ -275,15 +287,14 @@ class ResolvingOneSourceTests(unittest.TestCase):
         tracker and the ranker read. Narrowing it to the winning source's own map
         is how a merged card would quietly lose the other service's ids."""
         group = self.group()
-        group["ids"]["mal"] = 4242
-        self.assertEqual(calendar_resolve.resolve(group).ids["mal"], 4242)
+        group["records"][-1].ids["mal"] = 4242
+        self.assertEqual(_resolve(group).ids["mal"], 4242)
 
-    def test_a_group_holding_nothing_readable_resolves_to_nothing(self):
-        """Skipped, not raised over: one unreadable row in a stored window is not
-        a reason to fail a month."""
-        self.assertIsNone(calendar_resolve.resolve({"key": "x", "ids": {}, "by_source": {}}))
-        self.assertIsNone(calendar_resolve.resolve(
-            {"key": "x", "ids": {}, "by_source": {"trakt": {"title": "no air time"}}}))
+    def test_a_group_holding_no_record_resolves_to_nothing(self):
+        """A group holds each source's Record itself (cache.group_records), built
+        from a stored row, so an unreadable record cannot reach one; what is left
+        is a group with nothing in it, which draws nothing."""
+        self.assertIsNone(_resolve({"key": "x", "ids": {}, "by_source": {}}))
 
 
 def _record(source, slug, *, tmdb=None, title=None, air_ts=1784145600.0):
@@ -298,7 +309,7 @@ def _record(source, slug, *, tmdb=None, title=None, air_ts=1784145600.0):
     )
 
 
-class WhichSourceAViewerReadsTests(unittest.TestCase):
+class WhichSourceAViewerReadsTests(CardTestCase):
     """The per-viewer half: one stored window, several viewers, different
     answers out of the same rows.
 
@@ -313,7 +324,7 @@ class WhichSourceAViewerReadsTests(unittest.TestCase):
         """Three groups: one both services listed, one only Trakt, one only
         Simkl — which is the shape a real window has (measured on the author's
         own cache: 4 of 35 entries in one week carried both)."""
-        return calendar_cache.group_records([
+        return stored_groups([
             _record(Source.TRAKT, "shared", tmdb=100, title="Shared"),
             _record(Source.SIMKL, "shared-simkl", tmdb=100, title="Shared"),
             _record(Source.TRAKT, "trakt-only"),
@@ -323,7 +334,7 @@ class WhichSourceAViewerReadsTests(unittest.TestCase):
     def read(self, selection):
         prefs = source_prefs.SourcePrefs(user_id=1, calendar_source=selection)
         return [(r.title, str(r.source))
-                for r in (calendar_resolve.resolve(g, prefs) for g in self.groups())
+                for r in (_resolve(g, prefs) for g in self.groups())
                 if r is not None]
 
     def test_naming_one_source_drops_the_groups_only_the_other_describes(self):
@@ -358,11 +369,11 @@ class WhichSourceAViewerReadsTests(unittest.TestCase):
 
     def test_no_account_asking_reads_everything(self):
         """A public share page has no viewer to have a preference."""
-        titles = [calendar_resolve.resolve(g).title for g in self.groups()]
+        titles = [_resolve(g).title for g in self.groups()]
         self.assertEqual(titles, ["Shared", "Trakt-Only", "Simkl-Only"])
 
 
-class WhatTheInstanceAdmitsAtReadTests(unittest.TestCase):
+class WhatTheInstanceAdmitsAtReadTests(CardTestCase):
     """The OTHER exclusion, and it is the operator's rather than a viewer's:
     whether a service is on this instance's calendar at all.
 
@@ -375,7 +386,7 @@ class WhatTheInstanceAdmitsAtReadTests(unittest.TestCase):
     """
 
     def groups(self):
-        return calendar_cache.group_records([
+        return stored_groups([
             _record(Source.TRAKT, "shared", tmdb=100, title="Shared"),
             _record(Source.SIMKL, "shared-simkl", tmdb=100, title="Shared"),
             _record(Source.TRAKT, "trakt-only"),
@@ -386,7 +397,7 @@ class WhatTheInstanceAdmitsAtReadTests(unittest.TestCase):
         prefs = (source_prefs.SourcePrefs(user_id=1, calendar_source=selection)
                  if selection is not None else None)
         return [(r.title, str(r.source)) for r in
-                (calendar_resolve.resolve(g, prefs, None, settings) for g in self.groups())
+                (_resolve(g, prefs, None, settings) for g in self.groups())
                 if r is not None]
 
     def test_a_source_the_instance_switched_off_is_read_by_nobody(self):
@@ -427,6 +438,79 @@ class WhatTheInstanceAdmitsAtReadTests(unittest.TestCase):
                     self.read(Settings(simkl_public_calendar_enabled=False), selection), off)
 
 
+class ASourceChoiceNeverChangesWhatTheFiltersJudgeTests(unittest.IsolatedAsyncioTestCase):
+    """Narrowing the calendar to some services decides which listings a card is
+    drawn from — never what a viewer's filters judge.
+
+    REPORTED: Sam Pang Tonight is a talk show by Simkl's account and a comedy by
+    TMDB's. A viewer filtering out talk shows never saw it, until they narrowed
+    the calendar to TMDB: Simkl's genre went with Simkl's listing and the title
+    came back. Every filter now judges the title as every service the instance
+    admits describes it, in the viewer's own order.
+    """
+
+    async def asyncSetUp(self):
+        migrated_db("filterjudge")
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    def groups(self):
+        def record(source, slug, *, tmdb, title, genres, network):
+            r = _record(source, slug, tmdb=tmdb, title=title)
+            r.genres, r.network = genres, network
+            return r
+        return stored_groups([
+            record(Source.TMDB, "286597", tmdb=286597, title="Sam Pang Tonight",
+                   genres=["comedy"], network="10"),
+            record(Source.SIMKL, "2727595", tmdb=286597, title="Sam Pang Tonight",
+                   genres=["talk-show"], network="Network 10"),
+            record(Source.TMDB, "555", tmdb=555, title="A Sitcom", genres=["comedy"],
+                   network="ABC"),
+            record(Source.SIMKL, "777", tmdb=777, title="Simkl Alone", genres=["drama"],
+                   network="SBS"),
+        ])
+
+    async def read(self, selection, *, order=(), **filters):
+        prefs = source_prefs.SourcePrefs(user_id=1, calendar_source=selection,
+                                         metadata_order=list(order))
+        kept, filtered = read_kept([r for g in self.groups() for r in g["records"]], prefs,
+                                   specs=filters)
+        return [(r.title, str(r.source), list(r.genres)) for r in kept], filtered
+
+    async def test_a_genre_only_another_service_states_still_hides_the_title(self):
+        for selection in ("auto", "tmdb"):
+            with self.subTest(source=selection):
+                kept, filtered = await self.read(selection, genres="-talk-show")
+                self.assertNotIn("Sam Pang Tonight", [title for title, *_ in kept])
+                self.assertEqual(filtered, 1)
+
+    async def test_a_card_is_still_drawn_from_the_viewers_own_services(self):
+        """Judged by every service, drawn from TMDB's record alone: its genres,
+        its attribution."""
+        kept, _ = await self.read("tmdb")
+        self.assertEqual(kept, [("Sam Pang Tonight", "tmdb", ["comedy"]),
+                                ("A Sitcom", "tmdb", ["comedy"])])
+
+    async def test_the_judged_card_is_resolved_in_the_viewers_order(self):
+        """A network is one service's answer, picked in the viewer's order: a
+        viewer who reads Simkl first sees Network 10 on the all-services card,
+        so hiding Network 10 hides it under TMDB alone too."""
+        for selection in ("auto", "tmdb"):
+            with self.subTest(source=selection):
+                kept, _ = await self.read(selection, order=("simkl", "tmdb"),
+                                          network_filter=["-Network 10"])
+                self.assertNotIn("Sam Pang Tonight", [title for title, *_ in kept])
+        kept, _ = await self.read("tmdb", network_filter=["-Network 10"])
+        self.assertIn("Sam Pang Tonight", [title for title, *_ in kept],
+                      "in the declared order TMDB's network is the card's")
+
+    async def test_a_title_none_of_the_viewers_services_lists_is_not_counted_as_filtered(self):
+        kept, filtered = await self.read("tmdb", genres="-drama")
+        self.assertNotIn("Simkl Alone", [title for title, *_ in kept])
+        self.assertEqual(filtered, 0, "not this viewer's to draw is not a filter removing it")
+
+
 class TwoViewersOneWindowTests(unittest.IsolatedAsyncioTestCase):
     """The invariant this fix restores, end to end: the stored window is the
     union of what every source said, and two viewers who chose differently read
@@ -463,11 +547,12 @@ class TwoViewersOneWindowTests(unittest.IsolatedAsyncioTestCase):
         that week."""
         ids, _ = await self.fill_and_read("simkl")
         self.assertEqual(ids, ["simkl-only"])
-        window, _ = await calendar_cache.read_cached_window(
+        held = await calendar_entries.source_coverage(
             SHOWS.key, calendar_cache.window_start(date(2026, 7, 15)))
-        self.assertEqual(sorted(window.sources), ["simkl", "trakt"])
-        self.assertEqual(
-            sorted(s for g in window.groups for s in g["by_source"]), ["simkl", "trakt"])
+        self.assertEqual(sorted(name for name, row in held.items() if row.answered),
+                         ["simkl", "trakt"])
+        self.assertEqual(sorted({listed["source"] for listed in await listings()}),
+                         ["simkl", "trakt"])
 
     async def test_the_next_viewer_reads_their_own_answer_out_of_that_window(self):
         """No fetch is permitted for the second read, so whatever it finds was

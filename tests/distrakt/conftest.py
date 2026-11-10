@@ -21,6 +21,15 @@ AND NO SERVICE HAS A PICTURE FOR A TITLE NOTHING HAS RECORDED ONE FOR: a month
 gives each such row its one poster lookup before it draws, and that lookup's
 Trakt search answers nothing here — so the title is recorded as having none, the
 path a real empty answer takes.
+
+AND A ROW A TEST WRITES STRAIGHT INTO THE TRACKER ARRIVED DESCRIBED. A row on the
+viewer's own list keeps no words of its own: it is drawn with the title store's
+words for its title (app/distrakt/store.py's _SNAPSHOT_COLUMNS), which arrival
+files when the title arrives. A test that writes a row with
+`store.add_user_record` and a title is standing in for that arrival, so the words
+it states seed the title store (app/metadata/descriptions.py's seed_words —
+nothing is written where the store already has words for the title). A test
+ABOUT where a row's words come from writes the store itself.
 """
 from __future__ import annotations
 
@@ -28,16 +37,22 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app import db, distrakt
+from app.distrakt import store as distrakt_store
+from app.metadata import descriptions
 from app.providers.base import TitleFacts
 
 _NOTHING_MORE = {
     "app.providers.trakt.detail.find_by_shared_id": AsyncMock(return_value={}),
     "app.providers.simkl.by_id.find_by_shared_id": AsyncMock(return_value={}),
+    "app.providers.tmdb.search.find_by_shared_id": AsyncMock(return_value={}),
     "app.providers.trakt.detail.fetch_title_facts": AsyncMock(return_value=TitleFacts("", "")),
     "app.providers.simkl.detail.fetch_title_facts": AsyncMock(return_value=TitleFacts("", "")),
     "app.calendar.search.fill_one_gap": AsyncMock(return_value=""),
-    "app.media.posters._fresh_provider_lookup": AsyncMock(return_value=None),
 }
+
+# Each service's poster lookup by tmdb id answers nothing, entry by entry.
+_NO_PICTURE_FROM = ("tmdb", "trakt")
 
 
 @pytest.fixture(autouse=True)
@@ -46,3 +61,28 @@ def services_know_nothing_more(monkeypatch):
         module, name = target.rsplit(".", 1)
         monkeypatch.setattr(f"{module}.{name}", AsyncMock(
             return_value=stand_in.return_value))
+    from app.media import posters
+    for source in _NO_PICTURE_FROM:
+        monkeypatch.setitem(posters._ADDRESS_LOOKUPS, source, AsyncMock(return_value=None))
+
+
+@pytest.fixture(autouse=True)
+def a_row_written_by_a_test_arrived_described(monkeypatch):
+    """See the module docstring's last paragraph."""
+    written_straight = distrakt_store.add_user_record
+
+    async def add_user_record(user_id, record):
+        stored = await written_straight(user_id, record)
+        ids = {**(record.get("ids") or {}), **(stored.get("ids") or {})}
+        seeded = await db.transaction(lambda conn: descriptions.seed_words(
+            conn, stored["media"], ids, title=str(record.get("title") or ""),
+            network=str(record.get("network") or ""), now=db.now()))
+        if seeded is None:
+            return stored
+        return await distrakt_store.find_user_record(
+            user_id, distrakt_store.record_key(stored), stored["season"])
+
+    # Both spellings a test reaches it by: the store module, and the package that
+    # re-exports it (`from app import distrakt`).
+    monkeypatch.setattr(distrakt_store, "add_user_record", add_user_record)
+    monkeypatch.setattr(distrakt, "add_user_record", add_user_record)

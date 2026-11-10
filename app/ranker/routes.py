@@ -20,7 +20,7 @@ import functools
 import json
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -30,6 +30,7 @@ import anyio.to_thread
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import (HTMLResponse, JSONResponse, RedirectResponse,
                                Response)
+from markupsafe import Markup
 
 from . import (core as ranker, exports as ranker_export, grid_builder,
                imports as ranker_import, item_keys, seasons as ranker_seasons,
@@ -40,7 +41,11 @@ from ..auth import AuthLevel
 from ..config import load_settings
 from ..media import artwork, posters, user_images
 from ..perftrace import span
-from ..providers import detail_source
+from ..metadata import identity as title_identity
+from ..metadata import panel as metadata_panel
+from ..metadata import pictures as metadata_pictures
+from ..metadata import refresh as metadata_refresh
+from ..providers import UnknownSearchService, detail_source, season_choices, title_search
 from ..sources import prefs as source_prefs
 # THE DETAIL PORTS' failure type, which is not `ranker_sources.SourceUnavailable`:
 # that one is this feature's own translation for the search and ratings seams,
@@ -326,8 +331,10 @@ async def _sources(user_id: int) -> dict[str, object]:
     the account cannot reach.
     """
     sources: dict[str, object] = {"search": True}
-    if await ranker_sources.ratings_available(user_id):
-        sources["ratings"] = True
+    # WHICH SERVICES' RATINGS, not whether: the seed control draws one press per
+    # linked service that keeps ratings, each naming its service.
+    if rated := await ranker_sources.ratings_services(user_id):
+        sources["ratings"] = rated
     if await ranker_import.tracker_available(user_id):
         # WHETHER, NOT WHICH YEARS. The import dialog's year list is a fragment of
         # its own now (`import_years_fragment`), asked for when a medium is chosen
@@ -455,14 +462,35 @@ async def _rankings_response(request: Request, user, wanted: str | None, *,
     if board:
         first = board["pool"][:POOL_PAGE_SIZE]
         context.update(_pool_context(board["uid"], first, len(board["pool"]) - len(first)))
+        # The rows this answer draws: the pool's first page, and every tier's
+        # rows when the board is small enough to draw them open.
+        tiered_rows = ([item for category in board["categories"] for item in category["items"]]
+                       if tiered <= EAGER_ROW_LIMIT else [])
+        await _rows_viewed([*first, *tiered_rows])
         context.update(await _removals_context(user.user_id, board["uid"]))
         if open_for and not open_tier:
             context["open_tier"] = _tier_of(board, context["removals"], open_for)
-        context.update(_export_context(user.user_id, board))
+        context.update(await _export_context(user.user_id, board))
         context["strips_url"] = _strips_url(board["uid"])
         # The bulk Move's destinations, in the order the tiers are drawn.
         context["tiers"] = _move_choices(board)
     return templates.TemplateResponse(request, "ranker.html", context)
+
+
+async def _rows_viewed(items) -> None:
+    """ROWS DRAWN ARE TITLES VIEWED: each row's title, and the season a season
+    row is, past its clock — or that no service has described yet — is re-read
+    behind the page (app/metadata/refresh.py). The rows draw what the store holds
+    now. The row's own filing id rides with its ids, so a title filed by one
+    service's id is asked of that service too."""
+    metadata_refresh.viewed(
+        await load_settings(),
+        [metadata_refresh.Wanted(item["media"],
+                                 {**(item.get("ids") or {}),
+                                  item["match_source"]: item["match_id"]},
+                                 item.get("season"))
+         for item in items],
+        budget=metadata_refresh.ROWS_BUDGET)
 
 
 def _tier_of(board: dict, removals: list[dict], key: str) -> str:
@@ -505,6 +533,7 @@ async def pool_page_fragment(request: Request):
         return _fragment_failure(request, str(exc), _pool_url(board_uid, after),
                                  "ranker-pool-sentinel")
     context = _pool_context(board_uid, items, remaining)
+    await _rows_viewed(items)
     return templates.TemplateResponse(
         request, "_ranker_pool_page.html", {"request": request, **context},
     )
@@ -524,6 +553,7 @@ async def category_rows_fragment(request: Request):
     found = [c for c in board["categories"] if c["uid"] == category_uid]
     if not found:
         return _fragment_failure(request, "No such tier.", retry, "ranker-rows")
+    await _rows_viewed(found[0]["items"])
     return templates.TemplateResponse(
         request, "_ranker_category_rows.html",
         {"request": request, "items": found[0]["items"], "board_uid": board["uid"]},
@@ -646,20 +676,24 @@ async def seasons_fragment(request: Request):
         return HTMLResponse("")
     parsed = ranker.parse_key(item["key"])
     listed, note = [], ""
-    settings = load_settings()
+    settings = await load_settings()
     chosen = detail_source.choose(settings, item["ids"])
     if chosen is None:
         note = "No service here can list this show's seasons."
     else:
         try:
-            listed = (await detail_source.seasons(settings, chosen, Media.SHOW)).seasons
+            # FROM THE TITLE STORE, kept there when it has to be asked: the same
+            # list a row made into one of these seasons draws its count and name
+            # from (app/metadata/labels.py).
+            listed = await metadata_panel.season_list(settings, chosen, Media.SHOW,
+                                                      ids=item["ids"])
             await _remember_season_art(item["tmdb"], chosen.source, listed)
         except SourceUnavailable:
             logger.warning("Season list failed for %s", chosen.source, exc_info=True)
             note = "Couldn't list this show's seasons just now."
         if not listed and not note:
             note = "No seasons are listed for this show yet."
-    options = ranker_seasons.season_options(
+    options = season_choices.season_options(
         listed, held=held, current=item["season"],
         finished=await ranker_import.latest_finished_season(user.user_id, parsed.title),
         now=datetime.now(timezone.utc))
@@ -742,7 +776,7 @@ async def _item_details(request: Request, *, season_only: bool) -> Response:
         season = route_params.season(params.get("season"))
         if season is None:
             season = item["season"] if item["season"] is not None else _OPENING_SEASON
-    settings = load_settings()
+    settings = await load_settings()
     chosen = detail_source.choose(settings, item["ids"])
     if chosen is None:
         return await _described_by_the_board(request, user.user_id, item, season_only,
@@ -751,8 +785,8 @@ async def _item_details(request: Request, *, season_only: bool) -> Response:
         # A season the chosen service has no episodes of is answered by the next
         # service that does (detail_source.for_season). A whole panel also pools
         # every service's videos; a season tab draws none, so it asks for none.
-        describe = (detail_source.describe_season if season_only
-                    else detail_source.describe_panel)
+        describe = (metadata_panel.describe_season if season_only
+                    else metadata_panel.describe_panel)
         chosen, details = await describe(settings, chosen, item["ids"], media, season)
     except SourceUnavailable:
         # Drawn rather than answered with a status, like every fragment here, and
@@ -763,6 +797,11 @@ async def _item_details(request: Request, *, season_only: bool) -> Response:
     if details is None:
         return await _described_by_the_board(request, user.user_id, item, season_only,
                                              reachable=True)
+    # A PANEL OPENED IS A TITLE VIEWED (app/metadata/refresh.py).
+    metadata_refresh.viewed(
+        settings, [metadata_refresh.Wanted(media, {**item["ids"], **(details.get("ids") or {})},
+                                           season)],
+        budget=metadata_refresh.PANEL_BUDGET)
     if season_only:
         return details_panel.season_pane(request, details, media=media, season=season)
     return details_panel.panel(
@@ -770,10 +809,72 @@ async def _item_details(request: Request, *, season_only: bool) -> Response:
         title=item["label"], poster=await _panel_picture(user.user_id, item),
         # The row's ids first and the answer's beside them: which services know a
         # title is a fact about the row, and a Trakt-described answer carries no
-        # Simkl id to build that button from.
-        links=detail_source.outbound_links({**item["ids"], **(details.get("ids") or {})}, media),
-        season_count=item["season_count"] or 0,
-        carry=("board", "key"))
+        # Simkl id to build that button from. Beneath both, every id the title
+        # store knows for it (identity.every_id).
+        links=detail_source.outbound_links(await title_identity.every_id(
+            media, {**item["ids"], **(details.get("ids") or {})}), media),
+        carry=("board", "key"),
+        actions=_collection_action(params.get("board") or "", item, chosen, details))
+
+
+def _collection_action(board_uid: str, item: dict, chosen, details: dict) -> str:
+    """The panel's "add the whole collection" button, for a film TMDB described
+    as one of a collection (ranker_sources.film_collection says why only TMDB's
+    word counts); "" otherwise."""
+    collection = details.get("collection") or {}
+    if item["media"] != Media.MOVIE or chosen.source != Source.TMDB or not collection:
+        return ""
+    return Markup(templates.get_template("_ranker_collection.html").render(
+        board_uid=board_uid, key=item["key"], collection=collection))
+
+
+@guard.post("/rankings/boards/{board_uid}/items/collection", AuthLevel.RANKER_APPROVED)
+async def add_film_collection(board_uid: str, request: Request):
+    """Add every film of the collection a board's film row belongs to, and answer
+    with the page and a sentence saying what arrived.
+
+    THE REQUEST NAMES A ROW, NEVER A TITLE: the row's key on this board. Which
+    collection that film is in comes from TMDB's description of it, and which
+    films the collection holds from TMDB's own list (ranker_sources), so the
+    films the board receives are what TMDB said. They arrive through the board's
+    one add path and its arrival rule (ranker.add_titles), registered with the
+    title store in bounded turns before that transaction, so a long series does
+    not hold the write lock for every film at once. A film the board holds
+    already — the one the panel was opened on, at least — adds nothing.
+
+    ALWAYS 200 WITH THE OUTCOME SAID ON THE PAGE, as a search add answers: this
+    answer replaces the page."""
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+    notice, ok = "", True
+    try:
+        notice = await _add_collection(user.user_id, board_uid, data.get("key"))
+    except ranker.RankerError as exc:
+        notice, ok = str(exc), False
+    return await _rankings_response(request, user, board_uid, notice=notice, notice_ok=ok)
+
+
+async def _add_collection(user_id: int, board_uid: str, key: Any) -> str:
+    """What adding the collection of the film `key` names did, in a sentence.
+    Raises RankerError with the sentence to show when it cannot."""
+    item = await ranker.fetch_item(user_id, board_uid, key)
+    settings = await load_settings()
+    try:
+        collection = await ranker_sources.film_collection(settings, item)
+        if not collection:
+            raise ranker.ValidationError("TMDB doesn't list this film as part of a collection.")
+        films = await ranker_sources.collection_items(settings, collection)
+    except SourceUnavailable:
+        raise ranker.ValidationError(
+            "Couldn't reach TMDB for the collection just now — try again in a moment.") from None
+    name = collection.get("name") or "the collection"
+    if not films:
+        raise ranker.ValidationError(f"TMDB lists no films in {name}.")
+    added, _converted = await ranker.add_titles(user_id, board_uid, films, added_from="manual",
+                                                in_turns=True)
+    if not added:
+        return f"Every film of {name} is already on this board."
+    return f"Added {added} film{'s' if added != 1 else ''} of {name} to the pool."
 
 
 async def _described_by_the_board(request: Request, user_id: int, item: dict,
@@ -807,7 +908,8 @@ async def _described_by_the_board(request: Request, user_id: int, item: dict,
     return details_panel.panel(
         request, facts, media=media, season=None,
         title=item["label"], poster=await _panel_picture(user_id, item),
-        links=detail_source.outbound_links(item["ids"], media),
+        links=detail_source.outbound_links(await title_identity.every_id(media, item["ids"]),
+                                           media),
         note=f"{lead}: {reason}.")
 
 
@@ -821,7 +923,8 @@ async def _panel_picture(user_id: int, item: dict) -> str:
     broken picture where the empty string — which the panel reads as "use the
     describing service's own poster" — draws a real one.
     """
-    return proxied_image(await _row_address(user_id, item, look_up=False)) or ""
+    title, choices, order = await _row_choices(user_id, item, look_up=False)
+    return metadata_pictures.drawn(await load_settings(), title, choices, order)
 
 
 def _fragment_failure(request: Request, message: str, retry_url: str, target: str):
@@ -1140,21 +1243,23 @@ async def move_board_items(board_uid: str, request: Request):
 
 async def _stored_season_list(settings, ids: Mapping[str, Any], tmdb: Any = None) -> list[dict]:
     """The season list of the show `ids` names, AS THIS INSTANCE ALREADY HOLDS IT
-    — never a request. [] when nobody can describe the show or nothing is stored.
+    — in the title store, or in the describing service's response cache, and then
+    kept in the store — never a request. [] when nobody can describe the show or
+    nothing is held.
 
-    WHAT A ROW BECOMING A SEASON READS ITS COUNT AND NAME FROM. Every way a row
-    gets a season follows a moment that fetched this list anyway — the season
-    control's opening, a search result's checklist — or is a bulk arrival (an
-    import, a ratings seed) where a lookup per show would be a request per row. So
-    this reads the store, asked of the service that describes the title
-    (detail_source.choose), and a list nobody fetched leaves the facts blank.
+    WHAT A ROW BECOMING A SEASON DRAWS ITS COUNT AND NAME FROM, through the title
+    store (app/metadata/labels.py). Every way a row gets a season follows a moment
+    that fetched this list anyway — the season control's opening, a search
+    result's checklist — or is a bulk arrival (an import, a ratings seed) where a
+    lookup per show would be a request per row. A list nobody fetched leaves the
+    count and the name to the title's next description.
     """
     chosen = detail_source.choose(settings, ids)
     if chosen is None:
         return []
     try:
-        listed = (await detail_source.seasons(settings, chosen, Media.SHOW,
-                                              cached_only=True)).seasons
+        listed = await metadata_panel.season_list(settings, chosen, Media.SHOW, ids=ids,
+                                                  cached_only=True)
     except SourceUnavailable:
         return []
     await _remember_season_art(tmdb or ids.get("tmdb"), chosen.source, listed)
@@ -1176,36 +1281,19 @@ async def _remember_season_art(tmdb: Any, source: Source, listed: list[dict]) ->
 
 
 async def _with_season_facts(settings, items: list[dict]) -> list[dict]:
-    """`items` with each SEASON's episode total and name filled in from the stored
-    season list (seasons.season_facts), where the item did not bring its own —
-    an import's count is the tracker's record of that season and stays. One read
-    per show, however many of its seasons arrive."""
-    lists: dict[str, list[dict]] = {}
-    out = []
+    """`items`, with the season list of every show one of them is a season of
+    kept in the title store (`_stored_season_list`) — which is where a season
+    row's episode total and name are drawn from. One read per show, however many
+    of its seasons arrive; never a request."""
+    shows: set[str] = set()
     for item in items:
         if item.get("season") in (None, ""):
-            out.append(item)
             continue
         show = json.dumps(item.get("ids") or {}, sort_keys=True)
-        if show not in lists:
-            lists[show] = await _stored_season_list(settings, item.get("ids") or {})
-        out.append(_season_item(item, item.get("season"), lists[show]))
-    return out
-
-
-def _season_item(item: Mapping[str, Any], season: Any, listed: list[dict]) -> dict:
-    """`item` as one season of its show, carrying that season's episode total and
-    name from `listed` (seasons.season_facts) where the item did not bring its own.
-    A season that is not one a row could be is passed on untouched, so the add
-    refuses it in the data layer's own words rather than here."""
-    try:
-        number = item_keys.valid_season(season, item.get("media", Media.SHOW))
-    except ValueError:
-        return {**item, "season": season}
-    facts = ranker_seasons.season_facts(listed, number)
-    return {**item, "season": season,
-            "episode_count": item.get("episode_count") or facts["episode_count"],
-            "season_name": item.get("season_name") or facts["season_name"]}
+        if show not in shows:
+            shows.add(show)
+            await _stored_season_list(settings, item.get("ids") or {})
+    return items
 
 
 @guard.post("/rankings/boards/{board_uid}/items/season", AuthLevel.RANKER_APPROVED)
@@ -1231,13 +1319,13 @@ async def set_board_item_season(board_uid: str, request: Request):
         # The list the control was drawn from, read back from the store, so the
         # row's counts and name follow its new season with no second request.
         item = await ranker.fetch_item(user.user_id, board_uid, data.get("key"))
-        listed = (await _stored_season_list(load_settings(), item["ids"], item["tmdb"])
-                  if item["media"] == Media.SHOW else [])
+        if item["media"] == Media.SHOW:
+            await _stored_season_list(await load_settings(), item["ids"], item["tmdb"])
         row_key = await ranker.set_item_season(user.user_id, board_uid, data.get("key"),
-                                               data.get("season"), listed)
+                                               data.get("season"))
         season = ranker.parse_key(row_key).season
         notice = ("This row is the whole show now." if season is None else
-                  f"This row is {ranker_seasons.season_word(season)} now.")
+                  f"This row is {season_choices.season_word(season)} now.")
     except ranker.RankerError as exc:
         notice, ok = str(exc), False
     return await _rankings_response(request, user, board_uid, notice=notice, notice_ok=ok,
@@ -1391,31 +1479,48 @@ async def rankings_poster(request: Request):
                                        request.query_params.get("key"))
     except ranker.RankerError:
         return Response(status_code=404)
-    address = await _row_address(user.user_id, item, look_up=True)
-    if not address:
+    title, choices, order = await _row_choices(user.user_id, item, look_up=True)
+    if not choices:
         return Response(status_code=404, headers=_POSTER_MISS_HEADERS)
-    return RedirectResponse(proxied_image(address), status_code=302,
-                            headers=_POSTER_CACHE_HEADERS)
+    # THE LOCATION CARRIES THE REPORT ADDRESS (app/metadata/pictures.py): a
+    # picture that will not load sends the browser on to the next recorded one
+    # and heals the title, with no script.
+    return RedirectResponse(metadata_pictures.drawn(await load_settings(), title, choices, order),
+                            status_code=302, headers=_POSTER_CACHE_HEADERS)
 
 
-async def _row_address(user_id: int, item: Mapping[str, Any], *, look_up: bool) -> str:
-    """A board row's picture as an ORIGIN address, or "". `look_up` False answers
-    from what is recorded alone — the details panel, which has the describing
-    service's own picture to fall back on and so never needs to spend a lookup."""
-    if not item.get("tmdb"):
-        return ""
+async def _row_choices(user_id: int, item: Mapping[str, Any], *, look_up: bool
+                       ) -> tuple[metadata_pictures.Title, list[artwork.Choice], tuple[str, ...]]:
+    """A board row's picture: the title it is, every recorded address in the
+    viewer's order (artwork.ranked's, each with who stated it), and that order.
+    `look_up` False answers from what is recorded alone — the details panel,
+    which has the describing service's own picture to fall back on and so never
+    needs to spend a lookup."""
     order = await _poster_order(user_id)
+    if not item.get("tmdb"):
+        # A TITLE WITH NO TMDB ID draws what the registry filed under the title
+        # store's key for it (artwork's title_posters) — the key the row is filed
+        # under. It has no lookup: that asks by tmdb id, and its pictures arrive
+        # as the store learns them.
+        key = f"{item['media']}:{item['match_source']}:{item['match_id']}"
+        known = await artwork.known((), [(item["media"], key)])
+        return (metadata_pictures.Title(item["media"], None, key, None),
+                known.choices(item["media"], None, None, order, title_key=key), order)
     media, tmdb, season = item["media"], int(item["tmdb"]), item.get("season")
+    title = metadata_pictures.Title(media, tmdb, "", season)
     known = await artwork.known([(media, tmdb, season)])
     if season is not None and not known.seasons.get((media, tmdb, season)):
         # Nothing filed for the season yet: the list its row was made from may be
         # stored, and carries the season's own artwork.
-        await _stored_season_list(load_settings(), item.get("ids") or {}, tmdb)
+        await _stored_season_list(await load_settings(), item.get("ids") or {}, tmdb)
         known = await artwork.known([(media, tmdb, season)])
-    address = known.address(media, tmdb, season, order)
-    if address or not look_up:
-        return address
-    return await posters.find_address(load_settings(), media, tmdb, order, season)
+    choices = known.choices(media, tmdb, season, order)
+    if choices or not look_up:
+        return title, choices, order
+    # The title's one lookup records what it finds, so the registry answers again.
+    if await posters.find_address(await load_settings(), media, tmdb, order, season):
+        known = await artwork.known([(media, tmdb, season)])
+    return title, known.choices(media, tmdb, season, order), order
 
 
 # ---------------------------------------------------------------------------
@@ -1433,17 +1538,30 @@ def _media(value, default: Media | None = None) -> Media:
 
 
 def _search_context(*, query: str = "", media: Media | str = "", rows=(), typed: bool = False,
-                    too_short: bool = False, no_catalogue: bool = False, failed=(),
+                    too_short: bool = False, failed=(), controls=None,
                     message: str = "") -> dict[str, Any]:
     """What _ranker_search_results.html draws, in one shape for the fragment and
     for the page an add answers with — one builder, so the two cannot disagree
-    about what a search result carries."""
+    about what a search result carries. `controls` is what title_search's
+    `widen` draws under a services' answer (SearchOutcome.controls)."""
     return {"query": query, "media": str(media), "rows": list(rows), "typed": typed,
-            "too_short": too_short, "no_catalogue": no_catalogue,
+            "too_short": too_short, "controls": controls,
             "failed": sorted(str(source) for source in failed), "message": message}
 
 
-def _result_rows(hits, *, query: str, media: Media, held) -> list[dict[str, Any]]:
+def _searched(outcome: title_search.SearchOutcome, *, query: str, media: Media,
+              held) -> dict[str, Any]:
+    """A services' answer as the search context — the fragment's and an add's
+    redraw, from one place."""
+    return _search_context(
+        query=query, media=media, failed=outcome.result.failed,
+        controls=outcome.controls(),
+        rows=_result_rows(outcome.result.hits, query=query, media=media, held=held,
+                          ref=outcome.ref))
+
+
+def _result_rows(hits, *, query: str, media: Media, held,
+                 ref: title_search.SearchRef | None = None) -> list[dict[str, Any]]:
     """Search hits as the result rows the board draws — THE ONE PLACE A HIT
     BECOMES ONE, so the text a row shows and the reference it posts back are read
     off the same dict.
@@ -1451,9 +1569,10 @@ def _result_rows(hits, *, query: str, media: Media, held) -> list[dict[str, Any]
     `ref` IS HOW A ROW NAMES ITSELF, and the whole of what it sends: a stored
     title by the identity it is stored under (`t`, with the query only so the
     page an add answers with can list the same titles again), a service's hit by
-    the query and its place in the answer (`q`, `i`). `media` is the medium the
-    SEARCH was for, which is what reading that search back needs — not the hit's
-    own, which for a service that mixes films into a show search can differ.
+    the query, the search's own reference (`also`, `pages` — `ref`) and its
+    place in that answer (`i`). `media` is the medium the SEARCH was for, which
+    is what reading that search back needs — not the hit's own, which for a
+    service that mixes films into a show search can differ.
 
     `key` is the whole title's board key, None for a hit no id yet keys (a
     service's season-title before its season lookup): such a row cannot be drawn
@@ -1463,10 +1582,10 @@ def _result_rows(hits, *, query: str, media: Media, held) -> list[dict[str, Any]
     rows = []
     for index, hit in enumerate(hits):
         key = ranker_sources.hit_key(hit)
-        ref = ({"t": hit.title_key, "q": query} if hit.title_key
-               else {"q": query, "i": index})
+        named = ({"t": hit.title_key, "q": query} if hit.title_key
+                 else {"q": query, **(ref.fields() if ref else {}), "i": index})
         rows.append({
-            "ref": {**ref, "media": str(media)},
+            "ref": {**named, "media": str(media)},
             "key": key,
             "held": key is not None and key in held,
             "media": str(hit.media),
@@ -1531,10 +1650,13 @@ async def search_fragment(request: Request):
     """Enter's search: the titles the viewer's services find, drawn as the list
     under the pool's search box.
 
-    WHO IS ASKED is the viewer's settings' answer (ranker_sources.search_settings,
-    providers.for_catalogue_search): Trakt for every account, with the instance's
-    client id, and Simkl only for a viewer who has linked it, with their own
-    token. Each hit is marked with the services that found it.
+    WHO IS ASKED is every box's answer (title_search.search, with the viewer's
+    settings — ranker_sources.search_settings): the catalogue searched by
+    default, for every account, and a service the viewer has linked when they
+    add it from the list's "also search" control — named by reference in the
+    request (`also`, and `pages` for "more"). Each hit is marked with the
+    services that found it. The whole list is drawn: "more" lengthens it a page
+    at a time, and a row is named by its place in it.
 
     THIS IS WHAT THE SEARCH BUDGET COUNTS (`_search_over_budget`), and only this:
     it is the one read here that spends a service's rate limit. The list drawn
@@ -1558,21 +1680,20 @@ async def search_fragment(request: Request):
         return _search_results(request, board_uid, _search_context(
             message="Too many searches just now — give it a moment."))
     settings = await ranker_sources.search_settings(user.user_id)
-    if not ranker_sources.searchable(settings):
-        return _search_results(request, board_uid, _search_context(
-            query=query, media=media, no_catalogue=True))
-    result = await ranker_sources.catalogue_search(settings, query, media)
+    try:
+        outcome = await ranker_sources.catalogue_search(
+            settings, media, query, title_search.SearchRef.named(request.query_params))
+    except UnknownSearchService as exc:
+        return _search_results(request, board_uid, _search_context(message=str(exc)))
     held = await ranker.board_keys(user.user_id, board_uid)
-    return _search_results(request, board_uid, _search_context(
-        query=query, media=media, failed=result.failed,
-        rows=_result_rows(result.hits[:MAX_SEARCH_RESULTS], query=query, media=media,
-                          held=held)))
+    return _search_results(request, board_uid,
+                           _searched(outcome, query=query, media=media, held=held))
 
 
 @guard.get("/rankings/fragments/search-seasons", AuthLevel.RANKER_APPROVED)
 async def search_seasons_fragment(request: Request):
-    """One search result's season checklist — asked for the first time its
-    "Seasons…" is opened, never with the search.
+    """One search result's season checklist — asked for the first time its row
+    is pressed, never with the search.
 
     THE RESULT IS NAMED EXACTLY AS ITS ADD NAMES IT (`t`, or `q` and `i`) and
     read back from what a service said (ranker_sources.named_hit). Its seasons
@@ -1580,10 +1701,13 @@ async def search_seasons_fragment(request: Request):
     one the tracker's add opens — which also fills in the ids of a hit the search
     left keyless and names the season of a result that is one season.
 
-    WHAT IS OFFERED, GREYED AND SUGGESTED is app/ranker/seasons.py's, fed with
-    what this board already holds of the show (`held_seasons`) and the season the
-    viewer last finished, as a row's own season control is. The whole show is
-    not among them: the result's own row is what adds that.
+    WHAT IS OFFERED, GREYED AND SUGGESTED is app/providers/season_choices.py's,
+    fed with what this board already holds of the show (`held_seasons`) and the
+    season the viewer last finished, as a row's own season control is. THE WHOLE
+    SHOW LEADS THE LIST, because pressing a show's row opens this checklist
+    rather than adding: it is the board's one choice the tracker and the
+    calendar do not have, ticked beside seasons or alone, and greyed when the
+    board holds it. It is never "this row" — a result is not a row yet.
 
     EVERY OUTCOME IS DRAWN, at 200, as a sentence where the list would be.
     """
@@ -1623,31 +1747,19 @@ async def search_seasons_fragment(request: Request):
         held = await ranker.held_seasons(user.user_id, board_uid, str(title))
     except ranker.RankerError:
         held = set()
-    options = ranker_seasons.season_options(
+    whole_show, *seasons = season_choices.season_options(
         pick.seasons, held=held, current=None,
         finished=await ranker_import.latest_finished_season(user.user_id, title),
-        now=datetime.now(timezone.utc))[1:]
+        now=datetime.now(timezone.utc))
+    options = [replace(whole_show, current=False), *seasons]
     if pick.named_season is not None:
         # The result IS this season, so asking which would be a question it has
         # already answered.
         options = ([option for option in options if option.season == pick.named_season]
-                   or [ranker_seasons.SeasonOption(pick.named_season,
+                   or [season_choices.SeasonOption(pick.named_season,
                                                    held=pick.named_season in held)])
         return _answer(options, ticked=pick.named_season)
-    return _answer(options, note="" if options else "No seasons are listed for this show yet.")
-
-
-# The prefix a season checklist names each ticked season with, ONE FIELD PER
-# SEASON for the bulk Move's reason (PICK_PREFIX): json-enc makes a repeated name
-# a list only when there is more than one of it.
-SEASON_PREFIX = "season:"
-
-
-def _ticked_seasons(data: Mapping[str, Any]) -> list[str]:
-    """The seasons a checklist ticked, as the strings it posted — the data layer
-    validates each (item_keys.valid_season), so a bad one refuses the add."""
-    return [name[len(SEASON_PREFIX):] for name, value in data.items()
-            if name.startswith(SEASON_PREFIX) and value]
+    return _answer(options, note="" if seasons else "No seasons are listed for this show yet.")
 
 
 @dataclass(frozen=True)
@@ -1691,12 +1803,21 @@ async def _add_named(user, board_uid: str, data: Mapping[str, Any]) -> _Added:
     whole = item_keys.board_key(item["media"], item["match_source"], item["match_id"])
     items = [item]
     if data.get("want") == "seasons":
-        seasons = _ticked_seasons(data)
+        # The data layer validates each (item_keys.valid_season), so a bad
+        # one refuses the add.
+        seasons = season_choices.ticked(data)
         if not seasons:
             raise ranker.ValidationError("Tick at least one season to add.")
-        # Each season's count and name, from the list its checklist was drawn from.
-        listed = await ranker_sources.stored_seasons(settings, hit)
-        items = [_season_item(item, season, listed) for season in seasons]
+        # The list its checklist was drawn from, kept in the title store under
+        # the service that listed it: each season row draws its count and name
+        # from there (app/metadata/labels.py).
+        # The leader's: the service whose season lookup the checklist was drawn
+        # from (title_search.MergedSearchHit's `source_ids`).
+        lister, lister_id = next(iter(hit.source_ids.items()))
+        await metadata_panel.keep_season_list(
+            lister, item["media"], lister_id,
+            await ranker_sources.stored_seasons(settings, hit), ids=item.get("ids"))
+        items = [{**item, "season": season} for season in seasons]
     arrived = await ranker.add_titles(user.user_id, board_uid, items, added_from="manual")
     # THE PICTURE THE RESULT WAS DRAWN WITH IS FILED, under the service that
     # published it, as the calendar files every poster it sees. The row asks for
@@ -1708,6 +1829,11 @@ async def _add_named(user, board_uid: str, data: Mapping[str, Any]) -> _Added:
     if item.get("tmdb") and hit.poster and hit.poster_source:
         await artwork.record_poster_urls(
             [(item["media"], item["tmdb"], hit.poster_source, hit.poster)])
+    elif hit.poster and hit.poster_source:
+        # A title with no tmdb id, under the title store's key the row is filed by.
+        await artwork.record_title_poster_urls([(
+            item["media"], f"{item['media']}:{item['match_source']}:{item['match_id']}",
+            hit.poster_source, hit.poster)])
     # Every season was validated by the add itself, so reading the first back
     # cannot fail here.
     first = item_keys.board_key(item["media"], item["match_source"], item["match_id"],
@@ -1715,12 +1841,18 @@ async def _add_named(user, board_uid: str, data: Mapping[str, Any]) -> _Added:
     return _Added(arrived, whole, first)
 
 
-def _added_notice(added: _Added, seasons: bool) -> str:
+def _added_notice(added: _Added, seasons: bool, whole: bool = False) -> str:
     """What an add says it did, in words that fit whether it made rows, took a
-    whole-show row over, or found everything already there."""
+    whole-show row over, or found everything already there. `whole` is a
+    checklist that ticked the whole show, which is a row but not a season."""
     count, converted = added.arrived
     if count:
-        what = f"{count} season{'s' if count != 1 else ''}" if seasons else "the title"
+        if not seasons or (whole and count == 1):
+            what = "the title"
+        elif whole:
+            what = f"the whole show and {count - 1} season{'s' if count != 2 else ''}"
+        else:
+            what = f"{count} season{'s' if count != 1 else ''}"
         return f"Added {what} to the pool{_converted(converted)}."
     if converted:
         return (f"Made {converted} whole-show row{'s' if converted != 1 else ''} "
@@ -1752,7 +1884,8 @@ async def add_searched_title(board_uid: str, request: Request):
     notice, ok, first = "", True, ""
     try:
         added = await _add_named(user, board_uid, data)
-        notice, first = _added_notice(added, seasons), added.first
+        notice, first = _added_notice(
+            added, seasons, whole="" in season_choices.ticked(data)), added.first
     except ranker.RankerError as exc:
         notice, ok = str(exc), False
     return await _rankings_response(
@@ -1780,11 +1913,13 @@ async def _redrawn_search(user, board_uid: str, data: Mapping[str, Any]) -> dict
     if not query:
         return _search_context(media=media)
     settings = await ranker_sources.search_settings(user.user_id)
-    result = await ranker_sources.catalogue_search(settings, query, media, cached_only=True)
-    return _search_context(
-        query=query, media=media, failed=result.failed,
-        rows=_result_rows(result.hits[:MAX_SEARCH_RESULTS], query=query, media=media,
-                          held=held))
+    try:
+        outcome = await ranker_sources.catalogue_search(settings, media, query,
+                                            title_search.SearchRef.named(data),
+                                            cached_only=True)
+    except UnknownSearchService:
+        return _search_context(media=media)
+    return _searched(outcome, query=query, media=media, held=held)
 
 
 @guard.post("/api/rankings/boards/{board_uid}/items", AuthLevel.RANKER_APPROVED)
@@ -1917,7 +2052,7 @@ async def import_finished_titles(board_uid: str, request: Request):
     try:
         arrived = await ranker.add_titles(
             user.user_id, board_uid,
-            await _with_season_facts(load_settings(), ranker_sources.items_from_refs(refs)),
+            await _with_season_facts(await load_settings(), ranker_sources.items_from_refs(refs)),
             added_from="tracker",
         )
         notice, ok = f"Found {len(refs)}, added {arrived.added}{_converted(arrived.converted)}.", True
@@ -1929,7 +2064,8 @@ async def import_finished_titles(board_uid: str, request: Request):
 @guard.get("/rankings/fragments/seed", AuthLevel.RANKER_APPROVED)
 async def seed_control_fragment(request: Request):
     """The seed control back in its resting state — what Cancel asks for."""
-    return _seed_answer(request, request.query_params.get("board") or "")
+    user = await auth.current_user(request)
+    return await _seed_answer(request, user.user_id, request.query_params.get("board") or "")
 
 
 @guard.post("/rankings/boards/{board_uid}/seed", AuthLevel.RANKER_APPROVED)
@@ -1943,19 +2079,27 @@ async def seed_from_ratings(board_uid: str, request: Request):
     server's sentence about its own dry run rather than one composed in the
     browser from a JSON answer, and pressing the confirmation is the same request
     with `commit` on.
+
+    FROM THE ONE SERVICE THE PRESS NAMES (`service`), among those the viewer has
+    linked that keep ratings — a name it may not seed from is refused, never read
+    as another service's ratings (ranker_sources.ratings_source).
     """
     user = await auth.current_user(request)
     data = await authz.json_body(request)
     commit = route_params.ticked(data.get("commit"))
-    if not await ranker_sources.ratings_available(user.user_id):
-        return await _rankings_response(request, user, board_uid, notice_ok=False,
-                                        notice="There are no ratings to seed from.")
-    source = ranker_sources.ratings_source()
+    service = str(data.get("service") or "")
+    try:
+        source = await ranker_sources.ratings_source(user.user_id, service)
+    except ranker_sources.UnknownRatingsService as exc:
+        if commit:
+            return await _rankings_response(request, user, board_uid, notice_ok=False,
+                                            notice=str(exc))
+        return await _seed_answer(request, user.user_id, board_uid, message=str(exc), ok=False)
     try:
         rated = await source.fetch_ratings(user.user_id)
     except ranker_sources.SourceUnavailable as exc:
-        return _seed_answer(request, board_uid, message=str(exc), ok=False)
-    entries = await _with_season_facts(load_settings(), [
+        return await _seed_answer(request, user.user_id, board_uid, message=str(exc), ok=False)
+    entries = await _with_season_facts(await load_settings(), [
         item for rating in rated
         if (item := rating.title.as_item(user_rating=rating.rating)) is not None
     ])
@@ -1965,14 +2109,14 @@ async def seed_from_ratings(board_uid: str, request: Request):
         if commit:
             return await _rankings_response(request, user, board_uid,
                                             notice=str(exc), notice_ok=False)
-        return _seed_answer(request, board_uid, message=str(exc), ok=False)
+        return await _seed_answer(request, user.user_id, board_uid, message=str(exc), ok=False)
     if commit:
         return await _rankings_response(
             request, user, board_uid,
             notice=f"Seeded {summary['titles_placed']} title(s) into "
                    f"{summary['tiers_created']} new tier(s).")
-    return _seed_answer(
-        request, board_uid,
+    return await _seed_answer(
+        request, user.user_id, board_uid, service=service,
         confirm=f"This would add {summary['titles_added']} title(s)"
                 f"{_converted(summary['titles_converted'], 'make')}, place "
                 f"{summary['titles_placed']} and create {summary['tiers_created']} "
@@ -1990,15 +2134,19 @@ def _converted(count: int, verb: str = "made") -> str:
     return f", and {verb} {count} whole-show row{'s' if count != 1 else ''} into the season"
 
 
-def _seed_answer(request: Request, board_uid: str, *, confirm: str = "",
-                 message: str = "", ok: bool = True) -> Response:
+async def _seed_answer(request: Request, user_id: int, board_uid: str, *,
+                       service: str = "", confirm: str = "", message: str = "",
+                       ok: bool = True) -> Response:
     """The seed control in whichever of its states this answer leaves it in: the
-    button, the confirmation it turns into, or the button again with a line
-    saying why nothing happened. One partial, because each answer REPLACES the
-    element that was pressed."""
+    buttons (one per service the viewer can seed from), the confirmation one of
+    them turns into — naming that `service`, so the press that commits seeds from
+    the service the dry run read — or the buttons again with a line saying why
+    nothing happened. One partial, because each answer REPLACES the element that
+    was pressed."""
     return templates.TemplateResponse(request, "_ranker_seed.html", {
         "request": request, "board_uid": board_uid, "confirm": confirm,
-        "message": message, "ok": ok,
+        "message": message, "ok": ok, "service": service,
+        "sources": {"ratings": await ranker_sources.ratings_services(user_id)},
     })
 
 
@@ -2127,8 +2275,9 @@ def _export_text(value: Any, what: str) -> str:
 
 
 def _header_bytes(user_id: int, spec: Any) -> bytes | None:
-    """The icon for the banner: this account's avatar, or one of the images it
-    has saved, or nothing.
+    """SYNCHRONOUS, so a worker thread's: it reads a picture file. The icon for
+    the banner: this account's avatar, or one of the images it has saved, or
+    nothing.
 
     A SAVED IMAGE IS NAMED, NOT UPLOADED HERE. The uid has to be one this
     account actually owns — checked against its own list rather than trusted —
@@ -2191,7 +2340,8 @@ def _grid_entries(ranked: list[ranker_export.RankedTitle],
             title=entry.title or "Untitled",
             subtitle=entry.subtitle,
             poster=(posters.cached_poster(entry.media, entry.tmdb, order, entry.season)
-                    if entry.tmdb else None),
+                    if entry.tmdb else
+                    posters.cached_title_poster(entry.media, entry.title_key, order)),
             colour=entry.colour,
         )
         for entry in ranked
@@ -2222,19 +2372,27 @@ async def _warm_tiles(ranked: list[ranker_export.RankedTitle], order: tuple[str,
     whole, the share card's self-healing rule.
     """
     refs = [(entry.media, int(entry.tmdb), entry.season) for entry in ranked if entry.tmdb]
-    if not refs:
+    # A title with no tmdb id, by the title store's key (artwork's title_posters).
+    keys = [(entry.media, entry.title_key) for entry in ranked if not entry.tmdb]
+    if not refs and not keys:
         return False
-    settings = load_settings()
-    with span("ranker.export_tiles", refs=len(refs), budget=budget):
+    settings = await load_settings()
+    with span("ranker.export_tiles", refs=len(refs), keys=len(keys), budget=budget):
         with anyio.move_on_after(budget):
             await posters.ensure_posters(settings, refs, order)
+            await posters.ensure_title_posters(settings, keys, order)
     # SETTLED is a tile on disk, or a title whose one lookup found no picture
-    # (artwork.record_miss) — the placeholder is then the best it will ever look.
-    # Anything else missing timed out or failed, and may yet arrive.
-    missed = (await artwork.known(refs)).missed
-    return any(posters.cached_poster(media, tmdb, order, season) is None
-               and (media, tmdb) not in missed
-               for media, tmdb, season in refs)
+    # (artwork.record_miss) — the placeholder is then the best it will ever look —
+    # or a title with no tmdb id nothing has filed a picture for, which has no
+    # lookup to make. Anything else missing timed out or failed, and may yet
+    # arrive.
+    known = await artwork.known(refs, keys)
+    return (any(posters.cached_poster(media, tmdb, order, season) is None
+                and (media, tmdb) not in known.missed
+                for media, tmdb, season in refs)
+            or any(posters.cached_title_poster(media, key, order) is None
+                   and known.titles.get((media, key))
+                   for media, key in keys))
 
 
 async def _render(entries: list[grid_builder.GridEntry], options: _ExportOptions, *,
@@ -2290,7 +2448,7 @@ async def _consolidated(user_id: int, board_uid: str, options: _ExportOptions):
     return board, ranked
 
 
-def _export_context(user_id: int, board: dict) -> dict:
+async def _export_context(user_id: int, board: dict) -> dict:
     """Everything the export dialog's form is drawn from.
 
     THE CHOICES ARE THE SERVER'S, ALL OF THEM: the column counts and the scales it
@@ -2314,7 +2472,7 @@ def _export_context(user_id: int, board: dict) -> dict:
                                ("jpeg", "JPEG — widest support"),
                                ("png", "PNG — lossless, largest"))
         ],
-        "export_images": user_images.describe_images(user_id),
+        "export_images": await user_images.describe_images(user_id),
         "export_providers": user_images.list_provider_avatars(user_id),
         "export_image_cap": user_images.MAX_IMAGES_PER_USER,
         "export_name_cap": user_images.MAX_IMAGE_NAME,
@@ -2353,7 +2511,7 @@ async def add_header_image(board_uid: str, request: Request):
     return templates.TemplateResponse(
         request, "_ranker_header_pick.html",
         {"request": request, "chosen": chosen, "message": message,
-         **_export_context(user.user_id, board)},
+         **await _export_context(user.user_id, board)},
         headers={"HX-Trigger": "export-changed"} if chosen else None,
     )
 
@@ -2469,7 +2627,8 @@ async def preview_grid(request: Request):
     try:
         options = _parse_export(request.query_params)
         _, ranked = await _consolidated(user.user_id, board_uid, options)
-        header = _header_bytes(user.user_id, options.header_image)
+        header = await anyio.to_thread.run_sync(_header_bytes, user.user_id,
+                                                options.header_image)
     except ranker.RankerError:
         return Response(status_code=404)
     except ranker_export.ExportError:
@@ -2508,7 +2667,8 @@ async def export_grid(board_uid: str, request: Request):
     try:
         options = _parse_export(data)
         board, ranked = await _consolidated(user.user_id, board_uid, options)
-        header = _header_bytes(user.user_id, options.header_image)
+        header = await anyio.to_thread.run_sync(_header_bytes, user.user_id,
+                                                options.header_image)
     except ranker.RankerError as exc:
         return _refusal(exc)
     except ranker_export.ExportError as exc:

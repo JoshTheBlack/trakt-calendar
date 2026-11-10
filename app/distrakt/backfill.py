@@ -42,7 +42,7 @@ import logging
 import re
 from datetime import date
 
-from . import arrival, watch_history
+from . import arrival, live, watch_history
 # The roster is reached through this package's own public surface, the same names
 # an outside caller uses, rather than through the modules those names are defined
 # in — a backfill job has no business knowing which half of the tracker
@@ -225,7 +225,8 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
         # row it writes come from one answer. A lookup that fails reads as no
         # total, and the season is left out rather than guessed at.
         arrivals = await arrival.describe(
-            settings, [_as_record(ident) for ident in by_key.values()])
+            settings, [_as_record(ident) for ident in by_key.values()],
+            order=await live.totals_order(user_id))
 
         wanted_set = set(wanted)
         for ((key, season), ident), arrived in zip(by_key.items(), arrivals):

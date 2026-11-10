@@ -25,8 +25,9 @@ import logging
 import re
 from datetime import date, datetime, timedelta
 
-from .. import db
+from .. import after_response, db
 from ..config import DATA_DIR
+from ..metadata import rows as title_rows
 from ..providers.base import MATCH_SOURCES, item_key, parse_item_key
 from ..endpoints import ENDPOINTS
 
@@ -80,9 +81,16 @@ def marked(marks, item) -> bool:
     calendar grid, the day fragment, the stats card, the share page and the
     tracker's import all ask it, and a copy that asked only half the question
     would make a show hidden on one screen and visible on the next.
+
+    THE TITLE STORE'S IDS COUNT AS WELL AS THE CARD'S (`known_ids`). A card
+    carries the ids of the services its viewer admits, and a mark filed under
+    another service's slug — Simkl's, from before mark keys — named a title the
+    card no longer spelled once that service was switched off: four October
+    premieres a real account had hidden came back on its TMDB-only calendar. The
+    store holds every service's ids for the title whoever is admitted, so a mark
+    holds whichever services the viewer is reading.
     """
-    return marked_by_ids(marks, mark_key=item.mark_key, ids=item.ids,
-                         display_id=item.id, media=item.media)
+    return not item_spellings(item).isdisjoint(marks)
 
 
 def key_spellings(media, ids) -> set[str]:
@@ -121,16 +129,23 @@ def marked_by_ids(marks, *, mark_key: str, ids, display_id="", media="") -> bool
     is the exact failure a rule stated in one place and implemented in two
     produces. There is one implementation now and every surface calls it.
     """
-    if mark_key and mark_key in marks:
-        return True
-    if display_id and str(display_id) in marks:
-        return True
+    return not mark_spellings(mark_key=mark_key, ids=ids, display_id=display_id,
+                              media=media).isdisjoint(marks)
+
+
+def mark_spellings(*, mark_key: str, ids, display_id="", media="") -> frozenset[str]:
+    """Every stored mark that names this title — what `marked_by_ids` looks
+    for, said once, so a caller holding a month's cards can keep each card's
+    spellings and ask a later set of marks about them without the card."""
+    out = set()
+    if mark_key:
+        out.add(mark_key)
+    if display_id:
+        out.add(str(display_id))
     # ANY KEY THE TITLE'S IDS SPELL, for a mark made before its key moved — see
     # key_spellings. `media` defaults to the mark key's own, which is what a
     # caller holding only a key and an id map has.
-    if any(key in marks for key in
-           key_spellings(media or str(mark_key).split(":", 1)[0], ids)):
-        return True
+    out |= key_spellings(media or str(mark_key).split(":", 1)[0], ids)
     # EVERY SPELLING THIS CARD HAS EVER BEEN IDENTIFIED BY, not just the one it
     # carries today. Simkl's own slugs are not unique, so records moved from
     # being keyed by slug to being keyed by simkl id — and 118 marks on one real
@@ -138,8 +153,14 @@ def marked_by_ids(marks, *, mark_key: str, ids, display_id="", media="") -> bool
     # marked under the slug the card used to send. The stored mark is a fact
     # about a title; which spelling it happens to be written in is not.
     ids = ids or {}
-    return any(str(ids[name]) in marks for name in _LEGACY_ID_NAMESPACES
-               if ids.get(name) not in (None, ""))
+    out |= {str(ids[name]) for name in _LEGACY_ID_NAMESPACES if ids.get(name) not in (None, "")}
+    return frozenset(out)
+
+
+def item_spellings(item) -> frozenset[str]:
+    """`mark_spellings` for a card — the spellings `marked` tests."""
+    return mark_spellings(mark_key=item.mark_key, ids={**item.known_ids, **item.ids},
+                          display_id=item.id, media=item.media)
 
 
 def marked_keys(marks, items) -> set[str]:
@@ -227,12 +248,11 @@ async def spellings_of(mark_key: str) -> set[str]:
     there. Measured on one real account: 909 of its 1,038 marks were in a legacy
     spelling, which is the majority of every mark it held.
 
-    THE STORED ROW FOR THE TITLE is what knows which spellings it has ever
-    answered to, so no card has to carry them. It is found by its title key OR by
-    the id the mark key names, because the two can differ: `Item.mark_key` is
-    `resolve_key` over the ids as they are NOW, and enrichment adds ids to a row
-    without re-keying it (see key_spellings). Every key those ids spell is cleared
-    too, so a mark made under the title's earlier key comes off.
+    THE STORED ROWS FOR THE TITLE are what know which spellings it has ever
+    answered to, so no card has to carry them (app/metadata/rows.py's id_maps).
+    They are found by the title key OR by the id the mark key names, because a
+    mark can predate the key its title has now. Every key those ids spell is
+    cleared too, so a mark made under the title's earlier key comes off.
 
     A SPELLING TWO TITLES SHARE UNMARKS BOTH, and that is the honest answer
     rather than a flaw. 21 of that account's legacy marks are slugs naming more
@@ -245,24 +265,14 @@ async def spellings_of(mark_key: str) -> set[str]:
         key = parse_item_key(mark_key)
     except ValueError:
         key = None
-    if key is None:
-        rows = await db.fetch_all(
-            "SELECT media, ids_json FROM calendar_titles WHERE title_key = ?",
-            (str(mark_key),))
-    else:
-        rows = await db.fetch_all(
-            "SELECT media, ids_json FROM calendar_titles WHERE title_key = ? "
-            "OR (media = ? AND CAST(json_extract(ids_json, '$.' || ?) AS TEXT) = ?)",
-            (str(mark_key), key.media, key.match_source, key.match_id))
+    maps = await title_rows.id_maps(
+        str(mark_key), key.media if key else None,
+        (key.match_source, key.match_id) if key else None)
     found = {str(mark_key)}
-    for row in rows:
-        try:
-            ids = json.loads(row["ids_json"] or "{}")
-        except (TypeError, ValueError):
-            continue
+    for media, ids in maps:
         found.update(str(ids[name]) for name in _LEGACY_ID_NAMESPACES
                      if ids.get(name) not in (None, ""))
-        found.update(key_spellings(row["media"], ids))
+        found.update(key_spellings(media, ids))
     return found
 
 
@@ -377,8 +387,12 @@ async def resolve_view(user_id: int, endpoint: str, year: int, month: int, *,
         })
         history = history[-HISTORY_LIMIT:]
 
-    await set_view_state(user_id, endpoint, year, month,
-                         last_count=total, last_show_ids=list(show_ids), history=history)
+    # COMMITTED ONCE THE PAGE HAS BEEN SENT (after_response.write): nothing this
+    # page draws depends on the commit, only the next load's diff does.
+    show_ids = list(show_ids)
+    after_response.write(lambda: set_view_state(user_id, endpoint, year, month,
+                                                last_count=total, last_show_ids=show_ids,
+                                                history=history))
 
     last_count = prior["last_count"]
     if last_count is None:

@@ -48,6 +48,13 @@ if os.environ.get("PYTEST_XDIST_WORKER"):
 else:
     os.environ.setdefault("TRAKT_DATA_DIR", tempfile.mkdtemp(prefix="tns-test-"))
 
+# THE CALENDAR'S READS RUN ON A WORKER THREAD IN THE SUITE (app/read_pool.py with
+# no pool): every test client's lifespan would otherwise start processes of its
+# own, a few per client across thousands of clients. The functions a pool runs
+# are the same functions either way; tests/kernel/test_read_pool.py runs them in
+# a real pool.
+os.environ["READ_PROCESSES"] = "0"
+
 ORIGIN = "https://testserver"
 _db_counter = itertools.count(1)
 
@@ -273,6 +280,65 @@ def no_background_episode_lookups(monkeypatch):
     monkeypatch.setattr(trakt_detail, "fetch_season_episodes", _nothing)
 
 
+@pytest.fixture(autouse=True)
+def no_background_title_refresh(monkeypatch):
+    """Stop a page view's title-store refresh starting in tests that never asked
+    for it.
+
+    A PAGE THAT DRAWS TITLES QUEUES THE STALE ONES AND STARTS A PASS, behind the
+    page as a task of its own (app/metadata/refresh.py's `viewed` and `start`) —
+    so every test that draws a tracker month, a board, a calendar or a details
+    panel would leave one running past its own end, asking real services about
+    whatever it found. A test about what a page queues replaces `refresh.viewed`
+    and reads what it was handed; a test about the queue drives
+    `refresh.queue_viewed` and `refresh.drain` itself."""
+    from app.metadata import refresh
+    monkeypatch.setattr(refresh, "start", lambda work: work.close())
+    # And each test starts with every service's minute unspent, no heal under
+    # way, and no picture report checked or title healed yet.
+    monkeypatch.setattr(refresh, "_asked", {})
+    monkeypatch.setattr(refresh, "_heals", {})
+    from app.metadata import pictures
+    monkeypatch.setattr(pictures, "_checked", {})
+    monkeypatch.setattr(pictures, "_healed", {})
+    from collections import deque
+    monkeypatch.setattr(pictures, "_checks", deque())
+
+
+@pytest.fixture(autouse=True)
+def nothing_said_yet(monkeypatch):
+    """Each test starts with the log having said nothing (app/logging_setup.py's
+    `once`): a line an earlier test in the same worker said is not one this test
+    has seen."""
+    from collections import OrderedDict
+
+    from app import logging_setup
+    monkeypatch.setattr(logging_setup, "_said", OrderedDict())
+
+
+@pytest.fixture(autouse=True)
+def no_answer_still_being_worked_out(monkeypatch):
+    """Each test starts with no source's answer being worked out and no window
+    waiting on one: TMDB's season-premieres derivation and the calendar's
+    follow-ups of it live in process (app/providers/tmdb/premieres.py,
+    app/calendar/cache.py's `_pending`), and a test's loop ends with them."""
+    from app.calendar import cache as calendar_cache
+    from app.providers.tmdb import premieres
+    monkeypatch.setattr(calendar_cache, "_pending", {})
+    monkeypatch.setattr(premieres, "_waiting", {})
+    monkeypatch.setattr(premieres, "_worker", None)
+    monkeypatch.setattr(premieres, "_loop", None)
+
+
+@pytest.fixture(autouse=True)
+def no_service_resting_from_matching(monkeypatch):
+    """Each test starts with every service askable by the background matcher:
+    a service it could not ask is left alone in process for a quarter hour
+    (app/calendar/completion.py's `_resting_until`)."""
+    from app.calendar import completion
+    monkeypatch.setattr(completion, "_resting_until", {})
+
+
 @pytest.fixture
 def db_path(tmp_path):
     """A freshly migrated, test-only database, distinct from every other test's."""
@@ -290,7 +356,8 @@ def db_path(tmp_path):
 @pytest.fixture
 def settings(db_path):
     """A saved Settings row pointing at ORIGIN, the base URL `client` uses."""
-    from app.config import Settings, save_settings
+    from app.config import Settings
+    from tests.support import save_settings
 
     s = Settings(public_base_url=ORIGIN)
     save_settings(s)
@@ -307,7 +374,8 @@ def client(settings):
     test that has no reason to exercise it.
     """
     from app.main import app
+    from tests.support import settling
 
-    c = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+    c = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
     yield c
     c.close()

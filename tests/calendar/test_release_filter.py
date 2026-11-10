@@ -39,6 +39,7 @@ from app.calendar import filter as calendar_filter
 from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Media, Record, Source
+from tests import support
 from tests.support import migrated_db
 
 MOVIES = get_endpoint("movies")
@@ -53,20 +54,34 @@ _AIR_TS = 1783425600.0
 PREMIERE, LIMITED, THEATRICAL, DIGITAL, PHYSICAL, TV = 1, 2, 3, 4, 5, 6
 
 
-def _film(simkl_id: int, *, title="A Film", releases=None) -> Record:
+def _film(simkl_id: int, *, title="A Film", releases=None, tmdb=None) -> Record:
     """One Simkl film as the calendar normalizer produces it, optionally with
     the release map enrichment would have overlaid onto it."""
     return Record(
         source=Source.SIMKL, media=Media.MOVIE, id=str(simkl_id),
-        ids={"simkl": simkl_id}, detail_url="https://simkl.com",
+        ids={"simkl": simkl_id, "tmdb": tmdb or 9000 + simkl_id}, detail_url="https://simkl.com",
         title=title, air_ts=_AIR_TS, date_only=True,
         release_types_by_country=dict(releases or {}),
         enriched=releases is not None,
     )
 
 
-class KeepReleaseBlocksTests(unittest.TestCase):
-    """The predicate alone, over values — no database, no records, no read."""
+def _kept(records, countries="", types="", endpoint="movies") -> list[str]:
+    """The ids of the cards `records` draw for a viewer narrowed to `countries`
+    and `types` — judged by the calendar's own statement over a store holding
+    them (support.read_kept)."""
+    kept, _filtered = support.read_kept(
+        records, endpoint=endpoint,
+        specs={"movie_release_countries": countries, "movie_release_types": types})
+    return [record.id for record in kept]
+
+
+class ReleaseBlocksTests(support.CardTestCase):
+    """The rule over one film's schedule — what a block is, and what a filter
+    asks of it."""
+
+    def _one(self, releases, countries="", types=""):
+        return bool(_kept([_film(1, releases=releases)], countries, types))
 
     def test_a_country_and_a_type_must_meet_on_one_block(self):
         """THE RULE. A film that premiered in Brazil and opened in Japanese
@@ -74,53 +89,38 @@ class KeepReleaseBlocksTests(unittest.TestCase):
         Brazilian theatrical releases did not ask for it. Asking the two
         dimensions independently would keep it."""
         film = {"BR": [PREMIERE], "JP": [THEATRICAL]}
-        self.assertFalse(calendar_filter.keep_release_blocks(
-            film, {"br"}, set(), {THEATRICAL}, set()))
-        self.assertTrue(calendar_filter.keep_release_blocks(
-            film, {"jp"}, set(), {THEATRICAL}, set()))
+        self.assertFalse(self._one(film, "br", "3"))
+        self.assertTrue(self._one(film, "jp", "3"))
 
     def test_one_matching_block_is_enough(self):
-        film = {"BR": [PREMIERE], "US": [THEATRICAL, DIGITAL]}
-        self.assertTrue(calendar_filter.keep_release_blocks(
-            film, {"us"}, set(), {DIGITAL}, set()))
+        self.assertTrue(self._one({"BR": [PREMIERE], "US": [THEATRICAL, DIGITAL]}, "us", "4"))
 
     def test_a_country_alone_narrows_without_a_type(self):
-        self.assertTrue(calendar_filter.keep_release_blocks(
-            {"US": [PHYSICAL]}, {"us"}, set(), set(), set()))
-        self.assertFalse(calendar_filter.keep_release_blocks(
-            {"BR": [PHYSICAL]}, {"us"}, set(), set(), set()))
+        self.assertTrue(self._one({"US": [PHYSICAL]}, "us"))
+        self.assertFalse(self._one({"BR": [PHYSICAL]}, "us"))
 
     def test_a_type_alone_narrows_without_a_country(self):
-        self.assertTrue(calendar_filter.keep_release_blocks(
-            {"BR": [THEATRICAL]}, set(), set(), {THEATRICAL}, set()))
-        self.assertFalse(calendar_filter.keep_release_blocks(
-            {"BR": [TV]}, set(), set(), {THEATRICAL}, set()))
+        self.assertTrue(self._one({"BR": [THEATRICAL]}, types="3"))
+        self.assertFalse(self._one({"BR": [TV]}, types="3"))
 
     def test_an_exclude_disqualifies_the_block_not_the_film(self):
-        """The difference from every scalar dimension in this module: a film has
-        several releases, so "-br" means a Brazilian release is not one that
-        counts — a film out in Brazil AND America still survives on its American
-        block, and only a Brazil-only film goes."""
-        both = {"BR": [THEATRICAL], "US": [THEATRICAL]}
-        self.assertTrue(calendar_filter.keep_release_blocks(
-            both, set(), {"br"}, set(), set()))
-        self.assertFalse(calendar_filter.keep_release_blocks(
-            {"BR": [THEATRICAL]}, set(), {"br"}, set(), set()))
+        """The difference from every scalar dimension: a film has several
+        releases, so "-br" means a Brazilian release is not one that counts — a
+        film out in Brazil AND America still survives on its American block, and
+        only a Brazil-only film goes."""
+        self.assertTrue(self._one({"BR": [THEATRICAL], "US": [THEATRICAL]}, "-br"))
+        self.assertFalse(self._one({"BR": [THEATRICAL]}, "-br"))
 
     def test_a_type_exclude_works_the_same_way(self):
-        self.assertFalse(calendar_filter.keep_release_blocks(
-            {"US": [PREMIERE]}, set(), set(), set(), {PREMIERE}))
-        self.assertTrue(calendar_filter.keep_release_blocks(
-            {"US": [PREMIERE, THEATRICAL]}, set(), set(), set(), {PREMIERE}))
+        self.assertFalse(self._one({"US": [PREMIERE]}, types="-1"))
+        self.assertTrue(self._one({"US": [PREMIERE, THEATRICAL]}, types="-1"))
 
-    def test_an_empty_map_never_matches_here(self):
-        """This function is asked only about a film that HAS something to say —
-        whether "nothing to say" is kept is keep_release's decision, one level
-        up, and deliberately not buried in the predicate."""
-        self.assertFalse(calendar_filter.keep_release_blocks(
-            {}, {"us"}, set(), set(), set()))
-        self.assertFalse(calendar_filter.keep_release_blocks(
-            None, {"us"}, set(), set(), set()))
+    def test_an_empty_schedule_is_no_answer(self):
+        """A film whose schedule says nothing cannot be judged by it, so it is
+        kept — the same answer as a film nobody has described — while one whose
+        schedule names only other markets goes."""
+        self.assertTrue(self._one({}, "us"))
+        self.assertFalse(self._one({"BR": [PREMIERE]}, "us"))
 
 
 class ParseReleaseTypeSpecTests(unittest.TestCase):
@@ -139,71 +139,61 @@ class ParseReleaseTypeSpecTests(unittest.TestCase):
         self.assertEqual(calendar_filter.parse_release_type_spec(""), (set(), set()))
 
 
-class FilterReleaseGroupsTests(unittest.TestCase):
-    """The group-level half: which TITLES a viewer sees, asked once per group."""
+class ReleaseGroupsTests(support.CardTestCase):
+    """The card-level half: which TITLES a viewer sees, asked once per card."""
 
-    def _pairs(self, *record_lists):
-        return [({"key": f"movie:tmdb:{i}"}, list(rs))
-                for i, rs in enumerate(record_lists)]
+    @staticmethod
+    def _trakt(tmdb=None):
+        return Record(source=Source.TRAKT, media=Media.MOVIE, id="77",
+                      ids={"trakt": 77, **({"tmdb": tmdb} if tmdb else {})},
+                      detail_url="", title="A Film", air_ts=_AIR_TS)
 
     def test_a_show_endpoint_is_untouched_whatever_the_spec_says(self):
         """A release format is not a fact about an episode, and the show
         calendars must not quietly lose titles to a films control."""
-        pairs = self._pairs([_film(1, releases={"BR": [PREMIERE]})])
-        self.assertEqual(
-            calendar_filter.filter_release_groups(pairs, SHOWS.media, "us", "3"),
-            pairs)
+        show = Record(source=Source.SIMKL, media=Media.SHOW, id="1", ids={"simkl": 1, "tmdb": 1},
+                      detail_url="", title="A Show", air_ts=_AIR_TS, season=1, episode_number=1,
+                      release_types_by_country={"BR": [PREMIERE]}, enriched=True)
+        self.assertEqual(_kept([show], "us", "3", endpoint="shows"), ["1"])
 
     def test_an_empty_spec_is_a_pass_through(self):
-        pairs = self._pairs([_film(1, releases={"BR": [PREMIERE]})])
-        self.assertEqual(
-            calendar_filter.filter_release_groups(pairs, MOVIES.media, "", ""),
-            pairs)
+        self.assertEqual(_kept([_film(1, releases={"BR": [PREMIERE]})]), ["1"])
 
     def test_a_film_with_no_matching_release_is_removed(self):
-        pairs = self._pairs([_film(1, releases={"BR": [PREMIERE]})],
-                            [_film(2, releases={"US": [THEATRICAL]})])
-        kept = calendar_filter.filter_release_groups(pairs, MOVIES.media, "us", "")
-        self.assertEqual([r.id for _, rs in kept for r in rs], ["2"])
+        films = [_film(1, releases={"BR": [PREMIERE]}), _film(2, releases={"US": [THEATRICAL]})]
+        self.assertEqual(_kept(films, "us"), ["2"])
 
     def test_a_group_no_record_can_judge_is_kept(self):
         """The promise that survives: a film nothing carries a release map for is
         never dropped. Trakt's calendar publishes no release schedule at all, so
-        a film only Trakt lists is genuinely unjudgeable and stays."""
-        trakt = Record(source=Source.TRAKT, media=Media.MOVIE, id="t", ids={},
-                       detail_url="", title="A Film", air_ts=_AIR_TS)
-        pairs = self._pairs([trakt])
-        kept = calendar_filter.filter_release_groups(pairs, MOVIES.media, "us", "")
-        self.assertEqual(len(kept), 1)
+        a film only Trakt lists, with no releases read, is unjudgeable and
+        stays."""
+        self.assertEqual(_kept([self._trakt()], "us"), ["77"])
 
     def test_a_record_that_cannot_answer_no_longer_keeps_the_group(self):
-        """THE CORRECTION, AND IT WAS FOUND IN A BROWSER. Only a Simkl record
-        ever carries a release map, so on a film both services listed the Trakt
-        record is always silent — and while silence counted as survival, the
-        filter could not drop any film Trakt also listed. Measured on one real
-        August: 19 of 29 films surviving a filter for an empty market were merged
-        films whose Simkl record named their countries and matched none of them.
+        """THE CORRECTION, AND IT WAS FOUND IN A BROWSER. On a film both services
+        listed the Trakt record was always silent — and while silence counted as
+        survival, the filter could not drop any film Trakt also listed. Measured
+        on one real August: 19 of 29 films surviving a filter for an empty market
+        were merged films whose Simkl record named their countries and matched
+        none of them.
 
         A film's release schedule is a fact about the TITLE. Where one record
         holds it, the other's silence is an absence rather than a second
         opinion."""
-        trakt = Record(source=Source.TRAKT, media=Media.MOVIE, id="t", ids={},
-                       detail_url="", title="A Film", air_ts=_AIR_TS)
-        pairs = self._pairs([trakt, _film(1, releases={"BR": [PREMIERE]})])
-        kept = calendar_filter.filter_release_groups(pairs, MOVIES.media, "us", "")
-        self.assertEqual(kept, [])
+        films = [self._trakt(tmdb=501), _film(1, tmdb=501, releases={"BR": [PREMIERE]})]
+        self.assertEqual(_kept(films, "us"), [])
 
     def test_a_group_that_survives_keeps_both_its_records(self):
         """The half of the old rule that stands. The question is which TITLES a
-        viewer sees, so it is asked once per group — dropping the silent record
+        viewer sees, so it is asked once per card — dropping the silent record
         and keeping the informed one would quietly rewrite what a card says about
         its own provenance to enforce a rule about release formats."""
-        trakt = Record(source=Source.TRAKT, media=Media.MOVIE, id="t", ids={},
-                       detail_url="", title="A Film", air_ts=_AIR_TS)
-        pairs = self._pairs([trakt, _film(1, releases={"US": [THEATRICAL]})])
-        kept = calendar_filter.filter_release_groups(pairs, MOVIES.media, "us", "")
-        self.assertEqual(len(kept), 1)
-        self.assertEqual(len(kept[0][1]), 2)
+        films = [self._trakt(tmdb=501), _film(1, tmdb=501, releases={"US": [THEATRICAL]})]
+        placed, _viewer = support.read_views(
+            films, endpoint="movies", specs={"movie_release_countries": "us"})
+        self.assertEqual([sorted(view.card.by_source) for view in placed.views],
+                         [["simkl", "trakt"]])
 
 
 class ReleaseFilterThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase):
@@ -310,7 +300,7 @@ class ReleaseFilterThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase):
         # READ BACK THE STORED ROWS, which is what the assertion is actually
         # about. This used to inflate the whole calendar to reach them, through a
         # helper that no longer has any caller in the app.
-        stored, _asked, _answered, _at = await calendar_entries.read_span(
+        stored, _asked, _answered, _at = await support.read_span(
             MOVIES.key, date(2026, 7, 6), date(2026, 7, 13))
         simkl = [r for r in stored if r.source is Source.SIMKL]
         self.assertTrue(simkl)

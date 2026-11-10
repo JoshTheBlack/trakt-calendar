@@ -21,10 +21,11 @@ A REFUSAL IS DRAWN AT 200. A non-200 is never swapped (static/js/boost.js's
 `noSwap`), so a sentence answered with 400 would read as a press that did nothing.
 
 The token renewal the heartbeat performs (maybe_refresh_trakt_token) lives here
-too rather than in the bootstrap module, because it writes exactly the same
-fields the device flow does and for the same reason — Trakt issues a NEW
-refresh_token on every refresh and the old one stops working, so there must be
-one place that knows how to store a token pair.
+too rather than in the bootstrap module, because it renews the token the device
+flow issued. Trakt issues a NEW refresh_token on every refresh and the old one
+stops working, so a renewal is stored through trakt_routes.store_rotated_tokens —
+the app-wide copy and an administrator's linked identity can be one grant, and a
+renewal written to only one of them leaves the other dead.
 
 The per-user "Log in with Trakt" redirect flow is a different thing entirely and
 lives in app/auth/trakt_routes.py; this module only ever touches the ONE app-wide
@@ -45,7 +46,7 @@ from . import auth, authz, cache, config, db, route_params, secrets_box
 from .auth import encryption_flow, encryption_routes
 from .auth import routes as auth_routes, simkl as simkl_auth, trakt as trakt_auth, trakt_routes
 from .auth import AuthLevel
-from .calendar import vocab
+from .calendar import resolve as calendar_resolve, vocab
 from .config import SECRET_FIELDS, Settings, load_settings, save_settings
 from .endpoints import endpoint_choices
 from .integrations import arr, routes as integrations_routes
@@ -64,10 +65,13 @@ DEVICE_TEMPLATE = "_settings_device.html"
 TOKEN_TEMPLATE = "_settings_token.html"
 RECONNECT_TEMPLATE = "_settings_reconnect.html"
 
-# The content floor's certification rows are the Filters panel's chips, spelled
-# and read back by app/calendar/vocab.py, so a floor spec is byte-identical to a
-# spec a viewer's own filter would have written.
-FLOOR_CHIP_FIELDS = (vocab.SHOW_CERTIFICATIONS, vocab.MOVIE_CERTIFICATIONS)
+# The content floor's certification, show-type and missing-data rows are the
+# Filters panel's chips and tick boxes, spelled and read back by
+# app/calendar/vocab.py, so a floor spec is byte-identical to a spec a viewer's
+# own filter would have written. Each Settings field carries the viewer's column
+# name for exactly that reason (vocab.FLOOR_FIELDS).
+FLOOR_CHIP_FIELDS = (vocab.SHOW_CERTIFICATIONS, vocab.MOVIE_CERTIFICATIONS,
+                     vocab.TV_SHOW_TYPES, vocab.TV_MISSING, vocab.MOVIE_MISSING)
 
 ARR_KINDS = ("sonarr", "radarr")
 
@@ -81,13 +85,14 @@ _KEY_UNHEALTHY = (
 
 
 async def _apply_new_trakt_token(settings: Settings, token: dict) -> Settings:
-    """Write a fresh access/refresh token pair (from device-auth or a refresh
-    call) into `settings` and persist it. Trakt issues a NEW refresh_token on
-    every refresh — the old one stops working, so it must always be saved."""
+    """Write the token pair a NEW authorization issued (the device-code flow)
+    into `settings` and persist it. A REFRESH is not stored here: it replaces a
+    refresh token that may be held in more than one place, so it goes through
+    trakt_routes.store_rotated_tokens, which writes it everywhere it was."""
     settings.trakt_access_token = token["access_token"]
     settings.trakt_refresh_token = token.get("refresh_token", "")
     settings.trakt_token_expires_at = int(token.get("created_at", time.time())) + int(token.get("expires_in", 0))
-    save_settings(settings)
+    await save_settings(settings)
     return settings
 
 
@@ -98,7 +103,7 @@ async def maybe_refresh_trakt_token() -> None:
     token is actually due), so the token renews itself in the background
     without the user having to notice or intervene.
     """
-    settings = load_settings()
+    settings = await load_settings()
     if not (settings.trakt_client_id and settings.trakt_client_secret and settings.trakt_refresh_token):
         return
     if not settings.trakt_token_expires_at or time.time() < settings.trakt_token_expires_at:
@@ -111,10 +116,18 @@ async def maybe_refresh_trakt_token() -> None:
         # A rate-limited refresh is not an httpx error; catch it here too so the
         # background renewal just skips this cycle and tries again next tick rather
         # than letting the exception escape the heartbeat.
-        logger.warning("Trakt token auto-refresh failed: %s", exc)
+        # WHOSE TOKEN, AND TRAKT'S OWN REASON, so a failure says what to do: an
+        # `invalid_grant` means the refresh token was retired and only "Authorize
+        # with Trakt" in Settings brings it back.
+        logger.warning("Trakt token auto-refresh failed for %s: %s",
+                       await trakt_routes.holders_note(settings.trakt_refresh_token, app_wide=True),
+                       trakt_routes.refusal_reason(exc))
         return
-    await _apply_new_trakt_token(settings, token)
-    logger.info("Trakt token auto-refreshed (next expiry %s)", settings.trakt_token_expires_at)
+    # Stored wherever this grant is held — Settings AND the linked identity that
+    # adopted it — or the copy not written keeps a refresh token Trakt retired.
+    await trakt_routes.store_rotated_tokens(settings.trakt_refresh_token, token,
+                                              identity_id=None)
+    logger.info("Trakt token auto-refreshed (next expiry %s)", (await load_settings()).trakt_token_expires_at)
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +240,7 @@ async def _trakt_context(settings: Settings, admin, *, linked: bool = False,
 
 
 async def _panel_context(request: Request) -> dict:
-    settings = load_settings()
+    settings = await load_settings()
     admin = await auth.current_user(request)
     return {
         "request": request,
@@ -248,6 +261,11 @@ async def _panel_context(request: Request) -> dict:
         "endpoints": endpoint_choices(),
         "floor_chips": {field: vocab.chips_for(field, getattr(settings, field))
                         for field in FLOOR_CHIP_FIELDS},
+        # A tick box sends nothing when unticked, so a missing-data row says it
+        # was drawn with the presence marker the Filters panel uses.
+        "floor_presence": {field: vocab.presence_name(field) for field in vocab.TICK_FIELDS},
+        # The services the no-network rule means, by their registry labels.
+        "sparse_labels": calendar_resolve.sparse_labels(),
         "arr": {kind: _arr_choices(kind, settings) for kind in ARR_KINDS},
     }
 
@@ -317,7 +335,7 @@ async def save_settings_form(request: Request):
     the page behind the panel, which is what reloading after a save was always for.
     """
     data = await authz.json_body(request)
-    current = load_settings()
+    current = await load_settings()
     try:
         settings = config.apply_form(current, {**data, **vocab.specs_from_form(data)})
     except config.SettingsFormError as exc:
@@ -332,7 +350,7 @@ async def save_settings_form(request: Request):
     # value, a ticked clear empties it — so a blank secret on this object is a
     # decision rather than a gap, which is what save_settings otherwise
     # (correctly) refuses to assume.
-    save_settings(settings, clear_unset_secrets=True)
+    await save_settings(settings, clear_unset_secrets=True)
     # Re-check Sonarr/Radarr/Seerr immediately so buttons reflect the new config
     # right away, and invalidate the library cache so the next fetch re-pulls with
     # the new credentials rather than serving the stale cache until it expires.
@@ -358,7 +376,7 @@ async def arr_options(request: Request):
     kind = route_params.last_value(data.get("kind"))
     if kind not in ARR_KINDS:
         return _notice(request, "Unknown service.")
-    settings = load_settings()
+    settings = await load_settings()
     saved_url, saved_key = arr.credentials(kind, settings)
     url = str(route_params.last_value(data.get(f"{kind}_url")) or "").strip() or saved_url
     key = str(route_params.last_value(data.get(f"{kind}_api_key")) or "").strip() or saved_key
@@ -493,7 +511,7 @@ async def _device(request: Request, admin, *, pairing: Pairing | None = None,
     AN AUTHORIZATION CHANGES THREE OTHER PARTS OF THE TAB, and they ride the same
     answer out of band: the token line, the access token's field (now stored) and
     the reconnect notice, which a successful link takes down."""
-    settings = load_settings()
+    settings = await load_settings()
     return templates.TemplateResponse(request, DEVICE_TEMPLATE, {
         "request": request,
         "pairing": pairing,
@@ -515,7 +533,7 @@ async def device_start(request: Request):
     appears to work and stores nothing."""
     data = await authz.json_body(request)
     admin = await auth.current_user(request)
-    settings = load_settings()
+    settings = await load_settings()
     client_id = str(route_params.last_value(data.get("trakt_client_id")) or "").strip() \
         or settings.trakt_client_id
     typed_secret = str(route_params.last_value(data.get("trakt_client_secret")) or "").strip()
@@ -546,7 +564,7 @@ async def device_poll(request: Request):
     if pairing is None:
         return await _device(request, admin, message=(
             "That code is no longer waiting — start again if you still need to authorize."))
-    settings = load_settings()
+    settings = await load_settings()
     client_secret = pairing.client_secret or settings.trakt_client_secret
     try:
         token = await trakt_auth.poll_device_token(pairing.client_id, client_secret, pairing.device_code)
@@ -607,7 +625,7 @@ async def trakt_adopt(request: Request):
     reason drawn where the notice is.
     """
     admin = await auth.current_user(request)
-    linked, link_error = await trakt_routes.adopt_app_token(admin.user_id, load_settings())
+    linked, link_error = await trakt_routes.adopt_app_token(admin.user_id, await load_settings())
     return templates.TemplateResponse(request, RECONNECT_TEMPLATE, {
         "request": request,
         "reconnect_shown": not linked,
@@ -619,7 +637,7 @@ async def trakt_adopt(request: Request):
 async def trakt_refresh(request: Request):
     """The manual "refresh now" button — uses whatever is already saved (the
     device-auth flow is what actually seeds client_secret/refresh_token)."""
-    settings = load_settings()
+    settings = await load_settings()
     if not (settings.trakt_client_id and settings.trakt_client_secret and settings.trakt_refresh_token):
         return _token(request, settings,
                       "Not authorized yet — use “Authorize with Trakt” first.", ok=False)
@@ -628,9 +646,12 @@ async def trakt_refresh(request: Request):
             settings.trakt_client_id, settings.trakt_client_secret, settings.trakt_refresh_token,
         )
     except (httpx.HTTPError, trakt_auth.TraktRateLimitError) as exc:
-        return _token(request, settings, f"Refresh failed: {exc}", ok=False)
-    settings = await _apply_new_trakt_token(settings, token)
-    return _token(request, settings, "Trakt token refreshed.", ok=True)
+        return _token(request, settings,
+                      f"Refresh failed ({trakt_routes.refusal_reason(exc)}) — use “Authorize "
+                      "with Trakt” to get a fresh token.", ok=False)
+    await trakt_routes.store_rotated_tokens(settings.trakt_refresh_token, token,
+                                              identity_id=None)
+    return _token(request, await load_settings(), "Trakt token refreshed.", ok=True)
 
 
 def _token(request: Request, settings: Settings, message: str, *, ok: bool):

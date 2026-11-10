@@ -8,6 +8,7 @@ the bucketing, the plan and the writes are all real.
 from __future__ import annotations
 
 import asyncio
+import os
 import unittest
 from zoneinfo import ZoneInfo
 from datetime import date, timedelta
@@ -17,12 +18,13 @@ from unittest.mock import AsyncMock, patch
 from fastapi.responses import Response
 from fastapi.testclient import TestClient
 
-from app import auth, db, distrakt
+from app import auth, clock, db, distrakt
 from app.distrakt import backfill, watch_history
 from app.providers import title_search
 from app.calendar import state as calendar_state
 from app.providers.base import ItemKey, Media, PlayCounts
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings, settling
 from app.main import app
 from tests.support import ORIGIN, migrated_db, tracker_month
 
@@ -37,9 +39,10 @@ from tests.support import ORIGIN, migrated_db, tracker_month
 # a record whose only source is unconfigured is never asked about at all. Both on
 # here, so which service answers stays decided by the record's own ids.
 SETTINGS = SimpleNamespace(configured=True, timezone="UTC",
-                           trakt_configured=True, simkl_configured=False,
+                           trakt_configured=True, simkl_configured=False, tmdb_account_configured=False,
                            trakt_catalogue_configured=True,
-                           simkl_catalogue_configured=True)
+                           simkl_catalogue_configured=True,
+                           tmdb_configured=False)
 
 
 def _ep_event(trakt_id, season, number, watched_at, title="Show", network="Net"):
@@ -554,7 +557,7 @@ class ManualCompletedRouteTests(unittest.TestCase):
     def setUp(self):
         migrated_db("backfill-route")
         save_settings(Settings(trakt_client_id="id", trakt_access_token="tok"))
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(_make_user("tracker"))
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=self.user_id, provider="trakt", provider_user_id=7,
@@ -652,7 +655,7 @@ class CorrectingAFrozenMonthTests(unittest.TestCase):
     def setUp(self):
         migrated_db("backfill-frozen")
         save_settings(Settings(trakt_client_id="id", trakt_access_token="tok"))
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(_make_user("tracker"))
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=self.user_id, provider="trakt", provider_user_id=7,
@@ -765,7 +768,7 @@ class FilmsAreVisibleTests(unittest.TestCase):
     def setUp(self):
         migrated_db("backfill-visible")
         save_settings(Settings(trakt_client_id="id", trakt_access_token="tok"))
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(_make_user("tracker"))
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=self.user_id, provider="trakt", provider_user_id=7,
@@ -826,7 +829,7 @@ class AddingAFilmByHandTests(unittest.TestCase):
     def setUp(self):
         migrated_db("backfill-addfilm")
         save_settings(Settings(trakt_client_id="id", trakt_access_token="tok"))
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(_make_user("tracker"))
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=self.user_id, provider="trakt", provider_user_id=7,
@@ -907,7 +910,7 @@ class RemovingAFilmTests(unittest.TestCase):
     def setUp(self):
         migrated_db("backfill-rmfilm")
         save_settings(Settings(trakt_client_id="id", trakt_access_token="tok"))
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(_make_user("tracker"))
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=self.user_id, provider="trakt", provider_user_id=7,
@@ -1050,7 +1053,7 @@ class BackfillRouteTests(unittest.TestCase):
     def setUp(self):
         migrated_db("backfill-api")
         save_settings(Settings(trakt_client_id="id", trakt_access_token="tok"))
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(_make_user("tracker"))
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=self.user_id, provider="trakt", provider_user_id=7,
@@ -1144,8 +1147,13 @@ class BackfillRouteTests(unittest.TestCase):
         than inferred. A range holding nothing the sweep may read — here the
         month still under way, which a survey never touches — is not the same as
         a range that was read and held no finished season, and a reader told
-        "0 season(s)" cannot tell the two apart."""
-        html = " ".join(self._survey([], start="2026-09", end="2026-09").text.split())
+        "0 season(s)" cannot tell the two apart.
+
+        THE CLOCK IS PINNED INSIDE SEPTEMBER, because "the month still under way"
+        is a fact about today: written against the real date, this passed while
+        September was current and failed for ever after."""
+        with patch.dict(os.environ, {clock.FAKE_TODAY_ENV: "2026-09-15"}):
+            html = " ".join(self._survey([], start="2026-09", end="2026-09").text.split())
 
         self.assertIn("No month in that range was read for seasons", html)
         self.assertNotIn("season(s) ", html)

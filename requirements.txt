@@ -11,10 +11,6 @@ httpx==0.28.1
 python-multipart==0.0.32
 tzdata==2026.3
 Pillow==12.3.0
-# SVG-only network logos (distrakt/calendar). Needs the native Cairo library at
-# runtime (Linux/Docker: apt install libcairo2; Windows dev: often absent -> those
-# few SVG-only networks fall back to the emoji, PNG networks are unaffected).
-cairosvg==2.9.0
 # Fernet (AES-128-CBC + HMAC-SHA256) for encrypting provider tokens and API keys
 # at rest in the DB. Ships manylinux and Windows wheels, so it resolves in both
 # the .venv and the Docker build without a compiler.

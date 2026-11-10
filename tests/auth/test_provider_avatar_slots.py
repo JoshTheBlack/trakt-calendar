@@ -70,7 +70,7 @@ class SlotStorageTests(AppTestCase):
 
     def test_a_slot_is_overwritten_freely_but_the_avatar_is_not(self):
         asyncio.run(user_images.save_provider_avatar(self.user_id, "trakt", RED))
-        user_images.adopt_avatar_source(self.user_id, "trakt", only_if_missing=True)
+        asyncio.run(user_images.adopt_avatar_source(self.user_id, "trakt", only_if_missing=True))
         avatar_before = user_images.avatar_path(self.user_id).read_bytes()
 
         asyncio.run(user_images.save_provider_avatar(self.user_id, "trakt", BLUE))
@@ -89,27 +89,27 @@ class SlotStorageTests(AppTestCase):
         asyncio.run(user_images.save_provider_avatar(self.user_id, "plex", BLUE))
 
         self.assertFalse(
-            user_images.adopt_avatar_source(self.user_id, "plex", only_if_missing=True))
+            asyncio.run(user_images.adopt_avatar_source(self.user_id, "plex", only_if_missing=True)))
         self.assertEqual(user_images.avatar_path(self.user_id).read_bytes(), mine)
 
     def test_choosing_one_explicitly_does_replace_it(self):
         asyncio.run(user_images.save_avatar(self.user_id, _b64(RED)))
         asyncio.run(user_images.save_provider_avatar(self.user_id, "plex", BLUE))
         self.assertTrue(
-            user_images.adopt_avatar_source(self.user_id, "plex", only_if_missing=False))
-        self.assertTrue(user_images.avatar_source_is_adopted(self.user_id, "plex"))
+            asyncio.run(user_images.adopt_avatar_source(self.user_id, "plex", only_if_missing=False)))
+        self.assertTrue(asyncio.run(user_images.avatar_source_is_adopted(self.user_id, "plex")))
 
     def test_removing_a_slot_takes_the_avatar_only_when_it_was_that_copy(self):
         asyncio.run(user_images.save_provider_avatar(self.user_id, "trakt", RED))
         asyncio.run(user_images.save_provider_avatar(self.user_id, "plex", BLUE))
-        user_images.adopt_avatar_source(self.user_id, "trakt", only_if_missing=True)
+        asyncio.run(user_images.adopt_avatar_source(self.user_id, "trakt", only_if_missing=True))
 
         # Removing the OTHER service's slot leaves the avatar alone.
-        user_images.delete_avatar_source(self.user_id, "plex")
+        asyncio.run(user_images.delete_avatar_source(self.user_id, "plex"))
         self.assertTrue(user_images.has_avatar(self.user_id))
 
         # Removing the one being worn takes it with it.
-        user_images.delete_avatar_source(self.user_id, "trakt")
+        asyncio.run(user_images.delete_avatar_source(self.user_id, "trakt"))
         self.assertFalse(user_images.has_avatar(self.user_id))
 
     def test_slots_do_not_consume_the_saved_image_quota(self):
@@ -147,7 +147,7 @@ class SeedingTests(AppTestCase):
         with patch.object(provider_avatars, "fetch", AsyncMock(return_value=RED)):
             asyncio.run(provider_login.seed_provider_avatar(self.user_id, self._identity()))
         self.assertEqual(user_images.list_provider_avatars(self.user_id), ["trakt"])
-        self.assertTrue(user_images.avatar_source_is_adopted(self.user_id, "trakt"))
+        self.assertTrue(asyncio.run(user_images.avatar_source_is_adopted(self.user_id, "trakt")))
 
     def test_a_provider_with_no_picture_is_a_no_op_and_does_not_raise(self):
         with patch.object(provider_avatars, "fetch", AsyncMock(return_value=None)):
@@ -303,7 +303,7 @@ class SigningInDoesNotReseedTests(AppTestCase):
     def test_an_avatar_the_owner_deleted_stays_deleted_across_a_sign_in(self):
         self._sign_in("registered")
         self.assertTrue(user_images.has_avatar(self.user_id))
-        user_images.delete_avatar(self.user_id)
+        asyncio.run(user_images.delete_avatar(self.user_id))
 
         self._sign_in("login")
         self.assertFalse(user_images.has_avatar(self.user_id),
@@ -326,10 +326,10 @@ class YourOwnPictureSurvivesTests(AppTestCase):
         asyncio.run(user_images.save_avatar(self.user_id, _b64(RED)))
         mine = user_images.avatar_path(self.user_id).read_bytes()
         asyncio.run(user_images.save_provider_avatar(self.user_id, "trakt", BLUE))
-        user_images.adopt_avatar_source(self.user_id, "trakt", only_if_missing=False)
+        asyncio.run(user_images.adopt_avatar_source(self.user_id, "trakt", only_if_missing=False))
         self.assertNotEqual(user_images.avatar_path(self.user_id).read_bytes(), mine)
 
-        user_images.delete_avatar_source(self.user_id, "trakt")
+        asyncio.run(user_images.delete_avatar_source(self.user_id, "trakt"))
         self.assertEqual(user_images.avatar_path(self.user_id).read_bytes(), mine)
 
     def test_unlinking_a_service_restores_it_too(self):
@@ -337,17 +337,17 @@ class YourOwnPictureSurvivesTests(AppTestCase):
         asyncio.run(user_images.save_avatar(self.user_id, _b64(RED)))
         mine = user_images.avatar_path(self.user_id).read_bytes()
         asyncio.run(user_images.save_provider_avatar(self.user_id, "plex", BLUE))
-        user_images.adopt_avatar_source(self.user_id, "plex", only_if_missing=False)
+        asyncio.run(user_images.adopt_avatar_source(self.user_id, "plex", only_if_missing=False))
 
-        user_images.delete_avatar_source(self.user_id, "plex")
+        asyncio.run(user_images.delete_avatar_source(self.user_id, "plex"))
         self.assertEqual(user_images.avatar_path(self.user_id).read_bytes(), mine)
 
     def test_with_no_upload_behind_it_the_avatar_still_goes(self):
         """An account whose only picture ever came from a service has nothing to
         fall back to, and must not keep wearing a service it has disconnected."""
         asyncio.run(user_images.save_provider_avatar(self.user_id, "trakt", BLUE))
-        user_images.adopt_avatar_source(self.user_id, "trakt", only_if_missing=True)
-        user_images.delete_avatar_source(self.user_id, "trakt")
+        asyncio.run(user_images.adopt_avatar_source(self.user_id, "trakt", only_if_missing=True))
+        asyncio.run(user_images.delete_avatar_source(self.user_id, "trakt"))
         self.assertFalse(user_images.has_avatar(self.user_id))
 
     def test_removing_your_picture_removes_it_for_good(self):
@@ -356,10 +356,10 @@ class YourOwnPictureSurvivesTests(AppTestCase):
         producing a picture its owner had already deleted."""
         asyncio.run(user_images.save_avatar(self.user_id, _b64(RED)))
         asyncio.run(user_images.save_provider_avatar(self.user_id, "trakt", BLUE))
-        user_images.adopt_avatar_source(self.user_id, "trakt", only_if_missing=False)
-        user_images.delete_avatar(self.user_id)
+        asyncio.run(user_images.adopt_avatar_source(self.user_id, "trakt", only_if_missing=False))
+        asyncio.run(user_images.delete_avatar(self.user_id))
 
-        user_images.delete_avatar_source(self.user_id, "trakt")
+        asyncio.run(user_images.delete_avatar_source(self.user_id, "trakt"))
         self.assertFalse(user_images.has_avatar(self.user_id))
 
     def test_a_later_upload_replaces_what_you_fall_back_to(self):
@@ -367,9 +367,9 @@ class YourOwnPictureSurvivesTests(AppTestCase):
         asyncio.run(user_images.save_avatar(self.user_id, _b64(BLUE)))
         newest = user_images.avatar_path(self.user_id).read_bytes()
         asyncio.run(user_images.save_provider_avatar(self.user_id, "trakt", RED))
-        user_images.adopt_avatar_source(self.user_id, "trakt", only_if_missing=False)
+        asyncio.run(user_images.adopt_avatar_source(self.user_id, "trakt", only_if_missing=False))
 
-        user_images.delete_avatar_source(self.user_id, "trakt")
+        asyncio.run(user_images.delete_avatar_source(self.user_id, "trakt"))
         self.assertEqual(user_images.avatar_path(self.user_id).read_bytes(), newest)
 
 

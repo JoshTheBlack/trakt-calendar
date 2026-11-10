@@ -3,8 +3,9 @@
 {# THE ADD-SHOW MODAL, DRAWN BY THE SERVER IN THE ONE STATE IT IS EVER IN:
    closed, empty, and worded for the month being looked at.
 
-   IT RIDES BACK WITH EVERY MONTH ANSWER (`oob=true`), which is how it closes
-   after an add and how it forgets the query and the results that produced one.
+   IT RIDES BACK WITH EVERY MONTH ANSWER TO A PRESS (`oob=true`), which is how it
+   closes after an add and how it forgets the query and the results that produced
+   one. The page's own load of its month is not a press and leaves it alone.
    That used to be four lines of script clearing three elements and setting a
    heading, run on OPEN — so the modal that opened was whatever the last one had
    left behind, tidied up. Redrawn on every answer it is simply never in a state
@@ -13,7 +14,7 @@
    THE SEARCH IS THE SHARED BOX (_title_search.html, which holds why typing and
    Enter are two requests and how they are ordered). TYPING lists the titles
    this app already stores (/distrakt/fragments/search-stored), an index read of
-   a few milliseconds (calendar/entries.py's titles_matching); SUBMITTING asks
+   a few milliseconds (metadata/typed_search.py's titles_matching); SUBMITTING asks
    the services — and a catalogue fan-out at every prefix would buy nothing for
    somebody who opened this already knowing what they came to add. `required`
    is the empty check the browser already knows how to make. A typed answer
@@ -61,10 +62,6 @@
                 request, so nothing here has to know how many there are or where
                 in a list each one sits. -#}
             <div id="addSearchResults" class="distrakt-search-results"></div>
-            {#- What a pick answers into: a season picker, a refusal, or a season
-                that names itself — one partial, all three states
-                (_distrakt_seasons.html). -#}
-            <div id="addSeasonPick" class="distrakt-season-pick"></div>
         </div>
         <div class="modal-foot">
             <button type="button" class="btn-ghost" command="close" commandfor="addShowModal">Cancel</button>

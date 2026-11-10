@@ -27,7 +27,8 @@ from fastapi.responses import Response
 from app import distrakt as distrakt_store
 from app.calendar import state as calendar_state
 from app.providers.base import Item, ItemKey, Media, Source
-from app.config import Settings, load_settings
+from app.config import Settings
+from tests.support import load_settings
 from tests.support import AppTestCase, ORIGIN, import_everything_offered, restore_backup
 
 

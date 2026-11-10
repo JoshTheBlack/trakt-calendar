@@ -21,13 +21,14 @@ from unittest.mock import AsyncMock, patch
 
 from app import assets, db
 from app.calendar import vocab
-from app.config import Settings, load_settings, save_settings
+from app.config import Settings
+from tests.support import load_settings, save_settings
 from app.integrations import routes as integrations_routes
 from app.providers import detail_source
 from app.providers.base import Source
 
 from tests.calendar.test_routes import CalendarRouteTestCase, _entry
-from tests.support import window_fetch
+from tests.support import put_title, window_fetch
 
 # What one redrawn button says, spelled once because both adds answer with it and
 # because the selector's shape is load-bearing: htmx splits an out-of-band value
@@ -243,6 +244,30 @@ class EveryServiceAddsThroughTheOneRouteTests(_LibraryTestCase):
                                  json={"key": self.key, "target": target})
         self.assertEqual(seen, [("arr", "sonarr", "777"), ("seer", "show", "4242")])
 
+    def test_a_film_in_seerr_does_not_mark_the_show_sharing_its_tmdb_number(self):
+        """MEASURED on the owner's calendar: TMDB film 11317 (My Girl 2) in Seerr
+        drew CBC's The Fifth Estate (TMDB show 11317) as already requested. TMDB
+        numbers films and shows separately, so Seerr's library is held by medium
+        as well as id — and an add is recorded the same way."""
+        integrations_routes.LIBRARY_CACHE.update({"seer": ["movie:11317"], "_ts": 1e12})
+        view = integrations_routes.LibraryView(load_settings())
+        seerr = {b.kind: b for b in view.buttons("show", {"tvdb": "1", "tmdb": "11317"})}["seer"]
+        self.assertFalse(seerr.in_library)
+        film = {b.kind: b for b in view.buttons("movie", {"tmdb": "11317"})}["seer"]
+        self.assertTrue(film.in_library)
+
+    async def _requested(self, settings, media, tmdb, title):
+        return {"ok": True, "message": "Requested"}
+
+    def test_a_show_added_to_seerr_is_held_as_a_show(self):
+        with patch("app.integrations.seer.add_media", self._requested):
+            asyncio.run(integrations_routes.add_title(load_settings(), "seer", "show",
+                                                      {"tmdb": 11317}, "The Fifth Estate"))
+        self.assertIn("show:11317", integrations_routes.LIBRARY_CACHE["seer"])
+        view = integrations_routes.LibraryView(load_settings())
+        self.assertFalse({b.kind: b for b in view.buttons("movie", {"tmdb": "11317"})}
+                         ["seer"].in_library)
+
     def test_the_medium_picks_one_of_the_two_and_seerr_rides_beside_either(self):
         """Asked of the one function that decides, rather than of a rendered film
         calendar: which of Sonarr and Radarr a title gets is `LibraryView.buttons`'
@@ -281,7 +306,7 @@ class ThePanelHeaderCarriesTheSameButtonsTests(_LibraryTestCase):
     def _panel(self) -> str:
         chosen = detail_source.Answerer(Source.TRAKT, "1", stored_only=False)
         with patch("app.providers.detail_source.choose", return_value=chosen), \
-             patch("app.providers.detail_source.describe",
+             patch("app.metadata.panel.describe",
                    AsyncMock(return_value={"title": "Held Show", "overview": "A show."})):
             return self.client.get(self.URL).text
 
@@ -334,11 +359,10 @@ class ThePanelDrawsWhatTheCardIsShowingTests(ThePanelHeaderCarriesTheSameButtons
         self.key = "show:tvdb:555"
         for source, overview, title in (("trakt", "Trakt words.", "Trakt Name"),
                                         ("simkl", "Simkl words.", "Simkl Name")):
-            asyncio.run(db.execute(
-                "INSERT INTO calendar_titles (source, media, source_id, title_key, title,"
-                " title_fold, overview, poster, fetched_at) VALUES (?,?,?,?,?,?,?,?,0)",
-                (source, "show", source + "-1", self.key, title, title.lower(),
-                 overview, "/" + source + ".jpg")))
+            asyncio.run(db.transaction(lambda conn, source=source, overview=overview,
+                                       title=title: put_title(
+                conn, source, "show", source + "-1", self.key, title=title,
+                overview=overview, poster="/" + source + ".jpg", fetched_at=0)))
 
     def _panel_for(self, **params) -> str:
         # Built from scratch rather than appended to the parent's address: a
@@ -365,7 +389,7 @@ class ThePanelDrawsWhatTheCardIsShowingTests(ThePanelHeaderCarriesTheSameButtons
         panel = self._panel_for(title="simkl", poster="trakt", overview="simkl")
         self.assertIn("Simkl words.", panel)
         # THROUGH THE SHARED IMAGE PROXY, not the stored column's raw address —
-        # this route reads calendar_titles.poster directly (stored_values, not
+        # this route reads title_metadata.poster directly (stored_values, not
         # render()) and has to proxy it itself before handing it to an <img src>,
         # the same way render() already does for the calendar CARD's own poster.
         self.assertIn('src="https://wsrv.nl/?url=%2Ftrakt.jpg&amp;q=90&amp;w=440&amp;we"', panel)

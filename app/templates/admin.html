@@ -12,6 +12,8 @@
    (app/auth/admin_routes.py says why the whole body). No script of the page's
    own: copying an invite link or a temporary password is ui.js's `data-copy`. #}
 {% include '_admin_shell.html' %}
+{# Where a success toast lands; outside the shell, so a redraw keeps it. #}
+<div id="toastHost"></div>
 
 {% include "_footer.html" %}
 {% endblock %}

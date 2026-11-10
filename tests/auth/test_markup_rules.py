@@ -97,8 +97,6 @@ ACCOUNT_POSTS = (
     ("/me/username", {"username": "claimed"}),
     ("/me/password", {"password": "long-enough-password", "password_confirm": "long-enough-password"}),
     ("/me/share-watch-history", {"enabled": "0"}),
-    ("/me/tracker-retired", {"counted:trakt": "0", "counted:simkl": "1"}),
-    ("/me/order/tracker_order", {"source": "simkl", "direction": "up"}),
     ("/me/order/metadata_order", {"source": "simkl", "direction": "up"}),
     ("/me/identities/unlink", {"provider": "trakt"}),
     ("/me/avatar", {"image_b64": ""}),

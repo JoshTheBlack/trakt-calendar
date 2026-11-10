@@ -26,7 +26,7 @@
    (row -> its picture through the image proxy, or ""), and what
    routes._emoji_context builds: `emoji_for` (network -> the code it posts as),
    `emoji_own` (whether that is its own rather than the default), `logo_for`
-   (network -> a tile URL, or "" when this instance has none), `net_ref`
+   (network -> its Logo, or None when it has none), `net_ref`
    (network -> what an answer addresses its cells by) and `is_admin`. #}
 
 {# THE SHARED HALF OF EVERY MUTATION'S ADDRESS. The target is the show list and
@@ -71,22 +71,26 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
 {%- else %}<span class="distrakt-poster is-empty" aria-hidden="true"></span>{% endif -%}
 {%- endmacro %}
 
-{# The network badge: the LOGO alone, where this instance holds a tile, and an
-   empty slot where it does not — the emoji code has a cell of its own, so the
-   badge does not fall back to it. `data-net` is what an answer that
-   regenerated the logo addresses every copy by.
+{# The network badge: the LOGO alone, where the network has one, and an empty
+   slot where it does not — the emoji code has a cell of its own, so the badge
+   does not fall back to it. `data-net` is what an answer that resolved the logo
+   again addresses every copy by.
 
-   ASKED OF THE DISK RATHER THAN OF THE BROWSER. This used to be an <img> at the
+   `logo` IS A Logo (media/logos): the picture's address through the image proxy
+   and whether it is light, which is the frame's class — a light logo on the dark
+   frame, everything else on the light one.
+
+   ASKED OF THE TABLE RATHER THAN OF THE BROWSER. This used to be an <img> at the
    logo route with an `onerror` swapping in a fallback, so every network with no
-   tile cost a 404 per row and the fallback was a script. The month payload
-   already warms every network on the page before it renders
-   (routes._live_month_payload's ensure_logos), so by the time a row is drawn the
-   tile either exists or never will, and the server can simply say which. #}
+   tile cost a 404 per row and the fallback was a script. The month answer reads
+   every network on the page in one statement (routes._month_answer's
+   logos.for_page), so by the time a row is drawn the logo either exists or does
+   not, and the server can simply say which. #}
 {% macro badge(network, oob=false) -%}
 {%- set logo = logo_for(network) -%}
 <span class="distrakt-badge"{% if network %} data-net="{{ net_ref(network) }}"{% endif %}
       {%- if oob %} hx-swap-oob="outerHTML:.distrakt-badge[data-net='{{ net_ref(network) }}']"{% endif %}>
-    {%- if logo %}<img class="distrakt-logo" src="{{ logo }}" alt="">{% endif -%}
+    {%- if logo %}<img class="distrakt-logo{{ ' is-light' if logo.light }}" src="{{ logo.address }}" alt="" width="26" height="26">{% endif -%}
 </span>
 {%- endmacro %}
 
@@ -142,7 +146,7 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
         {#- Not boosted: htmx boosts every link under a boosted <body> and ignores
             `download`, so this would fetch the PNG and swap it into the page
             instead of saving a file. -#}
-        <a class="btn-ghost small" href="{{ logo }}&amp;download=1"
+        <a class="btn-ghost small" href="/api/distrakt/network-logo/download?network={{ network | urlencode }}"
            download hx-boost="false" title="Download {{ network }}'s logo">⬇</a>
         {%- endif %}
         {%- if is_admin %}
@@ -187,6 +191,19 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
 {%- if gone %}
 <span class="distrakt-missing"
       title="No longer in your {{ gone | join(' and ') }} library — your counts here are kept. Use ✕ to remove it.">dropped</span>
+{%- endif %}
+{%- endmacro %}
+
+{# NO SERVICE THIS TRACKER READS LISTS THE TITLE (routes._untracked): it was
+   added from a catalogue that keeps no watch history, and neither tracking
+   service could be matched to it by id. Said on the row, because its counts
+   will sit at zero whatever is watched, which otherwise reads as "not watched
+   yet". Not a button, for `missing_mark`'s reason: a later lookup finding the
+   title clears it with nothing to press. #}
+{% macro untracked_mark(show) -%}
+{%- if show.untracked %}
+<span class="distrakt-missing distrakt-untracked"
+      title="None of the services you've linked for tracking lists this show, so nothing you watch will be counted here. It stays on your list, and the tracker asks those services again (at most once a day) as it loads.">untracked</span>
 {%- endif %}
 {%- endmacro %}
 
@@ -242,7 +259,7 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
           role="img" title="{{ show.counts_note }}" aria-label="{{ show.counts_note }}"></span>
     {%- endif %}
     {{ picture(show) }}
-    <span class="distrakt-title"><span class="tt">{{ show.title }}</span>{{ return_mark(show) }}{{ missing_mark(show) }}</span>
+    <span class="distrakt-title"><span class="tt">{{ show.title }}</span>{{ return_mark(show) }}{{ missing_mark(show) }}{{ untracked_mark(show) }}</span>
     {#- The row's facts in one wrapper — `display: contents` on a wide list, so
         they stay the row's own columns, and one flexible line under the title
         on a phone. -#}
@@ -304,9 +321,18 @@ hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
 
 {# A watched film: no buckets, no counts, no progress — a play on a day. The one
    control it has is ✕, because a service's history is not always right about
-   what was watched and there is no roster row to correct it through. #}
+   what was watched and there is no roster row to correct it through.
+
+   IT OPENS THE DETAILS PANEL LIKE A SHOW ROW, by the same route named by its key
+   and nothing else (routes._film_details reads the rest from the viewer's own
+   watch). A film with no key has no identity to describe it by, and opens
+   nothing. #}
 {% macro film_row(film) %}
-<div class="distrakt-show-row distrakt-film-row">
+<div class="distrakt-show-row distrakt-film-row"
+     {%- if film.key %}
+     data-details-open="/distrakt/fragments/details{{ month_query }}&amp;key={{ film.key | urlencode }}"
+     data-details-heading="{{ film.title or 'Untitled' }}{{ ' (' ~ film.year ~ ')' if film.year }}"
+     {%- endif %}>
     {{ picture(film) }}
     <span class="distrakt-title"><span class="tt">{{ film.title or 'Untitled' }}</span></span>
     <span class="distrakt-facts">

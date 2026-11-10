@@ -68,6 +68,8 @@ PROVIDER = "plex"
 
 NOT_CONFIGURED = "Signing in with Plex is not available right now. Try again in a moment."
 ALREADY_LINKED = "That Plex account is already linked to another user on this instance."
+HOLDS_ANOTHER = ("A different Plex account is already linked to yours. Unlink it on your "
+                 "account page first, then connect this one.")
 UPSTREAM_FAILED = "Plex could not complete the sign-in. Please try again in a moment."
 
 
@@ -145,7 +147,7 @@ async def _begin(request: Request, *, purpose: str, session_id: str | None = Non
     response.headers["Cache-Control"] = "no-store"
     # Pins the handshake to this browser as well as to this row, so a poll
     # arriving from anywhere else is refused before the row is even read.
-    auth.set_handshake_cookie(response, state, load_settings(), request)
+    auth.set_handshake_cookie(response, state, await load_settings(), request)
     return response
 
 
@@ -184,7 +186,7 @@ async def plex_poll(request: Request):
     it. The row is only actually consumed once, at the poll where plex.tv
     reports the PIN approved.
     """
-    settings = load_settings()
+    settings = await load_settings()
     data = await authz.json_body(request)
     state = str(data.get("state") or "").strip()
 
@@ -255,7 +257,8 @@ async def _finish_link(request: Request, settings, identity: auth.ProviderIdenti
     """
     outcome = await provider_login.complete_provider_link(
         identity=identity, current=current,
-        already_linked=ALREADY_LINKED, key_unhealthy=KEY_UNHEALTHY,
+        already_linked=ALREADY_LINKED, holds_another=HOLDS_ANOTHER,
+        key_unhealthy=KEY_UNHEALTHY,
     )
     if isinstance(outcome, provider_login.Refusal):
         return _stopped(request, outcome.message)

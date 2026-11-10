@@ -23,7 +23,9 @@ import asyncio
 from urllib.parse import parse_qs, urlencode, urlsplit
 from unittest.mock import patch
 
+from app import db
 from app.config import Settings
+from app.metadata import descriptions, refresh as metadata_refresh, tables
 from app.providers.trakt import transport
 from app.ranker import core as ranker
 from tests.support import AppTestCase, DetailsPanel, ORIGIN
@@ -130,8 +132,17 @@ class ABoardTitleOpensThePanelTests(_BoardPanelTestCase):
         self.assertIn("Spies.", html)
         self.assertIn("What season 1 is about.", html)
 
-    def test_the_rows_own_count_can_widen_the_strip(self):
-        key = self.add(ids={"trakt": 7, "tmdb": 1}, season_count=5)
+    def test_the_seasons_another_service_lists_widen_the_strip(self):
+        """The strip is every season a service the title names LISTS
+        (metadata/panel.py's describe_panel) — here TMDB's stored list of five,
+        beside the three of the service describing the panel. A count alone
+        widens nothing: a season's number is not how many came before it."""
+        key = self.add(ids={"trakt": 7, "tmdb": 1})
+        asyncio.run(db.execute(f"UPDATE {tables.TITLES} SET tmdb_season_count = 5 "
+                               "WHERE tmdb_id IS NOT NULL AND title_key = ?", (key,)))
+        asyncio.run(db.transaction(lambda conn: descriptions.write_season_list(
+            conn, "tmdb", "show", "1", [{"season": n, "episode_count": 10} for n in range(1, 6)],
+            now=db.now(), ids={"tmdb": 1})))
         panel = DetailsPanel(self.get(self.panel_url(key))[0])
         self.assertEqual(panel.season_tabs, [1, 2, 3, 4, 5])
 
@@ -211,9 +222,19 @@ class ATitleNobodyCanDescribeTests(_BoardPanelTestCase):
         self.assertIn("⏱️ 50m", html)
         self.assertIn("No overview available.", html)
         self.assertIn("No seasons or episodes to show", html)
-        self.assertIn("without an id from any service", html)
+        # A board row filed under a tmdb id is a title TMDB knows, and this
+        # instance holds no TMDB token: a service that COULD answer is not set
+        # up, which is a different thing to say from "nobody can".
+        self.assertIn("not set up here", html)
         self.assertEqual(panel.season_tabs, [])
         self.assertEqual(panel.episodes, [])
+
+    def test_a_row_no_service_issues_an_id_for_says_nobody_can_be_asked(self):
+        asyncio.run(ranker.add_titles(self.user_id, BOARD, [{
+            "media": "show", "match_source": "imdb", "match_id": "tt0000001",
+            "title": "The Agency", "ids": {"imdb": "tt0000001"}}]))
+        html, _ = self.get(self.panel_url("show:imdb:tt0000001"), client=_Unreachable())
+        self.assertIn("without an id from any service", html)
 
     def test_a_film_is_not_told_it_has_no_episodes(self):
         key = self.add("5", media="movie", ids={"tmdb": 5})
@@ -252,3 +273,75 @@ class TheBoardCarriesThePanelTests(_BoardPanelTestCase):
         self.assertIn('id="detailsModal"', html)
         self.assertIn('data-details-open="/rankings/fragments/details?board=b1&amp;'
                       'key=show%3Atmdb%3A1"', html)
+
+
+class ATitleOnlyTmdbKnowsTests(_BoardPanelTestCase):
+    """A board row carrying a tmdb id and nothing else — an imported title, or
+    one no other service lists — is described by TMDB, which is first in the
+    order, with its seasons as tabs and TMDB's own page as the outbound link."""
+
+    TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJib2FyZCJ9.c2lnbmF0dXJl"
+
+    def make_settings(self):
+        return Settings(public_base_url=ORIGIN, tmdb_api_key=self.TOKEN,
+                        simkl_public_calendar_enabled=False)
+
+    def test_tmdb_describes_it(self):
+        asked = []
+
+        async def tmdb_get(settings, path, params=None, **kw):
+            asked.append(path)
+            if path == "tv/42":
+                return {"id": 42, "name": "A Show Only TMDB Lists",
+                        "overview": "TMDB's words.", "status": "Ended",
+                        "seasons": [{"season_number": 1, "episode_count": 3,
+                                     "air_date": "2024-01-01"},
+                                    {"season_number": 2, "episode_count": 2,
+                                     "air_date": "2025-01-01"}]}
+            if path.endswith("aggregate_credits"):
+                return {"cast": [{"name": "Board Lead", "roles": [{"character": "Hero"}]}]}
+            if path.startswith("tv/42/season/"):
+                return {"episodes": [{"episode_number": n, "name": f"Ep {n}",
+                                      "air_date": "2024-01-0%d" % n} for n in (1, 2)]}
+            raise AssertionError(f"TMDB asked about {path}")
+
+        key = self.add("42", ids={"tmdb": 42})
+        with patch("app.providers.tmdb.transport.cached_get", tmdb_get):
+            html, _ = self.get(self.panel_url(key), client=_Unreachable())
+        panel = DetailsPanel(html)
+        self.assertIn("TMDB&#39;s words.", html)
+        self.assertEqual(len(panel.season_tabs), 2)
+        self.assertEqual(panel.episodes, [1, 2])
+        self.assertIn('href="https://www.themoviedb.org/tv/42"', html)
+        self.assertIn("tv/42", asked)
+        self.assertIn("Board Lead", html)
+
+
+class ABoardTitleViewedTests(_BoardPanelTestCase):
+    """A board's panel and its rows name their titles to the title store's
+    refresh queue (app/metadata/refresh.py) — behind the page. A row's own filing
+    id rides with its ids, so a title filed by one service's id is asked of it."""
+
+    def setUp(self):
+        super().setUp()
+        self.seen = []
+        recorder = patch.object(metadata_refresh, "viewed",
+                                lambda settings, wanted, **kw: self.seen.append(
+                                    (list(wanted), kw)))
+        recorder.start()
+        self.addCleanup(recorder.stop)
+
+    def test_a_panel_names_its_title(self):
+        key = self.add(ids={"trakt": 7, "tmdb": 1})
+        self.get(self.panel_url(key))
+        (wanted, kw), = self.seen
+        self.assertEqual(kw["budget"], metadata_refresh.PANEL_BUDGET)
+        self.assertEqual([(w.media, str(w.ids.get("tmdb"))) for w in wanted], [("show", "1")])
+
+    def test_the_rows_a_board_draws_are_named(self):
+        self.add("1", ids={"tmdb": 1})
+        self.add("2", ids={"tmdb": 2})
+        self.client.get(f"/rankings?board={BOARD}")
+        (wanted, kw), = self.seen
+        self.assertEqual(kw["budget"], metadata_refresh.ROWS_BUDGET)
+        self.assertEqual(sorted(str(w.ids.get("tmdb")) for w in wanted), ["1", "2"])

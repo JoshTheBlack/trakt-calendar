@@ -28,9 +28,12 @@ import re
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import AsyncMock, patch
 
-from app import db, distrakt as distrakt_store
+from app import db, distrakt as distrakt_store, metadata
 from app.clock import today
 from app.config import Settings
+from app.distrakt import watch_history
+from app.metadata import refresh as metadata_refresh
+from app.providers.base import Media
 from app.providers.trakt import transport
 from tests.support import AppTestCase, DetailsPanel, ORIGIN
 
@@ -67,6 +70,8 @@ SHOW = {"title": "The Agency", "year": 2026, "overview": "Spies.",
 PEOPLE = {"cast": [{"person": {"name": "Michael"}, "character": "Martian"}]}
 EPISODES = [{"number": n, "title": f"Ep {n}", "first_aired": "2026-08-01T20:00:00.000Z"}
             for n in range(1, 11)]
+# The service's season list, which is where a panel's count of seasons comes from.
+SEASONS = [{"number": n, "episode_count": 10, "aired_episodes": 10} for n in range(1, 5)]
 
 KEY = "show:tmdb:1"
 
@@ -116,7 +121,7 @@ class _DetailsRouteTestCase(AppTestCase):
 
     def _details(self, season: int = 2, month: str = ""):
         client = _CatalogueClient({
-            "shows/7": SHOW, "shows/7/people": PEOPLE,
+            "shows/7": SHOW, "shows/7/people": PEOPLE, "shows/7/seasons": SEASONS,
             f"shows/7/seasons/{season}": EPISODES,
         })
         viewed = ""
@@ -648,7 +653,7 @@ class SeasonTabsOnARosterRowTests(_DetailsRouteTestCase):
 
     def _open(self, season: int = 4) -> DetailsPanel:
         client = _CatalogueClient({
-            "shows/7": SHOW, "shows/7/people": PEOPLE,
+            "shows/7": SHOW, "shows/7/people": PEOPLE, "shows/7/seasons": SEASONS,
             f"shows/7/seasons/{season}": EPISODES,
         })
         with patch.object(transport, "shared_client", return_value=client):
@@ -665,7 +670,9 @@ class SeasonTabsOnARosterRowTests(_DetailsRouteTestCase):
         self.assertEqual(resp.status_code, 200, resp.text)
         return DetailsPanel(resp.text)
 
-    def test_the_rows_season_is_how_many_tabs_there_are(self):
+    def test_the_services_season_count_is_how_many_tabs_there_are(self):
+        """The row's season is a tab of its own, never a count: a season's number
+        is not how many came before it."""
         panel = self._open()
         self.assertEqual(panel.season_tabs, [1, 2, 3, 4])
         self.assertEqual(panel.open_tab, 4)
@@ -706,3 +713,91 @@ class SeasonTabsOnARosterRowTests(_DetailsRouteTestCase):
             (self.user_id, "show", "tmdb", "1", 1, "trakt",
              json.dumps({"6": "2026-08-01T00:00:00Z"}), 7)))
         self.assertEqual(self._press(self._open().tab_urls[1]).watched, [6])
+
+
+FILM = {"title": "Coyote vs. Acme", "year": 2026, "overview": "A coyote sues.",
+        "runtime": 100, "genres": ["comedy"], "rating": 7.5}
+
+
+class AWatchedFilmOpensItsPanelTests(_DetailsRouteTestCase):
+    """A film row was the one row on the tracker that opened nothing: it carried
+    no opener, and the route answered only for a roster show and its season."""
+
+    def _watch(self, ids=None) -> None:
+        day = today()
+        asyncio.run(watch_history.record_movie_watches(self.user_id, [{
+            "ids": ids or {"tmdb": 5, "trakt": 9}, "title": "Coyote vs. Acme",
+            "year": 2026, "watched_at": f"{day:%Y-%m}-01T12:00:00Z"}]))
+
+    def _film(self, key: str = "movie:tmdb:5", month: str = ""):
+        client = _CatalogueClient({"movies/9": FILM, "movies/9/people": PEOPLE})
+        viewed = ""
+        if month:
+            year, number = distrakt_store.parse_month_key(month)
+            viewed = f"&year={year}&month={number}"
+        with patch.object(transport, "shared_client", return_value=client), \
+             patch("app.providers.simkl.transport.cached_get",
+                   new=AsyncMock(return_value=None)):
+            resp = self.client.get(f"/distrakt/fragments/details?key={key}{viewed}")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return resp.text
+
+    def test_a_watched_film_opens_its_panel(self):
+        self._watch()
+        html = self._film()
+        self.assertIn("A coyote sues.", html)
+        self.assertIn('href="https://trakt.tv/movies/9"', html)
+        self.assertIn('href="https://www.themoviedb.org/movie/5"', html)
+
+    def test_the_store_lends_the_ids_the_watch_did_not_carry(self):
+        """A play only Simkl reported keeps Simkl's id and the key's; the store
+        knows the film's Trakt id, and that is who describes it here."""
+        asyncio.run(metadata.ensure(Media.MOVIE, {"tmdb": 5, "trakt": 9}))
+        self._watch({"tmdb": 5, "simkl": 77})
+        self.assertIn("A coyote sues.", self._film())
+
+    def test_a_film_the_viewer_has_not_watched_is_refused(self):
+        self._watch()
+        self.assertIn("Not among your watched films", self._film("movie:tmdb:6"))
+
+    def test_a_film_a_frozen_month_recorded_opens_from_that_month(self):
+        """Frozen months draw their Films from their own snapshot, so that is
+        where a row on one is found."""
+        month = _month_back(2)
+        year, number = distrakt_store.parse_month_key(month)
+        asyncio.run(distrakt_store.save_month(self.user_id, {
+            "month": month, "closed": True, "shows": [],
+            "movies": [{"key": "movie:tmdb:5", "ids": {"trakt": 9},
+                        "title": "Coyote vs. Acme", "year": 2026,
+                        "watched_at": f"{year:04d}-{number:02d}-02T12:00:00Z"}]}))
+        self.assertIn("A coyote sues.", self._film(month=month))
+
+
+class APanelOpenedIsATitleViewedTests(_DetailsRouteTestCase):
+    """Opening a row's panel names the title, and the season on screen, to the
+    title store's refresh queue (app/metadata/refresh.py) — behind the page."""
+
+    def setUp(self):
+        super().setUp()
+        self.seen = []
+        recorder = patch.object(metadata_refresh, "viewed",
+                                lambda settings, wanted, **kw: self.seen.append(
+                                    (list(wanted), kw)))
+        recorder.start()
+        self.addCleanup(recorder.stop)
+
+    def test_a_shows_panel_names_its_season(self):
+        self._settle(_month_back(0))
+        self._panel()
+        (wanted, kw), = self.seen
+        self.assertEqual(kw["budget"], metadata_refresh.PANEL_BUDGET)
+        self.assertEqual([(w.media, w.season, str(w.ids.get("trakt"))) for w in wanted],
+                         [("show", 2, "7")])
+
+    def test_a_films_panel_names_the_film(self):
+        AWatchedFilmOpensItsPanelTests._watch(self)
+        AWatchedFilmOpensItsPanelTests._film(self)
+        (wanted, kw), = self.seen
+        self.assertEqual(kw["budget"], metadata_refresh.PANEL_BUDGET)
+        self.assertEqual([(w.media, w.season, str(w.ids.get("tmdb"))) for w in wanted],
+                         [("movie", None, "5")])

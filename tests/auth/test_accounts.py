@@ -21,7 +21,7 @@ from fastapi import Response
 from app import auth, db
 from app.config import Settings
 from tests import support
-from tests.support import migrated_db
+from tests.support import migrated_db, settled
 
 DAY = 24 * 3600
 
@@ -252,6 +252,8 @@ class SessionTests(AuthTestCase):
         later = start + 10 * DAY
         current = await auth.validate_session(session_id, now=later)
         self.assertEqual(current.expires_at, later + 14 * DAY)
+        # The slide is written once the answer has gone (after_response.write).
+        await settled()
         row = await db.fetch_one("SELECT * FROM sessions WHERE id = ?", (session_id,))
         self.assertEqual(row["expires_at"], later + 14 * DAY)
         self.assertEqual(row["last_seen_at"], later)
@@ -294,6 +296,7 @@ class SessionTests(AuthTestCase):
         for step in range(1, 6):  # +10d through +50d: all valid, all sliding
             now = start + step * 10 * DAY
             current = await auth.validate_session(session_id, now=now)
+            await settled()
             self.assertIsNotNone(current, f"should still be valid at +{step * 10}d")
             self.assertEqual(current.absolute_expires_at, start + 60 * DAY,
                              "the absolute cap must never move")

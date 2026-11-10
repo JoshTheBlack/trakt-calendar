@@ -9,7 +9,7 @@ time it talks to anything. Reusing one client per service removes that cost
 entirely and keeps the connections warm besides.
 
 The Trakt transport already knew this and had its own pooled client. Everything
-else in the app did not, and app/media/tmdb.py had resorted to importing Trakt's — a
+else in the app did not, and the TMDB client had resorted to importing Trakt's — a
 provider package handing out sockets to modules that are not providers. This
 module is that one good implementation, extracted so there is exactly one copy of
 the awkward part (see LOOP-KEYED below) and no reason for the next service to
@@ -46,13 +46,68 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import logging
+import time
+from collections import deque
 
+import anyio.to_thread
 import httpx
 
 from .perftrace import span
 
 logger = logging.getLogger(__name__)
+
+# WHAT ONE PIECE OF WORK HAS SENT, per pool, while a `tally` is open — see there.
+_tally: contextvars.ContextVar[dict[str, int] | None] = contextvars.ContextVar(
+    "http_pool_tally", default=None)
+
+
+@contextlib.contextmanager
+def tally():
+    """`with http_pool.tally() as sent:` — `sent[name]` is how many requests the
+    code inside has sent through the pool called `name`, each retry counted, and
+    a pool nothing went through absent.
+
+    WHY A COUNT OF REQUESTS AND NOT OF ITEMS. A background job paced by how many
+    items it handles is paced by a guess about what each one costs, and the cost
+    is not fixed: an answer the response cache holds sends nothing, and one that
+    misses can send several. A service's allowance is stated in requests, so a
+    job that must leave most of it to the pages counts what it actually SENT.
+
+    THIS WORK'S REQUESTS ONLY. The count lives in a context variable, so a page
+    served while the job runs is not counted against it; a task the job starts
+    inherits the count, which is right — what it sends, the job caused.
+    """
+    sent: dict[str, int] = {}
+    token = _tally.set(sent)
+    try:
+        yield sent
+    finally:
+        _tally.reset(token)
+
+
+# HOW FAR BACK A POOL REMEMBERS WHEN ITS REQUESTS LEFT: five minutes, the window
+# Trakt states its allowance over. Older moments are dropped as new ones arrive,
+# so what is held is bounded by the pool's own rate.
+RECENT_SECONDS = 300
+
+
+def sent_within(name: str, seconds: float) -> int:
+    """How many requests every pool called `name` has sent in the last `seconds`
+    (at most RECENT_SECONDS), WHOEVER SENT THEM.
+
+    THE WHOLE APP'S SPEND, where `tally` is one job's. A job that must leave a
+    service's allowance to the pages cannot know what else is spending it — a
+    backlog drain beside it, a viewer's busy minute — and a fixed share of its
+    own sat on top of whatever that was: MEASURED, the background alone sent
+    Trakt sixty reads in a busy minute against an allowance of a hundred a
+    minute. Asking this first lets such a job take only what is left under its
+    ceiling.
+    """
+    since = time.monotonic() - min(seconds, RECENT_SECONDS)
+    return sum(pool._sent_since(since) for pool in _pools if pool.name == name)
+
 
 # Every Pool ever constructed, so shutdown can close them all without main.py
 # having to name each one — a list it would inevitably fall out of step with.
@@ -79,6 +134,20 @@ def _shared_ssl_context():
     return _ssl_context
 
 
+async def load_trust_store() -> None:
+    """Read the trust store now, on a worker thread, so no client has to.
+
+    THE FIRST CLIENT OF A PROCESS USED TO PAY FOR IT ON THE EVENT LOOP. A client
+    is built inside a request or a heartbeat job, and building the context there
+    parsed the CA bundle where every other request was waiting — sampled at
+    ~350 ms on Windows, the first heartbeat's integration health check holding
+    the loop that long while pages were already being served. main.lifespan
+    calls this before the server takes a request; every client after finds the
+    context built. Calling it again costs nothing.
+    """
+    await anyio.to_thread.run_sync(_shared_ssl_context)
+
+
 class Pool:
     """A lazily-built, loop-keyed httpx client for one outbound service.
 
@@ -96,7 +165,7 @@ class Pool:
     """
 
     __slots__ = ("name", "max_connections", "timeout", "concurrency",
-                 "_loop", "_client", "_sem")
+                 "_loop", "_client", "_sem", "_recent")
 
     def __init__(self, name: str, *, max_connections: int = 8,
                  timeout: float = 30.0, concurrency: int | None = None):
@@ -107,6 +176,9 @@ class Pool:
         self._loop = None
         self._client: httpx.AsyncClient | None = None
         self._sem: asyncio.Semaphore | None = None
+        # The monotonic moments this pool's requests left, oldest first, for
+        # `sent_within`; nothing older than RECENT_SECONDS is kept.
+        self._recent: deque[float] = deque()
         _pools.append(self)
 
     def _rebind(self) -> None:
@@ -135,8 +207,33 @@ class Pool:
                 limits = httpx.Limits(max_connections=self.max_connections,
                                       max_keepalive_connections=self.max_connections)
                 self._client = httpx.AsyncClient(timeout=self.timeout, limits=limits,
-                                                 verify=_shared_ssl_context())
+                                                 verify=_shared_ssl_context(),
+                                                 event_hooks={"request": [self._count]})
         return self._client
+
+    async def _count(self, request: httpx.Request) -> None:
+        """One request leaving through this pool: counted for an open `tally`, and
+        its moment kept for `sent_within`."""
+        sent = _tally.get()
+        if sent is not None:
+            sent[self.name] = sent.get(self.name, 0) + 1
+        now = time.monotonic()
+        self._recent.append(now)
+        self._forget_before(now - RECENT_SECONDS)
+
+    def _forget_before(self, moment: float) -> None:
+        while self._recent and self._recent[0] < moment:
+            self._recent.popleft()
+
+    def _sent_since(self, moment: float) -> int:
+        """How many of this pool's requests left at or after `moment`."""
+        self._forget_before(time.monotonic() - RECENT_SECONDS)
+        count = 0
+        for when in reversed(self._recent):
+            if when < moment:
+                break
+            count += 1
+        return count
 
     def gate(self):
         """`async with pool.gate():` around a request, to honour `concurrency`.
@@ -214,6 +311,19 @@ class Pacer:
             return None
         self._tokens -= 1
         return wait
+
+    def full(self) -> bool:
+        """Whether the bucket holds its whole burst now — the state a new pacer
+        starts in, so one that is full can be dropped and made again later with
+        no difference anybody could observe. A bucket last used on another loop
+        counts as full, since `claim` refills it there anyway."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return True
+        if self._loop is not loop:
+            return True
+        return self._tokens + (loop.time() - self._stamp) * self.rate >= self.burst
 
 
 async def aclose_all() -> None:

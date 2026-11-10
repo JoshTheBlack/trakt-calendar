@@ -22,7 +22,7 @@ from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta, timezone
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:  # import-only-for-annotations: endpoints.py imports Media from here
@@ -65,13 +65,30 @@ _IMAGE_PARAMS = "q=90&w=440&we"
 # predictable format is one less thing for it to negotiate.
 POSTER_PARAMS = "w=500&h=750&fit=contain&cbg=000000&output=jpg&q=88"
 
+# WHAT A TITLE'S LOGO IS ASKED FOR, for a details panel's header. `output=png`
+# because a logo is lettering on transparency and the card's params let the proxy
+# pick a format — and because TMDB serves some logos as SVG, which the proxy
+# rasterises (MEASURED: an SVG asked with no output came back image/png, and
+# 8 KB at this size). Bounded on both sides, twice the header's drawn size, and
+# never enlarged: a logo is often several times wider than it is tall.
+LOGO_PARAMS = "w=600&h=160&fit=inside&we&output=png"
 
-def proxied_image(url: str | None, params: str | None = None) -> str | None:
+
+def proxied_image(url: str | None, params: str | None = None, *,
+                  fallbacks: Sequence[str] = (), report: str = "") -> str | None:
     """A poster URL addressed through the shared image proxy.
 
     `params` overrides what is asked of the proxy, for a caller whose picture is
     not a card in a browser — see POSTER_PARAMS. The proxy HOST is not
     overridable, which is the part this function exists to keep in one place.
+
+    `fallbacks` ARE TRIED IN ORDER WHEN THE PICTURE WILL NOT LOAD, by the proxy
+    and with no script: each rides as its `default=`, itself proxied with the
+    rest behind it. MEASURED against wsrv.nl, 2026-10-26: an origin answering 404
+    with a proxied `default` answers 302 to that address, which a browser follows
+    and the Content-Security-Policy admits because it is this same host — a RAW
+    default is redirected to the origin's own host, which img-src refuses. Costs
+    nothing while the first picture loads (artwork.ranked says what goes here).
 
     ONE IMPLEMENTATION FOR EVERY SOURCE, which is the point of it living here
     rather than in either provider package. The rule is about how this app treats
@@ -80,6 +97,13 @@ def proxied_image(url: str | None, params: str | None = None) -> str | None:
     CDN", and Simkl publishes this exact proxy as their own recommended form. A
     per-provider copy would be the same policy written twice, free to drift, with
     neither copy able to say it was the rule.
+
+    `report` IS THIS APP'S OWN ADDRESS FOR "THIS PICTURE WILL NOT LOAD", and it
+    replaces the fallbacks: carried RAW as the `default`, so the proxy sends the
+    browser to it — the same host the page is on, which img-src admits — and
+    the server decides what comes next (app/metadata/pictures.py). Only an
+    address on this app's own origin belongs here: a raw default anywhere else
+    is the hotlink the proxy exists to prevent.
 
     RETURNS THE INPUT UNCHANGED WHEN THERE IS NOTHING TO PROXY -- an empty or
     absent URL stays empty, so a title with no artwork does not acquire a proxy
@@ -91,7 +115,26 @@ def proxied_image(url: str | None, params: str | None = None) -> str | None:
     text = str(url)
     if text.startswith(_IMAGE_PROXY):
         return text
-    return f"{_IMAGE_PROXY}?url={quote(text, safe='')}&{params or _IMAGE_PARAMS}"
+    address = f"{_IMAGE_PROXY}?url={quote(text, safe='')}&{params or _IMAGE_PARAMS}"
+    if report:
+        return address + f"&default={quote(str(report), safe='')}"
+    rest = [str(fallback) for fallback in fallbacks if fallback and str(fallback) != text]
+    if rest:
+        behind = proxied_image(rest[0], params, fallbacks=rest[1:])
+        address += f"&default={quote(behind, safe='')}"
+    return address
+
+
+def proxied_origin(address: str | None) -> str:
+    """The origin address a `proxied_image` result was made from, or "" for
+    anything else — what a page that re-addresses a picture it was handed reads
+    back, rather than carrying a second copy of the origin beside the proxied
+    one (app/metadata/pictures.py's CardPictures)."""
+    text = str(address or "")
+    if not text.startswith(_IMAGE_PROXY):
+        return ""
+    found = parse_qs(urlsplit(text).query).get("url")
+    return found[0] if found else ""
 
 
 class SourceNotModified(Exception):
@@ -131,6 +174,30 @@ class SourceUnavailable(Exception):
         self.status = status
 
 
+class SourcePending(SourceUnavailable):
+    """A source WILL answer for this window, but its answer is still being worked
+    out behind the request — and `ready` says when it can be read.
+
+    WHAT IT IS FOR. Some answers cannot be read off one listing: TMDB publishes
+    no season-premieres calendar, so its answer is DERIVED from every show airing
+    that week, a few hundred lookups measured at tens of seconds per week cold.
+    A fill a reader is waiting on must not wait for that, so the source starts
+    the work, raises this at once, and the caller stores what everybody else
+    said. `ready` is an awaitable that finishes when the answer can be read (a
+    fetch of the same window then returns it) and raises when the work failed.
+
+    A SourceUnavailable, so a caller that does not know the difference treats the
+    source as one that could not answer, which is the safe reading. The calendar
+    cache knows it (app/calendar/cache.py): it records the source as asked and
+    not yet answered, does not call that a failure, and fills the window again
+    for that source alone once `ready` finishes.
+    """
+
+    def __init__(self, message: str, ready):
+        super().__init__(message)
+        self.ready = ready
+
+
 class Media(StrEnum):
     """The two kinds of title this app deals in.
 
@@ -160,10 +227,26 @@ class Source(StrEnum):
     An enum rather than a bare string because this value is written into
     `Item.source` by every provider and read back to decide who to ask for a
     detail lookup — a typo in either half would produce a record that silently
-    belongs to nobody. With two members that is no longer hypothetical: the same
-    title can arrive from both, and which one a given field came from is a fact
-    the reader has to be able to state.
+    belongs to nobody. With several members that is no longer hypothetical: the
+    same title can arrive from more than one, and which one a given field came
+    from is a fact the reader has to be able to state.
+
+    THE DECLARATION ORDER IS THE APP'S ONE ORDER, and every registry walk reads
+    it: who describes a title (the details panel AND the tracker's season
+    totals, app/providers/detail_source.py), whose value a card shows for a
+    viewer who has stated no preference (app/calendar/resolve.py), whose artwork
+    is tried first (app/media/posters.py), and which service a list of them names
+    first. A viewer's own metadata order still wins for that viewer; this is the
+    order for everybody who has not stated one.
+
+    TMDB IS FIRST because it is the widest catalogue of the three and the one
+    whose ids every other service already states: a title Trakt or Simkl lists
+    almost always carries a tmdb id, so leading with TMDB gives every title one
+    describer and one numbering, and leaves Trakt and Simkl to answer what TMDB
+    does not know or holds no episodes of (detail_source.for_season). It keeps no
+    watch history, so it is never a tracker source.
     """
+    TMDB = "tmdb"
     TRAKT = "trakt"
     SIMKL = "simkl"
 
@@ -184,7 +267,7 @@ class Source(StrEnum):
 # where it is unambiguous: a Trakt record's slug is Trakt's, and the Trakt
 # calendar addresses its records by it. Nothing stores it — the tracker's rows
 # keep the namespaced pair only — and an id map merged from two services must
-# not carry it (see distrakt/arrival.py's `canonical_ids`).
+# not carry it (see app/metadata/ids.py's `canonical`).
 ID_KEYS = ("trakt", "slug", "trakt_slug", "simkl", "simkl_slug",
            "tvdb", "tmdb", "imdb", "mal")
 
@@ -294,7 +377,15 @@ def resolve_key(media: Media | str, ids: Mapping[str, Any]) -> ItemKey | None:
 # The fields on `Record` that resolution writes and storage never does. See
 # `Record.field_sources` for what they hold and `Record.to_dict` for why they are
 # the one thing excluded from a stored record by name.
-PROVENANCE_FIELDS = ("field_sources", "alternatives", "source_links")
+PROVENANCE_FIELDS = ("field_sources", "alternatives", "links", "listed_airings")
+
+
+class ServiceLink(NamedTuple):
+    """One service's page for a title a card draws, and whether that service
+    LISTS the airing the card is drawn from — or only knows the title."""
+    source: str
+    url: str
+    listed: bool
 
 
 @dataclass
@@ -379,6 +470,10 @@ class Record:
     episode_title: str = ""
     season: int | None = None
     episode_number: int | None = None
+    # WHICH FINALE THE EPISODE IS (an EPISODE_MARKS key), on a calendar whose
+    # cards say so (endpoints.Endpoint.marked) — "" everywhere else, and on
+    # every record a service hands over: it is read from the title store.
+    episode_mark: str = ""
 
     # SIMKL'S OWN "IS THIS ACTUALLY A FILM" ANSWER, carried on the record so
     # app/calendar/filter.py's read-time prune can act on it — see
@@ -409,6 +504,19 @@ class Record:
     # must be able to tell "no release blocks" from "nobody has looked yet".
     release_types_by_country: dict[str, list[int]] = field(default_factory=dict)
 
+    # TWO FACTS ONLY A CATALOGUE STATES — TMDB's keyword names (lower-case) and,
+    # for a show, its type as a slug ("scripted", "talk-show") — read by
+    # app/calendar/filter.py's keyword and show-type rules.
+    #
+    # NONE MEANS "THIS RECORD DOES NOT SAY", and it is not the same answer as an
+    # empty value. Roughly six TMDB titles in ten have no keywords at all, so an
+    # empty list from a description is a real answer an include filter judges,
+    # while a service that never states keywords, or a listing nobody has
+    # described yet, has no answer and is shown unjudged. `enriched` cannot carry
+    # the difference: a Trakt record is enriched and says nothing about either.
+    keywords: list[str] | None = None
+    show_type: str | None = None
+
     # WHETHER genres/network/country/certification/runtime/status/overview ARE
     # REAL ANSWERS OR JUST THIS RECORD'S DEFAULTS. True for every source that
     # carries these fields on its calendar payload already (Trakt does, so it
@@ -422,8 +530,10 @@ class Record:
     enriched: bool = True
 
     # WHO SUPPLIED WHAT, once several sources have described this airing.
-    # {field: [source, ...]} for every field any of them filled in, and
-    # {field: {source: value}} for the ones where they filled it in DIFFERENTLY.
+    # {field: [source, ...]} for every field any of them filled in, the winner
+    # first, and {field: {source: value}} for the ones where they filled it in
+    # DIFFERENTLY — a value per thing they said, a difference of spelling being
+    # none (app/calendar/resolve.py's `_distinct`), and a rating always.
     # Both are set by app/calendar/resolve.py and by nothing else, and both are
     # empty on a record only one source described — which is what keeps them free
     # for the overwhelming majority of instances, where they always will be.
@@ -438,20 +548,47 @@ class Record:
     field_sources: dict[str, list[str]] = field(default_factory=dict)
     alternatives: dict[str, dict[str, Any]] = field(default_factory=dict)
 
-    # {source: detail_url} for every service that described this airing.
+    # EVERY ID THE TITLE STORE KNOWS FOR THIS TITLE — each service's own as well
+    # as the shared ones, whoever stated them (app/metadata/identity.py's row) —
+    # set by the calendar's read beside the ids this service stated. NOT MERGED
+    # INTO `ids`, and that is the point of a second field: `ids` is what this
+    # SERVICE said and what a card is keyed and grouped by, and a service's own id
+    # is that service's to state (identity.complete). This is only ever read to
+    # ADDRESS a service — a card's button for a service that knows the title
+    # though it does not list this airing (`links`).
+    known_ids: dict[str, Any] = field(default_factory=dict)
+
+    # [ServiceLink] — WHERE THIS TITLE LIVES AT EVERY SERVICE THAT KNOWS IT, in
+    # declared order, each saying whether that service LISTED this airing or only
+    # knows the title (its id is in `known_ids`).
     #
     # WHY IT IS NOT `detail_url` PLURAL AND WHY IT IS NOT A PREFERENCE. Exactly
     # one service is the card's — see app/calendar/resolve.py's SOURCE_FIELD, and
     # `detail_url` is one of the three fields that travel with it, because a page
     # on one service is not an answer another service gave. This is the other
-    # thing a merged card knows and had no way to say: that BOTH services have a
-    # page for this title. It is a set of destinations, not a value anybody won,
-    # so no preference orders it and resolution states no opinion about it — it is
-    # collected, in declared source order, and offered.
+    # thing a card knows: that every service that knows the title has a page for
+    # it. It is a set of destinations, not a value anybody won, so no preference
+    # orders it and resolution states no opinion about it — it is collected, in
+    # declared source order, and offered.
     #
     # NOT STORED, for the same reason the two maps above are not: it exists only
-    # after several records have been compared, which happens at read.
-    source_links: dict[str, str] = field(default_factory=dict)
+    # after a card's records have been put together, which happens at read.
+    links: list[ServiceLink] = field(default_factory=list)
+
+    # {source: {"air_ts", "date_only"}} — WHEN EACH SERVICE THAT DESCRIBED THIS
+    # AIRING SAYS IT AIRS. The card is drawn on ONE service's day — the viewer's
+    # first, app/calendar/resolve.py's `resolve_airing` — and this is what lets
+    # it say that the others gave a different one (`render`'s `air_choices`).
+    # Not stored, for the reason the maps above are not.
+    listed_airings: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    # WHICH STORED EPISODE THIS LISTING IS FILED ON — "{title key}|{unit}", the
+    # title store's episode row (app/metadata/episodes.py) — set by the
+    # calendar's read and by nothing else. Listings sharing it are one episode,
+    # and so one card (app/calendar/cache.py's `group_records`); a record with
+    # none (one a service has just described, never stored) is a card of its
+    # own. Not stored, and never compared across reads.
+    card: str = ""
 
     def shown_source(self, field_name: str) -> str:
         """Which service's stored value this record is carrying for `field_name`.
@@ -464,12 +601,14 @@ class Record:
         the reader is looking at from one word.
 
         THREE CASES, ONE READING. Where the services disagreed, `alternatives`
-        holds every value they gave and the one equal to what this record carries
-        is the winner — the same comparison a card makes to decide which service's
-        mark to draw beside the field. Where they agreed, or only one of them
-        spoke, `field_sources` names who spoke and any of them is a correct answer
-        because their values are identical. Where neither map is populated — a
-        group only one source described, which is every group on a single-source
+        holds a value per thing they said and the one equal to what this record
+        carries is the winner — the same comparison a card makes to decide which
+        service's mark to draw beside the field. Where they agreed — the same
+        value, or the same said two ways ("Tokyo MX", "TOKYO MX";
+        app/calendar/resolve.py's `_distinct`) — or only one of them spoke,
+        `field_sources` names who spoke with the winner first, whose spelling is
+        the one this record carries. Where neither map is populated — a group
+        only one source described, which is every group on a single-source
         instance — that source is the answer.
         """
         stated = self.alternatives.get(field_name)
@@ -567,6 +706,12 @@ class Item(Record):
     # matching the display form breaks every multi-word genre while leaving
     # single-word ones working.
     genre_slugs: list[str] = field(default_factory=list)
+    # [(service, "Fri 20 Nov 20:00")] — EVERY SERVICE'S DAY AND TIME, in this
+    # viewer's zone, when the services that described this airing disagree about
+    # either; empty when they agree, or only one spoke. The card draws them side
+    # by side under each service's mark, the way it draws two ratings: which day
+    # the card sits on is one service's answer, and the others are not lost.
+    air_choices: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def airing_key(self) -> str:
@@ -662,6 +807,64 @@ def epoch_moment(air_ts) -> datetime:
 
 
 
+# HOW A DAY IS WRITTEN FOR A READER: a card's date and every episode row in a
+# details panel, whichever service dated it — one spelling, so two lists read
+# alike.
+AIR_DISPLAY = "%d %b %Y"
+
+
+def genre_label(slug: str) -> str:
+    """A genre's slug in its display form ("game-show" -> "Game Show"). Every
+    service stores slugs, because filters match on them; this is the one reading
+    of them a person sees — a card, a details panel's chips."""
+    return str(slug).replace("-", " ").title()
+
+
+def status_label(status: str) -> str:
+    """A title's status as a details panel draws it ("returning series" ->
+    "Returning Series"), from the lower-case word a service's row stores."""
+    return str(status or "").replace("_", " ").title()
+
+
+# THE ONE STATUS VOCABULARY — Trakt's words, lower-cased, which is what TMDB's
+# reader maps its own onto (app/providers/tmdb/normalize.py's STATUS_WORDS) and
+# what a stored row and the details panel already speak. A service with words of
+# its own says what each may mean in these (`Provider.status_means`), so two
+# services' statuses can be compared without either being read as the other.
+STATUS_WORDS = frozenset({
+    "returning series", "in production", "planned", "pilot", "ended", "canceled",
+    "released", "post production", "rumored",
+})
+
+
+def status_spoken(status: str) -> frozenset[str]:
+    """`Provider.status_means` for a service that speaks STATUS_WORDS: its word,
+    folded, and nothing else — a word outside the vocabulary means only itself."""
+    word = " ".join(str(status or "").split()).casefold()
+    return frozenset({word}) if word else frozenset()
+
+
+# AN EPISODE'S PLACE IN ITS SEASON THAT A DETAILS PANEL MARKS, and how each
+# reads. Services word it differently — TMDB's `episode_type` says "finale" and
+# "mid_season", Trakt's "season_finale", "series_finale" and "mid_season_finale"
+# — so each says which of these its own word is (`Provider.episode_mark`), and a
+# word a service has not mapped marks nothing rather than being read as another
+# service's.
+EPISODE_MARKS: dict[str, str] = {"finale": "Finale", "mid_season_finale": "Mid-season finale"}
+
+
+# WHAT KIND OF SHOW A TITLE IS — this app's slugs and how each reads. A catalogue
+# that states a type maps its own words onto these (app/providers/tmdb/
+# normalize.py's TMDB_SHOW_TYPES), and the show-type filter offers them as chips
+# (app/calendar/vocab.py). One table, so a chip and a stored type cannot spell a
+# type two ways.
+SHOW_TYPES: dict[str, str] = {
+    "scripted": "Scripted", "miniseries": "Miniseries", "reality": "Reality",
+    "documentary": "Documentary", "talk-show": "Talk Show", "news": "News",
+    "video": "Video",
+}
+
+
 def render(record: Record, tz: ZoneInfo) -> Item:
     """The Item one viewer sees for `record`.
 
@@ -690,12 +893,10 @@ def render(record: Record, tz: ZoneInfo) -> Item:
     longer say where a picture came from. Proxying here reaches the browser and
     nothing else.
     """
-    moment = epoch_moment(record.air_ts)
-    if not record.date_only:
-        moment = moment.astimezone(tz)
+    moment = local_moment(record.air_ts, record.date_only, tz)
     values = {f.name: getattr(record, f.name) for f in fields(Record)}
     slugs = [str(g) for g in record.genres]
-    values["genres"] = [g.replace("-", " ").title() for g in slugs]
+    values["genres"] = [genre_label(g) for g in slugs]
     # BOTH SIDES OR NEITHER. `alternatives["poster"]` holds each service's own
     # address, and the card decides which service is on screen by asking which of
     # those the rendered poster EQUALS (see _card.html's `won_by`) — so proxying
@@ -714,14 +915,140 @@ def render(record: Record, tz: ZoneInfo) -> Item:
         **values,
         genre_slugs=slugs,
         air_date=moment.strftime("%Y-%m-%d"),
-        air_display=moment.strftime("%d %b %Y"),
+        air_display=moment.strftime(AIR_DISPLAY),
         # NO TIME FOR A DATE. A date-only record is pinned at UTC midnight so it
         # lands on its day for everyone, and that midnight is bookkeeping, not an
         # hour anybody named: printed, every film card and every day-only premiere
         # claimed to air at 00:00.
         air_time="" if record.date_only else moment.strftime("%H:%M"),
         day_of_week=moment.strftime("%A"),
+        air_choices=_air_choices(record.listed_airings, tz),
     )
+
+
+def local_moment(air_ts, date_only: bool, tz: ZoneInfo) -> datetime:
+    """An instant in the viewer's zone — or, for a date, the date itself, read
+    back in UTC where it was pinned and never converted (see Record.date_only).
+    THE ONE ANSWER TO WHICH LOCAL DAY A CARD IS: `render` draws it, and
+    app/calendar/query.py places a card on it before anything is drawn."""
+    moment = epoch_moment(air_ts)
+    return moment if date_only else moment.astimezone(tz)
+
+
+def _air_choices(listed: Mapping[str, Mapping[str, Any]], tz: ZoneInfo) -> list[tuple[str, str]]:
+    """Every service's day and time for one airing, in this viewer's zone, when
+    they DISAGREE — a different day, or two different times; a service that
+    gives only the date agrees with any time on it. Empty otherwise.
+
+    HERE AND NOT AT RESOLUTION, because a disagreement is about the LOCAL day:
+    01:00 UTC and 23:00 UTC the day before are one evening in New York and two
+    days in Tokyo."""
+    shown = []
+    for name, airing in listed.items():
+        date_only = bool(airing.get("date_only"))
+        moment = local_moment(airing.get("air_ts") or 0, date_only, tz)
+        shown.append((name, moment.strftime("%a %d %b"),
+                      "" if date_only else moment.strftime("%H:%M")))
+    days = {day for _name, day, _time in shown}
+    times = {time for _name, _day, time in shown if time}
+    if len(days) < 2 and len(times) < 2:
+        return []
+    return [(name, f"{day} {time}".rstrip()) for name, day, time in shown]
+
+
+@dataclass(frozen=True)
+class StoreColumns:
+    """The columns a service's GROUP holds in each of the title store's three
+    tables — one row per title, per season and per episode, every service's
+    facts side by side, each column spelled `{source}_{name}` (app/db.py's
+    MIGRATION_49 built them).
+
+    A SERVICE HAS ONLY THE COLUMNS IT CAN STATE, and says which here, so the
+    store never names a column for a service that never fills it and never reads
+    one service's empty column as that service's answer. Each package's own
+    declaration is the one place that fact is written: Simkl's catalogue states
+    no cast and no homepage, Trakt's no anime format, only TMDB's keywords — and
+    a service that starts stating a field is one ALTER TABLE and this.
+
+    What every group holds whoever supplies it (which row it is, and its clocks)
+    is spelled once below (`TITLE_KEEPING`, `SEASON_KEEPING`, `EPISODE_LISTING`,
+    `EPISODE_KEEPING`); everything else a package lists word by word.
+    tests/providers/test_protocol_conformance.py holds every registered service
+    to a set for every table, and tests/kernel/test_title_store_migration.py
+    holds the tables to exactly what is declared.
+    """
+    titles: frozenset[str] = frozenset()
+    seasons: frozenset[str] = frozenset()
+    episodes: frozenset[str] = frozenset()
+
+
+# WHAT EVERY SERVICE'S GROUP OF A TITLE ROW HOLDS that is not something the
+# service said: its own id for the title (NULL where the service has no group —
+# the group's presence, with `fetched_at`), the ids it stated, the address of
+# its page, the title folded for search, whether a description has answered
+# for it, and its clocks — `fetched_at` the age of its OLDEST word, which a
+# service's storage ceiling is read from.
+TITLE_KEEPING = frozenset({"id", "ids_json", "detail_url", "title_fold", "enriched",
+                           "fetched_at", "stale_after", "failed_at", "fail_count"})
+# A season's: its clocks (`fetched_at` NULL where the service has no group).
+SEASON_KEEPING = frozenset({"fetched_at", "stale_after", "failed_at", "fail_count"})
+# AN EPISODE'S LISTING, for a service that publishes a calendar: the instant it
+# lists the episode at, a bitmask of the calendars that instant is on (each
+# Endpoint's `bit`) and of those it reached through a search rather than the
+# feed, which half of the episode's coordinate the listing did NOT state (a
+# listing naming an episode number and no season joins a numbered episode
+# another service lists that day, and has to be able to leave it again), the
+# label it spelled, when it was last stored, and every further instant the same
+# service lists the episode at, each with masks of its own.
+EPISODE_LISTING = frozenset({"air_ts", "date_only", "calendars", "searched", "unstated",
+                             "label", "listed_at", "repeats_json"})
+# An episode description's clocks (`fetched_at` 0 for a listing's stub nothing
+# has described, NULL where the service has no description).
+EPISODE_KEEPING = frozenset({"fetched_at", "stale_after"})
+
+
+class Reach(StrEnum):
+    """HOW FAR ONE ANSWER FOR A CALENDAR WINDOW SPEAKS — what a fill stores from
+    it and what it takes off by it (app/calendar/cache.py's `answer_span`,
+    app/calendar/entries.py's `store_span`). A declaration per source, because
+    it is a fact about how that service publishes its calendar."""
+    # EXACTLY THE WINDOW ASKED, and nothing past it. Trakt's calendar answers
+    # entries weeks beyond the `days` it was given — a 7-day request has come
+    # back carrying entries two months past its end — and those are no answer
+    # about the later weeks: they are not every entry of them.
+    WINDOW = "window"
+    # EVERY DAY OF THE CALENDAR MONTHS THE WINDOW TOUCHES: a calendar published
+    # as one file per month (Simkl's archive) answers a window by reading each
+    # month's file whole, and is authoritative for every day of each it read.
+    MONTHS = "months"
+
+
+
+@dataclass(frozen=True)
+class DrawnFrom:
+    """A calendar a source LISTS WITHOUT PUBLISHING IT: its listings on another
+    of its own calendars, kept where a second service's word about the episode
+    says it belongs.
+
+    Simkl publishes no finales — nothing in its calendar or catalogue flags one
+    — but every episode it lists is on its All Episodes, and TMDB's season
+    lists say which episode ends a season (`episode_type`). So Simkl's Season
+    Finales are its All Episodes listings whose episode TMDB marks a finale or a
+    mid-season finale (`Provider.episode_mark` into EPISODE_MARKS), read from
+    the title store at READ (app/calendar/query.py's `read_rows`): nothing is
+    fetched or stored for the calendar itself, and a mark learned later puts the
+    card on the next read. The source fetches nothing for `endpoint`
+    (`answers` stays False — no fill asks it, no coverage row is written for
+    it); a read of `endpoint` makes the source's `listings_of` windows current
+    instead (app/calendar/cache.py's `_span_views`).
+
+    A DECLARATION, NEVER A FALLBACK: which service's word keeps a listing is
+    named here, it keeps the listing whoever else lists the episode, and the
+    source answers for its own listings alone.
+    """
+    endpoint: str        # the calendar listed this way
+    listings_of: str     # the source's own calendar its listings come from
+    marked_by: Source    # whose word about the episode keeps a listing
 
 
 @dataclass(frozen=True)
@@ -745,9 +1072,78 @@ class Capabilities:
     # history, progress, ratings. False means it can populate a calendar but can
     # never back the tracker.
     private_user_data: bool
+    # HOW LONG ANYTHING THIS SOURCE ANSWERED MAY BE KEPT after it was last
+    # obtained, in seconds — a term of the service's own, which the title store's
+    # sweep enforces on every row it holds (app/metadata/rows.py's
+    # sweep_past_ceilings) — or None where the service sets none and this app's
+    # own retention decides. REQUIRED, with no default: a service that forgot to
+    # say would be kept for ever by omission, which is the one way to be wrong
+    # about another party's terms that nothing would ever notice.
+    retain_seconds: int | None
+    # HOW FAR AN ANSWER FOR ONE CALENDAR WINDOW SPEAKS (`Reach`). REQUIRED, with
+    # no default: claiming too little reach costs a request, claiming too much
+    # takes listings off days the answer never spoke for, and which one a source
+    # forgot would be decided by nobody.
+    reach: Reach
+    # Whether every search box asks this source WITHOUT anybody choosing it. A
+    # source that is not is asked only when a viewer who has linked it adds it
+    # ("also search …" — providers.for_search), with that viewer's own token. A
+    # DECLARATION PER SOURCE rather than a name in the registry, so which
+    # catalogue a box searches first is a fact each package states about itself
+    # and never one service standing in for another.
+    searched_by_default: bool = False
+    # Whether a calendar listing this source stores SPARSE — `enriched=False`,
+    # its network, status and certification unknown — is completed by DESCRIBING
+    # the title through this source's own DetailPort: the title store's refresh
+    # queue asks it for every such row (app/metadata/refresh.py's
+    # `queue_listed`). A DECLARATION PER SOURCE, because how a sparse listing is
+    # completed differs by service and is that service's fact: a listing that
+    # arrives complete needs nothing, and one whose per-title read needs a
+    # viewer's token is completed some other way (Simkl's, by
+    # app/calendar/enrich.py's drain, which says why).
+    describes_sparse_listings: bool = False
+    # Whether what this source's own row in the title store says about a title
+    # JOINS EVERY CALENDAR CARD OF THAT TITLE IT DOES NOT LIST — as a TITLE-ONLY
+    # record, a further opinion on the card's facts (its certification, language,
+    # network, genres, keywords) that is never a listing: it gives no card a day,
+    # an episode or its attribution, and never puts a card on anybody's calendar
+    # (app/calendar/cache.py's `with_title_only` holds what one may and may not
+    # do). A DECLARATION PER SOURCE, so which catalogue describes every card is a
+    # fact a package states about itself and never one service standing in for
+    # another: a catalogue whose descriptions are its point declares it; a
+    # service whose rows are what its own calendar listed has nothing to add to
+    # a card it did not list.
+    describes_every_card: bool = False
+    # WHICH COLUMNS THIS SOURCE'S GROUP HAS in the title store's tables
+    # (`StoreColumns`). Empty by default so a test double needs none; every
+    # REGISTERED source declares a set for every table, which the conformance
+    # test holds it to.
+    store_columns: StoreColumns = StoreColumns()
+    # CALENDARS THIS SOURCE LISTS WITHOUT PUBLISHING THEM (`DrawnFrom`), each
+    # from another of its own calendars by another service's word. Never among
+    # `endpoints`: nothing fetches them.
+    drawn_from: tuple[DrawnFrom, ...] = ()
 
     def answers(self, endpoint_key: str) -> bool:
+        """Whether this source PUBLISHES the calendar: a fill asks it."""
         return endpoint_key in self.endpoints
+
+    def drawn(self, endpoint_key: str) -> DrawnFrom | None:
+        """How this source lists a calendar it does not publish, or None."""
+        return next((d for d in self.drawn_from if d.endpoint == endpoint_key), None)
+
+    def authoritative(self, start: date, days: int) -> tuple[date, date]:
+        """[first, after) — every day an answer for [start, start + days) is
+        authoritative for (`reach`). An unknown reach is an error, never read as
+        either of the others."""
+        end = start + timedelta(days=days)
+        if self.reach is Reach.WINDOW:
+            return start, end
+        if self.reach is Reach.MONTHS:
+            last = end - timedelta(days=1)
+            return (date(start.year, start.month, 1),
+                    date(last.year + last.month // 12, last.month % 12 + 1, 1))
+        raise ValueError(f"no rule for an answer whose reach is {self.reach!r}")
 
     def covers(self, day: date, *, today: date | None = None) -> bool:
         """Whether `day` falls inside this source's reachable window."""
@@ -1174,11 +1570,28 @@ class SeasonsAnswer(NamedTuple):
     network: str
 
 
+# HOW MANY OF A TITLE'S CAST THE DETAILS PANEL DRAWS, whichever service names
+# them — one number, because one panel draws every service's answer.
+# TWENTY, BECAUSE THE GRID IS FIVE WIDE. The cap is this app's own — a season's
+# cast runs to 118 on some titles and the panel is not a filmography — and it was
+# 16, which left the last row three short of full at the default width. Four rows
+# of five fills the grid; anything under a full row reads as the list having been
+# cut off mid-thought rather than deliberately bounded.
+CAST_SHOWN = 20
+
+
 class TitleFacts(NamedTuple):
     """A title's name and network as one service states them (see
-    DetailPort.fetch_title_facts). "" where the service does not say."""
+    DetailPort.fetch_title_facts). "" where the service does not say.
+
+    `network_from` names ANOTHER service where the network was that one's — a
+    caller that asked the next service for a network the first left blank
+    (app/distrakt/live.py's title_facts) — and is "" where the network is the
+    same service's as the title, which is every port's own answer. The title
+    store files each word under the service that said it."""
     title: str
     network: str
+    network_from: str = ""
 
 
 class VideoKind(StrEnum):
@@ -1291,7 +1704,8 @@ class DetailPort(Protocol):
         ...
 
     async def fetch_details(self, settings: Settings, media, source_id,
-                            season: int | None, *, cache_only: bool = False) -> dict:
+                            season: int | None, *, cache_only: bool = False,
+                            fresh: bool = False) -> dict:
         """One title, in THIS SOURCE's own id space, as the modal's field set.
 
         `source_id` is the id this source knows the title by — the value under
@@ -1302,12 +1716,38 @@ class DetailPort(Protocol):
         `cache_only=True` serves whatever is already cached and makes no outbound
         call, which is what the public share pages use so a visitor's click can
         never spend the owner's rate limit. Fields with nothing cached behind them
-        come back empty and the modal renders around them.
+        come back empty and the modal renders around them. `fresh=True` is the
+        opposite: what the response cache holds is not answer enough, and the
+        service is asked again (revalidated where it states a validator) — what
+        the title store's refresh asks with (app/metadata/refresh.py).
+
+        THE ANSWER IS WHAT THE SERVICE SAID, NOT HOW A PAGE DRAWS IT, because the
+        title store keeps it (app/metadata/descriptions.py) and every surface
+        draws the stored copy: `poster` and each cast member's `headshot` are
+        ORIGIN addresses, and each episode is {number, title, rating, overview,
+        first_aired} with `first_aired` as the service spells it — an instant, or
+        a bare day for a service that dates without timing. Proxying the pictures
+        and writing the dates for a reader happen once, for every service,
+        at app/providers/detail_source.py's `presented`.
 
         `videos` is THIS SERVICE's own list, as `Video`s, [] when it has none.
         What the panel plays is every service's lists pooled (see
         `fetch_videos` below and app/providers/detail_source.py), which is why
         the answer carries a list rather than one chosen trailer.
+
+        `keywords` and `show_type` are the two facts only some services state
+        (see Record.keywords): a list of keyword names and a show-type slug from
+        a service that states them — empty when the title has none — and None
+        from one that does not, so the store can tell "described, none" from
+        "never said" (app/metadata/descriptions.py's `facts_known`).
+
+        Four more only TMDB states today, each empty from a service that does
+        not: `logo` (the title's name as artwork, an ORIGIN address, ""),
+        `collection` (the film series a film belongs to, {"id", "name"}, {}),
+        `next_episode` (the episode the service says airs next, {season, number,
+        title, first_aired, episode_type} — a snapshot of when it answered — or
+        None) and `season_videos` (the season's OWN videos beside the title's
+        `videos`, [] without a season).
         """
         ...
 
@@ -1354,10 +1794,21 @@ class DetailPort(Protocol):
         ...
 
     async def fetch_season_summary(self, settings: Settings, source_id,
-                                   season: int, media: Media) -> dict:
+                                   season: int, media: Media, *,
+                                   fresh: bool = False) -> dict:
         """ONE season reduced to the shape `app/providers/season.py` defines —
         total, cadence, premiere, finale, the started/finished flags and
         `air_dates` — in THIS SOURCE's own id space.
+
+        `fresh=True` is the tracker's Refresh button: skip a cached answer and
+        ask again. A source whose cached season is revalidated anyway, or whose
+        episode list is on a clock a button press should not override, may
+        ignore it and says so in its own implementation.
+
+        THE TRACKER ASKS THROUGH THIS AND NEVER BY NAME. It used to pick between
+        two packages' functions with an if on the service's name, which sent
+        every answerer that was not the one it named to the other — so a third
+        service would have been handed somebody else's id.
 
         A PORT BECAUSE THE ANSWER WAS ONLY REACHABLE FROM ONE SOURCE. Both
         packages have had this function with these exact keys for as long as the
@@ -1395,10 +1846,11 @@ class DetailPort(Protocol):
         ...
 
     async def fetch_seasons(self, settings: Settings, source_id, media: Media, *,
-                            cached_only: bool = False) -> SeasonsAnswer:
+                            cached_only: bool = False, fresh: bool = False) -> SeasonsAnswer:
         """The season picker's answer for one title, in THIS SOURCE's own id
         space — see `SeasonsAnswer` for why the season list, a self-named
-        season and newly-surfaced ids all come back from one call.
+        season and newly-surfaced ids all come back from one call. `fresh` asks
+        past the response cache, as `fetch_details` does.
 
         `source_id` is this source's own id for the title, the same value
         `fetch_details` takes it as and for the same reason: a source cannot
@@ -1479,6 +1931,41 @@ class SearchHit(NamedTuple):
     poster: str = ""
 
 
+class SearchCatalogue(NamedTuple):
+    """One catalogue a search port can be asked, as a box offers it: `key` is the
+    name a request carries (a reference, unique app-wide — a service's own name,
+    or a service's name and its sub-catalogue), `label` what a button says.
+
+    A PORT MAY HOLD MORE THAN ONE because a service may keep separate catalogues
+    that one query does not reach together — measured 2026-10-23, Simkl's
+    /search/tv answers "frieren" and "kaiju no 8" with nothing, and its
+    /search/anime with 3 and 5 — and a box searches each as its own source of
+    results, with its own pages.
+    """
+    key: str
+    label: str
+
+
+# HOW MANY RESULTS ONE PAGE OF ANY CATALOGUE IS — one number, so every service a
+# box asks answers alike and "more from <service>" means the same next step for
+# each. TMDB's own page size, which it cannot be asked to change; the others are
+# asked for it (Trakt's and Simkl's `limit`).
+SEARCH_PAGE_SIZE = 20
+
+
+class SearchPage(NamedTuple):
+    """One page of one source's answer to a search: its hits, and whether the
+    source holds a further page.
+
+    `more` IS THE SOURCE'S OWN WORD, because only it knows how it pages — TMDB
+    states its page count in the answer, while a source that answers a search
+    whole says so by never having more. A box offers "more" from this and from
+    nothing it could infer, such as a page happening to be full.
+    """
+    hits: list[SearchHit]
+    more: bool = False
+
+
 @runtime_checkable  # see the note on SyncPort above
 class SearchPort(Protocol):
     """A source that can answer a free-text catalogue search — what the
@@ -1492,18 +1979,26 @@ class SearchPort(Protocol):
     not be registered honestly for the half it actually has.
 
     LIKE DetailPort AND CalendarPort, THIS ASKS ABOUT THE WORLD RATHER THAN
-    ABOUT ONE PERSON: a catalogue search authenticates with the instance's own
-    credential on every source registered so far, never with a viewer's token,
-    which is why `Provider.catalogue_is_configured` — the predicate that gates
-    this port, not `is_configured` — asks the same public question
-    `DetailPort.catalogue_configured` does for per-title lookups.
+    ABOUT ONE PERSON, which is why `Provider.catalogue_is_configured` — not
+    `is_configured` — is the credential that gates it. WHO IS ASKED is the
+    registry's (providers.for_search): a source `searched_by_default`, and any
+    other only for a viewer who has linked it and asked for it.
     """
 
+    # Every catalogue this port can be searched by, the first being the one a
+    # caller naming none gets. See SearchCatalogue.
+    catalogues: tuple[SearchCatalogue, ...]
+
     async def search_titles(self, settings: Settings, media: Media, query: str, *,
-                            cached_only: bool = False) -> list[SearchHit]:
-        """Every title this source's catalogue matches `query` on, for
-        `media`. An empty query answers [] without a call — there is nothing
-        to ask a service for.
+                            page: int = 1, catalogue: str | None = None,
+                            cached_only: bool = False) -> SearchPage:
+        """Page `page` — SEARCH_PAGE_SIZE results — of the titles `catalogue`
+        (one of this port's `catalogues`, by key; None for the first) matches
+        `query` on, for `media`. An empty query answers an empty page without a
+        call — there is nothing to ask a service for.
+
+        `page` IS A NUMBER, NEVER A LIST OF RESULTS, so "more" travels as a
+        reference, and `more` is the service's own word for a later page.
 
         `cached_only=True` NEVER MAKES A CALL: it answers from what an identical
         request already stored, and answers nothing at all when that has gone.
@@ -1631,6 +2126,21 @@ class WatchlistUndo(NamedTuple):
     status_before: str
 
 
+class WatchlistDrop(NamedTuple):
+    """One show to take off a list because the viewer gave up on it, with what
+    the tracker's own record says the service held BEFORE the tracker wrote it:
+    `status_before` from a confirmed write (NOT_HELD when the tracker put it
+    there), or None when the tracker has no confirmed write of it at this service
+    — in which case whatever the list holds is the viewer's own doing.
+
+    CARRIED TO EVERY PORT, ACTED ON BY THOSE WHOSE RULE NEEDS IT. Whether "the
+    viewer put it there first" stops a drop is each service's answer (see
+    WatchlistPort.drop), and only the tracker's record knows it — a list reads the
+    same whoever added a title."""
+    title: WatchlistTitle
+    status_before: str | None
+
+
 @runtime_checkable  # see the note on SyncPort above
 class WatchlistPort(Protocol):
     """Writing the tracker's shows to a person's OWN list at a service, and
@@ -1660,10 +2170,13 @@ class WatchlistPort(Protocol):
     so a caller never records "could not ask" as a per-title outcome.
     """
 
-    def list_url(self, account_id: str) -> str:
+    def list_url(self, account_id: str, account_name: str | None) -> str | None:
         """The address of the list this port writes to, on the service's own
         site, for the linked account `account_id` names (the identity row's
-        provider_user_id). Makes no call: it gates nothing, it is a link."""
+        provider_user_id) — `account_name` is the row's display name, for a site
+        that addresses a person's pages by their name. None when the address
+        cannot be made from what is held. Makes no call: it gates nothing, it is
+        a link."""
         ...
 
     async def holdings(self, settings: Settings,
@@ -1680,12 +2193,17 @@ class WatchlistPort(Protocol):
         ...
 
     async def drop(self, settings: Settings,
-                   titles: Sequence[WatchlistTitle]) -> dict[str, WatchlistResult]:
+                   rows: Sequence[WatchlistDrop]) -> dict[str, WatchlistResult]:
         """Take each title off that list because the viewer gave up on it. What
         "off" means is the service's: a status service moves it to its own
         given-up status, which keeps the viewer's history; a plain watchlist
         removes it. A title the service holds nothing for is ALREADY — dropping
-        must never ADD a title to somebody's library."""
+        must never ADD a title to somebody's library.
+
+        WHETHER A TITLE THE VIEWER LISTED THEMSELVES COMES OFF is also the
+        service's, from each row's `status_before`: a port that keeps such a
+        title answers it KEPT (TMDB's, whose list is the one a viewer keeps by
+        hand). Results are keyed by str(row.title.key)."""
         ...
 
     async def undo(self, settings: Settings,
@@ -1747,8 +2265,8 @@ class Provider(Protocol):
     detail_port: DetailPort | None
     # How this source answers a catalogue search, or None for a source that
     # cannot be searched. Declared for the same reason as the three ports
-    # above: `for_catalogue_search` asks the registry which sources can answer
-    # a search and never names one, so a source claiming search while carrying
+    # above: `for_search` and `for_shared_id_lookup` ask the registry which
+    # sources can answer and never name one, so a source claiming search while carrying
     # no port would be lying in the one way the registry cannot catch.
     search_port: SearchPort | None
     # How this source's own list is written, or None for a source the tracker
@@ -1763,14 +2281,78 @@ class Provider(Protocol):
         must answer without making a network call."""
         ...
 
+    def title_url(self, media: Media, ids: Mapping[str, Any]) -> str:
+        """This service's own page for the title `ids` names, or "" when the map
+        carries no id of this service's. Answered without a call.
+
+        ON THE PROVIDER, BECAUSE WHERE A SERVICE'S TITLES LIVE IS THAT SERVICE'S
+        FACT and every surface drawing an outbound button asks it of whichever
+        services a title names. It used to be a table of two packages' builders
+        in the one function that drew the buttons, so a service registered
+        later would silently have had no button at all — and TMDB, Simkl and
+        Trakt all ask in their terms that their data link back to the item.
+        """
+        ...
+
+    def episode_url(self, ids: Mapping[str, Any], season: int, number: int) -> str:
+        """This service's page for one episode of a show — as deep as it can go
+        from an id map: the episode where it has an address for one, the show
+        otherwise — or "" without an id of its own. Answered without a call.
+
+        What an episode tick in the tracker's panel opens, so a viewer can go and
+        correct a count where the count lives. On the provider for the reason
+        `title_url` is: the panel used to know two services' addresses by name,
+        and any other service's tick linked nowhere.
+        """
+        ...
+
+    def listing_id(self, ids: Mapping[str, Any]) -> str:
+        """The id this service files its listing of a title under — a calendar
+        `Record.id` of its — from the title's id map, or "" without an id of
+        its own. Answered without a call.
+
+        ON THE PROVIDER, BECAUSE WHICH SPELLING A SERVICE'S LISTING CARRIES IS
+        THAT SERVICE'S FACT: Trakt's calendar files a title under its slug where
+        it names one, Simkl's and TMDB's under the number. The title store keeps
+        one group per service per title and gives each listing back from it
+        (app/calendar/entries.py), so the id a listing was filed under is asked
+        of the service that filed it, by the same rule its calendar used.
+        """
+        ...
+
+    def status_means(self, status: str) -> frozenset[str]:
+        """The words of the one status vocabulary (STATUS_WORDS) that this
+        service's stored `status` may mean — one for a service that speaks it
+        (`status_spoken`), several for a word too coarse to tell them apart, and
+        none for no status at all. Answered without a call.
+
+        ON THE PROVIDER, BECAUSE A SERVICE'S WORDS ARE THAT SERVICE'S FACT. A
+        card offers each service's status side by side only where they really
+        disagree (app/calendar/resolve.py's `_distinct`), and "airing" from one
+        service beside "returning series" from another is one answer said twice:
+        measured on one October's All Episodes, 1,478 of the 1,603 cards whose
+        services disagreed about a status disagreed about nothing else.
+        """
+        ...
+
+    def episode_mark(self, episode_type: str) -> str:
+        """Which of EPISODE_MARKS this service's word for an episode's place in
+        its season (an episode's `episode_type`) is — "" for every word that is
+        none of them, and for a service that states no such word. Answered
+        without a call; what a details panel's finale badge reads
+        (app/metadata/panel.py's `presented`). On the provider for the reason
+        `status_means` is."""
+        ...
+
     def catalogue_is_configured(self, settings: Settings) -> bool:
         """Whether this instance can make this source's PUBLIC catalogue
-        reads — the predicate `for_catalogue_search` gates on, and
-        deliberately not `is_configured` above.
+        reads — the predicate `for_search` and `for_shared_id_lookup` gate on,
+        and deliberately not `is_configured` above (which `for_search` asks as
+        well, to decide whom a viewer may ADD to a search).
 
         THE SAME SPLIT `DetailPort.catalogue_configured` DRAWS, ASKED AT THE
-        PROVIDER LEVEL rather than the detail port's, because
-        `for_catalogue_search` picks which sources to ask before any of them
+        PROVIDER LEVEL rather than the detail port's, because the registry
+        picks which sources to ask before any of them
         has been asked to describe a title — it needs the answer off the
         Provider itself, the same object `is_configured` already lives on,
         not off a port that may be None for a source with no detail

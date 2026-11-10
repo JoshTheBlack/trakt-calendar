@@ -142,16 +142,26 @@
                     </div>
                     {% endif %}
 
-                    {% call ff.field('tv_genres', 'Genres', 'Another genre, then Enter…') %}
+                    {% call ff.field('tv_genres', 'Genres', 'Another genre, then Enter…',
+                                     also='tv_show_types', also_label='Show type') %}
                         Press a chip once to keep <em>only</em> that genre, again to filter it out,
                         again to stop filtering on it. A show is kept if it carries any genre you
                         asked for and none you excluded. This happens here rather than at Trakt, so
                         it works on any account — the Settings screen still carries a VIP caveat,
                         and it is about the fields Trakt is asked for directly.
+                        <br><br><strong>Show type</strong> is what kind of show it is, as TMDB says —
+                        scripted, reality, a talk show — one per show, where genres are every
+                        service's tags together. It is the one way to keep only scripted shows. A
+                        show TMDB has not described is shown until it is.
                     {% endcall %}
                     {% call ff.field('tv_countries', 'Countries', 'Another country code, then Enter…') %}
                         Where a show was <em>made</em>. Two-letter ISO codes; the box takes any of
                         them, including the ones with no chip here.
+                    {% endcall %}
+                    {% call ff.field('tv_languages', 'Languages', 'Another language code, then Enter…') %}
+                        The language a show was made in. Two-letter ISO 639-1 codes
+                        (<code>en</code>, <code>ja</code>); the box takes any of them. A show
+                        nothing has described yet is shown until it is.
                     {% endcall %}
                     {% call ff.field('network_filter', 'Networks', 'Network name, then Enter…') %}
                         Matched exactly as the service spells it, capitals included — one week of
@@ -165,6 +175,30 @@
                         Parental Guidelines and MPA ratings are separate vocabularies.
                         <code>NR</code> covers anything the service gave no rating.
                     {% endcall %}
+                    {% call ff.field('tv_keywords', 'Keywords', 'A keyword, then Enter…') %}
+                        TMDB's keywords, such as <code>anime</code> or <code>based on manga</code>
+                        — one per box, because some hold a comma. Most new shows have none, so
+                        <em>keeping only</em> a keyword hides most of a calendar; filtering one
+                        out is the usual use. A show TMDB has not described is shown until it is.
+                    {% endcall %}
+                    {% call ff.ticks('tv_missing', 'Missing data') %}
+                        Hide a show missing every fact a ticked rule names. A show nothing has
+                        described yet is shown until it is.
+                    {% endcall %}
+                    <div class="ffield">
+                        <div class="ffield-head">
+                            <span class="ffield-label">Listings</span>
+                            {% call ff.info() %}Who lists a show. A show only one service lists is
+                                most of what a catalogue adds to a calendar. Neither waits for a
+                                description: a listing {{ filter_panel.sparse_labels or 'a catalogue' }}
+                                has not described yet names no network, and is hidden until it
+                                is.{% endcall %}
+                        </div>
+                        <div class="fticks">
+                            {{ ff.switch('tv_single_service', 'Hide shows only one service lists') }}
+                            {% if filter_panel.sparse_labels %}{{ ff.switch('tv_sparse_no_network', 'Hide shows only ' ~ filter_panel.sparse_labels ~ ' lists that name no network') }}{% endif %}
+                        </div>
+                    </div>
                 </div>
 
                 {# ---------------- MOVIES ---------------- #}
@@ -210,6 +244,10 @@
                         below, which is where it is being <em>shown</em> — a Brazilian film opening
                         in America matches one and not the other.
                     {% endcall %}
+                    {% call ff.field('movie_languages', 'Languages', 'Another language code, then Enter…') %}
+                        The language a film was made in. Two-letter ISO 639-1 codes; separate from
+                        the TV tab's. A film nothing has described yet is shown until it is.
+                    {% endcall %}
                     {% call ff.field('movie_certifications', 'Ratings') %}
                         Film ratings. <code>NR</code> covers anything the service left unrated.
                     {% endcall %}
@@ -225,6 +263,27 @@
                         Theatrical means a film in American cinemas, not one that premiered elsewhere
                         and opened in cinemas somewhere else.
                     {% endcall %}
+                    {% call ff.field('movie_keywords', 'Keywords', 'A keyword, then Enter…') %}
+                        TMDB's keywords, one per box — <code>based on true story</code>,
+                        <code>sequel</code>. About half of new films have none, so filtering one out
+                        is the usual use. A film TMDB has not described is shown until it is.
+                    {% endcall %}
+                    {% call ff.ticks('movie_missing', 'Missing data') %}
+                        Hide a film missing every fact a ticked rule names — one service lists
+                        many films with no country and no poster. A film nothing has described
+                        yet is shown until it is.
+                    {% endcall %}
+                    <div class="ffield">
+                        <div class="ffield-head">
+                            <span class="ffield-label">Listings</span>
+                            {% call ff.info() %}Who lists a film. One service's film calendar is
+                                every release in every market, and most of it is films no other
+                                service lists.{% endcall %}
+                        </div>
+                        <div class="fticks">
+                            {{ ff.switch('movie_single_service', 'Hide films only one service lists') }}
+                        </div>
+                    </div>
                 </div>
                 </div>
             </div>

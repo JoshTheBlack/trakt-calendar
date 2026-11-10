@@ -25,7 +25,8 @@ import httpx
 
 from app import auth, db
 from app.auth import routes as auth_routes, trakt as trakt_auth, trakt_routes
-from app.config import Settings, load_settings, public_base_url_error, save_settings
+from app.config import Settings, public_base_url_error
+from tests.support import load_settings, save_settings
 from app.main import app
 from tests.auth._redirect_login import SharedRedirectSignInTests, SharedRedirectUnlinkTests
 from tests.support import AppTestCase, ORIGIN
@@ -82,6 +83,17 @@ class TraktOAuthTestCase(AppTestCase):
         # Something has to exist or the first-run gate answers every request
         # before any of this is reached.
         self.admin_id = self.make_user("admin_user", is_admin=True, calendar_approved=True)
+        # Every revocation is recorded rather than sent: an unlink revokes, and so
+        # does every refused completion (provider_login.end_unkept_grant) —
+        # without this they reach the real api.trakt.tv.
+        self.revoked: list[str] = []
+
+        async def _revoke(client_id, client_secret, access_token):
+            self.revoked.append(access_token)
+
+        patcher = patch.object(trakt_auth, "revoke_token", side_effect=_revoke)
+        self.revoke_mock = patcher.start()
+        self.addCleanup(patcher.stop)
 
     # -- fixtures ----------------------------------------------------------
 
@@ -493,22 +505,11 @@ class RefreshSerializationTests(TraktOAuthTestCase):
 
 
 class UnlinkTests(SharedRedirectUnlinkTests, TraktOAuthTestCase):
-    """Unlinking now also asks Trakt to forget the authorization, so every test
-    here patches that call — without it they reach the real api.trakt.tv.
+    """Unlinking also asks Trakt to forget the authorization; the base case
+    records that call in `self.revoked`.
 
     The answer is the whole account card at 200 (unlinking changes several of its
     sections), with any sentence in the line under the linked services."""
-
-    def setUp(self):
-        super().setUp()
-        self.revoked: list[str] = []
-
-        async def _revoke(client_id, client_secret, access_token):
-            self.revoked.append(access_token)
-
-        patcher = patch.object(trakt_auth, "revoke_token", side_effect=_revoke)
-        self.revoke_mock = patcher.start()
-        self.addCleanup(patcher.stop)
 
     def unlink(self, provider="trakt"):
         return self.client.post("/me/identities/unlink", json={"provider": provider})
@@ -674,6 +675,21 @@ class ReconnectNoticeTests(TraktOAuthTestCase):
         self.assertIn("squatter", resp.text)
         # And it is still up, because this login is still unlinked.
         self.assertTrue(self.notice_shown())
+
+    def test_adopting_a_token_of_another_account_than_the_one_linked_is_refused(self):
+        """One account of a service per login: an administrator who linked one
+        Trakt account is not given the app-wide token's other one beside it."""
+        self.sign_in_as(self.admin_id)
+        self.link_identity(self.admin_id, "trakt", TRAKT_ID)
+        with patch.object(trakt_auth, "fetch_account",
+                          return_value={"id": OTHER_TRAKT_ID, "name": "Other"}):
+            linked, why = asyncio.run(trakt_routes.adopt_app_token(
+                self.admin_id, load_settings()))
+        self.assertFalse(linked)
+        self.assertIn("different Trakt account", why)
+        rows = asyncio.run(db.fetch_all(
+            "SELECT provider_user_id FROM linked_identities WHERE user_id = ?", (self.admin_id,)))
+        self.assertEqual([row["provider_user_id"] for row in rows], [str(TRAKT_ID)])
 
     def test_a_token_trakt_will_not_resolve_reports_that_instead(self):
         asyncio.run(db.set_meta(auth_routes.TRAKT_RECONNECT_NOTICE, "1"))

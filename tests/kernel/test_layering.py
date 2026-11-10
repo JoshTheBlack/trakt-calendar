@@ -64,6 +64,7 @@ AUTH = "auth"
 MEDIA = "media"
 INTEGRATIONS = "integrations"
 CALENDAR = "calendar"
+METADATA = "metadata"
 DISTRAKT = "distrakt"
 RANKER = "ranker"
 SOURCES = "sources"
@@ -78,11 +79,12 @@ MAIN = "main"
 GROUPS: dict[str, str] = {
     # The kernel: configuration, storage, HTTP plumbing, rendering. Depends on
     # no feature, which is what makes it safe for every feature to depend on it.
-    "assets": KERNEL, "cache": KERNEL, "changelog": KERNEL, "chrome": KERNEL,
+    "after_response": KERNEL, "assets": KERNEL, "cache": KERNEL, "changelog": KERNEL,
+    "chrome": KERNEL,
     "clock": KERNEL, "config": KERNEL, "csp": KERNEL, "db": KERNEL, "details_panel": KERNEL,
     "endpoints": KERNEL, "http_pool": KERNEL, "logging_setup": KERNEL,
-    "perftrace": KERNEL, "route_params": KERNEL, "secrets_box": KERNEL,
-    "templating": KERNEL, "timezones": KERNEL, "youtube": KERNEL,
+    "perftrace": KERNEL, "read_pool": KERNEL, "route_params": KERNEL, "secrets_box": KERNEL,
+    "signed_tokens": KERNEL, "templating": KERNEL, "timezones": KERNEL, "youtube": KERNEL,
 
     # The value-type contract a source produces (Media, Item, Source, ItemKey).
     # Its own group because it is the one part of providers/ the kernel is
@@ -101,14 +103,20 @@ GROUPS: dict[str, str] = {
     "auth": AUTH, "authz": AUTH,
 
     # Pictures: where they are fetched from, how they are cached, how they are
-    # drawn. media/tmdb.py is here rather than with the integrations because
-    # network logos and poster art are the only things that read it.
+    # drawn. TMDB's client is not here: it is a source like the others
+    # (providers/tmdb/), and the pictures read it through MEDIA -> PROVIDERS.
     "media": MEDIA,
 
     # The three services a user points at their OWN server and adds titles to.
     "integrations": INTEGRATIONS,
 
     "calendar": CALENDAR,
+
+    # The title store: what every service says about a title, the title's
+    # identity, and every column elsewhere holding a title's key. A feature-tier
+    # package every feature reads and writes through — its own group because no
+    # one feature owns a title, which is the whole reason it left the calendar.
+    "metadata": METADATA,
 
     "distrakt": DISTRAKT,
 
@@ -160,6 +168,8 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
     (RANKER, KERNEL): Edge("boards are stored, rendered and configured"),
     (SETTINGS, KERNEL): Edge("the Settings screen reads and writes the settings themselves"),
     (SOURCES, KERNEL): Edge("a source preference is one row in the database, per account"),
+    (METADATA, KERNEL): Edge("the title store is database tables, written in the caller's "
+                             "transaction where a feature's own write needs it to be"),
 
     # --- the value-type contract, which everything may name ----------------
     (KERNEL, PROVIDER_TYPES): Edge(
@@ -174,6 +184,10 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
     (CALENDAR, PROVIDER_TYPES): Edge("the cache stores and replays Items"),
     (DISTRAKT, PROVIDER_TYPES): Edge("watch state is keyed by ItemKey across sources"),
     (RANKER, PROVIDER_TYPES): Edge("a board entry is a title identified the same way"),
+    (METADATA, PROVIDER_TYPES): Edge(
+        "a title's key IS the shared waterfall (resolve_key, MATCH_SOURCES), and a "
+        "service's listing arrives as a Record — the store files what the value "
+        "types already say rather than defining identity a second time"),
     (SOURCES, PROVIDER_TYPES): Edge(
         "the services a preference may name ARE the Source members, read from "
         "there rather than spelled again, so a preference cannot name a service "
@@ -190,15 +204,18 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "the same API base the source itself uses, so the two cannot drift "
         "apart — and so the sign-in call is covered by whatever pacing, retry "
         "and circuit-breaking that source's transport already owes the service"),
-    (MEDIA, PROVIDERS): Edge("poster art is looked up per title through the source"),
+    (MEDIA, PROVIDERS): Edge(
+        "poster art is looked up per title through the source, and the TMDB "
+        "artwork and network logos are read through providers/tmdb/ — the one "
+        "TMDB client, whose pool, 429 circuit and six-month ceiling every "
+        "picture taken from TMDB is held to, and whose cached title answer the "
+        "details panel has usually already paid for"),
     (CALENDAR, PROVIDERS): Edge(
         "the cache asks a source what airs in a window, a card's details panel "
         "asks providers/detail_source.py which service can describe it, and the "
         "search's catalogue half asks the services through "
         "providers/title_search.py — the one fan-out and merge every searching "
-        "feature shares. The stored-title search (entries.titles_matching) "
-        "answers with that module's hit type, folded by its rules, so a title "
-        "reads the same whichever half of a search found it"),
+        "feature shares"),
     (DISTRAKT, PROVIDERS): Edge(
         "the tracker reads the viewer's own history and progress. Its add flow "
         "searches the catalogues and reads a chosen result back through "
@@ -219,10 +236,32 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "the services through providers/title_search.py, the one fan-out, merge "
         "and read-back every searching feature shares, and a result's season "
         "checklist is that module's picker lookup"),
+    (METADATA, PROVIDERS): Edge(
+        "the title store is the ONE place the app asks a service by shared id, "
+        "through the registry's for_shared_id_lookup and each service's "
+        "SearchPort, so every service's port, cache and re-ask clock is the one "
+        "it already owns; and a stored title is answered to a search box as the "
+        "shared search's own hit type (title_search), so a title reads the same "
+        "whichever half of a search found it"),
+    (METADATA, MEDIA): Edge(
+        "a picture a service states for a title is filed in the poster registry "
+        "as the title store writes the service's description or listing "
+        "(artwork.file_sighting, in the store's own transaction) — under the "
+        "title's tmdb id, or its store key when it has none — so a service's new "
+        "address reaches every page the moment the store learns it, which is "
+        "what heals a dead picture"),
+    (SOURCES, PROVIDERS): Edge(
+        "a tracker preference — which linked service leads, and whose numbers "
+        "are retired — may name only a service that keeps a watch history, and "
+        "the registry's tracker_sources is the one answer to which those are; "
+        "validating against every Source let a catalogue with no history be "
+        "stored as a tracker"),
     (KERNEL, PROVIDERS): Edge(
         "config.py asks the registry which sources are configured when it "
-        "validates settings. Function-local because providers/ reads config, "
-        "and doing it at the top of the file would close that loop",
+        "validates settings, and templating.py's source_look reads a service's "
+        "label off its provider so a badge cannot spell it differently from the "
+        "rest of the app. Function-local in both because providers/ reads "
+        "config, and doing it at the top of either file would close that loop",
         deferred=True),
 
     # --- into auth. auth is a layer: every feature may depend on it ---------
@@ -241,6 +280,10 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "builder of that object, which is what decides that Simkl is asked only "
         "for a viewer who linked it"),
     (SETTINGS, AUTH): Edge("the Settings screen is admin-only and links the app's own account"),
+    (METADATA, AUTH): Edge(
+        "the dead-picture report route registers through authz's Guard as PUBLIC — "
+        "it arrives as the image proxy's redirect, which carries no session cookie "
+        "in Firefox — so its access level is declared like every other route's"),
     (KERNEL, AUTH): Edge(
         "config.py reaches encryption_flow to refuse writing a secret while the "
         "at-rest key is in a bad state. Function-local because encryption_flow "
@@ -281,10 +324,11 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "showing marks from the old configuration, and the panel's profile and "
         "folder <select>s are drawn from what arr.py asks the service"),
     (SETTINGS, CALENDAR): Edge(
-        "the content floor's certification rows are the Filters panel's chips, "
-        "drawn and read back by calendar/vocab.py — so the instance floor and a "
-        "viewer's filter store byte-identical specs for the same presses, and the "
-        "spec format has one owner"),
+        "the content floor's certification, show-type and missing-data rows are the "
+        "Filters panel's chips, drawn and read back by calendar/vocab.py — so the "
+        "instance floor and a viewer's filter store byte-identical specs for the same "
+        "presses, and the spec format has one owner — and the no-network rule names "
+        "its services by calendar/resolve.py's one registry question"),
     (DISTRAKT, SOURCES): Edge(
         "which services back the tracker for an account is that account's stated "
         "preference, so the sync asks the preference store before it asks any "
@@ -293,6 +337,27 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "which services fill a viewer's calendar is that account's stated "
         "preference, so the route reads it before asking the registry which "
         "sources may fill a window — the same reason the tracker reaches SOURCES"),
+    (CALENDAR, METADATA): Edge(
+        "a fill hands its records to the title store, which files each under its "
+        "title's key and writes the service's own rows in the fill's transaction; "
+        "the calendar's reads join its airings to those rows and to the title's "
+        "known ids by the table names the store spells, and a card's details, "
+        "library add and completion read the title back from the store"),
+    (DISTRAKT, METADATA): Edge(
+        "a tracker row is filed under the key the title store answers "
+        "(arrival.describe), its missing service ids are asked for through the "
+        "store, a history play is keyed with the title's known ids, and the add "
+        "box's typed list and a row's picture read the store's rows"),
+    (RANKER, METADATA): Edge(
+        "every board row is filed under the key the title store answers before "
+        "the board asks whether it already holds it, a search add learns every "
+        "service's id through the store, and the board's typed list reads it"),
+    (METADATA, RANKER): Edge(
+        "a re-key that finds a board already holding the title under its new key "
+        "keeps the dropped row in that board's removal history through the "
+        "board's own writer (ranker.core.remember_removal), so its owner can put "
+        "it back. Deferred because the board imports the store",
+        deferred=True),
     (CALENDAR, DISTRAKT): Edge(
         "the calendar READS THE VIEWER'S OWN WATCHED EPISODES for the card a details "
         "panel was opened from, through episode_progress — the tracker files "
@@ -312,27 +377,13 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         deferred=True),
     (DISTRAKT, CALENDAR): Edge(
         "the tracker imports a month's premieres, honours 'not watching', and "
-        "links a Discord post at the viewer's own calendar. It also reads the "
-        "STORED calendar windows back for the per-service slugs they already carry, so "
-        "a settled record can learn what a service calls a title without a "
-        "request being spent on asking. And a title added to a tracker by hand "
-        "writes the premiere airing no feed carried, through the calendar "
-        "search's own fill_one_gap — the same one-title write a followed search "
-        "result makes. The add modals' as-you-type list is the titles the "
-        "calendar already stores (entries.titles_matching), and a pick from it "
-        "is read back out of those stored rows by identity (entries.stored_title) "
-        "— the calendar owns those rows, so it owns the verbs that read them. A "
-        "row's picture is first the one the calendar's own record of the title "
-        "carries (entries.posters_for), so a title a month has loaded costs no "
-        "lookup"),
-    (RANKER, CALENDAR): Edge(
-        "the board's search lists, as somebody types, the titles this instance "
-        "already stores (entries.titles_matching), and a result picked from that "
-        "list is read back out of those stored rows by identity "
-        "(entries.stored_title) — the calendar owns those rows, so it owns the "
-        "verbs that read them, and the board reads them through the same two the "
-        "tracker's add does rather than a query of its own. Only "
-        "ranker/sources.py reaches it"),
+        "links a Discord post at the viewer's own calendar. Its name repair "
+        "re-reads the title store only when the stored calendar's signature has "
+        "moved. And a title added to "
+        "a tracker by hand writes the premiere airing no feed carried, through "
+        "the calendar search's own fill_one_gap — the same one-title write a "
+        "followed search result makes — after asking the calendar's airings "
+        "which services already draw it"),
     (RANKER, DISTRAKT): Edge(
         "one adapter module imports the tracker's public surface so a board can "
         "be seeded from what the viewer finished. THE ONLY ranker module allowed "

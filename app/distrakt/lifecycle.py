@@ -788,10 +788,28 @@ async def standing_questions(user_id: int, *, month: str, tz) -> HistoryQuestion
     unknown: list[watch_history.EpisodePlay] = []
     given_up: list[watch_history.EpisodePlay] = []
     rewatched: list[Rewatch] = []
+    locate = None
     for row in stored:
         key, season = row["key"], row["season"]
-        address = (str(key), int(season))
         placed = await find_shown_season(user_id, key, season, month=month)
+        if placed is None:
+            # A QUESTION FILED UNDER A TITLE THE TRACKER HOLDS BY ANOTHER KEY.
+            # A play is placed by its service's own id first (watch_history's
+            # `_tracked_by_own_id` says why); one stored before that rule, or
+            # under a key the service has since moved its pointer away from, is
+            # moved onto the title the tracker holds it by and judged there — so
+            # a season already on the page stops being asked about.
+            if locate is None:
+                locate = await watch_history.own_id_locator(user_id)
+            tracked = locate(key.media, row["ids"])
+            if tracked is not None and tracked != key:
+                await store.close_prompt(user_id, key, season)
+                await store.open_prompt(user_id, tracked, season, row["number"],
+                                        row["title"], row["ids"],
+                                        row.get("watched_at", ""))
+                key = tracked
+                placed = await find_shown_season(user_id, key, season, month=month)
+        address = (str(key), int(season))
         play = watch_history.EpisodePlay(key, season, row["number"],
                                          row["title"], row["ids"],
                                          row.get("watched_at", ""))

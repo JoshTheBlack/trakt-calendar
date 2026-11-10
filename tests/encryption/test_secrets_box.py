@@ -21,6 +21,7 @@ No network.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import unittest
@@ -28,7 +29,8 @@ import unittest
 from cryptography.fernet import Fernet
 
 from app import config, db, secrets_box
-from app.config import RECOVERY_FIELDS, SECRET_FIELDS, Settings, load_settings, save_settings
+from app.config import RECOVERY_FIELDS, SECRET_FIELDS, Settings
+from tests.support import load_settings, save_settings
 from tests.support import new_db_path
 
 KEY = Fernet.generate_key().decode()
@@ -67,6 +69,19 @@ class SecretsBoxTests(unittest.TestCase):
         # Leave no key set for the next test regardless of what this one did.
         os.environ.pop(secrets_box.ENV_VAR, None)
         secrets_box.reset_cache()
+
+    def test_a_derived_key_is_its_own_per_purpose_and_none_without_a_key(self):
+        with _KeyEnv(None):
+            self.assertIsNone(secrets_box.derived_key("signing"))
+        with _KeyEnv(KEY):
+            one, other = secrets_box.derived_key("signing"), secrets_box.derived_key("else")
+            self.assertEqual(len(one), 32)
+            self.assertNotEqual(one, other)
+            raw = base64.urlsafe_b64decode(KEY)
+            self.assertNotIn(one, (raw, raw[:16], raw[16:]), "never the sealing key itself")
+            self.assertEqual(secrets_box.derived_key("signing"), one)
+        with _KeyEnv(OTHER_KEY):
+            self.assertNotEqual(secrets_box.derived_key("signing"), one)
 
     def test_seal_then_open_round_trips_under_a_key(self):
         with _KeyEnv(KEY):

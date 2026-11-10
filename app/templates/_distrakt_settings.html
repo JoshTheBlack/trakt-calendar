@@ -1,0 +1,171 @@
+{% import '_distrakt_emoji_default.html' as default_emoji %}
+{# THE TRACKER'S SETTINGS, IN ONE DIALOG OPENED FROM THE HEADER.
+
+   They were four controls in two places: the default emoji a popover in this
+   header, and the other three on the account page — which is about the ACCOUNT,
+   where nobody is looking at the tracker when they want to change what it does.
+   Together they are one question asked four ways ("what does my tracker count,
+   and against what"), so they sit together, on the page they act on.
+
+   A MODAL <dialog> LIKE EVERY OTHER OVERLAY: `closedby="any"` gives it the
+   backdrop click and Escape, the × is an invoker carrying `command="close"`, and
+   the header's button opens it with `command="show-modal"` — no script, and none
+   added for this.
+
+   NOT PART OF _distrakt_modals.html's SET, and that is deliberate: that set is
+   redrawn closed and empty by every answer to a press, which is right for an add
+   that landed and wrong for a dialog whose controls are meant to be used one
+   after another with it staying open. Its controls answer THEIR OWN SECTION and
+   nothing else.
+
+   EVERY CONTROL POSTS ITSELF. An order is a press on an arrow (the server makes
+   the move and answers with the list, so a press starts from the stored order and
+   not from whatever another tab left on screen); the retired list is a form that
+   posts whole on any change, each box carrying a hidden "0" before it so an
+   unticked box is MENTIONED rather than absent; the default emoji saves on
+   `change` like a row's own code. A press that changes what the month holds also
+   asks the page to fetch its month again (routes._and_the_month); a refusal is
+   a sentence in its section at 200, because a non-200 is never swapped.
+
+   A LIST WITH ONE SERVICE IN IT IS NOT DRAWN: with one answering there is no
+   order to state, and the control could only confuse. #}
+
+{% macro button() -%}
+<button type="button" class="pill-btn" command="show-modal" commandfor="trackerSettings"
+        title="What the tracker counts, and against what">⚙️ Settings</button>
+{%- endmacro %}
+
+{# ONE "WHICH SERVICE LEADS" LIST. `kind` is the list's name — `tracker_order`
+   (which linked tracker decides a season) or `season_totals` (which catalogue a
+   season's episode total is asked of) — and is what the buttons post and what the
+   section's id is spelled from.
+
+   A REORDERING AND NEVER A SWITCH. A season only one service knows about still
+   counts, and a season the first catalogue holds nothing of is asked of the next:
+   the hint says "when" rather than promising the one lower down is ignored.
+
+   THE PRESSED ARROW KEEPS FOCUS where it still exists: each arrow has an id and
+   the one that moved is drawn `autofocus`, which htmx honours in swapped content;
+   when a row reaches the end and loses that arrow, its other one takes focus. #}
+{% macro order(kind, panel) %}
+{% set entries = panel.orders[kind] %}
+{% set section_id = 'settingsOrder-' ~ kind %}
+{% if entries %}
+<div class="auth-list" id="{{ section_id }}">
+  <div class="row source-row">
+    <span class="label">{{ "Which service decides" if kind == 'tracker_order' else "Where episode totals come from" }}</span>
+    <div class="row-main">
+      <ol class="tracker-priority-list">
+        {% for entry in entries %}
+        {% set first, last = loop.first, loop.last %}
+        {% if order_moved == kind ~ ':' ~ entry.source ~ '-up' %}
+        {% set focus = 'down' if first else 'up' %}
+        {% elif order_moved == kind ~ ':' ~ entry.source ~ '-down' %}
+        {% set focus = 'up' if last else 'down' %}
+        {% else %}
+        {% set focus = none %}
+        {% endif %}
+        <li class="tracker-priority-item" data-source="{{ entry.source }}">
+          <span class="tracker-priority-name">{{ entry.label }}</span>
+          {% for direction, arrow, shown in (('up', '↑', not first), ('down', '↓', not last)) %}
+          {% if shown %}
+          <button class="btn-ghost tiny" type="button" id="{{ kind }}-{{ entry.source }}-{{ direction }}"
+                  hx-post="/api/distrakt/settings/order/{{ kind }}" hx-json-enc
+                  hx-vals='{{ {"source": entry.source, "direction": direction} | tojson }}'
+                  hx-target="#{{ section_id }}" hx-swap="outerHTML"
+                  {%- if focus == direction %} autofocus{% endif %}
+                  aria-label="Move {{ entry.label }} {{ direction }}">{{ arrow }}</button>
+          {% endif %}
+          {% endfor %}
+        </li>
+        {% endfor %}
+      </ol>
+      {% if kind == 'tracker_order' %}
+      <p class="auth-sub">When both know about a season, the one at the top decides
+        whether you have finished it. A season only one of them has still counts.</p>
+      {% else %}
+      <p class="auth-sub">How many episodes a season has is asked of the one at the top
+        first, and of the next when it knows nothing of that season. Months you have
+        already finished keep the totals they recorded.</p>
+      {% endif %}
+      <span class="auth-error" role="alert">{{ order_message if order_kind == kind else '' }}</span>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endmacro %}
+
+{# WHOSE NUMBERS STILL COUNT. Unlinking a service stops it being ASKED, but the
+   numbers it already contributed stay in the watch history and go on being shown
+   — correctly flagged as belonging to a service nobody asked, and with no way to
+   ever stop. This is the way to stop. It never deletes anything: the numbers
+   stay, the rows mark them "retired, not counted", and switching one back on
+   puts it straight back. A frozen month is never touched.
+
+   ONE FORM, POSTED WHOLE ON ANY CHANGE, because the set is what the preference
+   IS. The answer is this list drawn from what was STORED, so a refused save puts
+   the box back without anything having to remember which way it was. #}
+{% macro retired(panel) %}
+{% if panel.retirable %}
+<div class="auth-list" id="settingsRetired">
+  <div class="row source-row">
+    <span class="label">Count history from</span>
+    <div class="row-main">
+      <form hx-post="/api/distrakt/settings/retired" hx-json-enc hx-boost="false" hx-trigger="change"
+            hx-target="#settingsRetired" hx-swap="outerHTML">
+        <ul class="tracker-retired-list">
+          {% for entry in panel.retirable %}
+          <li class="tracker-retired-item">
+            <label>
+              <input type="hidden" name="counted:{{ entry.source }}" value="0">
+              <input type="checkbox" id="counted-{{ entry.source }}" name="counted:{{ entry.source }}"
+                     value="1" autocomplete="off"{% if entry.counted %} checked{% endif %}>
+              <span>{{ entry.label }}</span>
+              {% if not entry.linked %}<span class="auth-sub">(not linked)</span>{% endif %}
+            </label>
+          </li>
+          {% endfor %}
+        </ul>
+      </form>
+      <p class="auth-sub">Turn one off if you have moved off that service. Its
+        episodes stay recorded and stop counting towards your rows; months you
+        have already finished keep what they recorded.</p>
+      <span class="auth-error" role="alert">{{ retired_message }}</span>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endmacro %}
+
+{# THE DEFAULT EMOJI, the code a network with none of its own posts as. The
+   field is _distrakt_emoji_default.html's, once; a network's own code is edited
+   on its row. #}
+{% macro emoji(default_network_emoji, month_query) %}
+<div class="auth-list" id="settingsEmoji">
+  <div class="row source-row">
+    <label class="label" for="emojiDefault">Default emoji</label>
+    <div class="row-main">
+      {{ default_emoji.field(default_network_emoji, month_query) }}
+      <p class="auth-sub">What your Discord posts use for a network with no code of
+        its own. A row's code is edited on the row itself.</p>
+    </div>
+  </div>
+</div>
+{% endmacro %}
+
+{% macro dialog(panel, default_network_emoji, month_query) %}
+<dialog id="trackerSettings" class="modal-overlay" closedby="any">
+    <div class="modal">
+        <div class="modal-head">
+            <h2>⚙️ Tracker settings</h2>
+            <button type="button" class="modal-close" command="close" commandfor="trackerSettings">&times;</button>
+        </div>
+        <div class="modal-body distrakt-settings-body">
+            {{ emoji(default_network_emoji, month_query) }}
+            {{ order('tracker_order', panel) }}
+            {{ order('season_totals', panel) }}
+            {{ retired(panel) }}
+        </div>
+    </div>
+</dialog>
+{% endmacro %}

@@ -1,0 +1,6 @@
+{% import '_distrakt_settings.html' as tracker_settings with context %}
+{# ONE SECTION OF THE TRACKER SETTINGS DIALOG, as stored now — the answer to a
+   press on any control in it (routes._settings_answer). `section` names which:
+   an order's kind (`tracker_order`, `season_totals`) or `retired`. #}
+{% if section == 'retired' %}{{ tracker_settings.retired(panel) }}
+{% else %}{{ tracker_settings.order(section, panel) }}{% endif %}

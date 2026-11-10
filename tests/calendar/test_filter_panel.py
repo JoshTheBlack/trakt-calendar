@@ -176,6 +176,20 @@ class ThePanelIsRenderedTests(CalendarRouteTestCase):
         self.assertEqual(len(checked), 1)
         self.assertIn('value="exclude"', checked[0])
 
+    def test_show_types_are_drawn_inside_genres_and_saved_as_their_own(self):
+        """Show type reads as part of genres and is drawn inside that field, with
+        its own label; it stays its own dimension, so a save writes it alone."""
+        panel = self.panel()
+        genres = panel[panel.index('data-field="tv_genres"'):]
+        genres = genres[:genres.index('data-field="tv_countries"')]
+        self.assertIn('class="fsubfield" data-field="tv_show_types"', genres)
+        self.assertIn(vocab.field_name(vocab.TV_SHOW_TYPES, "talk-show"), genres)
+        self.assertEqual(panel.count('data-field="tv_show_types"'), 1)
+        self.save(**{vocab.field_name(vocab.TV_SHOW_TYPES, "talk-show"): "exclude"})
+        prefs = asyncio.run(auth.get_user_prefs(self.user_id))
+        self.assertEqual(prefs["tv_show_types"], "-talk-show")
+        self.assertEqual(prefs["tv_genres"], "")
+
     def test_a_token_the_vocabulary_does_not_name_is_drawn_too(self):
         """Whatever a card badge added has to appear in the panel, or the badge
         writes an answer the one screen that lists them cannot show."""
@@ -578,7 +592,7 @@ class EveryWriteInThisPanelIsGuardedTests(CalendarRouteTestCase):
                              json={"medium": "podcast"}).status_code, 400)
         self.assertEqual(
             self.client.post("/calendar/filters/badge",
-                             json={"dimension": "language", "token": "en",
+                             json={"dimension": "day", "token": "monday",
                                    "mode": "exclude"}).status_code, 400)
         # And the save ignores a chip mode it has no meaning for rather than
         # storing it — vocab.specs_from_form is where that is argued.
@@ -638,3 +652,107 @@ class TheMarkupWritesThroughTheEncoderTests(CalendarRouteTestCase):
                          self.surfaces()["panel"], re.S)
         self.assertIsNotNone(form)
         self.assertEqual(form.group(1).strip(), "")
+
+
+class TheNewerDimensionsOnThePanelTests(CalendarRouteTestCase):
+    """Language, show types, keywords, missing data and the two switches: drawn,
+    saved, and — where the operator's floor already applies one — fixed on."""
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("newer_dimensions")
+        self.sign_in_as(self.user_id)
+        self.serving_month()
+
+    def panel(self, endpoint="shows/new") -> str:
+        resp = self.client.get(f"/calendar/fragments/filters?endpoint={endpoint}")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return resp.text
+
+    def prefs(self) -> dict:
+        return asyncio.run(auth.get_user_prefs(self.user_id))
+
+    def test_each_is_drawn(self):
+        panel = self.panel()
+        self.assertIn(vocab.field_name(vocab.TV_LANGUAGES, "ja"), panel)
+        self.assertIn(vocab.field_name(vocab.MOVIE_LANGUAGES, "en"), panel)
+        self.assertIn(vocab.field_name(vocab.TV_SHOW_TYPES, "talk-show"), panel)
+        self.assertIn('id="fadd-tv_keywords"', panel)
+        self.assertIn('id="fadd-movie_keywords"', panel)
+        for field in (vocab.TV_MISSING, vocab.MOVIE_MISSING):
+            self.assertIn(vocab.field_name(field, "country+poster"), panel)
+        for field in vocab.TOGGLE_FIELDS:
+            with self.subTest(field=field):
+                name = vocab.toggle_name(field)
+                self.assertIn(f'<input type="hidden" name="{name}" value="0" form="filtersForm">',
+                              panel)
+        # The no-network rule names its services by their registry labels.
+        self.assertIn("Hide shows only TMDB lists that name no network", panel)
+
+    def test_a_save_writes_every_one_and_the_panel_draws_it_back(self):
+        resp = self.client.post("/calendar/filters", json={
+            vocab.field_name(vocab.TV_LANGUAGES, "ja"): "exclude",
+            vocab.field_name(vocab.TV_SHOW_TYPES, "talk-show"): "exclude",
+            vocab.field_name(vocab.TV_KEYWORDS, "san francisco, california"): "exclude",
+            vocab.presence_name(vocab.TV_MISSING): "",
+            vocab.field_name(vocab.TV_MISSING, "country+poster"): "include",
+            vocab.toggle_name(vocab.TV_SINGLE_SERVICE): ["0", "1"],
+            vocab.toggle_name(vocab.TV_SPARSE_NO_NETWORK): "0",
+        })
+        self.assertEqual(resp.status_code, 200, resp.text)
+        prefs = self.prefs()
+        self.assertEqual(prefs["tv_languages"], "-ja")
+        self.assertEqual(prefs["tv_show_types"], "-talk-show")
+        self.assertEqual(prefs["tv_keywords"], ["-san francisco, california"])
+        self.assertEqual(prefs["tv_missing"], "country+poster")
+        self.assertTrue(prefs["tv_single_service"])
+        self.assertFalse(prefs["tv_sparse_no_network"])
+        self.assertEqual(prefs["movie_missing"], "", "the other tab is left alone")
+        ticked = re.findall(r'<input[^>]*name="%s"[^>]*>' % re.escape(
+            vocab.field_name(vocab.TV_MISSING, "country+poster")), self.panel())
+        self.assertIn("checked", ticked[0])
+        switch = re.findall(r'<input type="checkbox"[^>]*name="%s"[^>]*>' % re.escape(
+            vocab.toggle_name(vocab.TV_SINGLE_SERVICE)), self.panel())
+        self.assertIn("checked", switch[0])
+
+    def test_unticking_every_rule_clears_them(self):
+        self.client.post("/calendar/filters", json={
+            vocab.presence_name(vocab.TV_MISSING): "",
+            vocab.field_name(vocab.TV_MISSING, "poster"): "include"})
+        self.client.post("/calendar/filters", json={vocab.presence_name(vocab.TV_MISSING): ""})
+        self.assertEqual(self.prefs()["tv_missing"], "")
+
+    def test_a_typed_keyword_is_never_split_on_its_comma(self):
+        html = self.client.post("/calendar/filters/chip", json={
+            "field": vocab.TV_KEYWORDS, "token": "San Francisco, California"}).text
+        self.assertIn(vocab.field_name(vocab.TV_KEYWORDS, "san francisco, california"), html)
+        self.assertNotIn(vocab.field_name(vocab.TV_KEYWORDS, "california"), html)
+
+    def test_clearing_a_tab_greys_its_switches_too(self):
+        self.client.post("/calendar/filters", json={
+            vocab.toggle_name(vocab.MOVIE_SINGLE_SERVICE): "1"})
+        html = self.client.post("/calendar/filters/clear", json={"medium": "movie"}).text
+        switch = re.findall(r'<input type="checkbox"[^>]*name="%s"[^>]*>' % re.escape(
+            vocab.toggle_name(vocab.MOVIE_SINGLE_SERVICE)), html)
+        self.assertNotIn("checked", switch[0])
+        self.assertTrue(self.prefs()["movie_single_service"], "Clear saves nothing")
+
+    def test_a_rule_the_floor_already_applies_is_fixed_on(self):
+        """A viewer can only tighten the floor, so a box that looked uncheckable
+        would promise titles back that nothing can bring."""
+        from tests.calendar.test_routes import _configured_settings
+        from tests.support import save_settings
+        import dataclasses
+        save_settings(dataclasses.replace(_configured_settings(), tv_single_service=True,
+                                          movie_missing="country"))
+        panel = self.panel()
+        switch = re.findall(r'<input type="checkbox"[^>]*name="%s"[^>]*>' % re.escape(
+            vocab.toggle_name(vocab.TV_SINGLE_SERVICE)), panel)
+        self.assertIn("checked", switch[0])
+        self.assertIn("disabled", switch[0])
+        tick = re.findall(r'<input[^>]*name="%s"[^>]*>' % re.escape(
+            vocab.field_name(vocab.MOVIE_MISSING, "country")), panel)
+        self.assertIn("disabled", tick[0])
+        other = re.findall(r'<input[^>]*name="%s"[^>]*>' % re.escape(
+            vocab.field_name(vocab.MOVIE_MISSING, "poster")), panel)
+        self.assertNotIn("disabled", other[0])

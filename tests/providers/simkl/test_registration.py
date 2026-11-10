@@ -105,11 +105,27 @@ class TrackerSelectionTests(unittest.TestCase):
         self.assertEqual(providers.tracker_sources(),
                          {str(Source.TRAKT), str(Source.SIMKL)})
 
-    def test_trakt_is_still_first(self):
+    def test_trakt_is_still_the_first_tracker(self):
         """The declared order decides which source is an account's PRIMARY — the
-        one number a frozen month keeps — so a second source appearing must not
-        displace the one every existing instance already reads."""
-        self.assertEqual(list(providers.registered())[0], Source.TRAKT)
+        one number a frozen month keeps — so a source appearing must not displace
+        the one every existing instance already reads. TMDB is first in the whole
+        order and is no tracker at all, so the first TRACKER is still Trakt."""
+        trackers = [s for s in providers.registered()
+                    if str(s) in providers.tracker_sources()]
+        self.assertEqual(trackers[0], Source.TRAKT)
+
+    def test_a_service_with_no_history_never_backs_the_tracker(self):
+        """Even named as linked, TMDB is not read for anybody's viewing: it has
+        no sync port, so no watched count can ever be filed under it and the
+        primary count (counts.primary_count) can never be TMDB's."""
+        from app.config import Settings
+        from app.distrakt import counts, live
+        linked = Settings(tmdb_api_key="eyJa.eyJb.c", trakt_client_id="id",
+                          trakt_access_token="tok")
+        ports = providers.for_tracker_ports(None, {"tmdb", "trakt"}, linked)
+        self.assertEqual([str(s) for s, _ in ports], ["trakt"])
+        self.assertNotIn("tmdb", providers.tracker_sources())
+        self.assertEqual(counts.primary_count({"simkl": 4, "trakt": 6}, live.source_order()), 6)
 
 
 if __name__ == "__main__":  # pragma: no cover

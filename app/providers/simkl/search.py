@@ -1,24 +1,25 @@
 """Simkl's answer to the catalogue search port (app/providers/base.py's
-SearchPort): free-text search over Simkl's own title catalogue.
+SearchPort): free-text search over Simkl's own title catalogues.
 
-FANS OUT TO TWO ENDPOINTS FOR A SHOW QUERY, AND HIDES THAT FROM THE CALLER.
-Measured live 2026-08-12: GET /search/tv returns zero anime results — "kaiju
-no 8" and "frieren" both answer 0 hits there and 3 each on GET /search/anime
-— because Simkl keeps anime as a separate catalogue with its own search
-endpoint. The port's contract is one media-parameterized verb returning one
-list, so the split is paid here and nowhere else: a caller asking "search
-shows" should not have to know Simkl needs two requests to answer that where
-Trakt needs one.
+TWO CATALOGUES, SEARCHED APART. Simkl keeps anime as a separate catalogue with
+its own endpoint, and one query does not reach both: measured live 2026-08-12
+and again 2026-10-23, GET /search/tv answers "frieren" and "kaiju no 8" with
+nothing and GET /search/anime with 3 and 5 — and for "one piece" the TV
+endpoint's 3 are the live-action series and its spin-offs while anime holds the
+show. So the port offers two catalogues a box searches separately, each one
+page of SEARCH_PAGE_SIZE per ask: "simkl" (/search/tv for shows, /search/movie
+for films) and "simkl-anime" (/search/anime, holding both — see
+_FILM_SEARCH_TYPE). It used to fan a show query out over both endpoints and walk
+four pages of each behind one ask, which gave Simkl a different page size from
+every other service a box asks and no way to ask for more of just one of them.
 
-THESE ARE GETs, measured live the same day against /search/tv, /search/anime
-and /search/movie: all three answered 200 with results, both as a GET and
+THESE ARE GETs, measured live 2026-08-12 against /search/tv, /search/anime and
+/search/movie: all three answered 200 with results, both as a GET and
 (harmlessly) as a POST, but Simkl's own docs describe free-text search as
 `GET /search/{type}` and reserve the POSTs in this area for `/search/file`
-and `/search/random`, which this app has no use for. transport.py's own
-`cached_get` docstring used to claim "the search endpoints are POSTs" — that
-sentence was about those two, not these three, and has been corrected beside
-it. So this rides `cached_get` like every other catalogue read in this
-package: CATALOG_POOL, the 10 GET/second pool, and URL-cacheable.
+and `/search/random`, which this app has no use for. So this rides
+`cached_get` like every other catalogue read in this package: CATALOG_POOL,
+the 10 GET/second pool, and URL-cacheable.
 
 WHAT A SEARCH HIT DOES NOT CARRY, MEASURED AGAINST A LIVE RESPONSE: no
 network, no runtime, no overview, and no season — a hit's `ids` block holds
@@ -41,17 +42,22 @@ import asyncio
 import logging
 
 from ...config import Settings
-from ..base import Media, SearchHit, Source, resolve_key
+from ..base import SEARCH_PAGE_SIZE, Media, SearchHit, SearchPage, Source, resolve_key
 from . import _ids, _naming, transport
 from . import calendar as simkl_calendar
 
 logger = logging.getLogger(__name__)
 
-# Which path(s) answer a media-parameterized search. A show query asks BOTH —
-# see the module docstring for why — and a movie query asks the one endpoint
-# Simkl publishes for films.
-_SHOW_PATHS = ("search/tv", "search/anime")
-_MOVIE_PATHS = ("search/movie",)
+# Which endpoint answers each catalogue for each medium — see the module
+# docstring for why anime is its own catalogue.
+CATALOGUE = "simkl"
+ANIME_CATALOGUE = "simkl-anime"
+_PATHS = {
+    (CATALOGUE, Media.SHOW): "search/tv",
+    (CATALOGUE, Media.MOVIE): "search/movie",
+    (ANIME_CATALOGUE, Media.SHOW): "search/anime",
+    (ANIME_CATALOGUE, Media.MOVIE): "search/anime",
+}
 
 
 # `GET /search/anime` ANSWERS WITH FILMS AS WELL AS TV, and nothing else in the
@@ -105,40 +111,17 @@ def _hit(entry: dict, media: Media) -> SearchHit:
     )
 
 
-# How many results one page of a search asks for, and how many pages are worth
-# walking. Simkl serves 10 by default, caps `limit` at 50 and `page` at 20 — so
-# "pull the rest" for a broad word is 500 results, which is not a picker.
-#
-# MEASURED, NOT GUESSED: "attack" answers 123 titles across the two show
-# endpoints. That is not a rate problem (the per-title lookups behind it are
-# bounded by how many hits COLLIDE on one identity, and held for a day) — it is a
-# usability one. Forty per endpoint is roughly four screens, well past the ten
-# that used to be silently all anyone got, and short of the point where a longer
-# list stops being a better answer.
-PAGE_SIZE = 10
-MAX_PAGES = 4
-
-
-async def _search_one(settings: Settings, path: str, query: str, media: Media, *,
-                      cache_only: bool = False) -> list[SearchHit]:
-    """One endpoint's hits, EVERY page of them. Raises transport.SimklError on
-    a failure — caught and weighed by `search_titles`, which is the one place
-    that gets to decide whether a failed endpoint fails the whole search.
-
-    THE PAGES ARE ASSEMBLED AND CACHED AS ONE ANSWER by the transport, so
-    nothing here or above knows this endpoint paginates at all. Simkl serves
-    ten results by default and states the real total in
-    `X-Pagination-Page-Count`; taking the first page alone silently truncated
-    every query with more matches than that, and somebody searching a common
-    word got whichever ten Simkl ranked first with nothing to say the rest
-    existed."""
-    results = await transport.cached_paged_get(
+async def _search_one(settings: Settings, path: str, query: str, media: Media,
+                      page: int, *, cache_only: bool = False) -> tuple[list[SearchHit], bool]:
+    """One page of one endpoint, and whether Simkl holds a later one (its own
+    page count, transport.cached_page_get). Raises transport.SimklError on a
+    failure. Asked with the viewer's own token, which Simkl's v2 search requires."""
+    entries, more = await transport.cached_page_get(
         transport.catalog_client(), settings, path,
-        {"q": query, "limit": str(PAGE_SIZE)},
-        pool=transport.CATALOG_POOL, raise_errors=True, max_pages=MAX_PAGES,
-        cache_only=cache_only, private=True,
+        {"q": query, "limit": str(SEARCH_PAGE_SIZE)}, page,
+        pool=transport.CATALOG_POOL, raise_errors=True, cache_only=cache_only,
     )
-    return [_hit(entry, media) for entry in results]
+    return [_hit(entry, media) for entry in entries], more
 
 
 async def _name_the_seasons_that_collide(settings: Settings, hits: list[SearchHit], *,
@@ -202,74 +185,41 @@ async def _name_the_seasons_that_collide(settings: Settings, hits: list[SearchHi
 
 
 async def search_titles(settings: Settings, media: Media, query: str, *,
-                        cached_only: bool = False) -> list[SearchHit]:
-    """app/providers/base.py's SearchPort. Empty query returns [] without a
-    call, the same rule Trakt's search keeps.
+                        page: int = 1, catalogue: str = CATALOGUE,
+                        cached_only: bool = False) -> SearchPage:
+    """app/providers/base.py's SearchPort, for one of Simkl's two catalogues:
+    page `page` of SEARCH_PAGE_SIZE. Empty query answers an empty page without a
+    call, the same rule every service keeps.
 
     `cached_only=True` makes no call at all and reads back what an identical
     search stored — see SearchPort for what names it. The season-naming pass
     below inherits it, so a cached-only read cannot reach the network by the
     back door of resolving a collision.
 
-    ONE ENDPOINT FAILING DOES NOT FAIL THE OTHER. A show query is two
-    requests under one port call (see module docstring); if /search/anime is
-    down and /search/tv still answers, the tv hits are a real, useful answer
-    on their own, and losing them to a partner endpoint's failure would be the
-    opposite of every other degrade-partially-rather-than-wholesale rule this
-    app follows elsewhere.
-
-    EVERY ENDPOINT FAILING IS DIFFERENT AND MUST RAISE. SearchPort's own
-    contract (see base.py) is that a failure is not the same answer as "no
-    matches" — a caller reading several sources needs to tell the two apart,
-    the same distinction every other port in this app draws. Swallowing a
-    total failure into [] here would make Simkl being unreachable look
-    identical to Simkl genuinely finding nothing, exactly the failure this
-    port exists not to produce.
+    A FAILURE RAISES, never reading as "no matches": SearchPort's own contract
+    (see base.py) is that a caller reading several sources must tell "found
+    nothing" apart from "could not be asked".
     """
     q = (query or "").strip()
     if not q:
-        return []
+        return SearchPage([])
     media = Media(media)
-    paths = _MOVIE_PATHS if media is Media.MOVIE else _SHOW_PATHS
-    # ONE AT A TIME, NOT GATHERED, AND THAT IS SIMKL'S RULE RATHER THAN A
-    # PREFERENCE. Parallel requests are allowed only against the endpoints served
-    # from Cloudflare's edge — the calendar files, `/tv/{id}`, `/anime/{id}` and
-    # the episode lists — and search is explicitly not among them. Measured
-    # 2026-08-21: `GET /search/tv` answers `cf-cache-status: DYNAMIC`, so every
-    # one of these reaches the origin. Simkl names "parallelizing uncached
-    # endpoints" as a common reason a client id is suspended, without warning and
-    # with no appeal, which is not a risk worth one round trip.
-    #
-    # THE COST IS ONE EXTRA ROUND TRIP PER SEARCH, because a show query asks two
-    # endpoints (Simkl's /search/tv returns no anime) and a film query asks one.
-    # A search is a deliberate act by one person, not something a page load
-    # spends, so serializing it is the cheap side of this trade.
-    hits: list[SearchHit] = []
-    failures: list[BaseException] = []
-    for path in paths:
-        try:
-            hits.extend(await _search_one(settings, path, q, media,
-                                          cache_only=cached_only))
-        except Exception as exc:  # noqa: BLE001 — weighed below, per endpoint
-            failures.append(exc)
-    if failures and len(failures) == len(paths):
-        # Nothing answered at all — raise rather than reading as an honest
-        # empty result. The first failure is as good as any to surface: they
-        # are independent endpoints failing independently, not one cause with
-        # several symptoms.
-        raise failures[0]
-    for exc in failures:
-        logger.warning("Simkl search %s(%r) failed: %s", "/".join(paths), q, exc)
-    # A SHOW QUERY NEVER RETURNS A FILM. /search/anime answers with both under
-    # one endpoint (see _hit's own docstring for the measured mixing), and a
-    # film hit mixed in has nowhere useful to go from a shows search: it has no
-    # season to pick, and the show flow's own add has no watched-on date to
-    # record one with, so surfacing it there was a row that could only ever be
-    # refused. Dropped here rather than left for the caller to filter, so
-    # nothing downstream has to know this endpoint mixes media at all — the
-    # port's contract stays "asked for shows, got shows".
-    if media is Media.SHOW:
-        hits = [hit for hit in hits if hit.media is Media.SHOW]
+    try:
+        path = _PATHS[(catalogue, media)]
+    except KeyError:
+        raise ValueError(f"Simkl has no catalogue {catalogue!r} for {media}.") from None
+    # WHAT A HIT IS: the medium asked for, except in the anime catalogue, where
+    # the entry's own `type` says — so there everything not typed a film is a show
+    # (_hit reads the film type), whichever medium the search was for.
+    hits, more = await _search_one(settings, path, q,
+                                   Media.SHOW if catalogue == ANIME_CATALOGUE else media,
+                                   page, cache_only=cached_only)
+    # THE ANIME CATALOGUE ANSWERS BOTH MEDIA AT ONE ENDPOINT, and nothing else in
+    # the payload says which a hit is but its `type` (see _FILM_SEARCH_TYPE) — so
+    # each search keeps only the medium it was asked for. A film hit has nowhere
+    # useful to go from a show search (no season to pick, no watched-on date to
+    # record one with) and the reverse holds for a film search.
+    hits = [hit for hit in hits if hit.media is media]
     # SHOWS ONLY, past this point. A film has no season to name, and Simkl's
     # film catalogue does not follow the season-title convention its anime
     # catalogue does — measured, 41 film hits across six queries and not one
@@ -277,6 +227,6 @@ async def search_titles(settings: Settings, media: Media, query: str, *,
     # resolve, and the lookup this would make reads `/tv/{id}`, which is the
     # wrong question to ask about a film id even when it is cheap.
     if media is Media.MOVIE:
-        return hits
-    return await _name_the_seasons_that_collide(settings, hits,
-                                                cache_only=cached_only)
+        return SearchPage(hits, more)
+    return SearchPage(await _name_the_seasons_that_collide(settings, hits,
+                                                           cache_only=cached_only), more)

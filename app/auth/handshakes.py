@@ -81,6 +81,28 @@ async def create_handshake(
     return state
 
 
+async def hold_on_handshake(state: str, value: str) -> None:
+    """Keep the one server-side value a callback needs to finish its exchange on
+    the handshake row `state` names — sealed, in the slot a code-exchange flow
+    keeps its PKCE verifier in (`create_handshake`), which is that slot's meaning:
+    what the callback trades, and never anything the returning browser supplies.
+
+    FOR A FLOW WHOSE VALUE EXISTS ONLY AFTER THE ROW DOES. TMDB's request token is
+    asked for with an address that already carries the row's state, so the row
+    has to be made first and the token written to it once TMDB has answered.
+    Only an unconsumed row is written: a consumed or expired one is finished."""
+    await db.execute(
+        "UPDATE auth_handshakes SET pkce_verifier = ? WHERE state = ? AND consumed_at IS NULL",
+        (secrets_box.seal(value), state))
+
+
+def held_on_handshake(row) -> str | None:
+    """The value `hold_on_handshake` kept (or a PKCE verifier `create_handshake`
+    stored), opened at the point it is used, from a row the callback has just
+    CONSUMED — so it is read exactly once."""
+    return secrets_box.open_(row["pkce_verifier"]) or None
+
+
 def _check_handshake_row(row, *, provider: str, session_id: str | None, ts: int) -> None:
     """The binding checks shared by consume_handshake and peek_handshake: right
     provider, not expired, not already consumed, and — for a link handshake —

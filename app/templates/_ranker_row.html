@@ -59,15 +59,13 @@
        space before the image lands. ASKED BY BOARD AND KEY, and answered with a
        redirect to the picture through the image proxy — the season's own
        artwork on a season row, else the show's (routes.rankings_poster says
-       why the address is not written here). A title with no tmdb has no artwork
-       to ask for at all and renders the empty frame directly. #}
-    {% if item.tmdb %}
+       why the address is not written here). A title with no tmdb id asks the
+       same way: its pictures are filed under the title store's key, which is
+       the row's (artwork's title_posters), and one with none filed answers 404
+       and becomes the empty frame like any other. #}
     <img class="ranker-thumb" width="46" height="69" loading="lazy" alt=""
          src="/api/rankings/poster?{{ {'board': board_uid, 'key': item.key} | urlencode }}"
          data-if-missing="frame">
-    {% else %}
-    <span class="ranker-thumb is-missing" aria-hidden="true"></span>
-    {% endif %}
     {# WHAT THE ROW IS CALLED, which for a season is "Show — Season 3" or the
        season's own name ("True Detective — Night Country"): a board may hold a
        show and its seasons side by side, and the label is how they are told

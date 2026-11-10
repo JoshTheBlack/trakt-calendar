@@ -16,14 +16,18 @@ run in the same process against the same data directory.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import json
 import os
 import re
 import shutil
+import threading
 import unittest
+from datetime import timedelta
 from html import unescape
 from pathlib import Path
+from typing import NamedTuple
 
 from fastapi.testclient import TestClient
 
@@ -72,14 +76,20 @@ def window_fetch(entries):
 
     `entries` is either the raw entries every window should answer with, or a
     callable (endpoint, start) -> raw entries for a test that wants one window to
-    differ from another. The answer names EVERY SOURCE THAT COULD HAVE ANSWERED
-    THIS ENDPOINT as having replied — `trakt` always, and `simkl` for the four
-    endpoints its calendar covers — because that is what a real fill against two
-    registered sources returns, and because the caller records who it ASKED
-    independently: a stub answering for fewer sources than are in play stores a
-    window that was asked-but-silent, and the read path then marks the span
-    partial. A test exercising a genuinely partial fetch (one source refused)
-    wants that, and builds its own stub instead of this one.
+    differ from another. The answer names EVERY SOURCE IN PLAY FOR THE WINDOW as
+    having replied — the fill's own answer (cache._window_sources): Trakt where
+    the test's Settings hold its client id, Simkl for the endpoints its calendar
+    covers, TMDB for its three where they hold a read token — because that is
+    what a real fill against the registered sources returns, and because the
+    caller records who it ASKED independently: a stub answering for fewer
+    sources than are in play stores a window that was asked-but-silent, and the
+    read path then marks the span partial. A test exercising a genuinely partial
+    fetch (one source refused) wants that, and builds its own stub instead of
+    this one. NEVER FOR A SOURCE NOT IN PLAY: one answered for though the fill
+    did not ask it made a month's read depend on which of its weeks a
+    concurrent fill reached first — a week whose own fill found another week's
+    month-wide answer already stored asked nobody, and kept none of the records
+    the stub had put in the other weeks' answers.
 
     Patching HERE rather than at the transport keeps the floor filter and the
     window trim out of the way, which is what a test about the read path wants;
@@ -89,17 +99,21 @@ def window_fetch(entries):
     span read the same whichever sources answered; a test about per-viewer source
     selection needs records from two services and builds them itself.
     """
-    async def fetch(endpoint, settings, start, *, covered=()):
-        from app.providers.simkl import _SimklProvider
+    async def fetch(endpoint, settings, start, *, covered=(), sources=None):
+        from app.calendar import cache
 
         rows = entries(endpoint, start) if callable(entries) else entries
-        sources = ["trakt"]
-        if _SimklProvider.capabilities.answers(endpoint.key):
-            sources.append("simkl")
+        answering = [str(provider.source)
+                     for provider in cache._window_sources(endpoint, settings, start)]
+        # A fill asking only the services a window's coverage says are due
+        # (cache.ensure_window) hears from those alone — and the records are
+        # Trakt's, so a fill that did not ask Trakt brings none.
+        if sources is not None:
+            answering = [name for name in answering if name in set(map(str, sources))]
         # (records, answered, unchanged) — the stub never reports a source as
         # unchanged, because a test that wants that case is testing the
         # conditional GET and builds its own stub for it.
-        return calendar_records(rows, endpoint), sources, []
+        return (calendar_records(rows, endpoint) if "trakt" in answering else []), answering, []
     return fetch
 
 
@@ -148,6 +162,15 @@ def _schema_template() -> Path:
         asyncio.run(db.migrate())
         asyncio.run(db.run(lambda conn: conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")))
         db.close_thread_connection()
+        # AND THE TEMPLATE IS LEFT, never left current: a test that writes
+        # without a database of its own would otherwise write INTO the template,
+        # and every test copying it afterwards would start with those rows —
+        # MEASURED, a card test's titles turned up in fresh databases across
+        # tests/metadata, in whichever runs scheduled it first in a worker. Such
+        # a write lands in a throwaway copy instead.
+        unscoped = TMP / "unscoped.db"
+        shutil.copyfile(path, unscoped)
+        db.set_db_path(unscoped)
         _template_path = path
     return _template_path
 
@@ -158,6 +181,673 @@ def migrated_db(prefix: str = "test") -> Path:
     path = new_db_path(prefix)
     shutil.copyfile(template, path)
     return path
+
+
+# ---------------------------------------------------------------------------
+# settings, from a synchronous test
+# ---------------------------------------------------------------------------
+
+_settings_loop: asyncio.AbstractEventLoop | None = None
+_settings_loop_lock = threading.Lock()
+
+
+def run_coroutine(coroutine):
+    """Run `coroutine` to completion from synchronous code — a test method, a
+    setUp, a fixture — whether or not an event loop is running on this thread:
+    on one loop of its own, in a daemon thread, for the whole process."""
+    global _settings_loop
+    with _settings_loop_lock:
+        if _settings_loop is None:
+            loop = asyncio.new_event_loop()
+            threading.Thread(target=loop.run_forever, name="tests-settings",
+                             daemon=True).start()
+            _settings_loop = loop
+    return asyncio.run_coroutine_threadsafe(coroutine, _settings_loop).result()
+
+
+def load_settings(open_secrets: bool = True, *, apply_env_override: bool = True):
+    """`app.config.load_settings`, for a test that is not itself a coroutine. The
+    app reads its settings through db.run, so the read is a coroutine; the suite
+    asked for them synchronously in over two hundred places, and this is the one
+    door they all go through."""
+    from app import config
+    return run_coroutine(
+        config.load_settings(open_secrets, apply_env_override=apply_env_override))
+
+
+def save_settings(settings, *, clear_unset_secrets: bool = False) -> None:
+    """`app.config.save_settings`, for a test that is not itself a coroutine."""
+    from app import config
+    run_coroutine(config.save_settings(settings,
+                                               clear_unset_secrets=clear_unset_secrets))
+
+
+@contextlib.contextmanager
+def statements_per_transaction():
+    """How many statements each `db.transaction` body runs while the block is
+    open, one count per transaction in the order they ran (sqlite3's trace
+    callback, which fires once per statement — once per row of an executemany).
+    Only the body is counted — what holds the write lock; a `prepare` runs before
+    it is taken.
+
+    FOR THE WRITERS WHOSE STATEMENT COUNT MUST NOT GROW WITH WHAT THEY WRITE. A
+    transaction holds the database's one write lock for as long as its statements
+    take, and each can wait a GIL switch interval while the event loop is busy;
+    a test storing ten and a hundred of something and finding the same count is
+    what holds a writer to that.
+    """
+    counts: list[int] = []
+    with _transactions_traced(lambda statements: counts.append(len(statements))):
+        yield counts
+
+
+@contextlib.contextmanager
+def statements_run():
+    """Every statement each `db.transaction` body runs while the block is open —
+    a list per transaction, in the order they ran, each one's SQL text. Only the
+    body is recorded, as `statements_per_transaction` counts it."""
+    run: list[list[str]] = []
+    with _transactions_traced(run.append):
+        yield run
+
+
+async def settled() -> None:
+    """Wait for every write a request owes once it has answered
+    (after_response.write) — a session's slide, a page's is-new commit — for a
+    test that reads what one stored."""
+    import asyncio
+
+    from app import after_response
+    while after_response._writes:
+        await asyncio.gather(*list(after_response._writes))
+
+
+def settling(app):
+    """`app` as a TestClient's ASGI app that returns only once the writes the
+    request owed after its answer (after_response.write) have landed.
+
+    A TestClient not entered as a context manager runs each request on an event
+    loop of its own and stops it the moment the app returns, cancelling every
+    task still waiting — and an owed write waits its turn in the writer queue
+    behind whatever the page started before it (a refresh queueing what it drew,
+    say). MEASURED: across two runs of the calendar, auth and tracker suites, a
+    page's is-new commit or a session's slide was cancelled that way in dozens
+    of tests, and a test reading what one stored failed one run in two. A server
+    keeps its loop; this is the harness making the same promise."""
+    async def settled_app(scope, receive, send):
+        await app(scope, receive, send)
+        await settled()
+    return settled_app
+
+
+@contextlib.contextmanager
+def statements_executed():
+    """The SQL of every write made OUTSIDE a transaction while the block is open
+    — each `db.execute`, and each `db.executemany` once — in the order they
+    ran."""
+    from unittest import mock
+
+    from app import db
+
+    executed: list[str] = []
+    real_execute, real_many = db.execute, db.executemany
+
+    async def execute(sql, params=()):
+        executed.append(sql)
+        return await real_execute(sql, params)
+
+    async def executemany(sql, rows):
+        executed.append(sql)
+        return await real_many(sql, rows)
+
+    with mock.patch.object(db, "execute", execute), \
+            mock.patch.object(db, "executemany", executemany):
+        yield executed
+
+
+@contextlib.contextmanager
+def _transactions_traced(done):
+    """`db.transaction` with each body's statements (sqlite3's trace callback,
+    which fires once per statement — once per row of an executemany) handed to
+    `done` as the body ends."""
+    from unittest import mock
+
+    from app import db
+
+    real = db.transaction
+
+    async def traced(fn, *, prepare=None, decided=None):
+        def body(conn, *prepared):
+            seen: list[str] = []
+            conn.set_trace_callback(seen.append)
+            try:
+                return fn(conn, *prepared)
+            finally:
+                conn.set_trace_callback(None)
+                done(seen)
+        return await real(body, prepare=prepare, decided=decided)
+
+    with mock.patch.object(db, "transaction", traced):
+        yield
+
+
+# ---------------------------------------------------------------------------
+# the title store, as a test reads and seeds it
+# ---------------------------------------------------------------------------
+#
+# ONE ROW PER TITLE, SEASON AND EPISODE, a column group per service
+# (app/metadata/groups.py). A test asks about one service's group by name rather
+# than spelling `{source}_{column}` — the helpers below read a group back under
+# its columns' own names, and list every listing the episode rows hold one per
+# (service, instant, calendar), the shape a test asserting "what is listed"
+# wants. Seeding goes through the live writers where one fits (`put_listing`:
+# the store's own fold; `put_title`: the store's own `service_ids` filing), and
+# writes a group's columns directly only for what no writer would put there —
+# a clock in the past, a failure count.
+
+def as_stored(records):
+    """`records` as the calendar's read hands them over: each carrying the
+    episode row the title store files it on (`Record.card`) — its title by the
+    shared waterfall, and its row by the store's own filing and fold
+    (app/metadata/episodes.py's `Book`), run in memory on one calendar. For a
+    test that builds Records by hand and groups them with no database."""
+    from app.metadata import episodes
+
+    records = list(records)
+    book = episodes.Book()
+    for record in records:
+        instant = episodes.Instant(float(record.air_ts), calendars=1, entry=None)
+        book.place(title_key_of(record), str(record.media), str(record.source),
+                   record.season, record.episode_number, instant)
+    for record in records:
+        book.refold(title_key_of(record), 1, episodes.utc_day(float(record.air_ts)))
+    for record in records:
+        stated = ((None, None) if str(record.media) == "movie"
+                  else (record.season, record.episode_number))
+        record.card = next(
+            f"{row.key}|{row.unit}" for row in book.of_title(title_key_of(record))
+            if any(held.at == float(record.air_ts)
+                   and (row.stated(held) if row.media != "movie" else (None, None)) == stated
+                   for held in row.instants[str(record.source)]))
+    return records
+
+
+def stored_groups(records) -> list[dict]:
+    """Hand-built `records` as the cards their episode rows make, in memory —
+    each {"key", "base", "ids", "by_source", "records"} — as `as_stored` files
+    them and the read's own rule splits them (query.cards_of): for a test about
+    which records are one card, or one that builds a card's records to read
+    back through the store (`read_card`)."""
+    from app.calendar import query
+
+    by_row: dict[str, list] = {}
+    for record in as_stored(records):
+        by_row.setdefault(record.card, []).append(record)
+    out = []
+    for row, listings in by_row.items():
+        for number, card in enumerate(query.cards_of(listings), 1):
+            group = {"key": f"{row}#{number}", "base": row.split("|", 1)[0], "ids": {},
+                     "by_source": {}, "records": list(card)}
+            for record in card:
+                group["by_source"][str(record.source)] = record
+                for namespace, value in (record.ids or {}).items():
+                    if value not in (None, ""):
+                        group["ids"].setdefault(namespace, value)
+            out.append(group)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# hand-built cards, through the calendar's own read
+# ---------------------------------------------------------------------------
+#
+# THE RULES OF A CARD ARE THE READ'S, AND THE READ IS SQL (app/calendar/query.py):
+# whose value a viewer sees, which filters keep a card, what a service that only
+# describes the title may say. A test about one of them builds the records a
+# card is made of, as ever, and `read_cards` writes them into this test's own
+# store the way a fill and a description leave them — every word of each in its
+# service's group, each listing filed on its episode's row by the store's own
+# fold — and reads the cards back as a viewer would, synchronously, on the test's
+# connection. Each call starts from an empty store.
+
+def title_key_of(record) -> str:
+    """The title a hand-built record is of: the shared waterfall's key, or a
+    per-service key for a title it cannot key — as the store files one."""
+    from app.metadata import identity
+    from app.providers.base import resolve_key
+
+    key = resolve_key(record.media, record.ids or {})
+    return str(key) if key is not None else identity.per_source_key(record.source, record.id)
+
+
+def _record_words(record) -> dict:
+    """A record's words, as its service's group holds them."""
+    ratings = {}
+    if record.rating is not None:
+        ratings[str(record.source)] = record.rating
+    if record.imdb_rating is not None:
+        ratings["imdb"] = record.imdb_rating
+    stated = record.keywords is not None and record.show_type is not None
+    return {"title": record.title or "", "detail_url": record.detail_url or "",
+            "year": str(record.year or ""), "network": record.network or "",
+            "country": record.country or "", "language": record.language or "",
+            "certification": record.certification or "", "status": record.status or "",
+            "overview": record.overview or "", "poster": record.poster or "",
+            "runtime": record.runtime, "genres_json": json.dumps(list(record.genres or ())),
+            "ratings_json": json.dumps(ratings), "anime_type": record.anime_type or "",
+            "release_types_json": json.dumps(record.release_types_by_country or {}),
+            "enriched": 1 if record.enriched else 0,
+            "keywords_json": json.dumps(list(record.keywords or ())),
+            "show_type": str(record.show_type or ""), "facts_known": 1 if stated else 0}
+
+
+def seed_records(conn, records, *, endpoint: str = "shows", describing=()) -> None:
+    """`records` — listings — and `describing` — services' groups of titles they
+    do not list — written into an emptied store on `conn`."""
+    from app.metadata import groups, rows, tables
+
+    for table in (tables.EPISODES, tables.TITLES, tables.SERVICE_IDS):
+        conn.execute(f"DELETE FROM {table}")
+    known: dict[str, dict] = {}
+    for record in (*records, *describing):
+        key = title_key_of(record)
+        put_title(conn, str(record.source), str(record.media), record.id, key,
+                  ids=dict(record.ids or {}), **_record_words(record))
+        for name, value in (record.known_ids or {}).items():
+            known.setdefault(key, {}).setdefault(name, value)
+    for key, ids in known.items():
+        conn.execute(f"UPDATE {tables.TITLES} SET ids_json = ? WHERE title_key = ?",
+                     (json.dumps(ids), key))
+    for record in records:
+        key = title_key_of(record)
+        # Filed under the id its group states for it (rows.own_id), so it is the
+        # title's own entry rather than a second one.
+        own = rows.own_id(str(record.source), record.id, dict(record.ids or {}))
+        put_listing(conn, str(record.source), str(record.media), own, endpoint, key,
+                    float(record.air_ts), season=record.season, number=record.episode_number,
+                    date_only=bool(record.date_only), label=str(record.episode_label or ""))
+    for record in records:
+        source = str(record.source)
+        if not (record.episode_title and groups.has(tables.EPISODES, source, "title")):
+            continue
+        row = conn.execute(
+            f"SELECT unit FROM {tables.EPISODES} WHERE title_key = ? AND ({source}_air_ts = ? "
+            f"OR EXISTS (SELECT 1 FROM json_each({source}_repeats_json) r "
+            f"WHERE json_extract(r.value, '$.at') = ?))",
+            (title_key_of(record), float(record.air_ts), float(record.air_ts))).fetchone()
+        words = {"title": record.episode_title, "fetched_at": 1}
+        if groups.has(tables.EPISODES, source, "runtime"):
+            words["runtime"] = record.runtime
+        conn.execute(f"UPDATE {tables.EPISODES} SET "
+                     + ", ".join(f"{source}_{name} = ?" for name in words)
+                     + " WHERE title_key = ? AND unit = ?",
+                     (*words.values(), title_key_of(record), row[0]))
+
+
+def read_views(records, prefs=None, *, settings=None, endpoint: str = "shows", describing=(),
+               tz=None, specs=None):
+    """`records` stored (`seed_records`) and read back as one viewer's read
+    places and judges them — query.Placed."""
+    from zoneinfo import ZoneInfo
+
+    from app import db
+    from app.calendar import query, vocab
+    from app.endpoints import get_endpoint
+
+    conn = db.connection()
+    seed_records(conn, records, endpoint=endpoint, describing=describing)
+    viewer = query.Viewer(get_endpoint(endpoint), settings, prefs, tz or ZoneInfo("UTC"),
+                          vocab.complete_specs(specs or {}))
+    listings = query.read_rows(conn, endpoint, titles={title_key_of(r) for r in records})
+    return query.judge(conn, query.views_of(listings, viewer), viewer), viewer
+
+
+def read_cards(records, prefs=None, **kwargs) -> list:
+    """`records` read back as the Records one viewer's cards show, in air order
+    (`read_views`, then the drawn cards composed)."""
+    from app import db
+    from app.calendar import query
+
+    placed, viewer = read_views(records, prefs, **kwargs)
+    views = sorted(placed.views, key=lambda view: (view.air_date, view.air_ts))
+    return query.present_rows(db.connection(), views, viewer)
+
+
+def read_kept(records, prefs=None, **kwargs) -> tuple[list, int]:
+    """(the Records one viewer's cards show, in air order, how many their own
+    filters removed) for `records` — `specs`, `settings` and the rest as
+    `read_views` takes them."""
+    from app import db
+    from app.calendar import query
+
+    placed, viewer = read_views(records, prefs, **kwargs)
+    views = sorted(placed.views, key=lambda view: (view.air_date, view.air_ts))
+    return query.present_rows(db.connection(), views, viewer), placed.filtered_out
+
+
+def read_card(records, prefs=None, **kwargs):
+    """The one card `records` make for a viewer — None when they draw none."""
+    cards = read_cards(records, prefs, **kwargs)
+    assert len(cards) <= 1, f"these records make {len(cards)} cards"
+    return cards[0] if cards else None
+
+
+def _stored(conn, endpoint_key: str, listings) -> list:
+    """Each listing as the Record the calendar composes a card from — its
+    service's words, its episode's description."""
+    from app.calendar import query
+
+    rows = {(row["title_key"], row["unit"]): row for row in conn.execute(
+        query._words_sql(), {"rows": json.dumps([[l.title_key, l.unit] for l in listings])})}
+    return [query._listing_record(listing, rows[(listing.title_key, listing.unit)])
+            for listing in listings]
+
+
+def stored_records(endpoint_key: str, first=None, after=None, *, titles=None) -> list:
+    """Every stored listing on `endpoint_key` dated in [first, after) — or every
+    listing of `titles`, at any date — as Records, in the order a fill produces
+    them: what a test reads back to see what a fill stored."""
+    from app import db
+    from app.calendar import query
+    from app.metadata import episodes
+
+    conn = db.connection()
+    if titles is not None:
+        return _stored(conn, endpoint_key, query.read_rows(conn, endpoint_key, titles=titles))
+    after = after or first + timedelta(days=7)
+    lo, hi = episodes.epoch(first), episodes.epoch(after)
+    return _stored(conn, endpoint_key, [
+        listing for listing in query.read_rows(conn, endpoint_key, first=first, after=after)
+        if lo <= listing.air_ts < hi])
+
+
+async def read_span(endpoint_key: str, first, after):
+    """(stored records dated in [first, after), who answered, who was asked,
+    when it was stored) — a window's listings and its coverage, as a test reads
+    them back."""
+    from app import db
+
+    records = await db.run(lambda conn: stored_records(endpoint_key, first, after))
+    return (records, *await span_coverage(endpoint_key, first))
+
+
+async def span_coverage(endpoint_key: str, first):
+    """(who answered, who was asked, the earliest reply) for one window."""
+    from app.calendar import entries
+
+    held = await entries.source_coverage(endpoint_key, first)
+    asked = tuple(source for source, row in held.items() if row.asked)
+    answered = tuple(source for source, row in held.items() if row.answered)
+    stored_at = min((row.stored_at for row in held.values() if row.answered),
+                    default=min((row.stored_at for row in held.values()), default=None))
+    return answered, asked, stored_at
+
+
+class StoredWindow(NamedTuple):
+    """One window as a test reads it back: its cards (`stored_groups`' shape),
+    who ANSWERED and who was ASKED."""
+    groups: list
+    sources: tuple
+    asked: tuple = ()
+
+
+def grouped(records) -> list[dict]:
+    from app.calendar import query
+
+    by_row: dict[str, list] = {}
+    for record in records:
+        by_row.setdefault(record.card, []).append(record)
+    out = []
+    for row, listings in by_row.items():
+        for number, card in enumerate(query.cards_of(listings), 1):
+            group = {"key": f"{row}#{number}", "base": row.split("|", 1)[0], "ids": {},
+                     "by_source": {}, "records": list(card)}
+            for record in card:
+                group["by_source"][str(record.source)] = record
+                for namespace, value in (record.ids or {}).items():
+                    if value not in (None, ""):
+                        group["ids"].setdefault(namespace, value)
+            out.append(group)
+    return out
+
+
+async def read_cached_window(endpoint_key: str, start):
+    """(the window as stored, when it was stored) — None for a window nothing has
+    filled."""
+    records, answered, asked, stored_at = await read_span(
+        endpoint_key, start, start + timedelta(days=7))
+    if stored_at is None:
+        return None
+    return StoredWindow(grouped(records), tuple(answered), tuple(asked)), int(stored_at)
+
+
+async def load_window(endpoint, settings, start, *, allow_fetch: bool = True,
+                      force: bool = False, now: int | None = None):
+    """(the window, cached_at): `ensure_window` and then the window's stored
+    cards, as a test reads them — an empty window and None where nothing is
+    stored and nothing could be fetched."""
+    from app.calendar import cache
+
+    coverage = await cache.ensure_window(endpoint, settings, start, allow_fetch=allow_fetch,
+                                         force=force, now=now)
+    if coverage.cached_at is None:
+        return StoredWindow([], coverage.sources, coverage.asked), None
+    records, *_coverage = await read_span(endpoint.key, start, start + timedelta(days=7))
+    return StoredWindow(grouped(records), coverage.sources, coverage.asked), coverage.cached_at
+
+
+class CardTestCase(unittest.TestCase):
+    """A freshly migrated store per test, for a synchronous test of what a card
+    shows (`read_card`)."""
+
+    def setUp(self):
+        migrated_db(type(self).__name__.lower())
+
+    def tearDown(self):
+        from app import db
+        db.close_thread_connection()
+
+
+def _title_columns() -> tuple[str, ...]:
+    from app.metadata import groups, tables
+    return (*groups.NOT_WORDS[tables.TITLES], *groups.WORDS[tables.TITLES])
+
+
+async def title_groups(source: str | None = None) -> list[dict]:
+    """Every service group in `titles` (only `source`'s, when named), each with
+    `source`, `title_key`, `media`, `source_id` (the group's own id) and every
+    group column under its own name."""
+    from app import db
+    from app.metadata import groups, rows
+
+    names = [source] if source else list(groups.sources())
+    found = await db.fetch_all(rows.title_groups_sql(_title_columns(), sources=names))
+    return [dict(row) for row in found]
+
+
+async def title_group(title_key: str, source: str) -> dict | None:
+    """One title's group of one service, or None where it has none."""
+    return next((group for group in await title_groups(source)
+                 if group["title_key"] == str(title_key)), None)
+
+
+_SEASON_COLUMNS = ("name", "overview", "episode_count", "premiere", "air_dates_json", "poster",
+                   "cast_json", "videos_json", "fetched_at", "stale_after", "failed_at",
+                   "fail_count")
+
+
+async def season_groups(source: str | None = None) -> list[dict]:
+    """Every service's group of every season row (only `source`'s, when named):
+    `source`, `title_key`, `season` and the group's columns."""
+    from app import db
+    from app.metadata import groups, tables
+
+    out = []
+    for name in ([source] if source else groups.sources()):
+        for row in await db.fetch_all(
+                f"SELECT title_key, season, {groups.select(tables.SEASONS, name, _SEASON_COLUMNS)} "
+                f"FROM {tables.SEASONS} WHERE {groups.present(tables.SEASONS, name)} "
+                "ORDER BY title_key, season"):
+            out.append({"source": name, **dict(row)})
+    return out
+
+
+async def season_group(title_key: str, season: int, source: str) -> dict | None:
+    return next((group for group in await season_groups(source)
+                 if group["title_key"] == str(title_key) and group["season"] == int(season)),
+                None)
+
+
+_EPISODE_COLUMNS = ("title", "overview", "first_aired", "episode_type", "runtime", "rating",
+                    "votes", "fetched_at", "stale_after")
+
+
+async def episode_groups(source: str | None = None) -> list[dict]:
+    """Every service's DESCRIPTION of every episode row (only `source`'s, when
+    named) — a listing's stub (`fetched_at` 0) included: `source`, `title_key`,
+    `unit`, `season`, `number` and the description's columns."""
+    from app import db
+    from app.metadata import groups, tables
+
+    out = []
+    for name in ([source] if source else groups.sources()):
+        for row in await db.fetch_all(
+                f"SELECT title_key, unit, season, number, "
+                f"{groups.select(tables.EPISODES, name, _EPISODE_COLUMNS)} "
+                f"FROM {tables.EPISODES} WHERE {groups.present(tables.EPISODES, name)} "
+                "ORDER BY title_key, season, number"):
+            out.append({"source": name, **dict(row)})
+    return out
+
+
+async def listings(endpoint: str | None = None) -> list[dict]:
+    """Every listing the episode rows hold, one per (service, instant, calendar)
+    — on `endpoint` alone when one is named — as `source`, `media`, `source_id`
+    (the id the listing is filed under), `endpoint`, `title_key`, `unit`,
+    `air_ts`, `date_only`, `season` and `episode_number` (what the listing
+    stated, None for a half it left out), `from_search`, `label`, `stored_at`."""
+    from app import db, providers
+    from app.endpoints import ENDPOINTS
+    from app.metadata import episodes, groups, tables
+    from app.providers.base import Source
+
+    rows = await db.fetch_all(f"SELECT * FROM {tables.EPISODES} ORDER BY title_key, unit")
+    filed_as = {}
+    for row in await db.fetch_all(f"SELECT title_key, "
+                                  + ", ".join(f"{s}_ids_json, {s}_id" for s in groups.sources())
+                                  + f" FROM {tables.TITLES}"):
+        for source in groups.sources():
+            # The read's own rule (app/calendar/entries.py): the service's
+            # spelling of its ids, else the group's entry.
+            filed_as[(row["title_key"], source)] = (
+                providers.registered()[Source(source)].listing_id(
+                    json.loads(row[f"{source}_ids_json"] or "{}"))
+                or str(row[f"{source}_id"] or ""))
+    out = []
+    for row in rows:
+        stored = episodes.Row.read(row)
+        for source, held in stored.instants.items():
+            for instant in held:
+                season, number = stored.stated(instant)
+                for key, spec in ENDPOINTS.items():
+                    if not instant.calendars & spec.bit or (endpoint and key != endpoint):
+                        continue
+                    out.append({
+                        "source": source, "media": stored.media,
+                        "source_id": instant.entry or filed_as.get((stored.key, source), ""),
+                        "endpoint": key, "title_key": stored.key, "unit": stored.unit,
+                        "air_ts": instant.at, "date_only": instant.date_only,
+                        "season": season, "episode_number": number,
+                        "from_search": int(bool(instant.searched & spec.bit)),
+                        "label": instant.label, "stored_at": instant.listed_at})
+    return out
+
+
+def put_title(conn, source: str, media: str, source_id, title_key: str, *,
+              ids: dict | None = None, **values) -> None:
+    """A service's group of a title, inside the caller's connection: the entry
+    `source_id` names filed in `service_ids` by the store's own writer, the
+    group's columns as `values` give them (`fetched_at` now unless given)."""
+    import time
+
+    from app.metadata import groups, rows, tables
+
+    own = rows.own_id(source, source_id, ids or {})
+    stated = dict(ids or {rows.ID_NAMESPACE[source]: int(own) if own.isdigit() else own})
+    columns = {"id": own, "ids_json": json.dumps(stated), "fetched_at": int(time.time()),
+               **values}
+    if "title" in values and "title_fold" not in values:
+        columns["title_fold"] = rows.fold_title(values["title"])
+    conn.execute(f"INSERT INTO {tables.TITLES} (title_key, media, created_at) VALUES (?, ?, 0) "
+                 "ON CONFLICT(title_key) DO NOTHING", (title_key, media))
+    conn.execute(f"UPDATE {tables.TITLES} SET "
+                 + ", ".join(f"{source}_{name} = ?" for name in columns
+                             if groups.has(tables.TITLES, source, name))
+                 + " WHERE title_key = ?",
+                 (*(value for name, value in columns.items()
+                    if groups.has(tables.TITLES, source, name)), title_key))
+    rows.file_ids(conn, [[source, media, str(source_id), own, title_key]])
+
+
+def put_season(conn, source: str, title_key: str, season: int, **values) -> None:
+    """A service's group of one season, inside the caller's connection."""
+    import time
+
+    from app.metadata import groups, tables
+
+    columns = {"fetched_at": int(time.time()), **values}
+    conn.execute(f"INSERT INTO {tables.SEASONS} (title_key, season) VALUES (?, ?) "
+                 "ON CONFLICT(title_key, season) DO NOTHING", (title_key, int(season)))
+    conn.execute(f"UPDATE {tables.SEASONS} SET "
+                 + ", ".join(f"{source}_{name} = ?" for name in columns
+                             if groups.has(tables.SEASONS, source, name))
+                 + " WHERE title_key = ? AND season = ?",
+                 (*(value for name, value in columns.items()
+                    if groups.has(tables.SEASONS, source, name)), title_key, int(season)))
+
+
+def put_episode(conn, source: str, title_key: str, season: int, number: int, *,
+                media: str = "show", **values) -> None:
+    """A service's description of one numbered episode, inside the caller's
+    connection (`fetched_at` 0 — a listing's stub — unless given)."""
+    from app.metadata import groups, tables
+
+    unit = f"S{int(season)}E{int(number)}"
+    columns = {"fetched_at": 0, **values}
+    conn.execute(f"INSERT INTO {tables.EPISODES} (title_key, unit, media, season, number) "
+                 "VALUES (?, ?, ?, ?, ?) ON CONFLICT(title_key, unit) DO NOTHING",
+                 (title_key, unit, media, int(season), int(number)))
+    conn.execute(f"UPDATE {tables.EPISODES} SET "
+                 + ", ".join(f"{source}_{name} = ?" for name in columns
+                             if groups.has(tables.EPISODES, source, name))
+                 + " WHERE title_key = ? AND unit = ?",
+                 (*(value for name, value in columns.items()
+                    if groups.has(tables.EPISODES, source, name)), title_key, unit))
+
+
+def put_listing(conn, source: str, media: str, source_id, endpoint: str, title_key: str,
+                air_ts: float, *, season: int | None = None, number: int | None = None,
+                date_only: bool = False, from_search: bool = False, stored_at: int = 0,
+                label: str = "") -> None:
+    """A service's listing of an episode on a calendar, inside the caller's
+    connection — filed on its episode's row, and folded, by the store's own
+    writer (app/metadata/episodes.py). The title's group of the service, where
+    it has one, says whether `source_id` is its entry."""
+    from app.endpoints import ENDPOINTS
+    from app.metadata import episodes, rows, tables
+
+    bit = ENDPOINTS[endpoint].bit
+    own = rows.own_id(source, source_id, {})
+    held = conn.execute(f"SELECT {source}_id FROM {tables.TITLES} WHERE title_key = ?",
+                        (title_key,)).fetchone()
+    entry = None if held is None or held[0] in (None, own) else own
+    book = episodes.Book()
+    book.hold(episodes.read_titles(conn, [title_key]))
+    instant = episodes.Instant(float(air_ts), int(date_only), bit, bit if from_search else 0,
+                               0, label, int(stored_at), entry)
+    book.place(title_key, media, source, season, number, instant)
+    book.refold(title_key, bit, instant.day)
+    book.write(conn, book.spell())
 
 
 class DatabaseTestCase(unittest.IsolatedAsyncioTestCase):
@@ -200,12 +890,11 @@ class AppTestCase(unittest.TestCase):
         return Settings(simkl_public_calendar_enabled=False)
 
     def setUp(self):
-        from app.config import save_settings
         from app.main import app
 
         self.db_path = migrated_db(type(self).__name__.lower())
         save_settings(self.make_settings())
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
 
     def tearDown(self):
         from app import db

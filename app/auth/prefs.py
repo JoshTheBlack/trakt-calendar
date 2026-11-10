@@ -63,6 +63,41 @@ def insert_user_prefs(conn: db.Connection, user_id: int, settings: Settings,
     # starts on, including the operator's own at onboarding.
 
 
+# THE SIX DIMENSIONS MIGRATION 48 ADDED, by the key a prefs dict carries each under
+# and the column it is stored in, with how it is stored: a list as JSON (a
+# keyword's own name can hold a comma), a switch as 0/1, the rest as the spec
+# text they are. The keys are the ones app/calendar/vocab.py names — restated
+# here as strings because this layer depends on no feature.
+_NARROWING: dict[str, tuple[str, str]] = {
+    "tv_languages": ("tv_languages", "text"),
+    "movie_languages": ("movie_languages", "text"),
+    "tv_keywords": ("tv_keywords_json", "list"),
+    "movie_keywords": ("movie_keywords_json", "list"),
+    "tv_show_types": ("tv_show_types", "text"),
+    "tv_single_service": ("tv_single_service", "switch"),
+    "movie_single_service": ("movie_single_service", "switch"),
+    "tv_sparse_no_network": ("tv_sparse_no_network", "switch"),
+    "tv_missing": ("tv_missing", "text"),
+    "movie_missing": ("movie_missing", "text"),
+}
+_NARROWING_COLUMNS = tuple(column for column, _kind in _NARROWING.values())
+
+
+def _read_narrowing(row) -> dict:
+    """Those dimensions out of a `user_prefs` row — or their empty values, for
+    an account with no row."""
+    out: dict = {}
+    for key, (column, kind) in _NARROWING.items():
+        stored = row[column] if row is not None else None
+        if kind == "list":
+            out[key] = json.loads(stored or "[]")
+        elif kind == "switch":
+            out[key] = bool(stored)
+        else:
+            out[key] = stored or ""
+    return out
+
+
 async def get_user_prefs(user_id: int) -> dict:
     """A user's view preferences, in the shape the calendar read path and the
     per-user pref-write endpoint both use. Falls back to empty/default values if
@@ -73,6 +108,7 @@ async def get_user_prefs(user_id: int) -> dict:
         "network_filter_json, tv_genres, tv_countries, movie_genres, "
         "movie_countries, show_certifications, "
         "movie_certifications, movie_release_countries, movie_release_types, "
+        f"{', '.join(_NARROWING_COLUMNS)}, "
         "filters_paused, share_watch_history "
         "FROM user_prefs WHERE user_id = ?",
         (user_id,),
@@ -85,6 +121,7 @@ async def get_user_prefs(user_id: int) -> dict:
             "movie_genres": "", "movie_countries": "",
             "show_certifications": "", "movie_certifications": "",
             "movie_release_countries": "", "movie_release_types": "",
+            **_read_narrowing(None),
             "filters_paused": False,
             # ON where the row is missing, which is the same default the column
             # carries: a fallback that quietly published less than the account
@@ -106,6 +143,7 @@ async def get_user_prefs(user_id: int) -> dict:
         "movie_certifications": row["movie_certifications"] or "",
         "movie_release_countries": row["movie_release_countries"] or "",
         "movie_release_types": row["movie_release_types"] or "",
+        **_read_narrowing(row),
         "filters_paused": bool(row["filters_paused"]),
         # WHETHER THIS ACCOUNT'S SHARE LINKS PUBLISH ITS WATCH HISTORY. Read here
         # rather than from share_links because it is not a view option a link may
@@ -123,7 +161,7 @@ _USER_PREF_FIELDS = frozenset({
     "network_filter", "tv_genres", "tv_countries", "movie_genres",
     "movie_countries", "show_certifications", "movie_certifications",
     "movie_release_countries", "movie_release_types", "filters_paused",
-    "share_watch_history",
+    "share_watch_history", *_NARROWING,
 })
 
 
@@ -137,11 +175,16 @@ async def update_user_prefs(user_id: int, **fields) -> None:
     columns: list[str] = []
     params: list = []
     for key, value in updates.items():
-        if key in ("hide_not_watching", "filters_paused", "share_watch_history"):
+        kind = _NARROWING.get(key, (key, "text"))[1]
+        if key in ("hide_not_watching", "filters_paused", "share_watch_history") \
+                or kind == "switch":
             columns.append(f"{key} = ?")
             params.append(int(bool(value)))
         elif key == "network_filter":
             columns.append("network_filter_json = ?")
+            params.append(json.dumps(list(value)))
+        elif kind == "list":
+            columns.append(f"{_NARROWING[key][0]} = ?")
             params.append(json.dumps(list(value)))
         else:
             columns.append(f"{key} = ?")

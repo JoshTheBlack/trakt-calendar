@@ -9,9 +9,13 @@ No network.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import threading
+import time
 import unittest
+from unittest.mock import patch
 
 from app import db
 from tests.support import APP_DIR, TMP, new_db_path
@@ -565,6 +569,162 @@ class MigrationTests(DbTestCase):
         finally:
             conn.close()
             path.unlink(missing_ok=True)
+
+    def _at_version_with_titles(self, path, version: int):
+        """A database at schema `version` holding one service's title row, one
+        episode row and the airing that names them — the shape every instance
+        upgrading to 47 has."""
+        import sqlite3
+
+        from unittest.mock import patch
+
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        conn.execute("PRAGMA foreign_keys=ON")
+        with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= version]):
+            db.migrate_sync(conn)
+        conn.execute(
+            "INSERT INTO calendar_titles (source, media, source_id, title_key, title, ids_json, "
+            "network, enriched, fetched_at, stale_after) VALUES ('simkl', 'show', '55', "
+            "'show:tvdb:4321', 'A Show', '{\"simkl\": 55, \"tvdb\": 4321}', 'HBO', 1, 10, 20)")
+        conn.execute(
+            "INSERT INTO calendar_episodes (source, media, source_id, season, number, title, "
+            "fetched_at, stale_after) VALUES ('simkl', 'show', '55', 1, 2, 'Second', 10, 20)")
+        conn.execute(
+            "INSERT INTO calendar_airings (source, media, source_id, endpoint, title_key, air_ts, "
+            "air_date, season, episode_number, stored_at) VALUES ('simkl', 'show', '55', "
+            "'shows', 'show:tvdb:4321', 1783540800, '2026-07-08', 1, 2, 10)")
+        return conn
+
+    def _assert_the_store_after_47(self, conn):
+        title = dict(conn.execute("SELECT * FROM title_metadata").fetchone())
+        self.assertEqual((title["title_key"], title["title"], title["network"], title["enriched"]),
+                         ("show:tvdb:4321", "A Show", "HBO", 1))
+        # The columns later readers need, empty until their writers exist.
+        self.assertEqual((title["keywords_json"], title["cast_json"], title["videos_json"],
+                          title["collection_json"], title["next_episode_json"],
+                          title["first_aired"], title["logo"], title["season_count"]),
+                         ("[]", "[]", "[]", "{}", "{}", "", "", None))
+        self.assertEqual(conn.execute("SELECT title FROM episode_metadata").fetchone()[0], "Second")
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertFalse({"calendar_titles", "calendar_episodes"} & tables)
+        # 47's identity table is kept aside by 49 (`titles_v47`), still empty.
+        self.assertTrue({"titles_v47", "title_aliases", "season_metadata", "metadata_refresh",
+                         "title_posters", "network_logos"} <= tables)
+        for table in ("titles_v47", "title_aliases", "season_metadata", "metadata_refresh",
+                      "title_posters", "network_logos"):
+            self.assertEqual(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0, table)
+        # And 49 made the service's row its title's row in the one store.
+        self.assertEqual(tuple(conn.execute(
+            "SELECT title_key, simkl_title, simkl_network FROM titles").fetchone()),
+            ("show:tvdb:4321", "A Show", "HBO"))
+        indexes = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        self.assertTrue({"ix_title_metadata_fold", "ix_title_metadata_key",
+                         "ix_title_metadata_due", "ix_title_metadata_fetched",
+                         "ix_episode_metadata_due", "ix_episode_metadata_fetched",
+                         "ix_titles_tvdb", "ix_titles_imdb", "ix_titles_mal"} <= indexes)
+        self.assertFalse([name for name in indexes if "calendar_titles" in name
+                          or "calendar_episodes" in name])
+        # The airing still joins its title and episode under the new names.
+        joined = conn.execute(
+            "SELECT t.title, e.title FROM calendar_airings a "
+            "JOIN title_metadata t ON t.source = a.source AND t.source_id = a.source_id "
+            "JOIN episode_metadata e ON e.source = a.source AND e.source_id = a.source_id "
+            "AND e.season = a.season AND e.number = a.episode_number").fetchone()
+        self.assertEqual(tuple(joined), ("A Show", "Second"))
+        self.assertIn("season_totals_order_json",
+                      [c[1] for c in conn.execute("PRAGMA table_info(source_prefs)")])
+        # Every later migration ran after it, the way an upgrading instance's do.
+        self.assertEqual(conn.execute("SELECT version FROM schema_version").fetchone()[0],
+                         max(version for version, _step in db.MIGRATIONS))
+
+    async def test_migration_47_from_the_development_schema_renames_the_store_in_place(self):
+        """The development database is at 46: the calendar's title and episode
+        rows become the title store's, with every row and every index carried."""
+        path = TMP / "migration-47-from-46.db"
+        conn = self._at_version_with_titles(path, 46)
+        try:
+            db.migrate_sync(conn)
+            self._assert_the_store_after_47(conn)
+        finally:
+            conn.close()
+            path.unlink(missing_ok=True)
+
+    async def test_migration_47_from_the_production_schema_runs_everything_after_it(self):
+        """Production lags at 39, so 40-46 run first; the store's rows come
+        through all eight unchanged."""
+        path = TMP / "migration-47-from-39.db"
+        conn = self._at_version_with_titles(path, 39)
+        try:
+            db.migrate_sync(conn)
+            self._assert_the_store_after_47(conn)
+            self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        finally:
+            conn.close()
+            path.unlink(missing_ok=True)
+
+    # The columns migration 48 adds, with the value every existing row reads.
+    _AFTER_48 = {
+        "user_prefs": {"tv_languages": "", "movie_languages": "", "tv_keywords_json": "[]",
+                       "movie_keywords_json": "[]", "tv_show_types": "",
+                       "tv_single_service": 0, "movie_single_service": 0,
+                       "tv_sparse_no_network": 0, "tv_missing": "", "movie_missing": ""},
+        "title_metadata": {"show_type": "", "facts_known": 0},
+    }
+
+    def _assert_after_48(self, conn):
+        for table, columns in self._AFTER_48.items():
+            declared = {c[1]: c for c in conn.execute(f"PRAGMA table_info({table})")}
+            for column, value in columns.items():
+                with self.subTest(table=table, column=column):
+                    self.assertIn(column, declared)
+                    self.assertEqual(declared[column][3], 1, "NOT NULL")
+                    row = conn.execute(f"SELECT {column} FROM {table}").fetchone()
+                    self.assertEqual(row[0], value)
+
+    async def test_migration_48_adds_the_filter_columns_and_keeps_every_row(self):
+        """Additive only: a viewer's row and a title row come through untouched,
+        each new column reading the value that means "nothing narrowed" / "not
+        described". From the development schema before the store (46) and from
+        production's (39), so 47 and everything before it run first."""
+        for version in (46, 39):
+            with self.subTest(version=version):
+                path = TMP / f"migration-48-from-{version}.db"
+                conn = self._at_version_with_titles(path, version)
+                try:
+                    conn.execute("INSERT INTO users (username, created_at, updated_at) "
+                                 "VALUES ('viewer', 1, 1)")
+                    user_id = conn.execute("SELECT id FROM users").fetchone()[0]
+                    conn.execute("INSERT INTO user_prefs (user_id, endpoint, card_style, "
+                                 "day_packing, tv_genres) VALUES (?, 'shows/new', 'vertical', "
+                                 "'stacked', ?)", (user_id, "-anime"))
+                    db.migrate_sync(conn)
+                    self._assert_after_48(conn)
+                    self.assertEqual(conn.execute("SELECT tv_genres FROM user_prefs").fetchone()[0],
+                                     "-anime")
+                    self.assertEqual(conn.execute("SELECT network FROM title_metadata")
+                                     .fetchone()[0], "HBO")
+                    self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+                finally:
+                    conn.close()
+                    path.unlink(missing_ok=True)
+
+    async def test_the_identity_indexes_find_an_id_only_by_its_stored_type(self):
+        """Why the store keeps ids canonical: SQLite never finds the text '4321'
+        equal to the integer 4321, so an index lookup is only as good as the type
+        it was written in."""
+        await db.execute("INSERT INTO titles (title_key, media, ids_json, created_at) "
+                         "VALUES ('show:tmdb:1', 'show', '{\"tmdb\": 1, \"tvdb\": 4321}', 0)")
+        found = await db.fetch_value("SELECT COUNT(*) FROM titles WHERE media = 'show' AND "
+                                     "json_extract(ids_json, '$.tvdb') = ?", (4321,))
+        missed = await db.fetch_value("SELECT COUNT(*) FROM titles WHERE media = 'show' AND "
+                                      "json_extract(ids_json, '$.tvdb') = ?", ("4321",))
+        self.assertEqual((found, missed), (1, 0))
+        plan = " ".join(r["detail"] for r in await db.fetch_all(
+            "EXPLAIN QUERY PLAN SELECT title_key FROM titles WHERE media = ? AND "
+            "json_extract(ids_json, '$.tvdb') = ?", ("show", 1)))
+        self.assertIn("ix_titles_tvdb", plan)
 
     async def test_migration_21_opens_the_provider_column_and_keeps_every_row(self):
         """Both provider tables carried `CHECK (provider IN ('plex','trakt'))`,
@@ -1192,6 +1352,35 @@ class PragmaTests(DbTestCase):
         self.assertTrue(all(fk == 1 and str(jm).lower() == "wal" for fk, jm in results))
 
 
+class AggregatedReadTests(unittest.TestCase):
+    """db.aggregated reads every row as one: SQLite's JSON spells a REAL with 15
+    significant digits, so the columns a reader names `exact` come back as a
+    plain SELECT gives them — and only those cost the spelling."""
+
+    def setUp(self):
+        self.conn = __import__("sqlite3").connect(":memory:")
+        self.conn.execute("CREATE TABLE t (rating REAL, name TEXT, n INTEGER, at REAL)")
+        self.rows = [(8.893616676330566, "one", 3, 1791673200.0), (0.1, "two", None, None),
+                     (None, "8.25", 7, -2.5)]
+        self.conn.executemany("INSERT INTO t VALUES (?, ?, ?, ?)", self.rows)
+        self.columns = ["rating", "name", "n", "at"]
+
+    def test_a_plain_read_spells_a_rating_with_fifteen_digits(self):
+        read = db.aggregated(self.conn, self.columns, "FROM t ORDER BY rowid")
+        self.assertEqual(read[0][0], 8.89361667633057)
+
+    def test_the_exact_columns_come_back_as_a_select_gives_them(self):
+        read = db.aggregated(self.conn, self.columns, "FROM t ORDER BY rowid", exact=[0, 3])
+        self.assertEqual([tuple(row) for row in read], self.rows)
+
+    def test_a_text_column_is_never_read_as_a_number(self):
+        read = db.aggregated(self.conn, self.columns, "FROM t ORDER BY rowid", exact=[0, 1])
+        self.assertEqual(read[2][1], "8.25")
+
+    def test_nothing_found_is_no_rows(self):
+        self.assertEqual(db.aggregated(self.conn, self.columns, "FROM t WHERE 0", exact=[0]), [])
+
+
 class HelperTests(DbTestCase):
     async def test_execute_reports_lastrowid_and_rowcount(self):
         now = db.now()
@@ -1224,6 +1413,99 @@ class HelperTests(DbTestCase):
         with self.assertRaises(RuntimeError):
             await db.transaction(_boom)
         self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM users"), 0)
+
+    async def test_a_long_hold_of_the_write_lock_is_logged_naming_the_holder(self):
+        """Every other writer waits behind a held lock and gives up at the busy
+        timeout, so the hold that causes "database is locked" names itself."""
+        def slow_body(conn):
+            time.sleep(0.05)
+
+        def quick_body(conn):
+            pass
+
+        with patch.object(db, "LOCK_HELD_WARN_SECONDS", 0.01), \
+                self.assertLogs("app.db", level="WARNING") as logged:
+            await db.transaction(quick_body)
+            await db.transaction(slow_body)
+        self.assertEqual(len(logged.records), 1)
+        self.assertIn("slow_body", logged.output[0])
+
+    async def test_a_body_that_fails_after_a_long_hold_is_logged_too(self):
+        def failing_body(conn):
+            time.sleep(0.05)
+            raise RuntimeError("nope")
+
+        with patch.object(db, "LOCK_HELD_WARN_SECONDS", 0.01), \
+                self.assertLogs("app.db", level="WARNING") as logged, \
+                self.assertRaises(RuntimeError):
+            await db.transaction(failing_body)
+        self.assertIn("failing_body", logged.output[0])
+
+    async def test_what_prepare_read_before_the_lock_reaches_the_body(self):
+        calls = []
+
+        def prepare(conn):
+            calls.append("prepare")
+            return conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+        def body(conn, prepared):
+            calls.append(("body", prepared, conn.in_transaction))
+            return prepared
+
+        self.assertEqual(await db.transaction(body, prepare=prepare), 0)
+        self.assertEqual(calls, ["prepare", ("body", 0, True)])
+
+    async def test_another_connections_commit_after_prepare_makes_it_prepare_again(self):
+        """`prepare` read before the lock; once another writer has committed, what
+        it read may be stale, so it is read again under the lock."""
+        now = db.now()
+        prepared = []
+
+        def other_writer():
+            db.connection().execute(
+                "INSERT INTO users (username, created_at, updated_at) VALUES ('w', ?, ?)",
+                (now, now))
+            db.close_thread_connection()
+
+        def prepare(conn):
+            prepared.append(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+            if len(prepared) == 1:  # then another connection commits, once
+                writer = threading.Thread(target=other_writer)
+                writer.start()
+                writer.join()
+            return prepared[-1]
+
+        seen = await db.transaction(lambda conn, users: users, prepare=prepare)
+        self.assertEqual((prepared, seen), ([0, 1], 1))
+
+    async def test_a_transaction_waits_its_turn_however_long_the_one_ahead_takes(self):
+        """SQLite does not queue writers: one that finds the lock taken sleeps and
+        tries again until the busy timeout, and a run of other writers can outlast
+        it. Queued in the process instead, a transaction waits for the one ahead of
+        it, and reads and writes only once that one has finished."""
+        order = []
+
+        def slow(conn):
+            order.append("slow begins")
+            time.sleep(0.3)
+            order.append("slow ends")
+
+        def quick_prepare(conn):
+            order.append("quick prepares")
+
+        def quick(conn, _prepared):
+            order.append("quick writes")
+
+        # Connections opened under the patch wait 50 ms at a taken lock, far less
+        # than the slow body holds it; moving the generation makes every worker
+        # open a new one.
+        with patch.object(db, "BUSY_TIMEOUT_MS", 50):
+            db.set_db_path(db.db_path())
+            first = asyncio.ensure_future(db.transaction(slow))
+            await asyncio.sleep(0.05)
+            await db.transaction(quick, prepare=quick_prepare)
+            await first
+        self.assertEqual(order, ["slow begins", "slow ends", "quick prepares", "quick writes"])
 
     async def test_transaction_commits(self):
         now = db.now()
@@ -1263,6 +1545,19 @@ class DriverIsolationTests(unittest.TestCase):
             if path.name != "db.py" and pattern.search(path.read_text(encoding="utf-8"))
         )
         self.assertEqual(offenders, [], f"modules importing sqlite3 directly: {offenders}")
+
+    def test_only_the_db_module_takes_a_connection_itself(self):
+        """The same rule, one step on: `db.connection()` is this thread's
+        connection, so calling it from a route runs the query on the event loop —
+        which config.py did for every settings read and save until both went
+        through db.run and db.transaction. A body handed to one of those is given
+        its connection; nothing else asks for one."""
+        pattern = re.compile(r"\bdb\.connection\(")
+        offenders = sorted(
+            str(path.relative_to(APP_DIR)) for path in APP_DIR.rglob("*.py")
+            if path.name != "db.py" and pattern.search(path.read_text(encoding="utf-8"))
+        )
+        self.assertEqual(offenders, [], f"modules taking a connection directly: {offenders}")
 
 
 if __name__ == "__main__":

@@ -25,7 +25,8 @@ from fastapi import Request
 
 from app import assets, auth, authz, config, db, distrakt
 from app.auth import AuthLevel
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import load_settings, save_settings
 from app.main import BASE_DIR, app
 from tests.support import AppTestCase, ORIGIN
 
@@ -189,11 +190,15 @@ class UnauthenticatedTests(GatingTestCase):
         self.assertEqual(resp.json()["reason"], "login_required")
 
     def test_calendar_level_is_refused(self):
-        for path in ("/", "/calendar", "/api/state", "/calendar/fragments/season-line",
-                     "/calendar/fragments/details",
-                     "/api/network-logo?name=HBO"):
+        for path in ("/", "/calendar", "/api/state", "/calendar/fragments/card",
+                     "/calendar/fragments/badge", "/calendar/fragments/details"):
             with self.subTest(path=path):
                 self.assertEqual(self.client.get(path).status_code, 401)
+
+    def test_the_network_logo_route_is_gone_from_the_calendar(self):
+        """Badges are drawn through the image proxy now; the one logo route left is
+        the tracker's emoji download, at distrakt level."""
+        self.assertEqual(self.client.get("/api/network-logo?name=HBO").status_code, 404)
 
     def test_distrakt_level_is_refused(self):
         """Tested route by route rather than as a group: a gap here exposes one
@@ -209,6 +214,8 @@ class UnauthenticatedTests(GatingTestCase):
         for path in ("/api/distrakt/refresh", "/api/distrakt/import",
                      "/api/distrakt/remove", "/api/distrakt/emoji",
                      "/api/distrakt/emoji-default", "/api/distrakt/watchlist",
+                     "/api/distrakt/settings/order/tracker_order",
+                     "/api/distrakt/settings/retired",
                      "/api/distrakt/add", "/api/distrakt/abandon",
                      "/api/distrakt/acknowledge-return",
                      "/api/distrakt/unknown-add", "/api/distrakt/unknown-resume",
@@ -317,11 +324,13 @@ class CalendarTemplateTests(GatingTestCase):
         before the move to Simkl's AUTH V2 is still sealed and still redacted if
         anything ever reads it back, but no non-public Simkl call is made
         without a viewer's own token any more, so the panel offers no way to
-        set one — see config.py's own comment beside the field.
+        set one — see config.py's own comment beside the field. A person's own
+        TMDB token (config.VIEWER_FIELDS) is never an instance setting at all.
         """
         self.sign_in_as(self.admin_id)
         body = self.client.get(self.PANEL).text
-        typed = config.SECRET_FIELDS - {"trakt_refresh_token", "simkl_access_token"}
+        typed = config.SECRET_FIELDS - ({"trakt_refresh_token", "simkl_access_token"}
+                                          | config.VIEWER_FIELDS)
         for name in typed:
             with self.subTest(field=name):
                 self.assertRegex(body, rf'<input type="password" id="s_{name}" name="{name}"'
@@ -350,7 +359,7 @@ class DistraktTemplateTests(GatingTestCase):
         """It renders into ONE account's Discord posts, so it is that account's.
         The map used to be app-wide, which meant any user's roster import
         registered networks into the operator's map. The page draws the default
-        in its header pill; a network's own code is drawn on its rows."""
+        in the tracker's settings dialog; a network's own code is drawn on its rows."""
         mine = self._tracker(is_admin=False)
         theirs = self._tracker(is_admin=True)
         asyncio.run(distrakt.set_emoji_prefs(mine, {}, ":mine:"))
@@ -366,7 +375,8 @@ class DistraktTemplateTests(GatingTestCase):
     def test_a_new_account_starts_on_the_apps_default(self):
         """Nothing seeds it — not settings.json, not another account."""
         self.sign_in_as(self._tracker(is_admin=False))
-        self.assertIn(f"🙂 {distrakt.DEFAULT_EMOJI}", self.client.get(self.PAGE).text)
+        self.assertIn(f'id="emojiDefault" name="code" value="{distrakt.DEFAULT_EMOJI}"',
+                      self.client.get(self.PAGE).text)
 
 
 class SettingsRedactionTests(GatingTestCase):
@@ -402,7 +412,8 @@ class SettingsRedactionTests(GatingTestCase):
         # simkl_access_token has no panel input any more (no instance-wide
         # Simkl token exists under AUTH V2) — see
         # test_every_credential_input_is_drawn_write_only.
-        typed = config.SECRET_FIELDS - {"trakt_refresh_token", "simkl_access_token"}
+        typed = config.SECRET_FIELDS - ({"trakt_refresh_token", "simkl_access_token"}
+                                          | config.VIEWER_FIELDS)
         body = self.client.get(self.PANEL).text
         for name in typed:
             with self.subTest(field=name):
@@ -439,24 +450,25 @@ class SettingsRedactionTests(GatingTestCase):
         cannot read them back, so a save that omits them must not wipe them."""
         resp = self.client.post("/settings", json={"endpoint": "shows/premieres"})
         self.assertEqual(resp.status_code, 204, resp.text)
-        settings = config.load_settings()
+        settings = load_settings()
         self.assertEqual(settings.endpoint, "shows/premieres")
         self.assertEqual(settings.tmdb_api_key, SECRET_VALUES["tmdb_api_key"])
 
     def test_a_blank_credential_keeps_the_stored_one(self):
         self.client.post("/settings", json={"tmdb_api_key": "   "})
-        self.assertEqual(config.load_settings().tmdb_api_key, SECRET_VALUES["tmdb_api_key"])
+        self.assertEqual(load_settings().tmdb_api_key, SECRET_VALUES["tmdb_api_key"])
 
     def test_a_new_credential_replaces_the_stored_one(self):
-        self.client.post("/settings", json={"tmdb_api_key": "fresh-key"})
-        self.assertEqual(config.load_settings().tmdb_api_key, "fresh-key")
+        fresh = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJuZXcifQ.bmV3LXNpZ25hdHVyZQ"
+        self.client.post("/settings", json={"tmdb_api_key": fresh})
+        self.assertEqual(load_settings().tmdb_api_key, fresh)
 
     def test_a_ticked_clear_box_clears_a_credential(self):
         """Clearing has to be possible and has to be deliberate — otherwise the
         only way to disable an integration would be to hand-edit the file."""
         self.client.post("/settings", json={"clear:sonarr_api_key": "1"})
-        self.assertEqual(config.load_settings().sonarr_api_key, "")
-        self.assertEqual(config.load_settings().tmdb_api_key, SECRET_VALUES["tmdb_api_key"])
+        self.assertEqual(load_settings().sonarr_api_key, "")
+        self.assertEqual(load_settings().tmdb_api_key, SECRET_VALUES["tmdb_api_key"])
 
     def test_the_save_response_is_redacted_too(self):
         body = self.client.post("/settings", json={"pagination_limit": "not a number"}).text
@@ -482,7 +494,7 @@ class RequestShapeTests(GatingTestCase):
             with self.subTest(path=path):
                 resp = self.client.post(path, data={"trakt_access_token": "stolen"})
                 self.assertEqual(resp.status_code, 415)
-        self.assertEqual(config.load_settings().trakt_access_token, "")
+        self.assertEqual(load_settings().trakt_access_token, "")
 
     def test_a_body_with_no_content_type_is_refused(self):
         resp = self.client.post("/settings", content=b"{}")
@@ -493,7 +505,7 @@ class RequestShapeTests(GatingTestCase):
                                 headers={"Origin": "https://evil.example"})
         self.assertEqual(resp.status_code, 403)
         self.assertEqual(resp.json()["reason"], "cross_origin")
-        self.assertEqual(config.load_settings().endpoint, Settings().endpoint)
+        self.assertEqual(load_settings().endpoint, Settings().endpoint)
 
     def test_the_configured_base_url_wins_over_the_host_header(self):
         """Once an instance knows its own address, the check stops depending on a

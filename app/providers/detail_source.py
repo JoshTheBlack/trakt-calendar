@@ -25,40 +25,42 @@ card carried and this decides who to ask; the alternative — the client naming 
 service — puts the choice on the one side that cannot see whether that service's
 credentials are filled in.
 
-TRAKT IS PREFERRED WHEREVER IT HAS AN ID, INCLUDING ON A CARD ATTRIBUTED TO
-SIMKL, and the asymmetry is deliberate rather than left over. The modal is about
-the TITLE; the card's attribution is about whose listing put it on the page.
-Trakt's per-title answer is strictly the larger one — it carries a cast, a
-per-episode air date and a per-episode rating, none of which Simkl publishes
-anywhere this app can reach — so preferring the card's own service would take
-those away from a merged title for no gain. It DOES mean a viewer who set Simkl's
-overview to win on the card can read Trakt's in the modal; that is a real
-inconsistency and the smaller of the two, because the modal is one click away
-from a source-flip control the card already has and the missing cast would not be
-recoverable at all.
+THE DECLARED ORDER DECIDES, AND TMDB IS FIRST IN IT, INCLUDING ON A CARD
+ATTRIBUTED TO ANOTHER SERVICE. The panel is about the TITLE; the card's
+attribution is about whose listing put it on the page. TMDB is first in `Source`
+(base.py says why): it knows almost every title the other services list, by an id
+they all state, so leading with it gives every title one describer whichever
+service's card it was opened from. Trakt answers a title TMDB does not know, and
+Simkl one neither knows — and either answers a SEASON the service before it holds
+nothing of (`for_season`), or a title the service before it could say nothing
+about. It does mean a viewer who set another service's overview to win on the
+card can read TMDB's in the panel; the card's own flip control is one click away
+and shows every service's.
+
+WHAT THE CHOSEN SERVICE SAYS IS NOT THIS MODULE'S. Its answer is kept in the title
+store, and app/metadata/panel.py reads it from there — asking the service only
+when the store has none — so this module answers WHO, and a feature asks the
+store WHAT.
 """
 from __future__ import annotations
 
-import asyncio
-import logging
+from collections.abc import Iterator, Mapping, Sequence
 from typing import NamedTuple
 
 # The registry through its MODULE OBJECT rather than as names bound off it, so a
 # test double installed on app.providers is the one these functions call (see
 # CLAUDE.md's rule about names bound at import time).
 from .. import providers
-from . import videos
-from .base import Media, SeasonsAnswer, Source, SourceUnavailable, Video
+from .base import Media, SeasonsAnswer, ServiceLink, Source, SourceUnavailable
 
-logger = logging.getLogger(__name__)
 
 
 def ports():
     """Every registered source that can describe a title, in DECLARED order.
 
-    Declared order is the preference order — Trakt, then Simkl — for the reason
-    the module docstring gives, and it comes from the registry rather than from a
-    list here so a third source is a registration and not an edit.
+    Declared order is the preference order — TMDB, then Trakt, then Simkl — for
+    the reason the module docstring gives, and it comes from the registry rather
+    than from a list here so another source is a registration and not an edit.
     """
     return [(source, provider.detail_port)
             for source, provider in providers.registered().items()
@@ -68,7 +70,7 @@ def ports():
 def ids_from_query(params) -> dict[str, str]:
     """The id map a details request carried, read out of its query string.
 
-    ONE PARAMETER PER SOURCE, NAMED FOR THAT SOURCE — `?trakt=203330&simkl=2601798`
+    ONE PARAMETER PER SOURCE, NAMED FOR THAT SOURCE — `?tmdb=95396&trakt=154997`
     — rather than the `?id=` a single-source app could get away with. A card
     two services described has two ids and neither is "the" id; sending one plus
     a service name would put the choice on the client (see the module docstring),
@@ -103,39 +105,55 @@ class Outbound(NamedTuple):
     url: str
 
 
-# The per-source page builders, reached through the MODULE rather than by
-# importing the functions off them, so a test double installed on a provider's
-# calendar module is the one this calls (see CLAUDE.md's rule about names bound
-# at import time).
 def outbound_links(ids, media) -> list[Outbound]:
     """Where a title lives at every registered service that knows it, in declared
     order — the outbound buttons a card and the details panel both draw.
 
-    BOTH SERVICES REQUIRE THIS AND ONE OF THEM SAYS SO IN WRITING. Simkl's API
-    rules ask that wherever their data appears it link back to the page for that
-    specific item rather than to a homepage, and the tracker had nowhere at all
-    to do it from — its rows carry a network logo and its panel carried no link
-    to either service. A calendar card has had these since it existed; this is
-    the same answer, asked once, for the surfaces that have only an id map.
+    EVERY SERVICE REQUIRES THIS AND TWO SAY SO IN WRITING. Simkl's API rules ask
+    that wherever their data appears it link back to the page for that specific
+    item rather than to a homepage, and TMDB's terms ask for a link back too; the
+    tracker had nowhere at all to do it from — its rows carry a network logo and
+    its panel carried no link to any service. A calendar card has had these since
+    it existed; this is the same answer, asked once, for the surfaces that have
+    only an id map.
 
     ONE ENTRY PER SERVICE THE MAP NAMES, so a title only one service knows gets
-    one button rather than a dead second. The URL shape is each package's own
-    (`title_url`), because where a service's titles live is that service's fact.
+    one button rather than a dead second. The URL is each provider's own
+    (`Provider.title_url`), reached through the registry: this used to hold a
+    table of two packages' builders, which would have given a third service no
+    button and no error.
     """
-    from ..providers.simkl import calendar as simkl_calendar
-    from ..providers.trakt import calendar as trakt_calendar
+    return [Outbound(source, url) for source, url, _listed in _pages(media, ids, {})]
 
-    builders = {Source.TRAKT: trakt_calendar, Source.SIMKL: simkl_calendar}
-    out = []
-    for source, _port in ports():
-        if not str((ids or {}).get(str(source)) or "").strip():
-            continue
-        package = builders.get(source)
-        if package is None:
-            continue  # a source registered without a page builder links nowhere
-        if url := package.title_url(Media(media), ids):
-            out.append(Outbound(source, url))
-    return out
+
+def service_links(media, ids, listing: Mapping[str, str]) -> list[ServiceLink]:
+    """`outbound_links` for a CARD: every service in `listing` — {service: its
+    record's detail_url}, the services the card is drawn from — listed, with its
+    own record's page where it gave one, and then every other service `ids`
+    names, as a service that knows the title without listing this airing. In
+    declared order, so a service's button sits in the same place on every card.
+
+    ONE WALK OVER THE REGISTRY FOR BOTH, so a card and a details panel cannot
+    come to different answers about where a title lives at a service; the
+    panel's buttons are this with nothing listed. A listed service with no page
+    of its own record's and no id to build one from gets no button — a homepage
+    is no destination.
+    """
+    return [ServiceLink(str(source), url, listed)
+            for source, url, listed in _pages(media, ids, listing)]
+
+
+def _pages(media, ids, listing: Mapping[str, str]):
+    """(registered source, its page for the title, whether it is listed), in
+    declared order — the one walk both functions above are spelled from."""
+    for source, provider in providers.registered().items():
+        name = str(source)
+        listed = name in listing
+        url = (listing.get(name) or "") if listed else ""
+        if not url and str((ids or {}).get(name) or "").strip():
+            url = provider.title_url(Media(media), ids or {})
+        if url:
+            yield source, url, listed
 
 
 class Answerer(NamedTuple):
@@ -152,12 +170,18 @@ class Answerer(NamedTuple):
     stored_only: bool
 
 
-def choose(settings, ids) -> Answerer | None:
+def choose(settings, ids, order: Sequence[str] | None = None) -> Answerer | None:
     """Who to ask about a title carrying `ids`, and the id to ask them by.
 
     `ids` is {namespace: value}, straight off the card. A source is asked by ITS
     OWN name in that map — `ids["trakt"]`, `ids["simkl"]` — because a service
     cannot look a title up by an id it does not issue.
+
+    `order` IS A VIEWER'S OWN, and only a question that is theirs passes one: the
+    tracker's episode totals (app/sources/prefs.py's `totals_order`). Every details
+    panel passes none and is asked in the declared order, so a panel and a card
+    keep agreeing about who describes a title; `order` reorders the candidates
+    and removes none.
 
     A SOURCE THAT CANNOT BE REACHED IS STILL WORTH ASKING OF THE LOCAL STORE,
     which is the second pass below. Every field a modal draws was cached the last
@@ -176,7 +200,7 @@ def choose(settings, ids) -> Answerer | None:
     finds nothing behind it is the other empty case, and only it can tell —
     reading the store is the only way to find out.
     """
-    known = _known_ids(ids)
+    known = known_ids(ids, order)
     for source, value in known:
         if providers.get(source).detail_port.catalogue_configured(settings):
             return Answerer(source, value, stored_only=False)
@@ -185,13 +209,17 @@ def choose(settings, ids) -> Answerer | None:
     return None
 
 
-async def for_season(settings, ids, chosen: Answerer, ask, holds):
+async def for_season(settings, ids, chosen: Answerer, ask, holds,
+                     order: Sequence[str] | None = None):
     """(who answered, their answer) for ONE SEASON of a title: `chosen`'s answer,
     unless it holds nothing of that season and a later service the title names
     does.
 
     `ask(answerer)` asks one service; `holds(answer)` says whether the answer has
-    anything of the season in it (episodes, a total).
+    anything of the season in it (episodes, a total). `order` is the order the
+    later services are tried in and should be the one `chosen` was picked by: a
+    viewer who asked Trakt first for their totals and whose Trakt holds nothing
+    of a season goes on to their second choice, not to the declared one.
 
     WHY A SEASON CAN OUTRANK THE DECLARED ORDER. `choose` picks by id, and the ids
     on a title are one service's claim that two catalogues' entries are the same
@@ -212,13 +240,9 @@ async def for_season(settings, ids, chosen: Answerer, ask, holds):
     can be asked, which is what stored-only means.
     """
     first = await ask(chosen)
-    if holds(first) or chosen.stored_only:
+    if holds(first):
         return chosen, first
-    for source, value in _known_ids(ids):
-        if (source == chosen.source
-                or not providers.get(source).detail_port.catalogue_configured(settings)):
-            continue
-        other = Answerer(source, value, stored_only=False)
+    for other in later_for_season(settings, ids, chosen, order):
         try:
             answer = await ask(other)
         except SourceUnavailable:
@@ -228,120 +252,36 @@ async def for_season(settings, ids, chosen: Answerer, ask, holds):
     return chosen, first
 
 
-async def describe_season(settings, chosen: Answerer, ids, media, season: int | None, *,
-                          cache_only: bool = False) -> tuple[Answerer, dict | None]:
-    """`describe`, with the season rule `for_season` states: (who answered, the
-    answer). A panel draws the answering service's name and links, so it has to
-    be told which one that was. With no season there is nothing to hold, and it
-    is `describe` exactly."""
-    if season is None:
-        return chosen, await describe(settings, chosen, media, season, cache_only=cache_only)
-    return await for_season(
-        settings, ids, chosen,
-        lambda answerer: describe(settings, answerer, media, season, cache_only=cache_only),
-        lambda details: bool(details and details.get("episodes")))
+def later_for_season(settings, ids, chosen: Answerer,
+                     order: Sequence[str] | None = None) -> Iterator[Answerer]:
+    """The services `for_season` turns to, in turn, when `chosen` holds nothing
+    of the season: every later one the title names that this instance can ask —
+    none after a stored-only `chosen`. ONE WALK, so a season decided from what
+    the store already holds (app/metadata/panel.py's `season_lines`) goes the way
+    asking would."""
+    if chosen.stored_only:
+        return
+    for source, value in known_ids(ids, order):
+        if (source == chosen.source
+                or not providers.get(source).detail_port.catalogue_configured(settings)):
+            continue
+        yield Answerer(source, value, stored_only=False)
 
 
-async def describe_panel(settings, chosen: Answerer, ids, media, season: int | None, *,
-                         cache_only: bool = False) -> tuple[Answerer, dict | None]:
-    """`describe_season`, with `videos` replaced by EVERY service's videos
-    pooled (app/providers/videos.py says why that one field is pooled when
-    nothing else is). What every surface calls to draw a WHOLE panel; a season
-    tab calls `describe_season`, because the videos are the title's and a tab
-    does not draw them.
-
-    `ids` IS WHAT THE CALLER MAY ASK ABOUT, and it is the same map
-    `describe_season` is handed — which is what keeps the share page's promise:
-    it passes the ids its link's airings carry and nothing else, so a service
-    asked for its videos is a service asked about a title the link shows. Each
-    service is asked by its own id in that map, never by an id another service
-    stated, so every list is that service's own answer about this title.
-
-    ASKED BESIDE THE DESCRIPTION, not after it, so the panel waits for the
-    slower of the two rather than their sum. Only where the season rule hands
-    the description to a later service is the first service's list asked
-    afterwards — its description was already read, so that is normally cached.
-
-    A SERVICE THAT CANNOT BE REACHED IS READ FROM THE STORE, as `choose` reads
-    it; one that FAILS contributes nothing and never fails the panel — the
-    videos are an addition to a description, not a reason to lose one.
-    """
-    others = [(source, value) for source, value in _known_ids(ids)
-              if source != chosen.source]
-    described, *lists = await asyncio.gather(
-        describe_season(settings, chosen, ids, media, season, cache_only=cache_only),
-        *(_videos(settings, source, value, media, cache_only=cache_only)
-          for source, value in others))
-    answerer, details = described
-    if details is None:
-        return answerer, None
-    by_source = {source: listed for (source, _id), listed in zip(others, lists)}
-    by_source[answerer.source] = list(details.get("videos") or [])
-    if chosen.source not in by_source:
-        by_source[chosen.source] = await _videos(
-            settings, chosen.source, chosen.source_id, media, cache_only=cache_only)
-    order = [source for source, _port in ports()]
-    pooled = videos.pool([by_source[source] for source in order if source in by_source],
-                         str(answerer.source))
-    return answerer, {**details, "videos": pooled}
-
-
-def _known_ids(ids) -> list[tuple[Source, str]]:
+def known_ids(ids, order: Sequence[str] | None = None) -> list[tuple[Source, str]]:
     """(source, that source's own id) for every registered detail source `ids`
-    names, in declared order."""
-    return [(source, value) for source, _port in ports()
-            if (value := str((ids or {}).get(str(source)) or "").strip())]
+    names, in declared order — or in `order` first, where a caller states one.
 
-
-async def _videos(settings, source: Source, source_id: str, media, *,
-                  cache_only: bool) -> list[Video]:
-    """One service's videos, [] where it could not answer. An unreachable
-    service is read from the store, for the reason `choose` gives."""
-    port = providers.get(source).detail_port
-    try:
-        return await port.fetch_videos(
-            settings, Media(media), source_id,
-            cache_only=cache_only or not port.catalogue_configured(settings))
-    except SourceUnavailable:
-        logger.warning("%s could not list videos for %s; the panel plays the others",
-                       source, source_id)
-        return []
-
-
-async def describe(settings, chosen: Answerer, media, season: int | None, *,
-                   cache_only: bool = False) -> dict | None:
-    """The chosen source's answer, or None when there is genuinely nothing to
-    show — the whole "who answers and did they" step, in one call.
-
-    IT EXISTS SO THE EMPTY CASE IS DECIDED ONCE. A stored-only answerer is a
-    guess that this instance has described the title before; whether it actually
-    has can only be found out by reading, and what a caller does about an empty
-    read — refuse, rather than open a modal with nothing in it — is a rule both
-    modals have to follow identically or the same title behaves differently
-    depending on which page it was clicked from.
-
-    `cache_only` is the CALLER's own restriction (the public pages never spend
-    the owner's budget) and is ORed with the answerer's, which is a fact about
-    the instance. Neither overrides the other; both mean "do not make a call".
+    A STATED ORDER ONLY MOVES SERVICES UP: a name in it that `ids` does not carry
+    is skipped, and a service it does not name keeps its declared place after the
+    ones it does, so an order written before a source existed cannot hide it.
     """
-    details = await fetch(settings, chosen.source, media, chosen.source_id, season,
-                          cache_only=cache_only or chosen.stored_only)
-    if chosen.stored_only and not _says_anything(details):
-        return None
-    return details
-
-
-def _says_anything(details: dict) -> bool:
-    """Whether a stored answer has enough in it to be worth drawing.
-
-    A CACHE-ONLY READ THAT MISSED STILL ANSWERS THE FULL KEY SET, empty — that is
-    DetailPort's own contract, so the renderer never sees a missing key — which
-    means "nothing was stored" and "this title has nothing to say" arrive
-    identically and the only way to tell is to look at the values. These three
-    are what a modal is FOR: what it is called, what it is about, and what is in
-    it. A card with none of them is a blank the reader cannot act on.
-    """
-    return bool(details.get("title") or details.get("overview") or details.get("episodes"))
+    found = [(source, value) for source, _port in ports()
+             if (value := str((ids or {}).get(str(source)) or "").strip())]
+    if not order:
+        return found
+    rank = {name: place for place, name in enumerate(order)}
+    return sorted(found, key=lambda pair: rank.get(str(pair[0]), len(rank)))
 
 
 async def seasons(settings, chosen: Answerer, media, *,
@@ -350,9 +290,9 @@ async def seasons(settings, chosen: Answerer, media, *,
     asked of whoever `choose` picked, so "which service lists this title's
     seasons" is the same answer as "which service describes it".
 
-    A stored-only answerer is asked of its store alone, for the reason `describe`
-    ORs it in: it is a fact about this instance that the source cannot be
-    reached, not a caller's policy. `cached_only` is the caller's policy, ORed in
+    A stored-only answerer is asked of its response cache alone: it is a fact
+    about this instance that the source cannot be reached, not a caller's
+    policy. `cached_only` is the caller's policy, ORed in
     beside it: a moment that must not spend a request — a rankings row becoming
     a season reads the list its control already fetched — asks the store alone
     and takes an empty answer as "not known".
@@ -360,15 +300,3 @@ async def seasons(settings, chosen: Answerer, media, *,
     return await providers.get(chosen.source).detail_port.fetch_seasons(
         settings, chosen.source_id, Media(media),
         cached_only=chosen.stored_only or cached_only)
-
-
-async def fetch(settings, source: Source, media, source_id: str,
-                season: int | None, *, cache_only: bool = False) -> dict:
-    """The chosen source's answer, in the one field set the modal renders.
-
-    A separate step from `choose` so the public share route can decide who would
-    answer and then ask them with `cache_only=True`, which is the only thing that
-    differs between the two callers.
-    """
-    return await providers.get(source).detail_port.fetch_details(
-        settings, media, source_id, season, cache_only=cache_only)

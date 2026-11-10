@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from fastapi import Request, Response
 
-from ..config import TRUSTED_PROXY_IPS_DEFAULT, Settings, load_settings
+from ..config import TRUSTED_PROXY_IPS_DEFAULT, Settings
 from . import sessions
 
 logger = logging.getLogger(__name__)
@@ -106,11 +106,10 @@ def session_cookie_name(settings: Settings, request: Request | None = None) -> s
     return COOKIE_NAME_SECURE if use_secure_cookie(settings, request) else COOKIE_NAME
 
 
-def read_session_cookie(request: Request, settings: Settings | None = None) -> str | None:
+def read_session_cookie(request: Request, settings: Settings) -> str | None:
     """The session id from the request, checking both cookie names so that
     flipping the Secure policy doesn't log the whole instance out."""
-    cfg = settings or load_settings()
-    preferred = session_cookie_name(cfg, request)
+    preferred = session_cookie_name(settings, request)
     other = COOKIE_NAME if preferred == COOKIE_NAME_SECURE else COOKIE_NAME_SECURE
     return request.cookies.get(preferred) or request.cookies.get(other)
 
@@ -238,7 +237,7 @@ def peer_is_trusted_proxy(request: Request, settings: Settings) -> bool:
     return _is_trusted(peer, parse_trusted_networks(getattr(settings, "trusted_proxy_ips", "")))
 
 
-def client_ip(request: Request, settings: Settings | None = None) -> str:
+def client_ip(request: Request, settings: Settings) -> str:
     """The caller's IP address, honoring X-Forwarded-For only when the immediate
     peer is a configured trusted proxy.
 
@@ -249,10 +248,9 @@ def client_ip(request: Request, settings: Settings | None = None) -> str:
     ignored entirely — trusting them would let anyone spoof an IP and slip a
     per-IP rate limit.
     """
-    cfg = settings or load_settings()
     peer = (request.client.host if request.client else "") or "unknown"
-    networks = parse_trusted_networks(getattr(cfg, "trusted_proxy_ips", ""))
-    _maybe_warn_default_proxy(request, cfg)
+    networks = parse_trusted_networks(getattr(settings, "trusted_proxy_ips", ""))
+    _maybe_warn_default_proxy(request, settings)
 
     if not _is_trusted(peer, networks):
         return peer

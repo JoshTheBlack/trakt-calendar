@@ -17,6 +17,7 @@ knowing the tracker exists.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import NamedTuple, Sequence
 from urllib.parse import urlencode
 
@@ -32,17 +33,16 @@ class SeasonTab(NamedTuple):
     current: bool
 
 
-def season_tabs(request: Request, count: int, current: int | None, *,
+def season_tabs(request: Request, seasons: Iterable[int], current: int | None, *,
                 carry: Sequence[str] = (),
                 pinned: dict[str, str] | None = None) -> tuple[SeasonTab, ...]:
-    """A tab per season from 1 to `count`, each addressed at this surface's own
-    season fragment.
+    """A tab per season of `seasons`, in order, each addressed at this surface's
+    own season fragment.
 
-    THE TABS COST NOTHING TO OFFER, which is the whole reason they can be on
-    every surface: the count is already on the thing that was clicked — a
-    calendar card knows its own season, a roster row knows its own, a board item
-    stores one — so drawing the strip needs no lookup, and a season's rows are
-    fetched only if somebody opens that tab.
+    A TAB COSTS NOTHING UNTIL IT IS PRESSED: the season list comes with the
+    panel's own answer (metadata/panel.py's describe_panel, from the store where
+    it holds one), and a season's rows are fetched only if somebody opens that
+    tab.
 
     THE ADDRESS IS THIS REQUEST'S OWN with `/season` on the end and the season
     swapped, so a tab asks for exactly what the panel asked for about a different
@@ -80,12 +80,12 @@ def season_tabs(request: Request, count: int, current: int | None, *,
         SeasonTab(number,
                   f"{base}?{urlencode(carried + [('season', str(number))])}",
                   number == current)
-        for number in range(1, count + 1))
+        for number in sorted(set(seasons)))
 
 
 def panel(request: Request, details: dict, *, media: str, season: int | None,
           title: str = "", poster: str = "", progress: object | None = None,
-          links=(), season_count: int = 0, picker: bool = True,
+          links=(), picker: bool = True,
           carry: Sequence[str] = (), pinned: dict[str, str] | None = None,
           note: str = "", actions: str = "", overview: str = "",
           follow_up: str = ""):
@@ -114,11 +114,9 @@ def panel(request: Request, details: dict, *, media: str, season: int | None,
     look, so a surface opting in is one declared read rather than a template that
     knows whose record it is drawing.
 
-    `season_count` is what the SURFACE knows about how many seasons there are, and
-    it is a floor rather than the answer: the describing service states its own
-    count and that is the better number, because a card for season 2 of a
-    five-season show knows only about two. 0 from both means no picker. One tab is
-    not drawn either — a strip naming the only season there is offers nothing to
+    THE STRIP IS `details["seasons"]` — every season the title's services list
+    (metadata/panel.py's describe_panel) — and the season being viewed. An answer with no list draws the season being viewed alone, and one
+    tab is not drawn: a strip naming the only season there is offers nothing to
     move between. `carry` and `pinned` are what a tab's address is made of — see
     `season_tabs`.
 
@@ -158,19 +156,21 @@ def panel(request: Request, details: dict, *, media: str, season: int | None,
         "request": request, "d": details, "media": media, "season": shown,
         "title": title, "poster": poster, "progress": progress, "links": links,
         "note": note, "actions": actions, "overview": overview, "follow_up": follow_up,
+        # The season the panel opens on has its own videos at the head of the
+        # video menu (metadata/panel.py's describe_panel), so its pane does not
+        # draw them again; a tab's pane (`season_pane`) does.
+        "season_videos_in_menu": True,
         # `shown` rather than the asked-for season, so the tab that reads as
         # current is the one whose rows are actually below it.
         #
-        # THE WIDEST OF THE THREE ANSWERS, and each is a floor the others can
-        # raise: the SERVICE's count is the true one, the season being viewed
-        # proves at least that many exist, and the surface's own is what a board
-        # item stores. Taking the largest is what stopped the strip stopping at
-        # the season somebody happened to open — a card for season 2 of a
-        # five-season show used to offer two tabs.
-        "tabs": season_tabs(
-            request,
-            max(season_count, shown or 0, int(details.get("season_count") or 0)),
-            shown, carry=carry, pinned=pinned)
+        # THE SEASONS THE TITLE'S SERVICES LIST (`seasons`, widened by
+        # metadata/panel.py's describe_panel), AND THE ONE BEING VIEWED — never a
+        # count. A season's number is not how many came before it: Simkl files a
+        # daily or talk show's seasons by year (1,934 titles on the development
+        # copy's calendars), and counting up to a card's season 2026 drew 2,026
+        # tabs.
+        "tabs": season_tabs(request, {*listed_numbers(details), shown}, shown,
+                            carry=carry, pinned=pinned)
                 if picker and media != "movie" and shown else (),
     })
 
@@ -195,6 +195,12 @@ def season_pane(request: Request, details: dict, *, media: str, season: int | No
     })
 
 
+def listed_numbers(details: dict) -> set[int]:
+    """The season numbers an answer's season list (`seasons`) names."""
+    return {int(entry["season"]) for entry in details.get("seasons") or ()
+            if isinstance(entry, dict) and entry.get("season") is not None}
+
+
 def answered_season(details: dict, season: int | None) -> int | None:
     """The season the source actually came back with, falling back to the one the
     click asked about.
@@ -206,8 +212,9 @@ def answered_season(details: dict, season: int | None) -> int | None:
     which season the rows below it are. A source that does not state the key at
     all is the same case as one that states it empty.
 
-    ALWAYS AN int OR None, because the number is arithmetic now and not only a
-    heading: the season picker counts up to it. A source that spelled it as text
+    ALWAYS AN int OR None, because the number is not only a heading: the season
+    strip holds it beside the seasons the services list, and a "3" beside a 3 is
+    two tabs. A source that spelled it as text
     is read as a number, and one that spelled it as something else at all falls
     back to what was asked rather than taking the panel down.
     """

@@ -180,6 +180,14 @@ class SeasonTabsOnACalendarCardTests(_CardPanelTestCase):
         self.assertEqual(panel.season_tabs, [1, 2, 3])
         self.assertEqual(panel.open_tab, 1)
 
+    def test_a_season_numbered_by_its_year_is_one_tab_not_a_count(self):
+        """Simkl files a daily or talk show's seasons by year. The season on
+        screen proves that season exists and nothing about the numbers below it:
+        counting up to it drew 2,026 tabs for a card of season 2026."""
+        panel = self._panel(season="2026")
+        self.assertEqual(panel.season_tabs, [1, 2, 3, 2026])
+        self.assertEqual(panel.open_tab, 2026)
+
     def test_a_film_draws_no_strip_and_no_episodes(self):
         panel = self._panel(media="movie")
         self.assertEqual(panel.season_tabs, [])

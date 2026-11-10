@@ -17,10 +17,16 @@ down with it.
 """
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import logging
 import shutil
+import weakref
 import zlib
+from typing import NamedTuple
+
+import anyio.to_thread
 
 from . import db
 from .config import DATA_DIR
@@ -137,6 +143,37 @@ async def get_stale(key: str):
         return None
 
 
+async def fresh_keys(keys, ttl_seconds: int) -> frozenset[str]:
+    """Which of `keys` hold a value stored within `ttl_seconds` — `get`'s
+    question for many keys in one read, without decoding any payload.
+
+    FOR A CALLER CHOOSING WORK BY WHAT IT REMEMBERS DOING: a background pass
+    weighing a few thousand cards a minute against "asked this week" markers
+    would otherwise make a few thousand reads to learn which few are due. A
+    locked database reads as nothing remembered, like `get`'s miss — the caller
+    then asks again what it asked before, which costs a request and loses
+    nothing."""
+    wanted = list(dict.fromkeys(str(key) for key in keys))
+    if not wanted or ttl_seconds <= 0:
+        return frozenset()
+    cutoff = db.now() - ttl_seconds
+
+    def _work(conn: db.Connection) -> frozenset[str]:
+        # A list, not a set: this module's own `set` is the cache write.
+        fresh: list[str] = []
+        for at in range(0, len(wanted), 500):
+            chunk = wanted[at:at + 500]
+            fresh.extend(row[0] for row in conn.execute(
+                f"SELECT cache_key FROM api_cache WHERE cached_at >= ? "
+                f"AND cache_key IN ({','.join('?' * len(chunk))})", (cutoff, *chunk)))
+        return frozenset(fresh)
+
+    try:
+        return await db.run(_work)
+    except db.DatabaseError:
+        return frozenset()
+
+
 async def set(key: str, value, retain_seconds: int | None = RETAIN_SECONDS) -> None:
     """Store `value` for `key`, to be reclaimed once nothing has re-fetched it for
     `retain_seconds`. Best-effort — a write failure is swallowed.
@@ -158,22 +195,146 @@ async def set(key: str, value, retain_seconds: int | None = RETAIN_SECONDS) -> N
     refresh re-inserts and bumps `cached_at`, so the clock only ever runs on rows
     nothing has asked for. What expires is precisely the orphans, plus titles
     genuinely untouched for half a year — and those simply get fetched again.
+
+    IN TURN, LIKE EVERY WRITE (db.execute): a write made around the writer
+    queue commits while a calendar store is deciding its rows in its turn, and
+    the store must then decide them again under the lock. MEASURED on a harness
+    copy while a month's refills and the background lookups ran together: six
+    stores re-decided, holding the lock 0.17–0.70 s each to do it.
+
+    AND COMPRESSED BEFORE THE TURN, on a worker thread: the encoding reads
+    nothing, and done in the turn (as a `prepare`) it held every other write
+    behind it — MEASURED, a restart's first two minutes on a harness copy with
+    live services: 368 cache writes whose wait and turn passed 0.75 s, turns to
+    1.34 s, and a viewer's mark waited 2.2 s behind them.
+
+    AND THE ANSWERS THAT ARRIVE TOGETHER ARE WRITTEN TOGETHER (`_Unwritten`):
+    this answer joins the ones waiting to be written, and one writer per event
+    loop writes everything waiting in one statement when its turn comes
+    (db.execute_gathered), at most `WRITE_TURN_ROWS` / `WRITE_TURN_BYTES` a turn —
+    so the cache never has more than one turn in the writer queue, however many
+    answers land at once. Each answer as its own turn was the queue's largest
+    tenant: MEASURED, the same restart wrote 2,690 answers in two minutes (1,215
+    of them TMDB's /tv/{id}, 448 discover pages — Season Premieres derived),
+    up to 123 slow ones in ten seconds, their turns adding up to 19.7 s against
+    the calendar stores' 6.4 s, and a viewer's unmark waited 3.3 s behind them.
+    This still returns only once the row has been written (or the write has
+    failed), so nothing reading the table sees anything it did not before.
     """
-    def _work(conn: db.Connection) -> None:
-        blob = _encode(value)
-        conn.execute(
-            "INSERT INTO api_cache (cache_key, payload, cached_at, ttl_seconds, byte_size) "
-            "VALUES (?, ?, ?, ?, ?) "
+    try:
+        blob = await anyio.to_thread.run_sync(_encode, value)
+    except (TypeError, ValueError):
+        return
+    state = _unwritten()
+    loop = asyncio.get_running_loop()
+    landed = loop.create_future()
+    # A later answer for a key still waiting replaces the earlier one.
+    state.rows[key] = (blob, db.now(), retain_seconds)
+    state.landing.setdefault(key, []).append(landed)
+    if state.writer is None:
+        state.writer = loop.create_task(_write_unwritten(state))
+    # Shielded: a caller that gives up waiting must not take the write with it.
+    await asyncio.shield(landed)
+
+
+# AT MOST THIS MUCH IN ONE TURN of the cache's writer: its rows' bytes are what
+# the turn writes to the log, and one statement's values are five a row.
+WRITE_TURN_ROWS = 100
+WRITE_TURN_BYTES = 4 * 1024 * 1024
+
+
+class _Unwritten:
+    """One event loop's answers waiting to be written (`rows`, by key, in the
+    order they arrived), who is waiting for each (`landing`), and the one task
+    writing them (`writer`). Touched on that loop alone."""
+
+    __slots__ = ("rows", "landing", "writer")
+
+    def __init__(self) -> None:
+        self.rows: dict[str, tuple[bytes, int, int | None]] = {}
+        self.landing: dict[str, list[asyncio.Future]] = {}
+        self.writer: asyncio.Task | None = None
+
+
+# Per event loop, as the writer queue is (db._writer_queue): a test's loop and
+# the server's never share a writer.
+_unwritten_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _Unwritten] = (
+    weakref.WeakKeyDictionary())
+
+
+def _unwritten() -> _Unwritten:
+    loop = asyncio.get_running_loop()
+    state = _unwritten_by_loop.get(loop)
+    if state is None:
+        state = _unwritten_by_loop[loop] = _Unwritten()
+    return state
+
+
+def _landed(futures: list[asyncio.Future]) -> None:
+    for future in futures:
+        if not future.done():
+            future.set_result(None)
+
+
+def _take(state: _Unwritten) -> list[tuple[str, bytes, int, int | None, list[asyncio.Future]]]:
+    """The answers one turn writes, oldest first, within the turn's bounds — a
+    single answer larger than the byte budget is a turn of its own."""
+    taken: list[tuple[str, bytes, int, int | None, list[asyncio.Future]]] = []
+    size = 0
+    for key, (blob, cached_at, retain) in list(state.rows.items()):
+        if taken and (len(taken) >= WRITE_TURN_ROWS or size + len(blob) > WRITE_TURN_BYTES):
+            break
+        del state.rows[key]
+        taken.append((key, blob, cached_at, retain, state.landing.pop(key, [])))
+        size += len(blob)
+    return taken
+
+
+@functools.lru_cache(maxsize=None)
+def _insert_sql(rows: int) -> str:
+    """One statement writing `rows` answers — one step of the driver however
+    many rows, so a turn's statement count does not grow with what it writes."""
+    return ("INSERT INTO api_cache (cache_key, payload, cached_at, ttl_seconds, byte_size) "
+            "VALUES " + ", ".join(["(?, ?, ?, ?, ?)"] * rows) + " "
             "ON CONFLICT(cache_key) DO UPDATE SET "
             "payload = excluded.payload, cached_at = excluded.cached_at, "
-            "ttl_seconds = excluded.ttl_seconds, byte_size = excluded.byte_size",
-            (key, blob, db.now(), retain_seconds, len(blob)),
-        )
+            "ttl_seconds = excluded.ttl_seconds, byte_size = excluded.byte_size")
 
+
+async def _write_unwritten(state: _Unwritten) -> None:
+    """Write what is waiting, a turn at a time, until nothing is. Every answer
+    that arrives while a turn waits is taken by that turn when it comes."""
     try:
-        await db.run(_work)
-    except (db.DatabaseError, TypeError, ValueError):
-        pass
+        while state.rows:
+            taken: list[tuple[str, bytes, int, int | None, list[asyncio.Future]]] = []
+
+            def take():
+                taken.extend(_take(state))
+                if not taken:
+                    return None
+                values = [value for key, blob, cached_at, retain, _ in taken
+                          for value in (key, blob, cached_at, retain, len(blob))]
+                return _insert_sql(len(taken)), values
+
+            try:
+                await db.execute_gathered("INSERT api_cache", take)
+            except db.DatabaseError:
+                pass
+            except Exception:
+                # Best-effort like every cache write, and the writer must go on:
+                # a caller waits on each answer it took.
+                logger.exception("writing %d cached answer(s) failed", len(taken))
+            finally:
+                for *_, futures in taken:
+                    _landed(futures)
+    finally:
+        # Only a cancelled writer (the loop shutting down) leaves anything here;
+        # nobody is left to write it for.
+        for futures in state.landing.values():
+            _landed(futures)
+        state.rows.clear()
+        state.landing.clear()
+        state.writer = None
 
 
 async def delete(key: str) -> None:
@@ -183,13 +344,14 @@ async def delete(key: str) -> None:
     this table is a copy of somebody else's answer, and leaving it for the sweep
     costs nothing but bytes. A short-lived handshake is different: once it has
     ended its row describes nothing, and the sweep's grace period would keep it
-    for months.
+    for months. In turn, like `set` — and an answer for `key` still waiting to be
+    written goes too, which is the order the two were asked in.
     """
-    def _work(conn: db.Connection) -> None:
-        conn.execute("DELETE FROM api_cache WHERE cache_key = ?", (key,))
-
+    state = _unwritten()
+    state.rows.pop(key, None)
+    _landed(state.landing.pop(key, []))
     try:
-        await db.run(_work)
+        await db.execute("DELETE FROM api_cache WHERE cache_key = ?", (key,))
     except db.DatabaseError:
         pass
 
@@ -258,6 +420,92 @@ async def record_source_file(url: str, source: str, month: str, *, etag: str,
          entries, 1 if changed else 0))
 
 
+# HOW MUCH ONE TURN OF THE SWEEP DELETES. A deleted row's payload pages are
+# walked to be freed, so a turn's cost follows the bytes it removes as well as the
+# rows; both are capped, and a single row larger than the byte cap is a turn of
+# its own. MEASURED on a copy of dev (88,295 rows, 204 MB): see `sweep`.
+SWEEP_TURN_ROWS = 500
+SWEEP_TURN_BYTES = 4 * 1024 * 1024
+
+# A row past its own ttl and the grace — the first pass. Rows written with no ttl
+# never match: they leave only by the size cap.
+_DUE = "ttl_seconds IS NOT NULL AND cached_at + ttl_seconds + :grace <= :now"
+
+
+class _Turn(NamedTuple):
+    """One turn of a sweep: the JSON array of [rowid, cached_at] it deletes, and
+    how many rows and bytes that is."""
+    victims: str
+    rows: int
+    bytes: int
+
+
+def _plan_sweep(conn: db.Connection, now: int, max_bytes: int | None) -> list[_Turn]:
+    """Every row a sweep at `now` deletes, oldest first and cut into turns —
+    read and decided and NOT written.
+
+    THE FIRST READ ANSWERS IN ONE ROW, and almost always with nothing: whether
+    any row is past its ttl, and the table's total against the cap. Only when
+    something is due are the rows themselves read: every row past its ttl, then,
+    of the rest, the least-recently stored until the total fits — the running
+    total a window over the order the eviction walks, so a row goes when the rows
+    before it have not yet freed enough.
+
+    THE TURNS ARE SPELLED HERE, on the worker thread, so what crosses back to the
+    event loop is one string per turn rather than a Python object per row: halving
+    a copy of dev's table plans 40,538 rows."""
+    params = {"grace": TTL_GRACE_SECONDS, "now": now}
+    (total, expired, expired_bytes), = conn.execute(
+        f"SELECT COALESCE(SUM(byte_size), 0), COALESCE(SUM({_DUE}), 0), "
+        f"COALESCE(SUM(CASE WHEN {_DUE} THEN byte_size END), 0) FROM api_cache",
+        params).fetchall()
+    excess = (total - expired_bytes - max_bytes
+              if max_bytes is not None and max_bytes >= 0 else 0)
+    if not expired and excess <= 0:
+        return []
+    reads = []
+    if expired:
+        reads.append((f"SELECT rowid, cached_at, byte_size FROM api_cache WHERE {_DUE} "
+                      f"ORDER BY cached_at, cache_key", params))
+    if excess > 0:
+        reads.append((
+            f"SELECT rowid, cached_at, byte_size FROM ("
+            f"  SELECT rowid, cached_at, byte_size, cache_key, SUM(byte_size) OVER ("
+            f"    ORDER BY cached_at ASC, cache_key ASC "
+            f"    ROWS UNBOUNDED PRECEDING) - byte_size AS freed_before "
+            f"  FROM api_cache WHERE NOT ({_DUE})) "
+            f"WHERE freed_before < :excess ORDER BY cached_at, cache_key",
+            {**params, "excess": excess}))
+    turns: list[_Turn] = []
+    victims: list[str] = []
+    size = 0
+    for sql, bound in reads:
+        cursor = conn.cursor()
+        cursor.row_factory = None
+        for rowid, cached_at, byte_size in cursor.execute(sql, bound):
+            # A turn is full at its row cap, or when this row would take it past
+            # its byte cap — and a row larger than the cap is a turn of its own.
+            if victims and (len(victims) >= SWEEP_TURN_ROWS
+                            or size + byte_size > SWEEP_TURN_BYTES):
+                turns.append(_Turn(f"[{','.join(victims)}]", len(victims), size))
+                victims, size = [], 0
+            victims.append(f"[{rowid},{cached_at}]")
+            size += byte_size
+    if victims:
+        turns.append(_Turn(f"[{','.join(victims)}]", len(victims), size))
+    return turns
+
+
+# One turn's delete: the planned rows that are still what the plan saw. A row
+# stored again since (`set` keeps the rowid and moves `cached_at`) is recent now,
+# and stays.
+_DELETE_TURN = (
+    "DELETE FROM api_cache WHERE rowid IN ("
+    "  SELECT a.rowid FROM json_each(?) v CROSS JOIN api_cache a"
+    "  WHERE a.rowid = json_extract(v.value, '$[0]')"
+    "    AND a.cached_at = json_extract(v.value, '$[1]'))")
+
+
 async def sweep(now: int | None = None, max_bytes: int | None = None) -> int:
     """Evict from api_cache and return how many rows were deleted.
 
@@ -271,40 +519,45 @@ async def sweep(now: int | None = None, max_bytes: int | None = None) -> int:
     from Trakt, so cached_at tracks the last time it was actually (re)fetched.
     There is deliberately no separate last-access column — maintaining one would
     mean a write on every cache read.
+
+    DECIDED BEFORE THE LOCK, NOTHING DUE TAKES NO LOCK, AND WHAT IS DUE GOES IN
+    BOUNDED TURNS. The heartbeat runs this every minute and nearly every minute
+    nothing is due, yet it used to scan the whole table twice inside its write
+    transaction — a column after the payload is read by walking the payload's
+    pages — and delete everything due in that same hold. MEASURED on a copy of dev
+    (88,295 rows, 204 MB, nothing due): the lock held 0.56–0.68 s a minute alone
+    and 0.91–1.02 s beside a month read, 3.54 s on dev at a start; halving the
+    table, one 2.05 s hold; 25,575 rows past their ttl, 2.15 s — and every other
+    writer waited the whole of it. Now the plan is a read on a worker thread
+    (`_plan_sweep`), which waits for no writer and holds nobody up; and each turn
+    of at most SWEEP_TURN_ROWS rows / SWEEP_TURN_BYTES bytes is a transaction of
+    its own, one statement, taking its place in the writer queue behind whatever
+    arrived meanwhile. MEASURED on the same copy: nothing due takes no lock at
+    all; halving the table is 85 turns of a median 13 ms and a p95 of 0.1 s — a
+    turn whose commit crosses SQLite's automatic WAL checkpoint pays for the
+    checkpoint, as any writer's does (0.07–0.14 s, and 0.3 s for the first one
+    on a freshly copied file) — and a one-row write beside it waits a median
+    2–10 ms.
+
+    A TURN DELETES ONLY WHAT THE PLAN SAW: a row stored again since the plan was
+    made is recent now and stays (`_DELETE_TURN`). Rows written after the plan
+    are not counted against the cap until the next sweep, a minute later — the
+    cap is a budget the sweep restores, never a wall a write is refused at.
     """
     ts = db.now() if now is None else now
+    turns = await db.run(lambda conn: _plan_sweep(conn, ts, max_bytes))
+    if not turns:
+        return 0
+    deleted = 0
+    for turn in turns:
+        def _sweep_turn(conn: db.Connection, victims: str = turn.victims) -> int:
+            return conn.execute(_DELETE_TURN, (victims,)).rowcount
 
-    def _work(conn: db.Connection) -> int:
-        deleted = conn.execute(
-            "DELETE FROM api_cache WHERE ttl_seconds IS NOT NULL "
-            "AND (cached_at + ttl_seconds + ?) <= ?",
-            (TTL_GRACE_SECONDS, ts),
-        ).rowcount
-        if max_bytes is not None and max_bytes >= 0:
-            total = conn.execute("SELECT COALESCE(SUM(byte_size), 0) FROM api_cache").fetchone()[0]
-            if total > max_bytes:
-                to_free = total - max_bytes
-                freed = 0
-                victims: list[str] = []
-                # Walk oldest-first, collecting keys until enough bytes are freed,
-                # then delete in one pass — the cursor is fully read before any
-                # DELETE runs.
-                for row in conn.execute(
-                    "SELECT cache_key, byte_size FROM api_cache "
-                    "ORDER BY cached_at ASC, cache_key ASC"
-                ).fetchall():
-                    if freed >= to_free:
-                        break
-                    victims.append(row["cache_key"])
-                    freed += int(row["byte_size"])
-                if victims:
-                    conn.executemany(
-                        "DELETE FROM api_cache WHERE cache_key = ?", [(k,) for k in victims]
-                    )
-                    deleted += len(victims)
-        return deleted
-
-    return await db.transaction(_work)
+        deleted += await db.transaction(_sweep_turn)
+    logger.info("response cache: removed %d row(s) of %d planned (%.1f MB) in %d turn(s).",
+                deleted, sum(turn.rows for turn in turns),
+                sum(turn.bytes for turn in turns) / 1e6, len(turns))
+    return deleted
 
 
 def discard_legacy_dir() -> None:

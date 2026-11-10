@@ -25,8 +25,10 @@ from datetime import date, datetime, timezone
 from unittest import mock
 
 from app import db
+from app.metadata import descriptions, tables
 from app.providers import detail_source
 from app.providers.base import SeasonsAnswer, Source
+from app.providers import season_choices
 from app.ranker import core as ranker, seasons
 from tests.ranker.test_removals import BOARD, key, show_ref
 from tests.ranker.test_seasons import _SeasonsTestCase, season_key
@@ -52,7 +54,7 @@ def by_season(options) -> dict:
 class WhatIsOfferedTests(unittest.TestCase):
 
     def options(self, listed=LISTED, *, held=(None,), current=None, finished=None):
-        return seasons.season_options(listed, held=held, current=current,
+        return season_choices.season_options(listed, held=held, current=current,
                                       finished=finished, now=NOW)
 
     def test_the_whole_show_comes_first_then_every_season_in_order(self):
@@ -65,7 +67,7 @@ class WhatIsOfferedTests(unittest.TestCase):
         self.assertTrue(options[2].held and options[2].current)
         self.assertTrue(options[None].held and not options[None].current)
         self.assertFalse(options[1].held or options[3].held)
-        self.assertEqual(options[2].notes[0], "this row")
+        self.assertEqual(options[2].notes[:2], ("10 eps", "this row"))
         self.assertEqual(options[None].notes, ("on the board",))
 
     def test_a_season_no_service_listed_is_still_offered_when_the_row_is_it(self):
@@ -92,7 +94,7 @@ class WhatIsOfferedTests(unittest.TestCase):
 class WhatIsSuggestedTests(unittest.TestCase):
 
     def suggested(self, listed=LISTED, *, finished=None):
-        return [option.season for option in seasons.season_options(
+        return [option.season for option in season_choices.season_options(
             listed, held=(None,), current=None, finished=finished, now=NOW)
             if option.suggested]
 
@@ -100,7 +102,7 @@ class WhatIsSuggestedTests(unittest.TestCase):
         self.assertEqual(self.suggested(), [3])
 
     def test_never_a_season_still_to_air_but_it_is_listed_with_its_date(self):
-        options = by_season(seasons.season_options(
+        options = by_season(season_choices.season_options(
             LISTED, held=(), current=None, finished=None, now=NOW))
         self.assertFalse(options[4].suggested)
         self.assertFalse(options[4].aired)
@@ -118,17 +120,17 @@ class WhatIsSuggestedTests(unittest.TestCase):
         self.assertEqual(self.suggested([{"season": 0, "first_aired": "2026-09-20"}]), [])
 
     def test_a_suggestion_already_on_the_board_says_both(self):
-        options = by_season(seasons.season_options(
+        options = by_season(season_choices.season_options(
             LISTED, held=(None, 3), current=None, finished=None, now=NOW))
-        self.assertEqual(options[3].notes, ("on the board", "suggested"))
+        self.assertEqual(options[3].notes, ("9 eps", "on the board", "suggested"))
 
     def test_a_premiere_is_compared_as_the_service_states_it(self):
-        self.assertTrue(seasons.has_aired("2026-09-27T11:59:00.000Z", NOW))
-        self.assertFalse(seasons.has_aired("2026-09-27T12:01:00.000Z", NOW))
-        self.assertTrue(seasons.has_aired("2026-09-27", NOW))
-        self.assertFalse(seasons.has_aired("2026-09-28", NOW))
-        self.assertFalse(seasons.has_aired("", NOW))
-        self.assertFalse(seasons.has_aired("soon", NOW))
+        self.assertTrue(season_choices.has_aired("2026-09-27T11:59:00.000Z", NOW))
+        self.assertFalse(season_choices.has_aired("2026-09-27T12:01:00.000Z", NOW))
+        self.assertTrue(season_choices.has_aired("2026-09-27", NOW))
+        self.assertFalse(season_choices.has_aired("2026-09-28", NOW))
+        self.assertFalse(season_choices.has_aired("", NOW))
+        self.assertFalse(season_choices.has_aired("soon", NOW))
 
 
 def answer(listed=LISTED) -> SeasonsAnswer:
@@ -240,10 +242,10 @@ class WhatTheListDrawsTests(_ControlTestCase):
         body, _ = self.season_list(key(SHOW))
         self.assertEqual(self.choices(body), [
             ("", True, "this row"),
-            ("1", True, "on the board"),
-            ("2", True, "on the board"),
-            ("3", False, "suggested"),
-            ("4", False, "airs 15 Jan 2099"),
+            ("1", True, "8 eps · on the board"),
+            ("2", True, "10 eps · on the board"),
+            ("3", False, "9 eps · suggested"),
+            ("4", False, "10 eps · airs 15 Jan 2099"),
         ])
         self.assertIn(f'name="key" value="{key(SHOW)}"', body)
 
@@ -259,7 +261,7 @@ class WhatTheListDrawsTests(_ControlTestCase):
                 (self.user_id, SHOW, season)))
         # Season 3 finished and on no row of this board: suggested.
         body, _ = self.season_list(key(SHOW))
-        self.assertIn(("3", False, "suggested"), self.choices(body))
+        self.assertIn(("3", False, "9 eps · suggested"), self.choices(body))
 
     def test_an_account_without_the_tracker_gets_the_aired_suggestion(self):
         self.build_with_seasons()
@@ -271,7 +273,7 @@ class WhatTheListDrawsTests(_ControlTestCase):
         body, _ = self.season_list(key(SHOW), [LISTED[0], LISTED[1]])
         # Not approved for the tracker, so its record is not read: season 2 is
         # the latest aired, and it is on the board already.
-        self.assertIn(("2", True, "on the board · suggested"), self.choices(body))
+        self.assertIn(("2", True, "10 eps · on the board · suggested"), self.choices(body))
 
     def test_nobody_to_ask_still_draws_the_whole_show_and_says_why(self):
         self.build_with_seasons()
@@ -285,7 +287,7 @@ class WhatTheListDrawsTests(_ControlTestCase):
         from app.providers.base import SourceUnavailable
         self.build_with_seasons()
 
-        async def _down(settings, chosen, media):
+        async def _down(settings, chosen, media, *, cached_only=False):
             raise SourceUnavailable("down")
 
         with mock.patch.object(detail_source, "seasons", _down):
@@ -375,17 +377,14 @@ NAMED = [
 
 
 class WhatAChoiceWritesTests(_ControlTestCase):
-    """Choosing a season writes what the row now COUNTS and is CALLED, read from
-    the season list the control was drawn from — out of the store, never a
-    second request — and never leaves the old definition's numbers behind."""
+    """Choosing a season makes the row COUNT and be CALLED what that season is,
+    from the season list the control was drawn from — kept in the title store,
+    read back with no second request — and never leaves the old definition's
+    numbers behind: the row keeps no numbers of its own to leave."""
 
     def facts(self, row_key: str) -> tuple:
-        season = None if row_key == key(SHOW) else int(row_key.rsplit(":s", 1)[1])
-        row = asyncio.run(db.fetch_one(
-            "SELECT season_count, episode_count, season_name FROM tier_items "
-            " WHERE match_id = ? AND IFNULL(season, -1) = ?",
-            (SHOW, -1 if season is None else season)))
-        return row["season_count"], row["episode_count"], row["season_name"]
+        item = asyncio.run(ranker.fetch_item(self.user_id, BOARD, row_key))
+        return item["season_count"], item["episode_count"], item["season_name"]
 
     def choose(self, row_key: str, season, listed=LISTED) -> tuple[str, list, list]:
         cached: list = []
@@ -396,8 +395,6 @@ class WhatAChoiceWritesTests(_ControlTestCase):
 
     def test_a_season_counts_its_own_episodes_and_no_seasons(self):
         self.build_with_seasons()
-        asyncio.run(db.execute("UPDATE tier_items SET season_count = 5, episode_count = 38 "
-                               " WHERE match_id = ? AND season IS NULL", (SHOW,)))
         _, calls, cached = self.choose(key(SHOW), 3)
         self.assertEqual(self.facts(season_key(SHOW, 3)), (None, 9, None))
         self.assertEqual(calls, [(Source.TRAKT, "70")])
@@ -408,13 +405,17 @@ class WhatAChoiceWritesTests(_ControlTestCase):
         self.choose(key(SHOW), 3)
         body, _, _ = self.choose(season_key(SHOW, 3), "")
         self.assertIn("This row is the whole show now.", body)
+        # A season list alone is not the whole show's count: only the service's
+        # description says how many seasons there are (labels.board_columns).
+        self.assertEqual(self.facts(key(SHOW)), (None, None, None))
+        asyncio.run(db.execute(
+            f"UPDATE {tables.TITLES} SET trakt_season_count = 4 "
+            "WHERE trakt_id IS NOT NULL AND title_key = ?", (key(SHOW),)))
         # Four listed seasons, 8 + 10 + 9 + 10 episodes.
         self.assertEqual(self.facts(key(SHOW)), (4, 37, None))
 
     def test_a_list_nobody_stored_leaves_the_counts_blank_not_stale(self):
         self.build_with_seasons()
-        asyncio.run(db.execute("UPDATE tier_items SET season_count = 5, episode_count = 38 "
-                               " WHERE match_id = ? AND season IS NULL", (SHOW,)))
         self.choose(key(SHOW), 3, listed=[])
         self.assertEqual(self.facts(season_key(SHOW, 3)), (None, None, None))
 
@@ -460,23 +461,55 @@ class TheLabelTests(unittest.TestCase):
         self.assertEqual(seasons.season_part(4, "Night Country"), "Night Country")
 
 
-class TheFactsTests(unittest.TestCase):
-    """seasons.season_facts — a row's counts describe what the row is."""
+class WhatTheWholeShowCountsTests(_ControlTestCase):
+    """The whole show's counts, from the title store: its numbered seasons and
+    their episodes, from the first service whose description vouches for its
+    season list (app/metadata/labels.py)."""
 
-    def test_a_season(self):
-        self.assertEqual(seasons.season_facts(NAMED, 4),
-                         {"season_count": None, "episode_count": 6,
-                          "season_name": "Night Country"})
+    def facts(self) -> tuple:
+        item = asyncio.run(ranker.fetch_item(self.user_id, BOARD, key(SHOW)))
+        return item["season_count"], item["episode_count"]
 
-    def test_the_whole_show_counts_numbered_seasons_only(self):
-        listed = [{"season": 0, "episode_count": 3}, *LISTED]
-        self.assertEqual(seasons.season_facts(listed, None),
-                         {"season_count": 4, "episode_count": 37, "season_name": None})
+    def file(self, listed, *, described: int | None) -> None:
+        asyncio.run(db.transaction(lambda conn: descriptions.write_season_list(
+            conn, "trakt", "show", "70", listed, now=db.now(),
+            ids={"trakt": 70, "tmdb": int(SHOW)})))
+        if described is not None:
+            asyncio.run(db.execute(
+                f"UPDATE {tables.TITLES} SET trakt_season_count = ? "
+                "WHERE trakt_id IS NOT NULL", (described,)))
 
-    def test_nothing_known_is_none_not_zero(self):
-        blank = {"season_count": None, "episode_count": None, "season_name": None}
-        self.assertEqual(seasons.season_facts([], 3), blank)
-        self.assertEqual(seasons.season_facts([], None), blank)
+    def test_the_specials_are_not_a_season_of_the_count(self):
+        self.build_with_seasons()
+        self.file([{"season": 0, "episode_count": 3}, *LISTED], described=4)
+        self.assertEqual(self.facts(), (4, 37))
+
+    def test_a_list_no_description_vouches_for_counts_nothing(self):
+        """Season rows come from three writers, so the rows that happen to exist
+        are not a list until a description says how many seasons there are."""
+        self.build_with_seasons()
+        self.file(LISTED[:2], described=None)
+        self.assertEqual(self.facts(), (None, None))
+
+    def test_a_list_shorter_than_the_description_counts_nothing(self):
+        self.build_with_seasons()
+        self.file(LISTED[:2], described=4)
+        self.assertEqual(self.facts(), (4, None))
+
+    def test_a_boards_read_finds_season_rows_by_their_title(self):
+        """Every season row the board's read reaches, it reaches by its title's
+        key — never by walking the seasons. Left to choose, the planner once
+        walked every season row of the listing service for each whole-show row:
+        MEASURED on a copy of dev, a 340-row board read in 42 s with TMDB's
+        17,700 season rows, and in 0.02 s driven from the title."""
+        sql = f"EXPLAIN QUERY PLAN {ranker._ITEMS} WHERE i.board_id = ?"
+        plan = asyncio.run(db.run(lambda conn: [
+            str(row["detail"]) for row in conn.execute(sql, (0,)).fetchall()]))
+        reaches = [line for line in plan if line.startswith(("SEARCH s ", "SCAN s"))]
+        self.assertTrue(reaches)
+        for line in reaches:
+            with self.subTest(line=line):
+                self.assertIn("title_key=", line)
 
 
 if __name__ == "__main__":

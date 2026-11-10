@@ -1,0 +1,20 @@
+{#- tight -#}
+{# THE ANSWER TO A CARD'S COMPARE CONTROL: the card that was pressed, drawn
+   whole in its own place (the control's `hx-target`), and every other card of
+   its title on the month that has something to compare, drawn whole and
+   addressed out of band by its airing — so comparing a show compares it
+   everywhere the page holds it, with no script, exactly as a mark redraws every
+   card of the title it marks (_marked_cards.html).
+
+   A CARD FOR A DAY THIS PAGE IS NOT HOLDING SWAPS NOTHING, and that is correct
+   rather than tolerated: the day has not been fetched yet, and the page filed
+   the title as compared (calendar/routes.py's `calendar_card`), so the day draws
+   it compared when it is.
+
+   THE CARDS ARE _card.html, the same file the page draws, so a compared card
+   cannot come out different from one drawn compared to begin with.
+
+   Context: `item` (the pressed card), `others` (the title's other cards worth
+   redrawing) and `expanded`. #}
+{% include "_card.html" %}
+{%- for other in others %}{% with item = other, oob = true %}{% include "_card.html" %}{% endwith %}{% endfor %}

@@ -23,6 +23,8 @@ shared storage, which is exactly what the calendar's own storage rules forbid.
     DATA_DIR/posters/<media>/<tmdb>.<source>.jpg       500x750, from the proxy
     DATA_DIR/posters/<media>/<tmdb>.s<N>.<source>.jpg  season N's own
     DATA_DIR/posters/<media>/<tmdb>.<source>.none      negative marker
+    DATA_DIR/posters/<media>/k<digest>.<source>.jpg    a title with no tmdb id,
+                                                       by its title store key
 
 A SEASON IS TRIED FOR ITS OWN ARTWORK FIRST — the season registry, which a
 season list somebody already read filled (only Trakt publishes season artwork,
@@ -43,14 +45,14 @@ RESOLUTION CHAIN, in order, each one falling through to the next on failure:
     3. the show_posters registry, tried in the CALLER'S order — which is what
        makes a link preview draw the same picture as the page it previews
     4. THE TITLE'S ONE LOOKUP (`_look_up_address`), unless one already found
-       nothing (artwork.record_miss): TMDB /tv or /movie -> poster_path -> w500
-       if TMDB is configured and in the order, else a Trakt id-lookup by tmdb;
-       an answer is recorded into the registry, and so is a miss
+       nothing (artwork.record_miss): each service in the caller's order that
+       can be asked for a picture by tmdb id (`_ADDRESS_LOOKUPS`) and is
+       configured here, first answer wins; an answer is recorded into the
+       registry, and so is a miss
     5. negative marker against the order's first source
 Stage 4 used to come FIRST, which spent a request to learn something a calendar
-fill had already written down and decided the picture would be TMDB's whatever
-the page was showing. It is the fallback now: it exists for titles nobody's
-calendar has ever named, which is the ranker's imported ones.
+fill had already written down. It is the last resort now: it exists for titles
+nobody's calendar has ever named, which is the ranker's imported ones.
 A registry URL that fails is not deleted — its fail_count increments and
 resolution falls through to the next source, because a dead URL should trigger
 rediscovery, not a permanent hole.
@@ -58,6 +60,7 @@ rediscovery, not a permanent hole.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from io import BytesIO
@@ -67,11 +70,12 @@ import anyio.to_thread
 from PIL import Image
 
 from . import artwork
-from . import tmdb as tmdb_client
 from ..providers.trakt import calendar as trakt_calendar, transport as trakt_transport
+from .. import providers
 from ..config import DATA_DIR
 from ..perftrace import span
 from ..providers.base import Media, POSTER_PARAMS, Source, proxied_image
+from ..providers.tmdb import detail as tmdb_detail, transport as tmdb_transport
 
 logger = logging.getLogger(__name__)
 
@@ -92,21 +96,16 @@ MAX_SOURCE_DIMENSION = 6000
 # of title would not need this module to be remembered.
 MEDIA_VALUES = tuple(Media)
 
-# WHICH SERVICE'S ARTWORK TO PREFER, when the caller does not say. The app's own
-# declared provider order first and TMDB behind it — the reverse of what this
-# module used to do, and the reason is that the CARD AND ITS PREVIEW PICTURE
-# MUST AGREE. The calendar draws `Record.poster`, which is whatever the source
-# filling that calendar published; resolving the preview TMDB-first meant the
-# link preview showed a different picture from the page it previewed, which for
-# Halloween Wars was a different picture of a different-looking show. TMDB stays
-# in the order because it is the only source the ranker's own imported titles
-# have — they were never on anyone's calendar — but it is now the backstop
-# rather than the default.
+# WHICH SERVICE'S ARTWORK TO PREFER, when the caller does not say: the app's own
+# declared provider order (`Source`), and nothing appended to it. The CARD AND
+# ITS PREVIEW PICTURE MUST AGREE, and a card draws whatever its describing service
+# published — so the order a picture is resolved in is the order a card's fields
+# are, which is the declared one for a viewer who has stated none.
 #
-# TMDB IS NOT A `Source`, which is why this is not simply the enum: it is an
-# artwork origin this app reads, never a calendar or tracker one, so it has no
-# entry in the provider registry and has to be named here.
-DEFAULT_ORDER = tuple(str(s) for s in Source) + ("tmdb",)
+# THIS USED TO APPEND "tmdb" TO THE ENUM, because TMDB was an artwork origin
+# rather than a source. It is a source now, first in the declared order, and
+# appending it again listed it twice.
+DEFAULT_ORDER = tuple(str(s) for s in Source)
 
 _FAN_OUT = 8
 
@@ -140,17 +139,13 @@ def _none_path(media: str, tmdb: int, source: str) -> Path:
 
 def order_for(preferred) -> tuple[str, ...]:
     """Whose artwork a viewer's pictures come from, most preferred first:
-    `preferred` (their metadata preference over the app's sources —
-    sources.prefs' source_order) with TMDB behind it.
-
-    TMDB IS APPENDED RATHER THAN ORDERED, because it is not a calendar source
-    and an account cannot have an opinion about it in those preferences. It is
-    the backstop for a title no calendar named. One spelling of this, for the
-    share card, the rankings board and the tracker, so the three cannot come to
-    prefer different pictures of one title.
+    `preferred` (their metadata preference over every source — sources.prefs'
+    source_order, which already places any source they did not name after the
+    ones they did, in declared order). One spelling of this, for the share card,
+    the rankings board and the tracker, so the three cannot come to prefer
+    different pictures of one title.
     """
-    ordered = tuple(str(source) for source in preferred)
-    return ordered if "tmdb" in ordered else ordered + ("tmdb",)
+    return tuple(str(source) for source in preferred)
 
 
 def cached_poster(media: str, tmdb: object, order: tuple[str, ...] = DEFAULT_ORDER,
@@ -232,33 +227,57 @@ async def _try_source(url: str) -> bytes | None:
     None on ANY failure — network, non-200, or a body that will not open — so
     the caller falls through to the next source in the chain.
     """
-    raw = await tmdb_client.download(proxied_image(url, POSTER_PARAMS))
+    raw = await tmdb_transport.download(proxied_image(url, POSTER_PARAMS))
     if raw is None:
         return None
     return await anyio.to_thread.run_sync(_verify, raw)
 
 
-async def _fresh_provider_lookup(settings, media: str, tmdb: int) -> str | None:
-    """A live Trakt id-lookup by tmdb id, cached like any other Trakt call
-    through cached_get. Tried only once TMDB and the registry have both come
-    up empty. Whatever URL this finds is recorded through app/media/artwork.py so the
-    next poster this cold doesn't pay for the lookup twice."""
+class _LookupFailed(Exception):
+    """A service that could not be asked about a picture — distinct from one
+    that was asked and has none, which is what lets a miss be recorded only when
+    every service in the order genuinely answered nothing."""
+
+
+async def _tmdb_address(settings, media: str, tmdb: int) -> str | None:
+    """TMDB's poster for the title, from the same cached `/tv/{id}` answer its
+    details panel reads."""
+    try:
+        data = await tmdb_detail.title_payload(settings, tmdb, media)
+    except tmdb_transport.TmdbError as exc:
+        raise _LookupFailed(str(exc)) from exc
+    return tmdb_transport.image_url((data or {}).get("poster_path")) or None
+
+
+async def _trakt_address(settings, media: str, tmdb: int) -> str | None:
+    """Trakt's poster for the title, by its search on the tmdb id (cached like
+    any other Trakt read)."""
     media_type = "show" if media == "show" else "movie"
-    results = await trakt_transport.cached_get(
-        trakt_transport.shared_client(), settings, f"search/tmdb/{tmdb}",
-        {"type": media_type, "extended": "full,images"},
-        # A failure RAISES rather than reading as an empty answer: "Trakt knows
-        # no picture for this" is remembered for good (artwork.record_miss), and
-        # an unreachable Trakt must not be taken for it.
-        raise_errors=True,
-    )
+    try:
+        results = await trakt_transport.cached_get(
+            trakt_transport.shared_client(), settings, f"search/tmdb/{tmdb}",
+            {"type": media_type, "extended": "full,images"},
+            # A failure RAISES rather than reading as an empty answer: "Trakt
+            # knows no picture for this" is remembered for good
+            # (artwork.record_miss), and an unreachable Trakt must not be taken
+            # for it.
+            raise_errors=True,
+        )
+    except trakt_transport.TraktError as exc:
+        raise _LookupFailed(str(exc)) from exc
     for entry in results if isinstance(results, list) else []:
-        obj = entry.get(media_type) or {}
-        url = trakt_calendar.poster(obj)
-        if url:
-            await artwork.record_poster_url(media, tmdb, "trakt", url)
+        if url := trakt_calendar.poster(entry.get(media_type) or {}):
             return url
     return None
+
+
+# HOW EACH SERVICE IS ASKED FOR A PICTURE BY A TMDB ID, ONE ENTRY PER SOURCE.
+# A title's one lookup walks the viewer's order and asks each service that has
+# an entry and can be reached (its own catalogue predicate). Simkl's entry is
+# None, deliberately: its lookup by a shared id goes through /redirect, which
+# needs the viewer's own token, and a picture is drawn for pages nobody signed in
+# to. tests/media/test_posters.py fails for a registered source missing here.
+_ADDRESS_LOOKUPS = {"tmdb": _tmdb_address, "trakt": _trakt_address, "simkl": None}
 
 
 # The lookups under way, by title, so two requests for one title's picture that
@@ -287,28 +306,33 @@ async def _look_up_address(settings, media: str, tmdb: int,
     recorded now for every later reader — or None, and then the title is
     recorded as a miss (artwork.record_miss) so nothing asks again.
 
-    Only the services that answer by the tmdb id already in hand: TMDB's own
-    record where TMDB is configured and in `order`, then Trakt's search by tmdb
-    id. The caller has already checked the registry and the miss.
+    Each service in `order` with a lookup by tmdb id (`_ADDRESS_LOOKUPS`) whose
+    catalogue this instance can reach is asked in turn, and the first answer is
+    the picture. The caller has already checked the registry and the miss.
+
+    A MISS IS RECORDED ONLY WHEN SOMEBODY WAS ASKED AND NOBODY FAILED. A lookup
+    that FAILED is not one that found nothing, and neither is a lookup nobody
+    could make — an instance holding no credential for any service in the order
+    has learned nothing about the title, and a miss recorded then would outlive
+    the credential being filled in.
     """
-    if "tmdb" in order and getattr(settings, "tmdb_configured", False):
-        path = f"/tv/{tmdb}" if media == "show" else f"/movie/{tmdb}"
-        data = await tmdb_client.get_json(settings, path, "posters.tmdb_detail")
-        poster_path = (data or {}).get("poster_path")
-        if poster_path:
-            fresh = f"{tmdb_client.IMG}/w500{poster_path}"
-            await artwork.record_poster_url(media, tmdb, "tmdb", fresh)
-            return "tmdb", fresh
-    try:
-        fresh = await _fresh_provider_lookup(settings, media, tmdb)
-    except Exception as exc:
-        # A lookup that FAILED is not a lookup that found nothing: no miss is
-        # recorded, so the next reader may try again.
-        logger.warning("poster[%s/%s]: lookup failed: %s", media, tmdb, exc)
-        return None
-    if fresh:
-        return "trakt", fresh
-    await artwork.record_miss(media, tmdb)
+    asked = failed = False
+    for name in order:
+        lookup = _ADDRESS_LOOKUPS[name]
+        if lookup is None or not providers.get(name).catalogue_is_configured(settings):
+            continue
+        asked = True
+        try:
+            fresh = await lookup(settings, media, tmdb)
+        except _LookupFailed as exc:
+            logger.warning("poster[%s/%s]: %s could not be asked: %s", media, tmdb, name, exc)
+            failed = True
+            continue
+        if fresh:
+            await artwork.record_poster_url(media, tmdb, name, fresh)
+            return name, fresh
+    if asked and not failed:
+        await artwork.record_miss(media, tmdb)
     return None
 
 
@@ -404,7 +428,7 @@ async def ensure_poster(settings, media: str, tmdb: object,
                 continue
             raw = await _try_source(own[source])
             if raw is not None:
-                return _store(media, tid, source, raw, season)
+                return await anyio.to_thread.run_sync(_store, media, tid, source, raw, season)
             await artwork.record_season_failure(media, tid, season, source)
 
     # EVERY SOURCE GIVEN UP ON MEANS NO CALLS AT ALL, checked before the loop
@@ -431,7 +455,7 @@ async def ensure_poster(settings, media: str, tmdb: object,
             if url:
                 raw = await _try_source(url)
                 if raw is not None:
-                    return _store(media, tid, source, raw)
+                    return await anyio.to_thread.run_sync(_store, media, tid, source, raw)
                 # Dead URL: rediscovery, not a permanent hole. Fall through to
                 # the next source rather than giving up on this poster.
                 await artwork.record_failure(media, tid, source)
@@ -448,16 +472,94 @@ async def ensure_poster(settings, media: str, tmdb: object,
             if found:
                 raw = await _try_source(found[1])
                 if raw is not None:
-                    return _store(media, tid, found[0], raw)
+                    return await anyio.to_thread.run_sync(_store, media, tid, found[0], raw)
 
         logger.info("poster[%s/%s]: nothing resolved -> negative marker", media, tid)
-        _dir(media).mkdir(parents=True, exist_ok=True)
-        _none_path(media, tid, order[0]).write_text("", encoding="utf-8")
+        await anyio.to_thread.run_sync(_mark_none, media, tid, order[0])
         return None
 
 
+def _key_tile_path(media: str, title_key: str, source: str) -> Path:
+    """The tile of a title with no tmdb id, named by a digest of the title
+    store's key for it — a key carries characters (`:`, an imdb id's letters) a
+    file name should not have to be trusted with — and prefixed so it can never
+    be read as a tmdb id's tile."""
+    digest = hashlib.sha1(str(title_key).encode("utf-8")).hexdigest()[:20]
+    return _dir(media) / f"k{digest}.{source}.jpg"
+
+
+def cached_title_poster(media: str, title_key: str,
+                        order: tuple[str, ...] = DEFAULT_ORDER) -> Path | None:
+    """`cached_poster` for a title with no tmdb id, by the title store's key."""
+    if media not in MEDIA_VALUES or not title_key:
+        return None
+    for source in order:
+        path = _key_tile_path(media, title_key, source)
+        if path.exists():
+            return path
+    return None
+
+
+async def ensure_title_posters(settings, keys, order: tuple[str, ...] = DEFAULT_ORDER) -> int:
+    """`ensure_posters` for titles with no tmdb id — `keys` is (media, title store
+    key) — from what the registry recorded for them (artwork's `title_posters`),
+    in `order`. Returns how many tiles were written.
+
+    NO LOOKUP: the one lookup asks a service by tmdb id, which these titles do
+    not have. Their pictures arrive as the title store learns them (a listing, a
+    description), and a surface drawing the title queues its description
+    (app/metadata/refresh.py) — so a title with nothing recorded draws its
+    placeholder until then. A dead address is counted against its row, as
+    ensure_poster counts one, and the next source in the order is tried."""
+    want = {(str(media), str(key)) for media, key in keys
+            if media in MEDIA_VALUES and key
+            and not _key_tile_path(str(media), str(key), order[0]).exists()}
+    if not want:
+        return 0
+    sem = asyncio.Semaphore(_FAN_OUT)
+
+    async def _one(media: str, key: str) -> bool:
+        async with sem:
+            urls = await artwork.title_urls_for(media, key)
+            for source in order:
+                tile = _key_tile_path(media, key, source)
+                if tile.exists():
+                    return False
+                if not urls.get(source):
+                    continue
+                raw = await _try_source(urls[source])
+                if raw is not None:
+                    await anyio.to_thread.run_sync(_store_keyed, media, key, source, raw)
+                    return True
+                await artwork.record_title_failure(media, key, source)
+            return False
+
+    with span("posters.ensure_title_posters", n=len(want)):
+        results = await asyncio.gather(*(_one(*pair) for pair in want), return_exceptions=True)
+    return sum(1 for result in results if result is True)
+
+
+def _store_keyed(media: str, title_key: str, source: str, raw: bytes) -> Path:
+    """`_store`, for a title with no tmdb id. In a worker thread, as `_store` is."""
+    _dir(media).mkdir(parents=True, exist_ok=True)
+    tile = _key_tile_path(media, title_key, source)
+    tile.write_bytes(raw)
+    logger.info("poster[%s/%s]: GENERATED from %s -> %s", media, title_key, source, tile.name)
+    return tile
+
+
+def _mark_none(media: str, tmdb: int, source: str) -> None:
+    """Write the negative marker. In a worker thread, as `_store` is."""
+    _dir(media).mkdir(parents=True, exist_ok=True)
+    _none_path(media, tmdb, source).write_text("", encoding="utf-8")
+
+
 def _store(media: str, tmdb: int, source: str, raw: bytes, season: int | None = None) -> Path:
-    """Write one verified tile and answer where it went."""
+    """Write one verified tile and answer where it went.
+
+    RUN IN A WORKER THREAD by every caller: a tile is ~95 KB, and an export or a
+    share card writes dozens of them, each of which would otherwise be a disk
+    write on the event loop every other request waits behind."""
     _dir(media).mkdir(parents=True, exist_ok=True)
     tile = _tile_path(media, tmdb, source, season)
     tile.write_bytes(raw)
@@ -527,7 +629,8 @@ def sweep(max_bytes: int, now: float | None = None) -> int:
     LRU by file mtime until the total is back under max_bytes.
 
     TWO RULES, AND THE AGE ONE IS NOT NEGOTIABLE. TMDB's terms cap how long
-    anything obtained from them may be kept (tmdb.MAX_CACHE_SECONDS), and a
+    anything obtained from them may be kept (providers/tmdb/transport.py's
+    MAX_CACHE_SECONDS), and a
     size cap does not satisfy that: an instance under its budget would keep a
     tile for ever, which is exactly the case the terms are about. The byte cap
     is this app's own housekeeping and runs after.
@@ -543,7 +646,7 @@ def sweep(max_bytes: int, now: float | None = None) -> int:
     """
     if not POSTER_DIR.exists() or max_bytes < 0:
         return 0
-    cutoff = (time.time() if now is None else now) - tmdb_client.MAX_CACHE_SECONDS
+    cutoff = (time.time() if now is None else now) - tmdb_transport.MAX_CACHE_SECONDS
     entries: list[tuple[float, int, Path]] = []
     total = 0
     removed = 0

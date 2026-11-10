@@ -29,11 +29,66 @@ import unittest
 
 from app import providers
 from app.config import Settings
-from app.providers.base import (CalendarPort, DetailPort, LibraryPort, Media,
-                                PlayCountPort, Provider, SearchPort, Source, SyncPort,
-                                WatchlistPort)
+from app.providers.base import (EPISODE_KEEPING, EPISODE_LISTING, EPISODE_MARKS,
+                                SEASON_KEEPING, STATUS_WORDS, TITLE_KEEPING, CalendarPort,
+                                DetailPort,
+                                LibraryPort, Media, PlayCountPort, Provider, SearchPort, Source,
+                                SyncPort, WatchlistPort)
 from app.providers.trakt import detail as trakt_detail
 from tests.support import DatabaseTestCase
+
+
+# EACH SERVICE'S CATALOGUE CREDENTIAL, AND ONLY THAT — the instance-wide value
+# its public reads authenticate with. A TABLE WITH AN ENTRY PER SERVICE rather
+# than a field name spelled from the service's own name, because the services
+# do not share one shape: Trakt and Simkl take a client id, TMDB a read token. A
+# registered service missing here fails `test_every_registered_source_has_a_
+# credential_entry` rather than being quietly skipped.
+TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJ0ZXN0In0.c2lnbmF0dXJl"
+CATALOGUE_CREDENTIALS = {
+    "tmdb": {"tmdb_api_key": TMDB_TOKEN},
+    "trakt": {"trakt_client_id": "an-id"},
+    "simkl": {"simkl_client_id": "an-id"},
+}
+
+
+# And each service's PRIVATE credential — one person's own grant, as
+# auth.viewer.settings_for_user swaps it onto a viewer's Settings. TMDB's is the
+# user token its v4 sign-in issues AND the account it names (its account reads
+# are addressed by that id), so both travel.
+PRIVATE_CREDENTIALS = {
+    "tmdb": {"tmdb_user_token": "a-token", "tmdb_account_id": "6a5edaa7df66e2fc7c922663"},
+    "trakt": {"trakt_access_token": "a-token"},
+    "simkl": {"simkl_access_token": "a-token"},
+}
+
+# Whether each service carries a search port at all, and whether every box asks
+# it without anybody choosing it (Capabilities.searched_by_default) — one entry
+# per service, so a service registered later is a decision written here.
+SEARCHABLE = {"tmdb": True, "trakt": True, "simkl": True}
+SEARCHED_BY_DEFAULT = {"tmdb": True, "trakt": False, "simkl": False}
+
+# Whether a service's row in the title store joins every calendar card of a title
+# it does not list (Capabilities.describes_every_card) — one entry per service.
+DESCRIBES_EVERY_CARD = {"tmdb": True, "trakt": False, "simkl": False}
+
+
+def catalogue_settings(*sources) -> Settings:
+    """A Settings carrying these services' catalogue credentials and nothing
+    private — the live instance's own shape."""
+    fields = {}
+    for source in sources:
+        fields.update(CATALOGUE_CREDENTIALS[str(source)])
+    return Settings(**fields)
+
+
+class EveryServiceHasACredentialEntryTests(unittest.TestCase):
+
+    def test_every_registered_source_has_a_credential_entry(self):
+        registered = {str(s) for s in providers.registered()}
+        for table in (CATALOGUE_CREDENTIALS, PRIVATE_CREDENTIALS, SEARCHABLE,
+                      SEARCHED_BY_DEFAULT):
+            self.assertEqual(set(table), registered)
 
 
 class RegisteredProvidersConformTests(unittest.TestCase):
@@ -137,7 +192,7 @@ class CalendarPortIsDeclaredAlongsideTheEndpointsTests(unittest.TestCase):
             if port is None:
                 continue
             with self.subTest(source=source):
-                settings = Settings(**{f"{source}_client_id": "an-id"})
+                settings = catalogue_settings(source)
                 self.assertFalse(provider.is_configured(settings))
                 self.assertTrue(port.calendar_configured(settings))
 
@@ -235,7 +290,7 @@ class EverySourceCanDescribeATitleTests(unittest.TestCase):
         """
         for source, provider in providers.registered().items():
             with self.subTest(source=source):
-                settings = Settings(**{f"{source}_client_id": "an-id"})
+                settings = catalogue_settings(source)
                 self.assertTrue(provider.detail_port.catalogue_configured(settings))
                 self.assertFalse(provider.is_configured(settings))
 
@@ -290,8 +345,7 @@ class EveryDetailPortAnswersTheSameKeysTests(DatabaseTestCase):
         """Every source's CATALOGUE credential and no private one — the live
         instance's own shape, and what makes each port take its real path rather
         than an unconfigured shortcut."""
-        return Settings(**{f"{source}_client_id": "an-id"
-                           for source, _port in self._ports()})
+        return catalogue_settings(*(source for source, _port in self._ports()))
 
     def _ports(self):
         return [(str(source), provider.detail_port)
@@ -379,12 +433,26 @@ class EverySourceCanBeSearchedTests(unittest.TestCase):
     instance in before this port existed.
     """
 
-    def test_every_registered_source_carries_a_search_port(self):
+    def test_a_search_port_is_carried_exactly_where_the_table_says(self):
         for source, provider in providers.registered().items():
             with self.subTest(source=source):
-                self.assertIsNotNone(
-                    provider.search_port,
-                    f"{source} can be described but cannot be searched")
+                self.assertEqual(
+                    provider.search_port is not None, SEARCHABLE[str(source)],
+                    f"{source}'s search port does not match SEARCHABLE")
+
+    def test_which_services_every_box_asks_is_exactly_the_table(self):
+        for source, provider in providers.registered().items():
+            with self.subTest(source=source):
+                self.assertEqual(provider.capabilities.searched_by_default,
+                                 SEARCHED_BY_DEFAULT[str(source)])
+
+    def test_a_service_searched_by_default_carries_a_search_port(self):
+        """Declaring the default without the port would leave every box saying
+        it searched a service it never asked."""
+        for source, provider in providers.registered().items():
+            if provider.capabilities.searched_by_default:
+                with self.subTest(source=source):
+                    self.assertIsNotNone(provider.search_port)
 
     def test_every_search_port_present_satisfies_searchport(self):
         for source, provider in providers.registered().items():
@@ -409,7 +477,7 @@ class EverySourceCanBeSearchedTests(unittest.TestCase):
         """
         for source, provider in providers.registered().items():
             with self.subTest(source=source):
-                settings = Settings(**{f"{source}_client_id": "an-id"})
+                settings = catalogue_settings(source)
                 self.assertFalse(provider.is_configured(settings))
                 if source is Source.SIMKL:
                     self.assertFalse(provider.catalogue_is_configured(settings))
@@ -446,7 +514,8 @@ class EveryWatchlistPortWritesTheSameWayTests(DatabaseTestCase):
         """Every verb, every port. conftest's outbound guard is what says no
         request left: a write step that finds nothing to do must cost nothing,
         and must still get a mapping back rather than None."""
-        settings = Settings(**{f"{source}_client_id": "an-id" for source, _ in self._ports()})
+        settings = Settings(**{field: value for source, _ in self._ports()
+                               for field, value in CATALOGUE_CREDENTIALS[source].items()})
         for source, port in self._ports():
             with self.subTest(source=source):
                 self.assertEqual(await port.holdings(settings, []), {})
@@ -457,7 +526,7 @@ class EveryWatchlistPortWritesTheSameWayTests(DatabaseTestCase):
     def test_every_port_links_out_without_a_call(self):
         for source, port in self._ports():
             with self.subTest(source=source):
-                self.assertTrue(port.list_url("12345").startswith("https://"))
+                self.assertTrue(port.list_url("12345", "a-name").startswith("https://"))
 
     def test_every_port_links_to_its_own_service(self):
         """The link sits beside that service's switch; a copied port that kept
@@ -465,9 +534,9 @@ class EveryWatchlistPortWritesTheSameWayTests(DatabaseTestCase):
         from urllib.parse import urlparse
         for source, port in self._ports():
             with self.subTest(source=source):
-                host = urlparse(port.list_url("12345")).hostname or ""
-                self.assertTrue(host == f"{source}.com" or host.endswith(f".{source}.com")
-                                or host == f"{source}.tv" or host.endswith(f".{source}.tv"),
+                host = urlparse(port.list_url("12345", "a-name")).hostname or ""
+                self.assertTrue(host == SERVICE_HOSTS[source]
+                                or host.endswith("." + SERVICE_HOSTS[source]),
                                 f"{source} links to {host}")
 
     def test_the_registry_offers_a_write_only_with_the_viewers_token(self):
@@ -476,17 +545,66 @@ class EveryWatchlistPortWritesTheSameWayTests(DatabaseTestCase):
         holds. A client id alone offers nothing."""
         for source, _port in self._ports():
             with self.subTest(source=source):
-                bare = Settings(**{f"{source}_client_id": "an-id"})
+                bare = Settings(**CATALOGUE_CREDENTIALS[source])
                 self.assertNotIn(source, [str(s) for s, _ in providers.for_watchlist(bare)])
-                linked = Settings(**{f"{source}_client_id": "an-id",
-                                     f"{source}_access_token": "a-token"})
+                linked = Settings(**CATALOGUE_CREDENTIALS[source], **PRIVATE_CREDENTIALS[source])
                 self.assertIn(source, [str(s) for s, _ in providers.for_watchlist(linked)])
 
     def test_a_source_with_no_port_is_never_offered(self):
-        linked = Settings(**{f"{source}_{field}": "x" for source in providers.registered()
-                             for field in ("client_id", "access_token")})
+        linked = Settings(**{field: value for source in providers.registered()
+                             for table in (CATALOGUE_CREDENTIALS, PRIVATE_CREDENTIALS)
+                             for field, value in table[str(source)].items()})
         offered = {str(source) for source, _ in providers.for_watchlist(linked)}
         self.assertEqual(offered, {source for source, _ in self._ports()})
+
+
+# Where each service's own pages live. A TABLE WITH AN ENTRY PER SERVICE, and
+# the test below fails for a registered source missing from it: the point of a
+# per-service table is that a new service is a visible decision here rather
+# than a silent pass.
+SERVICE_HOSTS = {"tmdb": "themoviedb.org", "trakt": "trakt.tv", "simkl": "simkl.com"}
+
+
+class EveryProviderLinksToItsOwnPagesTests(unittest.TestCase):
+    """`Provider.title_url` — the outbound button on every card and panel.
+
+    Asked through the registry by detail_source.outbound_links, which used to
+    hold a table of two packages' builders and so would have given a third
+    service no button at all, with nothing failing.
+    """
+
+    def test_every_registered_source_has_a_host_entry(self):
+        self.assertEqual(set(SERVICE_HOSTS), {str(s) for s in providers.registered()})
+
+    def test_a_title_this_service_knows_links_to_this_service(self):
+        from urllib.parse import urlparse
+        for source, provider in providers.registered().items():
+            for media in Media:
+                with self.subTest(source=str(source), media=str(media)):
+                    url = provider.title_url(media, {str(source): "12345"})
+                    host = urlparse(url).hostname or ""
+                    self.assertTrue(host == SERVICE_HOSTS[str(source)]
+                                    or host.endswith("." + SERVICE_HOSTS[str(source)]), url)
+                    self.assertIn("12345", url)
+
+    def test_a_title_this_service_does_not_know_has_no_link(self):
+        """Not the service's homepage: a button that goes nowhere near the title
+        is worse than no button."""
+        for source, provider in providers.registered().items():
+            with self.subTest(source=str(source)):
+                self.assertEqual(provider.title_url(Media.SHOW, {"imdb": "tt1"}), "")
+                self.assertEqual(provider.episode_url({"imdb": "tt1"}, 1, 1), "")
+
+    def test_an_episode_this_service_knows_links_to_this_service(self):
+        """`Provider.episode_url` — what an episode tick in the tracker's panel
+        opens."""
+        from urllib.parse import urlparse
+        for source, provider in providers.registered().items():
+            with self.subTest(source=str(source)):
+                url = provider.episode_url({str(source): "12345"}, 2, 3)
+                host = urlparse(url).hostname or ""
+                self.assertTrue(host == SERVICE_HOSTS[str(source)]
+                                or host.endswith("." + SERVICE_HOSTS[str(source)]), url)
 
 
 class TheCheckWouldActuallyFailTests(unittest.TestCase):
@@ -526,7 +644,7 @@ class TheCheckWouldActuallyFailTests(unittest.TestCase):
         # app/providers/__init__.py itself.
         for name in ("source", "label", "capabilities", "sync_port", "calendar_port",
                      "detail_port", "search_port", "watchlist_port", "is_configured",
-                     "catalogue_is_configured"):
+                     "catalogue_is_configured", "title_url", "episode_url"):
             with self.subTest(member=name):
                 self.assertIn(name, Provider.__protocol_attrs__)
 
@@ -588,6 +706,144 @@ class EveryIdReadingNamespacesTheSlugTests(unittest.TestCase):
         for source, read, _bare, _namespaced in self.PUBLIC_ID_READINGS:
             with self.subTest(source=source):
                 self.assertEqual(read({}), {})
+
+
+class WhoDescribesEveryCardTests(unittest.TestCase):
+
+    def test_every_registered_source_has_an_entry(self):
+        self.assertEqual(set(DESCRIBES_EVERY_CARD), {str(s) for s in providers.registered()})
+
+    def test_the_declaration_is_exactly_the_table(self):
+        for source, provider in providers.registered().items():
+            with self.subTest(source=source):
+                self.assertEqual(provider.capabilities.describes_every_card,
+                                 DESCRIBES_EVERY_CARD[str(source)])
+
+    def test_a_service_that_describes_every_card_can_describe_a_title(self):
+        """Its rows are its descriptions, which its detail port writes."""
+        for source, provider in providers.registered().items():
+            if provider.capabilities.describes_every_card:
+                with self.subTest(source=source):
+                    self.assertIsNotNone(provider.detail_port)
+
+
+class EveryServiceDeclaresItsStoreColumnsTests(unittest.TestCase):
+    """Capabilities.store_columns: which columns each service's group has in the
+    title store's tables. tests/kernel/test_title_store_migration.py holds the
+    tables to exactly these sets; this holds every service to having one."""
+
+    def test_every_registered_source_declares_a_set_for_every_table(self):
+        for source, provider in providers.registered().items():
+            declared = provider.capabilities.store_columns
+            for table in ("titles", "seasons", "episodes"):
+                with self.subTest(source=source, table=table):
+                    self.assertTrue(getattr(declared, table))
+
+    def test_every_group_holds_what_the_store_keeps_for_it(self):
+        for source, provider in providers.registered().items():
+            declared = provider.capabilities.store_columns
+            with self.subTest(source=source):
+                self.assertLessEqual(TITLE_KEEPING, declared.titles)
+                self.assertLessEqual(SEASON_KEEPING, declared.seasons)
+                self.assertLessEqual(EPISODE_KEEPING, declared.episodes)
+
+    def test_a_service_lists_episodes_exactly_when_it_publishes_a_calendar(self):
+        for source, provider in providers.registered().items():
+            declared = provider.capabilities.store_columns
+            with self.subTest(source=source):
+                self.assertEqual(EPISODE_LISTING <= declared.episodes,
+                                 provider.calendar_port is not None)
+
+
+class EveryServiceSaysWhichIdAListingIsFiledUnderTests(unittest.TestCase):
+    """Provider.listing_id: the id a service's listing of a title is filed under,
+    read off the ids it stated — what the calendar's read gives a card's record
+    as its own id (app/calendar/entries.py), so it must be the service's own and
+    never another's."""
+
+    def test_a_title_this_service_knows_is_filed_under_its_own_id(self):
+        for source, provider in providers.registered().items():
+            with self.subTest(source=str(source)):
+                self.assertEqual(provider.listing_id({str(source): 12345, "imdb": "tt1"}),
+                                 "12345")
+
+    def test_a_title_it_does_not_know_is_filed_under_nothing(self):
+        for source, provider in providers.registered().items():
+            with self.subTest(source=str(source)):
+                self.assertEqual(provider.listing_id({"imdb": "tt1", "tvdb": 4321}), "")
+
+
+class EveryServiceSaysWhichEpisodesItMarksTests(unittest.TestCase):
+    """Provider.episode_mark: each service's own word for an episode's place in
+    its season as one of base.EPISODE_MARKS, or nothing — every registered
+    service answering, and no word read as another service's."""
+
+    # Each registered service's words a details panel marks, measured from what
+    # the service states (the store's `{source}_episode_type` on the development
+    # copy, and each package's detail reader). A service registered without an
+    # entry here fails, so its words are a decision rather than a fallthrough.
+    MARKED = {
+        "tmdb": {"finale": "finale", "mid_season": "mid_season_finale"},
+        "trakt": {"season_finale": "finale", "series_finale": "finale",
+                  "mid_season_finale": "mid_season_finale"},
+        "simkl": {},
+    }
+    UNMARKED = ("", "standard", "season_premiere", "series_premiere", "mid_season_premiere",
+                "FINALE", "pilot")
+
+    def test_every_service_has_an_entry(self):
+        self.assertEqual(set(self.MARKED), {str(s) for s in providers.registered()})
+
+    def test_each_services_words(self):
+        for source, provider in providers.registered().items():
+            marked = self.MARKED[str(source)]
+            words = {*marked, *self.UNMARKED, *(w for m in self.MARKED.values() for w in m)}
+            for word in words:
+                with self.subTest(source=str(source), word=word):
+                    got = provider.episode_mark(word)
+                    self.assertEqual(got, marked.get(word, ""))
+                    self.assertIn(got, {"", *EPISODE_MARKS})
+
+
+class EveryServiceSaysWhatItsStatusMeansTests(unittest.TestCase):
+    """Provider.status_means: each service's status word as the one vocabulary
+    (base.STATUS_WORDS), so two services' statuses can be compared without
+    either being read as the other (app/calendar/resolve.py's `_distinct`)."""
+
+    def test_a_word_of_the_vocabulary_means_words_of_it_to_every_service(self):
+        for source, provider in providers.registered().items():
+            for word in (*STATUS_WORDS, "  Returning Series "):
+                with self.subTest(source=source, word=word):
+                    meaning = provider.status_means(word)
+                    self.assertTrue(meaning)
+                    self.assertLessEqual(meaning, STATUS_WORDS)
+
+    def test_simkls_own_words_mean_words_of_the_vocabulary(self):
+        from app.providers.simkl import titles as simkl_titles
+        for word, meaning in simkl_titles.STATUS_MEANS.items():
+            with self.subTest(word=word):
+                self.assertTrue(meaning)
+                self.assertLessEqual(meaning, STATUS_WORDS)
+
+    def test_no_status_means_nothing(self):
+        for source, provider in providers.registered().items():
+            with self.subTest(source=source):
+                self.assertEqual(provider.status_means(""), frozenset())
+
+    def test_a_service_that_speaks_the_vocabulary_means_its_own_word(self):
+        for source, provider in providers.registered().items():
+            if str(source) == "simkl":
+                continue
+            for word in STATUS_WORDS:
+                with self.subTest(source=source, word=word):
+                    self.assertEqual(provider.status_means(word), frozenset({word}))
+
+    def test_simkls_coarse_words(self):
+        simkl = providers.get(Source.SIMKL)
+        self.assertEqual(simkl.status_means("airing"), {"returning series"})
+        self.assertEqual(simkl.status_means("Ended"), {"ended", "canceled"})
+        self.assertEqual(simkl.status_means("tba"), {"planned", "in production", "pilot"})
+        self.assertEqual(simkl.status_means("something new"), {"something new"})
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

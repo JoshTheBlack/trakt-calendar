@@ -11,8 +11,8 @@
 
    ONE PRESS, TWO THINGS: `command="show-modal"` opens the dialog natively and
    `hx-get` fills it with the offer. The dialog is redrawn closed and empty with
-   every month answer (_distrakt_modals.html), which is how an import that landed
-   closes it. #}
+   every month answer to a press (_distrakt_modals.html), which is how an import
+   that landed closes it. #}
 {% macro button(month_query, due=false, oob=false) %}
 <button type="button" id="distraktImport" class="pill-btn{{ ' import-due' if due }}"
         title="{{ 'This month\'s premieres are waiting to be imported' if due else 'Choose premieres to import from the calendar' }}"

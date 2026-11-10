@@ -69,8 +69,27 @@
         {% set description = overview or d.overview %}
         {% if description %}<div class="details-overview">{{ description }}</div>
         {%- else %}<div class="d-empty">No overview available.</div>{% endif %}
+        {#- WHAT AIRS NEXT, a fact about the show whichever season is open, so it
+            sits with the title's words rather than in a season's pane. The
+            describing service's own word for it, in its own numbering — the
+            numbering the episode lists below are drawn in — and only while it is
+            still ahead: app/metadata/panel.py's `presented` drops a snapshot
+            whose day has passed, so a date in the past is never called "next". -#}
+        {% set upcoming = d.next_episode %}
+        {% if upcoming %}<div class="details-next">📅 Next: <span class="ep-num">S{{ upcoming.season }}E{{ '%02d' | format(upcoming.number | int) }}</span>
+            {%- if upcoming.title %} · {{ upcoming.title }}{% endif %} · {{ upcoming.air_display or 'date not announced' }}
+            {%- if upcoming.mark_label %} <span class="ep-place">{{ upcoming.mark_label }}</span>{% endif %}</div>{% endif %}
     </div>
 </div>
+
+{#- THE TITLE'S LOGO IN THE PANEL'S HEADING, where the describing service has one:
+    its name as artwork, through the image proxy (the one picture host img-src
+    admits), the name itself as the picture's alt. Out of band into the shell's
+    #detailsTitle (_details_modal.html), which the opening click filled with the
+    name as text — so a title with no logo keeps that text and a panel that never
+    loads keeps a heading, and the next panel opened sets its own text over this
+    picture (static/js/ui.js). -#}
+{% if d.logo %}<h2 id="detailsTitle" hx-swap-oob="innerHTML"><img class="details-logo" src="{{ d.logo }}" alt="{{ title or d.title }}"></h2>{% endif %}
 
 {# WHERE THIS TITLE LIVES, one button per service that knows it, wearing that
    service's own name. Both services ask that their data be linked back to the

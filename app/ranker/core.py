@@ -46,7 +46,11 @@ from typing import Any, NamedTuple
 
 from . import item_keys
 from . import seasons as ranker_seasons
-from .. import db
+from .. import db, metadata
+from ..metadata import descriptions as title_descriptions
+from ..metadata import ids as metadata_ids
+from ..metadata import labels as title_labels
+from ..metadata import rows as title_rows
 # The identity a board row is keyed on is the app's notion of "the same title",
 # not this feature's — the tracker files its own rows under the same triple — so
 # the vocabulary is read from where it lives. What a BOARD adds to it, the
@@ -285,7 +289,24 @@ def _board_dict(row) -> dict[str, Any]:
     return {field: row[field] for field in _BOARD_FIELDS}
 
 
+# EVERY READ OF A BOARD ROW, with what the title store says the row's title IS
+# beside it — its name, year, network, runtime, counts and its season's own name
+# — read in the same query (app/metadata/labels.py). A board row keeps none of
+# those: they are the title's, described by the services, and a copy filed on
+# the day the row arrived is how one title came to read differently on the board
+# and everywhere else. `ITEMS` is the alias every board query names the table by.
+_ITEM_COLUMNS = "i.*, " + title_labels.board_columns("i")
+_ITEMS = f"SELECT {_ITEM_COLUMNS} FROM tier_items i"
+
+
+def _year_of(stored) -> int | None:
+    year = title_rows.as_year(stored)
+    return year if isinstance(year, int) else None
+
+
 def _item_dict(row) -> dict[str, Any]:
+    """A board row as every reader of a board gets it: the row's own identity,
+    placement and rating, and its title's words from the title store (`_ITEMS`)."""
     try:
         ids = json.loads(row["ids_json"])
     except ValueError:
@@ -293,26 +314,38 @@ def _item_dict(row) -> dict[str, Any]:
         # the board down with it, and the row's own match_source/match_id are
         # what the feature actually ranks by.
         ids = {}
+    if not isinstance(ids, dict):
+        ids = {}
+    # THE ID THE ROW IS FILED BY IS ONE OF ITS IDS, whatever the stored map says:
+    # a row is about the title that id names, and a reader asking which service
+    # can describe the row, or filing what it learned about the title, needs it.
+    ids.setdefault(row["match_source"],
+                   metadata_ids.typed(row["match_source"], row["match_id"]))
+    title = row["label_title"] or ""
+    season_name = row["label_season_name"] or None
     return {
         "key": item_keys.row_key(row),
         "media": row["media"],
         "match_source": row["match_source"],
         "match_id": row["match_id"],
         "season": row["season"],
-        "season_name": row["season_name"],
+        "season_name": season_name,
         # What the row is CALLED, which for a season row is not its title alone —
         # seasons.row_label is the one spelling, so the row, its details heading
         # and the exports read the same words.
-        "label": ranker_seasons.row_label(row["title"], row["season"], row["season_name"]),
-        "season_label": ranker_seasons.season_part(row["season"], row["season_name"]),
+        "label": ranker_seasons.row_label(title, row["season"], season_name),
+        "season_label": ranker_seasons.season_part(row["season"], season_name),
         "tmdb": row["tmdb"],
-        "ids": ids if isinstance(ids, dict) else {},
-        "title": row["title"],
-        "year": row["year"],
-        "network": row["network"],
-        "season_count": row["season_count"],
-        "episode_count": row["episode_count"],
-        "runtime": row["runtime"],
+        "ids": ids,
+        "title": title,
+        "year": _year_of(row["label_year"]),
+        "network": row["label_network"] or "",
+        # A SEASON HAS NO SEASON COUNT: a number there could only be the whole
+        # show's, drawn beside "Season 3" as if it were the season's. Nothing
+        # known is None, never 0 — a film's description states no seasons as 0.
+        "season_count": (row["label_season_count"] or None) if row["season"] is None else None,
+        "episode_count": row["label_episode_count"] or None,
+        "runtime": row["label_runtime"],
         "user_rating": row["user_rating"],
         "added_from": row["added_from"],
         "rank_in_category": row["rank_in_category"],
@@ -501,15 +534,12 @@ async def clone_board(
         # in, with no id map to build in Python.
         conn.execute(
             "INSERT INTO tier_items (board_id, category_id, media, match_source, match_id, "
-            "season, season_name, tmdb, ids_json, title, year, network, season_count, "
-            "episode_count, runtime, user_rating, added_from, rank_in_category, created_at) "
+            "season, tmdb, ids_json, user_rating, added_from, rank_in_category, created_at) "
             "SELECT ?, (SELECT c.id FROM tier_categories c "
             "             JOIN tier_categories o ON o.uid = c.uid "
             "            WHERE c.board_id = ? AND o.id = i.category_id), "
-            "       i.media, i.match_source, i.match_id, i.season, i.season_name, i.tmdb, "
-            "       i.ids_json, i.title, i.year, "
-            "       i.network, i.season_count, i.episode_count, i.runtime, i.user_rating, "
-            "       i.added_from, i.rank_in_category, ? "
+            "       i.media, i.match_source, i.match_id, i.season, i.tmdb, i.ids_json, "
+            "       i.user_rating, i.added_from, i.rank_in_category, ? "
             "  FROM tier_items i WHERE i.board_id = ?",
             (new_id, new_id, ts, source_id),
         )
@@ -582,7 +612,7 @@ def read_board(conn: db.Connection, user_id: int, board_uid: str) -> dict[str, A
         (board_id,),
     ).fetchall()
     items = conn.execute(
-        f"SELECT * FROM tier_items WHERE board_id = ? ORDER BY {_READ_ORDER}",
+        f"{_ITEMS} WHERE i.board_id = ? ORDER BY {_READ_ORDER}",
         (board_id,),
     ).fetchall()
 
@@ -641,7 +671,7 @@ async def fetch_pool_after(user_id: int, board_uid: str, after: Any,
             ).fetchone()
             after_id = int(found["id"]) if found else 0
         rows = conn.execute(
-            "SELECT * FROM tier_items WHERE board_id = ? AND category_id IS NULL AND id > ? "
+            f"{_ITEMS} WHERE i.board_id = ? AND i.category_id IS NULL AND i.id > ? "
             f" ORDER BY {_READ_ORDER} LIMIT ?",
             (board_id, after_id, limit),
         ).fetchall()
@@ -675,6 +705,7 @@ async def add_titles(
     refs: list[Mapping[str, Any]],
     *,
     added_from: str = "manual",
+    in_turns: bool = False,
 ) -> Arrivals:
     """Add titles to a board's pool, saying how many rows were created and how
     many whole-show rows became the season that arrived.
@@ -687,16 +718,26 @@ async def add_titles(
     `refs` are mappings carrying the item fields; the provider adapters that
     produce them convert their own value type into this shape, so nothing in
     this module knows which service a title came from.
+
+    `in_turns` registers the titles with the title store BEFORE the add's own
+    transaction, in bounded turns (`_register_in_turns`), which then only reads
+    where each is filed — for an add of many titles at once (a whole film
+    collection), whose registering would otherwise hold the write lock for all
+    of them in one transaction. An add of one title registers it inside, as it
+    always has.
     """
     if added_from not in ADDED_FROM_VALUES:
         raise ValidationError(f"Unknown source {added_from!r}.")
     rows = [_normalize_ref(ref) for ref in refs]
+    if in_turns:
+        await _register_in_turns(rows)
     ts = db.now()
 
     def _work(conn: db.Connection) -> Arrivals:
         board = _resolve_board(conn, user_id, board_uid)
         board_id = int(board["id"])
-        plan = _plan_arrivals(rows, _item_ids(conn, board_id))
+        filed = [_filed(conn, row, register=not in_turns) for row in rows]
+        plan = _plan_arrivals(filed, _item_ids(conn, board_id))
         # Counted against the cap before anything is written, so a request that
         # would overflow is refused whole rather than half applied.
         _check_room(conn, board_id, sum(1 for step in plan if step.item_id is None))
@@ -706,12 +747,74 @@ async def add_titles(
                 added += _insert_item(conn, board_id, step.row, added_from, ts)
             else:
                 _redefine_row(conn, board_id, step.item_id, step.row["season"], step.row)
+                _seed_the_store(conn, step.row, ts)
                 converted += 1
         if added or converted:
             _touch(conn, board_id, user_id, ts)
         return Arrivals(added, converted)
 
     return await db.transaction(_work)
+
+
+def _filed(conn: db.Connection, row: dict[str, Any], *, register: bool) -> dict[str, Any]:
+    """`row` filed where the title store says its title is.
+
+    EVERY WAY A TITLE REACHES A BOARD COMES THROUGH HERE, BEFORE THE BOARD ASKS
+    WHETHER IT ALREADY HOLDS IT: a search add, an import of what somebody
+    finished, a ratings seed, a removal put back, a restored backup. A title the
+    store knows by its tmdb id is that title however its arrival named it — a
+    ratings list naming a show by its tvdb id would otherwise land beside the row
+    the board already holds for it. Registering it (metadata.register) is also
+    how a board row's title becomes one the rest of the app can describe.
+
+    `register` False decides the key WITHOUT writing anything — a seed's preview
+    must not change the store it is previewing against, and a seed's commit has
+    registered its titles before its own transaction (`_register_in_turns`).
+    """
+    media, ids, flat = _filing(row)
+    if register:
+        found = metadata.register(conn, media, ids, filed_under=flat)
+        key = found.triple if found is not None else None
+    else:
+        key = metadata.resolve_triple(conn, media, ids)
+    if key is None or (key.match_source, key.match_id) == (row["match_source"], row["match_id"]):
+        return row
+    own = metadata_ids.typed(key.match_source, key.match_id)
+    out = {**row, "match_source": key.match_source, "match_id": key.match_id,
+           "ids_json": json.dumps({**ids, key.match_source: own}, sort_keys=True)}
+    if key.match_source == "tmdb" and out.get("tmdb") is None:
+        out["tmdb"] = own
+    return out
+
+
+def _filing(row: Mapping[str, Any]) -> tuple[str, dict[str, Any], str]:
+    """(media, ids, the key it is filed under) — what registering `row`'s title
+    with the title store names it by."""
+    ids = json.loads(row["ids_json"] or "{}")
+    if row.get("tmdb") is not None:
+        ids.setdefault("tmdb", row["tmdb"])
+    # THE ID THE ROW IS FILED BY IS THE ROW'S OWN STATEMENT, so it wins over an id
+    # map that disagrees: a row's key may move UP to a title its ids name above it,
+    # never sideways to a different title in the same id space.
+    ids[row["match_source"]] = metadata_ids.typed(row["match_source"], row["match_id"])
+    return row["media"], ids, item_keys.board_key(row["media"], row["match_source"],
+                                                  row["match_id"])
+
+
+# HOW MANY TITLES ONE REGISTERING TURN CARRIES, for an arrival of many at once (a
+# ratings seed reads a person's whole ratings list — hundreds of titles). Each
+# turn is one transaction of metadata.ensure_many's fixed shape, so the writer
+# lock is held for a bounded time however long the list, and every other write
+# takes its turn between them (CLAUDE.md's write-transaction rule).
+REGISTER_TURN_TITLES = 200
+
+
+async def _register_in_turns(rows: list[dict[str, Any]]) -> None:
+    """Register every row's title with the title store in bounded turns, BEFORE
+    the caller's own transaction — which then only reads where each is filed."""
+    filings = [_filing(row) for row in rows]
+    for start in range(0, len(filings), REGISTER_TURN_TITLES):
+        await metadata.ensure_many(filings[start:start + REGISTER_TURN_TITLES])
 
 
 class _Arrival(NamedTuple):
@@ -795,38 +898,30 @@ def _redefine_row(conn: db.Connection, board_id: int, item_id: int, season: int 
     row, shared by the row's own season control (`set_item_season`) and by a
     season arriving over its whole show (`_plan_arrivals`).
 
-    WHAT THE ROW COUNTS AND IS CALLED IS ALWAYS REWRITTEN (_DEFINING_FACTS),
-    from `facts` where it states them and cleared where it does not. Those
-    describe what the row IS, so a number that belonged to its old definition
-    describes something else: a row made into Season 3 used to go on showing the
-    whole show's "5S 38E" beside its new season. Nothing is better than that.
+    WHAT THE ROW COUNTS AND IS CALLED FOLLOWS ITS NEW DEFINITION BY ITSELF: they
+    are the title store's words for that season of the title (`_ITEMS`), so a row
+    made into Season 3 draws Season 3's count and name and nothing of the whole
+    show's — there is no copy on the row to rewrite or to leave behind.
 
-    The rest of `facts` — the arriving row's title, network, rating and the like
-    (_ARRIVING_FACTS) — replaces the row's own value only where it knows one,
-    because an arrival that does not know a title's network has not learned that
-    it has none. The season control passes only the defining facts it read off
-    the season list, since choosing a season teaches nothing else about it.
+    What an arriving season says about itself that IS the row's own — its tmdb id
+    where the row has none, the viewer's rating (_ARRIVING_FACTS) — replaces the
+    row's value only where it knows one, because an arrival that does not know a
+    rating has not learned that there is none.
     """
     facts = facts or {}
-    defining = {column: facts.get(column) for column in _DEFINING_FACTS}
-    if season is None:
-        defining["season_name"] = None
     known = {column: facts[column] for column in _ARRIVING_FACTS
              if facts.get(column) not in (None, "")}
-    assignments = "".join(f", {column} = ?" for column in (*defining, *known))
+    assignments = "".join(f", {column} = ?" for column in known)
     conn.execute(
         f"UPDATE tier_items SET season = ?{assignments} WHERE id = ? AND board_id = ?",
-        (season, *defining.values(), *known.values(), item_id, board_id))
+        (season, *known.values(), item_id, board_id))
 
 
-# What describes the row's DEFINITION — rewritten whenever it changes. Constants,
-# never input, which is what makes naming them in SQL safe (and the same below).
-_DEFINING_FACTS = ("season_count", "episode_count", "season_name")
-
-# What a season arriving over its whole-show row may otherwise say about itself.
-# Not the identity (it is the same title), not where the row sits and not who
-# added it first.
-_ARRIVING_FACTS = ("tmdb", "title", "year", "network", "runtime", "user_rating")
+# What a season arriving over its whole-show row may otherwise say about itself
+# that the row keeps. Not the identity (it is the same title), not where the row
+# sits and not who added it first; and not its words, which are the title
+# store's. Constants, never input, which is what makes naming them in SQL safe.
+_ARRIVING_FACTS = ("tmdb", "user_rating")
 
 
 def _insert_item(conn: db.Connection, board_id: int, row: Mapping[str, Any],
@@ -836,24 +931,46 @@ def _insert_item(conn: db.Connection, board_id: int, row: Mapping[str, Any],
     when a row was actually created.
 
     The one place a tier_items row is written, so every way a title can arrive —
-    a search, an import, a ratings seed — stores exactly the same columns and
-    respects the same unique index.
+    a search, an import, a ratings seed, a restore — stores exactly the same
+    columns and respects the same unique index.
+
+    THE ROW KEEPS WHAT IS THE VIEWER'S — which title and season, where it sits,
+    their rating, how it arrived — and none of the title's words: those are the
+    title store's (`_ITEMS`). THE WORDS IT ARRIVED WITH SEED THE STORE where the
+    store has none for the title yet (descriptions.seed_words), so a title added
+    from a search draws its name at once, until its own service describes it.
     """
     cur = conn.execute(
         "INSERT INTO tier_items (board_id, category_id, media, match_source, match_id, "
-        "season, season_name, tmdb, ids_json, title, year, network, season_count, "
-        "episode_count, runtime, user_rating, added_from, rank_in_category, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "season, tmdb, ids_json, user_rating, added_from, rank_in_category, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         # NO CONFLICT TARGET: the board's uniqueness is an index over
         # IFNULL(season, -1) (migration 44), and a named target must match an
         # index exactly. Any unique index satisfies a bare DO NOTHING.
         "ON CONFLICT DO NOTHING",
         (board_id, category_id, row["media"], row["match_source"], row["match_id"],
-         row["season"], row["season_name"], row["tmdb"], row["ids_json"], row["title"],
-         row["year"], row["network"], row["season_count"], row["episode_count"],
-         row["runtime"], row["user_rating"], added_from, rank, ts),
+         row["season"], row["tmdb"], row["ids_json"], row["user_rating"], added_from,
+         rank, ts),
     )
+    if cur.rowcount > 0:
+        _seed_the_store(conn, row, ts)
     return 1 if cur.rowcount > 0 else 0
+
+
+def _seed_the_store(conn: db.Connection, row: Mapping[str, Any], ts: int) -> None:
+    """The words an arriving row carries — its title's name, network, year and
+    runtime, and a season row's own name and episode total — into the title
+    store where it has none for them (descriptions.seed_words), so a title added
+    from a search, an import or a backup draws them at once. A whole show's
+    season count is not seeded: only a service's description of the title says
+    how many seasons it has, and that arrives when the row is first drawn."""
+    ids = {**json.loads(row["ids_json"] or "{}"),
+           row["match_source"]: metadata_ids.typed(row["match_source"], row["match_id"])}
+    title_descriptions.seed_words(
+        conn, row["media"], ids, title=row["title"], network=row["network"],
+        year=row.get("year"), runtime=row.get("runtime"), season=row["season"],
+        season_name=row.get("season_name") or "", episode_count=row.get("episode_count"),
+        now=ts)
 
 
 def _normalize_ref(ref: Mapping[str, Any]) -> dict[str, Any]:
@@ -927,7 +1044,7 @@ async def fetch_item(user_id: int, board_uid: str, key: Any) -> dict[str, Any]:
     def _work(conn: db.Connection) -> dict[str, Any]:
         board = _resolve_board(conn, user_id, board_uid)
         row = conn.execute(
-            f"SELECT * FROM tier_items WHERE board_id = ? AND {_key_match()}",
+            f"{_ITEMS} WHERE i.board_id = ? AND {_key_match('i')}",
             (int(board["id"]), *_key_params(parsed)),
         ).fetchone()
         if row is None:
@@ -957,16 +1074,14 @@ async def held_seasons(user_id: int, board_uid: str, key: Any) -> set[int | None
     return await db.run(_work)
 
 
-async def set_item_season(user_id: int, board_uid: str, key: Any, season: Any,
-                          listed: list[Mapping[str, Any]] | None = None) -> str:
+async def set_item_season(user_id: int, board_uid: str, key: Any, season: Any) -> str:
     """Make the row `key` names a different season of its show, or the whole
     show (`season` None or ""), and return the row's new key.
 
     THE ROW IS CHANGED IN PLACE: the same id, the same tier and the same rank, so
-    redefining what a row is never reshuffles the board around it. Its title and
-    rating stay as they are; what it COUNTS and is called follow the new
-    definition, read off `listed` — the service's season list the control was
-    drawn from — by seasons.season_facts, and blank where the list is not known.
+    redefining what a row is never reshuffles the board around it. Its rating
+    stays; what it COUNTS and is called follow the new definition by themselves,
+    being the title store's words for that season (`_ITEMS`).
 
     A SEASON THE BOARD ALREADY HOLDS IS REFUSED, not merged: the control greys
     those out, so arriving here with one means another tab put it there since,
@@ -996,8 +1111,7 @@ async def set_item_season(user_id: int, board_uid: str, key: Any, season: Any,
             raise ValidationError(
                 "This board already holds the whole show." if wanted is None else
                 "This board already holds that season.")
-        _redefine_row(conn, board_id, known[str(parsed)], wanted,
-                      ranker_seasons.season_facts(listed or [], wanted))
+        _redefine_row(conn, board_id, known[str(parsed)], wanted)
         _touch(conn, board_id, user_id, ts)
         return str(target)
 
@@ -1031,7 +1145,7 @@ async def remove_items(user_id: int, board_uid: str, keys: list[Any]) -> int:
         ts = db.now()
         removed = 0
         for item_id in ids:
-            _remember_removal(conn, board_id, item_id, ts)
+            remember_removal(conn, board_id, item_id, ts)
             cur = conn.execute(
                 "DELETE FROM tier_items WHERE id = ? AND board_id = ?", (item_id, board_id)
             )
@@ -1068,8 +1182,13 @@ _TITLE_HISTORY = "tier_item_removals"
 _TIER_HISTORY = "tier_category_removals"
 
 
-def _remember_removal(conn: db.Connection, board_id: int, item_id: int, ts: int) -> None:
+def remember_removal(conn: db.Connection, board_id: int, item_id: int, ts: int) -> None:
     """Write one title into its board's removal history, just before it goes.
+
+    PUBLIC BECAUSE A SECOND CALLER REMOVES ROWS: the title store's re-key, which
+    drops a board row its title is already held under at its new key, keeps the
+    dropped one here so its owner can put it back (app/metadata/holders.py).
+    Inside the caller's transaction.
 
     ONE ROW PER BOARD KEY — a title, or one season of it, exactly as the board
     holds them. A title removed, re-added by hand and removed again keeps only
@@ -1084,7 +1203,7 @@ def _remember_removal(conn: db.Connection, board_id: int, item_id: int, ts: int)
     projection is carried across a removal with no edit here.
     """
     row = conn.execute(
-        "SELECT i.*, c.uid AS category_uid FROM tier_items i "
+        f"SELECT {_ITEM_COLUMNS}, c.uid AS category_uid FROM tier_items i "
         "  LEFT JOIN tier_categories c ON c.id = i.category_id "
         " WHERE i.id = ? AND i.board_id = ?",
         (item_id, board_id),
@@ -1261,10 +1380,10 @@ async def restore_removal(user_id: int, board_uid: str, key: Any) -> bool:
         _check_room(conn, board_id, 1)
 
         record = _json_object(found["item_json"])
-        row = _normalize_ref({**record, "media": found["media"],
-                              "match_source": found["match_source"],
-                              "match_id": found["match_id"],
-                              "season": found["season"]})
+        row = _filed(conn, _normalize_ref({**record, "media": found["media"],
+                                           "match_source": found["match_source"],
+                                           "match_id": found["match_id"],
+                                           "season": found["season"]}), register=True)
         category_id = found["category_id"]
         rank = 0
         if category_id is not None:
@@ -1519,7 +1638,7 @@ def _remember_tier_removal(conn: db.Connection, board_id: int, row, ts: int) -> 
     """Write one tier into its board's removal history, just before it goes, and
     return how many titles it held.
 
-    ONE ROW PER TIER uid, the rule `_remember_removal` keeps for a title and for
+    ONE ROW PER TIER uid, the rule `remember_removal` keeps for a title and for
     its reason: a tier deleted, re-created and deleted again keeps only its
     newest deletion, and that is also what lets a restore be addressed by the
     uid rather than by a history row's integer id.
@@ -1888,12 +2007,19 @@ async def seed_ratings(
     a preview shows, and — when committed — the board's new version.
     """
     rated = [(_normalize_ref(entry), _rating(entry.get("user_rating"))) for entry in entries]
+    # A COMMIT REGISTERS ITS TITLES FIRST, in bounded turns of their own: a ratings
+    # list is hundreds of titles, and registering each inside the seed's one
+    # transaction held the writer lock for all of them. A preview registers
+    # nothing — it must not change the store it is previewing against.
+    if commit:
+        await _register_in_turns([row for row, _score in rated])
 
     def _work(conn: db.Connection) -> dict[str, Any]:
         board = _resolve_board(conn, user_id, board_uid)
         board_id = int(board["id"])
         scope = board["media_scope"]
-        in_scope = [(row, score) for row, score in rated
+        # Filed as every arrival is (`_filed`), from what the store now says.
+        in_scope = [(_filed(conn, row, register=False), score) for row, score in rated
                     if scope == "mixed" or row["media"] == scope]
 
         placements = _item_placements(conn, board_id)
@@ -2078,6 +2204,11 @@ _BACKUP_ITEM_FIELDS = ("media", "match_source", "match_id", "season", "season_na
                        "title", "year", "network", "season_count", "episode_count",
                        "runtime", "user_rating", "added_from", "rank_in_category",
                        "created_at")
+# Which of those the row itself keeps; the rest are its title's words, read from
+# the title store with it (`_item_dict`).
+_BACKUP_ROW_FIELDS = frozenset({"media", "match_source", "match_id", "season", "tmdb",
+                                "ids_json", "user_rating", "added_from",
+                                "rank_in_category", "created_at"})
 
 
 async def export_user_data(user_id: int) -> dict[str, Any]:
@@ -2104,11 +2235,17 @@ async def export_user_data(user_id: int) -> dict[str, Any]:
             category_uids[int(row["id"])] = str(row["uid"])
         items: dict[int, list[dict[str, Any]]] = {}
         for row in conn.execute(
-            "SELECT i.* FROM tier_items i JOIN tier_boards b ON b.id = i.board_id "
+            f"SELECT {_ITEM_COLUMNS} FROM tier_items i JOIN tier_boards b ON b.id = i.board_id "
             " WHERE b.user_id = ? ORDER BY i.rank_in_category, i.id",
             (user_id,),
         ):
-            entry = {field: row[field] for field in _BACKUP_ITEM_FIELDS}
+            # SELF-CONTAINED: the title's words travel in the file as the board
+            # drew them — read from the title store, since the row keeps none —
+            # so a backup reads on its own and restores onto an instance that has
+            # never seen the title (the restore seeds them, `_insert_item`).
+            item = _item_dict(row)
+            entry = {field: (row[field] if field in _BACKUP_ROW_FIELDS else item[field])
+                     for field in _BACKUP_ITEM_FIELDS}
             # NULL category means the board's pool, and it stays NULL through the
             # round trip: a pool title is unranked work in progress, not a title
             # whose tier went missing.
@@ -2173,8 +2310,11 @@ async def restore_user_data(user_id: int, doc: Any) -> int:
                 category_ids[category["uid"]] = int(cur.lastrowid)
             for item in board["items"]:
                 category_uid = item["category_uid"]
+                # A backup names each title by ids and words alone; filing it
+                # through the title store puts it under the key its title has
+                # now, whatever key it was saved under.
                 _insert_item(
-                    conn, board_id, item["row"], item["added_from"],
+                    conn, board_id, _filed(conn, item["row"], register=True), item["added_from"],
                     item["created_at"] or ts,
                     category_id=None if category_uid is None else category_ids[category_uid],
                     rank=item["rank_in_category"],

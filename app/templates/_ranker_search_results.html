@@ -14,35 +14,38 @@
    (ranker/sources.py's named_hit), so a page can never decide what a board
    stores.
 
-   A RESULT IS TWO CONTROLS, SIDE BY SIDE AND NEVER NESTED. The row itself adds
-   the whole title — clicked, or dragged into a tier (ranker/dnd.js reads the
-   same reference off the wrapper's data attributes). Under a show's row, a
-   <details> asks for that show's season checklist the first time it is opened,
-   so a search costs no season lookups. They are siblings because htmx's
-   attribute inheritance is on (static/js/boost.js): a checklist form inside the
-   row would inherit the row's own request and values.
+   A SHOW'S ROW OPENS ITS SEASON CHECKLIST UNDER IT, as the tracker's and the
+   calendar's do: the row is the <summary> of its own <details>, asking — once —
+   for the checklist into the slot inside it, so a search costs no season
+   lookups. The checklist leads with the whole show, so a press never adds
+   something the viewer did not choose. A FILM'S ROW IS THE ADD: there is
+   nothing to choose. Either can be dragged into a tier, which adds the whole
+   title (ranker/dnd.js reads the same reference off the wrapper's data
+   attributes). The checklist's form is the summary's SIBLING, never inside it,
+   because htmx's attribute inheritance is on (static/js/boost.js): a form
+   inside the row would inherit the row's own request.
 
-   WHETHER THE WHOLE TITLE IS ALREADY ON THE BOARD IS DECIDED HERE, and a held
-   row cannot be clicked at all — a drag can end in a click on the result it
-   just added: style.css gives `.ranker-hit.is-held > .ranker-result` no pointer
-   events, so the click never reaches it. That rule, not a filter on the
+   WHETHER THE WHOLE TITLE IS ALREADY ON THE BOARD IS DECIDED HERE. A held
+   film's row cannot be clicked at all — a drag can end in a click on the result
+   it just added: style.css gives `.ranker-hit.is-held > .ranker-result` no
+   pointer events, so the click never reaches it. That rule, not a filter on the
    trigger, because htmx builds an event filter (`click[...]`) with the Function
    constructor, which the app's Content-Security-Policy refuses (app/csp.py). A
-   held show's seasons can still be opened and added.
+   held show's row still opens: its seasons can be added, and its checklist
+   greys the whole show.
 
    EVERY CONTROL THAT ASKS FOR SOMETHING JOINS THE BOX'S QUEUE on the results
    (`title_search.queue`), for the box's own reason: a typed answer still
    waiting when a row is pressed would otherwise land after the row's answer.
 
    Context: `rows` (routes._result_rows), `query`, `media`, `typed` (stored
-   titles listed while typing), `too_short`, `no_catalogue`, `failed`,
-   `message`, `board_uid`. Nothing at all for a query too short to list, which
-   the stylesheet reads as "hide the list". #}
+   titles listed while typing), `too_short`, `controls` (what title_search's
+   `widen` draws under a services' answer), `failed`, `message`, `board_uid`.
+   Nothing at all for a query too short to list, which the stylesheet reads as
+   "hide the list". #}
 {%- set results = '#searchResults' %}
 {%- if message %}<span class="ranker-preview-hint">{{ message }}</span>
 {%- elif typed and too_short %}
-{%- elif no_catalogue %}<span class="ranker-preview-hint">No service is set up to search, so
-    there is nothing to ask. An operator adds a Trakt or Simkl client id in Settings.</span>
 {%- elif query %}
 {%- if typed %}
 {#- Where these came from, said once above them: what this app already knows,
@@ -54,30 +57,41 @@
 {%- endif %}
 {%- if failed %}<span class="ranker-preview-hint search-failed">Couldn't reach {{ src.names(failed) }} —
     showing what the rest found.</span>{% endif %}
-{%- if not rows and not typed %}<span class="ranker-preview-hint">Nothing found.</span>{% endif %}
+{%- if not rows and not typed and controls and controls.asked %}<span class="ranker-preview-hint">Nothing found.</span>{% endif %}
 {%- for row in rows %}
 <div class="ranker-hit{% if row.held %} is-held{% endif %}"
      {%- if row.key %} data-key="{{ row.key }}"{% endif %}
      {%- for name, value in row.ref.items() %} data-{{ name }}="{{ value }}"{% endfor %}>
+{%- set show = row.media == 'show' %}
+{%- if show %}
+{%- set action = {"hx-get": "/rankings/fragments/search-seasons?"
+                            ~ (dict(row.ref, board=board_uid) | urlencode),
+                  "hx-trigger": "click once", "hx-target": "next .search-pick",
+                  "hx-swap": "innerHTML", "hx-json-enc": "false",
+                  "hx-sync": title_search.queue(results),
+                  "title": ("Drag into a tier, or click to pick seasons" if row.key
+                            else "Click to pick seasons")} %}
+{%- else %}
 {%- set action = {"hx-post": "/rankings/boards/" ~ board_uid ~ "/items/add", "hx-json-enc": "",
                   "hx-vals": row.ref | tojson | forceescape, "hx-target": "body",
                   "hx-swap": "innerHTML", "hx-sync": title_search.queue(results),
                   "title": ("Drag into a tier, or click to add to the pool" if row.key
                             else "Click to add to the pool")} %}
-{%- call title_search.row('div', action, row.title or "Untitled", row.year, row.poster,
-                          sources=row.sources, go='' if row.held else 'Add →',
+{%- endif %}
+{%- if show %}<details class="search-hit">{% endif %}
+{%- call title_search.row('summary' if show else 'div', action, row.title or "Untitled", row.year,
+                          row.poster, sources=row.sources,
+                          go='Seasons →' if show else ('' if row.held else 'Add →'),
                           extra_class='ranker-result') %}
     {%- if row.season is not none %}<span class="chip search-season">Season {{ row.season }}</span> {% endif %}
     {{- [row.network, (row.runtime ~ "m") if row.runtime and row.media == 'movie' else ""] | select | join(" · ") -}}
 {%- endcall %}
-{%- if row.media == 'show' %}
-<details class="ranker-hit-seasons">
-    <summary hx-get="/rankings/fragments/search-seasons?{{ dict(row.ref, board=board_uid) | urlencode }}"
-             hx-trigger="click once" hx-target="next .ranker-hit-pick" hx-swap="innerHTML"
-             hx-json-enc="false" {{ title_search.sync(results) }}>Seasons…</summary>
-    <div class="ranker-hit-pick"></div>
+{%- if show %}
+<div class="search-pick"></div>
 </details>
 {%- endif %}
 </div>
 {%- endfor %}
+{{ title_search.widen(results, '/rankings/fragments/search?' ~ ({'board': board_uid} | urlencode),
+                      query, controls, {'media': media}) }}
 {%- endif %}

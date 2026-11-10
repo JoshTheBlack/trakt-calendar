@@ -7,12 +7,13 @@
    from it. `hx-swap="none"` because nothing here is replaced: the answer is all
    out of band, or empty when the other service does not list the title.
 
-   `airing` is the card the panel was opened from, as the page drew it: the
-   answer's redraw of it can carry a different one once the other service's
-   time joins (see _card.html's `replaces`).
+   `airing` is the card the panel was opened from, as the page drew it, and
+   `day` the day it was drawn on: the answer's redraw of it can carry a
+   different airing once the other service's time joins, or a different day
+   once that service describes it (see _card.html's `replaces`).
 
    Context: `query` (endpoint, year, month, urlencoded), `key`, `season`,
-   `airing`. #}
+   `airing`, `day`. #}
 <div hidden hx-post="/api/calendar/complete-card?{{ query }}" hx-json-enc hx-boost="false"
      hx-swap="none" hx-trigger="load"
-     hx-vals='{{ {"key": key, "season": season, "airing": airing} | tojson }}'></div>
+     hx-vals='{{ {"key": key, "season": season, "airing": airing, "day": day} | tojson }}'></div>

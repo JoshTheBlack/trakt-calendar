@@ -16,7 +16,8 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app import auth, db
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings, settling
 from app.main import app
 from tests.support import ORIGIN, migrated_db, window_fetch
 
@@ -40,7 +41,7 @@ class GzipResponseTests(unittest.TestCase):
     def setUp(self):
         migrated_db("gzip")
         save_settings(_configured_settings())
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(auth.create_user(
             username="gzip_viewer", password="hunter2hunter2",
             settings=_configured_settings(), calendar_approved=True,
@@ -81,7 +82,7 @@ class StaticCacheHeaderTests(unittest.TestCase):
     def setUp(self):
         migrated_db("static")
         save_settings(_configured_settings())
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
 
     def tearDown(self):
         self.client.close()
@@ -153,7 +154,7 @@ class BoostedNavigationMarkupTests(unittest.TestCase):
     def setUp(self):
         migrated_db("boost-markup")
         save_settings(_configured_settings())
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(auth.create_user(
             username="boost_viewer", password="hunter2hunter2",
             settings=_configured_settings(), calendar_approved=True,

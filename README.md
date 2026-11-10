@@ -24,8 +24,8 @@
 
 - 📅 Browse premieres for any month, grouped by day
 - 📡 **Switchable endpoints** — new shows, season premieres, season finales, all episodes, or movies
-- 🔀 **Two sources, one calendar** — Trakt and, optionally, [Simkl](#simkl--an-optional-second-source). A title both list is one card; which services show is a tick-box in **🎚️ Filters**, and whose description wins is an order on your **Account** page. Simkl needs no credentials to fill a calendar
-- 🔍 **Find a title and jump to it** — search the calendar you're on as you type, or press Enter to also ask the services for titles your calendar hasn't loaded yet; opening one files it onto the day it airs
+- 🔀 **Several sources, one calendar** — Trakt, optionally [Simkl](#simkl--an-optional-second-source), and [TMDB](#tmdb--the-first-describer) for series, season and movie premieres. A title several list is one card; which services show is a tick-box in **🎚️ Filters**, and whose description wins is an order on your **Account** page. Simkl needs no credentials to fill a calendar
+- 🔍 **Find a title and jump to it** — search the calendar you're on as you type, or press Enter to also search TMDB (and any service you've linked) for titles your calendar hasn't loaded yet; opening one goes to where it airs
 - 🖼️ Rich poster tiles — rating, runtime, network and episode badges, plus language, country and a current-season summary
 - 🔍 **Details modal** — overview, every video both services list in one player, and each season's description, cast and episodes with your watched ones marked, plus a link out to each service
 - ✅ Mark shows **watching / not watching** — saved to your account, with a one-click filter to hide the ones you're not watching
@@ -78,6 +78,14 @@ directory (`/data/logs/app.log` in the container), or any other value for a path
 It rolls over at 10 MB and keeps five old files, so it never passes about 60 MB. `LOG_LEVEL`
 (default `INFO`) sets how much is written to both.
 
+### Calendar read workers — `READ_PROCESSES`
+
+The calendar reads its months and days in a few worker processes beside the web process, so
+several days loading at once (as a page scrolls) are read side by side instead of one after
+another. By default there is one worker per CPU core less one, at most four; each holds
+about 100 MB. Set `READ_PROCESSES` to a smaller number on a machine short of memory, or to
+`0` to read everything in the web process as earlier versions did.
+
 ## Serving over HTTPS
 
 Three settings decide whether the app behaves correctly behind a reverse proxy. All three
@@ -100,13 +108,20 @@ It is file-only because a wrong value would log you out of the screen that fixes
 > **If it is ever wrong**, sign-in succeeds and the very next request is anonymous, looping
 > back to `/login`. Both `/login` and Settings detect the mismatch and say so.
 
-### `public_base_url` — required for provider login and share links
+### `public_base_url` — required for provider login, share links and self-healing posters
 
 The origin people reach this instance on, e.g. `https://shows.example.com` — no path, no
 trailing slash. Every absolute URL the app generates is built from it, never from the `Host`
 header, and Trakt and Simkl compare the redirect URI byte for byte. Required for "Log in with
 Trakt" and public share links; setting it also narrows the same-origin check on mutating
 requests to that one origin.
+
+It is also how a poster that won't load comes back to this instance: the image service the
+pages draw pictures through sends the browser to `<public base URL>/api/posters/missed`,
+which answers with the next service's poster and checks whether the first is really gone —
+and if it is, has every service describe the title again, so its current poster is picked up.
+Without a public base URL a failing poster still falls back to the next one, but nothing is
+checked or looked up again.
 
 **Locked out** (unset, or wrong)? Set the `PUBLIC_BASE_URL` environment variable and restart.
 It overrides the saved value — the startup log and the Settings screen both say so while it
@@ -158,6 +173,14 @@ Then set `public_base_url` to `https://shows.example.com` in Settings and leave
 `cookie_secure` at `always`.
 </details>
 
+### `/api/posters/missed` — leave it reachable without signing in
+
+That address is public on purpose: it is reached by the browser following the image
+service's redirect, and Firefox sends no session cookie on that hop. It acts only on a
+signed, short-lived token the page was drawn with, and refuses any request that isn't an
+image loading. If a single-sign-on proxy sits in front of the app, let this one path through,
+or failing posters will draw an empty frame instead of the next service's.
+
 ### Content-Security-Policy — the app sends its own
 
 Every response carries a strict `Content-Security-Policy` (only the app's own scripts and
@@ -183,6 +206,8 @@ in an encryptable secrets store (see [At-rest encryption](#at-rest-encryption-of
 | **Trakt Client ID / Access Token** | Your Trakt API credentials |
 | **Simkl Client ID / Secret** | Optional — see [Simkl](#simkl--an-optional-second-source) for what each feature needs. Each person links their own account |
 | **Include Simkl results on the calendar** | Instance-wide, on by default. Untick it and Simkl leaves the calendar at once, cached months included |
+| **TMDB API Read Access Token** | Optional — see [TMDB](#tmdb--the-first-describer). The long token, not the short API key |
+| **TMDB language / region** | The language TMDB describes titles in (default `en-US`), and the country whose film releases count (default `US`) |
 | **Timezone** | Air times are converted to this zone |
 | **Default endpoint** | Which calendar to show by default |
 | **Pagination limit** | Max items fetched per request |
@@ -202,31 +227,47 @@ The endpoint, layout and hide-not-watching controls also live in the header. Mar
 something "not watching" applies to the **show** — every view, every month, and your share
 page — until you turn it back on.
 
-**🎚️ Filters** in the header narrows your calendar by genre, country, certification and
-network. Filters belong to your account, so two people reading the same cached month each
-see it their own way; new accounts start unfiltered. The button reads **🎚️ Filtered** while
-anything is held back. The **📺 TV** and **🎬 Movies** tabs hold separate answers — excluding
-a genre from your shows leaves your films alone:
+**🎚️ Filters** in the header narrows your calendar by genre, country, language,
+certification, network, show type and keyword, and by who lists a title. Filters belong to
+your account, so two people reading the same cached month each see it their own way; new
+accounts start unfiltered. The button reads **🎚️ Filtered** while anything is held back. The
+**📺 TV** and **🎬 Movies** tabs hold separate answers — excluding a genre from your shows
+leaves your films alone:
 
 | | 📺 TV | 🎬 Movies |
 |---|---|---|
 | Services | which services fill your show calendars | which fill your film calendar |
 | Genres | ✅ | ✅ (separate answer) |
 | Countries — where a title was *made* | ✅ | ✅ (separate answer) |
+| Languages — the language it was made in | ✅ | ✅ (separate answer) |
 | Networks | ✅ | — (a film has no network) |
 | Certifications | US TV Parental Guidelines | MPA film ratings |
+| Show types — TMDB's scripted, reality, talk show… | ✅ | — |
+| Keywords — TMDB's, typed one at a time | ✅ | ✅ (separate answer) |
+| Missing data — no country, language or poster, or two of them | ✅ | ✅ (separate answer) |
+| Hide titles only one service lists | ✅ | ✅ (separate answer) |
+| Hide shows only TMDB lists that name no network | ✅ | — |
 | Release markets and formats — where a film is being *shown* | — | ✅ |
 
 Press a chip once to keep **only** that value, again to **filter it out**, again to clear it.
 Anything the chips don't name can be typed in below them. Networks match **exactly** as the
-service spells them: `tvN` and `TVN` are two different broadcasters. At least one service has
-to stay on.
+service spells them: `tvN` and `TVN` are two different broadcasters. A keyword is typed one
+per box, because some hold a comma (`san francisco, california`); most new titles have no
+keywords at all, so filtering one out is the usual use. At least one service has to stay on.
+
+**A title nothing has described yet is shown until it is**, rather than hidden for a fact
+nobody has looked up — Simkl's calendar arrives without countries or languages, TMDB's
+without networks. Keywords and show types are TMDB's, so they wait for TMDB's own
+description, and a title TMDB doesn't list isn't judged by them. The two exceptions are
+about who lists a title, which is known at once: **only one service lists it**, and **only
+TMDB lists it with no network**, which hides a brand-new TMDB-only listing until TMDB says
+where it airs (usually within minutes).
 
 **The switch at the top turns every filter off without clearing any of them** — for "show
 me everything for a bit". Your **share links keep filtering** while it is off.
 
-You can also filter from a card: press its genre, country, network or certification and
-choose *filter out* or *only this*.
+You can also filter from a card: press its genre, country, language, network or
+certification and choose *filter out* or *only this*.
 
 > Trakt gates its own calendar filtering behind a [VIP subscription](https://trakt.tv/vip/filtering);
 > this app filters the cached response itself, so Filters work on any account.
@@ -239,6 +280,115 @@ their own Filters say. Use it to trim what nobody on the instance watches, or to
 content off a family instance (Certifications uses the US TV Parental Guidelines and MPA
 film ratings). Blank — the default — filters nothing. A change applies at once, months
 already cached included, and undoing it brings those titles straight back.
+
+The floor also carries the newer dimensions: **Languages** and **Keywords** (one floor for
+TV and films; keywords one per line), **Show types**, **missing data** per medium, **hide
+titles only one service lists** per medium, and **hide shows only TMDB lists that name no
+network**. Languages is applied before caching like the fields above; the rest judge a whole
+card — who lists it, what TMDB says of it — so they apply as each calendar is read, ahead of
+every viewer's own filters. A viewer can only narrow further: a switch or missing-data rule
+the floor already applies shows in their 🎚️ Filters ticked and fixed.
+
+## TMDB — the first describer
+
+With a TMDB token in Settings, TMDB is the first service asked about any title that
+carries a TMDB id — which is nearly every title Trakt or Simkl lists. It describes the
+title in the details panel, supplies posters and network logos, and adds its videos to the
+panel's menu. Trakt and Simkl answer what TMDB doesn't know, and a season TMDB has no
+episodes of goes to the next service that does.
+A panel TMDB describes also shows the show's own logo as its heading, the episode airing
+next (while it is still to come), finales and mid-season finales in the episode list, and a
+season's own trailers ahead of the show's; a film TMDB files in a collection can add the
+whole collection to a rankings board from its panel there. A title described before you
+upgraded gains these the next time it's re-read, which happens when it is looked at.
+Anyone who set their own service order on their **Account** page keeps it; TMDB comes after
+the services they named.
+
+**TMDB also lists three calendars**, beside Trakt and Simkl: **Series Premieres** (shows
+whose first episode airs that day), **Movie Premieres** (films with a limited, theatrical or
+digital release in the instance's TMDB region, on the day of their first release) and
+**Season Premieres**. TMDB publishes no season-premieres list, so the app works one out for
+each week — the shows on air that week that had nothing on air in the four weeks before,
+each checked against TMDB's own season dates. That takes a few hundred requests a week, so
+it runs in the background: the first time a week is opened, Trakt's and Simkl's cards show
+at once and TMDB's join them within a minute, and the stats box counts the **weeks being
+worked out**. TMDB does not fill Season Finales or All Episodes itself, but its episode
+lists are what put Simkl's finales on Season Finales (below).
+
+TMDB gives dates, not times. A card TMDB describes — every card, for anyone whose service
+order starts with TMDB, which is the default — sits on TMDB's day and shows a time only when
+another service's airing falls on that same day. A card shows one value for each detail —
+your first service's — and where the services disagree, a small service mark on its poster
+opens every service's answer side by side, dates included. TMDB lists far more than the other two (about five times the
+series premieres in a typical month, many of them regional or web series): switch TMDB off
+for TV or films in 🎚️ Filters, or trim it with **hide titles only one service lists**, **hide
+shows only TMDB lists that name no network**, languages, show types or missing data. A
+listing arrives without its network, certification, keywords or show type and is looked up
+in the background, so for its first few minutes a TMDB-only title is shown even where those
+filters would hide it — except by the no-network rule, which hides it until it is.
+
+**Titles are matched across services in the background**, every minute. This month's and
+next month's premieres and films that only TMDB lists are looked up on Trakt by their TMDB
+id, and where Trakt has the title its own date joins the card; titles Trakt or Simkl list
+without a TMDB id are looked up on TMDB, and merge with TMDB's own card where it has one.
+Each answer stands for a week. Trakt allows an app 500 reads every five minutes, shared with
+the pages you're waiting on, so the lookups spend at most 50 Trakt requests a minute, and
+only while the whole app has sent fewer than 350 in the last five minutes — the pages always
+keep the other 150. A card costs about three requests, so that's around fifteen cards a
+minute, and a month's backlog takes about two hours. Simkl isn't asked in the background, because its lookup needs a person's own account;
+opening a card's details asks it then.
+
+**A card shows a button for every service that knows its title.** The services whose
+calendars the card is drawn from are in colour; one that knows the title but doesn't list
+this airing — or that your calendar leaves out — is greyed until you hover it. The details
+panel offers every service that knows the title, wherever it is opened.
+
+**Every search box searches TMDB** when you press Enter, and they behave alike: the
+calendar's Find a title and the rankings board's. Twenty results at a time, with **More
+from TMDB** for the next twenty. Under the results,
+**Also search Trakt**, **Also search Simkl** and **Also search Simkl Anime** appear for each
+service *you* have linked; each adds that catalogue's results below the rest, searched with
+your own account, and then offers its own **More from …**. (Simkl keeps anime apart from its
+TV catalogue, and one search does not reach both.) Typing still lists only titles this
+instance already holds, and costs nothing.
+
+**Opening a show gives the same season checklist everywhere**: each season with its episode
+count, the suggested one marked, the ones you already have greyed. A rankings board can add
+several seasons at once, with the **Whole show** first (dragging a result into a tier adds
+the whole title). On the calendar each season is one press: one your calendar already draws
+opens its card, any other is added and opens on its card, and one your filters hide says so
+where you pressed it. A title found on TMDB is looked up on Trakt and Simkl by its TMDB id
+when it's added. A calendar season TMDB found is added as TMDB's own card on a calendar TMDB
+lists (a series or season premiere, a film's release); on Finales or All Episodes it opens
+the month it should be in.
+
+Get the token at [themoviedb.org → Settings → API](https://www.themoviedb.org/settings/api):
+copy the **API Read Access Token** (the long one). The short "API Key" is refused —
+it travels in the address of every request, where a credential ends up in logs. Nothing
+TMDB answers is kept longer than six months, which is TMDB's own limit; titles on a
+rankings board are re-read shortly before then, so they never lose their names.
+
+Without a token, TMDB steps aside and the other services describe titles as before. The
+search boxes say TMDB isn't configured rather than searching something else; anyone who
+has linked Trakt or Simkl can still add that service to a search.
+
+### Linking your own TMDB account
+
+Once the instance has a TMDB token **and** a [public base URL](#public_base_url--required-for-provider-login-share-links-and-self-healing-posters),
+each person can connect their own TMDB account from the **TMDB** row on their **Account**
+page: TMDB asks them to approve the app and sends them back. That reaches only what is
+theirs on TMDB — their own lists, and their ratings, which a rankings board can then be
+seeded from with **★ Seed from TMDB ratings** beside **★ Seed from Trakt ratings** (TMDB
+scores in half points; a half rounds up). It changes nothing else: TMDB was already every
+search box's catalogue, the calendar's sources stay as they were, and TMDB is never a way
+to sign in, so it cannot be anyone's last way in either. **Unlink** on the same row
+removes it and tells TMDB to forget the connection; if TMDB can't be reached, the page says
+so and the connection can be removed on themoviedb.org under **Settings ▸ Sessions**.
+
+**Approve only a link you started yourself.** TMDB ties an approval to the link, not to
+the browser that opened it, so whoever started a link gets the TMDB account of whoever
+approves it — approving somebody else's link connects your TMDB account to *their* account
+here. TMDB's approval page names this instance's TMDB application.
 
 ## Simkl — an optional second source
 
@@ -269,7 +419,11 @@ their own account from their **Account** page, and the link refreshes itself.
 
 - It reaches roughly **three years back and three months forward**; outside that, the app
   says the source does not go there rather than drawing an empty month.
-- It has **no season-finale listing**, so the Season Finales calendar is Trakt's alone.
+- It has **no season-finale listing** of its own. Its Season Finales are the episodes on its
+  All Episodes that **TMDB** marks as a finale or a mid-season finale, so they need a TMDB
+  token, and a finale appears once TMDB has been asked about its season (done in the
+  background, a few minutes' worth after an upgrade). A mid-season finale says so on its
+  card.
 - Its records arrive without genres, countries, certifications or networks. The app looks
   those up afterwards and shows how many titles are still waiting; until then a title is
   shown rather than filtered out.
@@ -277,7 +431,7 @@ their own account from their **Account** page, and the link refreshes itself.
 
 ## At-rest encryption of stored secrets
 
-By default, credentials (Trakt tokens, Sonarr/Radarr/Seerr/TMDB API keys, and every linked
+By default, credentials (Trakt tokens, Sonarr/Radarr/Seerr API keys, the TMDB token, and every linked
 account's Trakt token) are stored in the database as plaintext. Turning on encryption seals
 them with a key that lives **only** in your environment, so a leaked `app.db` (a backup, a
 volume snapshot) does not hand over live credentials. It does not defend against full host
@@ -394,11 +548,29 @@ app/
     share_code.py     The compact ?p= code a share link is handed out as
     share_card.py     The 1200x630 picture a share link unfurls into
     share_card_cache.py  Rendered cards on disk (data/share_cards), keyed by content
+  metadata/         The title store every feature reads: what each service says
+                     about a title, which title a set of ids is, and the one way in
+    __init__.py       ensure / store_records — registering a title, and the one
+                       place the app asks a service for its id by shared id
+    identity.py       A title's key, its aliases, and how a key moves up
+    holders.py        Every column holding a title's key, moved together on a re-key
+    rows.py           Each service's rows for a title and its episodes, and how
+                       long each may be kept
+    descriptions.py   A service's description of a title, filed and read back
+    panel.py          The details panel's answer, from the store first
+    labels.py         What a ███████ or board row is called and counts, read with it
+    refresh.py        Re-reading what a page found stale, behind the page
+    pictures.py       A picture that won't load: the next one, and the title healed
+    picture_routes.py The public address such a picture reports to
+    typed_search.py   The stored titles an add box lists as you type
+    backfill.py       Registering, once, everything stored before the store existed,
+                       and the words the ███████'s and boards' rows carried
   ████████/         The █████ ███████: store, live counts, month rollover, backup,
                      per-user prefs, and the calendar premiere import
     routes.py         The ███████ page and its API
     backfill.py       Filling in never-███████ months from █████ ███████
     █████_███████.py  The incremental per-user █████ cache the ███████ reads
+    ███████_settings.py  The settings dialog's lists, and what its controls save
     ███████_fmt.py    Which bucket a show is in, and the two ███████ posts
     prune.py          A hand-run pass over stored months (python -m)
   ranker/
@@ -406,8 +578,7 @@ app/
                        board keeps of the titles and tiers taken off it
     routes.py         The rankings page and its board API
     item_keys.py      What a board row is called: a title, or one season of it
-    seasons.py        What a show row's season choice offers, and what a season
-                       row is called and counts
+    seasons.py        What a season row is called
     sources.py        Where rankable titles come from
     imports.py        Seeding a board from what the viewer has finished
     exports.py        Turning a board into the thing a user takes away
@@ -415,12 +586,12 @@ app/
   media/
     posters.py        Which picture a title has, and the tiles on disk that the
                        share card and a board export composite
-    logos.py          Network logo tiles
+    logos.py          Which logo a network has (a table; badges draw it through the
+                       image proxy), and the one tile a download composites
     artwork.py        Poster URL bookkeeping (show_posters, season_posters, a
                        title known to have none); no downloads
     user_images.py    Per-user avatar and grid-header images
     imaging.py        Font, text-in-a-box and circular-mask primitives
-    tmdb.py           The TMDB client posters and logos fetch through
   integrations/     The three services a user points at their OWN server
     routes.py         Sonarr / Radarr / Seerr: status, options, add-to-library
     arr.py            Sonarr / Radarr
@@ -432,13 +603,14 @@ app/
     detail_source.py  Which service a details panel asks about a given title
     title_search.py   The one title search the calendar, boards and add dialogs share
     videos.py         Every service's videos for a title, pooled into one ordered list
+    tmdb/             transport, normalize, detail, search (posters and logos fetch through it)
     trakt/            transport, calendar, detail, sync, releases, watchlist
     simkl/            transport, calendar, detail, sync, titles, watchlist
   templates/        Jinja2 templates
   static/           CSS (one bundled stylesheet), JS (one directory per page), images
 run.py              Dev runner (Hypercorn)
-tests/              Mirrors app/ — kernel, providers, calendar, ████████, ranker,
-                     auth, media, integrations — plus encryption/, which is named
+tests/              Mirrors app/ — kernel, providers, calendar, metadata, ████████,
+                     ranker, auth, media, integrations — plus encryption/, which is named
                      for a concern because the at-rest key path spans two packages
 ```
 

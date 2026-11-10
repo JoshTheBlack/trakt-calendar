@@ -1,0 +1,6 @@
+{#- tight -#}
+{# What a card's filter badge asks for the first time it is opened: its three
+   buttons, swapped in after the badge's own <summary> (_filter_badge.html says
+   why they are not drawn with the card). #}
+{% import '_filter_badge.html' as fb with context %}
+{{ fb.offer(dimension, token, media) }}

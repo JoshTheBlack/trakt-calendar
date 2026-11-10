@@ -19,8 +19,8 @@ import httpx
 from ... import youtube
 from ...config import Settings
 from .. import season as season_rules
-from ..base import (MATCH_SOURCES, Media, Source, TitleFacts, Video, VideoKind,
-                    proxied_image)
+from ..base import (CAST_SHOWN, MATCH_SOURCES, SEARCH_PAGE_SIZE, Media, Source, TitleFacts,
+                    Video, VideoKind, genre_label)
 from . import _ids, transport
 from .transport import TraktError
 
@@ -28,33 +28,24 @@ logger = logging.getLogger(__name__)
 
 
 def _headshot(person: dict) -> str | None:
-    """A cast member's headshot, THROUGH THE SHARED IMAGE PROXY -- the same one
-    every poster this app draws addresses (see app/providers/base.py's
-    proxied_image). Trakt's own address was reaching the browser directly here,
-    which both hotlinks their CDN (against the terms proxied_image's docstring
-    quotes) and is unproxied by construction: a browser CSP that admits only the
-    proxy host, as this app's does, blocked every headshot until this wrapped it."""
+    """A cast member's headshot as Trakt's ORIGIN address, made absolute (Trakt
+    states its image addresses without a scheme). A browser never draws this:
+    the panel proxies it (app/providers/detail_source.py's `presented`), because
+    Trakt's terms ask that its CDN not be hotlinked and this app's CSP admits
+    only the proxy host."""
     imgs = (person.get("images") or {}).get("headshot") or []
     if imgs:
         url = imgs[0]
-        return proxied_image(url if url.startswith("http") else "https://" + url)
+        return url if url.startswith("http") else "https://" + url
     return None
-
-
-# TWENTY, BECAUSE THE GRID IS FIVE WIDE. The cap is this app's own — a season's
-# cast runs to 118 on some titles and the panel is not a filmography — and it was
-# 16, which left the last row three short of full at the default width. Four rows
-# of five fills the grid; anything under a full row reads as the list having been
-# cut off mid-thought rather than deliberately bounded.
-_CAST_SHOWN = 20
 
 
 def _cast_from(people: dict) -> list[dict]:
     """The modal's cast list from a /people response: the top-billed
-    `_CAST_SHOWN`, name + character + headshot. `characters` (a list) is Trakt's
+    `CAST_SHOWN`, name + character + headshot. `characters` (a list) is Trakt's
     newer shape and `character` (a string) the older one; both still arrive."""
     cast = []
-    for member in (people.get("cast") or [])[:_CAST_SHOWN]:
+    for member in (people.get("cast") or [])[:CAST_SHOWN]:
         person = member.get("person") or {}
         character = member.get("character") or (member.get("characters") or [""])[0]
         cast.append({
@@ -65,25 +56,22 @@ def _cast_from(people: dict) -> list[dict]:
     return cast
 
 
-def _episodes_from(episodes_raw, tz: ZoneInfo) -> list[dict]:
-    """The modal's episode list from a season response. An episode with no or an
-    unparseable air date gets an empty display string rather than being dropped —
-    an unscheduled episode still exists and still belongs in the list."""
+def _episodes_from(episodes_raw) -> list[dict]:
+    """The modal's episode list from a season response. `first_aired` is the
+    instant Trakt states, untouched — which day it falls on is the reader's zone
+    to decide. An episode with no air date keeps its row with "" rather than
+    being dropped: an unscheduled episode still exists and still belongs in the
+    list."""
     episodes = []
     for ep in episodes_raw if isinstance(episodes_raw, list) else []:
-        fa = ep.get("first_aired")
-        air_display = ""
-        if fa:
-            try:
-                air_display = datetime.fromisoformat(str(fa).replace("Z", "+00:00")).astimezone(tz).strftime("%d %b %Y")
-            except ValueError:
-                air_display = ""
         episodes.append({
             "number": ep.get("number"),
             "title": ep.get("title") or f"Episode {ep.get('number')}",
-            "air_display": air_display,
+            "first_aired": str(ep.get("first_aired") or ""),
             "rating": round(float(ep["rating"]), 1) if ep.get("rating") else None,
             "overview": (ep.get("overview") or "").strip(),
+            "episode_type": str(ep.get("episode_type") or ""),
+            "runtime": ep.get("runtime") if isinstance(ep.get("runtime"), int) else None,
         })
     return episodes
 
@@ -127,7 +115,7 @@ def videos_from(raw) -> list[Video]:
 
 
 async def fetch_videos(settings: Settings, media: str, trakt_id, *,
-                       cache_only: bool = False) -> list[Video]:
+                       cache_only: bool = False, fresh: bool = False) -> list[Video]:
     """Every video Trakt lists for a show or a film.
 
     ITS OWN CALL, measured: no `extended` value puts videos on the title record
@@ -143,7 +131,7 @@ async def fetch_videos(settings: Settings, media: str, trakt_id, *,
     base = "movies" if media == "movie" else "shows"
     return videos_from(await transport.cached_get(
         transport.shared_client(), settings, f"{base}/{trakt_id}/videos", {},
-        cache_only=cache_only))
+        cache_only=cache_only, fresh=fresh))
 
 
 async def fetch_title_payload(settings: Settings, media: str, trakt_id: str,
@@ -174,8 +162,9 @@ _NUMBERED_SEASON = re.compile(r"(?i)season\s+\d+")
 
 
 async def fetch_details(settings: Settings, media: str, trakt_id: str, season: int | None,
-                        cache_only: bool = False) -> dict:
-    """Full detail payload for the modal: overview, cast, episode list.
+                        cache_only: bool = False, fresh: bool = False) -> dict:
+    """Full detail payload for the modal: overview, cast, episode list — with
+    origin addresses and Trakt's own instants (base.DetailPort.fetch_details).
 
     ASKED ABOUT A SEASON, IT ANSWERS ABOUT THAT SEASON TOO. Where a season is
     named, the CAST is that season's rather than the title's, and the season's own
@@ -200,13 +189,13 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
     public share page uses so a visitor's click reuses what the owner's own views
     already cached rather than spending the owner's rate limit. Fields with no
     cached source come back empty, and the modal renders around them."""
-    tz = ZoneInfo(settings.timezone)
     base = "movies" if media == "movie" else "shows"
     client = transport.shared_client()
     per_season = media != "movie" and season is not None
     tasks = {
         "info": transport.cached_get(
-            client, settings, f"{base}/{trakt_id}", {"extended": "full"}, cache_only=cache_only),
+            client, settings, f"{base}/{trakt_id}", {"extended": "full"},
+            cache_only=cache_only, fresh=fresh),
         # THE CAST OF THE SEASON WHERE ONE WAS NAMED, and of the title otherwise.
         # Both answer the same shape, so only the path differs; a season that
         # answers nothing falls back to the show's below rather than drawing an
@@ -215,15 +204,19 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
             client, settings,
             f"shows/{trakt_id}/seasons/{season}/people" if per_season
             else f"{base}/{trakt_id}/people",
-            {"extended": "full"}, cache_only=cache_only),
-        "videos": fetch_videos(settings, media, trakt_id, cache_only=cache_only),
+            {"extended": "full"}, cache_only=cache_only, fresh=fresh),
+        "videos": fetch_videos(settings, media, trakt_id, cache_only=cache_only, fresh=fresh),
     }
     if per_season:
         tasks["episodes"] = transport.cached_get(
             client, settings, f"shows/{trakt_id}/seasons/{season}", {"extended": "full"},
-            cache_only=cache_only)
+            cache_only=cache_only, fresh=fresh)
+    if media != "movie":
         # EVERY SEASON IN ONE CALL, which is where the season's own name and
-        # overview come from and how many seasons the picker offers.
+        # overview come from and how many seasons the title has — asked for every
+        # show, with or without a season named, because the count is a fact
+        # about the title the store keeps (a board row's "5S", a panel's tabs)
+        # and an answer that said 0 for "nobody asked" would be stored as one.
         #
         # THE SAME URL `fetch_show_seasons` ALREADY ASKS, deliberately: same path,
         # same params, so the same cache key, so a title the tracker's add flow or
@@ -234,7 +227,7 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         # season's rows only when somebody opens that season.
         tasks["seasons"] = transport.cached_get(
             client, settings, f"shows/{trakt_id}/seasons", {"extended": "full"},
-            cache_only=cache_only)
+            cache_only=cache_only, fresh=fresh)
     results = dict(zip(tasks.keys(), await asyncio.gather(*tasks.values())))
 
     info = results.get("info") or {}
@@ -244,7 +237,7 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
     if per_season and not cast:
         cast = _cast_from(await transport.cached_get(
             client, settings, f"{base}/{trakt_id}/people", {"extended": "full"},
-            cache_only=cache_only) or {})
+            cache_only=cache_only, fresh=fresh) or {})
 
     # Deferred so this module stays importable from calendar.py's side of the
     # package: the poster reading lives there because that is where the feed's
@@ -289,21 +282,17 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         # SERVICE rather than from the request is also what stops a hand-made
         # URL deciding what a shared calendar row is about.
         "ids": _ids.normalize(info.get("ids") or {}),
-        # THE POSTER, THROUGH THIS PACKAGE'S OWN ONE READING OF IT, THEN THROUGH
-        # THE SHARED PROXY. A per-title lookup returns the same images the
-        # calendar feed does and this projection dropped them, so a card the
-        # calendar SEARCH wrote had no picture -- reported as "Half Man is
-        # missing the poster". Reusing the calendar module's reading rather than
-        # re-reading the field is what keeps its documented rule about these
-        # addresses in one place; `trakt_calendar.poster()` deliberately returns
-        # Trakt's own address unproxied (see its docstring) because most of its
-        # callers are server-side downloads, not a browser -- this caller IS a
-        # browser (the details panel), so it proxies here rather than asking
-        # every such caller to remember to.
-        "poster": proxied_image(trakt_calendar.poster(info)) or "",
+        # THE POSTER, THROUGH THIS PACKAGE'S OWN ONE READING OF IT. A per-title
+        # lookup returns the same images the calendar feed does and this
+        # projection dropped them, so a card the calendar SEARCH wrote had no
+        # picture -- reported as "Half Man is missing the poster". Reusing the
+        # calendar module's reading rather than re-reading the field is what
+        # keeps its documented rule about these addresses in one place. The
+        # ORIGIN address: the title store keeps it, and the panel proxies it.
+        "poster": trakt_calendar.poster(info) or "",
         "network": info.get("network") or "",
         "runtime": info.get("runtime"),
-        "genres": [g.replace("-", " ").title() for g in (info.get("genres") or [])],
+        "genres": [genre_label(g) for g in (info.get("genres") or [])],
         # THE GENRES AS THE SOURCE SPELLS THEM, beside the display form above.
         # TWO CONSUMERS WANT TWO DIFFERENT THINGS and only one of them was being
         # served: the modal draws chips a person reads ("Science Fiction"), and a
@@ -338,6 +327,12 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         "imdb_rating": None,
         "release_types_by_country": {},
         "certification": (info.get("certification") or "").upper(),
+        # NOT STATED, which is a different answer from "none" (Record.keywords):
+        # Trakt's catalogue publishes neither keywords nor a show type, so a
+        # keyword or show-type filter shows a title only Trakt describes rather
+        # than judging it on an absence Trakt never claimed.
+        "keywords": None,
+        "show_type": None,
         # EVERY VIDEO TRAKT LISTS, from its own call — see `fetch_videos` for
         # why the list rather than the title's single `trailer` field.
         "videos": results.get("videos") or [],
@@ -348,6 +343,14 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         # is the lookup that already had it.
         "first_aired": info.get("first_aired") or "",
         "homepage": info.get("homepage") or "",
+        # NOT IN TRAKT'S DESCRIPTION: no logo artwork, no film series, and the
+        # episode airing next is a call of its own (/shows/{id}/next_episode)
+        # nothing here makes. Its season video lists were empty for every show
+        # probed (templates/_details.html says so), so none are asked for.
+        "logo": "",
+        "collection": {},
+        "next_episode": None,
+        "season_videos": [],
         "season": season,
         # WHAT THIS SEASON IS CALLED, where that is a name rather than a number.
         # Trakt titles an anthology's seasons properly — Murder House, Asylum,
@@ -356,13 +359,13 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         # so a caller can render this whenever it is non-empty without having to
         # know the difference.
         "season_title": _season_name(this_season),
-        # HOW MANY SEASONS THIS TITLE HAS, for the panel's season picker. Counted
-        # from the same one call the season's own words come from. 0 where nothing
-        # was asked about a season, which is the film case and the case of a show
-        # nobody named a season for.
-        "season_count": _usable_season_count(seasons),
+        # WHICH SEASONS THIS TITLE HAS, and how many — the season list, in the
+        # picker's shape (`picker_seasons`), from the same one call the season's
+        # own words come from. Empty for a film.
+        "season_count": len(picker_seasons(seasons)),
+        "seasons": picker_seasons(seasons),
         "cast": cast,
-        "episodes": _episodes_from(results.get("episodes") or [], tz),
+        "episodes": _episodes_from(results.get("episodes") or []),
     }
 
 
@@ -389,18 +392,26 @@ def _season_name(season: dict) -> str:
     return title
 
 
-def _usable_season_count(seasons) -> int:
-    """How many seasons a picker should offer.
+def picker_seasons(results) -> list[dict]:
+    """`/shows/{id}/seasons?extended=full` as the picker offers it —
+    [{season, episode_count, first_aired, name, poster}] in order — for the
+    seasons Trakt has populated with episodes: SPECIALS ARE NOT A SEASON somebody
+    pages back through, and a season with no episodes is one Trakt is holding a
+    place for. `fetch_show_seasons` says why each field is what it is."""
+    from . import calendar as trakt_calendar
 
-    SPECIALS ARE NOT A SEASON somebody pages back through, and a season with no
-    episodes is one Trakt is holding a place for — both are excluded, which is
-    the same filter `fetch_show_seasons` applies for the same reason.
-    """
-    if not isinstance(seasons, list):
-        return 0
-    return sum(1 for entry in seasons
-               if isinstance(entry, dict) and (entry.get("number") or 0) > 0
-               and (entry.get("episode_count") or 0) > 0)
+    out = []
+    for entry in results if isinstance(results, list) else []:
+        num = entry.get("number") if isinstance(entry, dict) else None
+        episode_count = (entry.get("episode_count") or 0) if isinstance(entry, dict) else 0
+        if num is None or num == 0 or episode_count <= 0:
+            continue
+        out.append({"season": int(num), "episode_count": int(episode_count),
+                    "first_aired": str(entry.get("first_aired") or ""),
+                    "name": _season_name(entry),
+                    "poster": trakt_calendar.poster(entry) or ""})
+    out.sort(key=lambda s: s["season"])
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -546,7 +557,7 @@ async def fetch_season_episodes(settings: Settings, trakt_id, season: int,
 
 
 async def fetch_show_seasons(settings: Settings, trakt_id, *,
-                             cached_only: bool = False) -> list[dict]:
+                             cached_only: bool = False, fresh: bool = False) -> list[dict]:
     """/shows/{id}/seasons?extended=full -> [{season, episode_count, first_aired,
     name, poster}] for seasons Trakt has actually populated with episodes (skips
     season 0/specials and any season with zero KNOWN episodes at all). Powers
@@ -590,21 +601,9 @@ async def fetch_show_seasons(settings: Settings, trakt_id, *,
         # flow's refusal therefore means "nothing was ever stored for this",
         # which is the honest thing to say to somebody naming a result from a
         # search the instance no longer holds.
-        cache_only=cached_only,
+        cache_only=cached_only, fresh=fresh,
     )
-    from . import calendar as trakt_calendar
-
-    out = []
-    for entry in results if isinstance(results, list) else []:
-        num = entry.get("number")
-        episode_count = entry.get("episode_count") or 0
-        if num is None or num == 0 or episode_count <= 0:
-            continue
-        out.append({"season": int(num), "episode_count": int(episode_count),
-                    "first_aired": str(entry.get("first_aired") or ""),
-                    "name": _season_name(entry),
-                    "poster": trakt_calendar.poster(entry) or ""})
-    out.sort(key=lambda s: s["season"])
+    out = picker_seasons(results)
     logger.info("fetch_show_seasons(%s) -> %d usable season(s)", trakt_id, len(out))
     return out
 
@@ -638,10 +637,17 @@ def ids_map(media: dict) -> dict:
     return _ids.normalize(media.get("ids") or {})
 
 
-async def search_titles(settings: Settings, media: str, query: str, *,
-                        cache_only: bool = False) -> list[dict]:
-    """/search/{show|movie}?query=... -> [{media, ids, title, year, network,
-    runtime, overview, poster}], newest-match-first as Trakt orders it.
+async def search_titles(settings: Settings, media: str, query: str, *, page: int = 1,
+                        cache_only: bool = False) -> tuple[list[dict], bool]:
+    """/search/{show|movie}?query=...&page=N&limit=SEARCH_PAGE_SIZE -> one page
+    of [{media, ids, title, year, network, runtime, overview, poster}] in
+    Trakt's order, and whether Trakt holds a later page.
+
+    `page` AND `limit` ARE ASKED IN THE QUERY, which Trakt honours over the
+    X-Pagination-* request headers every call carries (measured 2026-10-23:
+    "heat" answered 100 under the headers alone, 20 a page with `limit=20`, and
+    page 2 the next 20). A later page exists when this one came back FULL —
+    counted before the id filter below, which is about rows, not pages.
 
     `images` IS ASKED FOR, so a result row can show the title's poster from
     this one answer rather than a lookup per row — measured live 2026-09-27,
@@ -652,7 +658,7 @@ async def search_titles(settings: Settings, media: str, query: str, *,
     ONE implementation for both media types. The two searches differ only in the
     path segment and in which key the result object hangs under, so a second
     copy shaped for movies would drift from this one the first time either is
-    touched. Empty query returns [] without a call.
+    touched. Empty query returns ([], False) without a call.
 
     `cache_only=True` reads back the answer this exact search already stored and
     never asks Trakt. It is how a caller that searched a moment ago names one of
@@ -663,13 +669,14 @@ async def search_titles(settings: Settings, media: str, query: str, *,
         raise ValueError(f"Unknown media type {media!r}.")
     q = (query or "").strip()
     if not q:
-        return []
+        return [], False
     # Deferred for the reason `fetch_details`'s own import of it gives.
     from . import calendar as trakt_calendar
 
     results = await transport.cached_get(
         transport.shared_client(), settings, f"search/{media}",
-        {"query": q, "extended": "full,images"},
+        {"query": q, "extended": "full,images", "page": str(max(1, int(page))),
+         "limit": str(SEARCH_PAGE_SIZE)},
         raise_errors=True, cache_only=cache_only,
     )
 
@@ -694,9 +701,10 @@ async def search_titles(settings: Settings, media: str, query: str, *,
             "overview": (item.get("overview") or "").strip(),
             "poster": trakt_calendar.poster(item) or "",
         })
-    logger.info("search_titles(%s, %r) -> %d raw / %d usable result(s)", media, q,
-                len(results) if isinstance(results, list) else 0, len(out))
-    return out
+    raw = len(results) if isinstance(results, list) else 0
+    logger.info("search_titles(%s, %r, page %s) -> %d raw / %d usable result(s)",
+                media, q, page, raw, len(out))
+    return out, raw >= SEARCH_PAGE_SIZE
 
 
 # The shared ids Trakt's id lookup accepts, in MATCH_SOURCES order. Trakt has no

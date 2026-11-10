@@ -913,6 +913,20 @@ class WarmRouteTests(RankerTestCase):
         asyncio.run(ranker.create_board(self.user_id, uid="b1"))
         asyncio.run(ranker.add_titles(self.user_id, "b1", [show_ref("1"), show_ref("2")]))
 
+    def trakt_catalogue(self):
+        """Trakt's catalogue credential on this instance, so a title's one
+        picture lookup has a service it may ask."""
+        import dataclasses
+        from tests.support import load_settings, save_settings
+        save_settings(dataclasses.replace(load_settings(), trakt_client_id="cid"))
+
+    def test_nobody_asked_is_not_a_miss(self):
+        """With no service in the order this instance can ask, the title has
+        not been found to have no picture — nothing is remembered, so the
+        lookup happens once a credential is filled in."""
+        self.assertEqual(self.poster().status_code, 404)
+        self.assertIsNone(self.value("SELECT url FROM show_posters WHERE tmdb = 1"))
+
     def test_a_row_asks_for_its_own_tile_and_nothing_warms_it_first(self):
         """THE PAGE NO LONGER TELLS THE SERVER WHAT IT DREW. There was a route for
         that: the browser posted back the keys of the rows on screen and asked for
@@ -943,6 +957,32 @@ class WarmRouteTests(RankerTestCase):
         self.assertEqual(asked, [])
         self.assertFalse(list(posters.POSTER_DIR.glob("show/1.*")), "a page's picture is never a tile")
 
+    def test_a_title_with_no_tmdb_id_draws_what_is_filed_under_its_key(self):
+        """artwork's title_posters, keyed on the title store's key the row is filed
+        under; such a title has no lookup, which asks by tmdb id."""
+        from app.media import artwork
+        asyncio.run(ranker.add_titles(self.user_id, "b1", [{
+            "media": "show", "match_source": "tvdb", "match_id": "81189",
+            "title": "Tvdb Only", "ids": {"tvdb": 81189}}]))
+        asyncio.run(artwork.record_title_poster_urls(
+            [("show", "show:tvdb:81189", "simkl", "https://simkl.in/k.jpg")]))
+        asked = no_artwork(self)
+        resp = self.poster("show:tvdb:81189")
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.headers["location"], proxied_image("https://simkl.in/k.jpg"))
+        self.assertEqual(asked, [])
+
+    def test_a_row_with_no_tmdb_id_asks_for_its_picture(self):
+        """The row's <img> asks by board and key whatever the title is: a row
+        that skipped titles with no tmdb id drew an empty frame for a picture its
+        details panel and the board's export both drew."""
+        asyncio.run(ranker.add_titles(self.user_id, "b1", [{
+            "media": "show", "match_source": "mal", "match_id": "36106",
+            "title": "Mal Only", "ids": {"mal": 36106}}]))
+        html = self.client.get("/rankings").text
+        self.assertIn("/api/rankings/poster?board=b1&amp;key=show%3Amal%3A36106", html)
+        self.assertNotIn("ranker-thumb is-missing", html)
+
     def test_a_title_nobody_knows_costs_one_lookup_ever(self):
         from app.media import artwork
         asked = []
@@ -961,6 +1001,7 @@ class WarmRouteTests(RankerTestCase):
         """The miss is recorded (artwork.record_miss) and the next load asks
         nobody — with the real lookup, a Trakt search answering nothing."""
         from app.providers.trakt import transport as trakt_transport
+        self.trakt_catalogue()
         searched = []
 
         async def _nothing(*args, **kwargs):
@@ -995,8 +1036,12 @@ class WarmRouteTests(RankerTestCase):
 
     def test_a_lookup_that_fails_is_not_remembered_as_a_miss(self):
         from app.providers.trakt import transport as trakt_transport
+        self.trakt_catalogue()
 
-        with patched(trakt_transport, "cached_get", _explode("Trakt is down")):
+        async def _down(*args, **kwargs):
+            raise trakt_transport.TraktError("Could not reach Trakt")
+
+        with patched(trakt_transport, "cached_get", _down):
             self.assertEqual(self.poster().status_code, 404)
         self.assertIsNone(self.value("SELECT url FROM show_posters WHERE tmdb = 1"))
 
@@ -1008,8 +1053,10 @@ class WarmRouteTests(RankerTestCase):
         asyncio.run(artwork.record_season_poster_urls(
             [("show", 1, 2, "trakt", "https://media.trakt.tv/s2.jpg")]))
         no_artwork(self)
+        # The season's own first, and its show's behind it in case it is dead.
         self.assertEqual(self.poster("show:tmdb:1:s2").headers["location"],
-                         proxied_image("https://media.trakt.tv/s2.jpg"))
+                         proxied_image("https://media.trakt.tv/s2.jpg",
+                                       fallbacks=["https://media.trakt.tv/show.jpg"]))
         self.assertEqual(self.poster("show:tmdb:1:s3").headers["location"],
                          proxied_image("https://media.trakt.tv/show.jpg"))
 
@@ -1021,7 +1068,9 @@ class WarmRouteTests(RankerTestCase):
         prefs = asyncio.run(source_prefs.load(self.user_id))
         asyncio.run(source_prefs.save(dataclasses.replace(prefs, metadata_order=["simkl"])))
         no_artwork(self)
-        self.assertEqual(self.poster().headers["location"], proxied_image("https://x.test/simkl.jpg"))
+        self.assertEqual(self.poster().headers["location"],
+                         proxied_image("https://x.test/simkl.jpg",
+                                       fallbacks=["https://x.test/trakt.jpg"]))
 
     def test_a_title_on_somebody_elses_board_is_not_drawn(self):
         other = self.ranker_user("neighbour")
@@ -1208,8 +1257,14 @@ class TrackerImportTests(RankerTestCase):
         self.assertIn("Found 2, added 1, and made 1 whole-show row into the season.",
                       resp.text)
         rows = asyncio.run(db.fetch_all(
-            "SELECT id, season, category_id, episode_count FROM tier_items ORDER BY season"))
-        self.assertEqual([(r["season"], r["episode_count"]) for r in rows], [(1, 10), (2, 8)])
+            "SELECT id, season, category_id FROM tier_items ORDER BY season"))
+        # Each season draws the episode total the tracker recorded for it, seeded
+        # into the title store as it arrived.
+        board = asyncio.run(ranker.fetch_board(self.user_id, "b1"))
+        drawn = {item["season"]: item["episode_count"]
+                 for item in [*board["pool"], *(i for c in board["categories"]
+                                                 for i in c["items"])]}
+        self.assertEqual(drawn, {1: 10, 2: 8})
         converted = rows[1]
         self.assertEqual(converted["id"], whole_id)
         self.assertIsNotNone(converted["category_id"])
@@ -1237,10 +1292,14 @@ class TrackerImportTests(RankerTestCase):
                                    Source.TRAKT, "10", stored_only=False)), \
                 mock.patch.object(detail_source, "seasons", _seasons):
             self.client.post("/rankings/boards/b1/import", json={"media": "show"})
-        row = asyncio.run(db.fetch_one(
-            "SELECT season, season_count, episode_count, season_name FROM tier_items"))
-        self.assertEqual(dict(row), {"season": 3, "season_count": None, "episode_count": 17,
-                                     "season_name": "The Return"})
+        item, = asyncio.run(ranker.fetch_board(self.user_id, "b1"))["pool"]
+        # The season list the instance held is kept in the title store, and the
+        # row draws its season from there: the service's name for it and the
+        # service's count — the tracker's count seeds a season no service lists.
+        self.assertEqual({k: item[k] for k in ("season", "season_count", "episode_count",
+                                                 "season_name")},
+                         {"season": 3, "season_count": None, "episode_count": 18,
+                          "season_name": "The Return"})
         self.assertEqual(asked, [True])
 
     def test_the_year_list_is_a_fragment_of_its_own(self):
@@ -1572,13 +1631,16 @@ class ExportRouteTests(RankerTestCase):
         asked = []
 
         async def _ensure(settings, media, tmdb, order, season=None):
-            asked.append((media, tmdb, season, order[-1]))
+            asked.append((media, tmdb, season, tuple(order)))
             return None
 
         with patched(posters, "ensure_poster", _ensure):
             self.export(top_x=3, columns=3, fmt="jpeg")
         # Title 0 has tmdb 0, which is no artwork id at all: nothing to fetch.
-        self.assertEqual(sorted(asked), [("show", 1, None, "tmdb"), ("show", 2, None, "tmdb")])
+        # The order is the viewer's — this one stated none, so the declared one.
+        declared = ("tmdb", "trakt", "simkl")
+        self.assertEqual(sorted(asked), [("show", 1, None, declared),
+                                         ("show", 2, None, declared)])
 
     def test_a_season_tile_is_its_own_file_and_the_export_draws_it(self):
         from app.media import artwork

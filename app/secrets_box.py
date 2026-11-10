@@ -43,6 +43,9 @@ value and seals/opens to "", never collapsing to None.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import logging
 import os
 
@@ -83,6 +86,10 @@ class SealedButWrongKey(SecretsBoxError):
 # cached instead of re-parsing the environment on every seal/open.
 _fernet: Fernet | None = None
 _loaded: bool = False
+# The key's own bytes, kept only to derive a key for another job from
+# (`derived_key`), and the keys derived so far, by purpose.
+_raw: bytes | None = None
+_derived: dict[str, bytes] = {}
 
 
 def reset_cache() -> None:
@@ -91,9 +98,11 @@ def reset_cache() -> None:
     The running app reads ENCRYPTION_KEY once at process start and never changes
     it, so this exists for tests (and any code that mutates the env in-process)
     to pick up a new value without a restart."""
-    global _fernet, _loaded
+    global _fernet, _loaded, _raw
     _fernet = None
     _loaded = False
+    _raw = None
+    _derived.clear()
 
 
 def _instance() -> Fernet | None:
@@ -102,7 +111,7 @@ def _instance() -> Fernet | None:
     Reads ENCRYPTION_KEY once and caches the result. A present-but-malformed key
     raises InvalidKeyError; a blank/absent one is the valid opt-out and caches as
     None."""
-    global _fernet, _loaded
+    global _fernet, _loaded, _raw
     if _loaded:
         return _fernet
     raw = os.environ.get(ENV_VAR, "")
@@ -112,6 +121,7 @@ def _instance() -> Fernet | None:
     else:
         try:
             _fernet = Fernet(candidate)
+            _raw = base64.urlsafe_b64decode(candidate)
         except (ValueError, TypeError) as exc:
             # Distinct from "no key": the operator meant to enable encryption but
             # the value can't be used, so refuse to run rather than silently fall
@@ -124,6 +134,26 @@ def _instance() -> Fernet | None:
             ) from exc
     _loaded = True
     return _fernet
+
+
+def derived_key(purpose: str) -> bytes | None:
+    """A key of its own for `purpose`, derived from ENCRYPTION_KEY — or None when
+    no key is set.
+
+    FOR A JOB THAT NEEDS A SECRET WHICH SURVIVES A RESTART but is not sealing a
+    stored value: signing a short-lived token a page carries
+    (app/metadata/pictures.py). DERIVED, NEVER THE KEY ITSELF: HMAC-SHA256 of the
+    purpose under the configured key, so what the job publishes — a signature in
+    every page — is made under a key that says nothing about the one sealing the
+    secrets, and no two purposes share a key. Off disk, like the key it comes
+    from; a changed key changes it."""
+    if _instance() is None or _raw is None:
+        return None
+    found = _derived.get(purpose)
+    if found is None:
+        found = _derived[purpose] = hmac.new(_raw, purpose.encode("utf-8"),
+                                             hashlib.sha256).digest()
+    return found
 
 
 def is_enabled() -> bool:

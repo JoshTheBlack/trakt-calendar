@@ -15,7 +15,8 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app import auth, changelog, db
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings, settling
 from app.main import app
 from tests.support import ORIGIN, ROOT, migrated_db
 
@@ -165,7 +166,7 @@ class ChangelogRouteTests(unittest.TestCase):
     def setUp(self):
         migrated_db("changelog")
         save_settings(Settings(public_base_url=ORIGIN))
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(auth.create_user(
             username="reader", password="hunter2hunter2", settings=Settings()))
 

@@ -17,7 +17,7 @@ from datetime import date
 from .. import clock, db
 from ..calendar import state as calendar_state
 from ..providers.base import Media, collect_ids
-from . import arrival, calendar_import, lifecycle, store
+from . import arrival, calendar_import, lifecycle, live, store
 from .live import compute_live_shows, live_key
 from .store import (
     ADDED_BY_HISTORY,
@@ -251,7 +251,8 @@ async def history_records(user_id: int, settings, present: set[tuple[str, int]],
     # onto the tracker — a history event names no network and only one service's
     # ids. STRICT, as the season lookup here always was: a lookup that fails
     # aborts the build rather than seeding the list with guesses.
-    arrivals = await arrival.describe(settings, [rec for rec, _ in candidates], strict=True)
+    arrivals = await arrival.describe(settings, [rec for rec, _ in candidates], strict=True,
+                                      order=await live.totals_order(user_id))
     out = []
     for (_rec, entry), arrived in zip(candidates, arrivals):
         # An empty detail means no source could be asked about this title at all

@@ -44,13 +44,16 @@ from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse,
 from . import (cache as calendar_cache, resolve as calendar_resolve,
                share_card, share_card_cache, share_code, share_links,
                state as calendar_state, vocab)
-from .. import auth, authz, chrome, clock, details_panel, perftrace, route_params
+from .. import (after_response, auth, authz, chrome, clock, details_panel, perftrace,
+                route_params, templating)
 from ..auth import AuthLevel
 from ..authz import Guard
 from ..config import load_settings
 from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, Endpoint, endpoint_choices, get_endpoint
 from ..media import artwork, logos, posters, user_images
 from ..perftrace import span
+from ..metadata import identity as title_identity
+from ..metadata import panel as metadata_panel
 from ..providers import detail_source
 from ..providers.base import (Item, Media, Source, SourceUnavailable,
                               parse_item_key, parse_media)
@@ -455,7 +458,7 @@ async def _render(request: Request, share_row) -> Response:
     if target := _expanded_from_code(request):
         return RedirectResponse(target, status_code=302)
 
-    settings = load_settings()
+    settings = await load_settings()
     owner_id = int(share_row["user_id"])
     owner_prefs = await auth.get_user_prefs(owner_id)
 
@@ -566,20 +569,20 @@ async def _render(request: Request, share_row) -> Response:
         # of one's own to add to, and a visitor here has none. Relying on the name
         # simply being absent would work and would say nothing.
         "can_filter": False,
-        # WHICH NETWORKS THIS INSTANCE HOLDS A TILE FOR. Same question the
-        # signed-in calendar asks, and it has to be asked here too or every
-        # network badge on a public page requests a logo that may not exist.
-        # `logos.tiled` WITHOUT the warm-up its sibling does: a share page makes
-        # no outbound call it is not forced to (see this module's own
-        # allow_fetch=False rule), so it draws the tiles that are there and
-        # leaves generating them to the owner's own calendar.
-        "logo_networks": logos.tiled(item.network for item in visible if item.network),
+        # WHICH BADGE EACH NETWORK HAS. Same question the signed-in calendar asks,
+        # and it has to be asked here too or every network badge on a public page
+        # would be drawn for a logo that may not exist. `logos.known` WITHOUT the
+        # warm-up its sibling does: a share page makes no outbound call it is not
+        # forced to (see this module's own allow_fetch=False rule), so it draws the
+        # logos that are recorded and leaves resolving the rest to the owner's own
+        # calendar.
+        "logo_networks": await logos.known(item.network for item in visible if item.network),
     }
-    # Jinja renders SYNCHRONOUSLY on the event loop, and this template is one
-    # block per airing — a busy month is a lot of string building with every other
-    # request waiting behind it.
+    # This template is one block per airing — a busy month is a lot of string
+    # building — so it is drawn off the event loop (templating.drawn), where no
+    # other request waits behind it.
     with span("share.render_page", airings=len(visible)):
-        return templates.TemplateResponse(request, "share_calendar.html", context)
+        return await templating.drawn(request, "share_calendar.html", context)
 
 
 # ---------------------------------------------------------------------------
@@ -1020,8 +1023,8 @@ _warm_tasks: set[asyncio.Task] = set()
 
 def _spawn_poster_warm(view: ShareView, owner_id: int, visible: Sequence[Item],
                        settings, order: tuple[str, ...]) -> None:
-    """Start resolving the artwork this month's card will want, and return
-    immediately.
+    """Start resolving the artwork this month's card will want once the page
+    has been answered (after_response), and return immediately.
 
     A REAL TASK with its exceptions swallowed, not a bare un-awaited coroutine —
     that is a RuntimeWarning and no warm at all — because nothing here may affect
@@ -1037,7 +1040,14 @@ def _spawn_poster_warm(view: ShareView, owner_id: int, visible: Sequence[Item],
     if key in _warming or len(_warming) >= _WARM_CEILING:
         return
     refs = [(item, ref) for item, ref in _poster_refs(select_tile_items(visible))]
-    if not refs:
+    if refs:
+        after_response.later(lambda: _start_poster_warm(key, refs, settings, order))
+
+
+def _start_poster_warm(key: tuple, refs, settings, order: tuple[str, ...]) -> None:
+    # Asked again as it starts: another page of the same month may have begun
+    # its warm while this one was being answered.
+    if key in _warming or len(_warming) >= _WARM_CEILING:
         return
     _warming.add(key)
     task = asyncio.create_task(_warm_job(key, refs, settings, order))
@@ -1148,7 +1158,7 @@ async def _share_rate_limited(request: Request, settings) -> bool:
 
 @guard.get("/s/{token}", AuthLevel.PUBLIC)
 async def share_by_token(request: Request, token: str):
-    settings = load_settings()
+    settings = await load_settings()
     if await _share_rate_limited(request, settings):
         return _too_many_requests()
     return await _render(request, await share_links.resolve_by_token(token))
@@ -1199,7 +1209,7 @@ async def share_card_image(request: Request, token: str):
     fetch it, and a 405 there is a preview that never appears. Nothing here reads
     a body, so the same handler answers both.
     """
-    settings = load_settings()
+    settings = await load_settings()
     if await _share_rate_limited(request, settings):
         # THE ONE UNHAPPY PATH THAT IS NOT THE BANNER. Redirecting a throttled
         # request to a static file is a redirect the throttle was trying to avoid
@@ -1226,7 +1236,7 @@ async def share_card_image(request: Request, token: str):
 
 @guard.get("/u/{username}", AuthLevel.PUBLIC)
 async def share_by_username(request: Request, username: str):
-    settings = load_settings()
+    settings = await load_settings()
     if await _share_rate_limited(request, settings):
         return _too_many_requests()
     return await _render(request, await share_links.resolve_by_username(username))
@@ -1234,7 +1244,7 @@ async def share_by_username(request: Request, username: str):
 
 @guard.get("/c/{slug}", AuthLevel.PUBLIC)
 async def share_by_slug(request: Request, slug: str):
-    settings = load_settings()
+    settings = await load_settings()
     if await _share_rate_limited(request, settings):
         return _too_many_requests()
     return await _render(request, await share_links.resolve_by_slug(slug))
@@ -1376,8 +1386,10 @@ async def _describe_shared_title(request: Request, share_row, settings) -> _Desc
     # SAME HOLDS FOR THE THIRD: every service's videos are pooled over `bound`
     # and nothing else, so a service asked for its list is asked about a title
     # this link shows, by the id the link's own airing carries.
-    chosen, details = await detail_source.describe_panel(settings, chosen, bound,
-                                                         media, season)
+    # A PUBLIC PAGE DRAWS NO SEASON STRIP (`_details` says why), so no service is
+    # asked for a season list it would not draw.
+    chosen, details = await metadata_panel.describe_panel(settings, chosen, bound,
+                                                         media, season, with_seasons=False)
     if details is None:
         return None
     # THE BOUND IDS AND WHAT THE ANSWER ADDED, never the raw request: an outbound
@@ -1392,8 +1404,11 @@ async def _describe_shared_title(request: Request, share_row, settings) -> _Desc
         # lookup's: what a public page publishes about a title comes from what the
         # owner's calendar holds, not from what a stranger spelled. The airing also
         # carries each service's own NAME for the title, which is what lets these
-        # links be spelled the way both services ask for.
-        detail_source.outbound_links(shown_ids, media), shown)
+        # links be spelled the way both services ask for. Beneath them, every id the
+        # title store knows for that airing's title (identity.every_id) — read from
+        # this instance, never asked of anybody.
+        detail_source.outbound_links(await title_identity.every_id(media, shown_ids), media),
+        shown)
 
 
 def _the_airing_this_names(items: Sequence[Item], bound: dict[str, str]) -> Item | None:
@@ -1446,7 +1461,7 @@ async def _details(request: Request, share_row) -> Response:
     owner's calendar contains is exactly what that one message prevents). So the
     panel is drawn with `picker=False` and shows the season the card is for.
     """
-    settings = load_settings()
+    settings = await load_settings()
     params = _effective_params(request)
     if await _share_rate_limited(request, settings):
         return _too_many_requests()
@@ -1640,7 +1655,7 @@ async def _share_context(user, settings, **extra) -> dict:
 
 
 async def _share_answer(request: Request, template: str, user, **extra):
-    context = await _share_context(user, load_settings(), **extra)
+    context = await _share_context(user, await load_settings(), **extra)
     return templates.TemplateResponse(request, template, {"request": request, **context})
 
 
@@ -1700,7 +1715,7 @@ async def share_view(request: Request):
     — and the ticks are redrawn exactly when it did."""
     user = await auth.current_user(request)
     data = await authz.json_body(request)
-    settings = load_settings()
+    settings = await load_settings()
     before = share_links.link_view(await share_links.get_or_create(user.user_id)) or {}
     named = ENDPOINTS.get(str(route_params.last_value(data.get("endpoint")) or ""))
     offered = [choice["value"] for choice in share_source_choices(named, settings)] if named else []

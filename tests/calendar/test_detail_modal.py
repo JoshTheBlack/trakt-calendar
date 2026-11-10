@@ -29,14 +29,25 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app import db
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
+from app.metadata import identity
+from app.metadata import refresh as metadata_refresh
 from app.providers.base import Media
 from app.providers.simkl import transport as simkl_transport
 from app.providers.trakt import transport as trakt_transport
 from tests.support import AppTestCase, ORIGIN
+
+
+def publishing(**ports):
+    """A stand-in provider that publishes every calendar, so calendar/search.py's
+    rule that a service writes only to a calendar it publishes lets it write."""
+    return SimpleNamespace(calendar_port=object(),
+                           capabilities=SimpleNamespace(answers=lambda _key: True), **ports)
 
 # What Trakt's three catalogue paths answer for the merged title below. The cast
 # is the field that only exists on this side, and is what "Trakt still wins" is
@@ -153,6 +164,17 @@ class DetailModalSourceTests(AppTestCase):
         self.assertIn("Longing for Sea Bream!", html)
         self.assertIn("⭐ 8.1", html)
 
+    def test_opening_the_panel_names_the_title_and_its_season(self):
+        """To the title store's refresh queue (app/metadata/refresh.py)."""
+        seen = []
+        with patch.object(metadata_refresh, "viewed",
+                          lambda settings, wanted, **kw: seen.append((list(wanted), kw))):
+            self._both()
+        (wanted, kw), = seen
+        self.assertEqual(kw["budget"], metadata_refresh.PANEL_BUDGET)
+        self.assertEqual([(w.media, w.season) for w in wanted], [("show", 2)])
+        self.assertEqual(str(wanted[0].ids.get("trakt")), "203330")
+
     def test_the_preference_is_trakts_id_and_not_the_cards_attribution(self):
         """The card the author tested against is a Simkl-attributed card for a
         title Trakt also lists. Nothing about which service the CARD wears
@@ -196,8 +218,8 @@ class DetailModalSourceTests(AppTestCase):
         tests/providers/test_protocol_conformance.py holds for an EMPTY answer;
         what this adds is a pair of answers with real data in them, where a source
         can leave out a key it has nothing to say for."""
-        from app.config import load_settings
-        from app.providers import detail_source
+        from app import providers
+        from tests.support import load_settings
         from app.providers.base import Source
 
         trakt_client = _TraktClient({"shows/203330": TRAKT_SHOW,
@@ -208,10 +230,10 @@ class DetailModalSourceTests(AppTestCase):
                           new=_simkl_answers({"tv/3204421": SIMKL_TITLE,
                                               "tv/episodes/3204421": SIMKL_EPISODES})):
             settings = load_settings()
-            trakt_body = asyncio.run(detail_source.fetch(
-                settings, Source.TRAKT, "show", "203330", 2))
-            simkl_body = asyncio.run(detail_source.fetch(
-                settings, Source.SIMKL, "show", "3204421", 1))
+            trakt_body = asyncio.run(providers.get(Source.TRAKT).detail_port.fetch_details(
+                settings, "show", "203330", 2))
+            simkl_body = asyncio.run(providers.get(Source.SIMKL).detail_port.fetch_details(
+                settings, "show", "3204421", 1))
         for key in trakt_body:
             with self.subTest(key=key):
                 self.assertIn(key, simkl_body)
@@ -236,6 +258,10 @@ class DetailModalSourceTests(AppTestCase):
         html = self._simkl_only().text
         self.assertNotIn("youtube.com/watch", html)
         self.assertNotIn("<iframe", html)
+        # The title store kept that answer; the second half is a different
+        # answer about the same title, so the store starts empty again.
+        for table in ("titles", "service_ids", "seasons", "episodes"):
+            asyncio.run(db.execute(f"DELETE FROM {table}"))
         real = {**SIMKL_TITLE,
                 "trailers": [{"name": "Trailer", "youtube": "dQw4w9WgXcQ"}]}
         html = self._get("media=show&simkl=3204421&season=1",
@@ -353,6 +379,18 @@ class DetailModalSourceTests(AppTestCase):
         self.assertIn("Simkl&#39;s words.", html)
         self.assertNotIn("trakt.tv", html)
 
+    def test_a_service_the_title_store_knows_the_title_at_gets_its_button(self):
+        """The card named only Simkl's id, and neither it nor Simkl's answer names
+        Trakt's — but a lookup by shared id had taught the store Trakt's id for
+        the title (identity.every_id), and Trakt has a page for it. Asking
+        nobody: Trakt answers nothing here."""
+        asyncio.run(db.transaction(lambda conn: identity.settle(
+            conn, Media.SHOW, {"tvdb": 4242, "simkl": 3204421, "trakt": 1234,
+                               "trakt_slug": "somebody-knows-something"}, now=1)))
+        html = self._simkl_only("media=show&simkl=3204421&season=1&key=show%3Atvdb%3A4242").text
+        self.assertIn("Simkl&#39;s words.", html)
+        self.assertIn('href="https://trakt.tv/shows/somebody-knows-something"', html)
+
     # -- the gate ----------------------------------------------------------
 
     def test_the_gate_asks_about_the_source_being_asked(self):
@@ -464,6 +502,22 @@ class SimklOnlyOnAPublicShareLinkTests(AppTestCase):
     def _details(self, query):
         return self.client.get(f"/s/{self.token}/details?{query}&{SHARE_VIEW}")
 
+    def test_a_public_read_never_queues_a_refresh(self):
+        """A stranger's visit spends nothing of the owner's: neither the shared
+        page nor its panel names a title to the refresh queue."""
+        from app import cache
+        asyncio.run(cache.set(simkl_transport.cache_key("tv/3204421"), SIMKL_TITLE))
+        asyncio.run(cache.set(simkl_transport.cache_key("tv/episodes/3204421"),
+                              SIMKL_EPISODES))
+
+        def _refused(*args, **kwargs):
+            raise AssertionError("a public read queued a refresh")
+
+        with self._no_network(), patch.object(metadata_refresh, "viewed", _refused),                 patch.object(metadata_refresh, "queue_viewed", _refused):
+            page = self.client.get(f"/s/{self.token}?{SHARE_VIEW}")
+            panel = self._details("media=show&simkl=3204421&season=1")
+        self.assertEqual((page.status_code, panel.status_code), (200, 200))
+
     def test_a_simkl_only_card_on_a_public_page_serves_what_is_cached(self):
         from app import cache
         # Seeded through the transport's own key builder rather than a spelled-out
@@ -539,7 +593,7 @@ class OpeningAOneServiceCardAsksTheOtherTests(AppTestCase):
 
     def setUp(self):
         super().setUp()
-        user_id = self.make_user("viewer", calendar_approved=True)
+        self.viewer_id = user_id = self.make_user("viewer", calendar_approved=True)
         # Simkl's own search/redirect now require THIS viewer's own token (Simkl
         # AUTH V2 refuses them without one) — an instance client id alone is no longer enough to
         # offer "ask Simkl", so the ask this class is about needs a real link.
@@ -593,11 +647,15 @@ class OpeningAOneServiceCardAsksTheOtherTests(AppTestCase):
                            episode_label="S01E01", enriched=True)
                     for season, _when in moments]
 
+        # Nothing here describes the redrawn card's season: the line under it
+        # is read from the store and asks nobody (calendar/routes.py's
+        # `_season_lines`).
         port = SimpleNamespace(fetch_seasons=_seasons, records_for=_records,
-                               fetch_details=AsyncMock(return_value={}))
-        with patch("app.providers.for_catalogue_search", return_value=[
+                               fetch_details=AsyncMock(return_value={}),
+                               catalogue_configured=lambda settings: False)
+        with patch("app.providers.for_shared_id_lookup", return_value=[
                     (Source.SIMKL, SimpleNamespace(find_by_shared_id=_find))]), \
-             patch("app.providers.get", return_value=SimpleNamespace(detail_port=port)):
+             patch("app.providers.get", return_value=publishing(detail_port=port)):
             resp = self.client.post(
                 "/api/calendar/complete-card?endpoint=shows%2Fpremieres&year=2026&month=7",
                 json={"key": self.KEY, "season": 1})
@@ -609,7 +667,7 @@ class OpeningAOneServiceCardAsksTheOtherTests(AppTestCase):
         self.assertIn("simkl=4242", resp.text, "the redrawn card does not carry Simkl's id")
         self.assertEqual(again.text, "", "a card two services draw was asked about again")
 
-    def _complete(self, body):
+    def _complete(self, body, *, simkl_day=date(2026, 7, 8)):
         from types import SimpleNamespace
         from app.providers.base import Record, Source
 
@@ -623,16 +681,21 @@ class OpeningAOneServiceCardAsksTheOtherTests(AppTestCase):
             return [Record(source=Source.SIMKL, media=media, id=str(source_id),
                            ids={"simkl": str(source_id), "tmdb": 777}, detail_url="",
                            title="The Elusive Samurai",
-                           air_ts=datetime(2026, 7, 8, tzinfo=timezone.utc).timestamp(),
+                           air_ts=datetime(simkl_day.year, simkl_day.month, simkl_day.day,
+                                           tzinfo=timezone.utc).timestamp(),
                            date_only=True, season=season, episode_number=1,
                            episode_label="S01E01", enriched=True)
                     for season, _when in moments]
 
+        # Nothing here describes the redrawn card's season: the line under it
+        # is read from the store and asks nobody (calendar/routes.py's
+        # `_season_lines`).
         port = SimpleNamespace(fetch_seasons=_seasons, records_for=_records,
-                               fetch_details=AsyncMock(return_value={}))
-        with patch("app.providers.for_catalogue_search", return_value=[
+                               fetch_details=AsyncMock(return_value={}),
+                               catalogue_configured=lambda settings: False)
+        with patch("app.providers.for_shared_id_lookup", return_value=[
                     (Source.SIMKL, SimpleNamespace(find_by_shared_id=_find))]), \
-             patch("app.providers.get", return_value=SimpleNamespace(detail_port=port)):
+             patch("app.providers.get", return_value=publishing(detail_port=port)):
             return self.client.post(
                 "/api/calendar/complete-card?endpoint=shows%2Fpremieres&year=2026&month=7",
                 json={"key": self.KEY, "season": 1, **body}).text
@@ -647,6 +710,29 @@ class OpeningAOneServiceCardAsksTheOtherTests(AppTestCase):
         drawn = "0123456789abcdef"
         self.assertIn(f"hx-swap-oob=\"outerHTML:.card[data-airing='{drawn}']\"",
                       self._complete({"airing": drawn}))
+
+    def test_a_joining_service_that_moves_the_card_moves_it_to_its_day(self):
+        """ONE EPISODE IS ONE CARD, ON THE DAY THE VIEWER'S FIRST SERVICE GIVES.
+        This viewer puts Simkl first, and Simkl dates the premiere two days after
+        Trakt did: the card leaves the 8th and is appended to the 10th's grid —
+        a selector with no space in it, since htmx splits a swap spec there."""
+        from app.sources import prefs as source_prefs
+
+        asyncio.run(source_prefs.save(source_prefs.SourcePrefs(
+            user_id=self.viewer_id, metadata_order=["simkl", "trakt"])))
+        drawn = "0123456789abcdef"
+        answer = self._complete({"airing": drawn, "day": "2026-07-08"},
+                                simkl_day=date(2026, 7, 10))
+        self.assertIn(f"hx-swap-oob=\"delete:.card[data-airing='{drawn}']\"", answer)
+        # `>` is escaped in the attribute, and the browser hands htmx it decoded.
+        self.assertIn('hx-swap-oob="beforeend:#day-2026-07-10&gt;.grid"', answer)
+        self.assertNotIn("outerHTML:.card[data-airing=", answer)
+
+    def test_a_card_drawn_on_the_same_day_is_replaced_in_place(self):
+        drawn = "0123456789abcdef"
+        answer = self._complete({"airing": drawn, "day": "2026-07-08"})
+        self.assertIn(f"hx-swap-oob=\"outerHTML:.card[data-airing='{drawn}']\"", answer)
+        self.assertNotIn("beforeend:", answer)
 
     def test_an_airing_reference_is_only_ever_a_digest(self):
         """It goes into a selector, so anything but the digest's own shape is

@@ -37,7 +37,7 @@ class FakeList:
         self.delay = 0.0                 # seconds each call takes
         self.in_flight = asyncio.Event()  # set once any call has begun
 
-    def list_url(self, account_id: str) -> str:
+    def list_url(self, account_id: str, account_name: str | None) -> str:
         return f"https://lists.example/{account_id}/plantowatch/"
 
     async def _call(self, verb: str, keys: list[str]) -> None:
@@ -77,11 +77,15 @@ class FakeList:
         return {str(t.key): self._move(str(t.key), PLAN, lambda held: held == PLAN)
                 for t in titles}
 
-    async def drop(self, settings, titles):
-        await self._call("drop", [str(t.key) for t in titles])
-        return {str(t.key): self._move(str(t.key), DROPPED,
-                                       lambda held: held in (NOT_HELD, DROPPED))
-                for t in titles}
+    async def drop(self, settings, rows):
+        # Every drop is told what the tracker's record says was held before
+        # (WatchlistDrop); a status service like this one moves the title to its
+        # given-up status whoever listed it, so it is only recorded.
+        self.drop_rows = [*getattr(self, "drop_rows", []), *rows]
+        await self._call("drop", [str(row.title.key) for row in rows])
+        return {str(row.title.key): self._move(str(row.title.key), DROPPED,
+                                               lambda held: held in (NOT_HELD, DROPPED))
+                for row in rows}
 
     async def undo(self, settings, rows):
         await self._call("undo", [str(row.title.key) for row in rows])

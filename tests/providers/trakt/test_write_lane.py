@@ -117,7 +117,7 @@ class LaneTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sleeps.durations, [])
 
     async def test_reads_and_bearerless_writes_are_not_laned(self):
-        """A read spends the read quota, which GET_PACER paces; a token exchange
+        """A read spends a read quota, which its pacer paces; a token exchange
         carries no bearer and is nobody's write."""
         sleeps = _RecordingSleep()
         client = _Client(200, 200, 200, 200)
@@ -128,6 +128,19 @@ class LaneTests(unittest.IsolatedAsyncioTestCase):
             await transport.send(client, "POST", URL, headers=_headers(None), json={})
         self.assertEqual(sleeps.durations, [])
         self.assertEqual(transport._lanes, {})
+
+    async def test_an_idle_lane_is_dropped_by_the_next_write(self):
+        """A lane is keyed by a token and a token rotates, so the map would grow
+        by one lane per refresh for as long as the process runs — weeks. A lane
+        nobody holds and whose second has passed is dropped by the next write."""
+        clock = [1000.0]
+        with patch.object(transport.asyncio, "sleep", new=_RecordingSleep()), \
+                patch.object(transport._time, "monotonic", lambda: clock[0]):
+            await transport.send(_Client(201), "POST", URL, headers=_headers("old"), json={})
+            self.assertEqual(len(transport._lanes), 1)
+            clock[0] += transport.POST_MIN_INTERVAL
+            await transport.send(_Client(201), "POST", URL, headers=_headers("new"), json={})
+        self.assertEqual(len(transport._lanes), 1, "the rotated token's lane was kept")
 
     async def test_the_lane_holds_no_credential(self):
         with patch.object(transport.asyncio, "sleep", new=_RecordingSleep()):

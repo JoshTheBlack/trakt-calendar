@@ -53,6 +53,27 @@
    NOTHING AT ALL OTHERWISE, rather than a fallback: the title's own description
    is already on screen above the picker, and repeating it under every tab would
    say "this season is about the show" once per season. #}
+{#- THIS SEASON'S OWN VIDEOS, for a tab pressed after the panel opened. The panel's
+    video menu was drawn for the season it opened on, that season's own videos
+    leading it (app/providers/videos.py's `season_first`), and is not redrawn by a
+    tab — a tab is fetched once and kept, so a menu swapped by the tab's answer
+    would name the wrong season the moment an earlier tab was pressed again. So
+    the season's own are drawn here, in its pane, each aimed at the panel's ONE
+    player by name exactly as a menu choice is: nothing is fetched to play one,
+    and the frame is never doubled. The season the panel opened on draws none
+    here (`season_videos_in_menu`): they lead the menu above. -#}
+{% if d.season_videos and not season_videos_in_menu %}
+<div class="details-section-title">▶️ Season {{ season }} videos</div>
+<ul class="season-videos">
+    {%- for v in d.season_videos %}
+    <li><a class="pill-btn"
+        {%- if v.embeddable %} href="https://www.youtube-nocookie.com/embed/{{ v.video_id }}" target="detailsPlayer"
+        {%- else %} href="{{ v.url }}" target="_blank" rel="noopener"{% endif %}>
+        {{- v.title or v.kind | capitalize }}{% if not v.embeddable %} ↗{% endif %}</a></li>
+    {%- endfor %}
+</ul>
+{% endif %}
+
 {% if d.season_overview %}
 <div class="details-section-title">📖 Season {{ season }}
     {%- if d.season_title %} · {{ d.season_title }}{% endif %}</div>
@@ -97,7 +118,8 @@
             {%- for t in progress.ticks(ep.number) %}{{ tick(t, progress.single) }}{% endfor -%}
         </span>{% endif %}
         <span class="ep-num">E{{ '%02d' | format(ep.number | int) }}</span>
-        <span class="ep-title">{{ ep.title }}</span>
+        <span class="ep-title">{{ ep.title }}
+            {%- if ep.mark_label %} <span class="ep-place">{{ ep.mark_label }}</span>{% endif %}</span>
         {#- WHO WAS ASKED, on every row. The ticks beside it say who answered
             yes; without this, "the other service does not have this episode" and
             "the other service was never asked" look the same. -#}

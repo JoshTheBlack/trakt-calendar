@@ -28,7 +28,8 @@ from app.calendar import (cache as calendar_cache, share_card, share_code,
                           share_links, share_routes)
 from app.providers.base import Item, Media, Source
 from app.providers.trakt import transport as trakt_transport
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from app.media import posters
 from tests.support import AppTestCase, DetailsPanel, ORIGIN, calendar_records
 
@@ -570,8 +571,10 @@ class SharePageDetailsModalTests(_ShareDetailsTestCase):
         self.assertNotIn("openShareDetails", body)
         self.assertNotIn("/static/js/share.js", body)
         # THE ADDRESS CARRIES the page's own view as well as the card's ids — the
-        # bound cannot be evaluated without the view.
-        self.assertIn(f"/s/{self.token}/details?media=show&amp;trakt=123", opener.group(1))
+        # bound cannot be evaluated without the view. TMDB's id first: it is
+        # first in the declared order, and the card carries it.
+        self.assertIn(f"/s/{self.token}/details?media=show&amp;tmdb=789&amp;trakt=123",
+                      opener.group(1))
         self.assertIn("year=2026&amp;month=7", opener.group(1))
 
     def test_details_serve_the_owners_cached_data_without_calling_trakt(self):
@@ -651,6 +654,44 @@ class SharePageDetailsModalTests(_ShareDetailsTestCase):
             resp = self._details("media=show&trakt=999&simkl=888&season=2")
         self.assertRefused(resp)
         simkl_get.assert_not_called()
+
+    def test_a_tmdb_id_is_bound_like_any_other(self):
+        """TMDB is first in the order, so a card's tmdb id is the one a panel
+        asks by — and a made-up one is refused before TMDB is reached."""
+        save_settings(Settings(public_base_url=ORIGIN, tmdb_api_key=self.TMDB_TOKEN))
+        with self._no_network(), \
+             patch("app.providers.tmdb.transport.cached_get") as tmdb_get:
+            self.assertRefused(self._details("media=show&tmdb=999&season=2"))
+        tmdb_get.assert_not_called()
+
+    TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJzaGFyZSJ9.c2lnbmF0dXJl"
+
+    def test_a_tmdb_id_the_link_shows_is_described_by_tmdb(self):
+        """The bound id is TMDB's to describe — and only that title, that season,
+        is asked about."""
+        save_settings(Settings(public_base_url=ORIGIN, tmdb_api_key=self.TMDB_TOKEN))
+        asked = []
+
+        async def tmdb_get(settings, path, params=None, **kw):
+            asked.append(path)
+            if path == "tv/789":
+                return {"id": 789, "name": "Test Show", "overview": "Described by TMDB.",
+                        "seasons": [{"season_number": 2, "episode_count": 6}]}
+            if path == "tv/789/season/2":
+                return {"episodes": [{"episode_number": 5, "name": "The One",
+                                      "air_date": "2026-07-15"}]}
+            if path == "tv/789/season/2/aggregate_credits":
+                return {"cast": [{"name": "A Lead", "roles": [{"character": "Hero"}]}]}
+            raise AssertionError(f"TMDB asked about {path}")
+
+        with patch("app.providers.tmdb.transport.cached_get", tmdb_get):
+            resp = self._details("media=show&tmdb=789&trakt=123&season=2")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIn("Described by TMDB.", resp.text)
+        self.assertEqual(set(asked), {"tv/789", "tv/789/season/2",
+                                      "tv/789/season/2/aggregate_credits"})
+        self.assertIn("A Lead", resp.text)
+        self.assertIn('href="https://www.themoviedb.org/tv/789"', resp.text)
 
     # -- and the permission it grants --------------------------------------
 
@@ -1092,3 +1133,104 @@ class SharePageHasNoSeasonPickerTests(_ShareDetailsTestCase):
         with self._no_network():
             self.assertRefused(self._details("media=show&trakt=999&season=2"))
 
+
+
+class ASharePageDrawsEachEpisodeOnTheOwnersDayTests(SharePageTestCase):
+    """One episode two services date days apart is ONE card on a share page too,
+    on the day the OWNER's first service gives — the same placement the owner's
+    own calendar makes, read from the same rows (calendar/cache.py's `placed`).
+
+    Yellowjackets S04E01 as the dev instance holds it: Simkl's Friday evening in
+    New York (21 November 01:00 UTC) and Trakt's Sunday evening (23 November
+    02:00 UTC, a Monday — the other storage window)."""
+
+    def setUp(self):
+        super().setUp()
+        from app.providers.base import Record
+        from app.sources import prefs as source_prefs
+
+        save_settings(Settings(public_base_url=ORIGIN))
+        self.user_id = self._make_user("yjowner", calendar_approved=True)
+        self.source_prefs = source_prefs
+        self.sign_in_as(self.user_id)
+        self.token = asyncio.run(share_links.get_or_create(self.user_id))["token"]
+        self.client.cookies.clear()
+        for source, air_ts in ((Source.SIMKL, 1795222800.0), (Source.TRAKT, 1795399200.0)):
+            record = Record(source=source, media=Media.SHOW, id=f"{source}-yj",
+                            ids={"tmdb": 117488, str(source): f"{source}-yj"},
+                            detail_url="", title="Yellowjackets", air_ts=air_ts,
+                            season=4, episode_number=1, episode_label="S04E01")
+            start = calendar_cache.window_start(calendar_cache.record_utc_date(record))
+            asyncio.run(calendar_cache.store_window(
+                "shows", start, [record], 10**9, db.now(),
+                sources=[str(source)], asked=[str(source)]))
+
+    def _days_drawing_it(self) -> list[str]:
+        """The headings of the share page's day blocks that draw the episode."""
+        resp = self.client.get(
+            f"/s/{self.token}?year=2026&month=11&endpoint=shows&tz=America/New_York")
+        self.assertEqual(resp.status_code, 200)
+        blocks = re.findall(r'<section class="day-block">(.*?)</section>', resp.text, re.S)
+        return [re.search(r'class="day-title">📅 ([^<]+)<', block).group(1)
+                for block in blocks if "Yellowjackets" in block]
+
+    def _owner_prefers(self, *order):
+        asyncio.run(self.source_prefs.save(self.source_prefs.SourcePrefs(
+            user_id=self.user_id, metadata_order=list(order))))
+
+    def test_the_owners_order_decides_the_one_day_it_is_drawn_on(self):
+        self._owner_prefers("trakt", "simkl")
+        self.assertEqual(self._days_drawing_it(), ["Sunday, 22 November"])
+        self._owner_prefers("simkl", "trakt")
+        self.assertEqual(self._days_drawing_it(), ["Friday, 20 November"])
+
+
+class ASharePageKeepsTheOwnersNewerFiltersTests(SharePageTestCase):
+    """The six newer dimensions reach a share page as every other filter does —
+    the owner's, read with `honour_pause=False`, so an owner who has paused their
+    filters for the afternoon does not publish a wider calendar."""
+
+    def setUp(self):
+        super().setUp()
+        from app.providers.base import Record
+
+        save_settings(Settings(public_base_url=ORIGIN))
+        self.user_id = self._make_user("newerowner", calendar_approved=True)
+        self.sign_in_as(self.user_id)
+        self.token = asyncio.run(share_links.get_or_create(self.user_id))["token"]
+        self.client.cookies.clear()
+        listings = [
+            # Two services list it.
+            (Source.TRAKT, "both-trakt", 1, "Listed Twice", "HBO"),
+            (Source.SIMKL, "both-simkl", 1, "Listed Twice", "HBO"),
+            # Only TMDB lists it, and names no network.
+            (Source.TMDB, "2", 2, "Lonely Listing", ""),
+        ]
+        for source, own_id, tmdb, title, network in listings:
+            record = Record(source=source, media=Media.SHOW, id=own_id,
+                            ids={"tmdb": tmdb, str(source): own_id}, detail_url="",
+                            title=title, air_ts=1794657600.0, season=1, episode_number=1,
+                            episode_label="S01E01", network=network)
+            start = calendar_cache.window_start(calendar_cache.record_utc_date(record))
+            asyncio.run(calendar_cache.store_window(
+                "shows/new", start, [record], 10**9, db.now(),
+                sources=[str(source)], asked=[str(source)]))
+
+    def _page(self) -> str:
+        resp = self.client.get(f"/s/{self.token}?year=2026&month=11&endpoint=shows/new&tz=UTC")
+        self.assertEqual(resp.status_code, 200)
+        return resp.text
+
+    def test_a_paused_owner_still_publishes_only_what_their_filters_keep(self):
+        self.assertIn("Lonely Listing", self._page())
+        asyncio.run(auth.update_user_prefs(self.user_id, tv_single_service=True,
+                                           filters_paused=True))
+        page = self._page()
+        self.assertIn("Listed Twice", page)
+        self.assertNotIn("Lonely Listing", page)
+
+    def test_the_no_network_rule_reaches_it_too(self):
+        asyncio.run(auth.update_user_prefs(self.user_id, tv_sparse_no_network=True))
+        page = self._page()
+        self.assertIn("Listed Twice", page)
+        self.assertNotIn("Lonely Listing", page)

@@ -17,6 +17,7 @@ import asyncio
 import json
 
 from app import db
+from app.metadata import descriptions
 from app.ranker import core as ranker, exports as ranker_export
 from tests.ranker.test_removals import BOARD, _BoardTestCase, key, show_ref
 
@@ -266,8 +267,11 @@ class BackupTests(_SeasonsTestCase):
 
     def test_a_season_row_round_trips(self):
         self.build_with_seasons()
-        asyncio.run(db.execute("UPDATE tier_items SET season_name = 'Night Country' "
-                               "WHERE season = 2"))
+        # The season's own name is the title store's (a service's season list).
+        asyncio.run(db.transaction(lambda conn: descriptions.write_season_list(
+            conn, "tmdb", "show", int(SHOW),
+            [{"season": 2, "episode_count": 6, "name": "Night Country"}], now=db.now(),
+            ids={"tmdb": int(SHOW)})))
         before = self.board()
         doc = asyncio.run(ranker.export_user_data(self.user_id))
         seasons = {(item["match_id"], item["season"], item["season_name"])
@@ -283,16 +287,19 @@ class BackupTests(_SeasonsTestCase):
                          ["Title 7", "Title 7 — Night Country", "Title 8"])
 
     def test_a_version_1_backup_restores_exactly_as_it_always_did(self):
-        """Every title the whole show, in its tier and place, with its counts."""
+        """Every title the whole show, in its tier and place, under the words the
+        file drew it with — seeded into the title store, whose own description of
+        each title states its counts once a page draws it."""
         asyncio.run(ranker.restore_user_data(self.user_id,
                                              json.loads(json.dumps(SCHEMA_1_DOCUMENT))))
         self.assertEqual(self.keys_in("s"), [key(SHOW), key("8")])
         self.assertEqual(self.pool_keys(), [key("9")])
-        rows = asyncio.run(db.fetch_all(
-            "SELECT match_id, season, season_name, season_count, episode_count, title "
-            "FROM tier_items ORDER BY match_id"))
-        self.assertEqual([tuple(row) for row in rows],
-                         [(match_id, None, None, 3, 24, f"Title {match_id}")
+        board = self.board()
+        items = sorted([*board["categories"][0]["items"], *board["pool"]],
+                       key=lambda item: item["match_id"])
+        self.assertEqual([(i["match_id"], i["season"], i["season_name"], i["title"], i["year"],
+                           i["network"], i["runtime"]) for i in items],
+                         [(match_id, None, None, f"Title {match_id}", 2024, "HBO", 55)
                           for match_id in (SHOW, "8", "9")])
 
     def test_a_version_1_backup_that_carries_a_season_has_it_honoured(self):
@@ -382,9 +389,10 @@ class ExportTests(_SeasonsTestCase):
         rows = board["categories"][0]["items"]
         self.assertEqual([row["label"] for row in rows], self.LABELS)
         # And a season row counts only itself: its own episodes, never the
-        # show's season count.
+        # show's season count. The whole show's counts are its description's —
+        # none until a service has described it.
         self.assertEqual([(row["season_count"], row["episode_count"]) for row in rows],
-                         [(3, 24), (None, 6), (None, 8)])
+                         [(None, None), (None, 6), (None, 8)])
 
     def test_the_text_export_uses_the_same_names(self):
         self.build_show_and_two_seasons()

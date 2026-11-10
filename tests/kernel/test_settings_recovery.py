@@ -26,8 +26,8 @@ import unittest
 from unittest.mock import patch
 
 from app import config
-from app.config import PUBLIC_BASE_URL_ENV, Settings, load_settings, save_settings
-from tests.support import ORIGIN, PASSWORD, AppTestCase
+from app.config import PUBLIC_BASE_URL_ENV, Settings
+from tests.support import ORIGIN, PASSWORD, AppTestCase, load_settings, run_coroutine, save_settings
 
 STORED_SECRETS = {
     "trakt_client_secret": "client-secret-value",
@@ -313,7 +313,7 @@ class PublicBaseUrlOverrideIsAnnouncedTests(SettingsFileTestCase):
     def test_startup_names_both_values_when_they_differ(self):
         with self.with_env("https://shows.example.com"), \
                 self.assertLogs("app.config", level="WARNING") as logs:
-            config.warn_if_public_base_url_overridden()
+            run_coroutine(config.warn_if_public_base_url_overridden())
         line = "\n".join(logs.output)
         self.assertIn("https://shows.example.com", line)
         self.assertIn(WRONG_STORED_URL, line)
@@ -323,12 +323,12 @@ class PublicBaseUrlOverrideIsAnnouncedTests(SettingsFileTestCase):
         warning about it would train everybody to skip the line that matters."""
         with self.with_env(WRONG_STORED_URL):
             with patch.object(config.logger, "warning") as warned:
-                config.warn_if_public_base_url_overridden()
+                run_coroutine(config.warn_if_public_base_url_overridden())
         warned.assert_not_called()
 
     def test_startup_says_nothing_when_the_variable_is_unset(self):
         with patch.object(config.logger, "warning") as warned:
-            config.warn_if_public_base_url_overridden()
+            run_coroutine(config.warn_if_public_base_url_overridden())
         warned.assert_not_called()
 
     OVERRIDDEN = "PUBLIC_BASE_URL environment variable is set and it overrides"

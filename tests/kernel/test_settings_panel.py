@@ -35,7 +35,8 @@ from cryptography.fernet import Fernet
 
 from app import assets, config, db, secrets_box
 from app.auth import encryption_flow
-from app.config import Settings, load_settings, save_settings
+from app.config import Settings
+from tests.support import load_settings, save_settings
 from tests.support import AppTestCase, ORIGIN
 
 PANEL = "/settings/fragments/panel"
@@ -66,6 +67,11 @@ def _set_key(key: str | None) -> None:
     else:
         os.environ[secrets_box.ENV_VAR] = key
     secrets_box.reset_cache()
+
+# TMDB's credential field takes a read token (a JWT) and refuses anything else,
+# so a value typed into it in these tests is token-shaped.
+NEW_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJuZXcifQ.bmV3LXNpZ25hdHVyZQ"
+TYPED_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0eXBlZCJ9.dHlwZWQtc2lnbmF0dXJl"
 
 
 class PanelTestCase(AppTestCase):
@@ -150,7 +156,7 @@ class TheWriterDecidesEveryTypeTests(unittest.TestCase):
 
     def test_a_typed_credential_replaces_the_stored_one(self):
         current = Settings(tmdb_api_key="old-key")
-        self.assertEqual(self.write({"tmdb_api_key": "new-key"}, current).tmdb_api_key, "new-key")
+        self.assertEqual(self.write({"tmdb_api_key": NEW_TOKEN}, current).tmdb_api_key, NEW_TOKEN)
 
     def test_an_empty_credential_field_leaves_the_stored_one_alone(self):
         current = Settings(tmdb_api_key="old-key")
@@ -167,8 +173,24 @@ class TheWriterDecidesEveryTypeTests(unittest.TestCase):
     def test_a_value_typed_beside_a_ticked_clear_box_is_what_is_stored(self):
         """What somebody typed is the more specific instruction."""
         current = Settings(tmdb_api_key="old-key")
-        settings = self.write({"tmdb_api_key": "typed", config.clear_field("tmdb_api_key"): "1"}, current)
-        self.assertEqual(settings.tmdb_api_key, "typed")
+        settings = self.write({"tmdb_api_key": TYPED_TOKEN, config.clear_field("tmdb_api_key"): "1"}, current)
+        self.assertEqual(settings.tmdb_api_key, TYPED_TOKEN)
+
+    def test_a_short_v3_key_is_refused_with_where_to_find_the_token(self):
+        """TMDB's credential is the read token only; the short v3 key travels in
+        a query string, where a credential reaches access logs and cache keys.
+        The refusal says where the token is, and nothing is written."""
+        current = Settings(tmdb_api_key=NEW_TOKEN)
+        with self.assertRaises(config.SettingsFormError) as refused:
+            self.write({"tmdb_api_key": "0123456789abcdef0123456789abcdef"}, current)
+        self.assertIn("API Read Access Token", str(refused.exception))
+
+    def test_tmdb_language_and_region_are_judged_on_the_way_in(self):
+        self.assertEqual(self.write({"tmdb_language": "de-DE", "tmdb_region": "GB"}).tmdb_language,
+                         "de-DE")
+        for field, bad in (("tmdb_language", "english"), ("tmdb_region", "usa")):
+            with self.subTest(field=field), self.assertRaises(config.SettingsFormError):
+                self.write({field: bad})
 
     def test_a_setting_the_form_does_not_mention_is_left_alone(self):
         current = Settings(pagination_limit=123, sonarr_url="http://kept")
@@ -196,6 +218,21 @@ class RoundTripThroughTheRouteTests(PanelTestCase):
     """The same types, posted the way the panel posts them and read back out of
     both the store and the panel."""
 
+    def test_a_stored_v3_key_is_named_on_the_page_and_not_sent(self):
+        """An instance that saved TMDB's short v3 key before the field refused
+        one: the page says what to paste instead, and TMDB reads as unconfigured
+        rather than answering every call with a 401."""
+        save_settings(dataclasses.replace(load_settings(),
+                                          tmdb_api_key="0123456789abcdef0123456789abcdef"))
+        self.assertFalse(load_settings().tmdb_configured)
+        self.assertIn("API Read Access Token", self.panel())
+
+    def test_a_refused_key_is_drawn_as_a_sentence_and_nothing_is_saved(self):
+        resp = self.save(tmdb_api_key="0123456789abcdef0123456789abcdef")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("API Read Access Token", resp.text)
+        self.assertEqual(load_settings().tmdb_api_key, "")
+
     def test_a_string_round_trips(self):
         self.assertEqual(self.save(sonarr_url="http://sonarr:8989").status_code, 204)
         self.assertEqual(load_settings().sonarr_url, "http://sonarr:8989")
@@ -221,15 +258,15 @@ class RoundTripThroughTheRouteTests(PanelTestCase):
         self.assertIs(load_settings().hide_not_watching, False)
 
     def test_a_credential_is_set_and_then_cleared(self):
-        self.assertEqual(self.save(tmdb_api_key="fresh-key").status_code, 204)
-        self.assertEqual(load_settings().tmdb_api_key, "fresh-key")
+        self.assertEqual(self.save(tmdb_api_key=NEW_TOKEN).status_code, 204)
+        self.assertEqual(load_settings().tmdb_api_key, NEW_TOKEN)
         self.assertIn('name="clear:tmdb_api_key"', self.panel())
         self.assertEqual(self.save(**{"clear:tmdb_api_key": "1"}).status_code, 204)
         self.assertEqual(load_settings().tmdb_api_key, "")
         self.assertNotIn('name="clear:tmdb_api_key"', self.panel())
 
     def test_a_cleared_credential_leaves_no_row(self):
-        self.save(tmdb_api_key="fresh-key")
+        self.save(tmdb_api_key=NEW_TOKEN)
         self.save(**{"clear:tmdb_api_key": "1"})
         self.assertIsNone(asyncio.run(db.fetch_value(
             "SELECT value FROM app_secrets WHERE name = 'tmdb_api_key'")))
@@ -242,6 +279,33 @@ class RoundTripThroughTheRouteTests(PanelTestCase):
         from app.calendar import filter as calendar_filter
         self.assertEqual(calendar_filter.parse_spec(load_settings().show_certifications),
                          calendar_filter.parse_spec("TV-14, -TV-MA"))
+
+    def test_the_newer_floors_are_drawn_and_written(self):
+        """Language and keywords as text (keywords one a line — a keyword's own
+        name can hold a comma), the per-medium rows in the Filters panel's own
+        chips and tick boxes, the switches with their companions."""
+        panel = self.panel()
+        for name in ('name="languages"', 'name="keywords"', 'name="chip:tv_show_types:talk-show"',
+                     'name="chip:tv_missing:country+poster"', 'name="field:movie_missing"',
+                     'name="tv_single_service" value="0"', 'name="tv_sparse_no_network"'):
+            with self.subTest(name=name):
+                self.assertIn(name, panel)
+        resp = self.save(**{
+            "languages": "en, -ja",
+            "keywords": "anime\nSan Francisco,  California\n\n",
+            "chip:tv_show_types:talk-show": "exclude",
+            "field:tv_missing": "", "chip:tv_missing:country+poster": "include",
+            "field:movie_missing": "",
+            "tv_single_service": ["0", "1"], "movie_single_service": "0",
+            "tv_sparse_no_network": ["0", "1"]})
+        self.assertEqual(resp.status_code, 204, resp.text)
+        saved = load_settings()
+        self.assertEqual(saved.languages, "en, -ja")
+        self.assertEqual(saved.keywords, ["anime", "san francisco, california"])
+        self.assertEqual(saved.tv_show_types, "-talk-show")
+        self.assertEqual((saved.tv_missing, saved.movie_missing), ("country+poster", ""))
+        self.assertEqual((saved.tv_single_service, saved.movie_single_service,
+                          saved.tv_sparse_no_network), (True, False, True))
 
     def test_a_successful_save_reloads_the_page_it_was_opened_from(self):
         resp = self.save(endpoint="shows/premieres")

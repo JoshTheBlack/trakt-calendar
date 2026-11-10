@@ -112,6 +112,51 @@
 </form>
 {%- endmacro %}
 
+{#- WHAT A SERVICES' ANSWER SAYS UNDER ITSELF, the same on every surface:
+    `controls` is title_search.SearchOutcome.controls().
+
+    THE DEFAULT CATALOGUE NOT BEING CONFIGURED IS SAID, NEVER COVERED. Every box
+    asks the catalogue searched by default (TMDB); an instance with no credential
+    for it is told so here, and nothing is searched in its place — another
+    service answering silently would be one service standing in for another.
+
+    ONE BUTTON PER CATALOGUE, in the order the services are declared.
+    "ALSO SEARCH <SERVICE>" is a catalogue of a service this viewer has LINKED and
+    has not added yet (Simkl offers two: its TV and its anime catalogues).
+    Pressing it asks the same live route again for the same query with that
+    catalogue added — BY KEY, in `also`, a reference the server checks against
+    whom this viewer may add — and the answer is the whole list, the added
+    catalogue's results below the rows already there. Once added, that button is
+    "MORE FROM <SERVICE>", which every asked catalogue carries while it holds a
+    later page: the same search with that catalogue one page longer (`pages`,
+    key:count). The whole list comes back, because rows are numbered in the list
+    a page draws and a result is named by that number.
+
+    EVERY ONE OF THEM IS A GET OF THE SURFACE'S LIVE ROUTE, carrying the query
+    and `vals` (whatever that route always needs beside it: the calendar's
+    `live` and endpoint, the board's medium) plus the reference, and joins the
+    box's queue on the results for the box's own reason. Inside the results, so
+    each answer redraws them. -#}
+{% macro widen(results, live_url, query, controls, vals={}) -%}
+{%- if controls %}
+{%- if controls.unconfigured %}
+<p class="search-note search-unconfigured">{{ src.names(controls.unconfigured) }}
+    {{ 'is' if controls.unconfigured | length == 1 else 'are' }} not configured, so
+    {{ 'it was' if controls.unconfigured | length == 1 else 'they were' }} not searched — an
+    operator adds the credential in Settings.</p>
+{%- endif %}
+{%- if controls.buttons %}
+<div class="search-widen">
+    {%- for button in controls.buttons %}
+    <button type="button" class="btn-ghost small" hx-get="{{ live_url }}"
+            hx-vals="{{ dict(vals, q=query, **button.fields) | tojson | forceescape }}"
+            hx-json-enc="false" hx-target="{{ results }}" {{ sync(results) }}>{{ button.label }}</button>
+    {%- endfor %}
+</div>
+{%- endif %}
+{%- endif %}
+{%- endmacro %}
+
 {#- ONE RESULT ROW. What it DOES is the surface's — the ACTION SLOT is the
     element (`tag`) and its attributes (`action`, a dict rendered by Jinja's own
     `xmlattr`, which escapes every value, so an hx-vals holding JSON needs no

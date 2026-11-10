@@ -76,7 +76,7 @@ async def create_user(
     Hashing happens before the transaction opens: 200ms of Argon2 must not be
     holding SQLite's write lock while every other writer waits behind it.
     """
-    cfg = settings or load_settings()
+    cfg = settings or await load_settings()
     password_hash = await passwords.hash_password(password) if password else None
     tz = timezone if timezone is not None else (cfg.timezone or None)
 

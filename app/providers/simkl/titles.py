@@ -52,8 +52,28 @@ from __future__ import annotations
 from typing import Any
 
 from ...config import Settings
-from ..base import Media
+from ..base import Media, status_spoken
 from . import transport
+
+# WHAT SIMKL'S STATUS WORDS MAY MEAN in the app's one vocabulary
+# (base.STATUS_WORDS). Simkl states a show's status in three words where Trakt
+# and TMDB use six, so each of Simkl's covers every word it cannot tell apart —
+# "ended" is a show that ended or was canceled, "tba" one not yet airing — and
+# agrees with any of them, as a coordinate that states less agrees with one that
+# states more. Its words are stored as Simkl gives them (`_extract`); a word
+# this table does not name means only itself.
+STATUS_MEANS: dict[str, frozenset[str]] = {
+    "airing": frozenset({"returning series"}),
+    "ended": frozenset({"ended", "canceled"}),
+    "tba": frozenset({"planned", "in production", "pilot"}),
+}
+
+
+def status_means(status: str) -> frozenset[str]:
+    """Simkl's `status`, as base.STATUS_WORDS — see STATUS_MEANS."""
+    spoken = status_spoken(status)
+    return STATUS_MEANS.get(next(iter(spoken), ""), spoken)
+
 
 # Catalog metadata barely moves — an episode gains a date, a status flips once
 # a season away — so this sits on the same day-long TTL detail.py's episode
@@ -322,7 +342,7 @@ def _extract(payload: dict) -> dict[str, Any]:
     return {
         "extract_version": EXTRACT_VERSION,
         # RETURNED, NOT STORED, AND SO NOT AN EXTRACT_VERSION CHANGE.
-        # `entries.enrichment_values` names every field it keeps and this is not
+        # The title store's `enrichment_values` names every field it keeps and this is not
         # one of them, so no stored row gains a column and nothing is re-fetched.
         # What it is for: the calendar SEARCH builds a record for a title this
         # instance has never listed, and `calendar.to_show_record` needs a name.
@@ -374,7 +394,7 @@ def _extract(payload: dict) -> dict[str, Any]:
 
 
 async def fetch_title(settings: Settings, simkl_id: int, media: Media | str,
-                      *, cache_only: bool = False) -> dict | None:
+                      *, cache_only: bool = False, fresh: bool = False) -> dict | None:
     """One title's catalogue fields, or None when Simkl could not answer for
     `simkl_id` — a real failure (network, rate limit, an instance-wide block)
     or an id it does not recognise. The enrichment drain (app/calendar/enrich.py)
@@ -387,9 +407,10 @@ async def fetch_title(settings: Settings, simkl_id: int, media: Media | str,
     reference costs one call regardless of how many times the drain is asked
     about it before that TTL turns over.
 
-    `cache_only=True` makes no outbound call and answers None when nothing is
-    cached, which is a THIRD indistinguishable way of failing and is handled by
-    the same caller branch. It is what the public share pages read with: a
+    `fresh=True` asks Simkl again past the cached answer (the title store's
+    refresh). `cache_only=True` makes no outbound call and answers None when
+    nothing is cached, which is a THIRD indistinguishable way of failing and is
+    handled by the same caller branch. It is what the public share pages read with: a
     visitor's click serves what the owner's own views already warmed and can
     never spend the instance's Simkl budget.
     """
@@ -400,7 +421,7 @@ async def fetch_title(settings: Settings, simkl_id: int, media: Media | str,
         payload = await transport.cached_get(
             transport.catalog_client(), settings, f"{path}/{simkl_id}", {},
             pool=transport.CATALOG_POOL, ttl_seconds=DETAIL_CACHE_TTL_SECONDS,
-            cache_only=cache_only,
+            cache_only=cache_only, fresh=fresh,
         )
     except transport.SimklError:
         return None

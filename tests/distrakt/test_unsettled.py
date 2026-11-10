@@ -52,7 +52,7 @@ def lookup(dates: dict[tuple[str, int], str | None], *, fail: bool = False,
     import time would leave the real ones in place and the network guard would be
     what noticed.
     """
-    async def fetch_season_details(settings_, records, *, fresh, allow_degrade):
+    async def fetch_season_details(settings_, records, *, fresh, allow_degrade, order=None):
         if fail:
             raise TraktError("Trakt is unreachable")
         out = []

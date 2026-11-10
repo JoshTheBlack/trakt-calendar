@@ -37,6 +37,7 @@ from app.media import posters, user_images
 # The real warm, kept before ShareCardTestCase stubs it out, for the tests that
 # have to run the whole chain.
 REAL_ENSURE_POSTERS = posters.ensure_posters
+from tests import support
 from tests.support import APP_DIR, AppTestCase, ORIGIN, calendar_records
 
 # Artwork with the frequency content of a real poster, which is what the encoded
@@ -730,19 +731,16 @@ class TheCardDrawsTheSameArtworkAsThePageTests(ShareCardTestCase):
         self.assertEqual(self._order_used(["simkl", "trakt"])[:2], ("simkl", "trakt"))
         self.assertEqual(self._order_used(["trakt", "simkl"])[:2], ("trakt", "simkl"))
 
-    def test_tmdb_is_the_backstop_and_never_the_default(self):
-        """It stays in the order — it is the only artwork the ranker's own
-        imported titles have, since they were never on anyone's calendar — but
-        it no longer decides what a share link advertises."""
+    def test_tmdb_lands_after_the_services_an_owner_named(self):
+        """An owner who stated an order keeps it: TMDB, which they did not name,
+        comes after the services they did — once."""
         order = self._order_used(["simkl", "trakt"])
-        self.assertEqual(order[-1], "tmdb")
-        self.assertNotEqual(order[0], "tmdb")
+        self.assertEqual(order, ("simkl", "trakt", "tmdb"))
 
     def test_an_owner_with_no_preference_still_gets_the_declared_order(self):
-        from app.providers.base import Source
-
-        order = self._order_used()
-        self.assertEqual(order, tuple(str(s) for s in Source) + ("tmdb",))
+        """TMDB first, as it is everywhere a viewer has not reordered — the same
+        order the page itself resolved its pictures in."""
+        self.assertEqual(self._order_used(), ("tmdb", "trakt", "simkl"))
 
     def test_the_card_draws_the_tile_of_the_service_the_page_RESOLVED(self):
         """THE BUG THIS CLASS EXISTS FOR, AND THE OWNER'S ORDER IS NOT ENOUGH TO
@@ -899,7 +897,7 @@ class TheOwnersSourcePreferenceReachesBothSurfacesTests(ShareCardTestCase):
         different owner's link still finds everything the fill stored."""
         self.narrow_the_owner_to("trakt")
         self.page_total(self.query)
-        window, _ = asyncio.run(calendar_cache.read_cached_window(
+        window, _ = asyncio.run(support.read_cached_window(
             "shows/new", calendar_cache.window_start(date(2026, 8, 12))))
         self.assertEqual(sorted(s for g in window.groups for s in g["by_source"]),
                          ["simkl", "trakt"])
@@ -1019,7 +1017,7 @@ class ALinkThatNamesItsOwnSourcesTests(ShareCardTestCase):
         for everybody, so there is nothing left to narrow to and the link
         renders on the owner's preference — which on this instance is now one
         service, and it is the one still in play."""
-        from app.config import save_settings
+        from tests.support import save_settings
 
         save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="cid",
                                trakt_access_token="tok",
@@ -1086,7 +1084,7 @@ class ALinkThatNamesItsOwnSourcesTests(ShareCardTestCase):
         """Applied at read over the shared row, like every other narrowing: what
         one link says must never reach what everybody else reads."""
         self.page(f"{self.query}&source=trakt")
-        window, _ = asyncio.run(calendar_cache.read_cached_window(
+        window, _ = asyncio.run(support.read_cached_window(
             "shows/new", calendar_cache.window_start(date(2026, 8, 12))))
         self.assertEqual(sorted(s for g in window.groups for s in g["by_source"]),
                          ["simkl", "trakt"])

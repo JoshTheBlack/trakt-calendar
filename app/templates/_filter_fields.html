@@ -80,10 +80,16 @@
 {# `placeholder` empty means a CLOSED VOCABULARY and no box is drawn. Ratings and
    release formats are the two: a service publishes a fixed set of each, so a
    field offering to add a seventh rating would be offering something that can
-   never match anything. #}
-{% macro field(name, label, placeholder='') %}
+   never match anything.
+
+   `also` DRAWS A SECOND DIMENSION INSIDE THIS ONE (`subfield`), for one that
+   reads as part of it — show types beside genres — while staying its own
+   column, its own chips and its own presence marker, so what a save writes is
+   exactly what it was. Its set chips count in this field's head. #}
+{% macro field(name, label, placeholder='', also='', also_label='') %}
 {% set states = filter_panel.chips[name] %}
-{% set set_count = states | selectattr('mode') | list | length %}
+{% set set_count = (states | selectattr('mode') | list | length)
+                   + ((filter_panel.chips[also] | selectattr('mode') | list | length) if also else 0) %}
 <div class="ffield" data-field="{{ name }}">
     {# "THIS DIMENSION WAS ON THE PANEL", which is a different statement from any
        chip's. A dimension with no vocabulary and nothing stored — networks, for
@@ -100,5 +106,51 @@
         </details>
     </div>
     {{ chips(name, states, label, placeholder) }}
+    {% if also %}{{ subfield(also, also_label) }}{% endif %}
 </div>
+{% endmacro %}
+
+{# A DIMENSION DRAWN INSIDE ANOTHER'S FIELD (`field`'s `also`): its presence
+   marker, a label of its own and its chips — a closed vocabulary, so no box. #}
+{% macro subfield(name, label) %}
+<div class="fsubfield" data-field="{{ name }}">
+    <input type="hidden" name="{{ filter_panel.presence[name] }}" value="" form="filtersForm">
+    <span class="fsubfield-label">{{ label }}</span>
+    {{ chips(name, filter_panel.chips[name], label) }}
+</div>
+{% endmacro %}
+
+{# A DIMENSION WHOSE ANSWERS ARE TICKED OR NOT — the missing-data rules. The same
+   field shape as `field` (its presence marker, its head, its prose), drawn as
+   tick boxes (_filter_chip.html's `tick`), each posting its own chip field. A
+   rule the operator's floor already applies is fixed on and says so. #}
+{% macro ticks(name, label) %}
+{% set states = filter_panel.chips[name] %}
+{% set floor = filter_panel.floor[name] %}
+{% set set_count = states | selectattr('mode') | list | length %}
+<div class="ffield" data-field="{{ name }}">
+    <input type="hidden" name="{{ filter_panel.presence[name] }}" value="" form="filtersForm">
+    <div class="ffield-head">
+        <span class="ffield-label">{{ label }}</span>
+        {% if set_count %}<span class="ffield-count">{{ set_count }} set</span>{% endif %}
+        <details class="finfo">
+            <summary aria-label="What {{ label | lower }} does">i</summary>
+            <div class="finfo-body">{{ caller() }}</div>
+        </details>
+    </div>
+    <div class="fticks">
+        {% for state in states %}{{ fc.tick(state.name, 'include', state.label, 'ftick-' ~ name ~ '-' ~ loop.index,
+                                            on=state.mode == 'include', fixed=state.token in floor,
+                                            form='filtersForm') }}{% endfor %}
+    </div>
+    {% if floor %}<p class="hint">A fixed tick is one this instance already applies for everyone.</p>{% endif %}
+</div>
+{% endmacro %}
+
+{# ONE SWITCH (app/calendar/vocab.py's TOGGLE_FIELDS), with its hidden companion,
+   fixed on where the operator's floor already applies it. #}
+{% macro switch(field, label) %}
+{% set toggle = filter_panel.toggles[field] %}
+{{ fc.tick(toggle.name, '1', label, 'fswitch-' ~ field, on=toggle.on,
+           fixed=filter_panel.floor[field], form='filtersForm', companion=true) }}
 {% endmacro %}

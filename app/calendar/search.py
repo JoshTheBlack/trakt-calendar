@@ -39,26 +39,30 @@ not make, and nobody waits on one to see what their own calendar already holds.
 """
 from __future__ import annotations
 
-import asyncio
+import dataclasses
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from typing import NamedTuple
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from . import cache as calendar_cache
 from . import enrich as calendar_enrich
 from . import entries
-from . import filter as calendar_filter
+from . import query as calendar_query
 from . import vocab
-from .. import cache, db, providers
+from .. import cache, db, metadata, providers
 from ..endpoints import get_endpoint
+from ..metadata import identity as title_identity
+from ..metadata import rows as title_rows
+from ..metadata import typed_search
 from ..perftrace import span
 # The catalogue fan-out and merge every searching feature shares, whose dedupe
 # rules carry measured findings a second implementation would get wrong.
-from ..providers import title_search
-from ..providers.base import (Item, Media, Source, SourceUnavailable, epoch_moment,
-                              render)
+from ..providers import season_choices, title_search
+from ..providers.base import (Item, Media, Record, Source, SourceUnavailable,
+                              epoch_moment, proxied_image, render)
 
 logger = logging.getLogger(__name__)
 
@@ -70,17 +74,6 @@ GROUP_LIMIT = 40
 # HOW MANY ROWS A VIEWER IS SHOWN. Beyond this a search is not answering the
 # question they asked, and the honest response is to say the query was broad.
 RESULT_LIMIT = 60
-
-# HOW MANY CATALOGUE HITS ARE DESCRIBED. Each costs one per-title lookup, so
-# this is the request budget of a search, spent only on an explicit ask.
-CATALOGUE_LIMIT = 8
-
-# How many of one show's season premieres a search will offer, newest first.
-# WITHOUT THIS ONE FRANCHISE IS THE WHOLE RESULT LIST: a title running twenty
-# seasons would push every other show off, and the seasons nobody searched for
-# would crowd out the shows they did. Three is enough to reach a season now
-# airing, the one before it, and the one being announced.
-SEASONS_PER_SHOW = 3
 
 # How long a title written by this path stays fresh. THE SAME DAY-SCALE THE FILL
 # USES, because it is the same kind of row: a title's genres and certification
@@ -120,9 +113,7 @@ class Airing:
         weekly show is four rows in one month. Both are references the server
         resolves against the month it draws, not data it is being handed.
         """
-        return (f"/calendar?year={self.year}&month={self.month}"
-                f"&endpoint={quote(self.endpoint_key, safe='')}"
-                f"&highlight={quote(self.item.mark_key)}&day={self.day}#jump-target")
+        return landing_url(self.endpoint_key, self.item)
 
 
 @dataclass(frozen=True)
@@ -151,47 +142,6 @@ class Elsewhere:
     source_id: str = ""
     media: str = "show"
 
-    @property
-    def url(self) -> str:
-        """The jump route, which writes this one airing and then sends the
-        reader to the month it lands on.
-
-        NOT STRAIGHT TO THE MONTH, because the month may not draw this title
-        however correctly it fills — see `fill_one_gap` for the two datasets that
-        disagree. And NOT WRITTEN AT SEARCH TIME, because a search returns
-        everything that matched and a reader asked for one of them.
-
-        IT CARRIES A SOURCE AND AN ID AND NOTHING ELSE THAT MATTERS. The service
-        is asked for the rest, so this link cannot be edited into a calendar row
-        of somebody's choosing.
-
-        THE DISTINCTION IS BETWEEN POINTING AND PROMISING. Arriving fills the
-        month, which is the point: the calendar learns about the title, and a
-        card appears if a source lists it there. Whether one does is not
-        something this can know, so the link may land on a day with nothing on
-        it — which is why the results say so in words.
-
-        THE ANCHOR IS FREE AND THE HIGHLIGHT IS NOT. `#day-` is resolved by the
-        browser: it scrolls to that day when the day is drawn and does nothing
-        at all when it is not, so it costs nothing to be wrong about and saves
-        a reader scrolling a month to find out. A `highlight=` would be a
-        different claim — it names a specific CARD, and the identity a catalogue
-        lookup builds need not be the one the calendar draws for that title,
-        since which source describes it differs. Highlighting the wrong thing
-        or nothing is worse than not offering to.
-        """
-        season = f"&season={self.item.season}" if self.item.season is not None else ""
-        # `#jump-target` ON THE LINK ITSELF, not only on the redirect: the page is
-        # boosted, so following this is a fetch, and a fetch's final URL drops
-        # the fragment the redirect's Location carried — measured in Chromium and
-        # Firefox, the card was drawn and marked and the page stayed at the top.
-        # htmx scrolls to the anchor of the address it was asked to follow.
-        return (f"/calendar/jump?source={quote(str(self.source), safe='')}"
-                f"&id={quote(str(self.source_id), safe='')}"
-                f"&media={quote(str(self.media), safe='')}{season}"
-                f"&endpoint={quote(self.endpoint_key, safe='')}"
-                f"&year={self.year}&month={self.month}#jump-target")
-
 
 @dataclass(frozen=True)
 class Results:
@@ -203,6 +153,11 @@ class Results:
     truncated: bool = False
     failed: frozenset = frozenset()
     searched: tuple[str, ...] = ()
+    # What the box draws under a catalogue answer — title_search.SearchOutcome
+    # .controls — or None when no catalogue was asked.
+    controls: dict | None = None
+    # The titles the catalogues answered with, as every box lists them (Found).
+    found: tuple = ()
 
 
 def _local_day(air_ts: float, date_only: bool, tz: ZoneInfo) -> date:
@@ -227,9 +182,10 @@ async def stored(query: str, *, settings, prefs, tz: ZoneInfo,
     across `endpoints`.
 
     CONFIRMED BY THE READ PATH, NEVER BY THIS MODULE'S OWN OPINION. The matching
-    groups are run through `cache.visible_records` — the very pipeline
-    `assemble_range` runs, with this viewer's own filters and source selection —
-    and a row is offered only if it comes back out. Deciding here what a filter
+    titles are read through the calendar's own read (app/calendar/query.py) —
+    the very cards, judged by the very statement, a month draws, with this
+    viewer's own filters and source selection — and a row is offered only if it
+    comes back out. Deciding here what a filter
     would have done would be a second implementation of the six reasons a title
     is absent, and it would be wrong the first time any of them changed.
 
@@ -244,10 +200,10 @@ async def stored(query: str, *, settings, prefs, tz: ZoneInfo,
     month nobody has opened is a job for the catalogue half, which the viewer has
     to ask for.
     """
-    # entries.MIN_QUERY, enforced here rather than in the route so the typing
-    # path and the Enter path cannot disagree about it.
-    needle = entries.fold_title(query)
-    if len(needle) < entries.MIN_QUERY:
+    # The title store's MIN_QUERY, enforced here rather than in the route so the
+    # typing path and the Enter path cannot disagree about it.
+    needle = title_rows.fold_title(query)
+    if typed_search.too_short(query):
         return Results()
 
     found: list[Airing] = []
@@ -257,29 +213,24 @@ async def stored(query: str, *, settings, prefs, tz: ZoneInfo,
             keys = await entries.groups_matching(endpoint.key, query, GROUP_LIMIT)
             if not keys:
                 continue
-            records = await entries.read_groups(endpoint.key, keys)
-            groups = calendar_cache.group_records(records)
             # NARROWED PER ENDPOINT, INSIDE THE LOOP, because a search across
             # every calendar spans both media: the film endpoint answers under
             # the film filters and the film services, the show endpoints under
-            # theirs. Resolving either once outside the loop would apply one
+            # theirs. Reading either once outside the loop would apply one
             # medium's answers to the other's results.
-            specs = vocab.active_specs(prefs, endpoint.media, honour_pause=True)
-            kept, _narrowed = await calendar_cache.visible_records(
-                groups, endpoint,
-                genres=specs["genres"], countries=specs["countries"],
-                show_certifications=specs["show_certifications"],
-                movie_certifications=specs["movie_certifications"],
-                movie_release_countries=specs["movie_release_countries"],
-                movie_release_types=specs["movie_release_types"],
-                prefs=source_selection.for_media(endpoint.media), settings=settings)
-            for record in kept:
-                item = render(record, tz)
+            # WHERE IT AIRS IS WHERE THE CALENDAR DRAWS IT (query's placement):
+            # the day the viewer's own first service gives, and one row per card
+            # however many services list the episode.
+            viewer = _viewer(endpoint, settings, prefs,
+                             source_selection.for_media(endpoint.media), tz)
+            items = await calendar_query.present(
+                viewer, (await calendar_query.titles(viewer, keys)).views)
+            for item in items:
                 # THE TITLE IS CHECKED AGAIN AFTER RESOLUTION, because a group is
                 # loaded whole and the card may end up carrying the OTHER
                 # source's spelling — which is the right card, and may not be
                 # the string that matched.
-                if needle not in entries.fold_title(item.title):
+                if needle not in title_rows.fold_title(item.title):
                     continue
                 day = date.fromisoformat(item.air_date)
                 found.append(Airing(
@@ -294,6 +245,34 @@ async def stored(query: str, *, settings, prefs, tz: ZoneInfo,
                    searched=tuple(e.key for e in endpoints))
 
 
+def _filters(prefs, media) -> dict:
+    """This viewer's filters for `media`, as the read path takes them — EVERY
+    narrowing `vocab.active_specs` answers, the network list included, which is
+    what makes "would this viewer's calendar draw it" this module's question
+    asked the calendar's way."""
+    return vocab.active_specs(prefs, media, honour_pause=True)
+
+
+def _viewer(endpoint, settings, prefs, selection, tz: ZoneInfo) -> calendar_query.Viewer:
+    """This viewer on `endpoint`, as the calendar's read takes them: their
+    filters for its medium and their source selection for it."""
+    return calendar_query.Viewer(endpoint, settings, selection, tz,
+                                 vocab.complete_specs(_filters(prefs, endpoint.media)))
+
+
+def landing_url(endpoint_key: str, item: Item) -> str:
+    """The calendar, at the month `item` is drawn in, anchored on THAT CARD.
+
+    THE DAY RIDES WITH THE MARK: a card past the days the page draws inline does
+    not exist when the browser looks for #jump-target, so a mark alone landed at
+    the top of the month — see Airing.url for what each part is for."""
+    day = date.fromisoformat(item.air_date)
+    return (f"/calendar?year={day.year}&month={day.month}"
+            f"&endpoint={quote(endpoint_key, safe='')}"
+            f"&highlight={quote(item.mark_key, safe='')}"
+            f"&day={quote(item.air_date, safe='')}#jump-target")
+
+
 def _endpoint_for(media: Media) -> str:
     """Which calendar a catalogue hit should be looked for on.
 
@@ -305,100 +284,355 @@ def _endpoint_for(media: Media) -> str:
     return "movies" if media is Media.MOVIE else "shows/premieres"
 
 
-async def catalogue(query: str, *, settings, prefs, tz: ZoneInfo,
-                    known: frozenset[str]) -> Results:
-    """Titles a registered catalogue knows about, described well enough to draw.
+@dataclass(frozen=True)
+class Found:
+    """One title a catalogue search answered with, as every box lists it: the
+    merged hit, the medium it was searched as, and the reference a row names it
+    by (`ref`: the query, the medium, the search's own SearchRef fields and its
+    place in that answer) — what the season picker and the jump re-read it from.
+    """
+    hit: object
+    media: str
+    ref: dict
+    # The hit's poster through the image proxy — the one image host the
+    # Content-Security-Policy admits — made here, where it becomes something a
+    # browser draws.
+    poster: str = ""
+
+
+async def catalogue(query: str, *, settings, media: tuple = (Media.SHOW, Media.MOVIE),
+                    ref: title_search.SearchRef = title_search.SearchRef()) -> Results:
+    """The titles the catalogues this viewer's search asks know about — THE SAME
+    ROWS EVERY BOX DRAWS, the tracker's and the board's: every title each asked
+    catalogue answered, SEARCH_PAGE_SIZE a page, with every service's mark, and
+    "Also search" / "More from" under them (title_search.SearchOutcome.controls).
 
     ONLY ON AN EXPLICIT ASK. This is the half that spends requests, and it is
     reached from the search button or Enter rather than from typing.
 
-    `known` IS THE `(mark_key, season)` PAIRS THE STORED HALF ALREADY ANSWERED
-    FOR, so a season the calendar draws is not offered a second time as
-    somewhere to go — the stored answer is strictly better, it names the day.
-    The season is part of the key because a row here is a season premiere and
-    `mark_key` is deliberately the TITLE's identity; matching on the title alone
-    would hide every season of a show the calendar holds any airing of.
+THE MEDIUM OF THE CALENDAR BEING SEARCHED (`media`), so a box answers
+    SEARCH_PAGE_SIZE titles a page as every other box does; both media only when
+    the viewer asks to search every calendar, shows first, then films, and an
+    added service's titles below the default's across both (`_default_first`).
+    ONE SET OF CONTROLS for both, since the catalogues asked are the same for
+    each: a catalogue's "more" stands while either medium has a later page.
 
-    AND THE VIEWER'S OWN FILTERS APPLY HERE TOO, through the same
-    `filter.filter_records` the stored half reaches via `visible_records`. This
-    half used to skip them, which made it the one surface in the app that
-    offered somewhere it knew the reader could not get to: a title excluded by
-    genre, country or certification was listed, clicked, and the month it opened
-    could never draw it. Filtering makes "not on your calendar" mean "not there
-    YET" rather than "not there, ever, and you have no way to tell which".
-
-    A RECORD IS ASKED ONLY WHAT THE LOOKUP COULD ANSWER. `exempt_unenriched` is
-    NOT set: unlike a calendar fill, every row here has just been described by a
-    per-title lookup, so a missing genre means the service does not know one
-    rather than that nothing has asked yet.
-
-    A ROW IS A SEASON, NOT A SHOW, and that is the difference between offering
-    somewhere useful and somewhere technically true. A long-running title has one
-    first-air date and many premieres; keying the link on the show sent every
-    search for a recent season to the month the show began, years earlier, which
-    is a jump nobody wanted. Each season the source can date gets its own row and
-    its own month.
-
-    TWO LOOKUPS PER HIT AND THAT IS THE COST. A search hit carries no air date on
-    either source measured (Trakt's search omits it, Simkl's has only a year), so
-    a description supplies the poster, genres and certification a row is drawn
-    and filtered on, and a season list supplies the premieres. The DATE COMES
-    FREE WITH THE SEASON LIST — Trakt returns `first_aired` per season in the
-    same response as the counts, and Simkl's grouping already holds every
-    episode date — so resolving dates later, on a click, would be a third call
-    to learn what the second already said.
-
-    THE HITS ARE ASKED CONCURRENTLY, which is what keeps a second lookup from
-    doubling the wait. Both transports pace themselves against their service's
-    ceiling, so the gather is bounded by that rather than racing it.
-
-    BOUNDED TWICE OVER: CATALOGUE_LIMIT hits are described at all, and
-    SEASONS_PER_SHOW rows come back from any one of them, newest first. Without
-    the second bound one franchise with twenty seasons would be the entire
-    result list.
+    NOTHING IS DESCRIBED HERE. A row is a title, as on every box; opening it asks
+    for its seasons (`picker`), which is where the dates, the viewer's filters and
+    what the calendar already draws are read — so a search costs the services'
+    search answers and nothing else, whatever they return.
     """
-    needle = entries.fold_title(query)
-    if len(needle) < entries.MIN_QUERY:
+    if typed_search.too_short(query):
         return Results()
-
-    asked = providers.for_catalogue_search(settings)
-    if not asked:
-        return Results()
-
-    out: list[Elsewhere] = []
-    suppressed: list[Elsewhere] = []
+    found: list[Found] = []
     failed: set = set()
-    with span("search.catalogue", sources=len(asked)) as sp:
-        for media in (Media.SHOW, Media.MOVIE):
-            merged = await title_search.search_catalogue(asked, settings, media, query)
-            failed |= set(merged.failed)
-            # THE SAME SPECS THE CALENDAR ITSELF READS, picked per media by the
-            # one function that knows which column answers for which medium.
-            # Every dimension needs that now, not only certification: the two
-            # certification vocabularies were always different (TV Parental
-            # Guidelines against MPA ratings), and genres and countries became
-            # per-medium with the panel that asks for them.
-            specs = vocab.active_specs(prefs, media, honour_pause=True)
-            certifications = (specs["movie_certifications"] if media is Media.MOVIE
-                              else specs["show_certifications"])
-            described = await asyncio.gather(*(
-                _describe(settings, hit, media, tz)
-                for hit in merged.hits[:CATALOGUE_LIMIT]))
-            for rows in described:
-                for row in rows:
-                    if (row.item.mark_key, row.item.season) in known:
-                        suppressed.append(row)
-                        continue
-                    if not calendar_filter.filter_records(
-                            [row.record], specs["genres"], specs["countries"],
-                            certifications):
-                        continue
-                    out.append(row)
-        sp.set(found=len(out))
-        await _complete_known_seasons(suppressed)
+    more_from: set[str] = set()
+    plan = None
+    with span("search.catalogue", pages=len(ref.pages)) as sp:
+        for medium in media:
+            outcome = await title_search.search(settings, medium, query, ref)
+            plan = outcome.plan
+            failed |= set(outcome.result.failed)
+            more_from |= set(outcome.result.more_from)
+            for index, hit in enumerate(outcome.result.hits):
+                found.append(Found(hit, str(medium), {
+                    "q": query, "media": str(medium), **ref.fields(), "i": str(index)},
+                    proxied_image(hit.poster) or ""))
+        sp.set(found=len(found))
+    combined = title_search.SearchMergeResult(hits=[], failed=frozenset(failed),
+                                              more_from=frozenset(more_from))
+    controls = title_search.SearchOutcome(combined, ref, plan).controls()
+    return Results(found=tuple(_default_first(found, plan)), failed=frozenset(failed),
+                   controls=controls)
 
-    return Results(elsewhere=tuple(out[:RESULT_LIMIT]),
-                   failed=frozenset(failed))
+
+def _default_first(found: list[Found], plan) -> list[Found]:
+    """`found` with every service's rows in the order its catalogues are asked —
+    the default's first, an added service's below, both media together — as
+    every box draws them: what "also search" brings is appended rather than
+    shuffled in above rows already being read. Stable, so each service's rows
+    keep their own order (shows, then films). There is no relevance to rank
+    across services by — TMDB and Simkl answer in their own order and carry no
+    score."""
+    order = [str(entry.source) for entry in plan.asked] if plan else []
+
+    def rank(row: Found) -> int:
+        leader = str(next(iter(row.hit.source_ids), ""))
+        return order.index(leader) if leader in order else len(order)
+
+    return sorted(found, key=rank)
+
+
+@dataclass(frozen=True)
+class Picker:
+    """One title's choices for the calendar's season picker, and the rows they
+    were drawn from — what the jump writes and lands on."""
+    options: list
+    rows: list[Elsewhere]
+
+
+async def picker(settings, hit, media: Media, *, prefs, tz: ZoneInfo,
+                 source_selection=None) -> Picker:
+    """`hit`'s seasons — or a film's release — as the app's one season picker
+    offers them (app/providers/season_choices.py), for the calendar's jump.
+
+    DESCRIBED NOW, by the service that leads the hit, which is the cost the
+    search no longer pays: a season list for the premieres and a description for
+    the genres and certification the viewer's filters read.
+
+    THE VIEWER'S OWN FILTERS APPLY HERE, every one the calendar applies, through
+    the calendar's own (`_kept_by_filters`): a season the viewer's filters would
+    hide is listed and refused, saying so — never offered as somewhere to go
+    that the month it opens could not draw.
+
+    A SEASON THE CALENDAR ALREADY DRAWS IS A LINK TO ITS DAY rather than a
+    choice, and its airing from another service is completed on the way
+    (`_complete_known_seasons`): the season is already on the calendar, so the
+    stored airing joins the card it matches rather than drawing a new one.
+    """
+    rows = await _describe(settings, hit, media, tz)
+    specs = vocab.active_specs(prefs, media, honour_pause=True)
+    reasons: dict = {}
+    links: dict = {}
+    on_calendar: list[Elsewhere] = []
+    title_kept = (await _title_kept(rows[0].endpoint_key, rows[0].item.mark_key, media,
+                                    prefs=prefs, source_selection=source_selection,
+                                    settings=settings, tz=tz) if rows else None)
+    for row in rows:
+        season = row.item.season if media is not Media.MOVIE else None
+        drawn = await _drawn(row.endpoint_key, row.item.mark_key, row.item.season, media,
+                             prefs=prefs, source_selection=source_selection,
+                             settings=settings, tz=tz)
+        if drawn is not None:
+            on_calendar.append(row)
+        # THE FILTERS FIRST, a season the calendar holds included: a link to its
+        # day would open a day that cannot draw it, which is what a filtered
+        # season's link did — the month opened with nothing to find. A season it
+        # does not hold is judged by the title as the calendar holds it, when it
+        # holds any of it (`_title_kept`), and by the description only otherwise.
+        if drawn is not None:
+            kept = bool(drawn)
+        elif title_kept is not None:
+            kept = title_kept
+        else:
+            kept = await _kept_by_filters(row.record, media, specs, settings)
+        if not kept:
+            reasons[season] = "your filters hide it"
+        elif drawn:
+            # TO THE DAY THE CALENDAR DRAWS IT ON, which is this viewer's first
+            # service's day for the episode — not the describing service's,
+            # which may date it a day or a week differently.
+            links[season] = landing_url(row.endpoint_key, drawn[0])
+    await _complete_known_seasons(on_calendar)
+    if media is Media.MOVIE or all(row.item.season is None for row in rows):
+        # ONE CHOICE, NOT A SEASON: a film's release, or the premiere of a show
+        # whose service would not list its seasons (`_describe` falls back to
+        # the show's own first-air date rather than dropping the title).
+        options = [season_choices.SeasonOption(
+            None, premiere=date.fromisoformat(row.day),
+            name="Release" if media is Media.MOVIE else "Premiere",
+            held_as="on your calendar") for row in rows[:1]]
+    else:
+        options = season_choices.seasons_only(season_choices.season_options(
+            [{"season": row.item.season, "first_aired": row.day} for row in rows],
+            held=(), current=None, finished=None, now=datetime.now(timezone.utc),
+            held_as="on your calendar"))
+    return Picker(season_choices.blocking(options, reasons, links), rows)
+
+
+async def _drawn(endpoint_key: str, title_key: str, season: int | None, media: Media, *,
+                 prefs, source_selection, settings, tz: ZoneInfo,
+                 written=()) -> list[Item] | None:
+    """The cards THIS viewer's calendar draws for one season of a title (a film:
+    its release) on `endpoint_key`, each on its own day, earliest first — [] when
+    the calendar holds the season and the viewer's filters or sources hide it,
+    None when it holds none.
+
+    THE STORED RECORD, NOT THE DESCRIPTION, decides a title the calendar holds:
+    the calendar draws the service that listed it, and that record can answer a
+    filter differently from the describing service's. MEASURED on the owner's
+    calendar: Sever (2026) is stored from Simkl with no country, so their
+    US-only film filter hides the card, while TMDB's description says US — the
+    picker offered it, and the jump landed on a day with nothing on it. So this
+    runs the calendar's own read (`cache.placed`, with the viewer's source
+    choice), the same confirmation the search's stored half makes — which also
+    answers WHERE, the day the viewer's first service gives the episode.
+
+    `written` NARROWS IT TO THE CARD THOSE RECORDS JOINED, for a jump that has
+    just written them: a season two services date months apart is two cards,
+    and the jump lands on the one it wrote into.
+    """
+    if not await entries.sources_airing(endpoint_key, title_key, season):
+        return None
+    named = {(str(r.source), str(r.id), float(r.air_ts)) for r in written}
+
+    def holding(cards: list) -> list:
+        held = [card for card in cards
+                if any((listing.source, str(listing.id), float(listing.air_ts)) in named
+                       for listing in card.listings)]
+        return held or cards
+
+    endpoint = get_endpoint(endpoint_key)
+    viewer = _viewer(endpoint, settings, prefs,
+                     source_selection.for_media(endpoint.media) if source_selection else None,
+                     tz)
+    placed = await calendar_query.titles(
+        viewer, [title_key], narrow=holding,
+        keep=lambda listing: media is Media.MOVIE or listing.season == season)
+    items = await calendar_query.present(viewer, placed.views)
+    return sorted(items, key=lambda item: (item.air_date, item.air_ts))
+
+
+async def _title_kept(endpoint_key: str, title_key: str, media: Media, *, prefs,
+                      source_selection, settings, tz: ZoneInfo) -> bool | None:
+    """Whether this viewer's filters keep the TITLE as the calendar holds it on
+    `endpoint_key` — True when any of its stored cards is drawn, False when its
+    stored cards are there and the filters removed them, None when the calendar
+    holds none this viewer reads (nothing to judge by).
+
+    FOR A SEASON THE CALENDAR DOES NOT HOLD YET, of a title it does. The filters
+    rule on TITLE facts — network, genres, country, certification — and the
+    calendar's record of the title is what a season's card would carry once
+    written; the describing service's spelling of them can differ. MEASURED on
+    the owner's calendar: TMDB names Yellowjackets' network "Showtime" first,
+    while both services' listings say "Paramount+ with Showtime" — so with that
+    network filtered out, the seasons already on the calendar were refused and
+    the ones not on it were offered, judged by TMDB's word.
+    """
+    endpoint = get_endpoint(endpoint_key)
+    placed = await calendar_query.titles(
+        _viewer(endpoint, settings, prefs,
+                source_selection.for_media(endpoint.media) if source_selection else None, tz),
+        [title_key])
+    if placed.views:
+        return True
+    return False if placed.filtered_out else None
+
+
+async def _kept_by_filters(record, media: Media, specs, settings) -> bool:
+    """Whether this viewer's filters keep a record a service has just described,
+    for a title the calendar does not hold yet (`_drawn` answers one it does) —
+    EVERY filter the calendar applies, by the statement the calendar judges every
+    card with (query.described_kept): the release narrowing, the instance's floor
+    and every one of the viewer's own, handed over whole as `vocab.active_specs`
+    answers them so a dimension added there cannot be left out here."""
+    viewer = calendar_query.Viewer(get_endpoint(_endpoint_for(media)), settings, None,
+                                   ZoneInfo("UTC"), vocab.complete_specs(specs))
+    return await calendar_query.described_kept(viewer, record)
+
+
+def _jump_writer(hit, endpoint_key: str):
+    """Which of the services that found `hit` writes its airing onto
+    `endpoint_key`: the first, in the hit's own order, whose calendar lists it
+    (`_publishes`). None when none does — a catalogue that lists no calendar
+    describes the title, and the jump opens the month."""
+    for source, source_id in hit.source_ids.items():
+        provider = providers.get(source)
+        if provider is not None and provider.detail_port is not None \
+                and _publishes(provider, endpoint_key) and source_id:
+            return source, str(source_id)
+    return None
+
+
+class Landing(NamedTuple):
+    """Where a jump sends the reader (`url`, "" for nowhere in particular), or
+    that it sends them nowhere because the card is there and this viewer's
+    filters hide it (`hidden`)."""
+    url: str
+    hidden: bool = False
+
+
+async def jump(settings, hit, media: Media, seasons: list, *, tz: ZoneInfo,
+               now: int, prefs=None, source_selection=None) -> Landing:
+    """Write the airings the picker's ticked seasons name (a film: its release),
+    and answer where to land — the first ticked one's card, on the day this
+    viewer's calendar draws it. The title is the one the reference named, re-read
+    from the stored search; nothing about it comes from the request.
+
+    EACH SEASON IS WRITTEN BY A SERVICE THAT LISTS THE CALENDAR (`_jump_writer`),
+    with `exact_season`: a season that service cannot date writes nothing rather
+    than the show's own start (see fill_one_gap). One that no such service found
+    writes nothing, and the jump still opens the month the season should be in.
+
+    WHERE IT LANDS IS THE CALENDAR'S ANSWER (`_drawn`, through cache.placed), not
+    the written airing's own date: a written airing joins any other service's
+    listing of the episode, and the card is drawn on the day the viewer's first
+    service gives — which can be another day, or another month, than the one
+    just written. `prefs` (the viewer's filters) and `source_selection` are what
+    that answer is read under.
+
+    A CARD THE VIEWER'S FILTERS HIDE IS NOT A PLACE TO GO. The picker judges a
+    season the calendar does not hold yet by what it can know before anything
+    is written: the title's facts. Who LISTS the card is not known until the
+    write and the week's own fill — "only one service lists it" hid Yellowjackets'
+    second season, which TMDB's premieres list and Trakt's skip, so the jump
+    landed on a month with nothing to find. So the week the airing is filed in is
+    made current FIRST (`cache.ensure_window`, the fill the month's own load would
+    make a moment later, which also stands a searched airing down for its
+    service's feed), then the card is judged as that month would draw it, and a
+    hidden one answers `hidden` for the picker to say so in place.
+    """
+    rows = await _describe(settings, hit, media, tz)
+    # The EARLIEST ticked season leads, as the picker draws them top to bottom;
+    # a film, or a show with no season list, has its one row (season None).
+    wanted = sorted((row for row in rows if row.item.season in seasons
+                     or (media is Media.MOVIE and row is rows[0])),
+                    key=lambda row: (row.item.season is not None, row.item.season or 0))
+    if not wanted:
+        return Landing("")
+    written: list[list] = []
+    for row in wanted:
+        writer = _jump_writer(hit, row.endpoint_key)
+        if writer is None:
+            written.append([])
+            continue
+        source, source_id = writer
+        written.append(await fill_one_gap(
+            settings, source=source, source_id=source_id, media=media,
+            season=row.item.season if media is not Media.MOVIE else None,
+            endpoint_key=row.endpoint_key, now=now,
+            exact_season=media is not Media.MOVIE))
+    first = wanted[0]
+    # THE WEEK IT IS FILED IN, MADE CURRENT before it is judged (see above).
+    filed = calendar_cache.record_utc_date(written[0][0] if written[0] else first.item)
+    try:
+        await calendar_cache.ensure_window(get_endpoint(first.endpoint_key), settings,
+                                           calendar_cache.window_start(filed), now=now)
+    except SourceUnavailable as exc:
+        # Judged on what is stored, as the month would draw it if its fill failed.
+        logger.info("calendar jump: the week of %s could not be filled (%s)", filed, exc)
+    # THE CARD IS NAMED WHETHER OR NOT ANYTHING WAS WRITTEN: the month may draw
+    # the title from a service that lists it there, under the same identity this
+    # description keys (the tmdb > tvdb > imdb > mal waterfall), and naming a
+    # card the month does not draw marks nothing.
+    drawn = await _drawn(first.endpoint_key, first.item.mark_key, first.item.season, media,
+                         prefs=prefs or {}, source_selection=source_selection,
+                         settings=settings, tz=tz, written=written[0])
+    if drawn:
+        return Landing(landing_url(first.endpoint_key, drawn[0]))
+    if drawn is not None:
+        # HELD, AND HIDDEN FROM THIS VIEWER: nowhere to land.
+        return Landing("", hidden=True)
+    # NOTHING HELD — no service lists it here: the month the description puts it
+    # in, as a search result's promise is "go to where this should be".
+    return Landing(landing_url(first.endpoint_key, first.item))
+
+
+def _publishes(provider, endpoint_key: str) -> bool:
+    """Whether `provider` lists the calendar `endpoint_key` names — THE TEST FOR
+    WRITING ITS AIRING ONTO IT.
+
+    A SERVICE WRITES ONLY TO A CALENDAR IT PUBLISHES. What this module stores is
+    a service's own airing, as its calendar feed would have stored it, so a
+    service with no feed for that calendar has nothing to write there: TMDB lists
+    Series, Season and Movie Premieres and no finales or every episode, and a row
+    of its own on All Episodes would be an airing its feed never gives. A
+    search result for a calendar its service does not publish still links to the
+    month, which fills from the services that do list it. Asked by both writers
+    here — `fill_one_gap`, which every followed result, tracker arrival and card
+    completion passes through, and `_complete_known_seasons`.
+    """
+    return provider.calendar_port is not None and provider.capabilities.answers(endpoint_key)
 
 
 async def _complete_known_seasons(rows: list[Elsewhere]) -> int:
@@ -424,42 +658,24 @@ async def _complete_known_seasons(rows: list[Elsewhere]) -> int:
     now = db.now()
     stored = 0
     for row in rows:
+        if not _publishes(providers.get(row.source), row.endpoint_key):
+            continue
         drawn = await entries.sources_airing(row.endpoint_key, row.item.mark_key, row.item.season)
         if str(row.source) in drawn:
             continue
         written = await entries.store_loose_airings(
             row.endpoint_key, [row.record], now=now, stale_after=now + TITLE_STALE_SECONDS)
-        if written:
-            calendar_cache.forget_endpoint_spans(row.endpoint_key)
-        stored += written
+        stored += len(written)
     if stored:
         logger.info("calendar search: completed %d stored season(s) with a source's "
                     "own airing", stored)
     return stored
 
 
-@dataclass(frozen=True)
-class Landing:
-    """Where an airing `fill_one_gap` wrote is drawn: the card's mark key and the
-    viewer's day it falls on. Falsy when nothing was written.
-
-    THE DAY AS WELL AS THE MARK, because a month draws only its first few days
-    with the page and fetches the rest as the reader scrolls — so a card on a
-    later day does not exist when the browser looks for its anchor, and a jump
-    naming the mark alone landed at the top of the month. `Jump.url` already
-    carries both for a stored result; this is the same pair for a written one.
-    """
-    mark: str = ""
-    day: str = ""
-
-    def __bool__(self) -> bool:
-        return bool(self.mark)
-
-
 async def fill_one_gap(settings, *, source, source_id: str, media: Media,
-                      season: int | None, endpoint_key: str, tz: ZoneInfo,
-                      now: int, exact_season: bool = False) -> Landing:
-    """Write ONE title's airing into the calendar and answer where it is drawn.
+                      season: int | None, endpoint_key: str, now: int,
+                      exact_season: bool = False) -> list[Record]:
+    """Write ONE title's airing into the calendar, returning what was written.
 
     WHAT THIS IS FOR. A service can be missing its own title: Trakt's show record
     dates Half Man's first season to 2026-04-28T20:00Z and Trakt's premieres
@@ -481,8 +697,10 @@ async def fill_one_gap(settings, *, source, source_id: str, media: Media,
     lookup and nothing more. Title, date, network, poster and the shared ids all
     come back from the service, so a hand-made URL cannot invent a calendar row.
 
-    Returns the card's `Landing`, falsy when nothing could be written — which is
-    not an error: the month is still worth opening.
+    Returns the records written — empty when nothing could be, which is not an
+    error: the month is still worth opening. NOT WHERE THEY ARE DRAWN: a written
+    airing joins any other service's listing of the episode, and which day the
+    card lands on is the viewer's (cache.placed, asked by `jump`).
 
     `exact_season` REFUSES THE FALLBACK. A search jump may land on a show's own
     first-air date when its season cannot be dated — the reader asked where the
@@ -494,7 +712,9 @@ async def fill_one_gap(settings, *, source, source_id: str, media: Media,
     """
     provider = providers.get(source)
     if provider is None or provider.detail_port is None:
-        return Landing()
+        return []
+    if not _publishes(provider, endpoint_key):
+        return []
 
     when = ""
     if season is not None and media is not Media.MOVIE:
@@ -505,23 +725,23 @@ async def fill_one_gap(settings, *, source, source_id: str, media: Media,
                 break
     if not when:
         if exact_season and season is not None and media is not Media.MOVIE:
-            return Landing()
+            return []
         # The title's own first-air date: what a film always uses, and what a
         # show falls back to when the season could not be dated.
         when = await _first_aired_of(settings, provider, media, source_id)
         season = None
     if not when:
-        return Landing()
+        return []
 
     records = await _records_for(provider, settings, source_id, media,
                                  [(season, when)])
     if not records:
-        return Landing()
-    await entries.store_loose_airings(
+        return []
+    # An episode the service's own feed already lists is not written — its card
+    # is already there (entries.store_loose_airings) — so what comes back is what
+    # was, and a jump then lands on whichever card the month draws for it.
+    return await entries.store_loose_airings(
         endpoint_key, records, now=now, stale_after=now + TITLE_STALE_SECONDS)
-    calendar_cache.forget_endpoint_spans(endpoint_key)
-    item = render(records[0], tz)
-    return Landing(item.mark_key, item.air_date)
 
 
 # THE CALENDARS WHERE A CARD IS A SEASON'S PREMIERE OR A FILM'S RELEASE — the one
@@ -537,7 +757,10 @@ COMPLETABLE_ENDPOINTS = frozenset({"shows/new", "shows/premieres", "movies"})
 OTHER_SERVICE_ASK_SECONDS = 7 * 24 * 60 * 60
 
 
-def _asked_key(source: str, endpoint_key: str, title_key: str, season: int | None) -> str:
+def asked_key(source: str, endpoint_key: str, title_key: str, season: int | None) -> str:
+    """Where "`source` was asked about this card this week" is remembered, in
+    the response cache — read by a panel's open and by the background matcher
+    (app/calendar/completion.py) alike, so neither asks again what the other has."""
     return f"calendar_other_service_asked:{source}:{endpoint_key}:{title_key}:{season}"
 
 
@@ -551,12 +774,17 @@ async def other_service_to_ask(settings, *, endpoint_key: str, title_key: str,
     schedule would cost thousands of lookups a day to make a few cards two-sided
     (measured on the owner's instance: 17,205 of 18,342 stored titles are one
     service's). Opening a card's panel is somebody asking about THAT title, which
-    is when one lookup is worth paying.
+    is when one lookup is worth paying. The schedule asks about ONE kind only —
+    a premiere or film only TMDB lists, this month and next, at Trakt's slow
+    pace (app/calendar/completion.py says why that one is worth it) — and both
+    remember an answer under the same `asked_key`.
 
     EVERY CONDITION IS READ FROM WHAT THIS INSTANCE HOLDS, none from the request:
     a calendar whose cards can be completed; exactly one service with a stored
     airing of this title and season there; another service that publishes this
-    calendar here and can be searched; and no answer from it in the last week.
+    calendar here and can be asked by shared id (providers.for_shared_id_lookup —
+    not the search boxes' list, which a viewer shapes); and no answer from it in
+    the last week.
     """
     if endpoint_key not in COMPLETABLE_ENDPOINTS or not title_key:
         return ""
@@ -566,11 +794,11 @@ async def other_service_to_ask(settings, *, endpoint_key: str, title_key: str,
     on_calendar = {str(p.source) for p in providers.calendar_sources(settings=settings)
                    if p.capabilities.answers(endpoint_key)
                    and p.calendar_port.calendar_configured(settings)}
-    for source, _port in providers.for_catalogue_search(settings):
+    for source, _port in providers.for_shared_id_lookup(settings):
         name = str(source)
         if name in drawn or name not in on_calendar:
             continue
-        if await cache.get(_asked_key(name, endpoint_key, title_key, season),
+        if await cache.get(asked_key(name, endpoint_key, title_key, season),
                            OTHER_SERVICE_ASK_SECONDS) is None:
             return name
     return ""
@@ -578,41 +806,49 @@ async def other_service_to_ask(settings, *, endpoint_key: str, title_key: str,
 
 async def complete_from_other_service(settings, *, source: str, endpoint_key: str,
                                       title_key: str, season: int | None,
-                                      tz: ZoneInfo, now: int) -> bool:
-    """Ask `source` whether it lists the title, by shared id, and store its own
+                                      now: int, ask_every_service: bool = True) -> bool:
+    """Learn whether `source` lists the title, by shared id, and store its own
     airing of this season's premiere (or the film's release) on `endpoint_key`
     if it does. Returns whether an airing was stored.
 
-    THE SAME TWO STEPS AS ELSEWHERE, NOT A THIRD WAY. The ask is the search port's
-    exact lookup (find_by_shared_id — an answer is taken only when that service's
+    THE SAME TWO STEPS AS ELSEWHERE, NOT A THIRD WAY. The ask is the title store's
+    (metadata.ensure — the one place the app asks a service by shared id, every
+    service the title has no id from, an answer taken only when that service's
     own record states the id asked about), and the write is fill_one_gap, the
     search's own gap fill: that service's own record, built by its own builder,
     stored as its calendar feed would have stored it. So the airing joins this
-    card when the two services date it in the same week, and stands as that
-    service's card on its own date when they do not, exactly as its calendar
-    would draw it.
+    card's episode row whatever its date (app/metadata/episodes.py), exactly as
+    its calendar's listing would.
 
-    THE IDS COME FROM THE STORE (entries.group_identity), never from the request:
+    THE IDS COME FROM THE STORE (metadata.group_identity), never from the request:
     a write whose subject is a key the server resolves can only land on a title
     this instance already holds.
 
     AN ANSWER IS REMEMBERED FOR A WEEK, "not listed" included; a failure to ask
-    is not, so a service that was down is asked again on the next open.
+    is not, so a service that was down is asked again on the next open. The
+    store's own lookup is also held a day by each service's port, so a second
+    panel opened on the title within the day asks nobody. Remembered under the
+    key the title answers to AFTER the ask too, since an answer can re-key it.
+
+    A PANEL'S OPEN ASKS EVERY SERVICE the title has no id from, as every arrival
+    does, so one open teaches the store all it can. The background matcher asks
+    `source` alone (`ask_every_service=False`): it spends one service's
+    allowance at a time and may not spend another's uncounted.
     """
-    identity = await entries.group_identity(title_key)
-    port = dict((str(s), p) for s, p in providers.for_catalogue_search(settings)).get(source)
-    if identity is None or port is None:
+    held = await metadata.group_identity(title_key)
+    asked = source in {str(s) for s, _port in providers.for_shared_id_lookup(settings)}
+    if held is None or not asked:
         return False
-    media_name, ids, title = identity
+    media_name, ids, title = held
     media = Media(media_name)
-    try:
-        found = await port.find_by_shared_id(settings, media, dict(ids))
-    except SourceUnavailable as exc:
-        logger.info("calendar: %s could not be asked about %s (%s)", source, title_key, exc)
+    answer = await metadata.ask(media, ids, settings=settings, filed_under=title_key,
+                                asking=None if ask_every_service else (source,))
+    if answer.identity is None or source in answer.unreachable:
         return False
-    await cache.set(_asked_key(source, endpoint_key, title_key, season), 1,
-                    retain_seconds=OTHER_SERVICE_ASK_SECONDS)
-    source_id = (found or {}).get(source)
+    for key in {title_key, answer.identity.key}:
+        await cache.set(asked_key(source, endpoint_key, key, season), 1,
+                        retain_seconds=OTHER_SERVICE_ASK_SECONDS)
+    source_id = answer.identity.ids.get(source)
     if not source_id:
         logger.info("calendar: %s does not list %s (%s)", source, title, title_key)
         return False
@@ -620,7 +856,7 @@ async def complete_from_other_service(settings, *, source: str, endpoint_key: st
         stored = await fill_one_gap(
             settings, source=Source(source), source_id=str(source_id), media=media,
             season=None if media is Media.MOVIE else season,
-            endpoint_key=endpoint_key, tz=tz, now=now, exact_season=True)
+            endpoint_key=endpoint_key, now=now, exact_season=True)
     except SourceUnavailable as exc:
         logger.info("calendar: %s's airing of %s not written (%s)", source, title_key, exc)
         return False
@@ -665,14 +901,19 @@ async def _describe(settings, hit, media: Media, tz: ZoneInfo) -> list[Elsewhere
     if not moments:
         return []
 
-    records = await _records_for(provider, settings, source_id, media,
-                                 moments[:SEASONS_PER_SHOW])
+    records = await _records_for(provider, settings, source_id, media, moments)
     endpoint_key = _endpoint_for(media)
+    # DRAWN WITH THE TITLE'S KNOWN IDS, the way the calendar's read draws its own
+    # listings (identity.complete), so the card a row names — and the stored
+    # airing it is checked against — carries the title store's key even when this
+    # service knows the title only by a lower id. The record itself stays what
+    # the service said: it is what gets stored if the row is followed.
+    known = await title_identity.completed((record.media, record.ids) for record in records)
     rows = []
-    for record in records:
+    for record, ids in zip(records, known):
         day = _local_day(record.air_ts, record.date_only, tz)
         rows.append(Elsewhere(
-            item=render(record, tz), endpoint_key=endpoint_key,
+            item=render(dataclasses.replace(record, ids=ids), tz), endpoint_key=endpoint_key,
             endpoint_label=get_endpoint(endpoint_key).label,
             year=day.year, month=day.month, day=day.isoformat(), record=record,
             source=str(source), source_id=str(source_id), media=str(media)))
@@ -722,10 +963,8 @@ async def _season_premieres(settings, provider, source, source_id,
     with the premiere left EXACTLY as the source spelled it — see `_as_moment`
     for why the difference between a day and an instant must survive this.
 
-    NEWEST FIRST BECAUSE THAT IS WHAT A SEARCH IS USUALLY ABOUT. Somebody typing
-    a title they have just heard of wants the season now airing far more often
-    than the one from 2013, and `SEASONS_PER_SHOW` cuts from the far end — so
-    the bound removes the least likely rows rather than an arbitrary tail.
+    NEWEST FIRST, so a film's one row and a show's latest season lead; the
+    season picker draws them in season order (season_choices.season_options).
 
     A FAILURE HERE IS NOT A FAILURE OF THE SEARCH. The caller falls back to the
     show's own first-air date, so a source that cannot enumerate seasons costs

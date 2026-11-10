@@ -1,0 +1,20 @@
+{#- tight -#}
+{# What a big day's "show the rest" control is answered with
+   (calendar/routes.py's `calendar_day_rest`): the day's other cards, which take
+   the control's place in the day's grid — drawn by _card.html, as every card is
+   — plus the day's chip out of band (read afresh, as a late day's is) and, where
+   the day no longer holds what the shell counted, the month-changed sentence.
+
+   A REFUSED CONTROL (a token that is not this account's, or has lapsed) and a
+   day that could not be read answer with a sentence in the control's place, so
+   a press never just does nothing. #}
+{% if refused %}
+<p class="day-more-note">This page has been open too long to show more — <a href="/calendar">reload it</a>.</p>
+{% elif error %}
+<p class="day-more-note">⚠️ {{ error }} — the rest of this day couldn't be loaded.</p>
+{% else %}
+{%- if group and group['items'] %}{% for item in group['items'] %}{% include "_card.html" %}{% endfor %}
+{%- else %}<p class="day-more-note">Nothing else is on this day now.</p>{% endif %}
+{%- if chip %}{% with oob = True %}{% include "_day_chip.html" %}{% endwith %}{% endif %}
+{%- if month_changed %}{% with oob = True %}{% include "_month_changed.html" %}{% endwith %}{% endif %}
+{% endif %}

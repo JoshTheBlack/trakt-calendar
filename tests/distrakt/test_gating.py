@@ -33,7 +33,8 @@ from app import auth, cache, db
 from app.distrakt import routes as distrakt_routes
 from app.auth import viewer as auth_viewer
 from app.calendar import share_code, share_links
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from app.main import app
 from tests.support import AppTestCase, ORIGIN, tracker_month
 
@@ -61,6 +62,9 @@ DISTRAKT_POSTS = (
     "/api/distrakt/import",
     "/api/distrakt/emoji",
     "/api/distrakt/emoji-default",
+    "/api/distrakt/settings/order/tracker_order",
+    "/api/distrakt/settings/order/season_totals",
+    "/api/distrakt/settings/retired",
     "/api/distrakt/remove",
     "/api/distrakt/add",
     "/api/distrakt/abandon",
@@ -305,11 +309,13 @@ class RequestingUsersTokenTests(DistraktTestCase):
         # it names has to be in the shared cache for the lookup to be reached at
         # all — the pick re-reads it rather than taking ids off the page.
         asyncio.run(cache.set(
-            "https://api.trakt.tv/search/show?query=seeded&extended=full%2Cimages",
+            "https://api.trakt.tv/search/show?query=seeded&extended=full%2Cimages&page=1&limit=20",
             [{"show": {"title": "Test", "year": 2026,
                        "ids": {"trakt": 7, "tmdb": 7, "slug": "test"}}}]))
-        for path in ("/distrakt/fragments/search?q=test",
-                     "/distrakt/fragments/seasons?q=seeded&i=0"):
+        # Trakt is ADDED to the search by this viewer, who linked it — what the
+        # "also search Trakt" control sends — and the pick names that search.
+        for path in ("/distrakt/fragments/search?q=test&also=trakt",
+                     "/distrakt/fragments/seasons?q=seeded&also=trakt&i=0"):
             with self.subTest(path=path):
                 recorder = RecordingClient()
                 with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
@@ -321,11 +327,10 @@ class RequestingUsersTokenTests(DistraktTestCase):
         Trakt access", not as "use the operator's". Falling back would show them
         the operator's watch history.
 
-        THE SEARCH STILL RUNS, and that is not a weakening of this rule. Trakt's
-        /search is a public catalogue read that authenticates with the instance's
-        client id; what must never happen is somebody else's BEARER riding on it,
-        which is what this asserts. The request goes out with no Authorization
-        header at all — see transport.api_headers.
+        AND A LINK WITH NO TOKEN IS NO LINK TO SEARCH WITH: Trakt is offered to
+        a search box as "also search Trakt" only to a viewer whose own token it
+        would carry (providers.for_search), so asking to add it is refused and
+        Trakt is asked nothing — never with somebody else's bearer.
         """
         user_id = self._make_user("tokenless", calendar_approved=True, distrakt_approved=True)
         self._link_trakt(user_id, provider_user_id=4242, access_token=None)
@@ -336,9 +341,10 @@ class RequestingUsersTokenTests(DistraktTestCase):
         recorder = RecordingClient()
         self.sign_in_as(user_id)
         with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
-            resp = self.client.get("/distrakt/fragments/search?q=test")
+            resp = self.client.get("/distrakt/fragments/search?q=test&also=trakt")
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(set(recorder.authorizations), {""})
+        self.assertIn("Can&#39;t add trakt to this search.", resp.text)
+        self.assertEqual(recorder.authorizations, [])
 
     def test_a_private_trakt_response_is_never_written_to_the_shared_cache(self):
         """The blob cache is keyed by URL and shared by the whole instance, so two

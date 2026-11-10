@@ -137,6 +137,28 @@ def allowed_url(provider: str, url: str | None) -> str | None:
     return url.strip()
 
 
+async def _trakt_account(settings, token: str) -> dict:
+    from . import trakt  # deferred: it imports this module's siblings
+    return await trakt.fetch_account(settings.trakt_client_id, token)
+
+
+async def _simkl_account(settings, token: str) -> dict:
+    from . import simkl
+    return await simkl.fetch_account(settings.simkl_client_id, token)
+
+
+async def _plex_account(settings, token: str) -> dict:
+    from . import plex
+    return await plex.fetch_account(token, await plex.ensure_client_identifier())
+
+
+# How each sign-in service is asked for an account's current picture — one entry
+# per provider ALLOWED_HOSTS names, which tests/auth/test_provider_avatars.py
+# holds the two tables to.
+_ACCOUNT_LOOKUPS = {"trakt": _trakt_account, "simkl": _simkl_account,
+                    "plex": _plex_account}
+
+
 async def current_url(user_id: int, provider: str) -> str | None:
     """Ask the service, using this account's stored token, where its picture is
     now. None when there is no link, no usable token, or the lookup fails.
@@ -147,14 +169,18 @@ async def current_url(user_id: int, provider: str) -> str | None:
     it is worth an account lookup and why an ordinary sign-in is not.
 
     Each provider's `fetch_account` takes its arguments in its own order, which
-    is why this dispatches explicitly rather than looping: they are three
-    different APIs that happen to answer the same question.
+    is why each has its own entry in `_ACCOUNT_LOOKUPS` rather than one loop:
+    they are three different APIs that happen to answer the same question.
     """
-    from . import identities, plex, simkl, trakt  # deferred: they import this module's siblings
+    from . import identities  # deferred: it imports this module's siblings
     from .. import secrets_box
     from ..config import load_settings
 
-    if provider not in ALLOWED_HOSTS:
+    # REFUSED FOR ANY NAME WITHOUT BOTH ENTRIES. A provider with hosts but no
+    # account lookup (or the reverse) is a table that has drifted, and the
+    # dispatch below used to read every name that was neither of two services as
+    # the third.
+    if provider not in ALLOWED_HOSTS or provider not in _ACCOUNT_LOOKUPS:
         return None
     for row in await identities.list_identities(user_id):
         if row["provider"] != provider:
@@ -164,14 +190,9 @@ async def current_url(user_id: int, provider: str) -> str | None:
         token = secrets_box.open_(row["access_token"])
         if not token:
             return None
-        settings = load_settings()
+        settings = await load_settings()
         try:
-            if provider == "trakt":
-                account = await trakt.fetch_account(settings.trakt_client_id, token)
-            elif provider == "simkl":
-                account = await simkl.fetch_account(settings.simkl_client_id, token)
-            else:
-                account = await plex.fetch_account(token, await plex.ensure_client_identifier())
+            account = await _ACCOUNT_LOOKUPS[provider](settings, token)
         except Exception as exc:  # noqa: BLE001 — every lookup failure is "no picture"
             logger.debug("Could not re-read the %s account for user %s: %s",
                          provider, user_id, exc)

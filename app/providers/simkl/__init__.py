@@ -17,8 +17,9 @@ from datetime import date
 from ...config import Settings
 from ...endpoints import Endpoint
 from .. import register
-from ..base import (Capabilities, Media, Record, SearchHit, SeasonsAnswer, Source,
-                    TitleFacts, Video)
+from ..base import (EPISODE_KEEPING, EPISODE_LISTING, SEASON_KEEPING, TITLE_KEEPING,
+                    Capabilities, DrawnFrom, Media, Reach, Record, SearchCatalogue, SearchPage,
+                    SeasonsAnswer, Source, StoreColumns, TitleFacts, Video)
 from . import by_id, calendar, detail, search, sync, titles, watchlist
 from .transport import SimklBlockedError, SimklError, SimklRateLimitError
 
@@ -131,9 +132,10 @@ class _SimklDetailPort:
         return settings.simkl_catalogue_configured
 
     async def fetch_details(self, settings: Settings, media, source_id,
-                            season: int | None, *, cache_only: bool = False) -> dict:
+                            season: int | None, *, cache_only: bool = False,
+                            fresh: bool = False) -> dict:
         return await detail.fetch_details(settings, media, source_id, season,
-                                          cache_only=cache_only)
+                                          cache_only=cache_only, fresh=fresh)
 
     async def fetch_videos(self, settings: Settings, media, source_id, *,
                            cache_only: bool = False) -> list[Video]:
@@ -181,13 +183,17 @@ class _SimklDetailPort:
         return out
 
     async def fetch_season_summary(self, settings: Settings, source_id,
-                                   season: int, media: Media) -> dict:
+                                   season: int, media: Media, *,
+                                   fresh: bool = False) -> dict:
+        # `fresh` IS ACCEPTED AND IGNORED: an episode list is catalogue data on a
+        # day-long TTL, and re-fetching it on a button press would spend the
+        # instance's Simkl budget to learn nothing — see fetch_season_detail.
         return await detail.fetch_season_detail(settings, source_id, int(season), media)
 
     async def fetch_seasons(self, settings: Settings, source_id, media: Media, *,
-                            cached_only: bool = False) -> SeasonsAnswer:
+                            cached_only: bool = False, fresh: bool = False) -> SeasonsAnswer:
         return await detail.fetch_seasons(settings, source_id, media,
-                                          cached_only=cached_only)
+                                          cached_only=cached_only, fresh=fresh)
 
     async def fetch_title_facts(self, settings: Settings, source_id,
                                 media: Media) -> TitleFacts:
@@ -197,14 +203,18 @@ class _SimklDetailPort:
 class _SimklSearchPort:
     """Simkl's answer to "search this catalogue" (app/providers/base.py's
     SearchPort). A thin delegator over search.py, through the MODULE object,
-    exactly as the ports above are over their own modules — the two-endpoint
-    fan-out that search.py's own docstring explains lives entirely on that
-    side of this call.
+    exactly as the ports above are over their own modules. Two catalogues — TV
+    and films, and anime — for the reason search.py's own docstring measures.
     """
 
+    catalogues = (SearchCatalogue(search.CATALOGUE, "Simkl"),
+                  SearchCatalogue(search.ANIME_CATALOGUE, "Simkl Anime"))
+
     async def search_titles(self, settings: Settings, media: Media, query: str, *,
-                            cached_only: bool = False) -> list[SearchHit]:
-        return await search.search_titles(settings, media, query,
+                            page: int = 1, catalogue: str | None = None,
+                            cached_only: bool = False) -> SearchPage:
+        return await search.search_titles(settings, media, query, page=page,
+                                          catalogue=catalogue or search.CATALOGUE,
                                           cached_only=cached_only)
 
     async def find_by_shared_id(self, settings: Settings, media: Media, ids: dict) -> dict:
@@ -218,7 +228,7 @@ class _SimklWatchlistPort:
     write to Simkl means, and what was measured before any of it was written,
     is that module's to say."""
 
-    def list_url(self, account_id: str) -> str:
+    def list_url(self, account_id: str, account_name: str | None) -> str:
         return watchlist.list_url(account_id)
 
     async def holdings(self, settings: Settings, titles):
@@ -227,8 +237,11 @@ class _SimklWatchlistPort:
     async def put(self, settings: Settings, titles):
         return await watchlist.put(settings, titles)
 
-    async def drop(self, settings: Settings, titles):
-        return await watchlist.drop(settings, titles)
+    async def drop(self, settings: Settings, rows):
+        # SIMKL'S DROP TAKES NOTHING AWAY: it moves a title to its own Dropped
+        # status, which keeps the viewer's history, so who listed it first
+        # changes nothing here.
+        return await watchlist.drop(settings, [row.title for row in rows])
 
     async def undo(self, settings: Settings, rows):
         return await watchlist.undo(settings, rows)
@@ -243,13 +256,19 @@ class _SimklProvider:
     source = Source.SIMKL
     label = "Simkl"
     capabilities = Capabilities(
-        # 'shows/finales' is deliberately absent — nothing in Simkl's calendar
-        # or catalog flags a season or series finale, and deriving one from
-        # the per-title episode lists is future work that needs its own
-        # enrichment drain. The other four are what the CDN archive can
-        # answer today; see app/providers/simkl/calendar.py for the
-        # derivation each one uses.
+        # 'shows/finales' is not PUBLISHED — nothing in Simkl's calendar or
+        # catalog flags a season or series finale — so it is DRAWN (below).
+        # The four here are what the CDN archive answers; see
+        # app/providers/simkl/calendar.py for the derivation each one uses.
         endpoints=frozenset({"shows/new", "shows/premieres", "shows", "movies"}),
+        # SIMKL'S FINALES: its All Episodes listings whose episode TMDB's
+        # season list marks a finale or a mid-season finale (base.DrawnFrom
+        # says how). MEASURED on a copy of dev, October and November 2026:
+        # where TMDB had typed an episode Trakt's finales calendar lists and
+        # Simkl's All Episodes lists too, TMDB called it a finale 82 times of
+        # 82; and it marked 61 finales on Simkl's list that Trakt's calendar
+        # does not carry.
+        drawn_from=(DrawnFrom("shows/finales", "shows", Source.TMDB),),
         # Measured against Simkl's calendar archive, and re-verified live
         # against the same CDN files: it reaches roughly 37-42 months back
         # (growing month by month as the archive extends) and 3-4 months
@@ -267,6 +286,45 @@ class _SimklProvider:
         # stated twice and must never be changed apart. The conformance test is
         # what fails if only one of them moves.
         private_user_data=True,
+        # No storage ceiling is applied to Simkl's answers: its rows go by this
+        # app's own retention, and never while a feature row holds the title
+        # (app/metadata/rows.py's sweep_unlisted).
+        retain_seconds=None,
+        # EVERY DAY OF EACH MONTH A WINDOW READS. Simkl publishes its calendar as
+        # one archive file per month and kind (calendar.py's `fetch_window` reads
+        # every month a window touches, whole), so its answer is authoritative
+        # for each of those months — one read fills the month's weeks.
+        reach=Reach.MONTHS,
+        # SPARSE, AND COMPLETED ELSEWHERE. Simkl's calendar files carry a title,
+        # an id, a date and a picture, so every listing is stored unenriched —
+        # and completed by app/calendar/enrich.py's drain against simkl_titles,
+        # through the cached-by-id /tv/{id} family, not by describing the title
+        # through the DetailPort: that port's per-title reads need a viewer's
+        # token, which a background pass for the whole instance does not have.
+        describes_sparse_listings=False,
+        # WHAT SIMKL STATES, read off titles.py and detail.py: a title's
+        # description with its anime format (`anime_type`, its own — not TMDB's
+        # show type) and release schedule, its season count and videos, and
+        # IMDb's score beside its own in the ratings map. NO CAST, NO HOMEPAGE,
+        # NO KEYWORDS OR SHOW TYPE: detail.py records why, against Simkl's own
+        # documentation. A season is only what its episode list says (count,
+        # premiere, dates) — no name, words, poster or cast anywhere in Simkl's
+        # API — plus, where one of Simkl's entries IS that season (Simkl files
+        # some later seasons as titles of their own), that entry's `id` and
+        # whether it `named` exactly that season. An episode's title, words and
+        # date, and nothing else. A listing's `entry`: one title can be listed
+        # under several of Simkl's own ids.
+        store_columns=StoreColumns(
+            titles=TITLE_KEEPING | {
+                "title", "year", "network", "country", "language", "certification",
+                "status", "overview", "poster", "runtime", "genres_json", "ratings_json",
+                "first_aired", "season_count", "videos_json", "release_types_json",
+                "anime_type"},
+            seasons=SEASON_KEEPING | {
+                "episode_count", "premiere", "air_dates_json", "id", "named"},
+            episodes=EPISODE_LISTING | EPISODE_KEEPING | {
+                "entry", "title", "overview", "first_aired"},
+        ),
     )
     sync_port = _SimklSyncPort()
     # THE CALENDAR PORT, DECLARED IN THE SAME CHANGE AS THE ENDPOINT SET ABOVE
@@ -292,20 +350,36 @@ class _SimklProvider:
     def is_configured(self, settings: Settings) -> bool:
         return settings.simkl_configured
 
+    def title_url(self, media: Media, ids) -> str:
+        return calendar.title_url(media, ids)
+
+    def episode_url(self, ids, season: int, number: int) -> str:
+        return calendar.episode_url(ids, season, number)
+
+    def listing_id(self, ids) -> str:
+        return calendar.listing_id(ids)
+
+    def status_means(self, status: str) -> frozenset[str]:
+        return titles.status_means(status)
+
+    def episode_mark(self, episode_type: str) -> str:
+        # Simkl states no episode's place in its season (detail.py answers every
+        # `episode_type` empty), so it marks nothing.
+        return ""
+
     def catalogue_is_configured(self, settings: Settings) -> bool:
         # NOT THE SAME QUESTION `_SimklDetailPort.catalogue_configured` ASKS,
         # not any more. Under Simkl's v2 API, search and /redirect require a
         # user token — 401 user_token_required otherwise — where the per-title
-        # lookups that DetailPort answers with stay anonymous. THIS is the one
-        # method for_catalogue_search calls (see app/providers/__init__.py),
+        # lookups that DetailPort answers with stay anonymous. THIS is what
+        # for_search and for_shared_id_lookup ask (app/providers/__init__.py),
         # and it is handed the VIEWER's settings wherever a viewer is in scope.
         # A caller with no viewer hands it the instance-wide Settings, whose
         # `simkl_access_token` is always empty (config.load_settings leaves any
         # stored operator token out), so Simkl drops out there. So `simkl_configured`
         # (client id AND a token) is the right question here: a viewer with no
-        # linked Simkl account gets nothing from this source, and every Simkl
-        # search surface falls back to whatever else `for_catalogue_search`
-        # returns — Trakt, on this instance.
+        # linked Simkl account gets nothing from this source, and is not offered
+        # "also search Simkl" at all (providers.for_search).
         return settings.simkl_configured
 
 

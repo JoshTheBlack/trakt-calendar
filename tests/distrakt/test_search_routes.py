@@ -22,10 +22,12 @@ from unittest.mock import AsyncMock, patch
 
 from datetime import date
 
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from app.providers import title_search as catalogue_search
-from app.providers.base import (Media, SearchHit, SeasonsAnswer, Source, proxied_image,
-                                resolve_key)
+from app.providers.base import (Media, SearchHit, SearchPage, SeasonsAnswer, Source,
+                                proxied_image, resolve_key)
+from app.providers.tmdb import search as tmdb_search
 from app.providers.simkl import detail as simkl_detail
 from app.providers.simkl import search as simkl_search
 from app.providers.trakt import TraktError
@@ -38,10 +40,17 @@ TRAKT_HIT = {
     "overview": "An overview.", "poster": "https://media.trakt.tv/a-show.jpg",
 }
 
+TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJ0ZXN0In0.c2lnbmF0dXJl"
+TMDB_HIT = SearchHit(source=Source.TMDB, source_id="100", media=Media.SHOW,
+                     ids={"tmdb": 100}, title="A Show", year=2022, season=None,
+                     network="", runtime=None, overview="")
+
 BOTH_CONFIGURED = dict(public_base_url=ORIGIN, trakt_client_id="cid",
                        simkl_client_id="scid", simkl_client_secret="ssecret")
 
-_ROW = re.compile(r'<button class="search-row[^"]*"(.*?)>', re.S)
+# A show row is the <summary> its season picker unfolds under; a film row a
+# <button> that is the add.
+_ROW = re.compile(r'<(?:button|summary) class="search-row[^"]*"(.*?)>', re.S)
 _GET = re.compile(r'hx-get="([^"]*)"')
 _TITLE = re.compile(r'<span class="search-title">([^<]*)')
 
@@ -76,22 +85,23 @@ class SearchFragmentTests(AppTestCase):
         self.user_id = self.make_user("searcher", distrakt_approved=True,
                                       calendar_approved=True)
         self.link_identity(self.user_id, "simkl", 4242, "simkl-token")
+        self.link_identity(self.user_id, "trakt", 77, "trakt-token")
         self.sign_in_as(self.user_id)
 
     def test_a_trakt_only_instance_can_still_search(self):
         """§1's whole finding: an instance missing one catalogue must not lose
         the ability to search at all."""
         save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="cid"))
-        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[TRAKT_HIT])):
-            html = self.client.get("/distrakt/fragments/search?q=a").text
+        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=([TRAKT_HIT], False))):
+            html = self.client.get("/distrakt/fragments/search?also=trakt&q=a").text
         self.assertEqual(rows(html)[0]["title"], "A Show")
 
     def test_a_service_row_draws_the_poster_its_answer_carried_through_the_proxy(self):
         """The Content-Security-Policy admits one image host, the proxy, so a
         service's own address may never reach the page as itself."""
         save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="cid"))
-        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[TRAKT_HIT])):
-            html = self.client.get("/distrakt/fragments/search?q=a").text
+        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=([TRAKT_HIT], False))):
+            html = self.client.get("/distrakt/fragments/search?also=trakt&q=a").text
         self.assertEqual(unescape(re.search(r'<img class="search-poster" src="([^"]*)"',
                                          html).group(1)),
                       proxied_image("https://media.trakt.tv/a-show.jpg"))
@@ -100,19 +110,59 @@ class SearchFragmentTests(AppTestCase):
     def test_a_simkl_only_instance_can_still_search(self):
         save_settings(Settings(public_base_url=ORIGIN, simkl_client_id="scid",
                                simkl_client_secret="ssecret"))
-        with patch.object(simkl_search, "search_titles", AsyncMock(return_value=[])):
-            html = self.client.get("/distrakt/fragments/search?q=a").text
+        with patch.object(simkl_search, "search_titles", AsyncMock(return_value=SearchPage([]))):
+            html = self.client.get("/distrakt/fragments/search?also=simkl&q=a").text
         self.assertEqual(rows(html), [])
         self.assertIn("No matches.", html)
 
-    def test_no_catalogue_configured_is_its_own_state_not_a_failed_search(self):
-        """An instance with neither client id has nothing to search, which is an
-        operator's problem — telling the viewer their search failed would send
-        them to retype a query that was never wrong."""
-        save_settings(Settings(public_base_url=ORIGIN))
-        html = self.client.get("/distrakt/fragments/search?q=a").text
-        self.assertIn("No catalogue is configured", html)
+    def test_no_tmdb_token_is_said_and_nothing_is_searched_in_its_place(self):
+        """No service stands in for another: a Trakt client id is configured
+        and Trakt is linked, and a plain search still asks NOBODY — it says TMDB
+        is not configured and offers Trakt as an addition. Not "no matches",
+        which would send somebody to retype a query that was never wrong."""
+        save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="cid"))
+        spy = AsyncMock(return_value=[TRAKT_HIT])
+        with patch.object(trakt_detail, "search_titles", spy):
+            html = self.client.get("/distrakt/fragments/search?q=a").text
+        spy.assert_not_awaited()
+        self.assertIn("TMDB\n    is not configured", html)
         self.assertNotIn("No matches.", html)
+        self.assertIn("Also search Trakt", html)
+
+    def test_tmdb_answers_by_default_and_linked_services_are_offered(self):
+        save_settings(Settings(public_base_url=ORIGIN, tmdb_api_key=TMDB_TOKEN,
+                               trakt_client_id="cid", simkl_client_id="scid",
+                               simkl_client_secret="ssecret"))
+        trakt_spy = AsyncMock(return_value=[TRAKT_HIT])
+        with patch.object(tmdb_search, "search_titles",
+                          AsyncMock(return_value=SearchPage([TMDB_HIT], more=True))), \
+             patch.object(trakt_detail, "search_titles", trakt_spy):
+            html = self.client.get("/distrakt/fragments/search?q=a").text
+        trakt_spy.assert_not_awaited()
+        self.assertEqual(rows(html)[0]["title"], "A Show")
+        self.assertIn("tmdb-mark.svg", html)
+        self.assertIn("Also search Trakt", html)
+        self.assertIn("Also search Simkl", html)
+        self.assertIn("More from TMDB", html)
+
+    def test_more_asks_the_next_page_by_number_and_the_rows_name_it(self):
+        save_settings(Settings(public_base_url=ORIGIN, tmdb_api_key=TMDB_TOKEN))
+        second = TMDB_HIT._replace(source_id="101", ids={"tmdb": 101}, title="Another")
+
+        async def _pages(settings, media, query, *, page=1, cached_only=False):
+            return SearchPage([TMDB_HIT] if page == 1 else [second], more=page == 1)
+
+        with patch.object(tmdb_search, "search_titles", _pages):
+            html = self.client.get("/distrakt/fragments/search?q=a&pages=tmdb:2").text
+        self.assertEqual([r["title"] for r in rows(html)], ["A Show", "Another"])
+        self.assertEqual(rows(html)[1]["names"]["pages"], "tmdb:2")
+        self.assertNotIn("More from TMDB", html)
+
+    def test_a_service_the_viewer_may_not_add_is_refused_in_words(self):
+        save_settings(Settings(public_base_url=ORIGIN, tmdb_api_key=TMDB_TOKEN))
+        html = self.client.get("/distrakt/fragments/search?q=a&also=plex").text
+        self.assertIn("Can&#39;t add plex to this search.", html)
+        self.assertEqual(rows(html), [])
 
     def test_merged_results_carry_both_sources_marks(self):
         """A title both sources found comes back once, with both source marks
@@ -120,9 +170,9 @@ class SearchFragmentTests(AppTestCase):
         simkl_hit = SearchHit(source=Source.SIMKL, source_id="9", media="show",
                               ids={"simkl": 9, "tmdb": 100}, title="A Show", year=2022,
                               season=None, network="", runtime=None, overview="")
-        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[TRAKT_HIT])), \
-             patch.object(simkl_search, "search_titles", AsyncMock(return_value=[simkl_hit])):
-            html = self.client.get("/distrakt/fragments/search?q=a").text
+        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=([TRAKT_HIT], False))), \
+             patch.object(simkl_search, "search_titles", AsyncMock(return_value=SearchPage([simkl_hit]))):
+            html = self.client.get("/distrakt/fragments/search?also=trakt,simkl&q=a").text
         self.assertEqual(len(rows(html)), 1)
         # Both marks, from the macro that owns the filenames.
         self.assertIn("trakt-circlemark-dark.svg", html)
@@ -136,14 +186,31 @@ class SearchFragmentTests(AppTestCase):
         WHICH SOURCE LEADS is no longer a fact about the markup at all — it is
         `next(iter(hit.source_ids))` inside title_search.pick_from_hit, and SeasonPickerFragmentTests is where it
         is pinned."""
-        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[TRAKT_HIT])), \
-             patch.object(simkl_search, "search_titles", AsyncMock(return_value=[])):
+        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=([TRAKT_HIT], False))), \
+             patch.object(simkl_search, "search_titles", AsyncMock(return_value=SearchPage([]))):
             html = self.client.get(
-                "/distrakt/fragments/search?year=2026&month=8&q=a").text
+                "/distrakt/fragments/search?year=2026&month=8&also=trakt,simkl&q=a").text
         self.assertEqual(rows(html)[0]["names"],
-                         {"year": "2026", "month": "8", "q": "a", "i": "0"})
+                         {"year": "2026", "month": "8", "q": "a", "i": "0",
+                          "also": "simkl,trakt"})
         self.assertNotIn("data-ids", html)
         self.assertNotIn("data-source-ids", html)
+
+    def test_a_show_rows_season_picker_unfolds_under_that_row(self):
+        """The calendar's shape: the row is the <summary> of its own <details>
+        and asks once for its picker into the slot inside it. A slot beside the
+        list needed taking down out of band by every later search, and sat at the
+        bottom of the modal, far from the row pressed."""
+        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=([TRAKT_HIT], False))), \
+             patch.object(simkl_search, "search_titles", AsyncMock(return_value=SearchPage([]))):
+            html = self.client.get(
+                "/distrakt/fragments/search?year=2026&month=8&also=trakt,simkl&q=a").text
+        hit = re.search(r'<details class="search-hit">\s*<summary class="search-row[^"]*"(.*?)>'
+                        r'.*?<div class="search-pick"></div>\s*</details>', html, re.S)
+        self.assertIsNotNone(hit)
+        self.assertIn('hx-target="next .search-pick"', hit.group(1))
+        self.assertIn('hx-trigger="click once"', hit.group(1))
+        self.assertNotIn("addSeasonPick", html)
 
     def test_a_single_source_instance_still_draws_a_mark(self):
         """The mark is attribution as much as disambiguation — which service's
@@ -152,8 +219,8 @@ class SearchFragmentTests(AppTestCase):
         mis-shaped hit, a missing network) from the merge's. Always drawn now,
         not only when more than one catalogue was askable."""
         save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="cid"))
-        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[TRAKT_HIT])):
-            html = self.client.get("/distrakt/fragments/search?q=a").text
+        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=([TRAKT_HIT], False))):
+            html = self.client.get("/distrakt/fragments/search?also=trakt&q=a").text
         self.assertIn("trakt-circlemark-dark.svg", html)
 
     def test_one_source_failing_is_named_and_does_not_fail_the_search(self):
@@ -161,8 +228,8 @@ class SearchFragmentTests(AppTestCase):
             raise TraktError("down")
 
         with patch.object(trakt_detail, "search_titles", _boom), \
-             patch.object(simkl_search, "search_titles", AsyncMock(return_value=[])):
-            html = self.client.get("/distrakt/fragments/search?q=a").text
+             patch.object(simkl_search, "search_titles", AsyncMock(return_value=SearchPage([]))):
+            html = self.client.get("/distrakt/fragments/search?also=trakt,simkl&q=a").text
         self.assertIn("Couldn't reach Trakt", html)
         self.assertIn("No matches.", html)
 
@@ -174,9 +241,9 @@ class SearchFragmentTests(AppTestCase):
         bare_hit = SearchHit(source=Source.SIMKL, source_id="694485", media="show",
                              ids={"simkl": 694485}, title="Attack on Titan Season 3",
                              year=2018, season=None, network="", runtime=None, overview="")
-        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[])), \
-             patch.object(simkl_search, "search_titles", AsyncMock(return_value=[bare_hit])):
-            html = self.client.get("/distrakt/fragments/search?q=a").text
+        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=([], False))), \
+             patch.object(simkl_search, "search_titles", AsyncMock(return_value=SearchPage([bare_hit]))):
+            html = self.client.get("/distrakt/fragments/search?also=trakt,simkl&q=a").text
         self.assertFalse(rows(html)[0]["disabled"])
         # It has no shared id at all, and naming a result by its PLACE is what
         # lets it be picked anyway.
@@ -193,9 +260,9 @@ class SearchFragmentTests(AppTestCase):
                            year=year, season=season, network="", runtime=None, overview="")
                  for sid, year, season in (("1990194", 2023, 1), ("2595284", 2026, 2),
                                            ("3063278", 2027, 3))]
-        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[])), \
-             patch.object(simkl_search, "search_titles", AsyncMock(return_value=named)):
-            html = self.client.get("/distrakt/fragments/search?q=frieren").text
+        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=([], False))), \
+             patch.object(simkl_search, "search_titles", AsyncMock(return_value=SearchPage(named))):
+            html = self.client.get("/distrakt/fragments/search?also=trakt,simkl&q=frieren").text
         for season in (1, 2, 3):
             with self.subTest(season=season):
                 self.assertIn(f"Season {season}</span>", html)
@@ -207,9 +274,9 @@ class SearchFragmentTests(AppTestCase):
         unnamed = SearchHit(source=Source.SIMKL, source_id="10452", media="show",
                             ids={"simkl": 10452, "tmdb": 1395}, title="Gossip Girl",
                             year=2007, season=None, network="", runtime=None, overview="")
-        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[])), \
-             patch.object(simkl_search, "search_titles", AsyncMock(return_value=[unnamed])):
-            html = self.client.get("/distrakt/fragments/search?q=gossip").text
+        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=([], False))), \
+             patch.object(simkl_search, "search_titles", AsyncMock(return_value=SearchPage([unnamed]))):
+            html = self.client.get("/distrakt/fragments/search?also=trakt,simkl&q=gossip").text
         self.assertNotIn("distrakt-search-season", html)
 
 
@@ -234,12 +301,13 @@ class MovieSearchFragmentTests(AppTestCase):
         self.user_id = self.make_user("film-searcher", distrakt_approved=True,
                                       calendar_approved=True)
         self.link_identity(self.user_id, "simkl", 4242, "simkl-token")
+        self.link_identity(self.user_id, "trakt", 77, "trakt-token")
         self.sign_in_as(self.user_id)
 
     def test_a_trakt_only_instance_can_still_search(self):
         save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="cid"))
-        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[TRAKT_MOVIE_HIT])):
-            html = self.client.get("/distrakt/fragments/search-movie?q=a").text
+        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=([TRAKT_MOVIE_HIT], False))):
+            html = self.client.get("/distrakt/fragments/search-movie?also=trakt&q=a").text
         self.assertEqual(rows(html)[0]["title"], "A Movie")
         # A film's third column is its runtime; it has no network to show.
         self.assertIn("118 min", html)
@@ -250,22 +318,23 @@ class MovieSearchFragmentTests(AppTestCase):
         through the registry."""
         save_settings(Settings(public_base_url=ORIGIN, simkl_client_id="scid",
                                simkl_client_secret="ssecret"))
-        with patch.object(simkl_search, "search_titles", AsyncMock(return_value=[])):
-            html = self.client.get("/distrakt/fragments/search-movie?q=a").text
+        with patch.object(simkl_search, "search_titles", AsyncMock(return_value=SearchPage([]))):
+            html = self.client.get("/distrakt/fragments/search-movie?also=simkl&q=a").text
         self.assertEqual(rows(html), [])
 
-    def test_no_catalogue_configured_is_its_own_state(self):
+    def test_no_tmdb_token_is_said_rather_than_searched_around(self):
         save_settings(Settings(public_base_url=ORIGIN))
         html = self.client.get("/distrakt/fragments/search-movie?q=a").text
-        self.assertIn("No catalogue is configured", html)
+        self.assertIn("TMDB\n    is not configured", html)
+        self.assertNotIn("No matches.", html)
 
     def test_merged_results_carry_both_sources_marks(self):
         simkl_hit = SearchHit(source=Source.SIMKL, source_id="9", media="movie",
                               ids={"simkl": 9, "tmdb": 200}, title="A Movie", year=2022,
                               season=None, network="", runtime=None, overview="")
-        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[TRAKT_MOVIE_HIT])), \
-             patch.object(simkl_search, "search_titles", AsyncMock(return_value=[simkl_hit])):
-            html = self.client.get("/distrakt/fragments/search-movie?q=a").text
+        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=([TRAKT_MOVIE_HIT], False))), \
+             patch.object(simkl_search, "search_titles", AsyncMock(return_value=SearchPage([simkl_hit]))):
+            html = self.client.get("/distrakt/fragments/search-movie?also=trakt,simkl&q=a").text
         self.assertEqual(len(rows(html)), 1)
 
     def test_one_source_failing_is_named_and_does_not_fail_the_search(self):
@@ -273,8 +342,8 @@ class MovieSearchFragmentTests(AppTestCase):
             raise TraktError("down")
 
         with patch.object(trakt_detail, "search_titles", _boom), \
-             patch.object(simkl_search, "search_titles", AsyncMock(return_value=[])):
-            html = self.client.get("/distrakt/fragments/search-movie?q=a").text
+             patch.object(simkl_search, "search_titles", AsyncMock(return_value=SearchPage([]))):
+            html = self.client.get("/distrakt/fragments/search-movie?also=trakt,simkl&q=a").text
         self.assertIn("Couldn't reach Trakt", html)
 
     def test_a_hit_with_no_shared_id_is_refused_on_the_row(self):
@@ -286,9 +355,9 @@ class MovieSearchFragmentTests(AppTestCase):
         bare_hit = SearchHit(source=Source.SIMKL, source_id="9", media="movie",
                              ids={"simkl": 9}, title="Untethered", year=2022,
                              season=None, network="", runtime=None, overview="")
-        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[])), \
-             patch.object(simkl_search, "search_titles", AsyncMock(return_value=[bare_hit])):
-            html = self.client.get("/distrakt/fragments/search-movie?q=a").text
+        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=([], False))), \
+             patch.object(simkl_search, "search_titles", AsyncMock(return_value=SearchPage([bare_hit]))):
+            html = self.client.get("/distrakt/fragments/search-movie?also=trakt,simkl&q=a").text
         # `disabled` is what refuses it now: the row became the <button> it
         # always was, and the element already knows how to be unpressable.
         self.assertTrue(rows(html)[0]["disabled"])
@@ -296,9 +365,9 @@ class MovieSearchFragmentTests(AppTestCase):
 
 
 class SearchLabelTests(AppTestCase):
-    """The add modals' field labels name what is ACTUALLY being searched, from
-    the same registry call that answers the search — "Search Trakt" stopped
-    being true the moment a second catalogue could answer."""
+    """The add modals' field labels name what is ACTUALLY searched on Enter,
+    from the same registry call that answers the search: the default catalogue,
+    and never a linked service, which is only an offer under the results."""
 
     def make_settings(self):
         return Settings(**BOTH_CONFIGURED)
@@ -313,14 +382,11 @@ class SearchLabelTests(AppTestCase):
     def _page(self) -> str:
         return self.client.get("/distrakt?year=2026&month=1").text
 
-    def test_both_catalogues_are_named(self):
-        self.assertEqual(self._page().count("Search Trakt and Simkl"), 2)
-
-    def test_one_catalogue_goes_on_naming_itself(self):
-        save_settings(Settings(public_base_url=ORIGIN, simkl_client_id="scid",
-                               simkl_client_secret="ssecret"))
+    def test_tmdb_is_named_and_a_linked_service_is_not(self):
+        save_settings(Settings(**BOTH_CONFIGURED, tmdb_api_key=TMDB_TOKEN))
         page = self._page()
-        self.assertEqual(page.count("Search Simkl"), 2)
+        self.assertEqual(page.count("Search TMDB"), 2)
+        self.assertNotIn("Search Simkl", page)
         self.assertNotIn("Search Trakt", page)
 
     def test_no_catalogue_names_none(self):
@@ -421,11 +487,11 @@ class SeasonPickerFragmentTests(AppTestCase):
         with self._found(self._hit(Source.TRAKT, "1", {"tmdb": 100})), \
              patch.object(trakt_detail, "fetch_show_seasons", AsyncMock(return_value=seasons)):
             html = self._pick(month=self.ahead)
-        self.assertIn("S01 (10 eps)", html)
-        # The button names the result and the season, and nothing about the
+        self.assertIn('name="season:1"', html)
+        self.assertIn("10 eps", html)
+        # The checklist names the result and the seasons, and nothing about the
         # title: no id a browser could edit reaches the write.
-        self.assertIn('"q": "a"', html)
-        self.assertIn('"season": 1', html)
+        self.assertIn('name="q" value="a"', html)
         self.assertNotIn("tmdb", html)
 
     def test_a_hit_that_resolves_to_a_film_is_not_offered_a_season(self):
@@ -483,18 +549,17 @@ class SeasonPickerFragmentTests(AppTestCase):
                                     "imdb": "tt1", "mal": 51019})
         self.assertIsNotNone(resolve_key(Media.SHOW, pick.ids))
 
-    def test_a_season_that_names_itself_adds_on_sight(self):
+    def test_a_season_that_names_itself_arrives_as_that_season_ticked(self):
         """Asking which season would be asking a question the row already
-        answered, so the add fires as the answer lands — `hx-trigger="load"`,
-        which is the declarative form of what the browser used to do the moment
-        the lookup came back."""
+        answered, so the checklist offers that season alone, ticked — the
+        app's one season picker, the same on every surface."""
         answer = SeasonsAnswer(seasons=[], named_season=3, network="",
                                ids={"tmdb": 1429})
         with self._found(self._hit(Source.SIMKL, "694485", {"simkl": 694485})), \
              patch.object(simkl_detail, "fetch_seasons", AsyncMock(return_value=answer)):
             html = self._pick()
-        self.assertIn('hx-trigger="load"', html)
-        self.assertIn('"season": 3', html)
+        self.assertIn('name="season:3" value="1" checked', html)
+        self.assertNotIn('name="season:1"', html)
 
     def test_a_hit_still_unkeyable_after_the_lookup_says_so(self):
         answer = SeasonsAnswer(seasons=[], named_season=None, ids={}, network="")
@@ -553,7 +618,8 @@ class SeasonPickerFragmentTests(AppTestCase):
         with self._found(self._hit(Source.SIMKL, "1", {"simkl": 1})), \
              patch.object(simkl_detail, "fetch_seasons", AsyncMock(return_value=answer)):
             html = self._pick()
-        self.assertIn("S01 (12 eps)", html)
+        self.assertIn('name="season:1"', html)
+        self.assertIn("12 eps", html)
         self.assertNotIn('hx-trigger="load"', html)
 
     def test_a_genuine_failure_is_drawn_rather_than_answered_with_a_status(self):

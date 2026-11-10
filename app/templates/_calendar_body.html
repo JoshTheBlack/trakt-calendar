@@ -86,8 +86,13 @@
 
        Absent at zero rather than shown as "0": the lines DISAPPEARING is the
        signal that everything has settled, which is the state a reader is
-       actually looking for. #}
-    {% if backlog_titles or backlog_seasons %}
+       actually looking for.
+
+       A WEEK A SERVICE IS STILL WORKING OUT IS COUNTED HERE, NOT WARNED ABOUT:
+       nothing failed — TMDB's season premieres are derived behind the page and
+       land as each week finishes — so it belongs beside the other work still
+       under way rather than in the "couldn't be loaded" banner. #}
+    {% if backlog_titles or backlog_seasons or backlog_weeks %}
     <hr class="stats-divider">
     {% if backlog_titles %}
     <div class="stats-row" title="Stored titles whose genres, network and certification are still being looked up. Instance-wide, not just this month.">
@@ -95,8 +100,13 @@
     </div>
     {% endif %}
     {% if backlog_seasons %}
-    <div class="stats-row" title="Seasons still owed a per-episode lookup, for episode titles, runtimes and ratings. Instance-wide, not just this month.">
-        <span>📼 Seasons owed:</span><strong id="statBacklogSeasons">{{ backlog_seasons }}</strong>
+    <div class="stats-row" title="Seasons whose episodes have not been looked up yet, for each episode's title, runtime and rating. Instance-wide, not just this month.">
+        <span>📼 Seasons awaiting episode details:</span><strong id="statBacklogSeasons">{{ backlog_seasons }}</strong>
+    </div>
+    {% endif %}
+    {% if backlog_weeks %}
+    <div class="stats-row" title="Calendar weeks a service is still working out in the background — TMDB's season premieres are derived from every show airing that week. Each week's cards appear when it finishes. Instance-wide, not just this month.">
+        <span>🧮 Weeks being worked out:</span><strong id="statBacklogWeeks">{{ backlog_weeks }}</strong>
     </div>
     {% endif %}
     {% endif %}
@@ -135,6 +145,7 @@
 {% elif partial %}
 <div class="warning-banner">⚠️ Some calendar data couldn't be loaded — showing what we have.</div>
 {% endif %}
+{% include "_month_changed.html" %}
 {# Quiet on purpose, and separate from the warning above: nothing is wrong. A
    title one service listed but has not been looked up yet has no genres,
    country or certification to judge, so this month's filters let it through

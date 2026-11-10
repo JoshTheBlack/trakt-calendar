@@ -40,14 +40,17 @@ from fastapi.testclient import TestClient
 from app import auth, db
 from app.auth import trakt_routes
 from app.providers.trakt import detail as trakt_detail, sync as trakt_sync
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings, settling
 from app.main import app
 from app.media import posters
 from app.ranker import core as ranker
 from app.ranker import routes as ranker_routes, sources as ranker_sources
 from app.providers import title_search
-from app.providers.base import Source
+from app.providers.base import SearchPage, Source
+from app.providers.tmdb import search as tmdb_search
 from app.ranker.sources import Media, RatedTitle, TitleRef
+from tests.ranker.test_search import reference
 from tests.support import APP_DIR, ORIGIN, migrated_db
 
 
@@ -56,12 +59,15 @@ USER_TOKEN = "this-users-own-token"
 
 def result_rows(html: str) -> list[dict]:
     """The results a search fragment drew, each as the reference it posts."""
-    return [json.loads(unescape(vals)) for vals in
-            re.findall(r'<div class="search-row ranker-result"[^>]*?hx-vals="([^"]*)"', html)]
+    return [reference(attrs) for attrs in
+            re.findall(r'<(?:div|summary) class="search-row ranker-result"([^>]*)>', html)]
 
 
 def result_titles(html: str) -> list[str]:
     return [t.strip() for t in re.findall(r'<span class="search-title">([^<]*)', html)]
+
+
+TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJ0ZXN0In0.c2lnbmF0dXJl"
 
 
 def canned(*hits):
@@ -70,7 +76,7 @@ def canned(*hits):
     (providers/title_search.py), so no provider function runs."""
     calls = []
 
-    async def _search(asked, settings, media, query, *, cached_only=False):
+    async def _search(asked, settings, media, query, *, pages=1, cached_only=False):
         calls.append((query, media, cached_only))
         return title_search.SearchMergeResult(
             hits=[hit for hit in hits if hit.media == media], failed=frozenset())
@@ -117,8 +123,8 @@ class StandaloneTestCase(unittest.TestCase):
         # A configured instance credential, which is what a search is supposed
         # to use. Nothing in this file links an account to anything.
         save_settings(Settings(trakt_client_id="instance-client",
-                               trakt_access_token=OPERATOR_TOKEN))
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+                               trakt_access_token=OPERATOR_TOKEN, tmdb_api_key=TMDB_TOKEN))
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.admin_id = asyncio.run(auth.create_user(
             username="admin_user", password="hunter2hunter2", settings=Settings(),
             is_admin=True))
@@ -282,24 +288,24 @@ class AbsenceTests(StandaloneTestCase):
 class CredentialTests(StandaloneTestCase):
     """The two rules that are easy to get backwards."""
 
-    def test_search_reaches_trakt_on_the_client_id_and_never_the_operators_token(self):
-        """This account has linked nothing, so its settings carry no token — and
-        Trakt still answers, because a catalogue search authenticates with the
-        instance's client id. What must never happen is the operator's own token
-        standing in for the viewer's."""
+    def test_search_reaches_tmdb_on_the_instance_token_and_never_the_operators(self):
+        """This account has linked nothing, so its settings carry no token of its
+        own — and TMDB still answers, because every box asks it with the
+        instance's read token. What must never happen is the operator's own
+        Trakt token standing in for the viewer's, or Trakt being asked for an
+        account that never linked it."""
         seen = {}
 
-        async def _search(settings, media, query, cache_only=False):
-            seen["token"] = settings.trakt_access_token
-            seen["client"] = settings.trakt_client_id
-            return []
+        async def _search(settings, media, query, *, page=1, cached_only=False):
+            seen["trakt_token"] = settings.trakt_access_token
+            seen["tmdb"] = settings.tmdb_configured
+            return SearchPage([])
 
-        # The real Trakt adapter runs here — only the call at its edge is
-        # replaced — so this pins what the adapter actually reaches for.
-        with mock.patch.object(trakt_detail, "search_titles", _search):
+        with mock.patch.object(tmdb_search, "search_titles", _search),              mock.patch.object(trakt_detail, "search_titles",
+                               exploding("Trakt was searched for an account that never linked it")):
             resp = self.client.get("/rankings/fragments/search?q=test")
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(seen, {"token": "", "client": "instance-client"})
+        self.assertEqual(seen, {"trakt_token": "", "tmdb": True})
 
     def test_a_ratings_read_uses_the_callers_own_token(self):
         seen = {}
@@ -312,7 +318,7 @@ class CredentialTests(StandaloneTestCase):
         with mock.patch.object(trakt_routes, "access_token_for_user",
                                _token_for(USER_TOKEN)), \
              mock.patch.object(trakt_sync, "fetch_ratings", _ratings):
-            resp = self.client.post("/rankings/boards/b1/seed", json={})
+            resp = self.client.post("/rankings/boards/b1/seed", json={"service": "trakt"})
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(seen["token"], USER_TOKEN)
         self.assertNotEqual(seen["token"], OPERATOR_TOKEN)
@@ -320,7 +326,9 @@ class CredentialTests(StandaloneTestCase):
     def test_the_seed_is_offered_once_an_account_has_something_to_read(self):
         with mock.patch.object(trakt_routes, "access_token_for_user", _token_for(USER_TOKEN)):
             sources = asyncio.run(ranker_routes._sources(self.user_id))
-        self.assertEqual(sources, {"search": True, "ratings": True})
+        # WHICH SERVICES, each a press of its own: the linked services that keep
+        # ratings (ranker_sources.ratings_services).
+        self.assertEqual(sources, {"search": True, "ratings": [("trakt", "Trakt")]})
 
 
 def _token_for(token: str):
@@ -347,14 +355,24 @@ class ProtocolTests(StandaloneTestCase):
             RatedTitle(title=a_show(1399, "Game of Thrones"), rating=7),
         ])
         asyncio.run(ranker.create_board(self.user_id, uid="b1"))
-        with mock.patch.object(ranker_sources, "ratings_source", lambda: source), \
-             mock.patch.object(ranker_sources, "ratings_available", _true()), \
+        named = []
+
+        async def _named(user_id, service):
+            named.append(service)
+            return source
+
+        with mock.patch.object(ranker_sources, "ratings_source", _named), \
              mock.patch.object(trakt_sync, "fetch_ratings", exploding("the provider was called")):
             # THE DRY RUN ANSWERS THE CONFIRMATION ITS OWN COUNTS ARE WRITTEN
-            # INTO, and pressing that is the same request with `commit` on.
-            preview = self.client.post("/rankings/boards/b1/seed", json={}).text
+            # INTO, and pressing that is the same request with `commit` on — and
+            # the same service, which the confirmation carries.
+            preview = self.client.post("/rankings/boards/b1/seed",
+                                       json={"service": "trakt"}).text
             committed = self.client.post("/rankings/boards/b1/seed",
-                                         json={"commit": "1"}).text
+                                         json={"commit": "1", "service": "trakt"}).text
+
+        self.assertEqual(named, ["trakt", "trakt"])
+        self.assertIn('"service": "trakt"', preview)
 
         self.assertEqual(source.calls, [self.user_id, self.user_id])
         self.assertIn("would add 2 title(s)", preview)
@@ -365,12 +383,6 @@ class ProtocolTests(StandaloneTestCase):
         placed = {c["uid"]: [i["title"] for i in c["items"]] for c in board["categories"]}
         self.assertEqual(placed["tier-s"], ["Breaking Bad"])
         self.assertEqual(placed["tier-c"], ["Game of Thrones"])
-
-
-def _true():
-    async def _call(*args, **kwargs):
-        return True
-    return _call
 
 
 class ModuleIsolationTests(unittest.TestCase):

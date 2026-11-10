@@ -116,106 +116,32 @@ class ASeasonGoesToWhoHoldsItTests(unittest.TestCase):
         self.assertEqual(asked, ["trakt"])
 
 
-def _video(video_id, source, kind="trailer"):
-    from app.providers.base import Video, VideoKind
-    return Video(site="youtube", video_id=video_id,
-                 url=f"https://www.youtube.com/watch?v={video_id}", title="",
-                 kind=VideoKind(kind), official=None, published=None,
-                 sources=(source,))
 
+class OutboundLinksAskEveryRegisteredServiceTests(unittest.TestCase):
+    """outbound_links reaches each service's own `title_url` through the
+    registry. It used to hold a table of two packages' builders, so a service
+    registered later got no button and nothing said so."""
 
-class _DetailPort:
-    """One service's detail port: a description carrying its own videos, and
-    the same list on its own — or a failure, where the test says so."""
+    def test_a_service_registered_later_gets_its_button(self):
+        third = mock.Mock(title_url=lambda media, ids: f"https://mercury.example/{ids['mercury']}")
+        registry = {**providers.registered(), "mercury": third}
+        with mock.patch.object(providers, "registered", lambda: registry):
+            links = detail_source.outbound_links({"mercury": "7", "trakt": "1"}, "show")
+        self.assertIn(detail_source.Outbound("mercury", "https://mercury.example/7"), links)
 
-    def __init__(self, source, videos, *, configured=True, episodes=True, fails=False):
-        self.source, self.videos = source, videos
-        self.configured, self.episodes, self.fails = configured, episodes, fails
-        self.asked = []
+    def test_only_services_the_title_names_are_asked(self):
+        third = mock.Mock(title_url=mock.Mock(return_value="https://mercury.example/x"))
+        registry = {**providers.registered(), "mercury": third}
+        with mock.patch.object(providers, "registered", lambda: registry):
+            links = detail_source.outbound_links({"trakt": "1"}, "show")
+        third.title_url.assert_not_called()
+        self.assertEqual([str(link.source) for link in links], ["trakt"])
 
-    def catalogue_configured(self, settings):
-        return self.configured
-
-    async def fetch_details(self, settings, media, source_id, season, *, cache_only=False):
-        self.asked.append(("details", source_id, cache_only))
-        return {"title": "T", "overview": "o", "videos": list(self.videos),
-                "episodes": [{"number": 1}] if self.episodes else []}
-
-    async def fetch_videos(self, settings, media, source_id, *, cache_only=False):
-        from app.providers.base import SourceUnavailable
-        self.asked.append(("videos", source_id, cache_only))
-        if self.fails:
-            raise SourceUnavailable("down")
-        return list(self.videos)
-
-
-class APanelPoolsEveryServicesVideosTests(unittest.TestCase):
-    """describe_panel: the description is the chosen service's, and its
-    `videos` are every service's the ids name, pooled."""
-
-    def panel(self, ids, *, trakt=None, simkl=None, season=None, stored_only=False,
-              cache_only=False):
-        ports = {Source.TRAKT: trakt or _DetailPort("trakt", [_video("traktvideo1", "trakt")]),
-                 Source.SIMKL: simkl or _DetailPort("simkl", [_video("simklvideo1", "simkl",
-                                                                     "teaser")])}
-        chosen = detail_source.Answerer(Source.TRAKT, ids.get("trakt", ""),
-                                        stored_only=stored_only)
-        with mock.patch.object(detail_source, "ports",
-                               lambda: [(s, p) for s, p in ports.items()]), \
-                mock.patch.object(providers, "get",
-                                  lambda source: mock.Mock(detail_port=ports[Source(source)])):
-            who, details = asyncio.run(detail_source.describe_panel(
-                Settings(), chosen, ids, "show", season, cache_only=cache_only))
-        return who, details, ports
-
-    def test_both_services_videos_are_on_the_panel_with_the_best_first(self):
-        _who, details, ports = self.panel({"trakt": "1", "simkl": "2"})
-        self.assertEqual([v.video_id for v in details["videos"]],
-                         ["traktvideo1", "simklvideo1"])
-        self.assertEqual(details["title"], "T")
-        # The other service is asked for its list alone, by ITS OWN id.
-        self.assertEqual(ports[Source.SIMKL].asked, [("videos", "2", False)])
-
-    def test_a_service_the_ids_do_not_name_is_not_asked(self):
-        """What bounds the share page: a map with only one service's id asks
-        only that service."""
-        _who, details, ports = self.panel({"trakt": "1"})
-        self.assertEqual([v.video_id for v in details["videos"]], ["traktvideo1"])
-        self.assertEqual(ports[Source.SIMKL].asked, [])
-
-    def test_a_service_that_fails_contributes_nothing_and_fails_nothing(self):
-        simkl = _DetailPort("simkl", [_video("simklvideo1", "simkl")], fails=True)
-        _who, details, _ports = self.panel({"trakt": "1", "simkl": "2"}, simkl=simkl)
-        self.assertEqual([v.video_id for v in details["videos"]], ["traktvideo1"])
-
-    def test_cache_only_reaches_the_other_service_too(self):
-        _who, _details, ports = self.panel({"trakt": "1", "simkl": "2"}, cache_only=True)
-        self.assertEqual(ports[Source.SIMKL].asked, [("videos", "2", True)])
-
-    def test_a_service_this_instance_cannot_reach_is_read_from_its_store(self):
-        simkl = _DetailPort("simkl", [], configured=False)
-        _who, _details, ports = self.panel({"trakt": "1", "simkl": "2"}, simkl=simkl)
-        self.assertEqual(ports[Source.SIMKL].asked, [("videos", "2", True)])
-
-    def test_a_season_handed_to_a_later_service_keeps_the_first_services_videos(self):
-        """The season rule can move the description to Simkl; the title's videos
-        are still every service's, the first one's included."""
-        trakt = _DetailPort("trakt", [_video("traktvideo1", "trakt")], episodes=False)
-        who, details, ports = self.panel({"trakt": "1", "simkl": "2"}, trakt=trakt, season=4)
-        self.assertEqual(who.source, Source.SIMKL)
-        self.assertEqual({v.video_id for v in details["videos"]},
-                         {"traktvideo1", "simklvideo1"})
-        # The describer's own list now leads its kind — Simkl's teaser still
-        # follows Trakt's trailer, because a trailer outranks a teaser.
-        self.assertEqual(details["videos"][0].video_id, "traktvideo1")
-        self.assertIn(("videos", "1", False), ports[Source.TRAKT].asked)
-
-    def test_nothing_to_describe_is_still_nothing(self):
-        trakt = _DetailPort("trakt", [])
-        trakt.fetch_details = mock.AsyncMock(return_value={"videos": []})
-        who, details, _ports = self.panel({"trakt": "1", "simkl": "2"}, trakt=trakt,
-                                          stored_only=True)
-        self.assertIsNone(details)
+    def test_links_follow_the_declared_order(self):
+        links = detail_source.outbound_links({"simkl": "2", "trakt": "1"}, "movie")
+        self.assertEqual([str(link.source) for link in links],
+                         [str(s) for s in providers.registered()
+                          if str(s) in ("simkl", "trakt")])
 
 
 if __name__ == "__main__":

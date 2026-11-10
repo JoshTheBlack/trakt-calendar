@@ -22,6 +22,13 @@ THE SEQUENCE, and why each step is where it is:
     -> auth.create_session
     -> redirect by outcome.calendar_approved
 
+EVERY REFUSAL ENDS THE GRANT IT WAS HANDED (`end_unkept_grant`). The service
+minted a token for this completion, and a refused completion stores it nowhere,
+so nothing here could revoke it later and it would stand at the service, listed
+under the person's connected apps, for as long as the service keeps it. TMDB's
+callback used to do this for itself alone; Trakt's and Simkl's refusals left
+theirs standing.
+
 THE FOUR REFUSALS ARE NOT INTERCHANGEABLE and the order they are caught in is
 part of the policy:
 
@@ -64,10 +71,10 @@ from dataclasses import dataclass
 from fastapi import Request
 from fastapi.responses import Response
 
-from .. import auth
+from .. import auth, config, db, secrets_box
 from ..config import Settings
 from ..media import user_images
-from . import provider_avatars
+from . import provider_avatars, revocation
 from .routes import INVALID_CREDENTIALS, INVALID_INVITE
 
 logger = logging.getLogger(__name__)
@@ -79,6 +86,7 @@ logger = logging.getLogger(__name__)
 THROTTLED = "throttled"
 REGISTRATION_REFUSED = "registration_refused"
 IDENTITY_IN_USE = "identity_in_use"
+ANOTHER_ACCOUNT_HELD = "another_account_held"
 ACCOUNT_UNAVAILABLE = "account_unavailable"
 NO_SESSION = "no_session"
 KEY_UNHEALTHY = "key_unhealthy"
@@ -137,6 +145,15 @@ async def complete_provider_login(
     account here; it names the provider, which is the one thing this function
     cannot say for itself.
     """
+    outcome = await _sign_in(identity=identity, handshake=handshake, request=request,
+                             settings=settings, already_linked=already_linked)
+    if isinstance(outcome, Refusal):
+        await end_unkept_grant(identity)
+    return outcome
+
+
+async def _sign_in(*, identity: auth.ProviderIdentity, handshake, request: Request,
+                   settings: Settings, already_linked: str) -> LoginResult | Refusal:
     ip = auth.client_ip(request, settings)
     token = handshake["invite_token"]
     # Only a REGISTRATION is throttled — see the module docstring. `find_identity`
@@ -192,32 +209,107 @@ async def complete_provider_link(
     identity: auth.ProviderIdentity,
     current,
     already_linked: str,
+    holds_another: str,
     key_unhealthy: str,
 ) -> LinkResult | Refusal:
     """Attach a provider identity to the account already in session.
 
     The same shape one layer smaller: no registration, so no throttle and no
-    invite, but the same refusals with the same meanings. There is one extra —
-    IdentityWritesBlocked — because linking WRITES a token pair, and a link is
+    invite, but the same refusals with the same meanings. There are two extra.
+    IdentityWritesBlocked, because linking WRITES a token pair, and a link is
     the only one of the two paths that can be asked to overwrite tokens that are
-    already sealed at rest.
+    already sealed at rest. And ANOTHER_ACCOUNT_HELD: the account in session
+    already holds a different account of this service (auth.AnotherAccountHeld
+    says why that is refused rather than added), and `holds_another` is the
+    service's sentence telling the person to unlink that one first. 409.
 
     `current` is the signed-in user. None means the handshake was consumed
     without one, which the consumption itself already required, so it is refused
     here rather than trusted.
     """
+    outcome = await _link(identity=identity, current=current, already_linked=already_linked,
+                          holds_another=holds_another, key_unhealthy=key_unhealthy)
+    if isinstance(outcome, Refusal):
+        await end_unkept_grant(identity)
+    return outcome
+
+
+async def _link(*, identity: auth.ProviderIdentity, current, already_linked: str,
+                holds_another: str, key_unhealthy: str) -> LinkResult | Refusal:
     if current is None:  # pragma: no cover — consume_handshake already required it
         return Refusal(NO_SESSION, auth.HANDSHAKE_REJECTED, 400)
     try:
         await auth.link_provider_identity(identity=identity, user_id=current.user_id)
     except auth.IdentityInUse:
         return Refusal(IDENTITY_IN_USE, already_linked, 409)
+    except auth.AnotherAccountHeld:
+        return Refusal(ANOTHER_ACCOUNT_HELD, holds_another, 409)
     except auth.AccountUnavailable:
         return Refusal(ACCOUNT_UNAVAILABLE, auth.HANDSHAKE_REJECTED, 403)
     except auth.IdentityWritesBlocked:
         return Refusal(KEY_UNHEALTHY, key_unhealthy, 409)
     await seed_provider_avatar(current.user_id, identity)
     return LinkResult(user_id=current.user_id, redirect_target="/me")
+
+
+# The instance's own token for a service, where it has one, by Settings field —
+# a token this instance is using that is no refused completion's to revoke.
+# Every linkable service has an entry (tests/auth/test_provider_login.py holds
+# it), so a service added to revocation's table must say here whether it has
+# one. Simkl's operator field is a legacy V1 token the app never loads
+# (config.OPERATOR_SECRETS_NOT_LOADED), so it has none.
+INSTANCE_TOKEN_FIELDS: dict[str, str | None] = {
+    "trakt": "trakt_access_token",
+    "simkl": None,
+    "plex": None,
+    "tmdb": None,
+}
+
+
+async def end_unkept_grant(identity: auth.ProviderIdentity) -> None:
+    """Revoke, at the service, the token a refused completion was handed.
+
+    UNLESS SOMETHING HERE STILL HOLDS THAT VERY TOKEN. A service may answer a
+    second authorization with the token it already issued — nothing in Trakt's
+    or Simkl's documentation promises a fresh one — and revoking it then would
+    end the link that already works: the other account's, in IdentityInUse, or
+    the instance's own Trakt token. So a token any row of the same service
+    account holds, or the instance's own, is left alone; and so is every token
+    whenever one of those rows cannot be read (sealed, with the key missing),
+    because then nobody can say it is not the same one. Plex publishes no
+    revocation (revocation's table), so for it this asks nothing.
+
+    A FAILURE ONLY LOGS: the refusal is the answer either way, and the person
+    has nothing to do about a service that could not be reached.
+    """
+    token = (identity.access_token or "").strip()
+    if not token or revocation.revoker(identity.provider) is None:
+        return
+    if await _still_held(identity, token):
+        return
+    if await revocation.revoke(identity.provider, token):
+        logger.warning("A refused %s completion's token could not be revoked there.",
+                       identity.provider)
+
+
+async def _still_held(identity: auth.ProviderIdentity, token: str) -> bool:
+    field = INSTANCE_TOKEN_FIELDS[identity.provider]
+    if field and (getattr(await config.load_settings(), field) or "").strip() == token:
+        return True
+    rows = await db.fetch_all(
+        "SELECT access_token FROM linked_identities WHERE provider = ? AND provider_user_id = ?",
+        (identity.provider, identity.provider_user_id))
+    for row in rows:
+        stored = row["access_token"]
+        if not stored:
+            continue
+        try:
+            opened = secrets_box.open_(stored)
+        except secrets_box.SealedButWrongKey:
+            return True
+        if opened is None or opened == token:
+            return True
+    return False
 
 
 async def seed_provider_avatar(user_id: int, identity: auth.ProviderIdentity) -> None:
@@ -256,7 +348,7 @@ async def seed_provider_avatar(user_id: int, identity: auth.ProviderIdentity) ->
         return
     try:
         await user_images.save_provider_avatar(user_id, identity.provider, raw)
-        user_images.adopt_avatar_source(user_id, identity.provider, only_if_missing=True)
+        await user_images.adopt_avatar_source(user_id, identity.provider, only_if_missing=True)
     except Exception as exc:  # noqa: BLE001 — see the docstring: never fatal
         logger.debug("Could not store the %s avatar for user %s: %s",
                      identity.provider, user_id, exc)

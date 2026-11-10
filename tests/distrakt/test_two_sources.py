@@ -51,10 +51,14 @@ from tests.support import AppTestCase, ORIGIN, migrated_db, tracker_month
 # live.detail_source, which skips a record whose only source is unconfigured).
 # Keeping both true here is what leaves these tests measuring the account
 # question they are about.
-_CATALOGUE = {"trakt_catalogue_configured": True, "simkl_catalogue_configured": True}
-TRAKT_ONLY = SimpleNamespace(trakt_configured=True, simkl_configured=False, **_CATALOGUE)
-SIMKL_ONLY = SimpleNamespace(trakt_configured=False, simkl_configured=True, **_CATALOGUE)
-BOTH = SimpleNamespace(trakt_configured=True, simkl_configured=True, **_CATALOGUE)
+# TMDB's catalogue is OFF on all of them: these tests are about the two services
+# that keep a watch history, and a TMDB that answered every season total would
+# take the row out of the question they ask.
+_CATALOGUE = {"trakt_catalogue_configured": True, "simkl_catalogue_configured": True,
+              "tmdb_configured": False}
+TRAKT_ONLY = SimpleNamespace(trakt_configured=True, simkl_configured=False, tmdb_account_configured=False, **_CATALOGUE)
+SIMKL_ONLY = SimpleNamespace(trakt_configured=False, simkl_configured=True, tmdb_account_configured=False, **_CATALOGUE)
+BOTH = SimpleNamespace(trakt_configured=True, simkl_configured=True, tmdb_account_configured=False, **_CATALOGUE)
 
 LABELS = {"trakt": "Trakt", "simkl": "Simkl"}
 ORDER = ("trakt", "simkl")
@@ -488,8 +492,9 @@ def _trakt_only_record(tid, season=1, **fields) -> dict:
 # services, but only Simkl's catalogue can be asked about a title. This is the
 # question live.detail_source puts, and the state the reported row was in.
 SIMKL_CATALOGUE_ONLY = SimpleNamespace(
-    trakt_configured=True, simkl_configured=True,
-    trakt_catalogue_configured=False, simkl_catalogue_configured=True)
+    trakt_configured=True, simkl_configured=True, tmdb_account_configured=False,
+    trakt_catalogue_configured=False, simkl_catalogue_configured=True,
+    tmdb_configured=False)
 
 
 class TheIdALibraryMatchTeachesTests(TwoSourceTestCase):
@@ -1762,10 +1767,14 @@ class SourceNamesTests(unittest.TestCase):
     spell a service differently from the rest of the app."""
 
     def test_the_labels_are_the_registrys_own(self):
-        self.assertEqual(live.source_labels(), LABELS)
+        self.assertEqual(live.source_labels(),
+                         {"tmdb": "TMDB", "trakt": "Trakt", "simkl": "Simkl"})
 
     def test_the_order_is_the_declared_one(self):
-        self.assertEqual(live.source_order(), ORDER)
+        """TMDB first — it names a row's total wherever it answered one — and the
+        two tracker services after it in the order every existing instance
+        already reads them."""
+        self.assertEqual(live.source_order(), ("tmdb", "trakt", "simkl"))
 
 
 if __name__ == "__main__":  # pragma: no cover
@@ -1968,7 +1977,8 @@ class WhoDescribesThisTests(unittest.IsolatedAsyncioTestCase):
              patch("app.providers.simkl.detail.fetch_title_facts",
                    AsyncMock(return_value=TitleFacts("Juliet and Juliet", "Rai 1"))) as simkl:
             got = await live.title_facts(self.settings(), rec)
-        self.assertEqual(got, TitleFacts("Juliet & Juliet", "Rai 1"))
+        # The network is Simkl's, and says so: the title store files it there.
+        self.assertEqual(got, TitleFacts("Juliet & Juliet", "Rai 1", network_from="simkl"))
         self.assertEqual(simkl.await_args.args[1], 2611545)
 
     async def test_a_stated_network_is_never_asked_about_again(self):

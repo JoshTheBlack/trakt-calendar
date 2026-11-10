@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, patch
 
 from app import distrakt as distrakt_store
 from app.distrakt import post_memo, prefs
+from app.media import logos
 from app.providers.base import Media
 
 from tests.distrakt.test_month_fragment import KEY, MonthFragmentTestCase
@@ -224,10 +225,8 @@ class SavingACodeTests(MonthFragmentTestCase):
                                 json={"code": ":film:"})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("month-changed", resp.headers.get("HX-Trigger", ""))
-        self.assertRegex(resp.text, r'id="emojiDefaultPillLabel" hx-swap-oob="outerHTML"')
-        self.assertNotIn('id="emojiDefaultPill"', resp.text)
-        self.assertIn("🙂 :film:", resp.text)
-        self.assertRegex(resp.text, r'<input type="text" id="emojiDefault" name="code" value=":film:"')
+        self.assertNotIn("emojiDefaultPill", resp.text)
+        self.assertRegex(resp.text, r'<input type="text" id="emojiDefault" name="code" value=":film:"[^>]*hx-swap-oob="outerHTML"')
         self.assertEqual(asyncio.run(distrakt_store.get_emoji_prefs(self.user_id)), ({}, ":film:"))
         # Empty means the app's own default.
         self.client.post(f"/api/distrakt/emoji-default?year={year}&month={month}", json={"code": ""})
@@ -250,9 +249,13 @@ class SavingACodeTests(MonthFragmentTestCase):
                          {"HBO": ":theirs:"})
 
 
+HBO_LOGO = logos.Logo("https://wsrv.nl/?url=hbo&w=128&h=128&fit=contain&output=png", False)
+LIGHT_LOGO = logos.Logo("https://wsrv.nl/?url=starz&w=128&h=128&fit=contain&output=png", True)
+
+
 class TheLogoToolsTests(MonthFragmentTestCase):
     """Under a code while it is edited: the network's name, its tile to download
-    where there is one, and — for an administrator — making the tile again."""
+    where there is a logo, and — for an administrator — resolving the logo again."""
 
     def setUp(self):
         super().setUp()
@@ -264,15 +267,29 @@ class TheLogoToolsTests(MonthFragmentTestCase):
         found = re.search(r'<span class="distrakt-emoji-tools">(.*?)</span>\s*</span>', html, re.S)
         return found.group(1) if found else ""
 
-    def test_download_is_offered_only_where_there_is_a_tile(self):
-        with patch("app.media.logos.versions", return_value={}):
-            self.assertNotIn("download", self.tools(self.month(*self.current).html))
-        with patch("app.media.logos.versions", return_value={"HBO": 7}):
-            tools = unescape(self.tools(self.month(*self.current).html))
-        self.assertIn('href="/api/network-logo?name=HBO&v=7&download=1"', tools)
+    def drawn(self, found: dict):
+        with patch("app.media.logos.for_page", new=AsyncMock(return_value=found)):
+            return self.month(*self.current).html
+
+    def test_download_is_offered_only_where_there_is_a_logo(self):
+        self.assertNotIn("download", self.tools(self.drawn({})))
+        tools = unescape(self.tools(self.drawn({"HBO": HBO_LOGO})))
+        self.assertIn('href="/api/distrakt/network-logo/download?network=HBO"', tools)
         self.assertIn('hx-boost="false"', tools)
 
-    def test_only_an_administrator_is_offered_the_regenerate(self):
+    def test_the_badge_is_the_proxied_logo_framed_by_its_lightness(self):
+        html = unescape(self.drawn({"HBO": HBO_LOGO}))
+        self.assertRegex(html, r'<img class="distrakt-logo" src="https://wsrv\.nl/\?url=hbo[^"]*" '
+                               r'alt="" width="26" height="26">')
+        light = unescape(self.drawn({"HBO": LIGHT_LOGO}))
+        self.assertIn('<img class="distrakt-logo is-light" src="https://wsrv.nl/?url=starz', light)
+
+    def test_a_network_with_no_logo_has_an_empty_slot_and_no_picture(self):
+        html = self.drawn({})
+        self.assertNotIn('class="distrakt-logo', html)
+        self.assertRegex(html, r'<span class="distrakt-badge" data-net="[^"]+">\s*</span>')
+
+    def test_only_an_administrator_is_offered_the_recheck(self):
         self.assertNotIn("/api/distrakt/network-logo", self.month(*self.current).html)
         self.assertEqual(self.client.post(self.address, json={"network": "HBO"}).status_code, 403)
 
@@ -286,32 +303,74 @@ class TheLogoToolsTests(MonthFragmentTestCase):
             "kind": distrakt_store.RecordKind.KEEPUP}))
         self.sign_in_as(admin)
 
-    def test_an_administrator_regenerates_by_the_months_own_tmdb_id(self):
+    def test_an_administrator_rechecks_by_the_months_own_tmdb_id(self):
         self.as_admin()
         self.assertIn("/api/distrakt/network-logo", self.month(*self.current).html)
-        made = AsyncMock(return_value="tile")
-        with patch("app.media.logos.regenerate", made), \
-                patch("app.media.logos.versions", return_value={"HBO": 9}):
+        made = AsyncMock(return_value=logos.Recheck.FOUND)
+        with patch("app.media.logos.recheck", made), \
+                patch("app.media.logos.known", new=AsyncMock(return_value={"HBO": HBO_LOGO})):
             resp = self.client.post(self.address, json={"network": "HBO"})
-        self.assertEqual(made.await_args.args[1:], ("HBO", 500))
-        # Every badge and every code cell for HBO, with the new tile's version.
+        self.assertEqual(made.await_args.args[1:], ("HBO", [500]))
+        # Every badge and every code cell for HBO, drawn from the table as it now is.
         self.assertIn(f"hx-swap-oob=\"outerHTML:.distrakt-badge[data-net='{_ref('HBO')}']\"", resp.text)
         self.assertIn(f"hx-swap-oob=\"outerHTML:.distrakt-emoji[data-net='{_ref('HBO')}']\"", resp.text)
-        self.assertIn("name=HBO&amp;v=9", resp.text)
+        self.assertIn("https://wsrv.nl/?url=hbo", unescape(resp.text))
         self.assertIn("toast ok", resp.text)
 
-    def test_a_regenerate_that_made_nothing_says_the_old_tile_is_kept(self):
+    def test_what_a_recheck_made_of_it_is_said(self):
         self.as_admin()
         self.month(*self.current)
-        with patch("app.media.logos.regenerate", AsyncMock(return_value=None)), \
-                patch("app.media.logos.versions", return_value={"HBO": 9}):
-            resp = self.client.post(self.address, json={"network": "HBO"})
-        self.assertIn("the old one is kept", resp.text)
-        self.assertIn("toast err", resp.text)
+        for outcome, sentence, level in (
+                (logos.Recheck.KEPT, "the old one is kept", "toast err"),
+                (logos.Recheck.MISSING, "TMDB has no usable logo", "toast err"),
+                (logos.Recheck.UNANSWERED, "could not be asked", "toast err")):
+            with self.subTest(outcome=str(outcome)), \
+                    patch("app.media.logos.recheck", AsyncMock(return_value=outcome)), \
+                    patch("app.media.logos.known", new=AsyncMock(return_value={})):
+                resp = self.client.post(self.address, json={"network": "HBO"})
+            self.assertIn(sentence, resp.text)
+            self.assertIn(level, resp.text)
 
     def test_a_network_the_month_names_no_tmdb_id_for_is_refused(self):
         self.as_admin()
-        with patch("app.media.logos.regenerate", AsyncMock()) as made:
+        with patch("app.media.logos.recheck", AsyncMock()) as made:
             resp = self.client.post(self.address, json={"network": "Nowhere TV"})
         made.assert_not_awaited()
         self.assertIn("toast err", resp.text)
+
+
+class TheLogoDownloadTests(MonthFragmentTestCase):
+    """The one route that composites a logo: Discord wants a 128px PNG on a plate,
+    which the image proxy cannot make."""
+
+    def test_it_is_a_named_attachment_made_when_asked(self):
+        with patch("app.media.logos.download_tile", AsyncMock(return_value=b"png")) as made:
+            resp = self.client.get("/api/distrakt/network-logo/download",
+                                   params={"network": "Apple TV+"})
+        made.assert_awaited_once_with("Apple TV+")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers["content-type"], "image/png")
+        self.assertIn('filename="apple-tv.png"', resp.headers["content-disposition"])
+        # Private: a shared cache in front of the app has no business holding it.
+        self.assertTrue(resp.headers["cache-control"].startswith("private"))
+        self.assertEqual(resp.content, b"png")
+
+    def test_a_network_with_no_logo_or_no_name_is_a_404(self):
+        with patch("app.media.logos.download_tile", AsyncMock(return_value=None)):
+            self.assertEqual(self.client.get("/api/distrakt/network-logo/download",
+                                             params={"network": "Nowhere"}).status_code, 404)
+        self.assertEqual(self.client.get("/api/distrakt/network-logo/download").status_code, 404)
+        too_long = "x" * (prefs.MAX_NETWORK_LENGTH + 1)
+        self.assertEqual(self.client.get("/api/distrakt/network-logo/download",
+                                         params={"network": too_long}).status_code, 404)
+
+    def test_nothing_in_the_request_is_ever_fetched(self):
+        """The network is a name the server looks up in its own table; there is no
+        parameter a caller could point an outbound request with."""
+        with patch("app.media.logos.download_tile", AsyncMock(return_value=None)) as made, \
+                patch("app.providers.tmdb.transport.download", AsyncMock()) as fetched:
+            self.client.get("/api/distrakt/network-logo/download",
+                            params={"network": "HBO", "url": "https://evil.example/x.png",
+                                    "logo_path": "/x.png"})
+        made.assert_awaited_once_with("HBO")
+        fetched.assert_not_awaited()

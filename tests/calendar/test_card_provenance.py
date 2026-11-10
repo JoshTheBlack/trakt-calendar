@@ -22,13 +22,24 @@ from urllib.parse import quote
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from app.calendar import cache as calendar_cache, resolve as calendar_resolve
+from app.calendar import resolve as calendar_resolve
 from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Record, Source, render
 from app.templating import TEMPLATES_DIR, templates
 
+from tests.support import CardTestCase, read_card, stored_groups
+
 UTC = ZoneInfo("UTC")
+
+
+def _resolve(group, prefs=None, endpoint=None, settings=None):
+    """The one card `group`'s records make for a viewer, read back through the
+    calendar's own read from a store they were written into (support.read_card)."""
+    records = list(group["records"]) if isinstance(group, dict) else list(group)
+    return read_card(records, prefs, settings=settings,
+                     endpoint=getattr(endpoint, "key", endpoint) or "shows")
+
 AIR_TS = 1784145600.0
 
 # The fields the card is willing to draw two answers for, in the two shapes it
@@ -53,12 +64,14 @@ def _record(source, **overrides) -> Record:
     return Record(**values)
 
 
-def _card_html(*records: Record, prefs=None) -> str:
+def _card_html(*records: Record, prefs=None, expanded=True) -> str:
     """One rendered card for the group `records` form, resolved and rendered the
-    way the calendar's own read path does it."""
-    groups = calendar_cache.group_records(list(records))
+    way the calendar's own read path does it — DRAWN WHOLE, as its compare
+    control fetches it, unless `expanded` is False: the card a page draws first,
+    with the control and nothing to compare (`ACardIsDrawnWithItsWinnersTests`)."""
+    groups = stored_groups(list(records))
     assert len(groups) == 1, "these records do not match; the matcher would draw two cards"
-    resolved = calendar_resolve.resolve(groups[0], prefs)
+    resolved = _resolve(groups[0], prefs)
     item = render(resolved, UTC)
     return templates.env.get_template("_card.html").render(
         item=item, not_watching=set(), new_ids=set(), is_admin=False,
@@ -66,7 +79,8 @@ def _card_html(*records: Record, prefs=None) -> str:
         # is answered with every card for it ON THIS MONTH, so the button has to
         # say which month it is asking about.
         month=1, year=2026, endpoint=get_endpoint("shows/new"),
-        settings=Settings())
+        settings=Settings(), expanded=expanded,
+        card_expand=lambda item: f"/calendar/fragments/card?airing={item.airing_key}")
 
 
 def _swap(html: str, field: str) -> str | None:
@@ -77,11 +91,12 @@ def _swap(html: str, field: str) -> str | None:
     return match.group(0) if match else None
 
 
-class ACardOnlyOneServiceDescribedTests(unittest.TestCase):
+class ACardOnlyOneServiceDescribedTests(CardTestCase):
     """Every card on an instance that has one source, and most of them on one
     that has two. None of the provenance machinery may cost it anything."""
 
     def setUp(self):
+        super().setUp()
         self.html = _card_html(_record(Source.TRAKT))
 
     def test_it_carries_no_provenance_attribute_at_all(self):
@@ -99,8 +114,12 @@ class ACardOnlyOneServiceDescribedTests(unittest.TestCase):
         self.assertNotIn("source-logo", self.html.split('class="card-body"')[0])
 
     def test_its_outbound_button_is_its_own_services(self):
+        """The one service it was drawn from, in colour — the TMDB id its ids
+        name is a title TMDB knows, drawn greyed beside it (ServicesThatOnlyKnow
+        TheTitleTests)."""
         self.assertIn('title="View on Trakt"', self.html)
-        self.assertEqual(self.html.count("trakt-btn"), 1)
+        self.assertEqual(self.html.count('class="trakt-btn"'), 1)
+        self.assertEqual(self.html.count('class="trakt-btn unlisted"'), 1)
 
     def test_the_button_wears_the_services_name_rather_than_its_symbol(self):
         """A button is a promise about where a click goes, and the name says
@@ -109,12 +128,13 @@ class ACardOnlyOneServiceDescribedTests(unittest.TestCase):
         self.assertIn("trakt-logo-dark.svg", self.html)
 
 
-class ACardTheOtherServiceListedTests(unittest.TestCase):
+class ACardTheOtherServiceListedTests(CardTestCase):
     """The unmatched case: two services listed a title without agreeing it is the
     same title, so it draws twice. It still has to say which service it came
     from — otherwise the two cards read as the app showing one thing twice."""
 
     def setUp(self):
+        super().setUp()
         self.html = _card_html(_record(Source.SIMKL))
 
     def test_it_says_which_service_listed_it_on_its_outbound_button(self):
@@ -133,15 +153,73 @@ class ACardTheOtherServiceListedTests(unittest.TestCase):
         self.assertNotIn("trakt-logo-dark.svg", self.html)
 
     def test_it_offers_the_one_page_there_is(self):
-        """One service listed it, so there is one place to go."""
-        self.assertEqual(self.html.count("trakt-btn"), 1)
+        """One service listed it, so there is one place to go in colour — and
+        TMDB, whose id it names, greyed beside it."""
+        self.assertEqual(self.html.count('class="trakt-btn"'), 1)
+        self.assertEqual(self.html.count('class="trakt-btn unlisted"'), 1)
 
 
-class ADisagreementIsDrawnWhereThereIsOneTests(unittest.TestCase):
+class ACardIsDrawnWithItsWinnersTests(CardTestCase):
+    """The card a page draws first: every field's winning value and nothing
+    else, and — where the services disagree — ONE control that fetches the card
+    drawn whole in its place (_card.html's header; the classes below are about
+    that whole drawing)."""
+
+    def setUp(self):
+        super().setUp()
+        self.records = (_record(Source.TRAKT),
+                        _record(Source.SIMKL, title="Another Title", rating=7.2,
+                                poster="https://simkl.test/q.jpg"))
+        self.html = _card_html(*self.records, expanded=False)
+
+    def test_it_draws_the_winners_and_no_flip_and_no_pair_of_chips(self):
+        self.assertIn("One Title", self.html)
+        self.assertNotIn("Another Title", self.html)
+        self.assertNotIn(quote("https://simkl.test/q.jpg", safe=""), self.html)
+        self.assertNotIn('class="flip"', self.html)
+        self.assertNotIn("flip-pick", self.html)
+        self.assertNotIn("chip dual", self.html)
+
+    def test_one_control_fetches_the_card_drawn_whole_in_its_place(self):
+        controls = re.findall(r'<button[^>]*class="source-swap card-expand"[^>]*>', self.html, re.S)
+        self.assertEqual(len(controls), 1)
+        control = controls[0]
+        self.assertRegex(control, r'hx-get="/calendar/fragments/card\?airing=[0-9a-f]{16}"')
+        self.assertIn('hx-trigger="click once"', control)
+        self.assertIn('hx-target="closest .card"', control)
+        self.assertIn('hx-swap="outerHTML"', control)
+        # It wears the mark of the service whose values are on screen, and is a
+        # button — a control static/js/ui.js's opener leaves to act for itself.
+        self.assertIn('alt="Trakt"', self.html.split("card-expand", 1)[1].split("</button>", 1)[0])
+
+    def test_a_disagreement_about_the_day_alone_offers_it_too(self):
+        html = _card_html(_record(Source.TRAKT),
+                          _record(Source.SIMKL, air_ts=AIR_TS + 2 * 86400), expanded=False)
+        self.assertIn("card-expand", html)
+        self.assertNotIn("chip dual day", html)
+
+    def test_a_card_whose_services_agree_offers_nothing(self):
+        self.assertNotIn("card-expand", _card_html(_record(Source.TRAKT), expanded=False))
+
+    def test_a_surface_that_offers_no_address_draws_no_control(self):
+        groups = stored_groups(list(self.records))
+        item = render(_resolve(groups[0]), UTC)
+        html = templates.env.get_template("_card.html").render(
+            item=item, not_watching=set(), new_ids=set(), is_admin=False, month=1,
+            year=2026, endpoint=get_endpoint("shows/new"), settings=Settings())
+        self.assertNotIn("card-expand", html)
+        self.assertNotIn('class="flip"', html)
+
+    def test_drawn_whole_it_carries_no_control(self):
+        self.assertNotIn("card-expand", _card_html(*self.records))
+
+
+class ADisagreementIsDrawnWhereThereIsOneTests(CardTestCase):
     """`alternatives` names exactly the fields the two services filled in
     differently, and the card's marks are that set and no wider."""
 
     def setUp(self):
+        super().setUp()
         self.html = _card_html(
             _record(Source.TRAKT),
             _record(Source.SIMKL, title="Another Title", poster="https://simkl.test/q.jpg"))
@@ -228,12 +306,13 @@ class ADisagreementIsDrawnWhereThereIsOneTests(unittest.TestCase):
         self.assertIn("Another Title", html)
 
 
-class TwoNumbersRatherThanAnAverageTests(unittest.TestCase):
+class TwoNumbersRatherThanAnAverageTests(CardTestCase):
     """A rating, a runtime, a network or a status the two services disagree
     about is shown as both, never as a mean — two user bases produce two
     legitimate numbers and their average is a number nobody reported."""
 
     def setUp(self):
+        super().setUp()
         self.html = _card_html(
             _record(Source.TRAKT),
             _record(Source.SIMKL, rating=7.9, runtime=42))
@@ -262,7 +341,48 @@ class TwoNumbersRatherThanAnAverageTests(unittest.TestCase):
         self.assertNotIn('class="chip dual" data-field="network"', self.html)
 
 
-class AFlipIsAViewFlipAndNothingElseTests(unittest.TestCase):
+class WhenTheServicesDisagreeAboutTheDayTests(CardTestCase):
+    """The card sits on ONE service's day — the viewer's first — and says what
+    the others gave, under each one's mark, wherever they differ for this
+    viewer (Item.air_choices). Yellowjackets S04E01, Simkl's 21 November 01:00
+    UTC against Trakt's 23 November 02:00 UTC, read in UTC."""
+
+    def _chip(self, html: str) -> str | None:
+        found = re.search(r'<span class="chip dual day" data-field="airing".*?</span>\s*</span>',
+                          html, re.S)
+        return found.group(0) if found else None
+
+    def test_it_takes_the_day_chips_place(self):
+        """It names the days itself, so the card does not also draw "📆 Monday"."""
+        html = _card_html(_record(Source.TRAKT, air_ts=1795399200.0),
+                          _record(Source.SIMKL, air_ts=1795222800.0))
+        self.assertNotIn('<span class="chip day">', html)
+        self.assertIn('<span class="chip day">', _card_html(_record(Source.TRAKT)))
+
+    def test_both_days_are_on_the_card_under_their_services_marks(self):
+        html = _card_html(_record(Source.TRAKT, air_ts=1795399200.0),
+                          _record(Source.SIMKL, air_ts=1795222800.0))
+        chip = self._chip(html)
+        self.assertIn("Mon 23 Nov 02:00", chip)
+        self.assertIn("Sat 21 Nov 01:00", chip)
+        self.assertIn("trakt-circlemark-dark.svg", chip)
+        self.assertIn("simkllogo.svg", chip)
+
+    def test_services_that_agree_draw_no_chip(self):
+        self.assertIsNone(self._chip(_card_html(_record(Source.TRAKT), _record(Source.SIMKL))))
+
+    def test_a_date_with_no_time_agrees_with_a_time_on_that_date(self):
+        """TMDB's bare date and Trakt's evening on it are one claim, said at two
+        resolutions — nothing to choose between."""
+        html = _card_html(_record(Source.TRAKT, air_ts=AIR_TS + 3600),
+                          _record(Source.SIMKL, air_ts=AIR_TS - AIR_TS % 86400, date_only=True))
+        self.assertIsNone(self._chip(html))
+
+    def test_a_card_only_one_service_described_draws_none(self):
+        self.assertIsNone(self._chip(_card_html(_record(Source.TRAKT))))
+
+
+class AFlipIsAViewFlipAndNothingElseTests(CardTestCase):
     """Choosing a service mark changes one value on one card, on screen, until the
     page is left. It is not a preference, and the reason is not tidiness: whose
     value wins is stated once for every card on the Sources screen, so a choice
@@ -277,6 +397,7 @@ class AFlipIsAViewFlipAndNothingElseTests(unittest.TestCase):
     """
 
     def setUp(self):
+        super().setUp()
         self.html = _card_html(
             _record(Source.TRAKT),
             _record(Source.SIMKL, title="Another Title"))
@@ -314,12 +435,13 @@ class AFlipIsAViewFlipAndNothingElseTests(unittest.TestCase):
                 self.assertNotIn(f'.flip-pick[value="{service}"]', css)
 
 
-class BothServicesPagesAreOfferedTests(unittest.TestCase):
+class BothServicesPagesAreOfferedTests(CardTestCase):
     """A card several services described has several real destinations, and they
     are not competing answers: the card is attributed to one service, but the
     other's page for the same title exists and is just as good a place to go."""
 
     def setUp(self):
+        super().setUp()
         self.html = _card_html(
             _record(Source.TRAKT),
             _record(Source.SIMKL, rating=7.9))
@@ -356,14 +478,70 @@ class BothServicesPagesAreOfferedTests(unittest.TestCase):
         """These are the same kind of fact as the provenance maps: they only
         exist once several records have been compared, which happens at read over
         a window filled without knowing who would read it."""
-        groups = calendar_cache.group_records(
+        groups = stored_groups(
             [_record(Source.TRAKT), _record(Source.SIMKL, rating=7.9)])
-        resolved = calendar_resolve.resolve(groups[0], None)
-        self.assertEqual(set(resolved.source_links), {"trakt", "simkl"})
-        self.assertNotIn("source_links", resolved.to_dict())
+        resolved = _resolve(groups[0], None)
+        self.assertEqual([(link.source, link.listed) for link in resolved.links],
+                         [("tmdb", False), ("trakt", True), ("simkl", True)])
+        self.assertNotIn("links", resolved.to_dict())
 
 
-class TheCardAgreesWithTheResolutionVocabularyTests(unittest.TestCase):
+class ServicesThatOnlyKnowTheTitleTests(CardTestCase):
+    """A service the title store knows the title at (Record.known_ids) has a page
+    for it whether or not it lists this airing: its button is drawn, greyed, in
+    its declared place — the colour stays with the services the card is drawn
+    from. The owner's case: TMDB-only Season Premieres whose Trakt or Simkl id a
+    lookup by shared id had learned, and no card offered."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmdb_only = _record(
+            Source.TMDB, ids={"tmdb": 900}, detail_url="https://tmdb.test/show",
+            known_ids={"tmdb": 900, "trakt": 77, "trakt_slug": "one-title",
+                       "simkl": 55})
+        self.html = _card_html(self.tmdb_only)
+
+    def _button(self, label: str) -> str:
+        return re.search(r'<a class="trakt-btn[^"]*"[^>]*title="View on %s[^"]*".*?</a>'
+                         % label, self.html, re.S).group(0)
+
+    def test_every_service_that_knows_it_gets_a_button_in_declared_order(self):
+        self.assertEqual(re.findall(r'title="View on (\w+)', self.html),
+                         ["TMDB", "Trakt", "Simkl"])
+
+    def test_only_the_service_it_was_drawn_from_is_in_colour(self):
+        self.assertIn('class="trakt-btn"', self._button("TMDB"))
+        self.assertIn("https://tmdb.test/show", self._button("TMDB"))
+        for label in ("Trakt", "Simkl"):
+            with self.subTest(service=label):
+                self.assertIn('class="trakt-btn unlisted"', self._button(label))
+                self.assertIn(f"this card isn't drawn from {label}", self._button(label))
+
+    def test_a_known_page_is_built_from_the_services_own_id(self):
+        self.assertIn("https://trakt.tv/shows/one-title", self._button("Trakt"))
+        self.assertIn("https://simkl.com/tv/55", self._button("Simkl"))
+
+    def test_the_known_ids_never_become_the_cards_own(self):
+        """`ids` is what the card is keyed and grouped by, and a service's own id
+        is that service's to state (identity.complete); the store's knowledge
+        only addresses a button."""
+        groups = stored_groups([self.tmdb_only])
+        resolved = _resolve(groups[0], None)
+        self.assertNotIn("trakt", resolved.ids)
+        self.assertEqual(resolved.known_ids["trakt"], 77)
+
+    def test_a_service_the_viewer_left_out_is_greyed_too(self):
+        """The card is drawn from the services this viewer's calendar admits; a
+        listing it left out is a service it knows the title at."""
+        from app.sources import prefs as source_prefs
+
+        html = _card_html(
+            _record(Source.TRAKT), _record(Source.SIMKL, rating=7.9),
+            prefs=source_prefs.SourcePrefs(user_id=1, calendar_source="trakt"))
+        self.assertIn('class="trakt-btn unlisted" href="https://simkl.com/tv/simkl-id"', html)
+
+
+class TheCardAgreesWithTheResolutionVocabularyTests(CardTestCase):
     """The card decides which fields are worth drawing twice; app/calendar/
     resolve.py decides which fields can conflict at all. The first has to be a
     subset of the second, or the card carries a control that can never appear."""
@@ -382,7 +560,7 @@ class TheCardAgreesWithTheResolutionVocabularyTests(unittest.TestCase):
         self.assertNotIn("card_style", CARD)
 
 
-class TheIdsThePanelIsOpenedWithTests(unittest.TestCase):
+class TheIdsThePanelIsOpenedWithTests(CardTestCase):
     """A card asks for its panel with EVERY service's own id, not just Trakt's.
 
     The server picks who to ask from what the card's details address names — so
@@ -440,7 +618,7 @@ class TheIdsThePanelIsOpenedWithTests(unittest.TestCase):
         self.assertNotIn("trakt=", address)
 
 
-class ThePosterOnlyWallRendersAMergedCardTests(unittest.TestCase):
+class ThePosterOnlyWallRendersAMergedCardTests(CardTestCase):
     """The layout with the least room, over a card carrying the most marks."""
 
     def test_a_merged_card_renders_under_every_card_style(self):

@@ -2,14 +2,76 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## 🏷️ [1.2.6] - UNRELEASED
+## 🏷️ [1.3.0] - UNRELEASED
+
+### ⚠️ Upgrading
+- 🗄️ **Back up `data/app.db` first: the first start rebuilds the database** — about five seconds for a 90 MB database before the app answers, longer in proportion for a bigger one.
+- 🎬 **TMDB now takes its API Read Access Token, not the short API key.** Paste the long token from themoviedb.org → Settings → API into Settings; a short key isn't used, and Settings says so.
+- 🧵 **Calendar months are read in worker processes**, one per CPU core less one (at most four), about 100 MB each — set `READ_PROCESSES` lower, or to `0`, on a machine short of memory.
+- 🖼️ **Set your public base URL** (Settings → Server, or `PUBLIC_BASE_URL`): a poster that won't load reports back to it so the title can be looked up again.
+- ⏳ **Some things fill in over the first hours**: network logos, TMDB's descriptions of what the calendars list, and the matching of titles across services.
+
+### Added
+- 📅 **TMDB is a third calendar service** for Series, Season and Movie Premieres, beside Trakt and Simkl. It gives dates, not times, and its season premieres are worked out in the background, joining a week within a minute of its first opening.
+- 🎬 **TMDB describes titles first** — details panels, pictures, and every calendar card of a title it knows, even ones only Trakt or Simkl list — with Trakt and Simkl answering what TMDB doesn't. Its language and film-release region are set in Settings.
+- 🏁 **Season Finales lists Simkl's shows too**, wherever TMDB marks the episode a finale, and tags mid-season finales.
+- 🎚️ **New filters**, for each viewer and as an instance-wide floor: languages, TMDB keywords, show types, missing data, **hide titles only one service lists** and **hide shows only TMDB lists that name no network**.
+- 🔗 **Titles are matched across services in the background**, and a card shows a button for every service that knows the title — greyed where that service doesn't list this airing.
+- 🔍 **Every search box searches TMDB** when you press Enter; **Also search Trakt**, **Simkl** or **Simkl Anime** adds a service you've linked.
+- ☑️ **One season picker everywhere.** A rankings board can add a show and any of its seasons in one go, and on the calendar a season goes straight to its card — or says your filters hide it.
+- 🔗 **Link your own TMDB account** from your Account page, and **seed a rankings board from your TMDB ratings**.
+- 🎞️ **More in a TMDB-described details panel**: the show's logo, the next episode, finales marked, a season's own trailers first — and on a rankings board, a film's whole collection added in one press.
+- 🩹 **A poster that won't load fixes itself**: the next service's picture shows at once, and a picture that's really gone has its title looked up again.
+- 📜 **A very busy day shows a hundred cards first**, the ones most of your services list, and a **Show the other N** button.
+- 🔄 **A month that changes while it's open says so**, with a link to reload it.
+- 🖼️ **Rankings boards show posters for titles TMDB doesn't list**, mostly anime, where they showed an empty frame.
+
+### Changed
+- 🔀 **A card shows your first service's answer for each detail**, its day and time included. Where services disagree, a mark on its poster shows every service's answer, on every card of that show.
+- ⚡ **Calendar months open faster and weigh far less in the browser**, and the app keeps answering while one is built.
+- 🔁 **A week due a refresh is refilled after the page has been sent**, asking only the services that are due; one Simkl month file fills every week it covers.
+- 🗂️ **Titles are described once and kept current as you look at them**: details panels and rankings boards read the same store, re-reading anything a few days old behind the page.
+- 📡 **Network badges are TMDB's own logos** on a light or dark frame, and networks named in non-Latin script get theirs too.
+- 📊 **The stats box**: "Seasons owed" reads **Seasons awaiting episode details**, beside **Weeks being worked out** for TMDB's season premieres.
 
 ### Fixed
-- 🎬 **A film only Simkl knows can be found and jumped to from the calendar search.** It used to come back with nowhere to land.
-- 🔗 **A custom share name saved after clearing one works.** Its `/c/` link used to answer "not found" from the start.
+- 📅 **One episode is one card**, however far apart its services' dates: Yellowjackets' season 4 premiere showed on both Friday and Sunday.
+- 🙈 **A title your filters hide stays hidden whichever services you show.** Narrowing to one service hid the others' description of the title from your filters.
+- 🔗 **An account links one account of each service.** A second Trakt, Simkl or Plex account could be linked beside the first.
+- 🔌 **A sign-in or link the app turns down no longer leaves the app connected to your Trakt or Simkl account.**
+- 🔑 **The instance's Trakt token no longer needs re-authorizing after a while away.**
+- 🚦 **Trakt reads stay inside Trakt's real limits**, the app's own and each person's paced separately.
+- 🌐 **All Episodes holds up when Trakt is slow**, a routine refresh no longer says "some calendar data couldn't be loaded", and a week a service couldn't load is retried within a quarter of an hour, not a week.
+- 🗂️ **A details panel offers the seasons a show really has**, not 2,026 tabs for a show numbered by year.
+- 📅 **A premiere found by a search no longer shows twice** once its service's calendar lists it.
+- 🐢 **The app no longer stalls for a third of a second every minute.**
+- 🎬 **A network list in the Settings floor no longer empties the film calendar.**
+- 📡 **A network no longer borrows another's logo** (BBC Two drew Channel 4's).
+- 📥 **A show isn't marked as on Seerr because a film with the same TMDB number is.**
+- 🔧 **Smaller fixes:**
+  - The Unenriched count includes titles nobody has looked up yet.
+  - A logo or poster lookup that failed is tried again, not remembered as none.
+  - A custom share name saved after clearing one works.
+  - An administrator can unlink a Simkl account.
+  - A film only Simkl knows can be jumped to from the calendar search.
+  - "This calendar doesn't reach that month" offers a service that does.
+
+### 🥚
+- It knows a third catalogue now: asks it first how long things are, in an order you can change from a little room of its own, and can even take in something nobody else counts — marked, so you know nobody is.
+- A third list elsewhere can be kept in step with it, too.
+- It opens far sooner, keeps its boxes open while it does, and the empty ones open when pressed.
+- When one of them quietly moves something to a new address, it still finds it by the name that one gave it.
+- Switching one of them off no longer paints every line as a disagreement, and the little pictures beside the names come from where the posters do.
 
 ### Under the hood
-- ⏱️ **The test suite runs in about two minutes instead of eleven**: it uses every CPU core and stops re-reading the certificate store for every test. Code nothing used any more is gone, and the code no test reached now has tests.
+- 🗂️ **One store of what every service says about a title** — a row per title, season and episode, every service side by side; the tables it replaces are kept, unread, until a later release removes them.
+- ⏳ **Nothing TMDB supplied is kept past six months**, TMDB's own limit; titles a board holds are re-read before then.
+- 🚦 **Background re-reads take a fixed share of each service's allowance** (a minute's: TMDB 600, Simkl 40, Trakt 4), so pages never queue behind them.
+- 🔒 **Writes take turns and stay short**, so none gives up with "database is locked"; one that holds the lock over a second says so in the log.
+- 🔎 **A slow request's log line accounts for all of its time**, and names where any gap fell.
+- 📝 **Log lines are written by a thread of their own**, so `LOG_LEVEL=DEBUG` no longer slows the app down.
+- 📦 **`cairosvg` and `libcairo2` are gone** from the image: logos are no longer drawn on the server.
+- ⏱️ **The test suite runs in about two minutes**, across every CPU core.
 
 ## 🏷️ [1.2.5] - 2026-09-30
 

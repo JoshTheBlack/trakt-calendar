@@ -82,9 +82,15 @@ class RankedTitle:
     # Which season of the show this entry is, None for the whole show — a
     # season and its show are two entries, ranked like any two titles.
     season: int | None = None
-    # The season's own name where it has one (tier_items.season_name), which is
-    # what an anthology's season is called in place of its number.
+    # The season's own name where it has one (the title store's, read with the
+    # row), which is what an anthology's season is called in place of its number.
     season_name: str = ""
+
+    @property
+    def title_key(self) -> str:
+        """The title store's key for the title — a board row is filed under it —
+        which is what a title with no tmdb id has its pictures filed by."""
+        return f"{self.media}:{self.match_source}:{self.match_id}"
 
     @property
     def label(self) -> str:

@@ -10,8 +10,10 @@ from __future__ import annotations
 import json
 import logging
 
-from .. import db
-from ..providers.base import Media, collect_ids, resolve_key
+from .. import db, metadata
+from ..metadata import descriptions
+from ..metadata import labels as title_labels
+from ..providers.base import Media, collect_ids, item_key, resolve_key
 from . import store
 from .store import IDENTITY_COLUMNS, MONTH_RECORD_COLUMNS, USER_RECORD_COLUMNS
 
@@ -100,16 +102,36 @@ class RestoreError(ValueError):
     """A restore document that cannot be applied (unknown schema, wrong shape)."""
 
 
+# THE WORDS A TABLE NO LONGER KEEPS, written into the document anyway. A row on
+# the viewer's own list is drawn with the title store's words for its title and
+# stores none (store._SNAPSHOT_COLUMNS), but a backup is SELF-CONTAINED — it is
+# read by a person and restored onto an instance that may never have seen the
+# title — so each such row carries the title and network it was drawn with when
+# the backup was taken. A restore files the title by its ids
+# (metadata.register) and reads nothing back from these; the store describes
+# the title again on that instance.
+_EXPORTED_WORDS = {
+    "distrakt_user_seasons": title_labels.tracker_columns("distrakt_user_seasons"),
+}
+# The words each such row carries in the document, read from those columns.
+WORDS_FROM_THE_STORE = ("title", "network")
+
+
 async def export_user_data(user_id: int) -> dict:
     """The requesting user's complete distrakt dataset as one JSON-able document.
     Contains no tokens and no other user's data."""
     doc: dict = {"schema": EXPORT_SCHEMA, "exported_at": db.now()}
     for table, cols in _EXPORT_TABLES:
+        words = _EXPORTED_WORDS.get(table)
         rows = await db.fetch_all(
-            f"SELECT {', '.join(cols)} FROM {table} WHERE user_id = ?",
+            f"SELECT {', '.join(cols)}{', ' + words if words else ''} FROM {table} "
+            "WHERE user_id = ?",
             (user_id,),
         )
-        doc[table] = [{c: row[c] for c in cols} for row in rows]
+        doc[table] = [{**{c: row[c] for c in cols},
+                       **({word: row[f"label_{word}"] for word in WORDS_FROM_THE_STORE}
+                          if words else {})}
+                      for row in rows]
     return doc
 
 
@@ -371,6 +393,7 @@ async def restore_user_data(user_id: int, doc: dict) -> None:
         if not isinstance(rows, list):
             raise RestoreError(f"{table} must be a list")
         payload[table] = rows
+    titles = _restored_titles(payload)
 
     def _work(conn: db.Connection) -> None:
         for table in payload:
@@ -394,5 +417,46 @@ async def restore_user_data(user_id: int, doc: dict) -> None:
                 conn.execute(
                     f"INSERT INTO {table} ({collist}) VALUES ({placeholders})",
                     [user_id, *(row[column] for column in stated)])
+        # EVERY RESTORED TITLE GOES THROUGH THE TITLE STORE (metadata.register),
+        # in the same transaction as the rows. A backup is self-contained — ids
+        # and words, no reference to anything stored here — and it may name a
+        # title by a key the store has since retired; registering it moves the
+        # restored rows to the key the title answers to now, exactly as a re-key
+        # moves every other holder.
+        for key, (media, ids) in titles.items():
+            metadata.register(conn, media, ids, filed_under=key)  # moves rows if re-keyed
+        # AND THE WORDS THE FILE DREW EACH LISTED ROW WITH, where this instance's
+        # title store has none for the title: the list keeps no words of its own,
+        # and a restore onto an instance that has never seen a title would
+        # otherwise draw it nameless until it is described
+        # (descriptions.seed_words, which never overrides the store's own).
+        now = db.now()
+        for row in payload.get("distrakt_user_seasons") or []:
+            key = item_key(*(str(row.get(c) or "") for c in IDENTITY_COLUMNS))
+            if key in titles:
+                descriptions.seed_words(conn, titles[key][0], titles[key][1],
+                                        title=str(row.get("title") or ""),
+                                        network=str(row.get("network") or ""), now=now)
 
     await db.transaction(_work)
+
+
+# The id columns a restored row may carry, and the id space each is in.
+_RESTORED_IDS = {"trakt_id": "trakt", "simkl_id": "simkl", "tmdb": "tmdb", "tvdb": "tvdb",
+                 "imdb": "imdb", "mal": "mal", "trakt_slug": "trakt_slug",
+                 "simkl_slug": "simkl_slug"}
+
+
+def _restored_titles(payload: dict[str, list]) -> dict[str, tuple[str, dict]]:
+    """{key a restored row is filed under: (media, every id those rows state)}."""
+    out: dict[str, tuple[str, dict]] = {}
+    for rows in payload.values():
+        for row in rows:
+            if not isinstance(row, dict) or not all(row.get(c) for c in IDENTITY_COLUMNS):
+                continue
+            key = item_key(*(str(row[c]) for c in IDENTITY_COLUMNS))
+            held = out.setdefault(key, (str(row["media"]), {}))[1]
+            for column, name in _RESTORED_IDS.items():
+                if row.get(column) not in (None, ""):
+                    held.setdefault(name, row[column])
+    return out

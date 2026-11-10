@@ -25,10 +25,10 @@ ENV TRUSTED_PROXY_IPS=127.0.0.1/32
 
 WORKDIR /app
 
-# Native runtime libs: libcairo2 for cairosvg (SVG-only network logos) and
-# libjpeg/zlib for Pillow. Cleaned up in the same layer to keep the image small.
+# Native runtime libs: libjpeg/zlib for Pillow. Cleaned up in the same layer to
+# keep the image small.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libcairo2 libjpeg62-turbo zlib1g \
+    && apt-get install -y --no-install-recommends libjpeg62-turbo zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

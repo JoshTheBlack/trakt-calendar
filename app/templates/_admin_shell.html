@@ -13,8 +13,11 @@
    cell rather than floating beside the button (style.css, `.admin-table .confirm-ask`):
    the table scrolls sideways inside its wrapper, and a floating box on the last
    rows would be cut off by that scroller. #}
+{# A SUCCESS IS A TOAST, as it is everywhere else in the app; a REFUSAL stays a
+   line in the section it came from, because it is something to read before
+   acting again and a toast fades. #}
 {% macro notice_for(section) %}
-{%- if notice.section == section and notice.message %}
+{%- if notice.section == section and notice.message and not notice.ok %}
 <p class="admin-msg {{ 'ok' if notice.ok else 'error' }}" role="{{ 'status' if notice.ok else 'alert' }}">{{ notice.message }}</p>
 {%- else %}
 <p class="admin-msg"></p>
@@ -137,7 +140,7 @@
               {{ post(base ~ '/sessions/revoke-all', 'Log out', face='btn-primary small') }}
               {% endcall %}
 
-              {% for provider in ('trakt', 'plex') if provider in u.providers %}
+              {% for provider in linkable_providers if provider in u.providers %}
               {% call confirm_box.ask('unlink-' ~ provider ~ '-' ~ u.id,
                                       'Unlink ' ~ provider.title() ~ ' from this account?',
                                       'Unlink ' ~ provider.title(), danger=true, face='btn-ghost tiny') %}
@@ -277,3 +280,5 @@
     </div>
   </section>
 </div>
+{% import '_toast.html' as toast %}
+{% if notice.ok %}{{ toast.flash(notice.message) }}{% endif %}

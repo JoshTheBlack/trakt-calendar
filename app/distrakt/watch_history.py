@@ -120,7 +120,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import NamedTuple
@@ -128,9 +128,10 @@ from typing import NamedTuple
 from . import arrival, counts, film_snapshots, naming, removals, store
 from .store import ID_COLUMNS, IDENTITY_COLUMNS, record_key
 from .. import cache, clock, db, providers
+from ..metadata import identity as title_identity
 from ..providers.base import (ItemKey, LibraryEntry, LibraryPort, LibraryRead, Media,
                               PlayCountPort, SourceUnavailable, UnlistedSeasons,
-                              collect_ids, item_key, resolve_key)
+                              collect_ids, item_key, parse_item_key, resolve_key)
 from ..sources import prefs as source_prefs
 
 logger = logging.getLogger(__name__)
@@ -402,18 +403,24 @@ def _row_ids(row) -> dict:
 
 
 def _insert_sql(table: str, own_columns: tuple[str, ...]) -> str:
-    """An INSERT for one of the two cache tables: the user, the identity, the
-    table's own columns, then the ids a call is placed with. Built from the column
-    names rather than written out so the placeholder count cannot drift from
-    them — miscounting `?` in a hand-written statement is silent until it isn't.
+    """An INSERT of every row one of the two cache tables gets, in ONE statement —
+    each row a JSON array: the user, the identity, the table's own columns, then
+    the ids a call is placed with. Built from the column names rather than
+    written out so the column count cannot drift from them.
+
+    ONE STATEMENT, NOT ONE PER ROW: a save writes a viewer's whole history (1,240
+    rows for one account on the development copy), and a write transaction holds
+    the database's one write lock while each statement can wait a GIL switch
+    interval for a busy event loop to let it go on.
     """
     # `source` is written explicitly rather than left to the column's default.
     # The default is 'trakt' and was right while one service could write; with a
     # second one it would silently file Simkl's rows as Trakt's, and nothing
     # downstream could tell.
     columns = ("user_id", *IDENTITY_COLUMNS, "source", *own_columns, *_CACHE_ID_COLUMNS)
+    picked = ", ".join(f"json_extract(value, '$[{at}]')" for at in range(len(columns)))
     return (f"INSERT INTO {table} ({', '.join(columns)}) "
-            f"VALUES ({', '.join(['?'] * len(columns))})")
+            f"SELECT {picked} FROM json_each(?) ORDER BY key")
 
 
 def _key_params(key: str) -> tuple:
@@ -524,6 +531,55 @@ async def _save(user_id: int, state: dict) -> None:
         ids = entry.get("ids") or {}
         return tuple(ids.get(id_key) for id_key in _CACHE_ID_COLUMNS.values())
 
+    progress = []
+    for key, entry in shows.items():
+        seasons = _seasons_by_source(entry)
+        # A SERVICE WITH NOTHING WATCHED STILL HAS TO LEAVE A MARK. This table
+        # holds one row per (season, service), so a service that was asked
+        # about a title and had nothing to report writes no row at all — and
+        # _load, which rebuilds the cache from these rows, then cannot tell
+        # "asked about, nothing watched" from "never asked about". It read as
+        # never-baselined on every load, so sync_and_baseline re-fetched that
+        # title from that service every time, for ever. A brand-new premiere
+        # is exactly that case, so a month of them cost a fetch each on every
+        # page load.
+        #
+        # NO_SEASONS is not a season and is never rendered as one: _load drops
+        # it after using its presence to reconstruct the entry and to name the
+        # service that answered. A negative number is safe to reserve because
+        # season 0 is real (it is where specials live) but a negative one
+        # cannot be.
+        #
+        # THE MARK NAMES THE SERVICE, one row each, because the question it
+        # answers is per service: two of them can be asked about one title and
+        # they do not have to agree about having seen none of it. A service
+        # with slots needs no mark — the slots already say it answered.
+        rows = [(season_s, source, eps)
+                for season_s, by_source in seasons.items()
+                for source, eps in by_source.items()]
+        # THE WHOLE-TITLE CLAIM GETS ITS OWN ROW, for the same reason the mark
+        # does: it is an answer with no season to hang on, and a service that
+        # made it would otherwise read back on the next load as one that was
+        # never asked.
+        whole = sorted(_watched_all_sources(entry))
+        rows += [(ALL_SEASONS, source, {}) for source in whole]
+        answered = {source for _season_s, source, _eps in rows}
+        marks = [(NO_SEASONS, source, {})
+                 for source in sorted(_baselined_sources(entry) - answered)]
+        # The fallback covers a state assembled by a caller that never went
+        # through a baseline — a restore of a backup taken before the state
+        # was per service, say — where the only service that could have
+        # written the rows is the one every stored row already carried.
+        for season_s, source, eps in (rows + marks or
+                                      [(NO_SEASONS, _LEGACY_SOURCE, {})]):
+            progress.append([
+                user_id, *_key_params(key), str(source), int(season_s),
+                json.dumps(episode_watches(eps or {})), *_ids_params(entry)])
+    films = [[user_id, *_key_params(key), str((movie or {}).get("source") or _LEGACY_SOURCE),
+              (movie or {}).get("watched_at") or "", (movie or {}).get("title") or "",
+              (movie or {}).get("year"), *_ids_params(movie or {})]
+             for key, movie in movies.items()]
+
     def _work(conn: db.Connection) -> None:
         conn.execute(
             "INSERT INTO distrakt_watch_state "
@@ -535,59 +591,11 @@ async def _save(user_id: int, state: dict) -> None:
             (user_id, cursors_json, beacons_json, play_counts_json),
         )
         conn.execute("DELETE FROM distrakt_show_progress WHERE user_id = ?", (user_id,))
-        for key, entry in shows.items():
-            seasons = _seasons_by_source(entry)
-            # A SERVICE WITH NOTHING WATCHED STILL HAS TO LEAVE A MARK. This table
-            # holds one row per (season, service), so a service that was asked
-            # about a title and had nothing to report writes no row at all — and
-            # _load, which rebuilds the cache from these rows, then cannot tell
-            # "asked about, nothing watched" from "never asked about". It read as
-            # never-baselined on every load, so sync_and_baseline re-fetched that
-            # title from that service every time, for ever. A brand-new premiere
-            # is exactly that case, so a month of them cost a fetch each on every
-            # page load.
-            #
-            # NO_SEASONS is not a season and is never rendered as one: _load drops
-            # it after using its presence to reconstruct the entry and to name the
-            # service that answered. A negative number is safe to reserve because
-            # season 0 is real (it is where specials live) but a negative one
-            # cannot be.
-            #
-            # THE MARK NAMES THE SERVICE, one row each, because the question it
-            # answers is per service: two of them can be asked about one title and
-            # they do not have to agree about having seen none of it. A service
-            # with slots needs no mark — the slots already say it answered.
-            rows = [(season_s, source, eps)
-                    for season_s, by_source in seasons.items()
-                    for source, eps in by_source.items()]
-            # THE WHOLE-TITLE CLAIM GETS ITS OWN ROW, for the same reason the mark
-            # does: it is an answer with no season to hang on, and a service that
-            # made it would otherwise read back on the next load as one that was
-            # never asked.
-            whole = sorted(_watched_all_sources(entry))
-            rows += [(ALL_SEASONS, source, {}) for source in whole]
-            answered = {source for _season_s, source, _eps in rows}
-            marks = [(NO_SEASONS, source, {})
-                     for source in sorted(_baselined_sources(entry) - answered)]
-            # The fallback covers a state assembled by a caller that never went
-            # through a baseline — a restore of a backup taken before the state
-            # was per service, say — where the only service that could have
-            # written the rows is the one every stored row already carried.
-            for season_s, source, eps in (rows + marks or
-                                          [(NO_SEASONS, _LEGACY_SOURCE, {})]):
-                conn.execute(progress_sql, (
-                    user_id, *_key_params(key), str(source), int(season_s),
-                    json.dumps(episode_watches(eps or {})), *_ids_params(entry),
-                ))
+        if progress:
+            conn.execute(progress_sql, (json.dumps(progress),))
         conn.execute("DELETE FROM distrakt_movie_watches WHERE user_id = ?", (user_id,))
-        for key, movie in movies.items():
-            conn.execute(movie_sql, (
-                user_id, *_key_params(key),
-                str((movie or {}).get("source") or _LEGACY_SOURCE),
-                (movie or {}).get("watched_at") or "",
-                (movie or {}).get("title") or "", (movie or {}).get("year"),
-                *_ids_params(movie or {}),
-            ))
+        if films:
+            conn.execute(movie_sql, (json.dumps(films),))
 
     await db.transaction(_work)
 
@@ -696,11 +704,116 @@ def _watched_changed(old: dict | None, new: dict) -> bool:
             or old.get("mv_watched") != new.get("mv_watched"))
 
 
+# The field `_keyed_as_tracked` pins an event's title with: the flat key of the
+# tracked title the reporting service's own id names. Set and read only in this
+# module, on a payload that lives for one sync.
+_TRACKED_AS = "_tracked_as"
+
+
 def _event_key(payload: dict, media: Media) -> ItemKey | None:
     """The identity of the title an event is about, or None when the event names
     no shared id — in which case there is nothing to file it under and nothing
-    the tracker could have been counting for it either."""
+    the tracker could have been counting for it either. The tracked title the
+    reporting service's own id names comes first; otherwise the event's ids,
+    completed from the title store (`_keyed_as_tracked` does both)."""
+    pinned = payload.get(_TRACKED_AS)
+    if pinned:
+        return parse_item_key(pinned)
     return resolve_key(media, collect_ids(payload.get("ids") or {}))
+
+
+def _tracked_by_own_id(titles: Mapping[str, dict], source: str) -> dict[str, str]:
+    """{`source`'s own id: the tracked key holding it}, for every id exactly ONE
+    tracked title holds.
+
+    A SERVICE'S OWN ID IS THE ONE NAME FOR ITS TITLE THAT IT NEVER RE-POINTS.
+    Which TMDB title it says that is, is a mapping the service keeps and can
+    change: Simkl lists The Great British Bake Off as one show of seventeen series
+    (Simkl 21506), TMDB splits it at the channel change into two titles, and on
+    2026-10-24 Simkl moved its pointer from the second to the first. The tracker
+    holds the season under the key it was filed with and remembers Simkl's own id
+    for it — so keyed by shared ids, every Simkl play after that pointed at a
+    title the tracker had never heard of: the row stopped counting and the play
+    came back as a question about a show already on the page.
+
+    EXACTLY ONE, the title store's own rule for a lower id joining a title
+    (identity.settle): an id two tracked titles hold says nothing about which of
+    them a play is, and those plays key by their shared ids as before.
+    """
+    holders: dict[str, set[str]] = {}
+    for key, entry in titles.items():
+        own = (entry.get("ids") or {}).get(source)
+        if own not in (None, ""):
+            holders.setdefault(str(own), set()).add(str(key))
+    return {own: next(iter(keys)) for own, keys in holders.items() if len(keys) == 1}
+
+
+async def own_id_locator(user_id: int) -> Callable[[str, Mapping], ItemKey | None]:
+    """A lookup, `locate(media, ids)`, answering which tracked title a service's
+    own id in `ids` names — or None when none does, or when two of them name
+    different titles.
+
+    FOR A PLAY ALREADY WRITTEN DOWN (lifecycle.standing_questions). A question
+    stored before a service's own id placed its plays names whatever title the
+    service's shared ids pointed at, while it is about the title the tracker
+    holds by that service's id — `_tracked_by_own_id` says why that one wins. A
+    stored play does not say which service reported it, so every tracker
+    source's own id it carries is tried, and they must agree.
+
+    THE TRACKER'S IDS ARE READ ONCE, here, and the lookup is pure: it is asked
+    once per stored question that nothing else placed, on every month load.
+    """
+    state = await _load(user_id)
+    sources = tuple(_CACHE_ID_COLUMNS.values())
+    indexes = {str(media): {source: _tracked_by_own_id(state.get(kind) or {}, source)
+                            for source in sources}
+               for media, kind in ((Media.SHOW, "shows"), (Media.MOVIE, "movies"))}
+
+    def locate(media: str, ids: Mapping) -> ItemKey | None:
+        by_source = indexes.get(str(media)) or {}
+        found = {by_source[source].get(str(own))
+                 for source in sources
+                 if (own := (ids or {}).get(source)) not in (None, "")}
+        found.discard(None)
+        return parse_item_key(found.pop()) if len(found) == 1 else None
+
+    return locate
+
+
+async def _keyed_as_tracked(events: list, state: dict, source: str) -> list:
+    """`events` with each title keyed as the tracker files it, in place.
+
+    FIRST, THE REPORTING SERVICE'S OWN ID: a title the tracker already holds by
+    that id is pinned to its key (`_tracked_by_own_id` says why that outranks the
+    service's shared ids).
+
+    OTHERWISE, THE TITLE STORE'S IDS. A SERVICE NAMES A TITLE BY THE IDS IT
+    KNOWS, AND THE TRACKER FILES IT BY THE STORE'S. A show a service knows only
+    by its tvdb id is the title the store knows by its tmdb id too, and the
+    tracker's row for it is filed there; keying the play by the service's ids
+    alone would fold it into nothing and leave the row's progress short. The
+    title's shared ids are added beneath the service's own (identity.complete),
+    so a play keys as the row does — and nothing is added for a title the store
+    has never seen.
+    """
+    tracked = {Media.SHOW: _tracked_by_own_id(state.get("shows") or {}, source),
+               Media.MOVIE: _tracked_by_own_id(state.get("movies") or {}, source)}
+    bodies, pairs = [], []
+    for event in events or ():
+        for kind, media in (("show", Media.SHOW), ("movie", Media.MOVIE)):
+            body = event.get(kind) if isinstance(event, dict) else None
+            if not (isinstance(body, dict) and isinstance(body.get("ids"), dict)):
+                continue
+            own = body["ids"].get(source)
+            pinned = tracked[media].get(str(own)) if own not in (None, "") else None
+            if pinned is not None:
+                body[_TRACKED_AS] = pinned
+                continue
+            bodies.append(body)
+            pairs.append((media, collect_ids(body["ids"])))
+    for body, ids in zip(bodies, await title_identity.completed(pairs)):
+        body["ids"] = {**ids, **body["ids"]}
+    return events
 
 
 def _set_show_baseline(state: dict, key, ids: dict, season_to_eps: dict,
@@ -1533,8 +1646,13 @@ async def record_movie_watches(user_id: int, movies: list[dict], *,
     state = await _load(user_id)
     recorded = 0
     latest: dict[str, dict] = {}
-    for movie in movies:
-        ids = collect_ids(movie.get("ids") or {})
+    # Keyed as the store keys the film, for `_keyed_as_tracked`'s reason. These
+    # plays are a backfill's sweep across services or a film added by hand, so
+    # there is no one reporting service whose own id could place them.
+    known = await title_identity.completed(
+        [(Media.MOVIE, collect_ids(movie.get("ids") or {})) for movie in movies])
+    for movie, completed in zip(movies, known):
+        ids = {**completed, **collect_ids(movie.get("ids") or {})}
         key = resolve_key(Media.MOVIE, ids)
         if key is None:
             continue
@@ -1938,6 +2056,7 @@ async def _sync_one(settings, state: dict, source, port, plays: list, *,
                 await _rebaseline_by_id(settings, state, name, source, port, span,
                                         reason="unwatch-implied")
 
+    await _keyed_as_tracked(events, state, name)
     for event in events:
         _apply_event(state, event, name)
         # Taken from the RAW event rather than from the fold above, because the
@@ -2236,6 +2355,43 @@ def _fold_library(state: dict, name: str, read) -> bool:
     return False
 
 
+async def _keyed_as_tracked_library(read: LibraryRead, titles: Mapping[str, dict],
+                                    source: str) -> LibraryRead:
+    """`read` with each title keyed as the tracker files it — `titles` being the
+    tracked titles, {key: {"ids": ...}}, whose own ids `source`'s entries are
+    placed by.
+
+    THE SAME TWO STEPS AS A PLAY (`_keyed_as_tracked`), for the same reasons. An
+    entry the tracker holds by `source`'s own id takes that title's key, whatever
+    the service now says its shared ids are. Any other entry is keyed by the title
+    store: A SERVICE KEYS ITS OWN LIBRARY BY THE IDS IT KNOWS (LibraryRead.entries),
+    and the tracker's rows are filed by the store's — a show the service knows
+    only by its tvdb id is the store's tmdb title, and a row filed there would
+    read as "not in this library" and be marked missing. Completing each entry's
+    ids from the store (identity.complete) re-keys it the way the row was keyed;
+    an entry the store has never seen keeps the key the service gave it.
+
+    Where two entries come to the same key, the one placed by its own id wins and
+    otherwise the first is kept — they are one title.
+    """
+    tracked = _tracked_by_own_id(titles, source)
+    entries: dict[str, LibraryEntry] = {}
+    rest = []
+    for key, entry in read.entries.items():
+        own = (entry.ids or {}).get(source)
+        pinned = tracked.get(str(own)) if own not in (None, "") else None
+        if pinned is not None:
+            entries[pinned] = entry
+        else:
+            rest.append(key)
+    known = await title_identity.completed(
+        [(Media.SHOW, read.entries[key].ids) for key in rest])
+    for key, ids in zip(rest, known):
+        found = resolve_key(Media.SHOW, collect_ids(ids))
+        entries.setdefault(str(found) if found is not None else key, read.entries[key])
+    return read._replace(entries=entries)
+
+
 async def _sync_from_library(settings, state: dict, name: str, library, span, *,
                              start_at, activities, since) -> list[dict]:
     """One source's half of a sync when it can hand over the whole library.
@@ -2250,6 +2406,7 @@ async def _sync_from_library(settings, state: dict, name: str, library, span, *,
                                            activities=activities, since=since)
         sp.set(titles=len(read.entries), events=len(read.events),
                complete=read.complete)
+    read = await _keyed_as_tracked_library(read, state.get("shows") or {}, name)
     # THE FOLD DECIDES WHETHER THE READ COUNTS AS COMPLETE, not the read itself:
     # a complete read that fails the floor is downgraded there, and stashing it
     # here on its own say-so would hand the baseline that follows a read the fold
@@ -2312,6 +2469,10 @@ async def _baseline_from_library(settings, user_id: int, state: dict, name: str,
             if name not in state[_UNREADABLE]:
                 state[_UNREADABLE].append(name)
             return False
+        # The titles about to be baselined count as tracked here too: they are on
+        # the tracker, and what this read is for is finding each of them in it.
+        read = await _keyed_as_tracked_library(
+            read, {**(state.get("shows") or {}), **missing}, name)
         state[_LIBRARY] = {**(state.get(_LIBRARY) or {}), name: read}
     for key, record in missing.items():
         found = read.entries.get(key)

@@ -12,6 +12,7 @@ ever silently dropping a title the stored calendar names.
 from __future__ import annotations
 
 import asyncio
+import threading
 import unittest
 from datetime import date
 from types import SimpleNamespace
@@ -21,12 +22,14 @@ from zoneinfo import ZoneInfo
 from app import db
 from app.calendar import cache as calendar_cache, enrich as calendar_enrich
 from app.calendar import entries as calendar_entries
+from app.metadata import rows as title_rows
 from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Media, Record, Source
 from app.providers.simkl import titles as simkl_titles
 from app.providers.simkl import transport as simkl_transport
-from tests.support import migrated_db
+from tests import support
+from tests.support import migrated_db, statements_per_transaction, put_title, title_groups
 
 SHOWS = get_endpoint("shows")
 MOVIES = get_endpoint("movies")
@@ -46,6 +49,12 @@ _OK_FIELDS = {
     "type": "", "anime_type": "", "total_episodes": None, "poster": "",
     "first_aired": "", "trailers": [],
 }
+
+
+async def title_group_of_simkl() -> dict:
+    """The one Simkl group the test stored."""
+    (group,) = await title_groups("simkl")
+    return group
 
 
 def _simkl_record(simkl_id, *, title="Moonshadow", genres=(), country="", certification=""):
@@ -86,7 +95,7 @@ class EnrichmentReachesTheStoredRowTests(EnrichTestCase):
     comes back filled, a narrower answer leaves the fields it never carried at
     their defaults, ids are added but never overwritten, and one row answers
     twenty airings. What changed is where the answer lives: the drain writes it
-    onto `calendar_titles` and the read serves the row, instead of every read
+    onto Simkl's group of the title's row and the read serves the row, instead of every read
     joining `simkl_titles` back in.
 
     So each of these stores a window FIRST and enriches after, which is the real
@@ -95,7 +104,7 @@ class EnrichmentReachesTheStoredRowTests(EnrichTestCase):
     """
 
     async def _one(self, simkl_id=1):
-        records, *_ = await calendar_entries.read_span(
+        records, *_ = await support.read_span(
             SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
         return records[0]
 
@@ -177,13 +186,13 @@ class EnrichmentReachesTheStoredRowTests(EnrichTestCase):
             airings.append(record)
         await self._stored(airings)
         await calendar_enrich._upsert_success(1, "show", {"genres": ["drama"]}, now=1000)
-        records, *_ = await calendar_entries.read_span(
+        records, *_ = await support.read_span(
             SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
         self.assertEqual(len(records), 20)
         self.assertTrue(all(r.enriched for r in records))
         self.assertTrue(all(r.genres == ["drama"] for r in records))
         self.assertEqual(
-            await db.fetch_value("SELECT COUNT(*) FROM calendar_titles"), 1)
+            len(await title_groups()), 1)
 
     async def test_a_trakt_record_is_left_alone(self):
         """Trakt's calendar carries these fields already, so its records arrive
@@ -202,7 +211,7 @@ class EnrichmentReachesTheStoredRowTests(EnrichTestCase):
         await self._stored([_simkl_record(1)])
         spy = AsyncMock(side_effect=AssertionError("must not fetch"))
         with patch("app.providers.simkl.titles.fetch_title", spy):
-            await calendar_entries.read_span(
+            await support.read_span(
                 SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
         spy.assert_not_awaited()
 
@@ -224,14 +233,26 @@ class OwedTitlesTests(EnrichTestCase):
         await self._stored([trakt_record])
         self.assertEqual(await calendar_enrich._owed_titles(), {})
 
-    async def test_an_already_answered_title_is_still_returned(self):
-        """Filtering OUT what is already answered is `drain`'s job, not this
-        function's — it stays a pure "what does the cache name" question."""
+    async def test_a_title_whose_row_has_its_answer_is_not_owed(self):
+        """Only the UNANSWERED are owed, read through the index on `enriched`: a
+        row that has its answer is kept current by being viewed
+        (app/metadata/refresh.py), not re-read here every tick."""
+        await self._stored([_simkl_record(9001, title="Moonshadow")])
+        await calendar_enrich._upsert_success(9001, "show", {
+            "genres": ["drama"], "network": "", "country": "", "certification": "",
+            "runtime": None, "status": "", "overview": "", "ids": {},
+        }, now=1000)
+        self.assertEqual(await calendar_enrich._owed_titles(), {})
+
+    async def test_a_title_answered_in_the_table_but_not_on_its_row_is_still_owed(self):
+        """The row is what is owed: an answer sitting in simkl_titles that the row
+        never received is handed over by the drain without a lookup."""
         await calendar_enrich._upsert_success(9001, "show", {
             "genres": ["drama"], "network": "", "country": "", "certification": "",
             "runtime": None, "status": "", "overview": "", "ids": {},
         }, now=1000)
         await self._stored([_simkl_record(9001, title="Moonshadow")])
+        await db.execute("UPDATE titles SET simkl_enriched = 0 WHERE simkl_id IS NOT NULL")
         owed = await calendar_enrich._owed_titles()
         self.assertEqual(owed, {(9001, "show"): "Moonshadow"})
 
@@ -392,9 +413,9 @@ class DrainTests(EnrichTestCase):
     async def test_a_row_from_the_older_extraction_is_re_fetched_not_treated_as_complete(self):
         """A row written before ids/type/anime_type/trailers existed carries
         no `extract_version` key at all — the shape every one of the ~260
-        rows already in a live simkl_titles table is in. It must be treated
-        as OWED, not as already answered, so the author does not wait a full
-        30-day retention cycle for the fields that make matching cheap."""
+        rows already in a live simkl_titles table is in. For a title the drain
+        OWES (its row still unanswered), that answer must be treated as owed
+        too, not handed over as complete."""
         await self._stored([_simkl_record(1, title="X")])
         await calendar_enrich._upsert_success(1, "show", {
             # The exact shape the narrower extraction wrote: no
@@ -404,6 +425,7 @@ class DrainTests(EnrichTestCase):
             "certification": "", "runtime": None, "status": "", "overview": "",
             "ids": {"tvdb": "999"},
         }, now=1000)
+        await db.execute("UPDATE titles SET simkl_enriched = 0 WHERE simkl_id IS NOT NULL")
         spy = AsyncMock(return_value=_OK_FIELDS)
         with patch("app.providers.simkl.titles.fetch_title", spy):
             fetched = await calendar_enrich.drain(self.SETTINGS, now=1000)
@@ -421,7 +443,7 @@ class DrainTests(EnrichTestCase):
             "ids": {"tvdb": "999"},
         }, now=1000)
         await self._stored([_simkl_record(1)])
-        records, *_ = await calendar_entries.read_span(
+        records, *_ = await support.read_span(
             SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
         got = records[0]
         self.assertTrue(got.enriched)
@@ -459,6 +481,52 @@ class DrainTests(EnrichTestCase):
         self.assertTrue(any("Moonshadow" in line for line in captured.output))
 
 
+class APassWritesItsBatchOnceTests(EnrichTestCase):
+    """A pass's lookups are in flight together, and each used to write its own
+    answer as it arrived — a read of every Simkl row in the store and two write
+    transactions apiece, each on a worker thread. A backlog of films took every
+    worker the app has and a month's page waited on them. So a pass of thirty
+    titles must cost the database exactly what a pass of three does."""
+    SETTINGS = DrainTests.SETTINGS
+
+    async def _pass(self, ids) -> tuple[int, list[int]]:
+        """Odd ids answer and even ids fail, so a pass writes both kinds."""
+        async def answer_odd(settings, simkl_id, media):
+            return dict(_OK_FIELDS, network="AMC") if simkl_id % 2 else None
+
+        calls: list[int] = []
+        real_run = db.run
+
+        async def counting_run(fn):
+            calls.append(1)
+            return await real_run(fn)
+
+        await self._stored([_simkl_record(n, title=f"T{n}") for n in ids])
+        with patch("app.providers.simkl.titles.fetch_title", side_effect=answer_odd), \
+                patch.object(db, "run", counting_run), statements_per_transaction() as counted:
+            await calendar_enrich.drain(self.SETTINGS)
+        return len(calls), counted
+
+    async def test_thirty_titles_cost_what_three_do(self):
+        """The second pass asks only the thirty new titles: the first pass's are
+        answered, or failed a moment ago and inside their backoff."""
+        self.assertEqual(await self._pass(range(1, 4)), await self._pass(range(101, 131)))
+        self.assertEqual(await db.fetch_value(
+            "SELECT COUNT(*) FROM titles WHERE simkl_enriched = 1 AND simkl_network = 'AMC'"), 2 + 15)
+        self.assertEqual(await db.fetch_value(
+            "SELECT COUNT(*) FROM simkl_titles WHERE fail_count = 1"), 1 + 15)
+
+    async def test_a_batch_larger_than_one_statement_carries_is_written_whole(self):
+        await self._stored([_simkl_record(n, title=f"T{n}") for n in range(1, 6)])
+        with patch.object(calendar_enrich, "_ANSWERS_PER_STATEMENT", 2):
+            await calendar_enrich._upsert_successes(
+                [(n, "show", dict(_OK_FIELDS, network="AMC")) for n in range(1, 6)], 1000)
+        self.assertEqual(await db.fetch_value(
+            "SELECT COUNT(*) FROM simkl_titles WHERE fail_count = 0"), 5)
+        self.assertEqual(await db.fetch_value(
+            "SELECT COUNT(*) FROM titles WHERE simkl_enriched = 1"), 5)
+
+
 class AnAnswerThatArrivedAfterTheRowStillReachesItTests(EnrichTestCase):
     """THE CASE A DELETED MECHANISM LEFT BEHIND, found on a live calendar.
 
@@ -484,7 +552,7 @@ class AnAnswerThatArrivedAfterTheRowStillReachesItTests(EnrichTestCase):
                                simkl_catalogue_configured=True)
 
     async def _one(self):
-        records, *_ = await calendar_entries.read_span(
+        records, *_ = await support.read_span(
             SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
         return records[0]
 
@@ -498,8 +566,8 @@ class AnAnswerThatArrivedAfterTheRowStillReachesItTests(EnrichTestCase):
             "extract_version": simkl_titles.EXTRACT_VERSION,
             "genres": ["drama"], "network": "AMC",
         }, now=1000)
-        await db.execute("UPDATE calendar_titles SET enriched = 0, genres_json = '[]', "
-                         "network = '' WHERE source = 'simkl'")
+        await db.execute("UPDATE titles SET simkl_enriched = 0, simkl_genres_json = '[]', "
+                         "simkl_network = '' WHERE simkl_id IS NOT NULL")
         self.assertFalse((await self._one()).enriched)
 
         never = AsyncMock(side_effect=AssertionError("a stored answer was refetched"))
@@ -530,12 +598,12 @@ class AnAnswerThatArrivedAfterTheRowStillReachesItTests(EnrichTestCase):
         await calendar_enrich._upsert_success(1, "show", {
             "extract_version": simkl_titles.EXTRACT_VERSION, "genres": ["drama"],
         }, now=1000)
-        await db.execute("UPDATE calendar_titles SET enriched = 0 WHERE source = 'simkl'")
+        await db.execute("UPDATE titles SET simkl_enriched = 0 WHERE simkl_id IS NOT NULL")
         with patch("app.providers.simkl.titles.fetch_title",
                    AsyncMock(return_value=_OK_FIELDS)):
             await calendar_enrich.drain(self.SETTINGS, now=2000)
         self.assertEqual(
-            await calendar_entries.unenriched("simkl", "simkl"), set())
+            await title_rows.unenriched("simkl", "simkl"), {})
 
 
 class AnAnswerAlreadyPaidForGoesInWithTheFillTests(EnrichTestCase):
@@ -555,7 +623,7 @@ class AnAnswerAlreadyPaidForGoesInWithTheFillTests(EnrichTestCase):
                                simkl_catalogue_configured=True)
 
     async def _one(self):
-        records, *_ = await calendar_entries.read_span(
+        records, *_ = await support.read_span(
             SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
         return records[0]
 
@@ -630,6 +698,32 @@ class SweepTests(EnrichTestCase):
             fetched = await calendar_enrich.drain(self.SETTINGS)
         self.assertEqual(fetched, 1)
         spy.assert_awaited_once()
+
+
+class StoredAnswersAreUnpackedOffTheLoopTests(EnrichTestCase):
+    """A drain reads every Simkl title the stored calendar names, and unpacking
+    that many stored answers on the event loop held it for a third of a second
+    on every heartbeat."""
+
+    async def test_the_payloads_are_decompressed_on_a_worker_thread(self):
+        await calendar_enrich._upsert_success(7, "show", dict(_OK_FIELDS, network="BBC"),
+                                              now=1000)
+        threads = []
+        real = calendar_enrich._decompress
+
+        def _watched(blob):
+            threads.append(threading.get_ident())
+            return real(blob)
+
+        with patch.object(calendar_enrich, "_decompress", _watched):
+            rows = await calendar_enrich._read_rows([(7, "show"), (8, "movie")])
+        self.assertEqual(rows[(7, "show")]["fields"]["network"], "BBC")
+        self.assertEqual(list(rows), [(7, "show")])
+        self.assertTrue(threads)
+        self.assertNotIn(threading.get_ident(), threads)
+
+    async def test_asking_for_nothing_reads_nothing(self):
+        self.assertEqual(await calendar_enrich._read_rows([]), {})
 
 
 class FilterExemptionThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase):
@@ -1066,7 +1160,7 @@ class BothWritersReadThePayloadTheSameWayTests(EnrichTestCase):
 
     A lookup's answer is written in two places: onto a RECORD on the way into a
     fill (`_apply`), and onto a stored ROW when the drain answers for a title
-    whose row already exists (`entries.apply_enrichment`). Each used to read the
+    whose row already exists (`title_rows.apply_enrichment`). Each used to read the
     payload itself, and they disagreed — one looked for `ratings` where the
     payload says `rating`. Measured on a live instance: 1,505 titles kept their
     score and 225 lost it, decided by nothing but which path happened to reach
@@ -1093,8 +1187,7 @@ class BothWritersReadThePayloadTheSameWayTests(EnrichTestCase):
                "anime_type", "release_types_json", "enriched")
 
     async def _row(self):
-        row = await db.fetch_one(
-            f"SELECT {', '.join(self.COLUMNS)} FROM calendar_titles WHERE source = 'simkl'")
+        row = await title_group_of_simkl()
         return tuple(row[name] for name in self.COLUMNS)
 
     async def test_the_fill_path_and_the_row_path_store_the_same_thing(self):
@@ -1105,7 +1198,8 @@ class BothWritersReadThePayloadTheSameWayTests(EnrichTestCase):
         through_the_fill = await self._row()
 
         # PATH B — the row exists first and the drain updates it in place.
-        await db.execute("DELETE FROM calendar_titles")
+        for table in ("titles", "service_ids", "episodes"):
+            await db.execute(f"DELETE FROM {table}")
         await db.execute("DELETE FROM simkl_titles")
         await self._stored([_simkl_record(1)])
         await calendar_enrich._upsert_success(1, "show", self.PAYLOAD, now=1000)
@@ -1119,9 +1213,9 @@ class BothWritersReadThePayloadTheSameWayTests(EnrichTestCase):
         await self._stored([_simkl_record(1)])
         await calendar_enrich._upsert_success(1, "show", self.PAYLOAD, now=1000)
         self.assertEqual(
-            await db.fetch_value("SELECT ratings_json FROM calendar_titles"),
+            (await title_group_of_simkl())["ratings_json"],
             '{"simkl": 8.4}')
-        records, *_ = await calendar_entries.read_span(
+        records, *_ = await support.read_span(
             SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
         self.assertEqual(records[0].rating, 8.4)
 
@@ -1200,6 +1294,24 @@ class GivingUpOnATitleTests(EnrichTestCase):
         self.assertEqual(fetch.await_count, 1,
                          "a given-up title was never retried after its row aged out")
 
+    async def test_a_title_nobody_has_asked_about_yet_is_counted(self):
+        """The commonest owed title of all — a fill stored it a moment ago and
+        the drain has not reached it — has no simkl_titles row, and the count
+        used to drop it (NULL compared against the ceiling is NULL, not false), so
+        a month that had just filled read as settled."""
+        await self._stored([_simkl_record(9001, title="Fresh Off The Fill")])
+        titles, _seasons = await calendar_enrich.backlog()
+        self.assertEqual(titles, 1)
+
+    async def test_another_services_unanswered_row_is_not_this_drains(self):
+        """The Simkl drain owes Simkl's rows; a bare row another service's
+        answer created is not on its worklist and must not hold its count up."""
+        await db.transaction(lambda conn: put_title(
+            conn, "trakt", "show", "t-1", "show:tmdb:1", ids={"trakt": 1, "simkl": 9001},
+            fetched_at=1))
+        titles, _seasons = await calendar_enrich.backlog()
+        self.assertEqual(titles, 0)
+
     async def test_a_given_up_title_stops_being_counted(self):
         """A readout that cannot reach zero cannot say "settled", which is the
         one thing it was added to say."""
@@ -1232,7 +1344,7 @@ class GivingUpOnATitleTests(EnrichTestCase):
         await calendar_enrich._upsert_success(9001, "show", older, now=1000)
         # The calendar row still waiting, as it is when the answer it would have
         # been given is one nothing can use.
-        await db.execute("UPDATE calendar_titles SET enriched = 0")
+        await db.execute("UPDATE titles SET simkl_enriched = 0 WHERE simkl_id IS NOT NULL")
         await db.execute("UPDATE simkl_titles SET fail_count = ?, failed_at = 2000",
                          (calendar_enrich._GIVE_UP_AFTER,))
         titles, _seasons = await calendar_enrich.backlog()
@@ -1257,7 +1369,7 @@ class GivingUpOnATitleTests(EnrichTestCase):
         with patch("app.providers.simkl.titles.fetch_title",
                    AsyncMock(return_value=_OK_FIELDS)):
             await calendar_enrich.drain(self.SETTINGS, now=1000)
-        await db.execute("UPDATE calendar_titles SET enriched = 0")
+        await db.execute("UPDATE titles SET simkl_enriched = 0 WHERE simkl_id IS NOT NULL")
         await db.execute("UPDATE simkl_titles SET fail_count = ?, failed_at = 2000",
                          (calendar_enrich._GIVE_UP_AFTER + 10,))
 

@@ -32,7 +32,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
 
 from .. import auth, authz, db, secrets_box
-from ..config import Settings, load_settings
+from ..config import Settings, load_settings, save_settings
 from ..templating import templates
 # Bound as `trakt_auth` because inside app/auth/ a bare `trakt` would read as the
 # Trakt SOURCE (app/providers/trakt/); this is the login flow.
@@ -61,6 +61,10 @@ NOT_CONFIGURED = (
 # an identity away from the account holding it.
 ALREADY_LINKED = (
     "That Trakt account is already linked to another user on this instance."
+)
+HOLDS_ANOTHER = (
+    "A different Trakt account is already linked to yours. Unlink it on your "
+    "account page first, then connect this one."
 )
 
 UPSTREAM_FAILED = (
@@ -97,12 +101,13 @@ _LOGIN_NOTICES = {
 _LINK_NOTICES = {
     provider_login.NO_SESSION: ("Sign-in link not valid", {}),
     provider_login.IDENTITY_IN_USE: ("Already linked", _BACK_TO_ACCOUNT),
+    provider_login.ANOTHER_ACCOUNT_HELD: ("Already connected", _BACK_TO_ACCOUNT),
     provider_login.ACCOUNT_UNAVAILABLE: ("Sign-in failed", {}),
     provider_login.KEY_UNHEALTHY: ("Encryption needs attention", _BACK_TO_ACCOUNT),
 }
 
 
-def _notice(request: Request, title: str, message: str, *, status: int = 400,
+async def _notice(request: Request, title: str, message: str, *, status: int = 400,
             back: str = "/login", back_label: str = "Back to sign in"):
     """A dead-end page for a navigation that cannot continue.
 
@@ -120,18 +125,18 @@ def _notice(request: Request, title: str, message: str, *, status: int = 400,
         "back": back,
         "back_label": back_label,
     }, status_code=status)
-    auth.clear_handshake_cookie(response, load_settings(), request)
+    auth.clear_handshake_cookie(response, await load_settings(), request)
     return response
 
 
-def _handshake_refused(request: Request):
-    return _notice(request, "Sign-in link not valid", auth.HANDSHAKE_REJECTED, status=400)
+async def _handshake_refused(request: Request):
+    return await _notice(request, "Sign-in link not valid", auth.HANDSHAKE_REJECTED, status=400)
 
 
-def _refusal_notice(request: Request, refusal: provider_login.Refusal, pages: dict):
+async def _refusal_notice(request: Request, refusal: provider_login.Refusal, pages: dict):
     """Render a shared refusal as this medium's dead-end page."""
     title, back = pages[refusal.kind]
-    return _notice(request, title, refusal.message, status=refusal.status, **back)
+    return await _notice(request, title, refusal.message, status=refusal.status, **back)
 
 
 async def _begin(
@@ -147,11 +152,11 @@ async def _begin(
     unauthenticated caller cannot mint handshake rows in a loop — or get a second
     budget by alternating between the two providers.
     """
-    settings = load_settings()
+    settings = await load_settings()
     if await auth.handshake_start_limited(request, settings):
-        return _notice(request, "Too many attempts", TOO_MANY_STARTS, status=429)
+        return await _notice(request, "Too many attempts", TOO_MANY_STARTS, status=429)
     if not settings.trakt_login_configured:
-        return _notice(request, "Not available", NOT_CONFIGURED, status=503)
+        return await _notice(request, "Not available", NOT_CONFIGURED, status=503)
     state = await auth.create_handshake(
         provider=PROVIDER, purpose=purpose, session_id=session_id,
         invite_token=invite_token or None,
@@ -198,18 +203,18 @@ async def trakt_callback(request: Request):
     authorization code is exchanged, so a replayed or forged callback costs one
     database lookup and never reaches Trakt at all.
     """
-    settings = load_settings()
+    settings = await load_settings()
     state = request.query_params.get("state")
 
     if request.query_params.get("error"):
         # The user pressed "deny" on Trakt's screen, or Trakt refused. Nothing
         # was authorized, so there is nothing to undo.
-        return _notice(request, "Sign-in cancelled",
+        return await _notice(request, "Sign-in cancelled",
                        "You didn't authorize this app on Trakt. Nothing has changed.",
                        status=400)
 
     if not auth.handshake_cookie_matches(request, settings, state):
-        return _handshake_refused(request)
+        return await _handshake_refused(request)
 
     current = await auth.current_user(request)
     try:
@@ -218,13 +223,13 @@ async def trakt_callback(request: Request):
             session_id=current.session_id if current else None,
         )
     except auth.HandshakeError:
-        return _handshake_refused(request)
+        return await _handshake_refused(request)
 
     code = (request.query_params.get("code") or "").strip()
     if not code:
-        return _handshake_refused(request)
+        return await _handshake_refused(request)
     if not settings.trakt_login_configured:  # pragma: no cover — cleared mid-flow
-        return _notice(request, "Not available", NOT_CONFIGURED, status=503)
+        return await _notice(request, "Not available", NOT_CONFIGURED, status=503)
 
     try:
         token = await trakt_auth.exchange_code(
@@ -238,7 +243,7 @@ async def trakt_callback(request: Request):
         # Deliberately vague to the visitor and specific in the log: the
         # exception text can carry the request URL, and that carries the code.
         logger.warning("Trakt authorization exchange failed: %s", type(exc).__name__)
-        return _notice(request, "Sign-in failed", UPSTREAM_FAILED, status=502)
+        return await _notice(request, "Sign-in failed", UPSTREAM_FAILED, status=502)
 
     identity = auth.ProviderIdentity(
         provider=PROVIDER,
@@ -277,10 +282,11 @@ async def _finish_link(request: Request, settings: Settings,
     """
     outcome = await provider_login.complete_provider_link(
         identity=identity, current=current,
-        already_linked=ALREADY_LINKED, key_unhealthy=KEY_UNHEALTHY,
+        already_linked=ALREADY_LINKED, holds_another=HOLDS_ANOTHER,
+        key_unhealthy=KEY_UNHEALTHY,
     )
     if isinstance(outcome, provider_login.Refusal):
-        return _refusal_notice(request, outcome, _LINK_NOTICES)
+        return await _refusal_notice(request, outcome, _LINK_NOTICES)
     await _clear_reconnect_notice(current.is_admin)
     response = RedirectResponse(outcome.redirect_target, status_code=303)
     auth.clear_handshake_cookie(response, settings, request)
@@ -295,7 +301,7 @@ async def _finish_login(request: Request, settings: Settings,
         already_linked=ALREADY_LINKED,
     )
     if isinstance(outcome, provider_login.Refusal):
-        return _refusal_notice(request, outcome, _LOGIN_NOTICES)
+        return await _refusal_notice(request, outcome, _LOGIN_NOTICES)
     if not outcome.registered:
         # A returning user, which is what the reconnect notice was asking for
         # when an admin is the one returning. A registration cannot be: the
@@ -378,6 +384,16 @@ async def adopt_app_token(user_id: int, settings: Settings) -> tuple[bool, str |
             f"{await _identity_owner_label(str(account['id']))} on this instance. "
             "Unlink it there first, then try again."
         )
+    except auth.AnotherAccountHeld:
+        # This login already holds a DIFFERENT Trakt account: one account of a
+        # service per login, so the app-wide one is not added beside it.
+        logger.warning("This login already holds a different Trakt account than the "
+                       "app-wide token's.")
+        return False, (
+            "This login already has a different Trakt account linked than the one "
+            "this token belongs to. Unlink that one on your account page first, then "
+            "try again."
+        )
     except auth.AccountUnavailable:
         return False, "This login can't be linked to right now."
     except auth.IdentityWritesBlocked:
@@ -436,7 +452,7 @@ async def revoke_token_value(token: str | None, settings: Settings | None = None
     instance using the token, and rolling an unlink back because a third party
     was unreachable would leave the user stuck with a link they asked to remove.
     """
-    cfg = settings or load_settings()
+    cfg = settings or await load_settings()
     if not token:
         return None
     if not (cfg.trakt_client_id and cfg.trakt_client_secret):
@@ -452,6 +468,116 @@ async def revoke_token_value(token: str | None, settings: Settings | None = None
     return None
 
 
+# ---------------------------------------------------------------------------
+# one Trakt grant, possibly held in two places
+# ---------------------------------------------------------------------------
+#
+# THE APP-WIDE TOKEN AND AN ADMINISTRATOR'S LINKED IDENTITY CAN BE ONE GRANT.
+# `adopt_app_token` links the token pair Settings holds to the administrator who
+# authorized it, so the same refresh token is stored twice — and Trakt issues a
+# NEW refresh token on every refresh and retires the old one at once. Two
+# refreshers each storing the new pair only where they found the old one meant
+# whichever refreshed first left the other holding a dead refresh token: the
+# app-wide copy then failed every heartbeat with Trakt's 400 until somebody ran
+# "Authorize with Trakt" again (measured on a dev instance: the identity and
+# Settings held identical tokens, and the heartbeat logged a 400 a minute until
+# a re-authorization). So a rotation is stored wherever the old token was held.
+
+
+async def _identities_holding(refresh_token: str, *, besides: int | None = None) -> list:
+    """The Trakt identity rows whose stored refresh token is `refresh_token`,
+    other than row `besides`. Few rows — one per linked Trakt account — so each
+    is opened and compared.
+
+    TOLERANT OF A ROW THAT CANNOT BE OPENED. A row sealed under a key this
+    instance no longer has raises SealedButWrongKey; it is skipped and logged by
+    its id and user, never its contents, because one unreadable row must not
+    stop a renewal being stored for the rows that can be read.
+    """
+    if not refresh_token:
+        return []
+    rows = await db.fetch_all(
+        "SELECT id, user_id, refresh_token FROM linked_identities WHERE provider = ?",
+        (PROVIDER,))
+    holding = []
+    for row in rows:
+        if besides is not None and int(row["id"]) == besides:
+            continue
+        try:
+            stored = secrets_box.open_(row["refresh_token"])
+        except secrets_box.SealedButWrongKey:
+            logger.warning("Trakt identity %s (user %s) could not be opened with the "
+                           "configured key; it is left as it is", row["id"], row["user_id"])
+            continue
+        if stored == refresh_token:
+            holding.append(row)
+    return holding
+
+
+async def store_rotated_tokens(old_refresh_token: str, token: dict, *,
+                               identity_id: int | None) -> None:
+    """Store a refreshed Trakt pair EVERYWHERE the refresh token it replaced was
+    held — the app-wide Settings copy and every linked identity — because Trakt
+    has just retired that refresh token for all of them. THE ONE PLACE a Trakt
+    rotation is written; both the heartbeat's app-wide refresh and a user's own
+    refresh call it.
+
+    THE COPY THAT WAS RENEWED IS WRITTEN FIRST AND UNCONDITIONALLY: the identity
+    row `identity_id` names, by its id, or — with None — the app-wide copy in
+    Settings. Nothing about matching may stand between Trakt retiring the old
+    token and the new pair being kept by the holder that asked; a renewal lost
+    there is an account that has to be linked again. Only then are the OTHER
+    holders found, by matching the old refresh token, tolerantly.
+    """
+    if identity_id is not None:
+        await _store_on_identity(identity_id, token)
+        settings = await load_settings()
+        if old_refresh_token and settings.trakt_refresh_token == old_refresh_token:
+            await _store_in_settings(settings, token)
+    else:
+        await _store_in_settings(await load_settings(), token)
+    for row in await _identities_holding(old_refresh_token, besides=identity_id):
+        await _store_on_identity(int(row["id"]), token)
+
+
+async def _store_on_identity(identity_id: int, token: dict) -> None:
+    await auth.store_identity_tokens(
+        identity_id, access_token=token.get("access_token"),
+        refresh_token=token.get("refresh_token") or None,
+        token_expires_at=_expires_at(token))
+
+
+async def _store_in_settings(settings: Settings, token: dict) -> None:
+    settings.trakt_access_token = token["access_token"]
+    settings.trakt_refresh_token = token.get("refresh_token") or ""
+    settings.trakt_token_expires_at = _expires_at(token) or 0
+    await save_settings(settings)
+
+
+async def holders_note(refresh_token: str, *, app_wide: bool) -> str:
+    """Who a failing Trakt token belongs to, in words for a log line: the
+    app-wide token in Settings, a user's linked account, or both at once."""
+    users = [int(row["user_id"]) for row in await _identities_holding(refresh_token)]
+    who = []
+    if app_wide:
+        who.append("the app-wide token in Settings > Trakt")
+    who += [f"user {user}'s linked Trakt account" for user in users]
+    return " and ".join(who) if who else "a Trakt token no longer stored anywhere"
+
+
+def refusal_reason(exc: Exception) -> str:
+    """Trakt's own reason for refusing a refresh — its `error` field, such as
+    `invalid_grant` for a refresh token it has already retired — or the bare
+    failure. Never the request, which carries the credentials."""
+    response = getattr(exc, "response", None)
+    try:
+        error = (response.json() or {}).get("error") if response is not None else None
+    except ValueError:
+        error = None
+    status = getattr(response, "status_code", None)
+    return f"HTTP {status} {error}" if status and error else type(exc).__name__
+
+
 async def access_token_for_user(user_id: int, settings: Settings | None = None) -> str | None:
     """A currently-valid Trakt access token for `user_id`, or None.
 
@@ -465,7 +591,7 @@ async def access_token_for_user(user_id: int, settings: Settings | None = None) 
     token already stored, which is either still valid or about to be replaced by
     the request that won.
     """
-    cfg = settings or load_settings()
+    cfg = settings or await load_settings()
     row = await db.fetch_one(
         "SELECT * FROM linked_identities WHERE user_id = ? AND provider = ?",
         (user_id, PROVIDER),
@@ -491,13 +617,14 @@ async def access_token_for_user(user_id: int, settings: Settings | None = None) 
             cfg.trakt_client_id, cfg.trakt_client_secret, refresh_token,
         )
     except (httpx.HTTPError, trakt_auth.TraktRateLimitError) as exc:
-        logger.warning("Trakt token refresh failed for a linked account: %s", exc)
+        logger.warning("Trakt token refresh failed for %s: %s",
+                       await holders_note(refresh_token,
+                                          app_wide=cfg.trakt_refresh_token == refresh_token),
+                       refusal_reason(exc))
         await auth.release_identity_refresh(int(row["id"]))
         return access_token
-    await auth.store_identity_tokens(
-        int(row["id"]),
-        access_token=token.get("access_token"),
-        refresh_token=token.get("refresh_token") or None,
-        token_expires_at=_expires_at(token),
-    )
+    # Wherever this grant is held — this identity, and the app-wide copy in
+    # Settings when it is the token this account adopted — or the copy not
+    # refreshed is left with a refresh token Trakt has just retired.
+    await store_rotated_tokens(refresh_token, token, identity_id=int(row["id"]))
     return token.get("access_token")

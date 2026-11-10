@@ -24,8 +24,7 @@ from datetime import date, datetime
 from ... import youtube
 from ...config import Settings
 from .. import season as season_rules
-from ..base import (Media, SeasonsAnswer, Source, TitleFacts, Video, VideoKind,
-                    proxied_image)
+from ..base import Media, SeasonsAnswer, Source, TitleFacts, Video, VideoKind, genre_label
 from . import _ids, _naming, titles, transport
 
 logger = logging.getLogger(__name__)
@@ -70,7 +69,7 @@ def _episode_date(entry: dict) -> date | None:
 
 
 async def fetch_episodes(settings: Settings, simkl_id, media: Media | str = Media.SHOW,
-                         *, cache_only: bool = False) -> list[dict]:
+                         *, cache_only: bool = False, fresh: bool = False) -> list[dict]:
     """Every episode Simkl knows for a title, aired and unaired, as it sends them.
 
     Returns [] for a movie, for a title with no id, and for an id Simkl does not
@@ -89,7 +88,7 @@ async def fetch_episodes(settings: Settings, simkl_id, media: Media | str = Medi
     episodes = await transport.cached_get(
         transport.catalog_client(), settings, f"{path}/{simkl_id}", {},
         pool=transport.CATALOG_POOL, ttl_seconds=EPISODES_CACHE_TTL_SECONDS,
-        cache_only=cache_only,
+        cache_only=cache_only, fresh=fresh,
     )
     return episodes if isinstance(episodes, list) else []
 
@@ -202,11 +201,6 @@ async def _episodes_holding(settings: Settings, simkl_id, season: int,
 # service that listed it.
 # ---------------------------------------------------------------------------
 
-# How an episode's air date is written in the modal's list. The same strftime the
-# Trakt package uses for the same row, so two cards' episode lists read alike.
-_AIR_DISPLAY = "%d %b %Y"
-
-
 # Deferred for the reason the Trakt package gives for the same import: the
 # poster reading belongs beside the feed that parses it.
 from . import calendar as simkl_calendar  # noqa: E402
@@ -225,9 +219,9 @@ def _modal_episodes(episodes: list[dict], season: int) -> list[dict]:
     so the one renderer both sources feed sees a field this source did not fill
     in rather than a field that does not exist.
 
-    AN UNDATED EPISODE KEEPS ITS ROW with an empty display string, the same way
-    the Trakt package's `_episodes_from` keeps one: an unscheduled episode still
-    exists and dropping it would make a half-announced season look complete.
+    AN UNDATED EPISODE KEEPS ITS ROW with an empty date, the same way the Trakt
+    package's `_episodes_from` keeps one: an unscheduled episode still exists and
+    dropping it would make a half-announced season look complete.
     """
     rows = []
     for entry in episodes or []:
@@ -243,14 +237,17 @@ def _modal_episodes(episodes: list[dict], season: int) -> list[dict]:
         rows.append({
             "number": int(number),
             "title": str(entry.get("title") or f"Episode {number}"),
-            # THE DATE AS SIMKL STATES IT, NOT CONVERTED. Simkl expresses a whole
-            # file's times in one fixed offset rather than in each title's own
-            # zone (see _episode_date), so converting the instant into the
-            # viewer's zone would move a late-night episode a day for no reason
-            # anybody could act on.
-            "air_display": air_date.strftime(_AIR_DISPLAY) if air_date else "",
+            # THE DAY AS SIMKL STATES IT, NOT AN INSTANT TO CONVERT. Simkl
+            # expresses a whole file's times in one fixed offset rather than in
+            # each title's own zone (see _episode_date), so handing on the
+            # instant would let a reader's zone move a late-night episode a day
+            # for no reason anybody could act on. A bare day is drawn as itself.
+            "first_aired": air_date.isoformat() if air_date else "",
             "rating": None,
             "overview": str(entry.get("description") or "").strip(),
+            # Simkl states neither an episode's type nor its runtime.
+            "episode_type": "",
+            "runtime": None,
         })
     rows.sort(key=lambda row: row["number"])
     return rows
@@ -373,8 +370,10 @@ async def _filled_from_series(settings: Settings, simkl_id, media: Media,
 
 
 async def fetch_details(settings: Settings, media: Media | str, simkl_id,
-                        season: int | None, *, cache_only: bool = False) -> dict:
-    """One title as the detail modal draws it — app/providers/base.py's DetailPort.
+                        season: int | None, *, cache_only: bool = False,
+                        fresh: bool = False) -> dict:
+    """One title as Simkl describes it — app/providers/base.py's DetailPort, with
+    origin addresses and Simkl's own days.
 
     THE SAME KEYS THE TRAKT PACKAGE'S fetch_details RETURNS, for the reason that
     protocol states: one client-side renderer draws both, so a key present on
@@ -405,8 +404,10 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
     opens with no outbound call at all.
     """
     media = Media(media)
-    fields = await titles.fetch_title(settings, simkl_id, media, cache_only=cache_only) or {}
-    episodes = (await fetch_episodes(settings, simkl_id, media, cache_only=cache_only)
+    fields = await titles.fetch_title(settings, simkl_id, media, cache_only=cache_only,
+                                      fresh=fresh) or {}
+    episodes = (await fetch_episodes(settings, simkl_id, media, cache_only=cache_only,
+                                     fresh=fresh)
                 if media is not Media.MOVIE else [])
     # THE SAME RESOLUTION THE SEASON SUMMARY MAKES, for the same reason: the
     # season a record NAMES and the Simkl title a record CARRIES are two
@@ -468,14 +469,12 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         local = answered
     runtime = fields.get("runtime")
     return {
-        # EMPTY, AND NOT AN OVERSIGHT. What this reads is the enrichment
-        # extraction (titles.py's `_extract`), which keeps no title: the calendar
-        # already has one from the listing that put the card on the page. Adding
-        # a field to that extraction means bumping its version and re-fetching
-        # every stored row — 7698 of them on a live instance — to fill in a string
-        # the modal is already showing in its own heading, taken from the card the
-        # click came from.
-        "title": "",
+        # SIMKL'S OWN NAME FOR THE TITLE, which the extraction returns for any
+        # caller that asks and does not store (titles.py's `_extract`). It
+        # matters because this answer is KEPT: the title store files it, and a
+        # title only Simkl knows is drawn on a tracker row or a board row by the
+        # name this states.
+        "title": str(fields.get("title") or ""),
         "year": fields.get("year") or "",
         "overview": str(fields.get("overview") or "").strip(),
         "status": str(fields.get("status") or "").replace("_", " ").title(),
@@ -517,21 +516,19 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         # shape is versioned by EXTRACT_VERSION); the correction belongs here, at
         # the projection, exactly where the Trakt package puts its own.
         "ids": _ids.normalize(fields.get("ids") or {}),
-        # THE POSTER, AS A FULL URL, THROUGH THE SHARED PROXY. `_extract` keeps
-        # Simkl's partial path and this projection dropped it, so a card the
-        # calendar SEARCH wrote had no picture. Built by this package's own one
-        # reading of that path -- the same one the calendar feed uses -- because
-        # Simkl states a poster as a fragment and two places turning it into a
-        # URL would be two chances to get the size suffix wrong. Proxied here
-        # because this caller (the details panel) hands the address straight to
-        # a browser, which is exactly what the proxy exists to sit in front of.
-        "poster": proxied_image(simkl_calendar.poster_url(fields.get("poster"))) or "",
+        # THE POSTER, AS A FULL ORIGIN URL. `_extract` keeps Simkl's partial
+        # path and this projection dropped it, so a card the calendar SEARCH
+        # wrote had no picture. Built by this package's own one reading of that
+        # path -- the same one the calendar feed uses -- because Simkl states a
+        # poster as a fragment and two places turning it into a URL would be two
+        # chances to get the size suffix wrong. The panel proxies it.
+        "poster": simkl_calendar.poster_url(fields.get("poster")) or "",
         "runtime": runtime,
         # SLUGS BACK INTO WORDS, exactly as the Trakt package does to its own.
         # `_extract` slugs a genre so a viewer's filter spec matches one spelling
         # across both services; the modal draws chips a person reads, and the two
         # sources' chips have to look alike.
-        "genres": [str(g).replace("-", " ").title() for g in (fields.get("genres") or [])],
+        "genres": [genre_label(g) for g in (fields.get("genres") or [])],
         # THE GENRES AS THE SOURCE SPELLS THEM, beside the display form above.
         # TWO CONSUMERS WANT TWO DIFFERENT THINGS and only one of them was being
         # served: the modal draws chips a person reads ("Science Fiction"), and a
@@ -548,6 +545,12 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         "imdb_rating": (round(float(fields["imdb_rating"]), 1)
                         if fields.get("imdb_rating") else None),
         "certification": str(fields.get("certification") or "").upper(),
+        # NOT STATED, which is a different answer from "none" (Record.keywords):
+        # Simkl's catalogue record carries neither keywords nor a show type — its
+        # `anime_type` is a format of its own listing, not TMDB's show type — so
+        # a keyword or show-type filter shows a title only Simkl describes.
+        "keywords": None,
+        "show_type": None,
         # EVERY VIDEO SIMKL LISTS, not the first one — the panel pools them
         # with the other service's and picks what plays (see videos_from).
         "videos": videos_from(fields.get("trailers")),
@@ -558,6 +561,12 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         # Simkl's catalogue record carries no homepage field; the card's own
         # outbound button already offers this title's Simkl page.
         "homepage": "",
+        # Nor logo artwork, a film series or a next episode, and its videos hang
+        # off the title alone (see the season keys below).
+        "logo": "",
+        "collection": {},
+        "next_episode": None,
+        "season_videos": [],
         "season": answered,
         # TWO KEYS THIS SERVICE HAS NO SEASON-LEVEL ANSWER FOR, present and
         # honest. Checked against Simkl's own documentation rather than inferred:
@@ -574,11 +583,12 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         # Nor a season's own description — same documentation, same absence. The
         # panel draws the title's words above and nothing extra below.
         "season_overview": "",
-        # THE COUNT IS ANSWERABLE, THOUGH, and from something already fetched:
-        # every episode carries its season number, so the episode list says how
-        # many seasons there are without a second call. Specials are excluded the
-        # same way the Trakt package excludes them — `seasons_known` drops them.
+        # THE SEASONS ARE ANSWERABLE, THOUGH, and from something already fetched:
+        # every episode carries its season number, so the episode list says which
+        # seasons there are without a second call. Specials are excluded the same
+        # way the Trakt package excludes them — `seasons_known` drops them.
         "season_count": len(seasons_known(episodes)),
+        "seasons": _season_counts(episodes),
         "cast": [],
         # NO SEASON MEANS NO EPISODE SECTION, rather than every season run
         # together. A list nobody can label is worse than none: the reader has no
@@ -646,7 +656,7 @@ def _season_counts(episodes: list[dict]) -> list[dict]:
 
 
 async def fetch_seasons(settings: Settings, simkl_id, media: Media | str = Media.SHOW, *,
-                        cached_only: bool = False) -> SeasonsAnswer:
+                        cached_only: bool = False, fresh: bool = False) -> SeasonsAnswer:
     """app/providers/base.py's DetailPort.fetch_seasons.
 
     TWO CALLS, BOTH PAID BY ONE CLICK. `fetch_episodes` answers the picker's
@@ -672,7 +682,7 @@ async def fetch_seasons(settings: Settings, simkl_id, media: Media | str = Media
     if media is not Media.SHOW or not simkl_id:
         return SeasonsAnswer(seasons=[], named_season=None, ids={}, network="")
     episodes, naming = await asyncio.gather(
-        fetch_episodes(settings, simkl_id, media, cache_only=cached_only),
+        fetch_episodes(settings, simkl_id, media, cache_only=cached_only, fresh=fresh),
         _naming.fetch(settings, simkl_id, cache_only=cached_only),
     )
     return SeasonsAnswer(

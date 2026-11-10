@@ -27,6 +27,18 @@ attach as a header icon:
   - the stored file is a NEW image with decoded pixels pasted in, never the
     original bytes re-encoded, so EXIF/ICC/comment metadata never survives —
     stripping by construction rather than by trying to enumerate what to strip.
+
+WHAT READS OR WRITES A FILE IS A COROUTINE, AND DOES IT ON A WORKER THREAD.
+Every caller is a request on the event loop, which serves every other request
+(CLAUDE.md, "The event loop runs no pass…"): a read or a write lets go of the
+interpreter lock around each system call and must win it back — a switch
+interval each time while a week store or a read is busy on a thread — and
+Pillow's decode, resize and encode hold the lock for as long as they take. So
+each public function here that opens a picture or the names file runs ONE
+synchronous body (`_store_avatar`, `_adopt`, …) through `anyio.to_thread`, and
+an account page asks for everything it draws in one (`account_pictures`). What
+stays synchronous only asks whether a file is there or when it changed — one
+stat — or builds a path.
 """
 from __future__ import annotations
 
@@ -39,6 +51,7 @@ import shutil
 import uuid
 from io import BytesIO
 from pathlib import Path
+from typing import NamedTuple
 
 import anyio.to_thread
 from PIL import Image
@@ -197,12 +210,16 @@ def list_avatar_sources(user_id: int) -> list[str]:
     return [name for name in AVATAR_SOURCES if has_avatar_source(user_id, name)]
 
 
-def avatar_source_is_adopted(user_id: int, source: str) -> bool:
+async def avatar_source_is_adopted(user_id: int, source: str) -> bool:
     """Whether the account's avatar is currently a copy of this source.
 
     Byte equality, for the reason `adopt_avatar_source` gives: adoption is a copy
     rather than a pointer, so there is no field to consult and the honest
     question is whether the two files are the same picture."""
+    return await anyio.to_thread.run_sync(_is_adopted, user_id, source)
+
+
+def _is_adopted(user_id: int, source: str) -> bool:
     try:
         stored = avatar_source_path(user_id, source)
     except ValueError:
@@ -213,6 +230,38 @@ def avatar_source_is_adopted(user_id: int, source: str) -> bool:
         return False
 
 
+class Pictures(NamedTuple):
+    """What the account page draws of this account's pictures (`account_pictures`)."""
+    has_avatar: bool
+    # The avatar file's `picture_version`.
+    avatar_version: int
+    # Every source the account has a picture from, in AVATAR_SOURCES order.
+    sources: list["SourcePicture"]
+
+
+class SourcePicture(NamedTuple):
+    source: str
+    # Whether the avatar is a copy of this source's picture (`avatar_source_is_adopted`).
+    adopted: bool
+    version: int
+
+
+async def account_pictures(user_id: int) -> Pictures:
+    """The account's avatar and each source it can be copied from, read in one
+    turn of a worker thread — a page drew them with a stat and two whole-file
+    reads per source on the loop."""
+    return await anyio.to_thread.run_sync(_account_pictures, user_id)
+
+
+def _account_pictures(user_id: int) -> Pictures:
+    return Pictures(
+        has_avatar=has_avatar(user_id),
+        avatar_version=picture_version(avatar_path(user_id)),
+        sources=[SourcePicture(name, _is_adopted(user_id, name),
+                               picture_version(avatar_source_path(user_id, name)))
+                 for name in list_avatar_sources(user_id)])
+
+
 def list_provider_avatars(user_id: int) -> list[str]:
     """Which SERVICE slots this account has a picture in. The upload is excluded
     deliberately: this answers "which connected services have given us one",
@@ -221,7 +270,7 @@ def list_provider_avatars(user_id: int) -> list[str]:
     return [name for name in PROVIDER_SLOTS if has_provider_avatar(user_id, name)]
 
 
-def delete_avatar_source(user_id: int, source: str) -> bool:
+async def delete_avatar_source(user_id: int, source: str) -> bool:
     """Remove one source's picture. If the avatar was a copy of it, fall back to
     the account's own uploaded picture, or to no picture when there is none.
 
@@ -253,8 +302,12 @@ def delete_avatar_source(user_id: int, source: str) -> bool:
     is byte-identical — and it fails in the safe direction: an avatar that has
     since been replaced by an upload differs, and is therefore kept.
     """
+    return await anyio.to_thread.run_sync(_delete_source, user_id, source)
+
+
+def _delete_source(user_id: int, source: str) -> bool:
     if source == UPLOAD_SOURCE:
-        return delete_avatar(user_id)
+        return _delete_avatar(user_id)
     try:
         slot = avatar_source_path(user_id, source)
     except ValueError:
@@ -386,10 +439,14 @@ def clean_name(value: object) -> str:
     return text
 
 
-def describe_images(user_id: int) -> list[dict[str, str]]:
+async def describe_images(user_id: int) -> list[dict[str, str]]:
     """Every saved image as {uid, name}, oldest first — what a picker needs to
     render something a person can choose between. An image with no stored name
     gets a positional default so there is always something to show."""
+    return await anyio.to_thread.run_sync(_describe_images, user_id)
+
+
+def _describe_images(user_id: int) -> list[dict[str, str]]:
     names = _read_names(user_id)
     return [
         {"uid": uid, "name": names.get(uid) or f"Image {position}"}
@@ -397,9 +454,13 @@ def describe_images(user_id: int) -> list[dict[str, str]]:
     ]
 
 
-def set_image_name(user_id: int, image_uid: str, name: str) -> bool:
+async def set_image_name(user_id: int, image_uid: str, name: str) -> bool:
     """Name (or rename) a saved image. False when this account has no such
     image, so a caller answers 404 rather than storing a name for nothing."""
+    return await anyio.to_thread.run_sync(_set_image_name, user_id, image_uid, name)
+
+
+def _set_image_name(user_id: int, image_uid: str, name: str) -> bool:
     if image_uid not in list_images(user_id):
         return False
     names = _read_names(user_id)
@@ -468,11 +529,6 @@ def _normalize(raw: bytes) -> bytes:
     return buf.getvalue()
 
 
-async def _validated_master(image_b64: str) -> bytes:
-    raw = _decode_upload(image_b64)
-    return await anyio.to_thread.run_sync(_normalize, raw)
-
-
 async def save_avatar(user_id: int, image_b64: str) -> Path:
     """Validate, normalize, and store the account's avatar, replacing whatever
     was there before.
@@ -482,7 +538,11 @@ async def save_avatar(user_id: int, image_b64: str) -> Path:
     picture reversible — without it, adopting one overwrote the uploaded
     original and there was nothing to go back to.
     """
-    normalized = await _validated_master(image_b64)
+    return await anyio.to_thread.run_sync(_store_avatar, user_id, image_b64)
+
+
+def _store_avatar(user_id: int, image_b64: str) -> Path:
+    normalized = _normalize(_decode_upload(image_b64))
     path = avatar_path(user_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(normalized)
@@ -490,7 +550,7 @@ async def save_avatar(user_id: int, image_b64: str) -> Path:
     return path
 
 
-def delete_avatar(user_id: int) -> bool:
+async def delete_avatar(user_id: int) -> bool:
     """Remove the account's picture — the avatar AND the upload behind it.
 
     BOTH, because this is somebody saying "I do not want a picture", not
@@ -498,6 +558,10 @@ def delete_avatar(user_id: int) -> bool:
     later when a service's slot was removed, which is the app producing a picture
     its owner had already deleted.
     """
+    return await anyio.to_thread.run_sync(_delete_avatar, user_id)
+
+
+def _delete_avatar(user_id: int) -> bool:
     uploaded_avatar_path(user_id).unlink(missing_ok=True)
     try:
         avatar_path(user_id).unlink()
@@ -526,13 +590,17 @@ async def save_provider_avatar(user_id: int, provider: str, raw: bytes) -> Path:
     checks.
     """
     path = provider_avatar_path(user_id, provider)  # refuses an unknown slot first
-    normalized = await anyio.to_thread.run_sync(_normalize, raw)
+    return await anyio.to_thread.run_sync(_store, path, raw)
+
+
+def _store(path: Path, raw: bytes) -> Path:
+    normalized = _normalize(raw)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(normalized)
     return path
 
 
-def adopt_avatar_source(user_id: int, source: str, *, only_if_missing: bool) -> bool:
+async def adopt_avatar_source(user_id: int, source: str, *, only_if_missing: bool) -> bool:
     """Copy a provider slot into `avatar.webp`. Returns whether it did.
 
     CHOOSING A PRIMARY IS A COPY, NOT A POINTER, and that is the design rather
@@ -553,6 +621,10 @@ def adopt_avatar_source(user_id: int, source: str, *, only_if_missing: bool) -> 
     The bytes are already normalized — they went through `save_provider_avatar`
     to get into the slot — so this is a copy and not a second validation pass.
     """
+    return await anyio.to_thread.run_sync(_adopt, user_id, source, only_if_missing)
+
+
+def _adopt(user_id: int, source: str, only_if_missing: bool) -> bool:
     try:
         stored = avatar_source_path(user_id, source)
     except ValueError:
@@ -572,10 +644,14 @@ async def add_image(user_id: int, image_b64: str, name: str = "") -> str:
     Returns its uid. Raises TooManyImages at the cap, checked before the (more
     expensive) validation so a client already at the limit isn't paying for a
     decode Pillow work it can't use."""
+    return await anyio.to_thread.run_sync(_add_image, user_id, image_b64, name)
+
+
+def _add_image(user_id: int, image_b64: str, name: str) -> str:
     if len(list_images(user_id)) >= MAX_IMAGES_PER_USER:
         raise TooManyImages()
     label = clean_name(name)
-    normalized = await _validated_master(image_b64)
+    normalized = _normalize(_decode_upload(image_b64))
     uid = uuid.uuid4().hex
     d = images_dir(user_id)
     d.mkdir(parents=True, exist_ok=True)
@@ -587,7 +663,11 @@ async def add_image(user_id: int, image_b64: str, name: str = "") -> str:
     return uid
 
 
-def delete_image(user_id: int, image_uid: str) -> bool:
+async def delete_image(user_id: int, image_uid: str) -> bool:
+    return await anyio.to_thread.run_sync(_delete_image, user_id, image_uid)
+
+
+def _delete_image(user_id: int, image_uid: str) -> bool:
     if not _valid_uid(image_uid):
         return False
     try:
@@ -601,6 +681,20 @@ def delete_image(user_id: int, image_uid: str) -> bool:
     if names.pop(image_uid, None) is not None:
         _write_names(user_id, names)
     return True
+
+
+async def resized(path: Path, size: int) -> bytes | None:
+    """The master stored at `path`, resized to `size`x`size` (`resize_master`),
+    read and resized on a worker thread; None when there is no file."""
+    return await anyio.to_thread.run_sync(_resized, path, size)
+
+
+def _resized(path: Path, size: int) -> bytes | None:
+    try:
+        master = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    return resize_master(master, size)
 
 
 def resize_master(master: bytes, size: int) -> bytes:

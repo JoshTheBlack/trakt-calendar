@@ -26,18 +26,32 @@ class Endpoint:
     media: Media        # which object each item wraps
     has_episode: bool   # whether items include an "episode" object (SxxEyy)
     description: str
+    # THIS CALENDAR'S BIT in the title store's `calendars` masks — which
+    # calendars a service lists an episode's instant on, one integer per
+    # instant rather than a row per calendar (app/db.py's MIGRATION_49). A
+    # STORED MEANING: a bit, once written, names this calendar for as long as
+    # the rows holding it exist, so a bit is never reused or renumbered.
+    # tests/kernel/test_title_store_migration.py holds them distinct and equal
+    # to the ones the store was built with.
+    bit: int
     # THE ONE WORD THE CALENDAR'S OWN PICKER SHOWS, and only the picker. The page
     # header has to fit a phone in two rows, and a <select> cannot change its
     # option text by screen width, so the picker says this at every width — the
     # full `label` stays everywhere else a calendar is named (search results,
     # titles, the picker's own tooltip). Empty falls back to the label.
     short: str = ""
+    # WHETHER A CARD SAYS WHICH FINALE IT IS — "Mid-season finale" — read from
+    # the episode's own word at read (app/calendar/query.py's `read_rows`). On
+    # the finales calendar alone: the owner kept it off All Episodes, whose
+    # cards are heavy enough.
+    marked: bool = False
 
 
 # Order here is the order shown in the UI dropdown.
 ENDPOINTS: dict[str, Endpoint] = {
     "shows/new": Endpoint(
         key="shows/new",
+        bit=1,
         label="Series Premieres",
         media=Media.SHOW,
         has_episode=True,
@@ -46,6 +60,7 @@ ENDPOINTS: dict[str, Endpoint] = {
     ),
     "shows/premieres": Endpoint(
         key="shows/premieres",
+        bit=2,
         label="Season Premieres",
         media=Media.SHOW,
         has_episode=True,
@@ -54,14 +69,17 @@ ENDPOINTS: dict[str, Endpoint] = {
     ),
     "shows/finales": Endpoint(
         key="shows/finales",
+        bit=4,
         label="Season Finales",
         media=Media.SHOW,
         has_episode=True,
         description="Season/series finales airing this month.",
         short="Finales",
+        marked=True,
     ),
     "shows": Endpoint(
         key="shows",
+        bit=8,
         label="All Episodes",
         media=Media.SHOW,
         has_episode=True,
@@ -70,6 +88,7 @@ ENDPOINTS: dict[str, Endpoint] = {
     ),
     "movies": Endpoint(
         key="movies",
+        bit=16,
         label="Movie Premieres",
         media=Media.MOVIE,
         has_episode=False,

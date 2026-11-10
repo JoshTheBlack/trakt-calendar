@@ -34,8 +34,9 @@ kept have no tvdb or imdb; the calendar usually knows both. A SHARED id is only
 ever ADDED beside the one the row is filed under, never in place of it: the
 filing id is what addresses the row, so the row stays exactly where it was.
 
-THE SOURCE IS ALREADY PAID FOR. `calendar_titles` holds one row per service per
-title, keyed by the same identity the tracker files rows under, and reading it
+THE SOURCE IS ALREADY PAID FOR. The title store (app/metadata/rows.py) holds one
+row per service per title, keyed by the same identity the tracker files rows
+under, and reading it
 costs one indexed query and no network at all. So this is a pure re-read of what
 the instance already went and got. `app/calendar/enrich.py`'s drain derives its
 work from the same place for the same reason.
@@ -49,8 +50,9 @@ calendar itself merges the two services' cards on. Never a title search.
 ADD-ONLY, AND THAT IS `store.learn_ids`' RULE RATHER THAN THIS MODULE'S. A value
 already stored came off the payload the record was built from; a value arriving
 here is a join. Filling a blank cannot make a working record worse. Overwriting
-could — and a wrong Trakt id shadows a correct Simkl one, because the details
-layer prefers Trakt wherever it has an id.
+could — and a wrong id for an earlier service shadows a correct one for a later
+service, because the details layer asks the first declared service the record
+has an id for.
 """
 from __future__ import annotations
 
@@ -59,7 +61,7 @@ import logging
 
 from .. import cache
 from ..calendar import cache as calendar_cache
-from ..calendar import entries as calendar_entries
+from ..metadata import rows as title_rows
 from . import arrival, store
 
 logger = logging.getLogger(__name__)
@@ -125,7 +127,7 @@ async def fill_from_calendar(user_id: int, settings) -> int:
     # identity the tracker keys its rows by, and indexed. This once built an index
     # of the whole stored calendar to answer a handful of titles: 3.8 seconds to
     # learn two names, most of it blocking the event loop.
-    index = await calendar_entries.known_about(str(debt.key) for debt in wanted)
+    index = await title_rows.known_about(str(debt.key) for debt in wanted)
     changed = 0
     for debt in wanted:
         by_source = index.get(str(debt.key)) or {}

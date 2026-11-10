@@ -13,12 +13,19 @@
    composing that sentence in the browser out of a JSON answer and putting it in a
    generic "are you sure" dialog.
 
-   Context: `board_uid`, `confirm` (the sentence, when this IS the confirmation),
-   and `message`/`ok` (a line to say when nothing happened). #}
+   ONE PRESS PER SERVICE, each naming its service (`service`, a reference): a
+   seed reads one service's ratings, the one pressed for, and the confirmation
+   carries that name to the press that commits. Which services is the server's
+   (`sources.ratings`, ranker_sources.ratings_services — linked, and keeping
+   ratings).
+
+   Context: `board_uid`, `sources.ratings` ([(service, label)]), `service` and
+   `confirm` (the dry run's service and sentence, when this IS the
+   confirmation), and `message`/`ok` (a line to say when nothing happened). #}
 {% if confirm %}
 <span class="ranker-seed-confirm" hx-target="this" hx-swap="outerHTML">
     <span class="hint">{{ confirm }}</span>
-    {# Cancel DRAWS THE BUTTON AGAIN rather than restoring anything: the
+    {# Cancel DRAWS THE BUTTONS AGAIN rather than restoring anything: the
        confirmation is what is on the page, so the way back is to ask for the
        control. A GET, because it changes nothing — and because posting the dry
        run again to cancel it would spend a ratings read to do nothing. #}
@@ -26,13 +33,17 @@
             hx-get="/rankings/fragments/seed?board={{ board_uid | urlencode }}">Cancel</button>
     <button type="button" class="btn-primary small"
             hx-post="/rankings/boards/{{ board_uid }}/seed" hx-json-enc
-            hx-vals='{"commit": "1"}'
+            hx-vals='{{ {"commit": "1", "service": service} | tojson }}'
             hx-target="body" hx-swap="innerHTML">Seed the board</button>
 </span>
 {% else %}
-<button type="button" class="btn-ghost small" id="seedBtn"
-        title="Arrange titles into tiers from the scores you have already given them"
-        hx-post="/rankings/boards/{{ board_uid }}/seed" hx-json-enc
-        hx-target="this" hx-swap="outerHTML">★ Seed from ratings</button>
+<span class="ranker-seed" hx-target="this" hx-swap="outerHTML">
+    {%- for name, label in sources.ratings %}
+    <button type="button" class="btn-ghost small"
+            title="Arrange titles into tiers from the scores you have given them on {{ label }}"
+            hx-post="/rankings/boards/{{ board_uid }}/seed" hx-json-enc
+            hx-vals='{{ {"service": name} | tojson }}'>★ Seed from {{ label }} ratings</button>
+    {%- endfor %}
+</span>
 {% endif %}
 {%- if message %}{% import '_toast.html' as toast %}{{ toast.flash(message, ok) }}{% endif %}

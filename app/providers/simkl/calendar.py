@@ -28,6 +28,14 @@ cache instead of the cache growing a branch per source.
 NOTHING IN THIS MODULE FILTERS. Filtering is the calendar feature's job and
 happens on the far side of the cache — see trakt/calendar.py's docstring, which
 says the same thing for the same reason.
+
+A FILE IS READ ON A WORKER THREAD once it has arrived — parsed, de-duped and
+turned into Records there, never on the event loop that serves every request.
+MEASURED on Simkl's real October: 7.9 MB of tv.json and 0.4 MB of anime.json
+parsed in 85 ms, de-duped in 25 ms and made 18,290 Records in 235 ms — a third of
+a second the loop served nobody, twice that for a week reading two months, and
+twice again beside a restart's other refills. The work is pure: the entries are
+this read's own, and nothing else holds them while the thread has them.
 """
 from __future__ import annotations
 
@@ -35,6 +43,9 @@ import asyncio
 import logging
 import time as _time
 from datetime import date, datetime, timedelta
+from urllib.parse import quote
+
+import anyio.to_thread
 
 from ... import perftrace
 from ...config import Settings
@@ -217,7 +228,7 @@ async def _conditional_get(url: str, *, consumer: str, revalidate: bool = True) 
         raise SimklError(
             f"Simkl's calendar CDN returned HTTP {resp.status_code} for {url}.", resp.status_code)
     try:
-        data = resp.json()
+        data = await anyio.to_thread.run_sync(resp.json)
     except ValueError:
         raise SimklError(f"Simkl's calendar CDN returned an unreadable response for {url}.")
     if not isinstance(data, list):
@@ -242,7 +253,8 @@ async def _fetch_file(year: int, month: int, filename: str,
                                      consumer=consumer, revalidate=revalidate)
     if entries is None:
         return None
-    return _dedupe_file_entries([e for e in entries if isinstance(e, dict)])
+    return await anyio.to_thread.run_sync(
+        lambda: _dedupe_file_entries([e for e in entries if isinstance(e, dict)]))
 
 
 async def _read_files(wanted: list[tuple[int, int, str]], *, consumer: str,
@@ -358,8 +370,8 @@ def title_url(media: Media, ids: dict) -> str:
     same page, so a title with no slug still gets a real link rather than a
     homepage. With no usable id there is genuinely nowhere item-specific to point
     and "" is the honest answer — `Record.detail_url` is already optional
-    everywhere it is read, and app/calendar/resolve.py's `source_links` skips a
-    record without one.
+    everywhere it is read, and a card's buttons (detail_source.service_links)
+    skip a record with neither a page nor an id.
     """
     simkl_id = ids.get("simkl")
     if not simkl_id:
@@ -367,6 +379,24 @@ def title_url(media: Media, ids: dict) -> str:
     slug = str(ids.get("simkl_slug") or "").strip()
     path = f"{_SITE_PATHS[media]}/{simkl_id}"
     return f"https://simkl.com/{path}/{slug}" if slug else f"https://simkl.com/{path}"
+
+
+def episode_url(ids: dict, season: int, number: int) -> str:
+    """https://simkl.com/tv/<id>[/<slug>] — Simkl's page for the SHOW, because
+    an id from a roster row reaches no deeper: Simkl has no address for one
+    episode this app can build from what it holds.
+
+    THE ID IS THE STABLE IDENTIFIER AND THE SLUG IS DECORATION — Simkl says so
+    outright, and asks that the slug be included when it is known. So a title we
+    have no Simkl slug for still links, by id alone. Both are quoted, because
+    they come from stored rows rather than from this package's own reading.
+    """
+    simkl_id = str(ids.get("simkl") or "")
+    if not simkl_id:
+        return ""
+    base = f"https://simkl.com/tv/{quote(simkl_id, safe='')}"
+    slug = str(ids.get("simkl_slug") or "")
+    return f"{base}/{quote(slug, safe='')}" if slug else base
 
 
 def _detail_url(media: Media, entry_url, raw_ids: dict) -> str:
@@ -389,8 +419,9 @@ def _detail_url(media: Media, entry_url, raw_ids: dict) -> str:
     `_detail_url`): the numeric form reaches the same page, so a title with no
     slug still gets a real link rather than a homepage. With no usable id there
     is genuinely nowhere item-specific to point, and "" is the honest answer —
-    `Record.detail_url` is already optional everywhere it is read, and
-    app/calendar/resolve.py's `source_links` skips a record without one.
+    `Record.detail_url` is already optional everywhere it is read, and a card's
+    buttons (detail_source.service_links) skip a record with neither a page nor
+    an id.
     """
     if entry_url:
         return str(entry_url)
@@ -430,7 +461,7 @@ def _simkl_ids(raw: dict) -> dict:
     # nothing else can be asked; that would mean verifying each one against Trakt
     # before storing it, which is a lookup rather than a free read. Whoever wants
     # that should add it as a verified lookup, not by widening this map.
-    # BOTH SPELLINGS OF SIMKL'S OWN ID, as `_record_id` below reads them. A
+    # BOTH SPELLINGS OF SIMKL'S OWN ID, as `listing_id` below reads them. A
     # calendar file writes `simkl_id`; the per-title lookup a search builds its
     # record from writes `simkl`. Reading only the first stored every searched
     # card with no Simkl id — measured, nine rows on one instance — and a card
@@ -446,7 +477,7 @@ def _simkl_ids(raw: dict) -> dict:
     })
 
 
-def _record_id(ids_raw: dict) -> str:
+def listing_id(ids_raw: dict) -> str:
     """The stable identity of one Simkl title.
 
     THE SIMKL ID, NOT THE SLUG, AND THE SLUG IS NOT UNIQUE. This preferred the
@@ -511,7 +542,7 @@ def to_show_record(entry: dict) -> Record | None:
     return Record(
         source=Source.SIMKL,
         media=Media.SHOW,
-        id=_record_id(ids_raw),
+        id=listing_id(ids_raw),
         ids=_simkl_ids(ids_raw),
         detail_url=_detail_url(Media.SHOW, entry.get("url"), ids_raw),
         title=entry.get("title") or "Untitled",
@@ -556,7 +587,7 @@ def to_movie_record(entry: dict) -> Record | None:
     return Record(
         source=Source.SIMKL,
         media=Media.MOVIE,
-        id=_record_id(ids_raw),
+        id=listing_id(ids_raw),
         ids=_simkl_ids(ids_raw),
         detail_url=_detail_url(Media.MOVIE, entry.get("url"), ids_raw),
         title=entry.get("title") or "Untitled",
@@ -606,7 +637,7 @@ def to_anime_film_record(entry: dict) -> Record | None:
     return Record(
         source=Source.SIMKL,
         media=Media.MOVIE,
-        id=_record_id(ids_raw),
+        id=listing_id(ids_raw),
         ids=_simkl_ids(ids_raw),
         detail_url=_detail_url(Media.MOVIE, entry.get("url"), ids_raw),
         title=entry.get("title") or "Untitled",
@@ -715,12 +746,7 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
                   + [(year, month, _ANIME_FILE) for year, month in months])
         read = await _read_files(wanted, consumer=_consumer(endpoint, start),
                                  revalidate=revalidate)
-        movie_results, anime_results = read[:len(months)], read[len(months):]
-        raw = [e for batch in movie_results for e in batch]
-        films = [e for batch in anime_results for e in batch if is_anime_film(e)]
-        records = [to_movie_record(e) for e in raw]
-        records += [to_anime_film_record(e) for e in films]
-        return [r for r in records if r is not None]
+        return await anyio.to_thread.run_sync(lambda: _movie_records(read, len(months)))
 
     if endpoint.key not in _SHOW_DERIVATIONS:
         # 'shows/finales' and anything else this source has not declared in
@@ -733,7 +759,24 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
               + [(year, month, _ANIME_FILE) for year, month in months])
     read = await _read_files(wanted, consumer=_consumer(endpoint, start),
                              revalidate=revalidate)
-    tv_results, anime_results = read[:len(months)], read[len(months):]
+    return await anyio.to_thread.run_sync(lambda: _show_records(endpoint.key, read, len(months)))
+
+
+def _movie_records(read: list[list[dict]], months: int) -> list[Record]:
+    """The movies calendar's Records from its files (`read`: the months' movie
+    files, then their anime files) — pure, for a worker thread."""
+    movie_results, anime_results = read[:months], read[months:]
+    raw = [e for batch in movie_results for e in batch]
+    films = [e for batch in anime_results for e in batch if is_anime_film(e)]
+    records = [to_movie_record(e) for e in raw]
+    records += [to_anime_film_record(e) for e in films]
+    return [r for r in records if r is not None]
+
+
+def _show_records(endpoint_key: str, read: list[list[dict]], months: int) -> list[Record]:
+    """A show calendar's Records from its files (`read`: the months' tv files,
+    then their anime files) — pure, for a worker thread."""
+    tv_results, anime_results = read[:months], read[months:]
     tv_entries = [e for batch in tv_results for e in batch]
     # THE OTHER HALF OF THE SPLIT ABOVE, AND IT HAS TO BE THE OTHER HALF OF THE
     # SAME PREDICATE. A film the movies branch claims must leave the show
@@ -745,9 +788,9 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
     # and only enrichment turns out to call a film.
     anime_entries = [e for batch in anime_results for e in batch if not is_anime_film(e)]
 
-    if endpoint.key == "shows":
+    if endpoint_key == "shows":
         raw = tv_entries + anime_entries
-    elif endpoint.key == "shows/premieres":
+    elif endpoint_key == "shows/premieres":
         raw = _premieres(tv_entries) + _premieres(anime_entries)
     else:  # "shows/new"
         raw = _tv_new(tv_entries) + _anime_new(anime_entries)

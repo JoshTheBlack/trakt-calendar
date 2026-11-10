@@ -1,3 +1,4 @@
+{#- tight -#}
 {# How each service is SHOWN, in one place.
 
    Three surfaces need "which service is this, and what does it look like" — the
@@ -31,7 +32,11 @@
    attribution. Anything new that wants to draw a mark has to be something a
    reader can act on. #}
 
-{% macro label(source) %}{{ 'Simkl' if source == 'simkl' else 'Trakt' }}{% endmacro %}
+{# EVERY SERVICE'S NAME AND PICTURES COME FROM ONE TABLE, app/templating.py's
+   `source_look`, and a service missing from it fails the render. This file used
+   to answer "Simkl, else Trakt", which drew any third service under Trakt's name
+   and logo — credit to the wrong company on every card it touched. #}
+{% macro label(source) %}{{ source_look(source).label }}{% endmacro %}
 
 {# SEVERAL SERVICES NAMED IN ONE SENTENCE, in prose rather than as a list. Two
    surfaces in the add flow want this and want it identically — the search
@@ -45,11 +50,11 @@
 {%- endfor %}{% endmacro %}
 
 {% macro mark(source, css='') %}<img class="source-logo {{ css }}"
-     src="/static/images/{{ 'simkllogo.svg' if source == 'simkl' else 'trakt-circlemark-dark.svg' }}"
+     src="/static/images/{{ source_look(source).mark }}"
      alt="{{ label(source) }}" loading="lazy">{% endmacro %}
 
 {% macro wordmark(source) %}<img class="source-wordmark"
-     src="/static/images/{{ 'simkl_white_with_shaddow_transparent.png' if source == 'simkl' else 'trakt-logo-dark.svg' }}"
+     src="/static/images/{{ source_look(source).wordmark }}"
      alt="{{ label(source) }}" loading="lazy">{% endmacro %}
 
 {# ONE OUTBOUND BUTTON, wearing the name of where it actually goes. Both card
@@ -64,5 +69,10 @@
    for itself (static/js/ui.js's ACTS_FOR_ITSELF, which an <a> is). MEASURED in
    Firefox 155 and Chromium 153 against the real listener: with no handler here, a
    click on this button opens no panel. #}
-{% macro link(source, url) %}<a class="trakt-btn" href="{{ url }}" target="_blank"
-   rel="noopener" title="View on {{ label(source) }}">{{ wordmark(source) }}</a>{% endmacro %}
+{# `listed` false is a service that knows the title but is not one the card was
+   drawn from — it does not list this airing, or this viewer's calendar leaves
+   it out (detail_source.service_links): its button stays, greyed by
+   style.css's `.unlisted`, and its tooltip says so in words, since a colour
+   alone says nothing to somebody who cannot see it. #}
+{% macro link(source, url, listed=true) %}<a class="trakt-btn{% if not listed %} unlisted{% endif %}" href="{{ url }}" target="_blank"
+   rel="noopener" title="View on {{ label(source) }}{% if not listed %} — this card isn't drawn from {{ label(source) }}{% endif %}">{{ wordmark(source) }}</a>{% endmacro %}

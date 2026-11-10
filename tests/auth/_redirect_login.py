@@ -45,7 +45,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from app import auth, db
 from app.auth import routes as auth_routes
-from app.config import save_settings
+from tests.support import save_settings
 from tests.support import ORIGIN
 
 
@@ -303,14 +303,86 @@ class SharedRedirectSignInTests(_RedirectProvider):
         self.assertEqual(rows[0]["display_name"], "After")
         self.assertEqual(rows[0]["provider_user_id"], str(self.ACCOUNT_ID))
 
-    def test_a_different_numeric_id_is_a_different_identity(self):
+    def test_a_second_account_of_the_service_is_refused_while_one_is_linked(self):
+        """One account of a service per account here: a second row beside the
+        first would leave every reader of the grant picking between them. The
+        link already held is kept exactly as it was, and the person is told to
+        unlink it first."""
         user = self.make_user("collector", calendar_approved=True)
         self.sign_in_as(user)
         self.callback(self.start(self.path("link")), account_id=self.ACCOUNT_ID,
                       name="Same Name")
+        resp = self.callback(self.start(self.path("link")), account_id=self.OTHER_ACCOUNT_ID,
+                             name="Same Name")
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn(self.routes_module.HOLDS_ANOTHER, resp.text)
+        rows = self.identities()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["provider_user_id"], str(self.ACCOUNT_ID))
+
+    # -- a refusal ends the grant it was handed ------------------------------
+
+    def test_a_refused_link_revokes_the_token_it_was_handed(self):
+        """Refused, the fresh token is stored nowhere, so nothing here could
+        revoke it later; it would stand at the service under the person's
+        connected apps. The link already held keeps its own."""
+        user = self.make_user("collector", calendar_approved=True)
+        self.sign_in_as(user)
+        self.callback(self.start(self.path("link")), account_id=self.ACCOUNT_ID)
+        resp = self.callback(self.start(self.path("link")), account_id=self.OTHER_ACCOUNT_ID,
+                             token=self.Token(access=self.access("fresh"),
+                                              refresh=self.REFRESH_PREFIX + "fresh-r"))
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(self.revoked, [self.access("fresh")])
+
+    def test_a_refused_sign_in_revokes_the_token_it_was_handed(self):
+        self.sign_out()
+        resp = self.callback(self.start(invite="never-existed"),
+                             token=self.Token(access=self.access("fresh"),
+                                              refresh=self.REFRESH_PREFIX + "fresh-r"))
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self.revoked, [self.access("fresh")])
+
+    def test_a_refusal_keeps_a_token_another_account_here_holds(self):
+        """A service may answer a second authorization with the token it already
+        issued. Revoking it then would end the owner's working link."""
+        owner = self.make_user("owner", calendar_approved=True)
+        self.insert_identity(owner, access_token=self.access("shared"))
+        self.sign_in_as(self.make_user("interloper", calendar_approved=True))
+        resp = self.callback(self.start(self.path("link")),
+                             token=self.Token(access=self.access("shared"),
+                                              refresh=self.REFRESH_PREFIX + "shared-r"))
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(self.revoked, [])
+
+    def test_a_completed_link_revokes_nothing(self):
+        self.sign_in_as(self.make_user("linker", calendar_approved=True))
+        self.callback(self.start(self.path("link")))
+        self.assertEqual(self.revoked, [])
+
+    def test_after_an_unlink_a_different_account_links(self):
+        user = self.make_user("collector", calendar_approved=True)
+        self.sign_in_as(user)
+        self.insert_identity(user)
+        asyncio.run(db.execute("DELETE FROM linked_identities WHERE user_id = ?", (user,)))
+        resp = self.callback(self.start(self.path("link")), account_id=self.OTHER_ACCOUNT_ID)
+        self.assertEqual(resp.status_code, 303)
+        self.assertEqual([row["provider_user_id"] for row in self.identities()],
+                         [str(self.OTHER_ACCOUNT_ID)])
+
+    def test_a_different_numeric_id_is_a_different_identity(self):
+        """Two people, two accounts of the service: two identities, each its own."""
+        first = self.make_user("first", calendar_approved=True)
+        self.sign_in_as(first)
+        self.callback(self.start(self.path("link")), account_id=self.ACCOUNT_ID,
+                      name="Same Name")
+        second = self.make_user("second", calendar_approved=True)
+        self.sign_in_as(second)
         self.callback(self.start(self.path("link")), account_id=self.OTHER_ACCOUNT_ID,
                       name="Same Name")
-        self.assertEqual(len(self.identities()), 2)
+        self.assertEqual(sorted((int(row["user_id"]), row["provider_user_id"])
+                                for row in self.identities()),
+                         [(first, str(self.ACCOUNT_ID)), (second, str(self.OTHER_ACCOUNT_ID))])
 
     def test_an_account_response_without_a_numeric_id_is_refused(self):
         state = self.start()

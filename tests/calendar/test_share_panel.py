@@ -26,7 +26,8 @@ from urllib.parse import parse_qsl, urlsplit
 
 from app import auth, config, db
 from app.calendar import share_code, share_links, share_routes
-from app.config import Settings, load_settings, save_settings
+from app.config import Settings
+from tests.support import load_settings, save_settings
 from app.endpoints import get_endpoint
 from app.media import posters
 from tests.support import AppTestCase, ORIGIN, window_fetch

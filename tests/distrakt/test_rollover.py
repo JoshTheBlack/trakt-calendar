@@ -39,17 +39,21 @@ from tests.support import import_offered, migrated_db
 # lookup is made at all (live.detail_source): can this instance ask that service
 # about a title, which is its client id and not anybody's token. Both true, so
 # which service answers for a record goes on being decided by the ids it carries.
-SETTINGS = SimpleNamespace(trakt_configured=True, simkl_configured=False,
+SETTINGS = SimpleNamespace(trakt_configured=True, simkl_configured=False, tmdb_account_configured=False,
                            calendar_source_configured=True,
                            trakt_catalogue_configured=True,
                            simkl_catalogue_configured=True,
+                           tmdb_configured=False,
                            network_emojis={}, default_network_emoji=":tv:",
                            timezone="UTC",
                            # The operator's content floor, all open: the import
                            # asks whether any filter would rule on a title
                            # nothing has described yet (exempts_undescribed).
                            genres="", countries="", show_certifications="",
-                           movie_certifications="", network_filter=[])
+                           movie_certifications="", network_filter=[],
+                           languages="", keywords=[], tv_show_types="",
+                           tv_single_service=False, movie_single_service=False,
+                           tv_sparse_no_network=False, tv_missing="", movie_missing="")
 
 
 def _detail(total, watched_hint=None, cadence="Mon", premiere="7/6", finale=None,
@@ -353,7 +357,8 @@ class RolloverTests(RolloverTestCase):
 
     async def test_unconfigured_month_not_persisted(self):
         out = await distrakt.ensure_month(
-            self.user_id, 2026, 9, SimpleNamespace(trakt_configured=False, simkl_configured=False),
+            self.user_id, 2026, 9, SimpleNamespace(trakt_configured=False, simkl_configured=False,
+                                                   tmdb_account_configured=False),
             today=self.TODAY)
         self.assertEqual(out["shows"], [])
         self.assertIsNone(await distrakt.load_month(self.user_id, self.AHEAD))
@@ -808,8 +813,7 @@ class FinishingASeasonSettlesTheMonthItHappenedInTests(RolloverTestCase):
              patch("app.providers.trakt.sync.fetch_play_counts",
                    return_value=PlayCounts({}, False)), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
-             patch("app.calendar.cache.read_month", side_effect=no_premieres), \
-             patch("app.media.logos.ensure_logos", new=AsyncMock(return_value=None)):
+             patch("app.calendar.cache.read_month", side_effect=no_premieres):
             payload, status = await distrakt_routes._distrakt_month_payload(
                 self.user_id, self.today.year, self.today.month, self._settings())
         self.assertEqual(status, 200)
@@ -1036,8 +1040,7 @@ class WhatAMonthThatHasNotBegunTakesTests(RolloverTestCase):
              patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
              patch("app.providers.trakt.sync.fetch_play_counts",
                    return_value=PlayCounts({}, False)), \
-             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
-             patch("app.media.logos.ensure_logos", new=AsyncMock(return_value=None)):
+             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail):
             payload, status = await distrakt_routes._distrakt_month_payload(
                 self.user_id, year, month, self._settings())
         self.assertEqual(status, 200)
@@ -1164,8 +1167,7 @@ class AMonthOnlyShowsWhatItCanShowTests(RolloverTestCase):
              patch("app.providers.trakt.sync.fetch_play_counts",
                    return_value=PlayCounts({}, False)), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
-             patch("app.calendar.cache.read_month", side_effect=no_premieres), \
-             patch("app.media.logos.ensure_logos", new=AsyncMock(return_value=None)):
+             patch("app.calendar.cache.read_month", side_effect=no_premieres):
             payload, status = await distrakt_routes._distrakt_month_payload(
                 self.user_id, year, month, settings)
 
@@ -1211,8 +1213,7 @@ class AMonthOnlyShowsWhatItCanShowTests(RolloverTestCase):
              patch("app.providers.trakt.sync.fetch_play_counts",
                    return_value=PlayCounts({}, False)), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
-             patch("app.calendar.cache.read_month", side_effect=one_new_premiere), \
-             patch("app.media.logos.ensure_logos", new=AsyncMock(return_value=None)):
+             patch("app.calendar.cache.read_month", side_effect=one_new_premiere):
             payload, status = await distrakt_routes._distrakt_month_payload(
                 self.user_id, year, month, settings)
 

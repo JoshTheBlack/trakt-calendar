@@ -28,7 +28,7 @@ from app.distrakt import calendar_import
 from app.endpoints import get_endpoint
 from app.providers.base import Media, Record, Source
 from app.providers.simkl import SimklError
-from tests.support import migrated_db
+from tests.support import listings, migrated_db
 
 # 2026-07-15 12:00Z, inside the aligned window the fixtures are stored under.
 AIR = 1784131200.0
@@ -130,8 +130,7 @@ class TheMonthlyImportSurvivesTheStorageChangeTests(unittest.IsolatedAsyncioTest
         self.assertEqual({r["ids"]["tmdb"] for r in narrowed}, {1})
 
         # ...and the rows themselves are untouched by either read.
-        self.assertEqual(
-            await db.fetch_value("SELECT COUNT(*) FROM calendar_airings"), 2)
+        self.assertEqual(len(await listings()), 2)
 
     async def test_a_mark_in_a_namespace_the_record_cannot_carry_still_excludes(self):
         """THE FAILURE THE RECORD COULD NOT ANSWER. A mark may be stored under any

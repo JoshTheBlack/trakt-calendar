@@ -19,12 +19,22 @@ from unittest.mock import AsyncMock, patch
 from PIL import Image
 
 from app import db
+from app.config import Settings
+from app.providers.base import Source
 from app.media import artwork, logos, posters
-from app.media import tmdb as tmdb_client
+from app.providers.tmdb import transport as tmdb_client
 from tests.support import TMP, migrated_db
 
-NOT_CONFIGURED = SimpleNamespace(tmdb_configured=False, tmdb_api_key="")
-CONFIGURED = SimpleNamespace(tmdb_configured=True, tmdb_api_key="deadbeef" * 5)
+# Trakt's catalogue is on in both — its lookup by tmdb id is the one a title
+# with no TMDB answer falls to — and TMDB's only in CONFIGURED.
+NOT_CONFIGURED = Settings(trakt_client_id="cid")
+CONFIGURED = Settings(trakt_client_id="cid",
+                      tmdb_api_key="eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJwb3N0ZXJzIn0.c2ln")
+
+
+def trakt_lookup(fake):
+    """Stand `fake` in for Trakt's entry in the per-service lookup table."""
+    return patch.dict(posters._ADDRESS_LOOKUPS, {"trakt": fake})
 
 
 def _jpeg_bytes(size=(300, 450)) -> bytes:
@@ -119,6 +129,26 @@ class RegistryTests(ArtworkTestCase):
         remaining = {row["tmdb"] for row in self.rows("SELECT tmdb FROM show_posters")}
         self.assertEqual(remaining, {2})
 
+    def test_a_row_tmdb_supplied_goes_at_tmdbs_six_month_ceiling(self):
+        """TMDB's terms forbid keeping anything obtained from it for longer than
+        six months, and these rows used to stay three years like any other. Rows
+        from other services keep the long retention; the same age from TMDB is
+        gone. Both registries."""
+        now = db.now()
+        aged = now - tmdb_client.MAX_CACHE_SECONDS - 10
+        for source in ("tmdb", "trakt"):
+            asyncio.run(artwork.record_poster_url("show", 7, source, f"https://img/{source}.jpg"))
+            asyncio.run(artwork.record_season_poster_urls(
+                [("show", 7, 1, source, f"https://img/{source}-s1.jpg")]))
+        for table in ("show_posters", "season_posters"):
+            asyncio.run(db.execute(f"UPDATE {table} SET last_seen_at = ?", (aged,)))
+
+        self.assertEqual(asyncio.run(artwork.sweep(now)), 2)
+        for table in ("show_posters", "season_posters"):
+            with self.subTest(table=table):
+                self.assertEqual({r["source"] for r in self.rows(f"SELECT source FROM {table}")},
+                                 {"trakt"})
+
 
 # ---------------------------------------------------------------------------
 # app/media/posters.py — the tile cache and resolution chain
@@ -156,8 +186,8 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
     async def test_disk_hit_short_circuits_the_whole_chain(self):
         tile = self._place("show", 1396, "trakt")
 
-        with patch("app.media.posters.tmdb_client.get_json") as get_json, \
-             patch("app.media.posters.tmdb_client.download") as download, \
+        with patch("app.media.posters.tmdb_detail.title_payload") as get_json, \
+             patch("app.media.posters.tmdb_transport.download") as download, \
              patch("app.media.artwork.urls_for") as urls_for:
             result = await posters.ensure_poster(CONFIGURED, "show", 1396, self.ORDER)
 
@@ -171,7 +201,7 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
         choice answers rather than being re-resolved from the first."""
         tile = self._place("show", 1396, "tmdb")
 
-        with patch("app.media.posters.tmdb_client.download") as download:
+        with patch("app.media.posters.tmdb_transport.download") as download:
             result = await posters.ensure_poster(CONFIGURED, "show", 1396, self.ORDER)
 
         self.assertEqual(result, tile)
@@ -189,7 +219,7 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
             asked.append(url)
             return _jpeg_bytes()
 
-        with patch("app.media.posters.tmdb_client.download", new=_download):
+        with patch("app.media.posters.tmdb_transport.download", new=_download):
             trakt_tile = await posters.ensure_poster(
                 CONFIGURED, "show", 1396, ("trakt", "simkl"))
             simkl_tile = await posters.ensure_poster(
@@ -206,8 +236,8 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text("", encoding="utf-8")
 
-        with patch("app.media.posters.tmdb_client.get_json") as get_json, \
-             patch("app.media.posters.tmdb_client.download") as download:
+        with patch("app.media.posters.tmdb_detail.title_payload") as get_json, \
+             patch("app.media.posters.tmdb_transport.download") as download:
             result = await posters.ensure_poster(CONFIGURED, "show", 1396, self.ORDER)
 
         self.assertIsNone(result)
@@ -232,8 +262,8 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
         be TMDB's whatever the page was showing."""
         await artwork.record_poster_url("show", 1396, "trakt", "https://img/trakt.jpg")
 
-        with patch("app.media.posters.tmdb_client.get_json") as get_json, \
-             patch("app.media.posters.tmdb_client.download",
+        with patch("app.media.posters.tmdb_detail.title_payload") as get_json, \
+             patch("app.media.posters.tmdb_transport.download",
                    new=AsyncMock(return_value=_jpeg_bytes())):
             result = await posters.ensure_poster(CONFIGURED, "show", 1396, self.ORDER)
 
@@ -251,7 +281,7 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
             asked.append(url)
             return _jpeg_bytes()
 
-        with patch("app.media.posters.tmdb_client.download", new=_download):
+        with patch("app.media.posters.tmdb_transport.download", new=_download):
             await posters.ensure_poster(CONFIGURED, "show", 1396, self.ORDER)
 
         self.assertEqual(len(asked), 1)
@@ -268,7 +298,7 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
         body = _jpeg_bytes(size=(500, 750))
         await artwork.record_poster_url("show", 1396, "trakt", "https://img/trakt.jpg")
 
-        with patch("app.media.posters.tmdb_client.download",
+        with patch("app.media.posters.tmdb_transport.download",
                    new=AsyncMock(return_value=body)):
             result = await posters.ensure_poster(CONFIGURED, "show", 1396, self.ORDER)
 
@@ -281,19 +311,20 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
         await artwork.record_poster_url("show", 1396, "trakt", "https://img/trakt.jpg")
         huge = _jpeg_bytes(size=(posters.MAX_SOURCE_DIMENSION + 1, 10))
 
-        with patch("app.media.posters.tmdb_client.download",
+        with patch("app.media.posters.tmdb_transport.download",
                    new=AsyncMock(return_value=huge)), \
              patch("app.media.artwork.record_failure", new=AsyncMock()), \
-             patch("app.media.posters._fresh_provider_lookup",
-                   new=AsyncMock(return_value=None)):
+             trakt_lookup(AsyncMock(return_value=None)):
             result = await posters.ensure_poster(NOT_CONFIGURED, "show", 1396, ("trakt",))
 
         self.assertIsNone(result)
 
-    async def test_tmdb_is_the_fallback_and_records_the_url(self):
-        with patch("app.media.posters.tmdb_client.get_json",
+    async def test_tmdb_answers_where_the_order_reaches_it_and_records_the_url(self):
+        """The lookup follows the order: Trakt, first here, has nothing, and
+        TMDB's answer is the picture."""
+        with trakt_lookup(AsyncMock(return_value=None)),              patch("app.media.posters.tmdb_detail.title_payload",
                    new=AsyncMock(return_value={"poster_path": "/x.jpg"})), \
-             patch("app.media.posters.tmdb_client.download",
+             patch("app.media.posters.tmdb_transport.download",
                    new=AsyncMock(return_value=_jpeg_bytes())), \
              patch("app.media.artwork.record_poster_url", new=AsyncMock()) as record:
             result = await posters.ensure_poster(CONFIGURED, "show", 1396, self.ORDER)
@@ -301,15 +332,14 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.name, "1396.tmdb.jpg")
         record.assert_awaited_once_with(
-            "show", 1396, "tmdb", f"{posters.tmdb_client.IMG}/w500/x.jpg")
+            "show", 1396, "tmdb", f"{posters.tmdb_transport.IMAGE_BASE}/w500/x.jpg")
 
     async def test_tmdb_is_not_asked_when_it_is_not_in_the_order(self):
         """An order is a statement about which services' artwork this viewer
         wants. Reaching past it to TMDB anyway would make the preference
         advisory."""
-        with patch("app.media.posters.tmdb_client.get_json") as get_json, \
-             patch("app.media.posters._fresh_provider_lookup",
-                   new=AsyncMock(return_value=None)):
+        with patch("app.media.posters.tmdb_detail.title_payload") as get_json, \
+             trakt_lookup(AsyncMock(return_value=None)):
             result = await posters.ensure_poster(CONFIGURED, "show", 1396, ("trakt",))
 
         self.assertIsNone(result)
@@ -318,9 +348,9 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_failing_registry_url_falls_through_and_increments_fail_count(self):
         await artwork.record_poster_url("show", 1396, "trakt", "https://dead/x.jpg")
 
-        with patch("app.media.posters.tmdb_client.download", new=AsyncMock(return_value=None)), \
+        with patch("app.media.posters.tmdb_transport.download", new=AsyncMock(return_value=None)), \
              patch("app.media.artwork.record_failure", new=AsyncMock()) as record_failure, \
-             patch("app.media.posters._fresh_provider_lookup", new=AsyncMock(return_value=None)):
+             trakt_lookup(AsyncMock(return_value=None)):
             result = await posters.ensure_poster(NOT_CONFIGURED, "show", 1396, ("trakt",))
 
         self.assertIsNone(result)
@@ -334,19 +364,18 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
         to open it, so this goes through `_verify` for real."""
         await artwork.record_poster_url("show", 1396, "trakt", "https://dead/x.jpg")
 
-        with patch("app.media.posters.tmdb_client.download",
+        with patch("app.media.posters.tmdb_transport.download",
                    new=AsyncMock(return_value=b"not an image")), \
              patch("app.media.artwork.record_failure", new=AsyncMock()) as record_failure, \
-             patch("app.media.posters._fresh_provider_lookup", new=AsyncMock(return_value=None)):
+             trakt_lookup(AsyncMock(return_value=None)):
             result = await posters.ensure_poster(NOT_CONFIGURED, "show", 1396, ("trakt",))
 
         self.assertIsNone(result)
         record_failure.assert_awaited_once_with("show", 1396, "trakt")
 
-    async def test_fresh_provider_lookup_is_the_last_resort(self):
-        with patch("app.media.posters._fresh_provider_lookup",
-                   new=AsyncMock(return_value="https://fresh/x.jpg")), \
-             patch("app.media.posters.tmdb_client.download",
+    async def test_a_services_own_lookup_is_the_last_resort(self):
+        with trakt_lookup(AsyncMock(return_value="https://fresh/x.jpg")), \
+             patch("app.media.posters.tmdb_transport.download",
                    new=AsyncMock(return_value=_jpeg_bytes())):
             result = await posters.ensure_poster(NOT_CONFIGURED, "show", 1396, self.ORDER)
 
@@ -357,7 +386,7 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
         """Against the FIRST source in the order, not against every one tried:
         enough to stop this order retrying, while leaving a viewer who prefers
         the other service free to try it."""
-        with patch("app.media.posters._fresh_provider_lookup", new=AsyncMock(return_value=None)):
+        with trakt_lookup(AsyncMock(return_value=None)):
             result = await posters.ensure_poster(NOT_CONFIGURED, "show", 1396, self.ORDER)
 
         self.assertIsNone(result)
@@ -365,9 +394,9 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(posters._none_path("show", 1396, self.ORDER[1]).exists())
 
     async def test_media_namespacing_show_and_movie_never_share_a_file(self):
-        with patch("app.media.posters.tmdb_client.get_json",
+        with trakt_lookup(AsyncMock(return_value=None)),              patch("app.media.posters.tmdb_detail.title_payload",
                    new=AsyncMock(return_value={"poster_path": "/x.jpg"})), \
-             patch("app.media.posters.tmdb_client.download",
+             patch("app.media.posters.tmdb_transport.download",
                    new=AsyncMock(return_value=_jpeg_bytes())), \
              patch("app.media.artwork.record_poster_url", new=AsyncMock()):
             show_tile = await posters.ensure_poster(CONFIGURED, "show", 550, self.ORDER)
@@ -384,6 +413,24 @@ class PosterCacheTests(unittest.IsolatedAsyncioTestCase):
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text("", encoding="utf-8")
         self.assertFalse(posters.is_negative("movie", 551, ("trakt",)))
+
+    async def test_a_tile_is_written_off_the_loop_thread(self):
+        """~95 KB a tile, dozens per export: a disk write every other request
+        would wait behind if it ran on the event loop."""
+        import threading
+        await artwork.record_poster_url("show", 1396, "trakt", "https://img/trakt.jpg")
+        seen = []
+        real = posters._store
+
+        def store(*args):
+            seen.append(threading.get_ident())
+            return real(*args)
+
+        with patch.object(posters, "_store", store),              patch("app.media.posters.tmdb_transport.download",
+                   new=AsyncMock(return_value=_jpeg_bytes())):
+            await posters.ensure_poster(CONFIGURED, "show", 1396, self.ORDER)
+        self.assertEqual(len(seen), 1)
+        self.assertNotEqual(seen[0], threading.get_ident())
 
     async def test_invalid_pairs_are_a_clean_none_not_an_error(self):
         self.assertIsNone(await posters.ensure_poster(CONFIGURED, "book", 1))
@@ -411,6 +458,16 @@ class SeasonRegistryTests(ArtworkTestCase):
         self.assertEqual(artwork.pick(show, {}, ("simkl", "trakt")), "s.jpg")
         self.assertEqual(artwork.pick(show, {}, ("trakt", "simkl")), "t.jpg")
         self.assertEqual(artwork.pick({}, {}, ("trakt",)), "")
+
+    def test_ranked_is_picks_order_whole_and_each_address_once(self):
+        """What stands behind the picture a page draws: the next of these is what
+        the viewer sees when the first has died at its host."""
+        show = {"trakt": "t.jpg", "simkl": "s.jpg"}
+        self.assertEqual(artwork.ranked(show, {"trakt": "s2.jpg"}, ("simkl", "trakt")),
+                         ["s2.jpg", "s.jpg", "t.jpg"])
+        self.assertEqual(artwork.ranked(show, {"trakt": "t.jpg"}, ("trakt", "simkl")),
+                         ["t.jpg", "s.jpg"])
+        self.assertEqual(artwork.ranked({}, {}, ("trakt",)), [])
 
     def test_a_miss_is_invisible_to_every_address_reader_and_known_to_known(self):
         asyncio.run(artwork.record_miss("show", 8))
@@ -472,34 +529,28 @@ class FindAddressTests(ArtworkTestCase):
 
     def test_a_recorded_address_costs_no_lookup(self):
         asyncio.run(artwork.record_poster_url("show", 9, "trakt", "https://x/9.jpg"))
-        with patch.object(posters, "_fresh_provider_lookup",
-                          AsyncMock(side_effect=AssertionError("looked up"))):
+        with trakt_lookup(AsyncMock(side_effect=AssertionError("looked up"))):
             self.assertEqual(self.find(), "https://x/9.jpg")
         self.assertFalse(posters.POSTER_DIR.exists(), "an address writes no tile")
 
     def test_an_unknown_title_is_looked_up_once_and_recorded(self):
         lookup = AsyncMock(return_value="https://x/found.jpg")
 
-        async def _recording(settings, media, tmdb):
-            url = await lookup(settings, media, tmdb)
-            await artwork.record_poster_url(media, tmdb, "trakt", url)
-            return url
-
-        with patch.object(posters, "_fresh_provider_lookup", _recording):
+        with trakt_lookup(lookup):
             self.assertEqual(self.find(), "https://x/found.jpg")
             self.assertEqual(self.find(), "https://x/found.jpg")
         self.assertEqual(lookup.await_count, 1)
 
     def test_a_known_miss_costs_no_lookup(self):
         lookup = AsyncMock(return_value=None)
-        with patch.object(posters, "_fresh_provider_lookup", lookup):
+        with trakt_lookup(lookup):
             self.assertEqual(self.find(), "")
             self.assertEqual(self.find(), "")
         self.assertEqual(lookup.await_count, 1)
 
     def test_a_failed_lookup_is_tried_again_next_time(self):
-        lookup = AsyncMock(side_effect=RuntimeError("unreachable"))
-        with patch.object(posters, "_fresh_provider_lookup", lookup):
+        lookup = AsyncMock(side_effect=posters._LookupFailed("unreachable"))
+        with trakt_lookup(lookup):
             self.assertEqual(self.find(), "")
             self.assertEqual(self.find(), "")
         self.assertEqual(lookup.await_count, 2)
@@ -544,9 +595,41 @@ class FindAddressTests(ArtworkTestCase):
                 NOT_CONFIGURED, [("show", 1), ("show", 2), ("show", 3), ("show", 3)], self.ORDER))
         self.assertEqual((count, asked), (1, [("show", 3)]))
 
-    def test_the_viewers_order_puts_tmdb_behind_it(self):
-        self.assertEqual(posters.order_for(["simkl", "trakt"]), ("simkl", "trakt", "tmdb"))
-        self.assertEqual(posters.order_for(["tmdb"]), ("tmdb",))
+    def test_the_viewers_order_is_the_order(self):
+        """No service is appended: the viewer's metadata order already places
+        every service they did not name after the ones they did, TMDB included,
+        and appending TMDB again listed it twice."""
+        from app.sources import prefs
+        stated = prefs.SourcePrefs(user_id=1, metadata_order=["simkl", "trakt"])
+        self.assertEqual(posters.order_for(stated.source_order(list(Source))),
+                         ("simkl", "trakt", "tmdb"))
+        self.assertEqual(posters.DEFAULT_ORDER, ("tmdb", "trakt", "simkl"))
+
+    def test_every_registered_source_has_a_lookup_entry(self):
+        self.assertEqual(set(posters._ADDRESS_LOOKUPS), {str(s) for s in Source})
+
+    def test_the_lookup_walks_the_order_and_skips_a_service_it_cannot_ask(self):
+        """TMDB first where it leads, Simkl never (its lookup by id needs a
+        viewer's token), and a service this instance holds no credential for is
+        not asked."""
+        asked = []
+
+        def recorder(name, answer):
+            async def lookup(settings, media, tmdb):
+                asked.append(name)
+                return answer
+            return lookup
+
+        with patch.dict(posters._ADDRESS_LOOKUPS, {"tmdb": recorder("tmdb", None),
+                                                   "trakt": recorder("trakt", "https://x/t.jpg")}):
+            found = asyncio.run(posters.find_address(
+                CONFIGURED, "show", 31, ("tmdb", "simkl", "trakt")))
+            asked_with_tmdb = list(asked)
+            asked.clear()
+            asyncio.run(posters.find_address(NOT_CONFIGURED, "show", 32, ("tmdb", "trakt")))
+        self.assertEqual(found, "https://x/t.jpg")
+        self.assertEqual(asked_with_tmdb, ["tmdb", "trakt"])
+        self.assertEqual(asked, ["trakt"])
 
 
 class EnsurePostersTests(unittest.IsolatedAsyncioTestCase):
@@ -686,41 +769,9 @@ class TheAgeCeilingTests(unittest.TestCase):
 
 
 class LogoAgeCeilingTests(unittest.TestCase):
-    """The logo cache had NO sweep at all, and its tiles are TMDB-sourced.
-
-    AGE ONLY AND NO SIZE CAP, which is the deliberate asymmetry with the poster
-    cache: there are as many logos as there are networks, measured at a few
-    megabytes, so a byte budget would be a setting nobody could have a reason to
-    change.
-    """
-
-    def setUp(self):
-        logos.LOGO_DIR = TMP / f"logos-age-{id(self)}"
-        logos.LOGO_DIR.mkdir(parents=True)
-        self.now = 2_000_000_000.0
-
-    def _write(self, name: str, *, age_days: float) -> Path:
-        path = logos.LOGO_DIR / name
-        path.write_bytes(b"x" * 50)
-        when = self.now - age_days * 86400
-        os.utime(path, (when, when))
-        return path
-
-    def test_a_logo_past_the_ceiling_goes(self):
-        old = self._write("hbo.png", age_days=200)
-        fresh = self._write("netflix.png", age_days=5)
-        self.assertEqual(logos.sweep(now=self.now), 1)
-        self.assertFalse(old.exists())
-        self.assertTrue(fresh.exists())
-
-    def test_a_negative_marker_ages_out_too(self):
-        marker = self._write("obscure.none", age_days=200)
-        logos.sweep(now=self.now)
-        self.assertFalse(marker.exists())
-
-    def test_a_missing_directory_is_a_noop(self):
-        logos.LOGO_DIR = TMP / "logos-that-do-not-exist"
-        self.assertEqual(logos.sweep(now=self.now), 0)
+    """A network's logo is TMDB-sourced, so the ceiling the poster cache keeps is the
+    one it keeps. What the sweep does to the network_logos table is
+    tests/media/test_network_logos.py's; this holds the two to one number."""
 
     def test_the_ceiling_is_the_one_tmdb_states(self):
         """Read from the client that does the obtaining rather than restated, so
@@ -730,3 +781,94 @@ class LogoAgeCeilingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# a title with no tmdb id
+# ---------------------------------------------------------------------------
+
+class TitlesWithNoTmdbIdTests(ArtworkTestCase):
+    """Pictures for a title with no tmdb id are filed under the title store's key
+    for it (artwork's title_posters), with show_posters' columns and meanings,
+    and read through the same `known` and `ranked`."""
+
+    KEY = "show:tvdb:81189"
+
+    def file(self, tmdb, source, url):
+        asyncio.run(db.transaction(lambda conn: artwork.file_sighting(
+            conn, "show", tmdb, self.KEY, source, url, 1000)))
+
+    def test_a_sighting_goes_under_the_tmdb_id_where_there_is_one(self):
+        self.file(1396, "trakt", "https://img/t.jpg")
+        self.assertEqual(asyncio.run(artwork.urls_for("show", 1396)),
+                         {"trakt": "https://img/t.jpg"})
+        self.assertEqual(self.value("SELECT COUNT(*) FROM title_posters"), 0)
+
+    def test_and_under_the_title_key_where_there_is_none(self):
+        self.file(None, "simkl", "https://img/s.jpg")
+        self.assertEqual(asyncio.run(artwork.title_urls_for("show", self.KEY)),
+                         {"simkl": "https://img/s.jpg"})
+        self.assertEqual(self.value("SELECT COUNT(*) FROM show_posters"), 0)
+
+    def test_known_reads_them_in_the_viewers_order_and_skips_a_capped_one(self):
+        self.file(None, "simkl", "https://img/s.jpg")
+        self.file(None, "trakt", "https://img/t.jpg")
+        known = asyncio.run(artwork.known((), [("show", self.KEY)]))
+        self.assertEqual(known.addresses("show", None, None, ("trakt", "simkl"),
+                                         title_key=self.KEY),
+                         ["https://img/t.jpg", "https://img/s.jpg"])
+        for _ in range(artwork.MAX_FAIL_COUNT):
+            asyncio.run(artwork.record_title_failure("show", self.KEY, "trakt"))
+        known = asyncio.run(artwork.known((), [("show", self.KEY)]))
+        self.assertEqual(known.address("show", None, None, ("trakt", "simkl"),
+                                       title_key=self.KEY), "https://img/s.jpg")
+
+    def test_the_same_dead_address_stays_capped_and_a_new_one_starts_fresh(self):
+        self.file(None, "trakt", "https://img/dead.jpg")
+        for _ in range(artwork.MAX_FAIL_COUNT):
+            asyncio.run(artwork.record_title_failure("show", self.KEY, "trakt"))
+        self.file(None, "trakt", "https://img/dead.jpg")
+        self.assertEqual(asyncio.run(artwork.title_urls_for("show", self.KEY)), {})
+        self.file(None, "trakt", "https://img/new.jpg")
+        self.assertEqual(asyncio.run(artwork.title_urls_for("show", self.KEY)),
+                         {"trakt": "https://img/new.jpg"})
+
+    def test_the_registry_sweep_takes_them_too(self):
+        self.file(None, "tmdb", "https://img/m.jpg")
+        removed = asyncio.run(artwork.sweep(now=1000 + tmdb_client.MAX_CACHE_SECONDS))
+        self.assertEqual(removed, 1)
+
+
+class KeyedTileTests(unittest.IsolatedAsyncioTestCase):
+    ORDER = ("trakt", "simkl")
+    KEY = "show:tvdb:81189"
+
+    async def asyncSetUp(self):
+        migrated_db("keyed-tiles")
+        posters.POSTER_DIR = TMP / f"posters-keyed-{id(self)}"
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    async def test_a_tile_is_written_from_the_first_working_address_and_named_safely(self):
+        await artwork.record_title_poster_urls([
+            ("show", self.KEY, "trakt", "https://img/dead.jpg"),
+            ("show", self.KEY, "simkl", "https://img/live.jpg")])
+
+        async def fetch(url):
+            return None if "dead" in url else b"tile"
+
+        with patch.object(posters, "_try_source", side_effect=fetch):
+            self.assertEqual(await posters.ensure_title_posters(
+                CONFIGURED, [("show", self.KEY)], self.ORDER), 1)
+        tile = posters.cached_title_poster("show", self.KEY, self.ORDER)
+        self.assertEqual((tile.read_bytes(), tile.name.endswith(".simkl.jpg")), (b"tile", True))
+        self.assertNotIn(":", tile.name)
+        self.assertEqual(await db.fetch_value(
+            "SELECT fail_count FROM title_posters WHERE source = 'trakt'"), 1)
+
+    async def test_nothing_recorded_is_no_tile_and_no_request(self):
+        with patch.object(posters, "_try_source", side_effect=AssertionError("asked")):
+            self.assertEqual(await posters.ensure_title_posters(
+                CONFIGURED, [("show", self.KEY)], self.ORDER), 0)
+        self.assertIsNone(posters.cached_title_poster("show", self.KEY, self.ORDER))

@@ -25,16 +25,35 @@ from unittest.mock import AsyncMock, patch
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from app import db
+from app import db, providers
 from app.calendar import cache as calendar_cache, entries as calendar_entries
+from app.calendar import query as calendar_query
 from app.calendar import search as calendar_search
+from app.metadata import typed_search
+from app.providers import title_search
 from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import SourceUnavailable, Media, Record, Source
 from app.sources import prefs as source_prefs
+from tests import support
 from tests.support import migrated_db
 
+def publishing(**ports):
+    """A stand-in provider that publishes every calendar, so calendar/search.py's
+    rule that a service writes only to a calendar it publishes lets it write."""
+    return SimpleNamespace(calendar_port=object(),
+                           capabilities=SimpleNamespace(answers=lambda _key: True), **ports)
+
+
 SHOWS = "shows/premieres"
+
+
+async def _stored_titles(endpoint_key, title_keys):
+    """Every stored listing of `title_keys` on one calendar, whole."""
+    from app import db
+
+    return await db.run(lambda conn: support.stored_records(endpoint_key, titles=title_keys))
+
 # 2026-07-08 20:00Z, mid-window and mid-month so no test is about a boundary.
 AIR = 1783540800.0
 
@@ -163,6 +182,21 @@ class AJumpIsOnlyOfferedForACardThatWouldBeDrawnTests(SearchTestCase):
         prefs = dict(NO_FILTERS, tv_genres="-drama")
         self.assertEqual((await self.find("severance", prefs=prefs)).airings, ())
 
+    async def test_a_title_the_network_filter_removes_is_not_offered(self):
+        """THE FILTER THE SEARCH USED TO SKIP. The network lists judge a
+        rendered card, and only the month read applied them — so a search
+        offered a title on a network this viewer filters out, and its jump
+        opened a day that could not draw it."""
+        await self.store(dataclasses.replace(_record("Severance"), network="Apple TV"))
+        prefs = dict(NO_FILTERS, network_filter=["-Apple TV"])
+        self.assertEqual((await self.find("severance", prefs=prefs)).airings, ())
+        self.assertEqual(len((await self.find("severance")).airings), 1)
+
+    async def test_a_title_the_operators_network_list_removes_is_not_offered(self):
+        await self.store(dataclasses.replace(_record("Severance"), network="Apple TV"))
+        self.settings = dataclasses.replace(self.settings, network_filter=["-Apple TV"])
+        self.assertEqual((await self.find("severance")).airings, ())
+
     async def test_a_source_this_viewer_does_not_admit_is_not_offered(self):
         """Resolving to nobody is a real answer on the read path, and a search
         must inherit it rather than reaching past it into storage."""
@@ -215,14 +249,14 @@ class TheNeedleIsEscapedTests(unittest.TestCase):
     matches far more than it should. Both are ordinary things to type."""
 
     def test_a_wildcard_typed_by_a_person_is_a_literal(self):
-        self.assertEqual(calendar_entries.like_needle("100%"), r"%100\%%")
-        self.assertEqual(calendar_entries.like_needle("a_b"), r"%a\_b%")
+        self.assertEqual(typed_search.like_needle("100%"), r"%100\%%")
+        self.assertEqual(typed_search.like_needle("a_b"), r"%a\_b%")
 
     def test_the_escape_character_cannot_smuggle_itself(self):
-        self.assertEqual(calendar_entries.like_needle("a\\b"), r"%a\\b%")
+        self.assertEqual(typed_search.like_needle("a\\b"), r"%a\\b%")
 
     def test_it_folds_the_needle_the_same_way_a_stored_title_was_folded(self):
-        self.assertEqual(calendar_entries.like_needle("Pokémon"), "%pokemon%")
+        self.assertEqual(typed_search.like_needle("Pokémon"), "%pokemon%")
 
 
 class WhichGroupsAQueryLoadsTests(SearchTestCase):
@@ -232,7 +266,7 @@ class WhichGroupsAQueryLoadsTests(SearchTestCase):
     more, the same earliest-airing ones the endpoint-first read always chose."""
 
     async def titles_of(self, keys, endpoint=SHOWS):
-        records = await calendar_entries.read_groups(endpoint, keys)
+        records = await _stored_titles(endpoint, keys)
         return sorted({r.title for r in records})
 
     async def test_fewer_matches_than_the_limit_are_every_match(self):
@@ -262,7 +296,7 @@ class WhichGroupsAQueryLoadsTests(SearchTestCase):
         await self.store(_record("Severance"))
         await self.store(_record("Severance", air_ts=AIR + 86400), endpoint="shows")
         keys = await calendar_entries.groups_matching(SHOWS, "severance", 40)
-        records = await calendar_entries.read_groups(SHOWS, keys)
+        records = await _stored_titles(SHOWS, keys)
         self.assertEqual([r.air_ts for r in records], [AIR])
 
     async def plan(self, sql, params):
@@ -270,21 +304,25 @@ class WhichGroupsAQueryLoadsTests(SearchTestCase):
                                                       params).fetchall())
         return " | ".join(str(row["detail"]) for row in rows)
 
-    async def test_the_matches_are_found_in_the_fold_index_before_any_airing_is_read(self):
+    async def test_the_matches_are_found_in_the_fold_index_before_any_listing_is_read(self):
         """THE SHAPE IS THE SPEED. Measured on a copy of a real instance, the
-        planner left to itself walked the endpoint's every airing — 38-112ms a
-        keystroke for a query naming one title — and this order is 2ms."""
-        plan = await self.plan(calendar_entries._SEARCH_SQL, (SHOWS, "%x%", 40))
-        self.assertIn("ix_calendar_titles_fold", plan)
-        self.assertNotIn("ix_calendar_airings_month", plan)
-        self.assertLess(plan.index("ix_calendar_titles_fold"),
-                        plan.index("sqlite_autoindex_calendar_airings_1"))
+        planner left to itself walked the calendar's every listing — 38-112ms a
+        keystroke for a query naming one title — and this order is 2ms: each
+        service's fold index scanned, and only a matching title's episode rows
+        looked up, through their title."""
+        plan = await self.plan(calendar_entries._matching_sql(matches_first=True),
+                               {"bit": 8, "needle": "%x%", "limit": 40})
+        for source in ("tmdb", "trakt", "simkl"):
+            self.assertIn(f"ix_titles_{source}_fold", plan)
+        self.assertNotIn("SCAN e ", plan + " ")
+        self.assertIn("ix_episodes_season", plan)
 
-    async def test_a_group_is_read_through_its_key_and_not_the_endpoints_month(self):
-        sql = calendar_entries._BY_KEY_SQL.replace("__KEYS__", "?, ?")
-        plan = await self.plan(sql, (SHOWS, "a", "b"))
-        self.assertIn("ix_calendar_airings_key", plan)
-        self.assertNotIn("ix_calendar_airings_month", plan)
+    async def test_a_group_is_read_through_its_key_and_not_the_calendars_month(self):
+        sql = db.aggregated_sql(["e.title_key"], calendar_query._keys_from(
+            "e.title_key IN (SELECT value FROM json_each(?))"))
+        plan = await self.plan(sql, ('["a", "b"]',))
+        self.assertIn("ix_episodes_season", plan)
+        self.assertNotIn("SCAN e ", plan + " ")
 
 
 class WhichGroupsABigCalendarLoadsTests(WhichGroupsAQueryLoadsTests):
@@ -306,13 +344,15 @@ class WhichGroupsABigCalendarLoadsTests(WhichGroupsAQueryLoadsTests):
                           wraps=calendar_entries.db.fetch_all) as spy:
             await calendar_entries.groups_matching(SHOWS, "severance", 40)
         self.assertEqual([c.args[0] for c in spy.call_args_list],
-                         [calendar_entries._SEARCH_SQL])
+                         [calendar_entries._matching_sql(matches_first=True)])
 
 
 class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
-    """It links to a MONTH, never to a day, because visiting a month FILLS it —
-    and whether a card then appears depends on whether any source lists that
-    title on that calendar, which nothing here can promise."""
+    """A catalogue result's season PICKER (calendar/search.py's `picker`) — where
+    a title is described, its seasons dated, the viewer's filters read and what
+    the calendar already draws marked. Its jump links to a MONTH, because
+    visiting a month FILLS it — and whether a card then appears depends on
+    whether any source lists that title on that calendar."""
 
     def _hit(self, title="Unseen Show", simkl_id="4242", also=None, media=Media.SHOW):
         """A REAL `MergedSearchHit`, and the reason that matters is a bug this
@@ -392,25 +432,20 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         return SimpleNamespace(fetch_details=AsyncMock(return_value=described),
                                fetch_seasons=_seasons, records_for=_records)
 
-    async def _catalogue(self, described, known=frozenset(), seasons=None):
-        # ANSWERS FOR SHOWS AND NOT FOR FILMS, because the real thing asks
-        # both and gets different titles back. A double that returned the
-        # same hit to each would report one title twice and hide that.
-        async def _search(asked, settings, media, query):
-            if media is Media.SHOW:
-                return SimpleNamespace(hits=[self._hit()], failed=frozenset())
-            return SimpleNamespace(hits=[], failed=frozenset())
+    async def _picker(self, described, seasons=None, *, hit=None, media=Media.SHOW,
+                      port=None):
+        """The season picker for one catalogue result — where a title is
+        described now that the search lists titles alone."""
+        with patch("app.providers.get", return_value=publishing(
+                detail_port=port or self._port(described, seasons))):
+            return await calendar_search.picker(
+                self.settings, hit or self._hit(), media, prefs=self.prefs, tz=self.tz)
 
-        with patch("app.providers.title_search.search_catalogue", new=_search), \
-             patch("app.providers.for_catalogue_search",
-                   return_value=[(Source.SIMKL, object())]), \
-             patch("app.providers.get", return_value=SimpleNamespace(
-                 detail_port=self._port(described, seasons))):
-            return await calendar_search.catalogue(
-                "unseen", settings=self.settings, prefs=self.prefs, tz=self.tz,
-                known=known)
+    def _offered(self, chosen):
+        """The seasons a viewer can pick: neither refused nor already drawn."""
+        return [option for option in chosen.options if option.pickable]
 
-    async def test_a_season_older_than_the_epoch_does_not_crash_the_search(self):
+    async def test_a_season_older_than_the_epoch_does_not_crash_the_picker(self):
         """THE CRASH, EXACTLY. A catalogue answers for whatever a service knows,
         and services know about television older than 1970 — so a season list
         came back with a premiere in 1969, and converting it with
@@ -421,21 +456,19 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         WHICH YEARS THIS APP CAN DISPLAY MUST NOT DEPEND ON ITS OPERATING
         SYSTEM, which is what `providers.base.epoch_moment` is for.
         """
-        found = await self._catalogue(
+        chosen = await self._picker(
             {"first_aired": "1969-06-01T00:00:00Z", "title": "Old Show"},
             seasons=[{"season": 1, "first_aired": "1969-06-01"},
                      {"season": 2, "first_aired": "1970-06-01"}])
-        self.assertEqual(len(found.elsewhere), 2)
-        self.assertEqual(sorted(row.year for row in found.elsewhere), [1969, 1970])
+        self.assertEqual(sorted(row.year for row in chosen.rows), [1969, 1970])
+        self.assertEqual([option.season for option in chosen.options], [1, 2])
 
     async def test_a_show_older_than_the_epoch_is_placed_in_its_real_month(self):
         """Not merely "does not crash": the row has to land where the title
         actually aired, or refusing would have been the better answer."""
-        found = await self._catalogue({"first_aired": "1963-11-23T17:16:00Z"})
-        self.assertEqual(len(found.elsewhere), 1)
-        row = found.elsewhere[0]
-        self.assertEqual((row.year, row.month), (1963, 11))
-        self.assertEqual(row.day, "1963-11-23")
+        chosen = await self._picker({"first_aired": "1963-11-23T17:16:00Z"})
+        row, = chosen.rows
+        self.assertEqual((row.year, row.month, row.day), (1963, 11, "1963-11-23"))
 
     async def test_a_premiere_with_a_time_keeps_the_day_that_time_falls_on(self):
         """THE OFF-BY-ONE, EXACTLY. Trakt dates a premiere to the moment it airs
@@ -446,10 +479,10 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         landed a day early.
         """
         self.tz = ZoneInfo("America/New_York")
-        found = await self._catalogue(
+        chosen = await self._picker(
             {"first_aired": "2026-04-28T20:00:00Z"},
             seasons=[{"season": 1, "first_aired": "2026-04-28T20:00:00.000Z"}])
-        self.assertEqual(found.elsewhere[0].day, "2026-04-28")
+        self.assertEqual(chosen.rows[0].day, "2026-04-28")
 
     async def test_a_premiere_given_as_a_bare_day_is_not_moved_by_a_zone(self):
         """The other source's shape, and the opposite rule. Simkl's season list
@@ -457,28 +490,17 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         because Simkl states a whole file in one fixed offset — and a day is the
         same day everywhere. Converting it would move it for exactly the viewers
         the fix above was for."""
-        self.tz = ZoneInfo("America/New_York")
-        found = await self._catalogue(
-            {"first_aired": "2026-04-28T00:00:00Z"},
-            seasons=[{"season": 1, "first_aired": "2026-04-28"}])
-        self.assertEqual(found.elsewhere[0].day, "2026-04-28")
+        for zone in ("America/New_York", "Asia/Tokyo"):
+            with self.subTest(zone=zone):
+                self.tz = ZoneInfo(zone)
+                chosen = await self._picker(
+                    {"first_aired": "2026-04-28T00:00:00Z"},
+                    seasons=[{"season": 1, "first_aired": "2026-04-28"}])
+                self.assertEqual(chosen.rows[0].day, "2026-04-28")
 
-    async def test_a_bare_day_is_not_moved_for_a_viewer_ahead_of_utc_either(self):
-        """East as well as west: a day that is the same everywhere has to be the
-        same in both directions, or this is half a rule."""
-        self.tz = ZoneInfo("Asia/Tokyo")
-        found = await self._catalogue(
-            {"first_aired": "2026-04-28T00:00:00Z"},
-            seasons=[{"season": 1, "first_aired": "2026-04-28"}])
-        self.assertEqual(found.elsewhere[0].day, "2026-04-28")
-
-    async def test_searching_writes_nothing_at_all(self):
-        """THE WIDENING THIS UNDOES. The write first ran over every row a search
-        returned, so typing "traitors" and pressing Enter put sixteen season
-        premieres into a calendar shared by everyone on the instance — sixteen
-        decisions out of one act of curiosity. A search offers; it does not
-        decide. Following a result is the act that names exactly one thing.
-        """
+    async def test_opening_a_title_writes_nothing_new_to_the_calendar(self):
+        """A picker offers; it does not decide. Following it — the jump — is
+        the act that names what is written."""
         wrote = []
 
         async def _store(endpoint_key, records, *, now, stale_after):
@@ -486,100 +508,138 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
             return len(records)
 
         with patch("app.calendar.entries.store_loose_airings", _store):
-            found = await self._catalogue(
+            chosen = await self._picker(
                 {"first_aired": "2026-11-04T20:00:00Z", "title": "Unseen Show"})
-        self.assertEqual(len(found.elsewhere), 1)
-        self.assertEqual(wrote, [], "a search wrote to the shared calendar")
+        self.assertEqual(len(chosen.options), 1)
+        self.assertEqual(wrote, [], "opening a title wrote to the shared calendar")
 
     async def test_a_show_is_offered_once_per_season_premiere(self):
         """WHAT THE SHOW-SHAPED ROW COULD NOT DO. A long-running title has one
         first-air date and many premieres, so keying the link on the show sent
         every search for a recent season to the month the show began — years
-        before the season anybody was looking for."""
-        found = await self._catalogue(
-            {"first_aired": "2020-01-01T00:00:00Z", "title": "Long Runner"},
-            seasons=[{"season": 1, "first_aired": "2020-01-01"},
-                     {"season": 2, "first_aired": "2021-03-04"},
-                     {"season": 3, "first_aired": "2022-06-07"}])
-        self.assertEqual(len(found.elsewhere), 3)
-        months = sorted((row.year, row.month) for row in found.elsewhere)
-        self.assertEqual(months, [(2020, 1), (2021, 3), (2022, 6)])
-
-    async def test_the_newest_seasons_are_the_ones_kept(self):
-        """The bound cuts from the far end, because a search is far more often
-        about the season now airing than the one from years ago."""
-        found = await self._catalogue(
-            {"first_aired": "2010-01-01T00:00:00Z"},
+        before the season anybody was looking for. EVERY dated season is
+        offered: the picker is a list to choose from, not a search's budget."""
+        chosen = await self._picker(
+            {"first_aired": "2010-01-01T00:00:00Z", "title": "Long Runner"},
             seasons=[{"season": n, "first_aired": f"20{10 + n:02d}-05-01"}
                      for n in range(1, 9)])
-        self.assertEqual(len(found.elsewhere), 3)
-        self.assertEqual(sorted(row.year for row in found.elsewhere),
-                         [2016, 2017, 2018])
+        self.assertEqual([option.season for option in chosen.options], list(range(1, 9)))
+        self.assertEqual(sorted((row.year, row.month) for row in chosen.rows)[0], (2011, 5))
+        # The latest aired is the suggestion, as in every picker.
+        self.assertEqual([o.season for o in chosen.options if o.suggested], [8])
 
     async def test_a_season_with_no_date_is_not_offered(self):
-        """Same refusal as a title with no date, for the same reason: the offer
-        is "go to where this should be", and an undated season has no where."""
-        found = await self._catalogue(
+        """The offer is "go to where this should be", and an undated season has
+        no where."""
+        chosen = await self._picker(
             {"first_aired": "2020-01-01T00:00:00Z"},
             seasons=[{"season": 1, "first_aired": "2020-01-01"},
                      {"season": 2, "first_aired": ""},
                      {"season": 3, "first_aired": None}])
-        self.assertEqual(len(found.elsewhere), 1)
+        self.assertEqual([option.season for option in chosen.options], [1])
 
     async def test_a_source_that_will_not_list_seasons_still_offers_the_show(self):
         """Losing the season list costs precision, not the result. A reader who
         searched a title by name should not get nothing because one lookup of
         two was refused."""
-        found = await self._catalogue(
-            {"first_aired": "2026-11-04T20:00:00Z"}, seasons=None)
-        self.assertEqual(len(found.elsewhere), 1)
-        self.assertEqual((found.elsewhere[0].year, found.elsewhere[0].month),
-                         (2026, 11))
+        chosen = await self._picker({"first_aired": "2026-11-04T20:00:00Z"}, seasons=None)
+        row, = chosen.rows
+        self.assertEqual((row.year, row.month), (2026, 11))
 
-    async def test_a_season_already_on_the_calendar_is_skipped_alone(self):
-        """THE TRAP IN KEYING THIS ON THE TITLE. `mark_key` is the title's
-        identity and carries no season, so matching on it alone would hide every
-        season of a show the calendar happens to hold one airing of — which is
-        precisely the search where the other seasons are the useful answer."""
-        first = await self._catalogue(
-            {"first_aired": "2020-01-01T00:00:00Z"},
-            seasons=[{"season": 1, "first_aired": "2020-01-01"},
-                     {"season": 2, "first_aired": "2021-03-04"}])
-        one = first.elsewhere[0]
-        again = await self._catalogue(
-            {"first_aired": "2020-01-01T00:00:00Z"},
-            seasons=[{"season": 1, "first_aired": "2020-01-01"},
-                     {"season": 2, "first_aired": "2021-03-04"}],
-            known=frozenset({(one.item.mark_key, one.item.season)}))
-        self.assertEqual(len(again.elsewhere), 1)
-        self.assertNotEqual(again.elsewhere[0].item.season, one.item.season)
-
-    async def _stored_airing(self, source: Source, source_id: str):
-        """One source's premiere of season 1 of the title these tests search for
-        (tmdb 777), as the calendar holds it."""
+    async def _stored_airing(self, source: Source, source_id: str, season: int = 1,
+                             **fields):
+        """One source's premiere of a season of the title these tests open
+        (tmdb 777), as the calendar holds it — `fields` being what that service
+        said about it, which is what the calendar's filters read."""
         await calendar_entries.store_loose_airings("shows/premieres", [Record(
             source=source, media=Media.SHOW, id=source_id,
             ids={str(source): source_id, "tmdb": 777}, detail_url="", title="Unseen Show",
             air_ts=datetime(2020, 1, 1, tzinfo=timezone.utc).timestamp(),
-            season=1, enriched=True)], now=0, stale_after=10**10)
+            season=season, enriched=True, **fields)], now=0, stale_after=10**10)
 
-    async def _search_known_season_one(self):
-        found = await self._catalogue(
+    async def _open_known_season_one(self):
+        # SIMKL'S CALENDAR SWITCHED ON: the stored airing is Simkl's, and the
+        # picker asks whether this instance's calendar would draw it.
+        self.settings = Settings(simkl_public_calendar_enabled=True)
+        chosen = await self._picker(
             {"first_aired": "2020-01-01T00:00:00Z"},
-            seasons=[{"season": 1, "first_aired": "2020-01-01"}],
-            known=frozenset({("show:tmdb:777", 1)}))
-        return found, await calendar_entries.sources_airing(
+            seasons=[{"season": 1, "first_aired": "2020-01-01"},
+                     {"season": 2, "first_aired": "2021-03-04"}])
+        return chosen, await calendar_entries.sources_airing(
             "shows/premieres", "show:tmdb:777", 1)
+
+    async def test_a_season_already_on_the_calendar_links_to_its_day_alone(self):
+        """THE TRAP IN KEYING THIS ON THE TITLE. `mark_key` is the title's
+        identity and carries no season, so matching on it alone would mark every
+        season of a show the calendar happens to hold one airing of — which is
+        precisely the title whose other seasons are the useful answer."""
+        await self._stored_airing(Source.SIMKL, "4242")
+        chosen, _sources = await self._open_known_season_one()
+        one, two = chosen.options
+        self.assertTrue(one.href.startswith("/calendar?year=2020&month=1"), one.href)
+        self.assertIn("on your calendar", one.notes)
+        self.assertEqual((two.href, two.pickable), ("", True))
+
+    async def test_a_stored_season_the_filters_hide_is_refused_not_linked(self):
+        """A link to its day would open a day that cannot draw it — measured in
+        the owner's browser: the month opened with nothing to find."""
+        self.settings = Settings(simkl_public_calendar_enabled=True)
+        await self._stored_airing(Source.SIMKL, "4242", genres=["reality"])
+        self.prefs = {**self.prefs, "tv_genres": "-reality"}
+        chosen = await self._picker({"first_aired": "2020-01-01T00:00:00Z",
+                                     "genres": ["Reality"]},
+                                    seasons=[{"season": 1, "first_aired": "2020-01-01"}])
+        option, = chosen.options
+        self.assertEqual(option.href, "")
+        self.assertIn("your filters hide it", option.notes)
+        self.assertFalse(option.pickable)
+
+    async def test_a_stored_season_is_judged_by_the_record_the_calendar_draws(self):
+        """MEASURED on the owner's calendar: Sever (2026) is stored from Simkl with
+        no country, and their US-only country filter hides that card — while
+        TMDB's description says US. Judged by the description, the picker linked
+        to a day that drew nothing."""
+        self.settings = Settings(simkl_public_calendar_enabled=True)
+        await self._stored_airing(Source.SIMKL, "4242")
+        self.prefs = {**self.prefs, "tv_countries": "us"}
+        chosen = await self._picker({"first_aired": "2020-01-01T00:00:00Z", "country": "US"},
+                                    seasons=[{"season": 1, "first_aired": "2020-01-01"}])
+        option, = chosen.options
+        self.assertEqual(option.href, "")
+        self.assertIn("your filters hide it", option.notes)
+
+    async def test_a_season_not_held_is_judged_by_the_title_the_calendar_holds(self):
+        """MEASURED on the owner's calendar: TMDB names Yellowjackets' network
+        "Showtime", both services' listings "Paramount+ with Showtime". With that
+        network filtered out, the season on the calendar was refused and the ones
+        not on it were offered — judged by TMDB's word rather than by the title
+        the calendar holds, whose card a written season would be."""
+        self.settings = Settings(simkl_public_calendar_enabled=True)
+        await self._stored_airing(Source.SIMKL, "4242", network="Paramount+ with Showtime")
+        described = {"first_aired": "2020-01-01T00:00:00Z", "network": "Showtime"}
+        seasons = [{"season": 1, "first_aired": "2020-01-01"},
+                   {"season": 2, "first_aired": "2021-03-04"}]
+        self.prefs = {**self.prefs, "network_filter": ["-Paramount+ with Showtime"]}
+        one, two = (await self._picker(described, seasons=seasons)).options
+        for option in (one, two):
+            with self.subTest(season=option.season):
+                self.assertFalse(option.pickable)
+                self.assertIn("your filters hide it", option.notes)
+        # ...and without the filter the season not held is offered, so the test
+        # is about the filter.
+        self.prefs = {**self.prefs, "network_filter": []}
+        _one, two = (await self._picker(described, seasons=seasons)).options
+        self.assertTrue(two.pickable)
 
     async def test_a_known_season_another_service_airs_learns_this_ones_airing(self):
         """THE SUPPRESSION WAS KEYED ON TITLE AND SEASON, NOT SOURCE. MEASURED:
         Groomed was searched for, answered by Trakt, and dropped as a duplicate
         of the Simkl airing the calendar held — so the only write that could
-        have taught the calendar Trakt's airing never happened. The row is still
-        not offered twice; the season just gains the source it was missing."""
+        have taught the calendar Trakt's airing never happened. The season is
+        still not offered twice; it just gains the source it was missing."""
         await self._stored_airing(Source.TRAKT, "326227")
-        found, sources = await self._search_known_season_one()
-        self.assertEqual(found.elsewhere, ())
+        chosen, sources = await self._open_known_season_one()
+        self.assertTrue(chosen.options[0].href)
         self.assertEqual(sources, {"trakt", "simkl"})
 
     async def test_a_known_season_this_service_already_airs_writes_nothing(self):
@@ -591,90 +651,85 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
             return len(records)
 
         with patch("app.calendar.entries.store_loose_airings", _store):
-            found, _sources = await self._search_known_season_one()
-        self.assertEqual(found.elsewhere, ())
+            chosen, _sources = await self._open_known_season_one()
+        self.assertTrue(chosen.options[0].href)
         self.assertEqual(wrote, [])
 
     async def test_a_film_is_never_asked_for_seasons(self):
-        """Films have none, and asking would spend a call to be told so."""
+        """Films have none, and asking would spend a call to be told so. Its one
+        choice is its release."""
         asked = []
-
-        async def _search(_asked, settings, media, query):
-            if media is Media.MOVIE:
-                return SimpleNamespace(hits=[self._hit(title="A Film")],
-                                       failed=frozenset())
-            return SimpleNamespace(hits=[], failed=frozenset())
 
         async def _seasons(settings, source_id, media):
             asked.append(source_id)
             return SimpleNamespace(seasons=[])
 
-        with patch("app.providers.title_search.search_catalogue", new=_search), \
-             patch("app.providers.for_catalogue_search",
-                   return_value=[(Source.SIMKL, object())]), \
-             patch("app.providers.get", return_value=SimpleNamespace(
-                 detail_port=SimpleNamespace(
-                     fetch_details=AsyncMock(return_value={
-                         "first_aired": "2026-11-04T20:00:00Z"}),
-                     fetch_seasons=_seasons,
-                     records_for=self._port(
-                         {"first_aired": "2026-11-04T20:00:00Z"}).records_for))):
-            found = await calendar_search.catalogue(
-                "a film", settings=self.settings, prefs=self.prefs, tz=self.tz,
-                known=frozenset())
-        self.assertEqual(len(found.elsewhere), 1)
+        port = SimpleNamespace(
+            fetch_details=AsyncMock(return_value={"first_aired": "2026-11-04T20:00:00Z"}),
+            fetch_seasons=_seasons,
+            records_for=self._port({"first_aired": "2026-11-04T20:00:00Z"}).records_for)
+        chosen = await self._picker({}, hit=self._hit(title="A Film", media=Media.MOVIE),
+                                    media=Media.MOVIE, port=port)
+        option, = chosen.options
+        self.assertEqual((option.label, option.season), ("Release", None))
         self.assertEqual(asked, [], "a film was asked for its seasons")
 
-    async def test_a_country_this_viewer_excludes_is_not_offered(self):
+    async def test_a_country_this_viewer_excludes_is_refused_with_the_reason(self):
         """THE FILTER THAT LOOKED APPLIED AND WAS NOT.
 
-        Adding `filter_records` to this half was not enough on its own: the
-        record it filtered carried no `country`, because both packages' detail
-        projections dropped the field their own payloads return. A record with
-        no country cannot be excluded BY country, so a viewer excluding a dozen
-        of them was still offered every one — and the month such a row linked to
-        could never draw the title, which is exactly the report: "The Traitors
-        S02, Prime Video, and it isn't on that page".
+        Filtering was not enough on its own: the record it filtered carried no
+        `country`, because both packages' detail projections dropped the field
+        their own payloads return. A record with no country cannot be excluded BY
+        country, so a viewer excluding a dozen of them was still offered every one
+        — and the month such a row linked to could never draw the title, which is
+        exactly the report: "The Traitors S02, Prime Video, and it isn't on that
+        page". It is listed and REFUSED, saying so, so "not there" is never
+        confused with "nothing found".
         """
         self.prefs = {**self.prefs, "tv_countries": "-in"}
-        found = await self._catalogue({"first_aired": "2026-08-12T00:00:00Z",
-                                       "country": "IN"})
-        self.assertEqual(found.elsewhere, ())
+        chosen = await self._picker({"first_aired": "2026-08-12T00:00:00Z", "country": "IN"})
+        option, = chosen.options
+        self.assertFalse(option.pickable)
+        self.assertIn("your filters hide it", option.notes)
+
+    async def test_a_network_this_viewer_excludes_is_refused_with_the_reason(self):
+        """Both network lists judge the card the calendar would draw, so a season
+        on a network the viewer filters out is listed and refused like any other
+        filtered season — not offered as somewhere the month cannot show it."""
+        self.prefs = {**self.prefs, "network_filter": ["-Apple TV"]}
+        chosen = await self._picker({"first_aired": "2026-08-12T00:00:00Z",
+                                     "network": "Apple TV"})
+        option, = chosen.options
+        self.assertFalse(option.pickable)
+        self.assertIn("your filters hide it", option.notes)
 
     async def test_a_country_this_viewer_keeps_is_still_offered(self):
         self.prefs = {**self.prefs, "tv_countries": "-in"}
-        found = await self._catalogue({"first_aired": "2026-08-12T00:00:00Z",
-                                       "country": "US"})
-        self.assertEqual(len(found.elsewhere), 1)
+        chosen = await self._picker({"first_aired": "2026-08-12T00:00:00Z", "country": "US"})
+        self.assertEqual(len(self._offered(chosen)), 1)
 
     async def test_the_row_carries_the_country_it_was_filtered_on(self):
-        """One format is many shows: a franchise returns a row per national
-        version, all sharing a title and several sharing a network, so the
-        country is the only thing on the row that tells them apart. It is also
-        the field the filter reads — one value, so a reader cannot be shown a
-        country the filter did not use."""
-        found = await self._catalogue({"first_aired": "2026-08-12T00:00:00Z",
-                                       "country": "IN"})
-        self.assertEqual(found.elsewhere[0].item.country, "IN")
+        """It is the field the filter reads — one value, so a reader cannot be
+        shown a country the filter did not use."""
+        chosen = await self._picker({"first_aired": "2026-08-12T00:00:00Z", "country": "IN"})
+        self.assertEqual(chosen.rows[0].item.country, "IN")
 
-    async def test_a_title_this_viewer_filters_out_is_not_offered(self):
+    async def test_a_title_this_viewer_filters_out_is_refused(self):
         """THE ONE SURFACE THAT USED TO OFFER SOMEWHERE YOU CANNOT GET TO. A
-        title excluded by genre was listed here, and the month it linked to
-        could never draw it — so "not on your calendar" quietly covered both
-        "not there yet" and "not there, ever", with no way to tell which.
-        """
+        title excluded by genre was offered, and the month it linked to could
+        never draw it."""
         self.prefs = {**self.prefs, "tv_genres": "-reality"}
-        found = await self._catalogue({"first_aired": "2026-11-04T20:00:00Z",
-                                       "genres": ["Reality"]})
-        self.assertEqual(found.elsewhere, ())
+        chosen = await self._picker({"first_aired": "2026-11-04T20:00:00Z",
+                                     "genres": ["Reality"]})
+        self.assertEqual(self._offered(chosen), [])
 
     async def test_a_title_that_passes_the_filters_is_still_offered(self):
         """The other side of the same rule, so the filter cannot pass by
         rejecting everything."""
         self.prefs = {**self.prefs, "tv_genres": "-reality"}
-        found = await self._catalogue({"first_aired": "2026-11-04T20:00:00Z",
-                                       "genres": ["Drama"]})
-        self.assertEqual(len(found.elsewhere), 1)
+        chosen = await self._picker({"first_aired": "2026-11-04T20:00:00Z",
+                                     "genres": ["Drama"]})
+        self.assertEqual(len(self._offered(chosen)), 1)
 
     async def test_a_film_is_asked_about_the_film_vocabulary(self):
         """Certifications are two different vocabularies — TV Parental
@@ -683,69 +738,20 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         everywhere else that asks."""
         self.prefs = {**self.prefs, "movie_certifications": "-r",
                       "show_certifications": "-tv-ma"}
-
-        async def _search(asked, settings, media, query):
-            if media is Media.MOVIE:
-                return SimpleNamespace(hits=[self._hit(title="Unseen Film")],
-                                       failed=frozenset())
-            return SimpleNamespace(hits=[], failed=frozenset())
-
-        with patch("app.providers.title_search.search_catalogue", new=_search), \
-             patch("app.providers.for_catalogue_search",
-                   return_value=[(Source.SIMKL, object())]), \
-             patch("app.providers.get", return_value=SimpleNamespace(
-                 detail_port=self._port({"first_aired": "2026-11-04T20:00:00Z",
-                                         "certification": "R"}))):
-            found = await calendar_search.catalogue(
-                "unseen", settings=self.settings, prefs=self.prefs, tz=self.tz,
-                known=frozenset())
-        self.assertEqual(found.elsewhere, ())
-
-    async def test_it_links_to_the_month_and_not_to_a_day(self):
-        found = await self._catalogue({"first_aired": "2026-11-04T20:00:00Z",
-                                       "title": "Unseen Show"})
-        self.assertEqual(len(found.elsewhere), 1)
-        url = found.elsewhere[0].url
-        self.assertIn("year=2026", url)
-        self.assertIn("month=11", url)
-        # IT GOES THROUGH THE JUMP ROUTE, which writes this one airing and then
-        # redirects. Straight to the month was honest and useless: the month can
-        # fill perfectly and still not draw the title, because a service's show
-        # record and its calendar feed disagree.
-        self.assertIn("/calendar/jump?", url)
-        # AND IT CARRIES A SERVICE AND THAT SERVICE'S OWN ID AND NOTHING ELSE
-        # THAT MATTERS. Everything a row is made of comes back from the service,
-        # so this link cannot be edited into a calendar row of one's choosing.
-        self.assertIn("source=simkl", url)
-        self.assertIn("id=4242", url)
-        self.assertNotIn("title=", url)
-        self.assertNotIn("air", url)
-        # THE ANCHOR RIDES ON THE LINK ITSELF: following it is a boosted fetch,
-        # and a fetch's final URL drops the fragment the redirect carried, so a
-        # link without it landed at the top of the month over a marked card.
-        self.assertTrue(url.endswith("#jump-target"), url)
+        chosen = await self._picker(
+            {"first_aired": "2026-11-04T20:00:00Z", "certification": "R"},
+            hit=self._hit(title="Unseen Film", media=Media.MOVIE), media=Media.MOVIE)
+        self.assertEqual(self._offered(chosen), [])
 
     async def test_a_title_with_no_date_is_not_offered_at_all(self):
         """The whole offer is "go to where this should be", and a title nobody
         can date has no where. Refusing beats sending a reader to a guess."""
-        found = await self._catalogue({"title": "Unseen Show", "first_aired": ""})
-        self.assertEqual(found.elsewhere, ())
+        chosen = await self._picker({"title": "Unseen Show", "first_aired": ""})
+        self.assertEqual(chosen.options, [])
 
     async def test_an_unreadable_date_is_refused_rather_than_guessed(self):
-        found = await self._catalogue({"first_aired": "sometime next year"})
-        self.assertEqual(found.elsewhere, ())
-
-    async def test_a_title_the_calendar_already_draws_is_not_offered_twice(self):
-        """The stored answer names the day, which is strictly better than naming
-        the month; offering both would be two rows for one answer."""
-        first = await self._catalogue({"first_aired": "2026-11-04T20:00:00Z"})
-        # THE SEASON TRAVELS WITH THE TITLE, because a row is a season premiere
-        # and `mark_key` is deliberately the title's identity alone.
-        one = first.elsewhere[0].item
-        already = frozenset({(one.mark_key, one.season)})
-        again = await self._catalogue({"first_aired": "2026-11-04T20:00:00Z"},
-                                      known=already)
-        self.assertEqual(again.elsewhere, ())
+        chosen = await self._picker({"first_aired": "sometime next year"})
+        self.assertEqual(chosen.options, [])
 
     async def test_the_leading_source_is_the_one_asked_to_describe_it(self):
         """A title two services both found is described by ONE of them, and
@@ -756,64 +762,187 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         """
         seen = []
 
-        async def _search(asked, settings, media, query):
-            if media is not Media.SHOW:
-                return SimpleNamespace(hits=[], failed=frozenset())
-            return SimpleNamespace(
-                hits=[self._hit(also={Source.TRAKT: "trakt-one"})],
-                failed=frozenset())
-
         async def _details(settings, media, source_id, _):
             seen.append(source_id)
             return {"first_aired": "2026-11-04T20:00:00Z", "title": "Unseen Show"}
 
-        with patch("app.providers.title_search.search_catalogue", new=_search),              patch("app.providers.for_catalogue_search",
-                   return_value=[(Source.SIMKL, object())]),              patch("app.providers.get", return_value=SimpleNamespace(
-                 detail_port=SimpleNamespace(
-                     fetch_details=_details,
-                     fetch_seasons=AsyncMock(
-                         side_effect=SourceUnavailable("no season list")),
-                     records_for=AsyncMock(return_value=[])))):
-            await calendar_search.catalogue(
-                "unseen", settings=self.settings, prefs=self.prefs, tz=self.tz,
-                known=frozenset())
-
+        port = SimpleNamespace(fetch_details=_details,
+                               fetch_seasons=AsyncMock(side_effect=SourceUnavailable("no")),
+                               records_for=AsyncMock(return_value=[]))
+        await self._picker({}, hit=self._hit(also={Source.TRAKT: "trakt-one"}), port=port)
         self.assertEqual(seen, ["4242"], "the lookup did not use the leader's id")
 
-    async def test_a_hit_no_source_can_address_is_skipped_rather_than_raising(self):
+    async def test_a_hit_no_source_can_address_offers_nothing_rather_than_raising(self):
         """`source_ids` empty means nobody named this title in a way a lookup
-        can call back with. There is nothing to describe and nothing to link
-        to, so it is dropped — quietly, because it is not an error."""
-        async def _search(asked, settings, media, query):
-            from app.providers.title_search import MergedSearchHit
-            return SimpleNamespace(hits=[MergedSearchHit(
-                key=None, season=None, source_ids={}, ids={}, title="Nameless",
-                year=None, network="", runtime=None, overview="", media=Media.SHOW)],
-                failed=frozenset())
-
-        with patch("app.providers.title_search.search_catalogue", new=_search),              patch("app.providers.for_catalogue_search",
-                   return_value=[(Source.SIMKL, object())]):
-            found = await calendar_search.catalogue(
-                "nameless", settings=self.settings, prefs=self.prefs, tz=self.tz,
-                known=frozenset())
-        self.assertEqual(found.elsewhere, ())
+        can call back with. There is nothing to describe and nowhere to go."""
+        from app.providers.title_search import MergedSearchHit
+        nameless = MergedSearchHit(key=None, season=None, source_ids={}, ids={},
+                                   title="Nameless", year=None, network="", runtime=None,
+                                   overview="", media=Media.SHOW)
+        chosen = await self._picker({}, hit=nameless)
+        self.assertEqual(chosen.options, [])
 
     async def test_a_row_carries_what_the_lookup_described(self):
-        """It renders through the same shape a stored row does, so a reader is
-        not asked to learn a second kind of result."""
-        found = await self._catalogue({
+        """It renders through the same shape a stored row does."""
+        chosen = await self._picker({
             "first_aired": "2026-11-04T20:00:00Z", "network": "Apple TV",
             "overview": "A description.", "poster": "https://img/p.jpg",
             "genres": ["Drama"], "rating": 8.2, "imdb_rating": 7.9})
-        item = found.elsewhere[0].item
-        self.assertEqual(item.network, "Apple TV")
-        self.assertEqual(item.overview, "A description.")
-        self.assertEqual(item.imdb_rating, 7.9)
-        self.assertEqual(found.elsewhere[0].endpoint_key, "shows/premieres")
+        item = chosen.rows[0].item
+        self.assertEqual((item.network, item.overview, item.imdb_rating),
+                         ("Apple TV", "A description.", 7.9))
+        self.assertEqual(chosen.rows[0].endpoint_key, "shows/premieres")
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TheCatalogueHalfListsTitlesTests(SearchTestCase):
+    """The search's catalogue half: the same rows every box draws — every title
+    each asked catalogue answered, both media, an added service's below the
+    default's — and nothing described, so a search costs its search answers."""
+
+    _hit = TheCatalogueHalfIsADifferentPromiseTests._hit
+
+    def _led_by(self, source, n, *, also=None, media=Media.SHOW):
+        from app.providers.title_search import MergedSearchHit
+
+        ids = {**{source: str(n)}, **(also or {})}
+        return MergedSearchHit(key=None, season=None, source_ids=ids,
+                               ids={"tmdb": 9000 + n}, title=f"{source} {n}", year=2026,
+                               network="", runtime=None, overview="", media=media)
+
+    async def _found(self, shows=(), films=(), ref=title_search.SearchRef(),
+                     more_from=frozenset()):
+        async def _search(asked, settings, media, query, *, pages=1, cached_only=False):
+            hits = list(shows if media is Media.SHOW else films)
+            return title_search.SearchMergeResult(hits=hits, failed=frozenset(),
+                                                  more_from=more_from)
+
+        cat = {key: providers.SearchCatalogue(key, label) for key, label in (
+            ("tmdb", "TMDB"), ("trakt", "Trakt"), ("simkl", "Simkl"))}
+        plan = providers.SearchPlan(
+            asked=[providers.AskedCatalogue(Source.TMDB, object(), cat["tmdb"]),
+                   providers.AskedCatalogue(Source.TRAKT, object(), cat["trakt"])],
+            offered=(cat["simkl"],), unconfigured=(), order=tuple(cat.values()))
+        get = AsyncMock(side_effect=AssertionError("a search described a title"))
+        with patch("app.providers.title_search.search_catalogue", new=_search), \
+             patch("app.providers.for_search", return_value=plan), \
+             patch("app.providers.get", side_effect=get):
+            return await calendar_search.catalogue(
+                "unseen", settings=self.settings, ref=ref,
+                media=(Media.SHOW, Media.MOVIE))
+
+    async def test_every_title_is_listed_and_nothing_is_described(self):
+        found = await self._found(shows=[self._led_by(Source.TMDB, n) for n in range(20)],
+                                  films=[self._led_by(Source.TMDB, 99, media=Media.MOVIE)])
+        self.assertEqual(len(found.found), 21)
+        self.assertEqual(found.found[-1].media, "movie")
+
+    async def test_each_row_names_itself_by_reference(self):
+        found = await self._found(shows=[self._led_by(Source.TMDB, 1)],
+                                  ref=title_search.SearchRef(("trakt",), (("tmdb", 2),)))
+        self.assertEqual(found.found[0].ref, {"q": "unseen", "media": "show",
+                                              "also": "trakt", "pages": "tmdb:2", "i": "0"})
+
+    async def test_an_added_services_rows_come_after_the_defaults_across_both_media(self):
+        found = await self._found(
+            shows=[self._led_by(Source.TMDB, 1), self._led_by(Source.TRAKT, 2)],
+            films=[self._led_by(Source.TMDB, 3, media=Media.MOVIE)],
+            ref=title_search.SearchRef(("trakt",)))
+        self.assertEqual([row.hit.title for row in found.found],
+                         ["tmdb 1", "tmdb 3", "trakt 2"])
+
+    async def test_its_controls_are_every_boxs(self):
+        found = await self._found(shows=[self._led_by(Source.TMDB, 1)],
+                                  ref=title_search.SearchRef(("trakt",)),
+                                  more_from=frozenset({"tmdb"}))
+        self.assertEqual([b["label"] for b in found.controls["buttons"]],
+                         ["More from TMDB", "Also search Simkl"])
+
+    async def test_one_calendar_searches_its_own_medium_alone(self):
+        found = await self._found(shows=[self._led_by(Source.TMDB, 1)],
+                                  films=[self._led_by(Source.TMDB, 2, media=Media.MOVIE)])
+        both = len(found.found)
+        async def _search(asked, settings, media, query, *, pages=1, cached_only=False):
+            return title_search.SearchMergeResult(
+                hits=[self._led_by(Source.TMDB, 1, media=media)], failed=frozenset())
+        with patch("app.providers.title_search.search_catalogue", new=_search):
+            one = await calendar_search.catalogue("unseen", settings=self.settings,
+                                                  media=(Media.SHOW,))
+        self.assertEqual((both, [row.media for row in one.found]), (2, ["show"]))
+
+    async def test_a_query_too_short_asks_nobody(self):
+        self.assertEqual(await calendar_search.catalogue("u", settings=self.settings),
+                         calendar_search.Results())
+
+
+class TheJumpWritesWhatWasTickedTests(SearchTestCase):
+    """calendar/search.py's `jump`: the ticked seasons' airings, written by a
+    service that lists the calendar, and the first one's month to land on."""
+
+    _hit = TheCatalogueHalfIsADifferentPromiseTests._hit
+    _port = TheCatalogueHalfIsADifferentPromiseTests._port
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # The hit's leader writes: Simkl, which this instance's calendar admits.
+        self.settings = Settings(simkl_public_calendar_enabled=True)
+
+    async def _jump(self, seasons, *, provider=None, hit=None, prefs=None):
+        provider = provider or publishing(detail_port=self._port(
+            {"first_aired": "2020-01-01T00:00:00Z"},
+            seasons=[{"season": 1, "first_aired": "2020-01-01"},
+                     {"season": 2, "first_aired": "2021-03-04"}]))
+        # The week's own fill is the cache's, tested there; here, who it is for.
+        self.filled = AsyncMock()
+        with patch("app.providers.get", return_value=provider), \
+             patch.object(calendar_cache, "ensure_window", self.filled):
+            return await calendar_search.jump(self.settings, hit or self._hit(), Media.SHOW,
+                                              seasons, tz=self.tz, now=db.now(),
+                                              prefs=prefs or dict(NO_FILTERS))
+
+    async def test_it_writes_each_ticked_season_and_lands_on_the_first(self):
+        where = (await self._jump([2, 1])).url
+        self.assertTrue(where.startswith("/calendar?year=2020&month=1"), where)
+        # The card and its DAY: a card past the days the page draws inline does
+        # not exist when the browser looks for #jump-target, so a mark alone
+        # landed at the top of the month.
+        self.assertIn("&day=2020-01-01", where)
+        self.assertTrue(where.endswith("#jump-target"), where)
+        self.assertEqual(await calendar_entries.sources_airing(
+            "shows/premieres", "show:tmdb:777", 2), {"simkl"})
+
+    async def test_a_catalogue_with_no_calendar_writes_nothing_and_still_names_the_card(self):
+        """The month may draw the title from a service that lists it there, under
+        the identity this description keys, so the landing names that card;
+        naming one the month does not draw marks nothing."""
+        silent = SimpleNamespace(detail_port=self._port(
+            {"first_aired": "2020-01-01T00:00:00Z"},
+            seasons=[{"season": 1, "first_aired": "2020-01-01"}]),
+            calendar_port=None, capabilities=SimpleNamespace(answers=lambda _key: False))
+        where = (await self._jump([1], provider=silent)).url
+        self.assertEqual(where, "/calendar?year=2020&month=1&endpoint=shows%2Fpremieres"
+                                "&highlight=show%3Atmdb%3A777&day=2020-01-01#jump-target")
+        self.assertEqual(await calendar_entries.sources_airing(
+            "shows/premieres", "show:tmdb:777", 1), set())
+
+    async def test_nothing_ticked_lands_nowhere(self):
+        self.assertEqual(await self._jump([]), calendar_search.Landing(""))
+
+    async def test_the_week_it_is_filed_in_is_filled_before_it_is_judged(self):
+        """Who lists the card decides "only one service lists it", and a feed's
+        listing of the season arrives with its week's fill — the fill the
+        month's own load would make a moment later."""
+        await self._jump([1])
+        (endpoint, _settings, start), _kwargs = self.filled.call_args
+        self.assertEqual((endpoint.key, start), (SHOWS, date(2019, 12, 30)))
+
+    async def test_a_card_the_viewers_filters_hide_is_nowhere_to_land(self):
+        """Written, and listed by one service alone, for a viewer who hides
+        those: the month would draw nothing to land on (Yellowjackets' second
+        season, which TMDB's premieres list and Trakt's skip)."""
+        landing = await self._jump([1], prefs={**NO_FILTERS, "tv_single_service": True})
+        self.assertEqual(landing, calendar_search.Landing("", hidden=True))
+        self.assertEqual(await calendar_entries.sources_airing(
+            SHOWS, "show:tmdb:777", 1), {"simkl"})
 
 
 class AskingTheServiceACardIsMissingTests(SearchTestCase):
@@ -862,9 +991,9 @@ class AskingTheServiceACardIsMissingTests(SearchTestCase):
 
         port = SimpleNamespace(fetch_details=built.fetch_details,
                                fetch_seasons=built.fetch_seasons, records_for=_records)
-        return (patch("app.providers.for_catalogue_search", return_value=[
+        return (patch("app.providers.for_shared_id_lookup", return_value=[
                     (Source.SIMKL, SimpleNamespace(find_by_shared_id=_find))]),
-                patch("app.providers.get", return_value=SimpleNamespace(detail_port=port)))
+                patch("app.providers.get", return_value=publishing(detail_port=port)))
 
     async def _ask(self, answer, endpoint=SHOWS):
         search_patch, get_patch = self._services(answer)
@@ -875,7 +1004,7 @@ class AskingTheServiceACardIsMissingTests(SearchTestCase):
                 return source, False
             return source, await calendar_search.complete_from_other_service(
                 self.settings, source=source, endpoint_key=endpoint,
-                title_key=self.KEY, season=1, tz=self.tz, now=1000)
+                title_key=self.KEY, season=1, now=1000)
 
     async def test_a_one_service_premiere_gains_the_others_airing(self):
         source, stored = await self._ask({"simkl": "4242", "tmdb": 777})
@@ -945,7 +1074,7 @@ class CompletingASeasonNeverWritesTheShowsStartTests(AskingTheServiceACardIsMiss
             # Seasons the service CAN date, and season 1 is not among them.
             seasons=[{"season": 2, "first_aired": "2021-07-13"}])
         return search_patch, patch("app.providers.get",
-                                   return_value=SimpleNamespace(detail_port=built))
+                                   return_value=publishing(detail_port=built))
 
     async def test_a_season_the_other_service_cannot_date_writes_nothing(self):
         source, stored = await self._ask({"simkl": "4242", "tmdb": 777})
@@ -959,3 +1088,35 @@ class CompletingASeasonNeverWritesTheShowsStartTests(AskingTheServiceACardIsMiss
     test_the_next_read_of_the_month_draws_the_new_airing = None
     test_not_listed_is_an_answer_kept_for_a_week = None
     test_only_a_premiere_or_a_release_can_be_completed = None
+
+
+class AServiceWritesOnlyACalendarItPublishesTests(SearchTestCase):
+    """calendar/search.py's `_publishes`: what is written is a service's own
+    airing as its calendar feed would have stored it, so a catalogue with no
+    feed for that calendar writes nothing — following its search result opens
+    the month instead."""
+
+    async def test_following_a_result_from_a_catalogue_with_no_calendar_writes_nothing(self):
+        describer = SimpleNamespace(
+            fetch_seasons=AsyncMock(side_effect=AssertionError("it was described")),
+            fetch_details=AsyncMock(side_effect=AssertionError("it was described")),
+            records_for=AsyncMock(side_effect=AssertionError("it was built")))
+        catalogue_only = SimpleNamespace(
+            detail_port=describer, calendar_port=None,
+            capabilities=SimpleNamespace(answers=lambda _key: False))
+        with patch("app.providers.get", return_value=catalogue_only):
+            landing = await calendar_search.fill_one_gap(
+                self.settings, source=Source.TMDB, source_id="777", media=Media.SHOW,
+                season=1, endpoint_key=SHOWS, now=db.now())
+        self.assertFalse(landing)
+        self.assertEqual(await calendar_entries.sources_airing(SHOWS, "show:tmdb:777", 1),
+                         set())
+
+    def test_tmdb_writes_the_three_calendars_it_lists_and_no_others(self):
+        tmdb = providers.get(Source.TMDB)
+        for endpoint in ("shows/new", "shows/premieres", "movies"):
+            with self.subTest(endpoint=endpoint):
+                self.assertTrue(calendar_search._publishes(tmdb, endpoint))
+        for endpoint in ("shows/finales", "shows"):
+            with self.subTest(endpoint=endpoint):
+                self.assertFalse(calendar_search._publishes(tmdb, endpoint))

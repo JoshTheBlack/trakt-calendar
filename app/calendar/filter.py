@@ -34,10 +34,19 @@ release schedule, which no calendar payload carries and only the per-title
 catalogue does, so like the film prune it can act only on what enrichment has
 already found. See filter_release_groups for the rule and for why it is asked
 once per group rather than once per record.
+
+SIX MORE ARE ASKED OF A CARD WHOLE (`keep_title`), because a catalogue calendar
+lists everything anybody entered — TMDB took one October's Series Premieres
+from 180 cards to 991. Language, keywords and a show's type judge the resolved
+record like the three above; "only one service lists it", "only a sparse
+catalogue lists it and it names no network" and "it is missing a fact" judge
+the card against the services that listed it. `filter_titles` is the one place
+all of them, and the four above, are applied to a card — the operator's floor
+and a viewer's filters alike.
 """
 from __future__ import annotations
 
-from typing import Iterable, Protocol, Sequence, TypeVar
+from typing import Iterable, NamedTuple, Protocol, Sequence, TypeVar
 
 
 def parse_spec(spec: str) -> tuple[set[str], set[str]]:
@@ -61,10 +70,14 @@ def parse_spec(spec: str) -> tuple[set[str], set[str]]:
     return includes, excludes
 
 
-def merge_token(spec, token: str, mode: str, *, is_list: bool = False):
+def merge_token(spec, token: str, mode: str, *, is_list: bool = False,
+                cased: bool | None = None):
     """`spec` with one token set to `mode` — "include", "exclude", or "" to drop
-    it entirely. Returns the same shape it was given: a list for networks, a
-    comma string for everything else.
+    it entirely. Returns the same shape it was given: a list for networks and
+    keywords, a comma string for everything else. `cased` says whether two
+    spellings differing only in case are different tokens — true for networks
+    (below), false for keywords (parse_keyword_spec); it defaults to `is_list`,
+    which is the networks' answer.
 
     IT LIVES BESIDE THE PARSERS BECAUSE IT WRITES WHAT THEY READ. The leading-'-'
     convention, which dimensions fold case and which must not, and the fact that
@@ -98,8 +111,10 @@ def merge_token(spec, token: str, mode: str, *, is_list: bool = False):
     def bare(part: str) -> str:
         return (part[1:] if part.startswith("-") else part).strip()
 
+    exact = is_list if cased is None else cased
+
     def same(a: str, b: str) -> bool:
-        return a == b if is_list else a.lower() == b.lower()
+        return a == b if exact else a.lower() == b.lower()
 
     kept = [p for p in parts if not same(bare(p), token)]
     if mode == "exclude":
@@ -107,6 +122,30 @@ def merge_token(spec, token: str, mode: str, *, is_list: bool = False):
     elif mode == "include":
         kept.append(token)
     return kept if is_list else ", ".join(kept)
+
+
+def parse_keyword_spec(keywords: Iterable[str] | None) -> tuple[set[str], set[str]]:
+    """Split keyword names into (includes, excludes), lower-cased.
+
+    A LIST LIKE THE NETWORKS AND FOLDED LIKE THE GENRES, and each half for its
+    own reason. A list, because a TMDB keyword's name can hold a comma ("san
+    francisco, california"), so a comma string would cut one keyword in two.
+    Folded, because TMDB spells every keyword in lower case (normalize.keywords
+    stores them so) and a viewer typing "Anime" means "anime".
+    """
+    includes: set[str] = set()
+    excludes: set[str] = set()
+    for raw in keywords or ():
+        name = " ".join(str(raw).split()).lower()
+        if not name:
+            continue
+        if name.startswith("-"):
+            bare = name[1:].strip()
+            if bare:
+                excludes.add(bare)
+        else:
+            includes.add(name)
+    return includes, excludes
 
 
 def parse_network_spec(networks: Iterable[str] | None) -> tuple[set[str], set[str]]:
@@ -220,184 +259,6 @@ def parse_release_type_spec(spec: str) -> tuple[set[int], set[int]]:
     return numbers(raw_inc), numbers(raw_exc)
 
 
-def keep_release_blocks(release_types_by_country, c_inc: set[str], c_exc: set[str],
-                        t_inc: set[int], t_exc: set[int]) -> bool:
-    """Whether one film's {country: [type]} map has a release the viewer asked
-    for. THE PREDICATE, said once, over the values rather than the object.
-
-    THE TWO DIMENSIONS ARE JUDGED ON THE SAME BLOCK, WHICH IS THE WHOLE RULE
-    AND IS NOT WHAT ASKING THEM SEPARATELY WOULD DO. "US, theatrical" means a US
-    block that is theatrical — not "has a US release" and, unrelatedly, "has a
-    theatrical release somewhere". A film premiering in Brazil and reaching
-    American cinemas satisfies both readings; a film premiering in America and
-    reaching Brazilian cinemas satisfies only the loose one, and a viewer who
-    asked for American theatrical releases did not ask for it. Measured over one
-    live August: the joint reading takes 1314 films to 219 and the loose one
-    would not.
-
-    AN EXCLUDE DISQUALIFIES THE BLOCK, NOT THE FILM, and that is the difference
-    from every other dimension in this module — those are scalars, where one
-    excluded value is the title's only answer. Here a film has several answers,
-    so `-br` means "a Brazilian release is not one I count"; a film out in both
-    Brazil and America still survives on its American block, and only a
-    Brazil-only film disappears.
-
-    EMPTY IS NOT A DECISION. A film with no blocks at all cannot be judged, and
-    the caller (keep_release_group) is what decides that it is kept rather than
-    dropped — this function is asked only about a film that has something to
-    say.
-    """
-    for country, types in (release_types_by_country or {}).items():
-        code = str(country).lower()
-        if c_exc and code in c_exc:
-            continue
-        if c_inc and code not in c_inc:
-            continue
-        for kind in types or ():
-            if t_exc and kind in t_exc:
-                continue
-            if t_inc and kind not in t_inc:
-                continue
-            return True
-    return False
-
-
-def keep_release_group(records, c_inc: set[str], c_exc: set[str],
-                       t_inc: set[int], t_exc: set[int]) -> bool:
-    """Whether a group of records for ONE film survives the release specs.
-
-    The records that carry a release map are the ones asked; a group where none
-    does is kept, because there is nothing to judge it on. See
-    filter_release_groups for why the two halves are not the same question.
-
-    A GROUP WITH NO RELEASE MAP IS KEPT, ALWAYS. Three real situations produce
-    one and none of them is "this film is released nowhere": a source whose
-    calendar payload has no release schedule at all (Trakt's does not), a Simkl
-    film whose enrichment has not landed yet, and a row written before the map
-    was extracted. Dropping any of them would let a filter delete titles it has
-    no information about — the same reasoning behind `exempt_unenriched` above,
-    except that it needs no flag, because an empty map already says exactly
-    "nothing to judge".
-
-    THE COST OF THAT, STATED: a viewer who narrows to US theatrical still sees
-    the curated handful of films only the other service listed, because that
-    service never says how a film is being released. That is the honest answer
-    — this filter can only act on what somebody actually published.
-    """
-    known = [record for record in records
-             if getattr(record, "release_types_by_country", None)]
-    if not known:
-        return True
-    return any(keep_release_blocks(record.release_types_by_country,
-                                   c_inc, c_exc, t_inc, t_exc)
-               for record in known)
-
-
-def filter_release_groups(parsed, endpoint_media, countries_spec: str,
-                          types_spec: str) -> list:
-    """Keep the (group, records) pairs holding at least one record whose release
-    survives the two specs. A MOVIE-ENDPOINT RULE and inert everywhere else.
-
-    IT TAKES THE PAIRS THE READ PATH HOLDS AT THIS POINT rather than a flat list
-    of records, and that is the decision, not a convenience. The question is
-    which TITLES a viewer sees, so it has to be asked once per group: dropping
-    individual records instead would leave a title both services listed rendering
-    as a single-source card whenever one of them happened to be the one that
-    could answer, quietly changing what the card says about its own provenance
-    to enforce a filter about something else entirely.
-
-    A GROUP IS JUDGED ON THE RECORDS THAT CAN ANSWER, and kept whole when none
-    of them can. That is a correction to the rule this shipped with, which kept a
-    group if ANY record survived and so let a record with no map keep a title
-    whatever the record beside it said.
-
-    WHY THAT WAS WRONG, AND IT LOOKED RIGHT. Only a Simkl record ever carries a
-    release map — the overlay that attaches one skips every other source by
-    design (app/calendar/enrich.py's `_simkl_candidates`) — so on a film both
-    services listed, the Trakt record is always silent and the group always
-    survived. Measured on one real August: 19 of the 29 films surviving a filter
-    for a market with nothing in it were merged films whose Simkl record named
-    their release countries exactly, and said none of them matched.
-
-    THE DISTINCTION THE OLD RULE MISSED: "one service saying nothing is not
-    evidence against what the other said" is true when nobody knows, and this
-    still honours it — a group no record can judge is kept. But a film's release
-    schedule is a fact about the TITLE, not about which service happened to list
-    it, so where one record holds that fact the other's silence is not a second
-    opinion to be weighed against it. It is just an absence.
-
-    WHAT STILL SURVIVES EVERY FILTER: a film only Trakt lists. Nothing carries a
-    release map for one, because Trakt's calendar payload has no release schedule
-    in it — and its per-title `/movies/:id/releases` endpoint, which does, is not
-    read by this app. Until it is, those films are genuinely unjudgeable and are
-    kept, which is the same promise as before.
-
-    RUNS AT READ, LIKE EVERY OTHER PER-VIEWER NARROWING HERE, and for the extra
-    reason `prune_disguised_films` gives: the release map arrives only once the
-    background enrichment drain has looked the title up, long after the window
-    was stored. An unenriched film is therefore still shown until its row lands.
-    """
-    if str(endpoint_media) != "movie":
-        return list(parsed)
-    c_inc, c_exc = parse_spec(countries_spec)
-    t_inc, t_exc = parse_release_type_spec(types_spec)
-    if not (c_inc or c_exc or t_inc or t_exc):
-        return list(parsed)
-    return [pair for pair in parsed
-            if keep_release_group(pair[1], c_inc, c_exc, t_inc, t_exc)]
-
-
-def prune_disguised_films(records, endpoint_media) -> list:
-    """Drop a record Simkl's own enrichment marks as a FILM from a SERIES
-    endpoint (shows/new, shows/premieres, shows — anything whose media is
-    "show", never a movie endpoint).
-
-    THE SIGNAL IS `anime_type == "movie"`, MEASURED, NOT `total_episodes`.
-    Two titles measured live carry `total_episodes: 1` — The Ribbon Hero, an
-    ONA SERIES (Original Net Animation: an anime released to the web, not a
-    film), and Shiranuhi, an actual film — and only `anime_type` tells them
-    apart. `ona`, `ova`, `tv` and `special` are all SERIAL formats and must
-    survive this check untouched; only `movie` is pruned. Across three
-    disjoint samples totalling 300 titles this measured at 1.7% of entries
-    (5 of 300), which is why this is one condition here rather than new
-    machinery — see app/providers/simkl/titles.py's `_extract` for where the
-    field is captured.
-
-    THIS IS THE BACKSTOP AND NO LONGER THE ONLY RULE, WHICH CHANGES WHAT IT IS
-    FOR. A Simkl anime film is now kept off the series endpoints at the FILL
-    instead — app/providers/simkl/calendar.py's `is_anime_film` reads the
-    `anime_type` the CALENDAR file states on the entry itself, so the entry
-    never enters a show window and is normalized onto the movies one instead.
-    What still reaches this function, and why it stays:
-
-      - A WINDOW STORED BEFORE THAT SPLIT EXISTED, which still holds the film
-        under a show key until its TTL turns it over. Without this the title
-        would reappear on Series Premieres for one TTL on every instance that
-        upgrades.
-      - A TITLE THE CALENDAR FILE DOES NOT LABEL but the per-title detail
-        payload does. Measured across five months of live archives every anime
-        entry carried an `anime_type`, so this is a defence against Simkl's
-        shape changing rather than against anything observed — but the field
-        being absent is exactly the case where the fill cannot decide and this
-        can.
-
-    IT RUNS AT READ BECAUSE ITS OWN SIGNAL IS ENRICHMENT'S, arriving once the
-    background drain (app/calendar/enrich.py) has looked the title up, long
-    after the fill stored the window. THE TRANSITIONAL STATE THAT LEAVES, AND
-    IT IS DECLARED RATHER THAN DISCOVERED: for a title in one of those two
-    cases, nothing knows it is a film until enrichment lands, so it renders on
-    the series calendar and NOT on the movies one; and once enrichment does
-    land, this drops it from the series calendar while nothing puts it on the
-    movies one until that month's movies window is next filled. Both halves
-    are one TTL wide and self-healing, and both fail in the honest direction —
-    the same shape the genre/country/certification exemption already accepts
-    elsewhere in this module, not a defect to chase.
-    """
-    if str(endpoint_media) != "show":
-        return list(records)
-    return [r for r in records if getattr(r, "anime_type", "") != "movie"]
-
-
 def keep_values(genres, country, certification,
                 g_inc: set[str], g_exc: set[str],
                 c_inc: set[str], c_exc: set[str],
@@ -489,3 +350,89 @@ def filter_records(records, genres_spec: str, countries_spec: str,
     return [r for r in records
             if keep_record(r, g_inc, g_exc, c_inc, c_exc, cert_inc, cert_exc,
                            exempt_unenriched=exempt_unenriched)]
+
+
+def keep_languages(records, languages_spec: str) -> list:
+    """The `records` whose own language survives `languages_spec`, judged on the
+    record ALONE and with no exemption — the fill's half of the language floor,
+    asked beside `filter_records` for the reason that function gives for not
+    exempting at fill. A record with no language is dropped under an include
+    spec and kept under an exclude one, exactly as a missing country is."""
+    inc, exc = parse_spec(languages_spec)
+    if not (inc or exc):
+        return list(records)
+    return [r for r in records if _keep_scalar(r.language, inc, exc)]
+
+
+def _keep_scalar(value, inc: set[str], exc: set[str]) -> bool:
+    """One scalar value against an (includes, excludes) pair, exclude first —
+    the rule country and certification follow in `keep_values`."""
+    value = str(value or "").lower()
+    if exc and value in exc:
+        return False
+    if inc and value not in inc:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# a card, judged whole
+# ---------------------------------------------------------------------------
+
+# WHAT A "MISSING DATA" RULE NAMES: each ticked rule hides a card missing EVERY
+# fact it lists. Six rules rather than three facts and a mode, because the
+# pairs are what trims a catalogue's long tail without the cost of either half:
+# measured on one October's films, "no country" alone hides 1,805 cards and "no
+# country and no poster" 292. The tokens are what a stored spec holds.
+MISSING_RULES: dict[str, tuple[str, ...]] = {
+    "country": ("country",),
+    "language": ("language",),
+    "poster": ("poster",),
+    "country+language": ("country", "language"),
+    "country+poster": ("country", "poster"),
+    "language+poster": ("language", "poster"),
+}
+
+
+def parse_missing_spec(spec: str) -> tuple[tuple[str, ...], ...]:
+    """The ticked rules a stored spec names, each as the facts it needs missing.
+    A token no rule names is dropped rather than refused, as a release type is
+    (`parse_release_type_spec`): this runs on the read path over a stored value."""
+    includes, _excludes = parse_spec(spec)
+    return tuple(MISSING_RULES[token] for token in sorted(includes) if token in MISSING_RULES)
+
+
+class TitleRules(NamedTuple):
+    """One set of specs, parsed once for a whole read — the operator's floor, or
+    a viewer's filters for one medium (app/calendar/vocab.py's `floor_specs` and
+    `active_specs` give the keywords `parse` takes)."""
+    genres: tuple[set[str], set[str]]
+    countries: tuple[set[str], set[str]]
+    certifications: tuple[set[str], set[str]]
+    networks: tuple[set[str], set[str]]
+    languages: tuple[set[str], set[str]]
+    keywords: tuple[set[str], set[str]]
+    show_types: tuple[set[str], set[str]]
+    single_service: bool
+    sparse_no_network: bool
+    missing: tuple[tuple[str, ...], ...]
+
+    @classmethod
+    def parse(cls, *, genres: str = "", countries: str = "", certifications: str = "",
+              network_filter=None, languages: str = "", keywords=None, show_types: str = "",
+              single_service: bool = False, sparse_no_network: bool = False,
+              missing: str = "") -> "TitleRules":
+        return cls(parse_spec(genres), parse_spec(countries), parse_spec(certifications),
+                   parse_network_spec(network_filter), parse_spec(languages),
+                   parse_keyword_spec(keywords), parse_spec(show_types),
+                   bool(single_service), bool(sparse_no_network),
+                   parse_missing_spec(missing))
+
+    def narrows(self) -> bool:
+        return (any(inc or exc for inc, exc in (self.genres, self.countries,
+                                                 self.certifications, self.networks,
+                                                 self.languages, self.keywords,
+                                                 self.show_types))
+                or self.single_service or self.sparse_no_network or bool(self.missing))
+
+

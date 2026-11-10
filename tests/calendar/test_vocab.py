@@ -193,3 +193,99 @@ class CountTests(unittest.TestCase):
         prefs[vocab.NETWORK_FILTER] = []
         self.assertEqual(vocab.count_set(prefs, vocab.TV_FIELDS), 0)
         self.assertFalse(vocab.any_set(prefs, vocab.MOVIE_FIELDS))
+
+
+class TheNewerDimensionsTests(unittest.TestCase):
+    """Language, keywords, show type, missing data and the two switches, through
+    the same seams as every other dimension."""
+
+    def test_a_keyword_holding_a_comma_round_trips_as_one_keyword(self):
+        """A keyword's own name can hold a comma, so keywords are a LIST, and a
+        chip for one reads back as exactly that one keyword."""
+        name = vocab.field_name(vocab.TV_KEYWORDS, "san francisco, california")
+        specs = vocab.specs_from_form({name: vocab.EXCLUDE})
+        self.assertEqual(specs[vocab.TV_KEYWORDS], ["-san francisco, california"])
+        chips = vocab.chips_for(vocab.TV_KEYWORDS, specs[vocab.TV_KEYWORDS])
+        self.assertEqual([(c.token, c.mode) for c in chips],
+                         [("san francisco, california", vocab.EXCLUDE)])
+
+    def test_keywords_fold_case_where_networks_keep_it(self):
+        chips = vocab.chips_for(vocab.TV_KEYWORDS, ["Anime", "-anime"])
+        self.assertEqual(len(chips), 1, "one keyword, whatever its case")
+        self.assertEqual(len(vocab.chips_for(vocab.NETWORK_FILTER, ["TVN", "tvN"])), 2)
+
+    def test_a_tick_field_with_nothing_ticked_is_cleared_by_its_presence_marker(self):
+        """An unticked box sends nothing; the marker is what makes that an answer."""
+        specs = vocab.specs_from_form({vocab.presence_name(vocab.TV_MISSING): ""})
+        self.assertEqual(specs[vocab.TV_MISSING], "")
+        ticked = vocab.specs_from_form({
+            vocab.presence_name(vocab.TV_MISSING): "",
+            vocab.field_name(vocab.TV_MISSING, "country+poster"): vocab.INCLUDE})
+        self.assertEqual(ticked[vocab.TV_MISSING], "country+poster")
+
+    def test_a_switch_and_its_companion_read_as_one_answer(self):
+        name = vocab.toggle_name(vocab.TV_SINGLE_SERVICE)
+        self.assertEqual(vocab.toggles_from_form({name: ["0", "1"]}),
+                         {vocab.TV_SINGLE_SERVICE: True})
+        self.assertEqual(vocab.toggles_from_form({name: "0"}), {vocab.TV_SINGLE_SERVICE: False})
+        self.assertEqual(vocab.toggles_from_form({"toggle:not_a_switch": "1"}), {})
+
+    def test_every_dimension_belongs_to_exactly_the_tabs_it_has(self):
+        """A film has neither a type nor a network; everything else is per medium."""
+        for field in (vocab.TV_SHOW_TYPES, vocab.TV_SPARSE_NO_NETWORK):
+            self.assertIn(field, vocab.TV_FIELDS)
+            self.assertNotIn(field, vocab.MOVIE_FIELDS)
+        for tv, movie in ((vocab.TV_LANGUAGES, vocab.MOVIE_LANGUAGES),
+                          (vocab.TV_KEYWORDS, vocab.MOVIE_KEYWORDS),
+                          (vocab.TV_MISSING, vocab.MOVIE_MISSING),
+                          (vocab.TV_SINGLE_SERVICE, vocab.MOVIE_SINGLE_SERVICE)):
+            self.assertIn(tv, vocab.TV_FIELDS)
+            self.assertIn(movie, vocab.MOVIE_FIELDS)
+
+    def test_active_specs_turns_each_medium_into_its_own_columns(self):
+        prefs = {vocab.TV_LANGUAGES: "en", vocab.MOVIE_LANGUAGES: "-ja",
+                 vocab.TV_KEYWORDS: ["-anime"], vocab.MOVIE_KEYWORDS: ["sequel"],
+                 vocab.TV_SHOW_TYPES: "-talk-show", vocab.TV_MISSING: "poster",
+                 vocab.MOVIE_MISSING: "country", vocab.TV_SINGLE_SERVICE: True,
+                 vocab.MOVIE_SINGLE_SERVICE: False, vocab.TV_SPARSE_NO_NETWORK: True}
+        tv = vocab.active_specs(prefs, Media.SHOW, honour_pause=True)
+        film = vocab.active_specs(prefs, Media.MOVIE, honour_pause=True)
+        self.assertEqual((tv["languages"], tv["keywords"], tv["show_types"], tv["missing"],
+                          tv["single_service"], tv["sparse_no_network"]),
+                         ("en", ["-anime"], "-talk-show", "poster", True, True))
+        self.assertEqual((film["languages"], film["keywords"], film["show_types"],
+                          film["missing"], film["single_service"], film["sparse_no_network"]),
+                         ("-ja", ["sequel"], "", "country", False, False))
+
+    def test_pausing_pauses_the_newer_dimensions_and_a_share_link_does_not(self):
+        prefs = {vocab.TV_LANGUAGES: "en", vocab.TV_SINGLE_SERVICE: True,
+                 vocab.TV_KEYWORDS: ["-anime"], "filters_paused": True}
+        paused = vocab.active_specs(prefs, Media.SHOW, honour_pause=True)
+        self.assertEqual(paused, vocab.complete_specs({}))
+        shared = vocab.active_specs(prefs, Media.SHOW, honour_pause=False)
+        self.assertEqual((shared["languages"], shared["single_service"], shared["keywords"]),
+                         ("en", True, ["-anime"]))
+
+    def test_a_read_keyword_nobody_names_is_refused(self):
+        with self.assertRaises(TypeError):
+            vocab.complete_specs({"langauges": "en"})
+
+    def test_the_floor_reads_only_the_fields_it_declares(self):
+        """vocab.FLOOR_FIELDS is what the memo key promises to carry; each must
+        change what `floor_specs` answers for some medium."""
+        from app.config import Settings
+        values = {"keywords": ["-anime"], "network_filter": ["HBO"]}
+        for field in vocab.FLOOR_FIELDS:
+            with self.subTest(field=field):
+                default = Settings()
+                value = values.get(field, True if isinstance(getattr(default, field), bool)
+                                   else "x")
+                changed = Settings(**{field: value})
+                self.assertTrue(any(vocab.floor_specs(default, media) != vocab.floor_specs(changed, media)
+                                    for media in (Media.SHOW, Media.MOVIE)), field)
+
+    def test_a_language_badge_writes_its_mediums_column(self):
+        self.assertEqual(vocab.badge_field("language", "movie"), vocab.MOVIE_LANGUAGES)
+        self.assertEqual(vocab.badge_field("language", "show"), vocab.TV_LANGUAGES)
+        modes = vocab.BadgeModes({vocab.TV_LANGUAGES: "-ja"})
+        self.assertEqual(modes.mode("language", "JA", "show"), vocab.EXCLUDE)

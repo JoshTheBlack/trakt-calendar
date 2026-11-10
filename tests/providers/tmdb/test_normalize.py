@@ -1,0 +1,378 @@
+"""app/providers/tmdb/normalize.py — TMDB's payloads in this app's vocabulary.
+
+Driven by REAL answers, trimmed and saved under tests/fixtures/tmdb/ (no
+credential in any of them): Severance (a show with a US rating and a finished
+second season), Frieren (an anime from Japan), Dune: Part Two (a film rated per
+release), Severance's second season, and TMDB's two genre lists.
+"""
+from __future__ import annotations
+
+import json
+import unittest
+from datetime import date
+
+from app.calendar import vocab
+from app.providers.base import SHOW_TYPES, Media, Source, VideoKind
+from app.providers.tmdb import normalize
+from tests.support import APP_DIR
+
+FIXTURES = APP_DIR.parent / "tests" / "fixtures" / "tmdb"
+
+
+def fixture(name: str) -> dict:
+    return json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+
+
+SEVERANCE = fixture("tv_severance")
+FRIEREN = fixture("tv_frieren")
+DUNE = fixture("movie_dune_part_two")
+SEASON_2 = fixture("tv_severance_season_2")
+
+
+class EveryTmdbGenreIsADecisionTests(unittest.TestCase):
+    """The genre table names every genre TMDB lists, and maps each onto this
+    app's own slugs — or, for TV Movie, onto nothing, deliberately."""
+
+    def test_every_genre_tmdb_lists_has_an_entry(self):
+        listed = {g["id"] for media in ("tv", "movie")
+                  for g in fixture(f"genre_{media}_list")["genres"]}
+        self.assertEqual(listed - set(normalize.GENRE_SLUGS), set())
+
+    def test_every_mapped_slug_is_in_the_apps_vocabulary(self):
+        """A slug no filter offers would be a genre nobody could narrow by."""
+        offered = {chip.token for field in (vocab.TV_GENRES, vocab.MOVIE_GENRES)
+                   for chip in vocab.VOCABULARY[field]}
+        mapped = {slug for slugs in normalize.GENRE_SLUGS.values() for slug in slugs}
+        self.assertEqual(mapped - offered, set())
+
+    def test_the_combined_genres_split(self):
+        cases = [
+            ([{"id": 10759, "name": "Action & Adventure"}], ["action", "adventure"]),
+            ([{"id": 10765, "name": "Sci-Fi & Fantasy"}], ["science-fiction", "fantasy"]),
+            ([{"id": 10768, "name": "War & Politics"}], ["war"]),
+            ([{"id": 878, "name": "Science Fiction"}], ["science-fiction"]),
+            ([{"id": 10762, "name": "Kids"}], ["family"]),
+            ([{"id": 10767, "name": "Talk"}], ["talk-show"]),
+            ([{"id": 10402, "name": "Music"}], ["musical"]),
+            ([{"id": 10770, "name": "TV Movie"}], []),
+            # Read by id, so a name in another language maps the same way.
+            ([{"id": 80, "name": "Krimi"}], ["crime"]),
+            # Two genres landing on one slug name it once.
+            ([{"id": 10751, "name": "Family"}, {"id": 10762, "name": "Kids"}], ["family"]),
+        ]
+        for genres, expected in cases:
+            with self.subTest(genres=genres):
+                self.assertEqual(normalize.genre_slugs(genres), expected)
+
+    def test_a_genre_tmdb_adds_later_is_slugged_and_said(self):
+        with self.assertLogs("app.providers.tmdb.normalize", "INFO"):
+            self.assertEqual(normalize.genre_slugs([{"id": 1, "name": "Very New"}]),
+                             ["very-new"])
+
+    def test_real_payloads(self):
+        self.assertEqual(normalize.genre_slugs(SEVERANCE["genres"]),
+                         ["drama", "mystery", "science-fiction", "fantasy"])
+        self.assertEqual(normalize.genre_slugs(FRIEREN["genres"]),
+                         ["animation", "action", "adventure", "drama",
+                          "science-fiction", "fantasy"])
+
+
+class TheTitleFactsTests(unittest.TestCase):
+
+    def test_table(self):
+        cases = [
+            # (what, payload, media, reader, expected)
+            ("US rating first", SEVERANCE, Media.SHOW, normalize.certification, "TV-MA"),
+            ("anime's US rating", FRIEREN, Media.SHOW, normalize.certification, "TV-14"),
+            ("a film's earliest rated US release", DUNE, Media.MOVIE,
+             normalize.certification, "PG-13"),
+            ("country", SEVERANCE, Media.SHOW, lambda p, m: normalize.country_code(p), "US"),
+            ("anime country", FRIEREN, Media.SHOW, lambda p, m: normalize.country_code(p), "JP"),
+            ("language", FRIEREN, Media.SHOW, lambda p, m: normalize.language_code(p), "JA"),
+            ("show runtime is its last episode's", SEVERANCE, Media.SHOW, normalize.runtime, 80),
+            ("film runtime", DUNE, Media.MOVIE, normalize.runtime, 167),
+            ("show status in Trakt's words", SEVERANCE, Media.SHOW,
+             lambda p, m: normalize.status_word(p["status"]), "returning series"),
+            ("film status", DUNE, Media.MOVIE,
+             lambda p, m: normalize.status_word(p["status"]), "released"),
+            ("network", SEVERANCE, Media.SHOW, lambda p, m: normalize.network_of(p), "Apple TV"),
+            ("show title", SEVERANCE, Media.SHOW, normalize.title_of, "Severance"),
+            ("film title", DUNE, Media.MOVIE, normalize.title_of, "Dune: Part Two"),
+            ("year", SEVERANCE, Media.SHOW, normalize.year_of, 2022),
+            ("rating past the vote floor", SEVERANCE, Media.SHOW,
+             lambda p, m: normalize.rating(p), 8.4),
+        ]
+        for what, payload, media, reader, expected in cases:
+            with self.subTest(what):
+                self.assertEqual(reader(payload, media), expected)
+
+    def test_no_us_rating_falls_to_the_origin_countrys(self):
+        payload = {"origin_country": ["GB"], "content_ratings": {"results": [
+            {"iso_3166_1": "DE", "rating": "12"}, {"iso_3166_1": "GB", "rating": "15"}]}}
+        self.assertEqual(normalize.certification(payload, Media.SHOW), "15")
+
+    def test_no_rating_anywhere_useful_is_none(self):
+        payload = {"origin_country": ["GB"], "content_ratings": {"results": [
+            {"iso_3166_1": "DE", "rating": "12"}]}}
+        self.assertEqual(normalize.certification(payload, Media.SHOW), "")
+
+    def test_a_score_from_too_few_votes_is_no_score(self):
+        self.assertIsNone(normalize.rating({"vote_average": 9.9, "vote_count": 3}))
+
+    def test_ids_come_from_external_ids(self):
+        self.assertEqual(normalize.ids_of(SEVERANCE),
+                         {"tmdb": 95396, "imdb": "tt11280740", "tvdb": 371980})
+        self.assertEqual(normalize.ids_of(DUNE), {"tmdb": 693134, "imdb": "tt15239678"})
+
+    def test_release_types_are_tmdbs_own_numbering(self):
+        types = normalize.release_types_by_country(DUNE)
+        self.assertIn(3, types["US"])
+        self.assertEqual(types["FR"], [1, 3, 5])
+
+    def test_the_poster_is_an_origin_address(self):
+        self.assertEqual(normalize.poster_of(SEVERANCE),
+                         "https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg")
+
+
+class VideosTests(unittest.TestCase):
+
+    def test_youtube_entries_become_videos_tmdb_listed(self):
+        videos = normalize.videos_from(SEVERANCE)
+        self.assertEqual(len(videos), 3)
+        first = videos[0]
+        self.assertEqual((first.site, first.video_id, first.kind, first.official),
+                         ("youtube", "ufaAnhgiERE", VideoKind.FEATURETTE, True))
+        self.assertEqual(first.sources, (str(Source.TMDB),))
+        self.assertTrue(first.embeddable)
+
+    def test_an_unknown_site_is_skipped(self):
+        payload = {"videos": {"results": [{"site": "Dailymotion", "key": "x", "type": "Trailer"}]}}
+        self.assertEqual(normalize.videos_from(payload), [])
+
+
+class TheExtrasTests(unittest.TestCase):
+    """The logo, a film's collection, the next episode and a season's own
+    videos — read from real answers (tests/fixtures/tmdb: Severance's `images`
+    asked in English, Silo's `next_episode_to_air`, Dune: Part Two's
+    `belongs_to_collection`, a Stranger Things season's `videos`)."""
+
+    def test_the_logo_is_the_first_listed_as_an_origin_address(self):
+        payload = {**SEVERANCE, "images": fixture("images_tv_severance")}
+        self.assertEqual(normalize.logo_of(payload),
+                         "https://image.tmdb.org/t/p/w500/yyS1tALk7t3YdTNMOvR5gsnXINA.png")
+
+    def test_an_svg_logo_keeps_its_own_address(self):
+        logos = fixture("images_tv_severance")["logos"]
+        self.assertTrue(normalize.logo_of({"images": {"logos": logos[1:]}}).endswith(".svg"))
+
+    def test_no_images_and_no_logos_are_no_logo(self):
+        self.assertEqual(normalize.logo_of(SEVERANCE), "")
+        self.assertEqual(normalize.logo_of({"images": {"logos": []}}), "")
+
+    def test_a_films_collection(self):
+        self.assertEqual(normalize.collection_of(DUNE, Media.MOVIE),
+                         {"id": 726871, "name": "Dune Collection"})
+
+    def test_a_show_and_a_film_in_none_have_no_collection(self):
+        self.assertEqual(normalize.collection_of({**DUNE, "belongs_to_collection": None},
+                                                 Media.MOVIE), {})
+        self.assertEqual(normalize.collection_of(DUNE, Media.SHOW), {})
+
+    def test_the_next_episode(self):
+        silo = fixture("next_episode_tv")
+        entry = silo["next_episode_to_air"]
+        got = normalize.next_episode_of(silo, Media.SHOW)
+        self.assertEqual(got, {"season": entry["season_number"],
+                               "number": entry["episode_number"],
+                               "title": " ".join(entry["name"].split()),
+                               "first_aired": entry["air_date"],
+                               "episode_type": entry["episode_type"]})
+
+    def test_nothing_scheduled_or_no_episode_named_is_none(self):
+        self.assertIsNone(normalize.next_episode_of(SEVERANCE, Media.SHOW))
+        self.assertIsNone(normalize.next_episode_of(
+            {"next_episode_to_air": {"air_date": "2026-12-01"}}, Media.SHOW))
+        self.assertIsNone(normalize.next_episode_of(fixture("next_episode_tv"), Media.MOVIE))
+
+    def test_an_undated_next_episode_has_no_day(self):
+        got = normalize.next_episode_of({"next_episode_to_air": {
+            "season_number": 3, "episode_number": 1, "air_date": None}}, Media.SHOW)
+        self.assertEqual(got["first_aired"], "")
+
+    def test_a_seasons_own_videos_are_read_as_a_titles_are(self):
+        videos = normalize.videos_from(fixture("season_videos_tv"))
+        self.assertTrue(videos)
+        self.assertTrue(all(v.sources == (str(Source.TMDB),) for v in videos))
+
+
+class CastTests(unittest.TestCase):
+    """normalize.cast_from — both of TMDB's cast shapes, as the panel's keys."""
+
+    def test_a_shows_aggregate_cast_names_each_persons_role(self):
+        cast = normalize.cast_from(fixture("cast_tv_severance"))
+        self.assertEqual(cast[0]["name"], "Adam Scott")
+        self.assertTrue(cast[0]["character"])
+        # TMDB's origin address: the panel proxies it when it draws it.
+        self.assertTrue(cast[0]["headshot"].startswith("https://image.tmdb.org/"))
+        self.assertEqual(set(cast[0]), {"name", "character", "headshot"})
+
+    def test_a_films_cast_names_its_character(self):
+        cast = normalize.cast_from(fixture("cast_movie_dune_part_two"))
+        self.assertTrue(cast[0]["name"] and cast[0]["character"])
+
+    def test_the_cap_is_the_panels(self):
+        from app.providers.base import CAST_SHOWN
+        many = {"cast": [{"name": f"P{n}", "character": "x"} for n in range(50)]}
+        self.assertEqual(len(normalize.cast_from(many)), CAST_SHOWN)
+
+    def test_no_picture_is_no_headshot(self):
+        self.assertIsNone(normalize.cast_from({"cast": [{"name": "A"}]})[0]["headshot"])
+
+
+class SeasonsTests(unittest.TestCase):
+
+    def test_a_season_summary(self):
+        """The fixture keeps episodes 1-3 and 10 of season 2; a summary counts
+        what TMDB listed and reads its days unconverted."""
+        summary = normalize.season_summary(SEASON_2, 2, date(2026, 10, 22))
+        self.assertEqual(summary["season"], 2)
+        self.assertEqual(summary["total"], 4)
+        self.assertEqual(summary["premiere"], "1/16")
+        self.assertEqual(summary["cadence"], "Thu")
+        self.assertTrue(summary["finished_airing"])
+
+    def test_a_season_with_no_episodes_is_empty(self):
+        self.assertEqual(normalize.season_summary({}, 3, date(2026, 1, 1))["total"], 0)
+
+    def test_the_picker_skips_specials_and_empty_seasons(self):
+        seasons = normalize.picker_seasons(SEVERANCE)
+        self.assertEqual([s["season"] for s in seasons], [1, 2])
+        self.assertEqual(seasons[1]["episode_count"], 10)
+        self.assertEqual(seasons[1]["first_aired"], "2025-01-16")
+        self.assertEqual(seasons[1]["name"], "")  # "Season 2" restates the number
+
+    def test_panel_episodes(self):
+        rows = normalize.panel_episodes(SEASON_2)
+        self.assertEqual(rows[0]["number"], 1)
+        self.assertEqual(rows[0]["title"], "Hello, Ms. Cobel")
+        # TMDB's own day, as it states it — a reader's spelling of it is the
+        # panel's (app/metadata/panel.py's `presented`).
+        self.assertEqual(rows[0]["first_aired"], "2025-01-16")
+        self.assertEqual(set(rows[0]), {"number", "title", "first_aired", "rating",
+                                        "overview", "episode_type", "runtime"})
+
+
+class TheRecordTests(unittest.TestCase):
+
+    def test_a_season_premiere_record_is_a_dated_episode_one(self):
+        record = normalize.to_record(SEVERANCE, Media.SHOW, 2, "2025-01-16")
+        self.assertEqual((record.source, record.id, record.season, record.episode_number),
+                         (Source.TMDB, "95396", 2, 1))
+        self.assertEqual(record.episode_label, "S02E01")
+        self.assertTrue(record.date_only)
+        self.assertEqual(record.genres, ["drama", "mystery", "science-fiction", "fantasy"])
+        self.assertEqual(record.certification, "TV-MA")
+        self.assertEqual(record.detail_url, "https://www.themoviedb.org/tv/95396")
+
+    def test_a_film_record(self):
+        record = normalize.to_record(DUNE, Media.MOVIE, None, "2024-03-01")
+        self.assertIsNone(record.season)
+        self.assertEqual(record.network, "")
+        self.assertIn("US", record.release_types_by_country)
+
+    def test_an_unreadable_day_is_no_record(self):
+        self.assertIsNone(normalize.to_record(SEVERANCE, Media.SHOW, 1, "soon"))
+
+    def test_a_titles_own_answer_makes_a_described_record(self):
+        self.assertTrue(normalize.is_description(SEVERANCE))
+        self.assertTrue(normalize.to_record(SEVERANCE, Media.SHOW, 2, "2025-01-16").enriched)
+
+    def test_a_discover_entry_makes_a_sparse_record_with_what_it_states(self):
+        """A listing entry carries genre ids and no network, status, rating
+        block or external ids: the record says it is not described yet, rather
+        than presenting blanks as answers."""
+        entry = {"id": 95396, "name": "Severance", "first_air_date": "2022-02-17",
+                 "genre_ids": [18, 9648, 10765], "origin_country": ["US"],
+                 "original_language": "en", "poster_path": "/p.jpg",
+                 "vote_average": 8.4, "vote_count": 2500}
+        self.assertFalse(normalize.is_description(entry))
+        record = normalize.to_record(entry, Media.SHOW, 1, entry["first_air_date"])
+        self.assertFalse(record.enriched)
+        self.assertEqual(record.genres, ["drama", "mystery", "science-fiction", "fantasy"])
+        self.assertEqual(record.ids, {"tmdb": 95396})
+        self.assertEqual((record.network, record.status, record.certification), ("", "", ""))
+        self.assertEqual(record.rating, 8.4)
+        self.assertEqual(record.year, 2022)
+        # A listing states neither TMDB-only fact: unknown, not "none".
+        self.assertIsNone(record.keywords)
+        self.assertIsNone(record.show_type)
+
+    def test_a_titles_own_answer_states_its_keywords_and_type(self):
+        record = normalize.to_record(SEVERANCE, Media.SHOW, 2, "2025-01-16")
+        self.assertEqual(record.keywords[:3], ["office", "workplace", "memory"])
+        self.assertEqual(record.show_type, "scripted")
+        film = normalize.to_record(DUNE, Media.MOVIE, None, "2024-03-01")
+        self.assertIn("sequel", film.keywords)
+        self.assertEqual(film.show_type, "")
+
+
+class TheTitleOnlyFactsTests(unittest.TestCase):
+    """Keywords and show type: what each says, and when it says nothing."""
+
+    def test_a_show_and_a_film_list_their_keywords_under_different_names(self):
+        self.assertEqual(normalize.keywords(SEVERANCE, Media.SHOW)[0], "office")
+        self.assertEqual(normalize.keywords(DUNE, Media.MOVIE)[0], "based on novel or book")
+
+    def test_no_keyword_list_is_none_and_an_empty_one_is_none_stated(self):
+        bare = {k: v for k, v in SEVERANCE.items() if k != "keywords"}
+        self.assertIsNone(normalize.keywords(bare, Media.SHOW))
+        self.assertEqual(normalize.keywords({**SEVERANCE, "keywords": {"results": []}},
+                                            Media.SHOW), [])
+
+    def test_a_keyword_keeps_its_comma_and_is_folded(self):
+        payload = {**SEVERANCE, "keywords": {"results": [
+            {"name": "San Francisco, California"}, {"name": "san francisco, california"}]}}
+        self.assertEqual(normalize.keywords(payload, Media.SHOW), ["san francisco, california"])
+
+    def test_every_tmdb_show_type_maps_onto_the_apps_own(self):
+        """A chip and a stored type cannot spell a type two ways: every word
+        TMDB documents lands on one of base.SHOW_TYPES' slugs."""
+        for word, slug in normalize.TMDB_SHOW_TYPES.items():
+            with self.subTest(word=word):
+                self.assertIn(slug, SHOW_TYPES)
+                self.assertEqual(normalize.show_type({**SEVERANCE, "type": word}, Media.SHOW), slug)
+
+    def test_a_listing_states_no_type_and_a_film_has_none(self):
+        self.assertIsNone(normalize.show_type({"id": 1, "name": "x"}, Media.SHOW))
+        self.assertEqual(normalize.show_type(DUNE, Media.MOVIE), "")
+        self.assertEqual(normalize.show_type({**SEVERANCE, "type": "Holographic"}, Media.SHOW),
+                         "holographic")
+
+
+class TheSeasonPremieresTests(unittest.TestCase):
+    """Which of a show's seasons premiere in a span — the season-premieres
+    derivation's confirmation of each candidate."""
+
+    def test_a_season_whose_first_day_is_in_the_span(self):
+        payload = {"seasons": [{"season_number": 1, "air_date": "2022-02-17"},
+                               {"season_number": 2, "air_date": "2025-01-17"}]}
+        self.assertEqual(normalize.season_premieres(payload, date(2025, 1, 13),
+                                                    date(2025, 1, 19)), [(2, "2025-01-17")])
+
+    def test_specials_and_undated_seasons_are_not_premieres(self):
+        payload = {"seasons": [{"season_number": 0, "air_date": "2025-01-14"},
+                               {"season_number": 3, "air_date": None},
+                               {"season_number": 4}]}
+        self.assertEqual(normalize.season_premieres(payload, date(2025, 1, 13),
+                                                    date(2025, 1, 19)), [])
+
+    def test_both_ends_of_the_span_count(self):
+        payload = {"seasons": [{"season_number": 1, "air_date": "2025-01-13"},
+                               {"season_number": 2, "air_date": "2025-01-19"}]}
+        self.assertEqual(normalize.season_premieres(payload, date(2025, 1, 13),
+                                                    date(2025, 1, 19)),
+                         [(1, "2025-01-13"), (2, "2025-01-19")])
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

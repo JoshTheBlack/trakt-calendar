@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from urllib.parse import quote
 
 from .. import route_params
-from ..providers.base import Media
+from ..providers.base import SHOW_TYPES, Media
 from . import filter as calendar_filter
 
 # The pref field each dimension writes into. These are `user_prefs` column names
@@ -55,18 +55,57 @@ MOVIE_CERTIFICATIONS = "movie_certifications"
 NETWORK_FILTER = "network_filter"
 MOVIE_RELEASE_COUNTRIES = "movie_release_countries"
 MOVIE_RELEASE_TYPES = "movie_release_types"
+TV_LANGUAGES = "tv_languages"
+MOVIE_LANGUAGES = "movie_languages"
+# Stored in `tv_keywords_json` / `movie_keywords_json`, the way `network_filter`
+# is stored in `network_filter_json`: app/auth/prefs.py does the translation.
+TV_KEYWORDS = "tv_keywords"
+MOVIE_KEYWORDS = "movie_keywords"
+TV_SHOW_TYPES = "tv_show_types"
+TV_MISSING = "tv_missing"
+MOVIE_MISSING = "movie_missing"
+# The three dimensions that are a SWITCH rather than a set of tokens.
+TV_SINGLE_SERVICE = "tv_single_service"
+MOVIE_SINGLE_SERVICE = "movie_single_service"
+TV_SPARSE_NO_NETWORK = "tv_sparse_no_network"
 
-# Networks are the one dimension stored as a LIST rather than a comma string,
-# and filter.py's `merge_token` needs telling which it is being handed. Stated
-# once here so no caller has to remember it.
-LIST_FIELDS = frozenset({NETWORK_FILTER})
+# The dimensions stored as a LIST rather than a comma string, and filter.py's
+# `merge_token` needs telling which it is being handed. Networks, because the
+# textarea that first wrote them split on commas before storage; keywords,
+# because a TMDB keyword's own name can hold a comma. Stated once here so no
+# caller has to remember it.
+LIST_FIELDS = frozenset({NETWORK_FILTER, TV_KEYWORDS, MOVIE_KEYWORDS})
 
-# THERE IS NO "WHICH DIMENSIONS FOLD CASE" SET HERE, and the empty space is the
-# statement. There was one, for the browser: the panel had to tell a script
-# whether a typed token was the same token as one already drawn when only the case
-# differed. The server draws that chip now, and it answers the question by calling
-# filter.py's own parsers — which is where folding is decided, beside the matching
-# they have to agree with.
+# WHICH LIST KEEPS ITS CASE. Every comma-string dimension folds, and filter.py's
+# own parsers are where that is decided, beside the matching it has to agree
+# with; the two LIST dimensions differ, and this names which parser reads which.
+# Networks keep it ('TVN' and 'tvN' are two broadcasters — parse_network_spec);
+# keywords fold (TMDB spells every keyword in lower case — parse_keyword_spec).
+_LIST_PARSERS = {
+    NETWORK_FILTER: calendar_filter.parse_network_spec,
+    TV_KEYWORDS: calendar_filter.parse_keyword_spec,
+    MOVIE_KEYWORDS: calendar_filter.parse_keyword_spec,
+}
+CASED_FIELDS = frozenset({NETWORK_FILTER})
+
+# The dimensions that are one switch each, posted as `toggle:<column>`.
+TOGGLE_FIELDS = frozenset({TV_SINGLE_SERVICE, MOVIE_SINGLE_SERVICE, TV_SPARSE_NO_NETWORK})
+
+# The dimensions drawn as TICK BOXES rather than three-way chips: a missing-data
+# rule is on or off, never "only titles missing a country". Each box posts its
+# chip field as `include` or nothing, so the payload, the save and the stored
+# spec are exactly the chips' — the ticked rules, comma-separated.
+TICK_FIELDS = frozenset({TV_MISSING, MOVIE_MISSING})
+
+
+def parse(field: str, spec) -> tuple[set[str], set[str]]:
+    """`spec` as (includes, excludes), read by the parser filter.py matches this
+    dimension with — so a chip drawn here and a title judged there fold, or keep,
+    case the same way."""
+    parser = _LIST_PARSERS.get(field)
+    if parser is not None:
+        return parser(spec or ())
+    return calendar_filter.parse_spec(str(spec or ""))
 
 # The three answers a chip can carry, and the empty one is a real answer: it is
 # what "clear this" posts, and a field left out of the payload entirely would be
@@ -170,11 +209,42 @@ _RELEASE_TYPE_TOKENS = (
     ("4", "Digital"), ("5", "Physical"), ("6", "TV"),
 )
 
+# ISO 639-1 codes, lower-case like every other token here (a record states its
+# language upper-case and the filter folds). The languages this app's calendars
+# carry most, measured on one October's premieres — English, Japanese, Chinese
+# and Korean lead the shows, Spanish, French and Portuguese the films — and
+# everything else is one keystroke away.
+_LANGUAGE_TOKENS = (
+    ("en", "English"), ("es", "Spanish"), ("fr", "French"), ("de", "German"),
+    ("it", "Italian"), ("pt", "Portuguese"), ("nl", "Dutch"), ("da", "Danish"),
+    ("sv", "Swedish"), ("no", "Norwegian"), ("ja", "Japanese"), ("ko", "Korean"),
+    ("zh", "Chinese"), ("hi", "Hindi"), ("th", "Thai"), ("ru", "Russian"),
+)
+
+# The missing-data rules, in the order the panel lists them — filter.py's
+# MISSING_RULES says what each one hides.
+_MISSING_TOKENS = (
+    ("country", "No country"), ("language", "No language"), ("poster", "No poster"),
+    ("country+language", "No country and no language"),
+    ("country+poster", "No country and no poster"),
+    ("language+poster", "No language and no poster"),
+)
+
 VOCABULARY: dict[str, tuple[Chip, ...]] = {
     TV_GENRES: _chips(*((t, _GENRE_LABELS[t]) for t in _TV_GENRE_TOKENS)),
     MOVIE_GENRES: _chips(*((t, _GENRE_LABELS[t]) for t in _MOVIE_GENRE_TOKENS)),
     TV_COUNTRIES: _chips(*_COUNTRY_TOKENS),
     MOVIE_COUNTRIES: _chips(*_COUNTRY_TOKENS),
+    TV_LANGUAGES: _chips(*_LANGUAGE_TOKENS),
+    MOVIE_LANGUAGES: _chips(*_LANGUAGE_TOKENS),
+    # A CLOSED VOCABULARY: the type is one of the catalogue's own few words.
+    TV_SHOW_TYPES: _chips(*SHOW_TYPES.items()),
+    # NO VOCABULARY FOR KEYWORDS, for the networks' reason below: tens of
+    # thousands exist, so the panel draws what the viewer has named and a box.
+    TV_KEYWORDS: (),
+    MOVIE_KEYWORDS: (),
+    TV_MISSING: _chips(*_MISSING_TOKENS),
+    MOVIE_MISSING: _chips(*_MISSING_TOKENS),
     MOVIE_RELEASE_COUNTRIES: _chips(*_RELEASE_MARKET_TOKENS),
     MOVIE_RELEASE_TYPES: _chips(*_RELEASE_TYPE_TOKENS),
     SHOW_CERTIFICATIONS: _chips(
@@ -193,16 +263,30 @@ VOCABULARY: dict[str, tuple[Chip, ...]] = {
     NETWORK_FILTER: (),
 }
 
-# Every field the panel can carry, which is also every field its save may write.
-# The route validates against this rather than against a list of its own.
+# Every CHIP field the panel can carry, which is also every chip field its save
+# may write. The route validates against this rather than against a list of its
+# own. The switches are TOGGLE_FIELDS, posted under a name of their own.
 FIELDS = frozenset(VOCABULARY)
 
 # Which fields belong to which tab. Certifications, networks and the release
 # pair were already per-medium before the panel split; genres and countries
-# became so with it.
-TV_FIELDS = (TV_GENRES, TV_COUNTRIES, NETWORK_FILTER, SHOW_CERTIFICATIONS)
-MOVIE_FIELDS = (MOVIE_GENRES, MOVIE_COUNTRIES, MOVIE_CERTIFICATIONS,
-                MOVIE_RELEASE_COUNTRIES, MOVIE_RELEASE_TYPES)
+# became so with it. Show type and the no-network rule are the TV tab's alone:
+# a film has neither a type nor a network.
+TV_FIELDS = (TV_GENRES, TV_COUNTRIES, TV_LANGUAGES, NETWORK_FILTER, SHOW_CERTIFICATIONS,
+             TV_SHOW_TYPES, TV_KEYWORDS, TV_MISSING, TV_SINGLE_SERVICE,
+             TV_SPARSE_NO_NETWORK)
+MOVIE_FIELDS = (MOVIE_GENRES, MOVIE_COUNTRIES, MOVIE_LANGUAGES, MOVIE_CERTIFICATIONS,
+                MOVIE_RELEASE_COUNTRIES, MOVIE_RELEASE_TYPES, MOVIE_KEYWORDS,
+                MOVIE_MISSING, MOVIE_SINGLE_SERVICE)
+
+
+def empty(field: str):
+    """What `field` holds when nothing narrows it — what Clear draws, and what a
+    dimension mentioned with nothing set is saved as."""
+    if field in TOGGLE_FIELDS:
+        return False
+    return [] if field in LIST_FIELDS else ""
+
 
 _PREFIX = "chip"
 _SEPARATOR = ":"
@@ -322,6 +406,29 @@ def sources_from_form(data: dict, media: Media) -> set[str] | None:
     return chosen if mentioned else None
 
 
+# `toggle:<pref column>` IS ONE SWITCH (TOGGLE_FIELDS), with a hidden companion
+# posting "0" under the same name, for the service switches' reason: an unticked
+# box sends nothing, and absent means LEAVE ALONE to the save.
+_TOGGLE_PREFIX = "toggle"
+
+
+def toggle_name(field: str) -> str:
+    """The form-field name one switch posts under."""
+    return f"{_TOGGLE_PREFIX}{_SEPARATOR}{field}"
+
+
+def toggles_from_form(data: dict) -> dict[str, bool]:
+    """The switches this payload mentions, keyed by pref column — only those,
+    so a tab nobody opened is left alone. The box and its companion share a name,
+    so `route_params.ticked` reads the last entry, the box overriding."""
+    out: dict[str, bool] = {}
+    for name, value in data.items():
+        parts = str(name or "").split(_SEPARATOR)
+        if len(parts) == 2 and parts[0] == _TOGGLE_PREFIX and parts[1] in TOGGLE_FIELDS:
+            out[parts[1]] = route_params.ticked(value)
+    return out
+
+
 @dataclass(frozen=True)
 class ChipState:
     """A chip as the panel draws it: what it matches, what it says, how it is
@@ -347,15 +454,12 @@ def chips_for(field: str, spec) -> list[ChipState]:
     a naive "vocabulary, then everything stored" would do.
     """
     is_list = field in LIST_FIELDS
-    includes, excludes = (
-        calendar_filter.parse_network_spec(spec or ())
-        if is_list else calendar_filter.parse_spec(str(spec or ""))
-    )
-    # parse_spec lowercases and parse_network_spec does not, so the comparison
-    # below has to fold exactly the way the matching parser folds — otherwise a
-    # genre stored as "Drama" would draw an extra chip beside the vocabulary's.
+    includes, excludes = parse(field, spec)
+    # The comparison below has to fold exactly the way the matching parser folds
+    # — otherwise a genre stored as "Drama" would draw an extra chip beside the
+    # vocabulary's.
     def key(token: str) -> str:
-        return token if is_list else token.lower()
+        return token if field in CASED_FIELDS else token.lower()
 
     modes: dict[str, str] = {}
     for token in includes:
@@ -419,7 +523,7 @@ def specs_from_form(data: dict) -> dict[str, object]:
     for name in data:
         field = parse_presence_name(name)
         if field is not None:
-            out.setdefault(field, [] if field in LIST_FIELDS else "")
+            out.setdefault(field, empty(field))
     for name, value in data.items():
         parsed = parse_field_name(name)
         if parsed is None:
@@ -428,12 +532,13 @@ def specs_from_form(data: dict) -> dict[str, object]:
         mode = str(value or "")
         if mode not in MODES:
             continue
-        is_list = field in LIST_FIELDS
         if field not in out:
-            out[field] = [] if is_list else ""
+            out[field] = empty(field)
         if mode is IGNORED or not mode:
             continue
-        out[field] = calendar_filter.merge_token(out[field], token, mode, is_list=is_list)
+        out[field] = calendar_filter.merge_token(out[field], token, mode,
+                                                 is_list=field in LIST_FIELDS,
+                                                 cased=field in CASED_FIELDS)
     return out
 
 
@@ -453,6 +558,7 @@ def specs_from_form(data: dict) -> dict[str, object]:
 BADGE_FIELDS: dict[str, dict[str, str]] = {
     "genre": {"movie": MOVIE_GENRES, "show": TV_GENRES},
     "country": {"movie": MOVIE_COUNTRIES, "show": TV_COUNTRIES},
+    "language": {"movie": MOVIE_LANGUAGES, "show": TV_LANGUAGES},
     "network": {"movie": NETWORK_FILTER, "show": NETWORK_FILTER},
     "certification": {"movie": MOVIE_CERTIFICATIONS, "show": SHOW_CERTIFICATIONS},
 }
@@ -476,8 +582,8 @@ def badge_key(dimension: str, token: str) -> str:
 
 def badge_field(dimension: str, media) -> str | None:
     """The pref column a badge press writes, or None for a dimension this app
-    does not filter on. A card also draws a language and a weekday, and storing
-    either would be a preference that could never act."""
+    does not filter on. A card also draws a weekday, and storing it would be a
+    preference that could never act."""
     columns = BADGE_FIELDS.get(str(dimension or ""))
     if columns is None:
         return None
@@ -499,14 +605,10 @@ class BadgeModes:
         self._modes: dict[str, dict[str, str]] = {}
         for field in {column for columns in BADGE_FIELDS.values()
                       for column in columns.values()}:
-            is_list = field in LIST_FIELDS
-            includes, excludes = (
-                calendar_filter.parse_network_spec(prefs.get(field) or ())
-                if is_list else calendar_filter.parse_spec(str(prefs.get(field) or ""))
-            )
+            includes, excludes = parse(field, prefs.get(field))
             # Folded exactly the way the matching parser folds, or a genre stored
             # as "Drama" would leave the card's "drama" badge looking unset.
-            fold = (lambda token: token) if is_list else (lambda token: token.lower())
+            fold = (lambda token: token) if field in CASED_FIELDS else (lambda token: token.lower())
             self._modes[field] = {
                 **{fold(token): INCLUDE for token in includes},
                 **{fold(token): EXCLUDE for token in excludes},
@@ -516,7 +618,7 @@ class BadgeModes:
         field = badge_field(dimension, media)
         if field is None:
             return IGNORED
-        key = token if field in LIST_FIELDS else str(token).lower()
+        key = token if field in CASED_FIELDS else str(token).lower()
         return self._modes.get(field, {}).get(key, IGNORED)
 
     # Reached through here rather than as a template global because every
@@ -536,7 +638,32 @@ _EMPTY_SPECS: dict[str, object] = {
     "show_certifications": "", "movie_certifications": "",
     "movie_release_countries": "", "movie_release_types": "",
     "network_filter": [],
+    "languages": "", "keywords": [], "show_types": "",
+    "single_service": False, "sparse_no_network": False, "missing": "",
 }
+
+# THE KEYWORDS THE READ PATH TAKES, in one tuple. Every function between a route
+# and filter.py passes them through as one set (app/calendar/cache.py), and its
+# memo key is built from this tuple — so a dimension added here reaches the key
+# without anybody remembering to put it there.
+SPEC_KEYS = tuple(_EMPTY_SPECS)
+
+
+def complete_specs(specs: dict) -> dict[str, object]:
+    """`specs` with every read keyword present, an absent one at its empty value.
+
+    A KEYWORD THIS MODULE DOES NOT NAME IS A TypeError, as it would be against a
+    signature that spelled each one out: the read path takes them as one set so
+    that none can be left off a call, and a misspelt one silently filtering
+    nothing would be the same failure arriving from the other side.
+    """
+    unknown = set(specs) - set(SPEC_KEYS)
+    if unknown:
+        raise TypeError(f"not a calendar filter: {', '.join(sorted(unknown))}")
+    out = {**_EMPTY_SPECS, **specs}
+    for key in ("network_filter", "keywords"):
+        out[key] = list(out[key] or [])
+    return out
 
 
 def active_specs(prefs: dict, media: Media, *, honour_pause: bool) -> dict[str, object]:
@@ -562,7 +689,7 @@ def active_specs(prefs: dict, media: Media, *, honour_pause: bool) -> dict[str, 
     from a default nobody re-read.
     """
     if honour_pause and prefs.get("filters_paused"):
-        return dict(_EMPTY_SPECS)
+        return complete_specs({})
     if media is Media.MOVIE:
         return {
             **_EMPTY_SPECS,
@@ -571,6 +698,10 @@ def active_specs(prefs: dict, media: Media, *, honour_pause: bool) -> dict[str, 
             "movie_certifications": prefs.get(MOVIE_CERTIFICATIONS, ""),
             "movie_release_countries": prefs.get(MOVIE_RELEASE_COUNTRIES, ""),
             "movie_release_types": prefs.get(MOVIE_RELEASE_TYPES, ""),
+            "languages": prefs.get(MOVIE_LANGUAGES, ""),
+            "keywords": list(prefs.get(MOVIE_KEYWORDS) or []),
+            "single_service": bool(prefs.get(MOVIE_SINGLE_SERVICE)),
+            "missing": prefs.get(MOVIE_MISSING, ""),
         }
     return {
         **_EMPTY_SPECS,
@@ -578,7 +709,73 @@ def active_specs(prefs: dict, media: Media, *, honour_pause: bool) -> dict[str, 
         "countries": prefs.get(TV_COUNTRIES, ""),
         "show_certifications": prefs.get(SHOW_CERTIFICATIONS, ""),
         "network_filter": list(prefs.get(NETWORK_FILTER) or []),
+        "languages": prefs.get(TV_LANGUAGES, ""),
+        "keywords": list(prefs.get(TV_KEYWORDS) or []),
+        "show_types": prefs.get(TV_SHOW_TYPES, ""),
+        "single_service": bool(prefs.get(TV_SINGLE_SERVICE)),
+        "sparse_no_network": bool(prefs.get(TV_SPARSE_NO_NETWORK)),
+        "missing": prefs.get(TV_MISSING, ""),
     }
+
+
+# THE SETTINGS FIELDS THE OPERATOR'S FLOOR IS READ FROM — every one, because the
+# calendar's memo key carries the floor through `floor_specs` and nothing else
+# (tests/calendar/test_span_memo.py holds each to moving it). Language and
+# keywords are ONE floor for both media, like genres and countries: one
+# vocabulary, one answer. Show type and the no-network rule are shows' alone.
+# The single-service and missing-data floors are per medium, because the same
+# rule weighs differently on each — "only one service lists it" hides about half
+# of one October's series and nine films in ten. Those per-medium names are the
+# viewer's columns, so the Settings panel draws them with the panel's own chips.
+FLOOR_FIELDS = ("genres", "countries", "show_certifications", "movie_certifications",
+                "network_filter", "languages", "keywords", TV_SHOW_TYPES,
+                TV_SINGLE_SERVICE, MOVIE_SINGLE_SERVICE, TV_SPARSE_NO_NETWORK,
+                TV_MISSING, MOVIE_MISSING)
+
+
+def floor_specs(settings, media: Media) -> dict[str, object]:
+    """The operator's floor for one medium, in `active_specs`' keywords — THE ONE
+    PLACE A SETTINGS FIELD IS TURNED INTO WHAT A READ APPLIES, so the floor and a
+    viewer's filters are judged by the same code (filter.TitleRules), in turn.
+
+    THE NETWORK LIST IS A SHOW CALENDAR'S ALONE, as it is for a viewer
+    (`active_specs`): a film has no network at all, so an include-only list
+    applied to a film calendar hid every film — "only HBO" emptied Movie
+    Premieres. The release specs are a viewer's alone and come back empty.
+    """
+    show = str(media) != str(Media.MOVIE)
+    return {
+        **_EMPTY_SPECS,
+        "genres": settings.genres,
+        "countries": settings.countries,
+        "show_certifications": settings.show_certifications,
+        "movie_certifications": settings.movie_certifications,
+        "network_filter": list(settings.network_filter or []) if show else [],
+        "languages": settings.languages,
+        "keywords": list(settings.keywords or []),
+        "show_types": settings.tv_show_types if show else "",
+        "single_service": bool(settings.tv_single_service if show
+                               else settings.movie_single_service),
+        "sparse_no_network": bool(settings.tv_sparse_no_network) if show else False,
+        "missing": settings.tv_missing if show else settings.movie_missing,
+    }
+
+
+def title_rules(specs: dict, media) -> calendar_filter.TitleRules:
+    """`specs` — `active_specs`' or `floor_specs`' keywords — parsed for a read of
+    `media`: the certification spec for that medium, every other dimension as
+    it stands. The release specs are not among them; they judge a film's
+    per-service records before resolution (filter.filter_release_groups)."""
+    return calendar_filter.TitleRules.parse(
+        genres=specs.get("genres", ""), countries=specs.get("countries", ""),
+        certifications=(specs.get("movie_certifications", "") if str(media) == str(Media.MOVIE)
+                        else specs.get("show_certifications", "")),
+        network_filter=specs.get("network_filter"),
+        languages=specs.get("languages", ""), keywords=specs.get("keywords"),
+        show_types=specs.get("show_types", ""),
+        single_service=bool(specs.get("single_service")),
+        sparse_no_network=bool(specs.get("sparse_no_network")),
+        missing=specs.get("missing", ""))
 
 
 def any_set(prefs: dict, fields) -> bool:
@@ -599,9 +796,12 @@ def count_set(prefs: dict, fields) -> int:
     TOKENS, NOT DIMENSIONS. "3" on the Movies tab means three things are being
     filtered, which is what somebody glancing at it wants to know; counting
     dimensions would say "1" for a viewer who excluded nine genres and read as
-    though almost nothing were set.
+    though almost nothing were set. A switch that is on is one thing filtered.
     """
     total = 0
     for field in fields:
-        total += len(_spec_order(prefs.get(field), field in LIST_FIELDS))
+        if field in TOGGLE_FIELDS:
+            total += bool(prefs.get(field))
+        else:
+            total += len(_spec_order(prefs.get(field), field in LIST_FIELDS))
     return total

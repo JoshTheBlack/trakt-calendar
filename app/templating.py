@@ -16,13 +16,16 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urlencode
 
+import anyio.to_thread
 from fastapi.templating import Jinja2Templates
 from jinja2.ext import Extension
 
 from . import assets
 from . import chrome
+from . import perftrace
 from .providers.base import Source
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
@@ -39,10 +42,27 @@ TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 DEDENT_MARKER = "{#- dedent -#}"
 _LEADING_WHITESPACE = re.compile(r"^[ \t]+", re.M)
 
+# AND ONE THAT OPENS WITH THIS IS SENT WITHOUT THE LINE BREAKS BETWEEN ITS TAGS
+# TOO: a newline that follows a tag's `>` or a statement or comment tag (`%}`,
+# `#}`) and precedes a tag or a statement or comment tag goes — never one beside
+# an EXPRESSION, whose output may be text a newline was spacing. Each such
+# newline is a text node of its own in the browser, which a card drew sixty of:
+# MEASURED on one October's All Episodes, 61 of a card's 84 text nodes were
+# whitespace between its tags. FOR A TEMPLATE WHOSE EVERY CONTAINER LAYS OUT BY
+# FLEX OR GRID, OR POSITIONS WHAT IT HOLDS, where whitespace between tags draws
+# nothing — the calendar card and what it is built from — and only those: in
+# ordinary inline flow a line break between two tags is a visible space. A line
+# break is `\r\n` as well as `\n`: the loader hands the source over undecoded, and
+# a template saved by an editor that writes CRLF would otherwise silently stop
+# being tightened.
+TIGHT_MARKER = "{#- tight -#}"
+_BETWEEN_TAGS = re.compile(r"(?:(?<=>)|(?<=%\})|(?<=#\}))\r?\n(?=<|\{%|\{#)")
+
 
 class Dedent(Extension):
     """Strips each line's leading whitespace from a template that opens with
-    DEDENT_MARKER, AT COMPILE TIME — once per template, not once per render.
+    DEDENT_MARKER or TIGHT_MARKER, AT COMPILE TIME — once per template, not once
+    per render — and, behind TIGHT_MARKER, the line breaks between its tags.
 
     Only LEADING whitespace, and the newline stays. HTML collapses a run of
     whitespace between tags to the same single space a newline already is, so
@@ -52,6 +72,8 @@ class Dedent(Extension):
     every template being changed under its author."""
 
     def preprocess(self, source: str, name: str | None, filename: str | None = None) -> str:
+        if source.startswith(TIGHT_MARKER):
+            return _BETWEEN_TAGS.sub("", _LEADING_WHITESPACE.sub("", source))
         if not source.startswith(DEDENT_MARKER):
             return source
         return _LEADING_WHITESPACE.sub("", source)
@@ -59,6 +81,21 @@ class Dedent(Extension):
 
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 templates.env.add_extension(Dedent)
+
+
+async def drawn(request, name: str, context: dict, **kwargs):
+    """`templates.TemplateResponse`, built on a worker thread.
+
+    JINJA RENDERS WHEN THE RESPONSE IS BUILT, so building one on the event loop
+    holds every other request while it runs: MEASURED on a copy of dev, a month's
+    shell drew its 268 inline cards in 0.26 s and the loop answered nobody else
+    meanwhile, and an unfiltered month's 718 in 1.2 s. A calendar answer —
+    a month, a late day, a mark's redraw — is drawn here instead; the loop is
+    free while it is. The response is the same object, built the same way.
+    Timed as `templating.drawn` in its request's breakdown (perftrace)."""
+    with perftrace.span("templating.drawn", template=name):
+        return await anyio.to_thread.run_sync(
+            lambda: templates.TemplateResponse(request, name, context, **kwargs))
 
 # `assets` is the module itself, so _base.html calls assets.url(assets.STYLESHEET)
 # and there is no second copy of any asset path anywhere in the templates.
@@ -73,6 +110,50 @@ templates.env.globals["assets"] = assets
 # by every one of its callers — which is the fifteen-literals problem again, one
 # level up.
 templates.env.globals["product"] = chrome.PRODUCT_NAME
+
+
+class SourceLook(NamedTuple):
+    """How one service is SHOWN: its name, and its two pictures under
+    /static/images/ — see templates/_source_logo.html for which goes where."""
+    label: str
+    mark: str
+    wordmark: str
+
+
+# EVERY SERVICE'S TWO PICTURES, BY NAME, AND ONE ENTRY EACH. The template these
+# feed used to draw every service that was not Simkl as Trakt — its name, its
+# mark and its wordmark — so a third service would have been credited to the
+# wrong company on every card and button it touched. A service with no entry
+# here now fails the render (`source_look`) rather than borrowing another's
+# face; tests/kernel/test_source_look.py holds the table to the registry.
+#   tmdb  TMDB's own "primary short" square logo (themoviedb.org's logos and
+#         attribution page) as the wordmark, and the same logo on TMDB's navy
+#         tile as the mark, so it stays legible over a poster the way the
+#         other two marks' discs and tiles do. Sized by the same CSS classes as
+#         theirs, so it is never drawn larger, which TMDB's terms ask.
+SOURCE_IMAGES: dict[str, tuple[str, str]] = {
+    "trakt": ("trakt-circlemark-dark.svg", "trakt-logo-dark.svg"),
+    "simkl": ("simkllogo.svg", "simkl_white_with_shaddow_transparent.png"),
+    "tmdb": ("tmdb-mark.svg", "tmdb-wordmark.svg"),
+}
+
+
+def source_look(source) -> SourceLook:
+    """`source`'s name and pictures. Raises KeyError for a name that is not a
+    registered service with pictures: a card is better refused than drawn under
+    somebody else's logo.
+
+    THE NAME IS THE PROVIDER'S OWN LABEL, read from the registry, so a badge can
+    never spell a service differently from the rest of the app. Function-local
+    because the registry imports config, which this kernel module must not close
+    a loop through at load time."""
+    from . import providers
+    name = str(source)
+    mark, wordmark = SOURCE_IMAGES[name]
+    return SourceLook(providers.registered()[name].label, mark, wordmark)
+
+
+templates.env.globals["source_look"] = source_look
 
 
 def details_url(base: str, media, ids, season, key: str = "") -> str:

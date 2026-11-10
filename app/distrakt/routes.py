@@ -21,6 +21,7 @@ import asyncio
 import calendar as _calendar
 import json
 import logging
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote
 
@@ -28,23 +29,29 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from . import (arrival, backfill, counts, discord_fmt, episode_progress, lifecycle, live,
-               post_memo, prefs, rollover, slug_repair, unsettled, watch_history,
-               watchlist_writes)
+               post_memo, prefs, rollover, slug_repair, tracker_settings, unsettled,
+               watch_history, watchlist_writes)
 # The data layer is reached through this package's own public surface, the same
 # names an outside caller uses, rather than through the six modules those names
 # are defined in: a route handler has no business knowing which half of the
 # tracker `load_month` or `compute_live_shows` lives in.
 from .. import distrakt as distrakt_store
-from .. import auth, authz, chrome, clock, db, details_panel, providers, route_params
+from .. import auth, authz, chrome, clock, db, details_panel, metadata, providers, route_params
 from ..auth import AuthLevel, viewer
-from ..calendar import entries as calendar_entries, share_links
+from ..calendar import share_links
 from ..config import load_settings
+from ..metadata import identity as title_identity
+from ..metadata import panel as metadata_panel
+from ..metadata import pictures as metadata_pictures
+from ..metadata import refresh as metadata_refresh
+from ..metadata import rows as title_rows
+from ..metadata import typed_search
 from ..endpoints import endpoint_choices
 from ..media import artwork, logos, posters
 from ..perftrace import span
 # The catalogue search every feature shares — the fan-out, the merge and reading
 # a chosen result back out of it. What a result DOES once chosen is this file's.
-from ..providers import detail_source, title_search
+from ..providers import detail_source, season_choices, title_search
 from ..providers.base import (ItemKey, Media, Source, SourceUnavailable,
                               parse_item_key, parse_media, proxied_image, resolve_key)
 from ..providers.trakt import TraktError
@@ -336,11 +343,10 @@ async def _file_finished(user_id, month_key: str, record: dict, detail) -> dict:
     })
 
 
-async def _add_to_past_month(request: Request, user_id, month_key: str, show: dict,
-                             detail, settings, year: int, month: int,
-                             *, message: str = "") -> Response:
-    """Put one season onto a month that is OVER, as a completion, and answer with
-    that month.
+async def _record_past(user_id, month_key: str, show: dict, detail, settings) -> str:
+    """Put one season onto a month that is OVER, as a completion. Returns why it
+    could not, or "" when it was filed; the caller closes the month and answers
+    once every season it was asked for is filed.
 
     THE WHOLE OF WHAT ADDING TO A PAST MONTH MEANS, in one place, because two
     routes reach it: the ordinary add when the viewer has navigated back, and the
@@ -372,11 +378,10 @@ async def _add_to_past_month(request: Request, user_id, month_key: str, show: di
     """
     total = int((detail or {}).get("total") or 0)
     if not total:
-        return _month_refusal(
-            request,
-            "No source lists any episodes for that season, so it cannot be recorded as finished.")
+        return (f"No source lists any episodes for season {show['season']}, so it cannot "
+                "be recorded as finished.")
     try:
-        stored = await distrakt_store.add_month_record(user_id, month_key, {
+        await distrakt_store.add_month_record(user_id, month_key, {
             **show,
             "kind": distrakt_store.RecordKind.COMPLETED,
             "watched": total,
@@ -388,17 +393,35 @@ async def _add_to_past_month(request: Request, user_id, month_key: str, show: di
             "finished_airing": True,
         })
     except distrakt_store.UnkeyableRecord as exc:
-        return _month_refusal(request, str(exc))
-    # CLOSED THROUGH ITS OWN VERB. A hand-filled past month ends up closed like
-    # every other past month, so it renders and imports from its own rows with no
-    # further provider calls — but closing is two columns on the month row, and a
-    # save_month round trip to set them would delete the month's records and
-    # re-insert only the ones the doc handed over.
-    await distrakt_store.set_month_closed(user_id, month_key)
+        return str(exc)
     await arrival.write_missing_premieres(settings, show)
-    return await _month_answer(
-        request, user_id, year, month, settings, message=message,
-        point_at=((stored or {}).get("key") or "", int(show["season"])))
+    # THE MONTH IS CLOSED BY THE CALLER, once, after the last season: a
+    # hand-filled past month ends up closed like every other past month, so it
+    # renders and imports from its own rows with no further provider calls —
+    # closed THROUGH ITS OWN VERB (distrakt_store.set_month_closed), because
+    # closing is two columns on the month row and a save_month round trip to set
+    # them would delete the month's records and re-insert only the ones the doc
+    # handed over.
+    return ""
+
+
+def _ticked_seasons(data) -> list[int] | None:
+    """The seasons an add names, as numbers, in the order the checklist drew
+    them (season_choices.ticked) — or a single `season`, which is how the
+    re-watch question's answers and a season that names itself post. None when
+    one of them is not a number."""
+    raw = season_choices.ticked(data) or ([data["season"]] if "season" in data else [])
+    try:
+        return [int(value) for value in raw]
+    except (TypeError, ValueError):
+        return None
+
+
+def _added_message(title: str, seasons: list[int], *, finished: bool) -> str:
+    """What an add says it did: "Added Title S01" or "… S01, S03"."""
+    numbers = ", ".join(f"S{season:02d}" for season in seasons)
+    return (f"Recorded {title} {numbers} as finished" if finished
+            else f"Added {title} {numbers}")
 
 
 async def _distrakt_post_link(user_id: int, settings, year: int, month: int) -> str | None:
@@ -488,10 +511,12 @@ async def distrakt(request: Request):
         # open on" selector; the same list the calendar's endpoint picker uses.
         "endpoints": endpoint_choices(),
         **chrome.page_context(user),
-        # This user's OWN default emoji, for the header pill — it renders into
-        # their Discord posts and nobody else's. A network's own code is drawn
-        # on its rows, with the month.
+        # This user's OWN default emoji, for the settings dialog's field — it
+        # renders into their Discord posts and nobody else's. A network's own code
+        # is drawn on its rows, with the month.
         "default_network_emoji": default_network_emoji,
+        # The rest of that dialog: the orders and the retired list, as stored.
+        "settings_panel": await tracker_settings.load(user.user_id, settings),
         # The range the backfill dialog opens on. Rendered rather than fetched:
         # the server decides it and used to answer a request whose only job was
         # to fill in two inputs.
@@ -546,9 +571,33 @@ def _posts(inputs: discord_fmt.PostInputs, emojis: dict, default_emoji: str) -> 
     return {"post1": post1, "post2": post2, "post_inputs": inputs}
 
 
+def _untracked(show: Mapping, tracked_by: Sequence[str] | None) -> bool:
+    """Whether NO service this viewer's tracker reads lists the title — so no
+    viewing of it will ever be counted, and the row says so.
+
+    A TITLE CAN BE ADDED THAT NO TRACKING SERVICE LISTS: the search finds it in
+    a catalogue that keeps no watch history (TMDB), and the lookups by shared id
+    that teach a new row its Trakt and Simkl ids (metadata.ensure) found it
+    at neither. The add is allowed — the season is real and the viewer asked for
+    it — but a row that silently stays at zero reads as "not watched yet". The
+    answer is read off the row's own ids, so a later lookup that finds the title
+    (arrival.ask_for_missing_ids, once a day) clears the mark with no step of its
+    own."""
+    if tracked_by is None:
+        return False
+    ids = show.get("ids") or {}
+    return not any(ids.get(str(source)) not in (None, "") for source in tracked_by)
+
+
 def _rows_for(shape: lifecycle.MonthShape,
-              standing: distrakt_store.MonthStanding) -> list[dict]:
+              standing: distrakt_store.MonthStanding,
+              tracked_by: Sequence[str] | None = None) -> list[dict]:
     """The rows the page's list draws from, in this month's standing.
+
+    `tracked_by` names the services whose watch history this viewer's tracker
+    reads (watch_history.tracker_sources), for a month still being kept; a row
+    holding an id for none of them is marked `untracked` — see
+    `_untracked`. None for a frozen month, which reads no service.
 
     THREE COLLECTIONS, JOINED HERE AND NOWHERE EARLIER. What began in the month,
     what the month settled, and what the viewer has in hand are separate all the
@@ -619,6 +668,7 @@ def _rows_for(shape: lifecycle.MonthShape,
             row_count = counts.row_count(per_source, show.get("total"), live.source_order())
             show = {**show, "count_label": row_count.label, "count_split": row_count.split}
         rows.append({**show, "returned": bool(show.get("came_back")),
+                     "untracked": _untracked(show, tracked_by),
                      "counts": show.get("counts") or counts.counts_label(
                          per_source, show.get("total"), live.source_labels(),
                          live.source_order()),
@@ -680,14 +730,14 @@ async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, defau
     listed = (await distrakt_store.user_records(user_id)
               if standing is distrakt_store.MonthStanding.CURRENT else [])
     shape = lifecycle.shape_of(distrakt_store.frozen_shows(doc) if doc else [],
-                               live.stored_shows(listed, settings))
-    shows = _rows_for(shape, standing)
+                               live.stored_shows(listed, settings, await live.totals_order(user_id)))
+    trackers = [str(source) for source in await watch_history.tracker_sources(settings, user_id)]
+    shows = _rows_for(shape, standing, trackers)
     # EVERY SERVICE THE TRACKER READS IS NAMED, because this page is only drawn
     # when none of them answered — naming Trakt alone told a Simkl account the
     # wrong thing.
     labels = live.source_labels()
-    named = [labels.get(str(source), str(source))
-             for source in await watch_history.tracker_sources(settings, user_id)]
+    named = [labels.get(source, source) for source in trackers]
     services = live.and_list(named) or "The services this tracker reads"
     notice = (
         f"{services} {'is' if len(named) == 1 else 'are'} rate-limiting us right now — "
@@ -794,7 +844,7 @@ async def _sync_watch_history(settings, user_id: int, records: list[dict],
             unreadable)
 
 
-def _season_lookup(settings) -> lifecycle.SeasonLookup:
+def _season_lookup(settings, order=None) -> lifecycle.SeasonLookup:
     """How a reopening asks what a season looks like NOW, as a callable the
     lifecycle can use without knowing a provider exists.
 
@@ -812,7 +862,8 @@ def _season_lookup(settings) -> lifecycle.SeasonLookup:
     rather than of Trakt off a bare `ids["trakt"]`. "How long is this season" is
     one question with one answer and one place that decides who answers it — a
     premiere correction that only ever asked Trakt simply never happened on an
-    instance reading its catalogue from somewhere else.
+    instance reading its catalogue from somewhere else. `order` is the viewer's
+    own (live.totals_order): the lookup asks the catalogues in the order they want.
     """
     async def look_up(record: dict, season: int) -> dict:
         rec = {**record, "season": season}
@@ -820,10 +871,10 @@ def _season_lookup(settings) -> lifecycle.SeasonLookup:
         # answers a zeroed season when nobody can be asked, which is right for a
         # caller that has nothing else to draw; here it would overwrite a real
         # withdrawn verdict's counts with zeros, and {} is what says "keep them".
-        if live.detail_source(rec, settings) is None:
+        if live.detail_source(rec, settings, order) is None:
             return {}
         try:
-            return await live.season_detail(settings, rec)
+            return await live.season_detail(settings, rec, order=order)
         except SourceUnavailable:
             return {}
     return look_up
@@ -1043,7 +1094,7 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
             # when there is nothing new to fold in.
             if plays:
                 questions = await lifecycle.reconcile_history(
-                    user_id, plays, month=month_key, look_up=_season_lookup(settings),
+                    user_id, plays, month=month_key, look_up=_season_lookup(settings, await live.totals_order(user_id)),
                     tz=watch_history.viewer_tz(settings))
             else:
                 questions = await lifecycle.standing_questions(
@@ -1145,19 +1196,10 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
             # questioned against the service the page is already showing.
             order=[source for source, _port in ports])
 
-    shows = _rows_for(shape, standing)
+    shows = _rows_for(shape, standing, [str(source) for source, _port in ports])
     if premieres and season_fresh:
         await distrakt_store.stamp_refreshed(user_id, month_key)
 
-    # Pre-warm the network-logo cache for everything on the page, so a show added
-    # before logos existed doesn't depend on some OTHER show requesting its
-    # network's logo first (see logos.ensure_logos). Best-effort and
-    # self-limiting: a no-op once each network's tile is on disk.
-    if ports and shows:
-        with span("payload.ensure_logos"):
-            await logos.ensure_logos(settings, [
-                (s.get("network"), (s.get("ids") or {}).get("tmdb")) for s in shows
-            ])
     if ports and (shows or movies):
         # And every row's picture, the same way — the watched films' as well as
         # the shows': a title nothing has recorded a picture for gets its one
@@ -1168,6 +1210,18 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
             _, unknown = await _row_pictures(user_id, shows, movies)
             if unknown:
                 await posters.ensure_addresses(settings, unknown, await _poster_order(user_id))
+        # ROWS DRAWN ARE TITLES VIEWED: each row's description, and the season it
+        # is, that is past its clock — or that no service has given yet — is
+        # re-read behind the page (app/metadata/refresh.py). The rows draw what
+        # the store holds now.
+        metadata_refresh.viewed(
+            settings,
+            [metadata_refresh.Wanted(str(show.get("media") or Media.SHOW),
+                                     show.get("ids") or {}, show.get("season"))
+             for show in shows]
+            + [metadata_refresh.Wanted(str(Media.MOVIE), film.get("ids") or {})
+               for film in movies or []],
+            budget=metadata_refresh.ROWS_BUDGET)
 
     with span("payload.render"):
         # The first notice takes the PREMIERE records alone. It announces what
@@ -1408,15 +1462,13 @@ _BANNERS = {
 
 def _modal_context(settings, year: int, month: int) -> dict:
     """What the add flow's three overlays need drawing: which catalogues the
-    search fields may name, whether an add into this month records something as
-    FINISHED, and the day a film defaults to.
+    search fields name (those every search asks — providers.for_search; a
+    service the viewer adds is offered under the results, not in the label),
+    whether an add into this month records something as FINISHED, and the day a
+    film defaults to.
 
-    `settings` MUST BE THE VIEWER'S OWN, not the instance-wide one — Simkl's
-    catalogue search now genuinely requires a user token (see
-    providers.for_catalogue_search's docstring for why that predicate is no
-    longer symmetric across sources), and an instance-wide Settings object never
-    carries a Simkl token, so it would read as "no Simkl" for every viewer,
-    linked or not.
+    `settings` MUST BE THE VIEWER'S OWN, not the instance-wide one, for every
+    search surface's reason: what a viewer may add is whom they linked.
 
     THE MONTH BEING PAST IS THE ONE TEST, and it is the clock's alone. A month
     behind the clock is filled in by hand and is what `add-completed` is for; the
@@ -1434,8 +1486,9 @@ def _modal_context(settings, year: int, month: int) -> dict:
     today = clock.today()
     viewing_now = (today.year, today.month) == (year, month)
     return {
-        "catalogue_sources": [str(source) for source, _
-                              in providers.for_catalogue_search(settings)],
+        # A service once however many of its catalogues are asked.
+        "catalogue_sources": list(dict.fromkeys(
+            str(entry.source) for entry in providers.for_search(settings).asked)),
         "as_finished": distrakt_store.month_key(year, month) < _this_month(),
         "film_day": today.isoformat() if viewing_now else f"{year:04d}-{month:02d}-01",
         "film_max": today.isoformat(),
@@ -1452,7 +1505,8 @@ def _modal_context(settings, year: int, month: int) -> dict:
     }
 
 
-def _emoji_context(emojis: dict, default_emoji: str, networks, is_admin: bool) -> dict:
+def _emoji_context(emojis: dict, default_emoji: str, network_logos: dict[str, logos.Logo],
+                   is_admin: bool) -> dict:
     """What a row's network badge and emoji code are drawn from.
 
     ONE BUILDER FOR THE MONTH AND FOR AN ANSWER THAT REDRAWS ONE NETWORK'S CELLS,
@@ -1461,18 +1515,16 @@ def _emoji_context(emojis: dict, default_emoji: str, networks, is_admin: bool) -
 
     `emoji_for` is the code the network posts as — its own, or the default — and
     `emoji_own` whether it has one (prefs.own_code: an entry equal to the default
-    is none). `logo_for` is the tile's address with the tile's own version in
-    it, so a regenerated logo is a new address the browser has not cached
-    (media/logos.versions). `net_ref` is what an answer addresses the cells by.
+    is none). `logo_for` is the network's badge — the logo's address through the
+    image proxy and whether it is light — or None where the network has none
+    (media/logos.known); a regenerated logo is a new path and so a new address the
+    browser has not cached. `net_ref` is what an answer addresses the cells by.
     """
-    versions = logos.versions(networks)
     return {
         "emoji_for": lambda network: prefs.own_code(emojis, default_emoji, network) or default_emoji,
         "emoji_own": lambda network: bool(prefs.own_code(emojis, default_emoji, network)),
         "net_ref": prefs.network_ref,
-        "logo_for": lambda network: (
-            f"/api/network-logo?name={quote(network or '')}&v={versions[network]}"
-            if network in versions else ""),
+        "logo_for": lambda network: network_logos.get(network or ""),
         "is_admin": is_admin,
     }
 
@@ -1480,7 +1532,8 @@ def _emoji_context(emojis: dict, default_emoji: str, networks, is_admin: bool) -
 def _month_context(request: Request, payload: dict, year: int, month: int,
                    emojis: dict, default_emoji: str, settings, *,
                    message: str = "", ok: bool = True,
-                   pictures: dict | None = None, is_admin: bool = False) -> dict:
+                   pictures: dict | None = None, is_admin: bool = False,
+                   network_logos: dict[str, logos.Logo] | None = None) -> dict:
     """The month fragment's whole context, out of the payload and nothing else.
 
     ONE READER OF THE PAYLOAD. Every mutating route answers through this, so what
@@ -1512,10 +1565,9 @@ def _month_context(request: Request, payload: dict, year: int, month: int,
         "message_ok": ok,
         "closed": closed,
         "month_query": f"?year={year}&month={month}",
-        # Which networks this instance holds a tile for is asked once for the
-        # whole response rather than once per row, and never of the browser.
-        **_emoji_context(emojis, default_emoji,
-                         (show.get("network") for show in shows), is_admin),
+        # Which networks have a badge is asked once for the whole response rather
+        # than once per row, and never of the browser.
+        **_emoji_context(emojis, default_emoji, network_logos or {}, is_admin),
         # A row's picture, resolved for the whole page before it is drawn
         # (_row_pictures) — "" where nothing is known yet.
         "poster_for": lambda show: (pictures or {}).get((str(show.get("key")),
@@ -1570,17 +1622,28 @@ async def _row_pictures(user_id: int, shows: list[dict], films: list[dict] | Non
     is safe to call while drawing it.
 
     THE ADDRESS, NEVER THE IMAGE: nothing here puts a picture on disk. The row
-    draws the address through the image proxy.
+    draws the address through the image proxy with this app's report address
+    behind it, so a picture that will not load is replaced at once by the next
+    recorded one and its title healed (app/metadata/pictures.py).
+
+    THE REGISTRY'S ADDRESS FOR A SERVICE WINS over the title store's own row of
+    it, which only fills a service the registry holds nothing for — and never with
+    an address the registry has capped, or a picture confirmed dead would be
+    drawn again from the copy.
     """
     rows = ([(Media.SHOW, show) for show in shows if show.get("key")]
             + [(Media.MOVIE, film) for film in films or [] if film.get("key")])
     order = await _poster_order(user_id)
-    stored = {media: await calendar_entries.posters_for(
+    settings = await load_settings()
+    stored = {media: await title_rows.posters_for(
                   [row["key"] for kind, row in rows if kind == media], media)
               for media in (Media.SHOW, Media.MOVIE)}
     refs = [(str(media), tmdb, row.get("season")) for media, row in rows
             if (tmdb := _row_tmdb(row))]
-    known = await artwork.known(refs)
+    # A title with no tmdb id: the registry's pictures of it are filed under its
+    # key (artwork's title_posters), which is the row's own key.
+    known = await artwork.known(refs, [(str(media), str(row["key"])) for media, row in rows
+                                       if not _row_tmdb(row)])
     pictures: dict[tuple[str, int | None], str] = {}
     unknown: set[tuple[str, int]] = set()
     for media, row in rows:
@@ -1588,10 +1651,18 @@ async def _row_pictures(user_id: int, shows: list[dict], films: list[dict] | Non
         pair = (str(media), tmdb)
         season = row.get("season")
         own = known.seasons.get((*pair, season), {}) if tmdb and season is not None else {}
-        address = artwork.pick({**known.shows.get(pair, {}), **stored[media].get(row["key"], {})},
-                               own, order)
-        pictures[(str(row["key"]), season)] = proxied_image(address) or ""
-        if not address and tmdb and pair not in known.missed:
+        # The picture and, behind it, every other one in the same order: an
+        # address recorded here can die at its host (artwork.ranked).
+        filed = (known.shows.get(pair, {}) if tmdb
+                 else known.titles.get((str(media), str(row["key"])), {}))
+        kept = {source: url for source, url in stored[media].get(row["key"], {}).items()
+                if url not in known.capped}
+        choices = artwork.ranked_choices({**kept, **filed}, own, order, season)
+        title = metadata_pictures.Title(str(media), tmdb, "" if tmdb else str(row["key"]),
+                                        season)
+        pictures[(str(row["key"]), season)] = metadata_pictures.drawn(
+            settings, title, choices, order)
+        if not choices and tmdb and pair not in known.missed:
             unknown.add(pair)
     return pictures, sorted(unknown)
 
@@ -1599,7 +1670,8 @@ async def _row_pictures(user_id: int, shows: list[dict], films: list[dict] | Non
 async def _month_answer(request: Request, user_id: int, year: int, month: int,
                         settings, *, message: str = "", ok: bool = True,
                         force_fresh: bool = False,
-                        point_at: tuple | None = None) -> Response:
+                        point_at: tuple | None = None,
+                        overlays: bool = True) -> Response:
     """The month, recomputed and drawn: the one answer every mutating tracker
     route gives.
 
@@ -1607,6 +1679,10 @@ async def _month_answer(request: Request, user_id: int, year: int, month: int,
     moved between buckets, a verdict withdrawn or a film forgotten all change what
     the page says about the rest of it. That was already true when this was JSON;
     what is new is that there is no second representation of it to keep in step.
+
+    `overlays` is whether the answer also brings the add flow's dialogs back
+    closed and empty (_distrakt_modals.html). Every answer to a press does; the
+    page's own load of its month passes False — distrakt_month_fragment says why.
 
     ALWAYS 200, WHATEVER THE PAYLOAD SAYS. A non-200 is never swapped
     (static/js/boost.js's `noSwap`), so a status code would leave the page holding
@@ -1626,11 +1702,21 @@ async def _month_answer(request: Request, user_id: int, year: int, month: int,
     emojis, default_emoji = await distrakt_store.get_emoji_prefs(user_id)
     pictures, _ = await _row_pictures(user_id, payload.get("shows") or [],
                                       payload.get("movies") or [])
+    # EVERY ROW'S BADGE IS ONE READ for the whole page, and the networks nobody
+    # has resolved yet are resolved behind this response (logos.for_page), so a
+    # show added before logos existed does not depend on some OTHER show
+    # requesting its network's logo first — and a first load never waits on TMDB.
+    with span("payload.logos"):
+        network_logos = await logos.for_page(settings, [
+            (show.get("network"), (show.get("ids") or {}).get("tmdb"))
+            for show in payload.get("shows") or []])
     user = await auth.current_user(request)
     return templates.TemplateResponse(
         request, "_distrakt_month.html",
-        _month_context(request, payload, year, month, emojis, default_emoji, settings,
-                       message=message, ok=ok, pictures=pictures, is_admin=user.is_admin))
+        {**_month_context(request, payload, year, month, emojis, default_emoji, settings,
+                          message=message, ok=ok, pictures=pictures, is_admin=user.is_admin,
+                          network_logos=network_logos),
+         "overlays": overlays})
 
 
 def _rewatch_answer(request: Request, ask: dict, resubmit_url: str,
@@ -1754,6 +1840,15 @@ async def distrakt_month_fragment(request: Request):
     CLOSED or past month: rendered from the frozen snapshot with NO provider
     calls. Opening an uninitialized month lazily rolls it over first (see
     ensure_month).
+
+    THIS ANSWER LEAVES THE ADD FLOW'S DIALOGS ALONE (`overlays=False`), because
+    nobody pressed anything in them to ask for it. It arrives on the page's own
+    `load`, which can take seconds, and on `month-changed`; the dialogs are open
+    to the person from the moment the shell paints. Redrawn closed by this answer,
+    a dialog opened while the month was still being worked out shut in the
+    middle of being typed into and took the query with it — measured in Chromium
+    and Firefox. The shell already draws them closed and empty, and none of the
+    routes that raise `month-changed` (_and_the_month) is pressed from inside one.
     """
     user_id = await _distrakt_user_id(request)
     today = clock.today()
@@ -1761,7 +1856,8 @@ async def distrakt_month_fragment(request: Request):
     month = route_params.valid_month(request.query_params.get("month"), today.month)
     with span("GET /distrakt/fragments/month", ym=f"{year}-{month:02d}"):
         settings = await viewer.settings_for_user(user_id)
-        return await _month_answer(request, user_id, year, month, settings)
+        return await _month_answer(request, user_id, year, month, settings,
+                                   overlays=False)
 
 
 @guard.post("/api/distrakt/refresh", AuthLevel.DISTRAKT_APPROVED)
@@ -1809,7 +1905,7 @@ async def api_distrakt_import(request: Request):
     # fill a calendar" refused the button to somebody signed in with Simkl alone
     # over a token the import never uses. calendar_import.premiere_records reads
     # under the same instance settings, for the same reason.
-    if not load_settings().calendar_source_configured:
+    if not (await load_settings()).calendar_source_configured:
         return _month_refusal(request, "No calendar is configured, so there is nothing to import.")
     data = await authz.json_body(request)
     # WHICH TITLES, BY REFERENCE: one `pick:<key>|<season>` field per ticked row
@@ -1831,7 +1927,7 @@ async def api_distrakt_import(request: Request):
     if not chosen:
         return _month_refusal(request, "Tick at least one title to import.")
     # The instance's settings, for the reason the gate above gives.
-    added = await distrakt_store.import_premieres(user_id, month_key, load_settings(), chosen)
+    added = await distrakt_store.import_premieres(user_id, month_key, await load_settings(), chosen)
     return await _month_answer(
         request, user_id, year, month, settings,
         message=f"Imported {added} premiere{'' if added == 1 else 's'} from the calendar")
@@ -1861,7 +1957,7 @@ async def import_fragment(request: Request):
     context = {"request": request, "month_query": f"?year={year}&month={month}",
                "rows": [], "undescribed": [], "note": "",
                "ticked": request.query_params.get("ticked") != "none"}
-    settings = load_settings()
+    settings = await load_settings()
     if not settings.calendar_source_configured:
         context["note"] = "No calendar is configured, so there is nothing to import."
     elif await distrakt_store.is_backfill_blocked(user_id, month_key, clock.today()):
@@ -1914,8 +2010,8 @@ async def day_label_fragment(request: Request):
 
 @guard.get("/distrakt/fragments/details", AuthLevel.DISTRAKT_APPROVED)
 async def details_fragment(request: Request):
-    """The details panel for one roster show, drawn with THIS user's own record of
-    that season."""
+    """The details panel for one tracker row: a roster show, drawn with THIS
+    user's own record of that season, or a watched film (`_film_details`)."""
     return await _details_view(request, episodes_only=False)
 
 
@@ -2004,6 +2100,11 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
         key = parse_item_key(request.query_params.get("key"))
     except ValueError as exc:
         return details_panel.gap(request, str(exc))
+    if key.media == Media.MOVIE:
+        # A film has no season and no tabs, so a tab's address never names one.
+        if episodes_only:
+            return details_panel.gap(request, "Missing season")
+        return await _film_details(request, user_id, key, settings)
     if season is None or row_season is None:
         return details_panel.gap(request, "Missing season")
 
@@ -2041,8 +2142,8 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
         # of is answered by the next service that does (detail_source.for_season).
         # A whole panel also pools every service's videos; a season tab draws
         # none, so it asks for none.
-        describe = (detail_source.describe_season if episodes_only
-                    else detail_source.describe_panel)
+        describe = (metadata_panel.describe_season if episodes_only
+                    else metadata_panel.describe_panel)
         chosen, details = await describe(settings, chosen, ids, Media.SHOW, season)
         source = chosen.source
         if details is None:
@@ -2075,12 +2176,20 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
             user_id, key, learned, slug_repair.EVIDENCE_DETAIL_LOOKUP,
             str(placed.record.get("title") or ""))
         ids = {**ids, **learned}
+    # AND EVERY ID THE TITLE STORE KNOWS beneath the row's (identity.every_id),
+    # so a service a lookup by shared id found the show at gets its button and
+    # its ticks though the row never named it.
+    ids = await title_identity.every_id(Media.SHOW, ids)
     # THIS VIEWER'S OWN RECORD OF THE SEASON, read by identity rather than by
     # roster row: the same call the calendar's panel makes for a title this
     # person tracks, so the two surfaces cannot come to different conclusions
     # about who watched what. The ids handed over are the row's own, learned
     # ones included — the same map the outbound buttons are built from, so a
     # service with a working tick has a working button.
+    # A PANEL OPENED IS A TITLE VIEWED (app/metadata/refresh.py).
+    metadata_refresh.viewed(
+        settings, [metadata_refresh.Wanted(str(Media.SHOW), {**ids, **fresh_ids}, season)],
+        budget=metadata_refresh.PANEL_BUDGET)
     progress = await episode_progress.for_season(user_id, key, season, ids)
     if episodes_only:
         return details_panel.season_pane(request, details, media=str(Media.SHOW),
@@ -2096,10 +2205,11 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
                                # with a working tick has a working button.
                                links=detail_source.outbound_links(ids, Media.SHOW),
                                progress=progress,
-                               # THE ROW'S SEASON IS THE COUNT: a row for season 4
-                               # is a row for a show with three earlier ones, and
-                               # nothing has to be looked up to know it.
-                               season_count=row_season,
+                               # NO COUNT FROM THE ROW: its season is a tab of its
+                               # own (details_panel.panel) and the earlier ones are
+                               # the describing service's count — a season's number
+                               # is not how many came before it (Simkl numbers a
+                               # daily show's seasons by year).
                                # THE ROW, AND THE ROW'S SEASON, AND NOTHING ELSE.
                                # Everything this route looks up follows from the
                                # key, so a tab needs nothing more — and a
@@ -2111,6 +2221,72 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
                                # the same search the panel did.
                                pinned={"row": str(row_season),
                                        "year": str(year), "month": str(month)})
+
+
+async def _film_details(request: Request, user_id: int, key: ItemKey, settings) -> Response:
+    """The details panel for one watched film on the tracker.
+
+    THE ROW NEVER OPENED ONE: a film row was drawn without `data-details-open`,
+    and this route answered only for a roster show and its season, so a film was
+    the one row on the page that did nothing when pressed.
+
+    THE SAME RULE AS A SHOW ROW ABOUT WHERE THE IDS COME FROM: the viewer's own
+    record of watching the film (`_watched_film`), never the query string, so the
+    lookup cannot be pointed at a title the page does not show. The title store
+    adds the ids the other services know the film by (identity.known) — a play
+    only Simkl reported carries Simkl's id and the key's, and TMDB describes it
+    by the key's while the outbound buttons need the rest.
+
+    NO TICKS AND NO TABS: a film is one play on a day, and its row says which.
+    The picture is the row's own, through the same `_row_pictures` that drew it.
+    """
+    year, month = _viewed_month(request)
+    film = await _watched_film(user_id, key, distrakt_store.month_key(year, month))
+    if film is None:
+        return details_panel.gap(request, "Not among your watched films")
+    known = await title_identity.known(str(key))
+    ids = {key.match_source: key.match_id, **(known.ids if known is not None else {}),
+           **(film.get("ids") or {})}
+    chosen = detail_source.choose(settings, ids)
+    if chosen is None:
+        return details_panel.gap(request, "Nothing here can describe this item.")
+    try:
+        chosen, details = await metadata_panel.describe_panel(
+            settings, chosen, ids, Media.MOVIE, None)
+    except Exception:
+        # Drawn rather than answered with a status, for the reason the show
+        # path above gives.
+        logger.warning("Detail lookup failed for %s", chosen.source, exc_info=True)
+        return details_panel.gap(request, "⚠️ Could not load details for this item.")
+    if details is None:
+        return details_panel.gap(request, "Nothing here can describe this item.")
+    metadata_refresh.viewed(
+        settings, [metadata_refresh.Wanted(str(Media.MOVIE), {**ids, **(details.get("ids") or {})})],
+        budget=metadata_refresh.PANEL_BUDGET)
+    pictures, _ = await _row_pictures(user_id, [], [{"key": str(key), "ids": ids}])
+    return details_panel.panel(
+        request, details, media=str(Media.MOVIE), season=None,
+        title=str(film.get("title") or ""), poster=pictures.get((str(key), None), ""),
+        # The row's ids first and the answer's beside them, as the rankings board
+        # builds its film panel's buttons: which services know a title is a fact
+        # about the row.
+        links=detail_source.outbound_links({**ids, **(details.get("ids") or {})},
+                                           Media.MOVIE),
+        carry=("key",))
+
+
+async def _watched_film(user_id: int, key: ItemKey, month_key: str) -> dict | None:
+    """The viewer's own record of watching `key`: the watch state a month draws
+    its Films from, else the month on screen's frozen snapshot of them — the two
+    places a film row on the page can have come from (_distrakt_month_payload).
+    None when the viewer has no such film."""
+    state = await watch_history.load_state(user_id)
+    film = (state.get("movies") or {}).get(str(key))
+    if film is not None:
+        return film
+    doc = await distrakt_store.load_month(user_id, month_key)
+    return next((movie for movie in (doc or {}).get("movies") or []
+                 if str(movie.get("key")) == str(key)), None)
 
 
 async def _post_link_choices(user_id: int) -> dict:
@@ -2171,17 +2347,17 @@ async def api_distrakt_emoji(request: Request):
         "network": network,
         "month_query": f"?year={year}&month={month}",
         "post1": post1, "post2": post2,
-        **_emoji_context(emojis, default_emoji, [network], user.is_admin),
+        **_emoji_context(emojis, default_emoji, await logos.known([network]), user.is_admin),
     })
     return response if kept else _and_the_month(response)
 
 
 @guard.post("/api/distrakt/emoji-default", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_emoji_default(request: Request):
-    """Save the code a network with none of its own posts as, from the header
-    pill's field. Empty means the app's own default (prefs.set_default_emoji).
+    """Save the code a network with none of its own posts as, from the settings
+    dialog's field. Empty means the app's own default (prefs.set_default_emoji).
 
-    THE PILL AND ITS FIELD COME BACK OUT OF BAND, and the month is asked to fetch
+    THE FIELD COMES BACK OUT OF BAND, and the month is asked to fetch
     itself: every network without a code of its own, on every row and in both
     posts, changes with the default, which is the whole month's markup — and a
     default changes rarely enough that the refetch is the right cost.
@@ -2194,6 +2370,63 @@ async def api_distrakt_emoji_default(request: Request):
         "request": request, "default_network_emoji": default_emoji,
         "month_query": f"?year={year}&month={month}",
     }))
+
+
+async def _settings_answer(request: Request, user_id: int, settings, section: str,
+                           message: str = "", **notes) -> Response:
+    """One section of the tracker settings dialog, drawn from what is stored now.
+
+    A SAVE ASKS THE PAGE TO FETCH ITS MONTH AGAIN (`_and_the_month`): every
+    control here changes what the rows count or are measured against, and a
+    recomputed month inside this answer would spend a season lookup per listed
+    title in a response nobody asked a month of. A REFUSAL DOES NOT — nothing
+    changed — and says why as a sentence in its section, at 200, because a
+    non-200 is never swapped.
+    """
+    response = templates.TemplateResponse(request, "_distrakt_settings_answer.html", {
+        "request": request, "section": section,
+        "panel": await tracker_settings.load(user_id, settings),
+        "order_kind": section, "order_message": message, "retired_message": message,
+        **notes,
+    })
+    return response if message else _and_the_month(response)
+
+
+@guard.post("/api/distrakt/settings/order/{kind}", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_settings_order(kind: str, request: Request):
+    """Move one service a place up or down in one of the settings dialog's two
+    lists — which linked tracker decides a season, and which catalogue a season's
+    episode total is asked of — and answer with that list.
+
+    WHICH CATALOGUE IS ASKED CHANGES WHO IS ASKED AND NOTHING ELSE: a frozen
+    month keeps the totals it recorded, and the details panel is not this order's
+    (tracker_settings.move and sources/prefs.py's `totals_order` say why).
+    """
+    user_id = await _distrakt_user_id(request)
+    data = await authz.json_body(request)
+    settings = await viewer.settings_for_user(user_id)
+    source, direction = str(data.get("source") or ""), str(data.get("direction") or "")
+    message = await tracker_settings.move(user_id, settings, kind, source, direction)
+    # A list this version does not have is answered as the first one's section,
+    # which is where its sentence is drawn.
+    section = kind if kind in tracker_settings.ORDER_FIELDS else "tracker_order"
+    return await _settings_answer(request, user_id, settings, section, message,
+                                  order_moved="" if message else f"{kind}:{source}-{direction}")
+
+
+@guard.post("/api/distrakt/settings/retired", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_settings_retired(request: Request):
+    """State which services' stored numbers this account no longer counts, from
+    the dialog's boxes (`counted:<service>`, each with a hidden "0" before it so
+    an unticked box is mentioned rather than absent)."""
+    user_id = await _distrakt_user_id(request)
+    data = await authz.json_body(request)
+    prefix = "counted:"
+    mentioned = {key[len(prefix):]: route_params.ticked(value)
+                 for key, value in data.items() if key.startswith(prefix)}
+    settings = await viewer.settings_for_user(user_id)
+    message = await tracker_settings.set_retired(user_id, mentioned)
+    return await _settings_answer(request, user_id, settings, "retired", message)
 
 
 async def _watchlists_answer(request: Request, user_id: int, settings, *,
@@ -2242,35 +2475,45 @@ async def watchlists_fragment(request: Request):
     return await _watchlists_answer(request, user_id, settings, panel_oob=False)
 
 
-async def _network_tmdb(user_id: int, month_key: str, network: str) -> int | None:
-    """A TMDB id for some title on `network` that this viewer's month shows — the
+async def _network_tmdbs(user_id: int, month_key: str, network: str) -> list[int]:
+    """The TMDB ids of titles on `network` that this viewer's month shows — the
     lookup a network's logo is found by (TMDB lists a show's networks, not a
-    network's logo by name). From what is stored, the month's records and the
-    viewer's own list, the two things the page's rows are drawn from."""
+    network's logo by name), as many as a look-up tries (logos.TITLES_TRIED). From
+    what is stored, the month's records and the viewer's own list, the two things
+    the page's rows are drawn from."""
     doc = await distrakt_store.load_month(user_id, month_key) or {}
+    found: list[int] = []
     for rec in [*(doc.get("shows") or []), *await distrakt_store.user_records(user_id)]:
         if (rec.get("network") or "") == network:
             try:
                 tmdb = int((rec.get("ids") or {}).get("tmdb") or 0)
             except (TypeError, ValueError):
                 continue
-            if tmdb > 0:
-                return tmdb
-    return None
+            if tmdb > 0 and tmdb not in found:
+                found.append(tmdb)
+    return found[:logos.TITLES_TRIED]
+
+
+_RECHECK_SAID = {
+    logos.Recheck.FOUND: ("Made {network}'s logo again.", True),
+    logos.Recheck.KEPT: ("No new logo for {network} could be made, so the old one is kept.", False),
+    logos.Recheck.MISSING: ("TMDB has no usable logo for {network}.", False),
+    logos.Recheck.UNANSWERED: ("TMDB could not be asked just now, so {network}'s logo is "
+                               "unchanged.", False),
+}
 
 
 @guard.post("/api/distrakt/network-logo", AuthLevel.ADMIN)
 async def api_distrakt_network_logo(request: Request):
-    """Make a network's logo tile again, from the ↻ under a row's emoji code.
+    """Resolve a network's logo again, from the ↻ under a row's emoji code.
 
-    ADMIN, as the calendar's regenerate is: a tile is the instance's, shared by
-    every viewer and every calendar card, and making one spends the instance's
-    TMDB key.
+    ADMIN: a network's logo is the instance's, shared by every viewer and every
+    calendar card, and resolving one spends the instance's TMDB key.
 
     THE ANSWER IS EVERY ROW'S BADGE AND CODE CELL FOR THAT NETWORK, OUT OF BAND,
-    with the new tile's version in the address both draw (_emoji_context), plus
-    a line saying what happened. A regenerate that could make nothing keeps the tile it had
-    (logos.regenerate), and says so.
+    drawn from the table as it now stands (_emoji_context), plus a line saying what
+    happened. A recheck that comes out with no logo while the network has one keeps
+    it (logos.recheck), and says so.
     """
     user = await auth.current_user(request)
     data = await authz.json_body(request)
@@ -2278,25 +2521,40 @@ async def api_distrakt_network_logo(request: Request):
     if not network or len(network) > prefs.MAX_NETWORK_LENGTH:
         return _month_refusal(request, "That isn't a network this page shows.")
     year, month = _viewed_month(request)
-    tmdb = await _network_tmdb(user.user_id, distrakt_store.month_key(year, month), network)
-    if tmdb is None:
+    tmdbs = await _network_tmdbs(user.user_id, distrakt_store.month_key(year, month), network)
+    if not tmdbs:
         return _month_refusal(request, f"Nothing on this month names a TMDB id for {network}, "
                                        "so its logo can't be looked up.")
-    had = bool(logos.versions([network]))
-    made = await logos.regenerate(load_settings(), network, tmdb)
-    if made is not None:
-        message, ok = f"Made {network}'s logo again.", True
-    elif had:
-        message, ok = f"No new logo for {network} could be made, so the old one is kept.", False
-    else:
-        message, ok = f"TMDB has no usable logo for {network}.", False
+    sentence, ok = _RECHECK_SAID[await logos.recheck(await load_settings(), network, tmdbs)]
     emojis, default_emoji = await distrakt_store.get_emoji_prefs(user.user_id)
     return templates.TemplateResponse(request, "_distrakt_logo_answer.html", {
         "request": request, "network": network,
         "month_query": f"?year={year}&month={month}",
-        "message": message, "message_ok": ok,
-        **_emoji_context(emojis, default_emoji, [network], user.is_admin),
+        "message": sentence.format(network=network), "message_ok": ok,
+        **_emoji_context(emojis, default_emoji, await logos.known([network]), user.is_admin),
     })
+
+
+@guard.get("/api/distrakt/network-logo/download", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_network_logo_download(request: Request):
+    """A network's logo as the PNG a Discord emoji is made from, saved as a file —
+    the ⬇ under a row's emoji code.
+
+    THE ONE PLACE A LOGO IS COMPOSITED. A badge is the logo drawn through the
+    image proxy; Discord wants a 128px PNG with the logo on a rounded plate, which
+    the proxy cannot make, so it is made here when asked and kept nowhere
+    (logos.download_tile). The network travels as a name, a REFERENCE the server
+    resolves in its own table: no logo address from the request is ever fetched.
+    """
+    network = (request.query_params.get("network") or "").strip()
+    if not network or len(network) > prefs.MAX_NETWORK_LENGTH:
+        return Response(status_code=404)
+    png = await logos.download_tile(network)
+    if png is None:
+        return Response(status_code=404)
+    return Response(png, media_type="image/png", headers={
+        "Content-Disposition": f'attachment; filename="{logos.slug(network)}.png"',
+        "Cache-Control": "private, max-age=3600"})
 
 
 @guard.post("/api/distrakt/remove", AuthLevel.DISTRAKT_APPROVED)
@@ -2432,13 +2690,14 @@ async def _named_pick(settings, media: Media, named, *,
     title. A row a service answered just now names its query and its place in
     that answer (`q`, `i`), and the answer is re-read from where the search
     stored it (title_search.resolve_pick) — it may have no shared identity to be
-    named by until it is looked up. A row read from the stored calendar names
-    the identity it is stored under (`t`, a calendar_titles.title_key), and the
-    title, the ids and the network are read back out of the rows the services
-    wrote (calendar/entries.py's stored_title) — so a key this instance does not
+    named by until it is looked up. A row read from the title store names the
+    identity it is stored under (`t`, a title key), and the title, the ids and
+    the network are read back out of the rows the services wrote
+    (metadata/typed_search.py's stored_title) — so a key this instance does not
     hold is a refusal, never a title built from what the page sent. Either way
     the per-title season lookup then runs exactly as it always has
-    (title_search.pick_from_hit).
+    (title_search.pick_from_hit), and the season the result names is the title
+    store's (metadata.picked).
 
     `named` IS WHAT THE REQUEST CARRIED — a GET's query parameters or a POST's
     JSON body — because the fragment that draws the season picker and the add
@@ -2446,19 +2705,22 @@ async def _named_pick(settings, media: Media, named, *,
     """
     title_key = str(named.get("t") or "")
     if title_key:
-        hit = await calendar_entries.stored_title(title_key, media)
+        hit = await typed_search.stored_title(title_key, media)
         if hit is None:
             return None
-        return await title_search.pick_from_hit(settings, hit, cached_only=cached_only)
-    return await title_search.resolve_pick(settings, media, str(named.get("q") or ""),
-                                           named.get("i"), cached_only=cached_only)
+        return await metadata.picked(
+            await title_search.pick_from_hit(settings, hit, cached_only=cached_only))
+    return await metadata.picked(await title_search.resolve_pick(
+        settings, media, str(named.get("q") or ""), named.get("i"),
+        title_search.SearchRef.named(named), cached_only=cached_only))
 
 
 def _pick_reference(named) -> dict:
     """Exactly what named a search result — `t` for a row read from the stored
-    calendar, `q` and `i` for one a service answered — and nothing else, for a
-    request that has to name the same result again (the season buttons, the
-    re-watch question's two answers).
+    calendar; `q` and `i` for one a service answered, with the search's own
+    reference (`also`, `pages` — title_search.SearchRef) where it has one — and
+    nothing else, for a request that has to name the same result again (the
+    season buttons, the re-watch question's two answers).
 
     ONE SPELLING, because a second one went stale: the re-watch answers were
     re-posting `q` and `i` alone after the typed list began naming its rows by
@@ -2466,7 +2728,8 @@ def _pick_reference(named) -> dict:
     nothing and was refused as an expired search."""
     if named.get("t"):
         return {"t": str(named["t"])}
-    return {"q": str(named.get("q") or ""), "i": named.get("i", "")}
+    return {"q": str(named.get("q") or ""), "i": named.get("i", ""),
+            **title_search.SearchRef.named(named).fields()}
 
 
 def _pick_gone(named) -> str:
@@ -2505,35 +2768,36 @@ async def _search_fragment(request: Request, media: Media):
     the rows and nothing else, so the browser has no second copy of what a
     search hit looks like to keep in step with `_search_hit_payload`.
 
-    Gated on WHETHER ANY SOURCE CAN BE SEARCHED — `providers.for_catalogue_search`
-    returning something — rather than on Trakt's configuration alone, so an
-    instance with only a Simkl client id can still search: each source
-    authenticates a catalogue read with the INSTANCE's own credential, never
-    this viewer's token, which is the same distinction api_distrakt_add's own
-    comment draws for the identical lookup. Adding what it finds is a separate
-    act with its own gate. NO CATALOGUE AT ALL IS ITS OWN RENDERED STATE rather
-    than an error: nothing was searched, so telling somebody their search failed
-    would send them to retype a query that was never the problem.
+    WHO IS ASKED IS EVERY BOX'S ANSWER (title_search.search): the catalogue
+    searched by default, and each service this viewer added from the list's own
+    "also search" controls, named in the request by reference (`also`, with
+    `pages` for "more"). A default catalogue with no credential is said in the
+    list rather than replaced, and a name this viewer may not add is refused
+    there. Adding what it finds is a separate act with its own gate.
 
-    ONE SOURCE FAILING IS NOT THE SEARCH FAILING — `search_catalogue` returns
-    who could not be asked alongside what the rest found, and the fragment says
-    so quietly above results that are still real.
+    ONE SOURCE FAILING IS NOT THE SEARCH FAILING — the merge returns who could
+    not be asked alongside what the rest found, and the fragment says so quietly
+    above results that are still real.
     """
     settings = await viewer.settings_for_user(await _distrakt_user_id(request))
-    asked = providers.for_catalogue_search(settings)
     query = request.query_params.get("q", "")
+    ref = title_search.SearchRef.named(request.query_params)
     year, month = _viewed_month(request)
     context = {"request": request, "media": str(media), "hits": [], "failed": [],
-               "no_catalogue": not asked, "typed": False,
+               "typed": False, "controls": None, "refused": "",
                # Each row carries its own request, so it needs to be able to spell
-               # one: the query that found it names the search to read back, and
-               # the month is the one an add would land in.
-               "query": query, "month_query": f"?year={year}&month={month}"}
-    if asked:
-        result = await title_search.search_catalogue(
-            asked, settings, media, query)
-        context["hits"] = _search_rows(result.hits, media)
-        context["failed"] = sorted(str(source) for source in result.failed)
+               # one: the query and the search's reference name the search to read
+               # back, and the month is the one an add would land in.
+               "query": query, "search_ref": ref.fields(),
+               "month_query": f"?year={year}&month={month}"}
+    try:
+        outcome = await title_search.search(settings, media, query, ref)
+    except providers.UnknownSearchService as exc:
+        context["refused"] = str(exc)
+    else:
+        context["hits"] = _search_rows(outcome.result.hits, media)
+        context["failed"] = sorted(str(source) for source in outcome.result.failed)
+        context["controls"] = outcome.controls()
     return templates.TemplateResponse(request, "_distrakt_search_results.html", context)
 
 
@@ -2547,8 +2811,8 @@ async def _stored_fragment(request: Request, media: Media):
     same results list a submitted search swaps in.
 
     TYPING READS STORAGE AND NOTHING ELSE; ENTER ASKS THE SERVICES. Every title
-    some calendar month on this instance has loaded is in reach of an index read
-    (calendar/entries.py's titles_matching), which is cheap enough to run as
+    the title store holds is in reach of an index read
+    (metadata/typed_search.py's titles_matching), which is cheap enough to run as
     somebody types; asking a service spends somebody else's rate limit and is
     left to a deliberate act, the form's own submit (`_search_fragment`). So this
     builds no per-viewer settings at all — building them can refresh a token,
@@ -2563,21 +2827,21 @@ async def _stored_fragment(request: Request, media: Media):
     """
     query = request.query_params.get("q", "")
     year, month = _viewed_month(request)
-    hits = await calendar_entries.titles_matching(query, media, STORED_RESULT_LIMIT)
+    hits = await typed_search.titles_matching(query, media, STORED_RESULT_LIMIT)
     return templates.TemplateResponse(request, "_distrakt_search_results.html", {
         "request": request, "media": str(media), "hits": _search_rows(hits, media),
-        "failed": [], "no_catalogue": False, "typed": True,
+        "failed": [], "typed": True, "controls": None, "refused": "", "search_ref": {},
         # Under the shortest query the calendar's own search accepts there is
         # nothing to say yet — not "no matches", which would be an answer to a
         # question nobody has finished asking.
-        "too_short": len(calendar_entries.fold_title(query)) < calendar_entries.MIN_QUERY,
+        "too_short": typed_search.too_short(query),
         "query": query, "month_query": f"?year={year}&month={month}"})
 
 
 @guard.get("/distrakt/fragments/search", AuthLevel.DISTRAKT_APPROVED)
 async def distrakt_search_fragment(request: Request):
-    """Show search for the add flow, merged across every catalogue this instance
-    can ask (app/providers/title_search.py's `search_catalogue`). See `_search_fragment`
+    """Show search for the add flow, merged across every catalogue this search
+    asks (app/providers/title_search.py's `search`). See `_search_fragment`
     for what it renders and why it is a fragment rather than JSON."""
     return await _search_fragment(request, Media.SHOW)
 
@@ -2600,7 +2864,7 @@ async def distrakt_stored_movie_search_fragment(request: Request):
 @guard.get("/distrakt/fragments/search-movie", AuthLevel.DISTRAKT_APPROVED)
 async def distrakt_movie_search_fragment(request: Request):
     """Film search for the add-a-film flow, merged across every catalogue this
-    instance can ask (app/providers/title_search.py's `search_catalogue`) — the same
+    search asks (app/providers/title_search.py's `search`) — the same
     machinery the show search uses, media-parameterized to MOVIE.
 
     ITS OWN ROUTE RATHER THAN A MEDIA FLAG ON THE SHOW SEARCH, and the reason
@@ -2617,10 +2881,9 @@ async def distrakt_movie_search_fragment(request: Request):
     both media-parameterized; what is not shared is what each route does with
     the answer.
 
-    Gated on WHETHER ANY SOURCE CAN BE SEARCHED, exactly as the show search is
-    — see `_search_fragment` for why `providers.for_catalogue_search` is asked
-    rather than `trakt_catalogue_configured` alone, and for why a film hit with
-    no shared id comes back refused on the row while a show hit does not.
+    Asks whom the show search asks — see `_search_fragment` — and `_search_rows`
+    says why a film hit with no shared id comes back refused on the row while a
+    show hit does not.
     """
     return await _search_fragment(request, Media.MOVIE)
 
@@ -2659,9 +2922,18 @@ async def api_distrakt_add_movie(request: Request):
         return _month_refusal(request, _pick_gone(data))
     if unkeyable := _unkeyable_reason(pick.media, pick.ids, pick.title):
         return _month_refusal(request, unkeyable)
+    # EVERY SERVICE IS ASKED FOR ITS OWN ID, by the shared ids the pick names —
+    # the title store's lookups, the ones a show's arrival makes (metadata.ensure).
+    # A film the default catalogue found carries its tmdb id alone, and filed with
+    # nothing else it names no Trakt or Simkl page and no service's play of it
+    # says so until that service's history happens to report it. A service that
+    # cannot be asked costs the add nothing.
+    film = await metadata.ensure(Media.MOVIE, pick.ids, settings=settings)
+    ids = {**(film.ids if film is not None else {}), **pick.ids}
+    film_key = film.key if film is not None else str(resolve_key(Media.MOVIE, pick.ids) or "")
 
     recorded = await watch_history.record_movie_watches(user_id, [{
-        "ids": pick.ids,
+        "ids": ids,
         "title": pick.title,
         "year": pick.year,
         "watched_at": f"{watched_on.isoformat()}T12:00:00Z",
@@ -2678,19 +2950,17 @@ async def api_distrakt_add_movie(request: Request):
     filed = distrakt_store.month_key(watched_on.year, watched_on.month)
     state = await watch_history.load_state(user_id)
     mstart, mend = watch_history.month_bounds(filed)
-    filed_key = str(resolve_key(Media.MOVIE, pick.ids) or "")
     added = next((m for m in watch_history.movies_in_range(
                       state, mstart, mend, watch_history.viewer_tz(settings))
-                  if str(m.get("key") or "") == filed_key), None)
+                  if str(m.get("key") or "") == film_key), None)
     if added is not None:
         await _amend_closed_month_films(user_id, filed, add=added)
 
     # A film has no season, and -1 is what the roster's own schema uses for
-    # "this record is not about one" (see db.py's calendar_airings and
-    # store._SEASON_WHERE).
+    # "this record is not about one" (see store._SEASON_WHERE).
     return await _month_answer(
         request, user_id, year, month, settings,
-        point_at=(resolve_key(Media.MOVIE, pick.ids) or "", -1),
+        point_at=(film_key, -1),
         message=f"Recorded {pick.title} — watched {day}")
 
 
@@ -2804,12 +3074,18 @@ async def distrakt_seasons_fragment(request: Request):
         pick = await _named_pick(settings, Media.SHOW, named, cached_only=False)
     except SourceUnavailable as exc:
         pick, unavailable = None, str(exc)
+    unkeyable = _unkeyable_reason(pick.media, pick.ids, pick.title) if pick else None
     return templates.TemplateResponse(request, "_distrakt_seasons.html", {
         "request": request,
         "pick": pick,
         # ASKED HERE, AFTER the per-title lookup has had its chance to resolve
         # an id, with the same sentence the add's own refusal uses.
-        "unkeyable": _unkeyable_reason(pick.media, pick.ids, pick.title) if pick else None,
+        "unkeyable": unkeyable,
+        # THE APP'S ONE SEASON PICKER'S CHOICES (providers/season_choices.py):
+        # every season the service lists, those already on this tracker — the
+        # viewer's list, or this month's records — greyed and said so.
+        "options": (await _season_options(user_id, pick, year, month)
+                    if pick and not unkeyable and pick.media is Media.SHOW else []),
         "unavailable": unavailable,
         "gone": _pick_gone(named),
         "named": named,
@@ -2823,6 +3099,29 @@ async def distrakt_seasons_fragment(request: Request):
         # asking it here cannot disagree with them.
         "as_finished": distrakt_store.month_key(year, month) < _this_month(),
     })
+
+
+async def _season_options(user_id: int, pick, year: int, month: int) -> list:
+    """The add picker's choices for `pick`: the shared rule
+    (season_choices.season_options), with a season already on this tracker — on
+    the viewer's list, or recorded on the month being looked at — held. A pick
+    that IS one season offers that season alone. The title is keyed with its
+    known ids completed from the title store, so a pick naming a show only by a
+    lower id finds the rows its add would file beside."""
+    known, = await title_identity.completed([(Media.SHOW, pick.ids)])
+    key = str(distrakt_store.record_key({"media": Media.SHOW, "ids": known,
+                                         "title": pick.title}))
+    month_key = distrakt_store.month_key(year, month)
+    rows = [*await distrakt_store.user_records(user_id),
+            *await distrakt_store.month_records(user_id, month_key)]
+    held = {int(row["season"]) for row in rows
+            if str(row.get("key")) == key and row.get("season") is not None}
+    options = season_choices.seasons_only(season_choices.season_options(
+        pick.seasons, held=held, current=None, finished=None,
+        now=datetime.now(timezone.utc), held_as="on your tracker"))
+    if pick.named_season is not None:
+        return season_choices.only(options, pick.named_season)
+    return options
 
 
 async def _outstanding_play(user_id: int, key: ItemKey, season: int) -> dict | None:
@@ -2869,10 +3168,11 @@ async def api_distrakt_add(request: Request):
     data = await authz.json_body(request)
     today = clock.today()
     year, month = _viewed_month(request)
-    try:
-        season = int(data["season"])
-    except (KeyError, TypeError, ValueError):
+    seasons = _ticked_seasons(data)
+    if seasons is None:
         return _month_refusal(request, "Missing or invalid season")
+    if not seasons:
+        return _month_refusal(request, "Tick at least one season to add.")
     # THE RESULT IS NAMED, NOT HANDED OVER. The body carries the query that found
     # it and that hit's own key; the title, the network and every id are read back
     # out of the same two cached answers the picker was drawn from. This route
@@ -2895,29 +3195,10 @@ async def api_distrakt_add(request: Request):
         # on whatever a form happened to show.
         return _month_refusal(
             request, f"{pick.title} is a film, not a show — add it from ➕ Add Film instead.")
-    show = {
-        "media": Media.SHOW,
-        "ids": pick.ids,
-        "season": season,
-        "title": pick.title,
-        "network": pick.network,
-        # Added by hand, so removing it later says nothing about the
-        # calendar — see api_distrakt_remove.
-        "added_by": distrakt_store.ADDED_BY_MANUAL,
-    }
-    try:
-        # Resolved before anything is written, so a title with no shared id is
-        # refused here rather than at the insert, where the answer would be a 500.
-        key = distrakt_store.record_key(show)
-    except distrakt_store.UnkeyableRecord as exc:
-        return _month_refusal(request, str(exc))
-    # ADDING A SEASON WITHDRAWS ANY REFUSAL ABOUT IT. A dismissal says "do not put
-    # this season back on my list, stop asking", and adding it by hand is the
-    # viewer doing exactly the thing that refusal refused — so the refusal has
-    # lapsed. Left standing it silences the page's questions about a season the
-    # viewer has visibly changed their mind about, which is what happened to a
-    # re-added verdict: it could not be questioned again because a refusal made
-    # about the row that used to be there still applied to the one replacing it.
+    # THE MONTH IS CHECKED ONCE, BEFORE ANY SEASON IS WRITTEN. ADDING A SEASON
+    # WITHDRAWS ANY REFUSAL ABOUT IT (below): a dismissal says "do not put this
+    # season back on my list, stop asking", and adding it by hand is the viewer
+    # doing exactly the thing that refusal refused.
     month_key = distrakt_store.month_key(year, month)
     standing = distrakt_store.month_standing(month_key, today)
     if await distrakt_store.is_backfill_blocked(user_id, month_key, today):
@@ -2926,97 +3207,122 @@ async def api_distrakt_add(request: Request):
         # months. api_distrakt_add_completed is the way to state one outright.
         return _month_refusal(
             request, "Can't add shows to a past month that was never tracked.")
-    # WHAT THE SEASON IS FILED AS is arrival.describe's — the same ids, title,
-    # network and season facts any other way onto the tracker would file — and
-    # its season lookup is asked of whichever service those ids name, so a
-    # Simkl-only title gets a real episode total too.
-    #
-    # AHEAD OF EVERY WRITE, because the question below needs the season's episode
-    # total and has to be answered before anything is stored; after the refusals
-    # above, so a refused add spends no lookup.
-    arrived, = await arrival.describe(settings, [show])
-    show, detail = arrived.record, arrived.detail
 
-    # ALREADY FINISHED, ACCORDING TO THE VIEWER'S OWN HISTORY — asked FIRST, and
-    # nothing at all is written until it is answered.
-    #
-    # THE TWO CASES ARE INDISTINGUISHABLE FROM THE DATA. Somebody starting a
-    # re-watch and somebody whose tracker is meeting an old completion for the
-    # first time produce the identical signal: a season the history says is
-    # finished. The right record differs completely — a current run at zero, or a
-    # finished one filed under the month that history dates — so it is asked.
-    #
-    # AND ASKED BEFORE THE ADD, WHICH IS THE WHOLE CORRECTION. It was asked after
-    # for a while, on the reasoning that a viewer ignoring the question would
-    # then get the old behaviour. That was wrong, because adding is not inert:
-    # the recompute that follows an add runs the live pass, which settles any
-    # season the history dates as finished onto the month it names. A season
-    # watched in a month the tracker HAD tracked was therefore moved off the list
-    # before the question could be answered, and the answer then had no row to
-    # write to — the viewer saw "that season is not on your list" about a season
-    # they had just added. One watched in an untracked month stayed and showed
-    # its full episode count as this run's progress. Writing nothing until the
-    # question is answered makes both unreachable rather than compensated for.
-    #
-    # A MONTH THAT IS OVER IS NOT ASKED ABOUT AT ALL, and that is not an exception
-    # to the paragraph above so much as the case it never applied to. The question
-    # exists because "the history says this season is finished" has two readings —
-    # a re-watch beginning now, or an old completion the tracker is meeting for the
-    # first time — and NAMING A PAST MONTH ANSWERS IT. Somebody standing on August
-    # adding a show is saying it belongs to August; there is no current run to
-    # start, and offering to begin one on a month that ended would file a season at
-    # zero on a month nothing will ever advance.
-    #
-    # WHETHER THE MONTH WAS FROZEN IS THE WRONG QUESTION and used to be the one
-    # asked, by the page rather than here: a past month the rollover never reached
-    # has not been frozen, so an account that was offline through August ran the
-    # whole re-watch flow on it. Where a month STANDS is a fact about the calendar
-    # and true whether or not anything has been written down, which is why
-    # month_standing is derived rather than stored.
+    # SEVERAL SEASONS, ONE AT A TIME, IN THE ORDER TICKED, each exactly as a
+    # one-season add would file it. The re-watch question is PER SEASON, and the
+    # first season that needs it STOPS the pass: the seasons before it are filed,
+    # and the question re-posts that season and every one after it, naming which
+    # one it answers (`answering`) — so an answer applies to its own season and
+    # never to the rest, which are asked about in turn if they need it.
+    added: list[int] = []
+    first_key = None
+    for season in seasons:
+        show = {
+            "media": Media.SHOW,
+            "ids": pick.ids,
+            "season": season,
+            "title": pick.title,
+            "network": pick.network,
+            # Added by hand, so removing it later says nothing about the
+            # calendar — see api_distrakt_remove.
+            "added_by": distrakt_store.ADDED_BY_MANUAL,
+        }
+        try:
+            # Resolved before anything is written, so a title with no shared id
+            # is refused here rather than at the insert, where the answer would
+            # be a 500.
+            key = distrakt_store.record_key(show)
+        except distrakt_store.UnkeyableRecord as exc:
+            return _month_refusal(request, str(exc))
+        # WHAT THE SEASON IS FILED AS is arrival.describe's — the same ids, title,
+        # network and season facts any other way onto the tracker would file —
+        # and its season lookup is asked of whichever service those ids name, so
+        # a Simkl-only title gets a real episode total too.
+        #
+        # AHEAD OF EVERY WRITE, because the question below needs the season's
+        # episode total and has to be answered before anything is stored; after
+        # the refusals above, so a refused add spends no lookup.
+        arrived, = await arrival.describe(settings, [show],
+                                          order=await live.totals_order(user_id))
+        show, detail = arrived.record, arrived.detail
+        # FILED WHERE THE TITLE STORE SAYS THE TITLE IS, which can be a higher
+        # key than the pick's own ids name — every write below addresses that.
+        key = distrakt_store.record_key(show)
+        first_key = first_key or key
+
+        # A MONTH THAT IS OVER IS NOT ASKED ABOUT AT ALL: naming a past month
+        # answers the re-watch question (see `_rewatch_question`'s callers) — the
+        # season was finished during it.
+        if standing is distrakt_store.MonthStanding.PAST:
+            refusal = await _record_past(user_id, month_key, show, detail, settings)
+            if refusal:
+                return _month_refusal(request, refusal)
+            added.append(season)
+            continue
+
+        # ALREADY FINISHED, ACCORDING TO THE VIEWER'S OWN HISTORY — asked FIRST,
+        # and nothing at all is written for this season until it is answered:
+        # adding is not inert (the recompute after an add settles a season the
+        # history dates as finished onto the month it names), so the question
+        # has to come before the write or its answer has no row to land on.
+        # A body naming ONE `season` is answering about that season — the shape
+        # every one-season add and its question's answers have always posted.
+        answering = str(data.get("answering") or data.get("season") or "") == str(season)
+        said = data if answering else {}
+        ask, already_finished = await _rewatch_question(
+            user_id, settings, show, key, season, detail.get("total"),
+            said, title=show["title"])
+        if ask:
+            # One season left is posted as `season`, as a one-season add always
+            # was; with more after it, each as its own field and `answering`
+            # naming which one this answer is about.
+            still = seasons[seasons.index(season):]
+            named_seasons = ({"season": season} if len(still) == 1 else
+                             {"answering": str(season),
+                              **{f"{season_choices.FIELD_PREFIX}{s}": "1" for s in still}})
+            return _rewatch_answer(
+                request, ask, f"/api/distrakt/add?year={year}&month={month}",
+                {**_pick_reference(data), **named_seasons})
+
+        await distrakt_store.clear_prompt_dismissal(user_id, key, season)
+        if already_finished:
+            await _file_finished(user_id, month_key, show, detail)
+        elif detail and not detail.get("started_airing"):
+            await distrakt_store.add_month_record(user_id, month_key, {
+                **show,
+                "kind": distrakt_store.premiere_kind(show["season"]),
+                **{field: detail.get(field) for field in lifecycle.CATALOGUE_FIELDS},
+            })
+        else:
+            await lifecycle.follow(user_id, {**show, **detail, "season": show["season"]})
+        await arrival.write_missing_premieres(settings, show)
+        # THE DECISION, AS A FLOOR, WRITTEN BEFORE THE MONTH IS RECOMPUTED. A
+        # `history_from` in the body says "this pass starts here": the plays
+        # before it belong to the previous run and are not counted, which is what
+        # makes a re-watch show as a current season at zero. An empty one is the
+        # other answer — count everything — and needs no write, because no floor
+        # IS counting everything.
+        #
+        # IT MUST LAND BEFORE THE RECOMPUTE, not after: the recompute is the pass
+        # that would otherwise settle this season straight onto the month its
+        # history dates it to. AND IT TOUCHES NO MONTH RECORD: a season already
+        # settled on an earlier month keeps that record — `lifecycle.follow`
+        # writes the roster row and nothing else — so the old viewing stays where
+        # it settled and the re-watch exists beside it, which is what a re-watch
+        # is.
+        floor = _valid_day(said.get("history_from"))
+        if floor:
+            await distrakt_store.set_history_from(user_id, key, season, floor)
+        added.append(season)
+
     if standing is distrakt_store.MonthStanding.PAST:
-        return await _add_to_past_month(request, user_id, month_key, show, detail,
-                                        settings, year, month)
-    floor = _valid_day(data.get("history_from"))
-    ask, already_finished = await _rewatch_question(
-        user_id, settings, show, key, int(show["season"]), detail.get("total"),
-        data, title=show["title"])
-    if ask:
-        return _rewatch_answer(request, ask, f"/api/distrakt/add?year={year}&month={month}",
-                               {**_pick_reference(data), "season": season})
-
-    await distrakt_store.clear_prompt_dismissal(user_id, key, int(show["season"]))
-    if already_finished:
-        await _file_finished(user_id, month_key, show, detail)
-    elif detail and not detail.get("started_airing"):
-        await distrakt_store.add_month_record(user_id, month_key, {
-            **show,
-            "kind": distrakt_store.premiere_kind(show["season"]),
-            **{field: detail.get(field) for field in lifecycle.CATALOGUE_FIELDS},
-        })
-    else:
-        await lifecycle.follow(user_id, {**show, **detail, "season": show["season"]})
-    await arrival.write_missing_premieres(settings, show)
-    # THE DECISION, AS A FLOOR, WRITTEN BEFORE THE MONTH IS RECOMPUTED. A
-    # `history_from` in the body says "this pass starts here": the plays before
-    # it belong to the previous run and are not counted, which is what makes a
-    # re-watch show as a current season at zero. An empty one is the other
-    # answer — count everything — and needs no write, because no floor IS
-    # counting everything.
-    #
-    # IT MUST LAND BEFORE THE RECOMPUTE, not after: the recompute is the pass
-    # that would otherwise settle this season straight onto the month its history
-    # dates it to.
-    #
-    # AND IT TOUCHES NO MONTH RECORD. A season already settled on an earlier
-    # month keeps that record — `lifecycle.follow` writes the roster row and
-    # nothing else — so the old viewing stays where it settled and the re-watch
-    # exists beside it, which is what a re-watch is.
-    if floor:
-        await distrakt_store.set_history_from(
-            user_id, key, int(show["season"]), floor)
+        # A hand-filled past month ends up closed like every other past month —
+        # see `_record_past`.
+        await distrakt_store.set_month_closed(user_id, month_key)
     return await _month_answer(
-        request, user_id, year, month, settings, point_at=(key, show["season"]),
-        message=f"Added {show['title']} S{int(show['season']):02d}")
+        request, user_id, year, month, settings, point_at=(first_key, added[0]),
+        message=_added_message(pick.title, added,
+                               finished=standing is distrakt_store.MonthStanding.PAST))
 
 
 def _valid_day(raw) -> str:
@@ -3150,10 +3456,11 @@ async def api_distrakt_add_completed(request: Request):
     month_key = distrakt_store.month_key(year, month)
     if month_key >= _this_month():
         return _month_refusal(request, "Only a past month can be filled in by hand.")
-    try:
-        season = int(data["season"])
-    except (KeyError, TypeError, ValueError):
+    seasons = _ticked_seasons(data)
+    if seasons is None:
         return _month_refusal(request, "Missing or invalid season")
+    if not seasons:
+        return _month_refusal(request, "Tick at least one season to add.")
     # The result is NAMED here too, for the reason api_distrakt_add gives.
     pick = await _named_pick(settings, Media.SHOW, data, cached_only=True)
     if pick is None:
@@ -3165,31 +3472,36 @@ async def api_distrakt_add_completed(request: Request):
         # mixes films in with TV, so a show-box pick can resolve to a film.
         return _month_refusal(
             request, f"{pick.title} is a film, not a show — add it from ➕ Add Film instead.")
-    try:
-        # WHAT THE SEASON IS FILED AS is arrival.describe's, as for every way
-        # onto the tracker. STRICT: the episode total has to be REAL here — a
-        # frozen month's counts are never recomputed — so unlike the ordinary add
-        # a lookup that fails refuses rather than degrading. Asked of whichever
-        # source the ids name, so a Simkl-only title can be filled in by hand too.
-        arrived, = await arrival.describe(settings, [
-            {"media": Media.SHOW, "ids": pick.ids, "title": pick.title,
-             "season": season, "network": pick.network,
-             "added_by": distrakt_store.ADDED_BY_MANUAL}], strict=True)
-    except SourceUnavailable as exc:
-        return _month_refusal(request, f"That season could not be read: {exc}")
-    # A lookup that names no episodes is refused rather than filed at zero, and
-    # that refusal lives in _add_to_past_month with the reason for it, because the
-    # other door into a past month has to make the same one.
-    #
-    # Through the one place that knows what adding to a month that is over means
-    # — the record it becomes and the month ending up closed — because the
-    # ordinary add reaches the same place once the viewer has navigated back.
-    # `added_by` is stated here rather than there because this is a person filling
-    # a month in, which is a different provenance from anything a sweep wrote.
-    return await _add_to_past_month(
-        request, user_id, month_key, arrived.record,
-        arrived.detail, settings, year, month,
-        message=f"Recorded {arrived.record['title']} S{season:02d} as finished")
+    first_key = None
+    for season in seasons:
+        try:
+            # WHAT THE SEASON IS FILED AS is arrival.describe's, as for every way
+            # onto the tracker. STRICT: the episode total has to be REAL here — a
+            # frozen month's counts are never recomputed — so unlike the ordinary
+            # add a lookup that fails refuses rather than degrading. Asked of
+            # whichever source the ids name, so a Simkl-only title can be filled
+            # in by hand too.
+            arrived, = await arrival.describe(settings, [
+                {"media": Media.SHOW, "ids": pick.ids, "title": pick.title,
+                 "season": season, "network": pick.network,
+                 "added_by": distrakt_store.ADDED_BY_MANUAL}], strict=True,
+                order=await live.totals_order(user_id))
+        except SourceUnavailable as exc:
+            return _month_refusal(request, f"Season {season} could not be read: {exc}")
+        # Through the one place that knows what a season on a month that is over
+        # becomes — the ordinary add reaches it too once the viewer has navigated
+        # back — which also refuses a lookup that names no episodes rather than
+        # filing it at zero. `added_by` is stated here because this is a person
+        # filling a month in, a different provenance from anything a sweep wrote.
+        refusal = await _record_past(user_id, month_key, arrived.record, arrived.detail,
+                                     settings)
+        if refusal:
+            return _month_refusal(request, refusal)
+        first_key = first_key or distrakt_store.record_key(arrived.record)
+    await distrakt_store.set_month_closed(user_id, month_key)
+    return await _month_answer(
+        request, user_id, year, month, settings, point_at=(first_key, seasons[0]),
+        message=_added_message(pick.title, seasons, finished=True))
 
 
 def _backfill_answer(request: Request, *, plan: dict | None = None,
@@ -3344,7 +3656,8 @@ async def api_distrakt_abandon(request: Request):
         # drops the show there only if this was its last season on the tracker.
         # Taking it back needs nothing here: that is an arrival like any other.
         _departing(request, user_id, key, watchlist_writes.Departure.ABANDON)
-        show = await _live_form_source(settings, placed.record, season)
+        show = await _live_form_source(settings, placed.record, season,
+                                       await live.totals_order(user_id))
         rec = await lifecycle.give_up(
             user_id, show, month=acted_month,
             abandoned_form=discord_fmt.freeze_form(show))
@@ -3447,8 +3760,12 @@ async def api_distrakt_unknown_add(request: Request):
     # a history prompt is built from a play, which is deliberately thin (see
     # watch_history.EpisodePlay: a lookup per unmatched episode is the cost the
     # ask-the-viewer path exists to avoid) — no network, one service's ids.
-    arrived, = await arrival.describe(settings, [record])
+    arrived, = await arrival.describe(settings, [record],
+                                      order=await live.totals_order(user_id))
     record, detail = arrived.record, arrived.detail
+    # Where the title store filed it, which a re-key the arrival caused may have
+    # moved — together with the question itself (app/metadata/holders.py).
+    key = distrakt_store.record_key(record)
     year, month = _viewed_month(request)
 
     # THE SAME QUESTION THE ORDINARY ADD ASKS, AND FOR A BETTER REASON HERE. This
@@ -3605,7 +3922,8 @@ async def api_distrakt_verdict_readd(request: Request):
     placed = lifecycle.Placement(record, month_key)
     settings = await viewer.settings_for_user(user_id)
     await watch_history.baseline_show(settings, user_id, placed.record)
-    await lifecycle.reopen(user_id, placed, look_up=_season_lookup(settings))
+    await lifecycle.reopen(user_id, placed, look_up=_season_lookup(
+        settings, await live.totals_order(user_id)))
     # The month the VIEWER is looking at is what comes back, which need not be the
     # month the verdict sat on — the same split every other row control makes.
     year, month = _viewed_month(request)
@@ -3796,7 +4114,7 @@ async def api_distrakt_rewatch_complete(request: Request):
                                point_at=(key, season), message="Recorded as completed")
 
 
-async def _live_form_source(settings, record: dict, season: int) -> dict:
+async def _live_form_source(settings, record: dict, season: int, order=None) -> dict:
     """`record` merged with what the provider says about it right now, for the
     abandoned form that is about to be frozen.
 
@@ -3818,7 +4136,7 @@ async def _live_form_source(settings, record: dict, season: int) -> dict:
     """
     rec = {**record, "season": season}
     try:
-        detail = await live.season_detail(settings, rec)
+        detail = await live.season_detail(settings, rec, order=order)
     except SourceUnavailable:
         return dict(record)
     form = {**record, **detail, "season": season}
@@ -3911,7 +4229,7 @@ async def _share_link_payload(user_id: int) -> dict:
     """What the announcement post's link controls need: the resolved URL plus
     which of the three forms are actually publishable right now, so the selector
     can offer only the ones that would produce a working link."""
-    settings = load_settings()
+    settings = await load_settings()
     row = await share_links.get_or_create(user_id)
     user = await auth.get_user(user_id)
     username = user["username"] if user else None

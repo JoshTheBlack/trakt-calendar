@@ -91,6 +91,10 @@ NOT_CONFIGURED = (
 ALREADY_LINKED = (
     "That Simkl account is already linked to another user on this instance."
 )
+HOLDS_ANOTHER = (
+    "A different Simkl account is already linked to yours. Unlink it on your "
+    "account page first, then connect this one."
+)
 
 UPSTREAM_FAILED = (
     "Simkl could not complete the sign-in. Please try again in a moment."
@@ -135,12 +139,13 @@ _LOGIN_NOTICES = {
 _LINK_NOTICES = {
     provider_login.NO_SESSION: ("Sign-in link not valid", {}),
     provider_login.IDENTITY_IN_USE: ("Already linked", _BACK_TO_ACCOUNT),
+    provider_login.ANOTHER_ACCOUNT_HELD: ("Already connected", _BACK_TO_ACCOUNT),
     provider_login.ACCOUNT_UNAVAILABLE: ("Sign-in failed", {}),
     provider_login.KEY_UNHEALTHY: ("Encryption needs attention", _BACK_TO_ACCOUNT),
 }
 
 
-def _notice(request: Request, title: str, message: str, *, status: int = 400,
+async def _notice(request: Request, title: str, message: str, *, status: int = 400,
             back: str = "/login", back_label: str = "Back to sign in"):
     """A dead-end page for a navigation that cannot continue.
 
@@ -158,18 +163,18 @@ def _notice(request: Request, title: str, message: str, *, status: int = 400,
         "back": back,
         "back_label": back_label,
     }, status_code=status)
-    auth.clear_handshake_cookie(response, load_settings(), request)
+    auth.clear_handshake_cookie(response, await load_settings(), request)
     return response
 
 
-def _handshake_refused(request: Request):
-    return _notice(request, "Sign-in link not valid", auth.HANDSHAKE_REJECTED, status=400)
+async def _handshake_refused(request: Request):
+    return await _notice(request, "Sign-in link not valid", auth.HANDSHAKE_REJECTED, status=400)
 
 
-def _refusal_notice(request: Request, refusal: provider_login.Refusal, pages: dict):
+async def _refusal_notice(request: Request, refusal: provider_login.Refusal, pages: dict):
     """Render a shared refusal as this medium's dead-end page."""
     title, back = pages[refusal.kind]
-    return _notice(request, title, refusal.message, status=refusal.status, **back)
+    return await _notice(request, title, refusal.message, status=refusal.status, **back)
 
 
 async def _begin(
@@ -185,11 +190,11 @@ async def _begin(
     use, so an unauthenticated caller cannot mint handshake rows in a loop — or
     get a fresh budget by rotating between providers.
     """
-    settings = load_settings()
+    settings = await load_settings()
     if await auth.handshake_start_limited(request, settings):
-        return _notice(request, "Too many attempts", TOO_MANY_STARTS, status=429)
+        return await _notice(request, "Too many attempts", TOO_MANY_STARTS, status=429)
     if not settings.simkl_login_configured:
-        return _notice(request, "Not available", NOT_CONFIGURED, status=503)
+        return await _notice(request, "Not available", NOT_CONFIGURED, status=503)
     # PKCE is mandatory under Simkl's v2 authorization — see app/auth/simkl.py's
     # docstring. The verifier is stored on THIS handshake row and never leaves
     # the server; only the challenge derived from it goes to Simkl.
@@ -241,18 +246,18 @@ async def simkl_callback(request: Request):
     authorization code is exchanged, so a replayed or forged callback costs one
     database lookup and never reaches Simkl at all.
     """
-    settings = load_settings()
+    settings = await load_settings()
     state = request.query_params.get("state")
 
     if request.query_params.get("error"):
         # The user pressed "deny" on Simkl's screen, or Simkl refused. Nothing
         # was authorized, so there is nothing to undo.
-        return _notice(request, "Sign-in cancelled",
+        return await _notice(request, "Sign-in cancelled",
                        "You didn't authorize this app on Simkl. Nothing has changed.",
                        status=400)
 
     if not auth.handshake_cookie_matches(request, settings, state):
-        return _handshake_refused(request)
+        return await _handshake_refused(request)
 
     current = await auth.current_user(request)
     try:
@@ -261,13 +266,13 @@ async def simkl_callback(request: Request):
             session_id=current.session_id if current else None,
         )
     except auth.HandshakeError:
-        return _handshake_refused(request)
+        return await _handshake_refused(request)
 
     code = (request.query_params.get("code") or "").strip()
     if not code:
-        return _handshake_refused(request)
+        return await _handshake_refused(request)
     if not settings.simkl_login_configured:  # pragma: no cover — cleared mid-flow
-        return _notice(request, "Not available", NOT_CONFIGURED, status=503)
+        return await _notice(request, "Not available", NOT_CONFIGURED, status=503)
 
     # The verifier for THIS handshake, and only this one — read off the row
     # consume_handshake just claimed, never regenerated or reused across rows.
@@ -284,7 +289,7 @@ async def simkl_callback(request: Request):
         # Deliberately vague to the visitor and specific in the log: the
         # exception text can carry the request URL, and that carries the code.
         logger.warning("Simkl authorization exchange failed: %s", type(exc).__name__)
-        return _notice(request, "Sign-in failed", UPSTREAM_FAILED, status=502)
+        return await _notice(request, "Sign-in failed", UPSTREAM_FAILED, status=502)
 
     # THE SCOPE CHECK, BEFORE ANYTHING IS STORED. See this module's docstring:
     # a token this app cannot use to write later must be refused now, while
@@ -298,7 +303,7 @@ async def simkl_callback(request: Request):
         logger.warning("Simkl granted a token without %s (got %r)",
                        simkl_auth.REQUIRED_SCOPE, granted_scope)
         back = _BACK_TO_ACCOUNT if handshake["purpose"] == "link" else {}
-        return _notice(request, "Access not granted", SCOPE_REFUSED, status=400, **back)
+        return await _notice(request, "Access not granted", SCOPE_REFUSED, status=400, **back)
 
     try:
         account = await simkl_auth.fetch_account(
@@ -306,7 +311,7 @@ async def simkl_callback(request: Request):
         )
     except simkl_auth.AccountLookupError as exc:
         logger.warning("Simkl authorization exchange failed: %s", type(exc).__name__)
-        return _notice(request, "Sign-in failed", UPSTREAM_FAILED, status=502)
+        return await _notice(request, "Sign-in failed", UPSTREAM_FAILED, status=502)
 
     identity = auth.ProviderIdentity(
         provider=PROVIDER,
@@ -344,10 +349,11 @@ async def _finish_link(request: Request, settings: Settings,
     """Render provider_login's link completion as a browser redirect."""
     outcome = await provider_login.complete_provider_link(
         identity=identity, current=current,
-        already_linked=ALREADY_LINKED, key_unhealthy=KEY_UNHEALTHY,
+        already_linked=ALREADY_LINKED, holds_another=HOLDS_ANOTHER,
+        key_unhealthy=KEY_UNHEALTHY,
     )
     if isinstance(outcome, provider_login.Refusal):
-        return _refusal_notice(request, outcome, _LINK_NOTICES)
+        return await _refusal_notice(request, outcome, _LINK_NOTICES)
     response = RedirectResponse(outcome.redirect_target, status_code=303)
     auth.clear_handshake_cookie(response, settings, request)
     return response
@@ -361,7 +367,7 @@ async def _finish_login(request: Request, settings: Settings,
         already_linked=ALREADY_LINKED,
     )
     if isinstance(outcome, provider_login.Refusal):
-        return _refusal_notice(request, outcome, _LOGIN_NOTICES)
+        return await _refusal_notice(request, outcome, _LOGIN_NOTICES)
     response = RedirectResponse(outcome.redirect_target, status_code=303)
     # The only correct way to finish a sign-in: the session cookie going on and
     # the handshake cookie coming off are one act, not two.
@@ -401,7 +407,7 @@ async def access_token_for_user(user_id: int, settings: Settings | None = None) 
     failed gives, rather than attempting to refresh a grant Simkl's v2 token
     endpoint was never issued for.
     """
-    cfg = settings or load_settings()
+    cfg = settings or await load_settings()
     row = await db.fetch_one(
         "SELECT * FROM linked_identities WHERE user_id = ? AND provider = ?",
         (user_id, PROVIDER),
@@ -482,7 +488,7 @@ async def revoke_token_value(token: str | None, settings: Settings | None = None
     trakt_routes.revoke_token_value, which this mirrors exactly: a failure here
     is never allowed to undo the local unlink.
     """
-    cfg = settings or load_settings()
+    cfg = settings or await load_settings()
     if not _is_v2_token(token):
         # A legacy token, or none at all: nothing Simkl's v2 revoke would
         # recognise, and _is_v2_token already treats it as unusable everywhere

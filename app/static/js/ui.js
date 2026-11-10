@@ -48,10 +48,9 @@ function pageBusy(busy) {
 //
 // NO FETCH IS EXEMPT ANY MORE. Two used to be: a card's season line, one per
 // card as a month scrolled past, and the Sonarr/Radarr/Seerr status poll on its
-// timer — neither something a person was waiting through. The line is an htmx
-// request now that names itself as its own indicator (_card.html), and the
-// server draws the library marks with the page, so nothing polls. Every fetch
-// left is something somebody asked for.
+// timer — neither something a person was waiting through. The server draws the
+// line with the card now (_card.html) and the library marks with the page, so
+// nothing polls. Every fetch left is something somebody asked for.
 //
 // htmx REQUESTS COME THROUGH HERE AND MUST NOT BE COUNTED, which is a correction
 // rather than a precaution: htmx 3 and earlier used XMLHttpRequest, so this
@@ -60,11 +59,11 @@ function pageBusy(busy) {
 // read in the vendored source), so it picks up whatever is installed here.
 // MEASURED in Firefox 155 and Chromium 153 against a fragment carrying
 // `hx-indicator="this"`: the page-wide bar lit for it. That is exactly what
-// `hx-indicator` on a fragment exists to prevent — a card's season line asks for
-// itself as the month scrolls past, and _card.html says in so many words that the
-// page bar is for something a person is waiting through and a line per card is
-// not. htmx marks its own requests through `hx-indicator`, so letting one through
-// here counted it twice and overrode the narrower answer.
+// `hx-indicator` on a fragment exists to prevent — the page bar is for something
+// a person is waiting through, and a request that names itself as its own
+// indicator has said it is not that. htmx marks its own requests through
+// `hx-indicator`, so letting one through here counted it twice and overrode the
+// narrower answer.
 // THE HEADER IS THE TELL: htmx sets `HX-Request: true` on every request it makes.
 const nativeFetch = window.fetch.bind(window);
 

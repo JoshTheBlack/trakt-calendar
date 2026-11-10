@@ -1,0 +1,24 @@
+{% import '_season_checklist.html' as seasons %}
+{#- One calendar search result's season picker (routes.calendar_search_seasons):
+    the app's one season checklist, its choices calendar/search.py's `picker`.
+
+    EVERY SEASON IS ONE PRESS (`one_press`): one the calendar already draws is a
+    link to its card, and pressing any other is the jump — a json-enc POST to
+    /calendar/jump naming the result by the reference it was drawn with and that
+    season, a POST because following it WRITES the season's airing into the
+    shared calendar. The route answers with `HX-Redirect` to the card, a
+    navigation of the whole window, so the address bar ends on the calendar, Back
+    returns here and the browser itself scrolls to the card's `#jump-target` (see
+    the route for why not `HX-Location`). Not boosted. A navigation swaps
+    nothing (204); the one answer that is not one — the card is there and the
+    reader's filters hide it — is this picker again, drawn into its own slot.
+
+    Context: `options`, `ref`, `endpoint`, `title`, `media`, `note`. -#}
+{%- if options %}
+{{ seasons.checklist(options, {"hx-boost": "false", "hx-post": "/calendar/jump",
+                               "hx-json-enc": "", "hx-target": "closest .search-pick",
+                               "hx-swap": "innerHTML"},
+                     ref=ref, hidden={"endpoint": endpoint}, one_press=true,
+                     heading=('Seasons of ' if media == 'show' else '') ~ title) }}
+{%- endif %}
+{%- if note %}<p class="search-hint">{{ note }}</p>{% endif %}

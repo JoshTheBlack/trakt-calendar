@@ -22,7 +22,8 @@ from cryptography.fernet import Fernet
 
 from app import db, secrets_box
 from app.auth import encryption_flow as flow
-from app.config import Settings, load_settings, save_settings
+from app.config import Settings
+from tests.support import load_settings, save_settings
 from app.templating import templates
 from tests.support import AppTestCase
 

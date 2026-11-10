@@ -34,4 +34,16 @@
     that leaves this viewer nothing to see here is on the chip as well, and the
     chip stops offering to scroll to a day that arrived collapsed. -#}
 {% with oob = True %}{% include "_day_chip.html" %}{% endwith %}
+{% elif month_changed %}
+{#- A DAY THE SHELL COUNTED CARDS ON AND THAT NOW HOLDS NONE: an empty block in
+    the placeholder's place, because the sentence below arrives out of band and
+    htmx swaps nothing for an answer that is empty once its out-of-band parts
+    are taken out (htmx's `allowEmptySwapAfterOOB`), which would leave the
+    placeholder standing. -#}
+<section class="day-block" id="day-{{ date }}" data-date="{{ date }}" hidden></section>
 {% endif %}
+{#- A DAY THAT DRAWS SOMETHING OTHER THAN WHAT THE SHELL COUNTED FOR IT says so
+    over the whole page (_month_changed.html): what it draws is what the store
+    holds now — a card that has gone has no rows to draw it from — so the day is
+    right and the shell's numbers are the claim that went stale. -#}
+{% if month_changed %}{% with oob = True %}{% include "_month_changed.html" %}{% endwith %}{% endif %}

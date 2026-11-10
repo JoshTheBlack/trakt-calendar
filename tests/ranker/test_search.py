@@ -4,9 +4,9 @@ WHAT THIS FILE HOLDS, and why each matters:
   - TYPING READS STORED TITLES AND ASKS NOBODY — no service, no viewer
     settings, no budget — and lists every stored title, whoever's calendar
     loaded it, filters or not.
-  - ENTER ASKS EXACTLY THE VIEWER'S SERVICES (providers.for_catalogue_search
-    over auth/viewer.py's settings) and is the one thing the search budget
-    counts.
+  - ENTER ASKS TMDB, and a service the viewer has linked only when they add it
+    (providers.for_search over auth/viewer.py's settings), and is the one thing
+    the search budget counts.
   - A RESULT NAMES ITSELF BY REFERENCE — a stored title by its title_key, a
     service's hit by query and place — and every add reads the title back from
     what a service said. A title_key nothing stores is refused; fields the page
@@ -31,7 +31,9 @@ from urllib.parse import parse_qs, urlsplit
 from app import db, providers
 from app.auth import prefs as auth_prefs, simkl_routes, viewer
 from app.calendar import entries
-from app.config import Settings, save_settings
+from app.metadata import typed_search
+from app.config import Settings
+from tests.support import save_settings
 from app.providers import title_search
 from app.providers.base import ItemKey, Media, Record, Source, proxied_image
 from app.providers.simkl import search as simkl_search
@@ -40,8 +42,11 @@ from app.ranker import core as ranker, routes as ranker_routes
 from tests.ranker.test_boards import RankerTestCase, inside_pool, show_ref
 
 AIR = 1783540800.0  # 2026-07-08 20:00Z
+TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJ0ZXN0In0.c2lnbmF0dXJl"
 _HIT = re.compile(r'<div class="ranker-hit( is-held)?"([^>]*)>')
-_ROW = re.compile(r'<div class="search-row ranker-result"([^>]*)>')
+# A film's row is a <div> that posts the add; a show's is the <summary> that
+# asks for its checklist. Both name the result by the same reference.
+_ROW = re.compile(r'<(?:div|summary) class="search-row ranker-result"([^>]*)>')
 _TITLE = re.compile(r'<span class="search-title">([^<]*)')
 
 
@@ -72,18 +77,18 @@ def a_hit(n: int, *, media=Media.SHOW, ids=None, **overrides) -> title_search.Me
 
 
 class CannedCatalogue:
-    """The services' fan-out, replaced at its edge: more hits than a search may
-    draw, so the cap shows, and a record of every call — who was asked, with
-    which token, and whether it was a read-back."""
+    """The services' fan-out, replaced at its edge: a page's worth of hits, and
+    a record of every call — who was asked, with which token, which pages, and
+    whether it was a read-back."""
 
     def __init__(self, hits=None):
         self.hits = hits if hits is not None else [
-            a_hit(n) for n in range(1, ranker_routes.MAX_SEARCH_RESULTS + 6)]
+            a_hit(n) for n in range(1, 26)]
         self.calls: list[dict] = []
 
-    async def __call__(self, asked, settings, media, query, *, cached_only=False):
-        self.calls.append({"asked": [source for source, _ in asked], "query": query,
-                           "media": media, "cached_only": cached_only,
+    async def __call__(self, asked, settings, media, query, *, pages=1, cached_only=False):
+        self.calls.append({"asked": [entry[0] for entry in asked], "query": query,
+                           "media": media, "cached_only": cached_only, "pages": pages,
                            "simkl_token": settings.simkl_access_token})
         return title_search.SearchMergeResult(
             hits=[hit for hit in self.hits if hit.media == media], failed=frozenset())
@@ -91,12 +96,12 @@ class CannedCatalogue:
 
 def result_rows(html: str) -> list[dict]:
     """Every result as what it would SEND: its wrapper's data attributes (what a
-    drag posts), its row's hx-vals (what a click posts), its title and whether
-    it is held."""
+    drag posts), the reference its row names (`body` — a film's hx-vals, which
+    its click posts; a show's checklist address, less the board, which its
+    checklist posts back), its title and whether it is held."""
     titles = [unescape(t).strip() for t in _TITLE.findall(html)]
     wrappers = _HIT.findall(html)
-    bodies = [json.loads(unescape(re.search(r'hx-vals="([^"]*)"', attrs).group(1)))
-              for attrs in _ROW.findall(html)]
+    bodies = [reference(attrs) for attrs in _ROW.findall(html)]
     out = []
     for index, (classes, attrs) in enumerate(wrappers):
         data = dict(re.findall(r'data-([a-z]+)="([^"]*)"', attrs))
@@ -106,12 +111,22 @@ def result_rows(html: str) -> list[dict]:
     return out
 
 
+def reference(attrs: str) -> dict:
+    """What one row names its result by, whichever request it makes."""
+    vals = re.search(r'hx-vals="([^"]*)"', attrs)
+    if vals:
+        return json.loads(unescape(vals.group(1)))
+    url = unescape(re.search(r'hx-get="([^"]*)"', attrs).group(1))
+    return {name: values[0] for name, values in parse_qs(urlsplit(url).query).items()
+            if name != "board"}
+
+
 class _SearchTestCase(RankerTestCase):
 
     def setUp(self):
         super().setUp()
-        save_settings(Settings(trakt_client_id="cid", simkl_client_id="scid",
-                               simkl_public_calendar_enabled=False))
+        save_settings(Settings(tmdb_api_key=TMDB_TOKEN, trakt_client_id="cid",
+                               simkl_client_id="scid", simkl_public_calendar_enabled=False))
         self.user_id = self.ranker_user()
         self.sign_in_as(self.user_id)
         asyncio.run(ranker.create_board(self.user_id, uid="b1"))
@@ -124,8 +139,9 @@ class _SearchTestCase(RankerTestCase):
         return self.client.get(
             f"/rankings/fragments/search-stored?board=b1&q={query}&media={media}").text
 
-    def enter(self, query, media="show"):
-        return self.client.get(f"/rankings/fragments/search?board=b1&q={query}&media={media}").text
+    def enter(self, query, media="show", also=""):
+        return self.client.get(f"/rankings/fragments/search?board=b1&q={query}&media={media}"
+                               f"&also={also}").text
 
     def add(self, body: dict):
         return self.client.post("/rankings/boards/b1/items/add", json=body)
@@ -161,11 +177,11 @@ class TypingTests(_SearchTestCase):
     def test_the_list_is_every_stored_title_not_the_viewers_calendar(self):
         """Unfiltered: a title another viewer's month stored, and one this
         viewer's own filters would hide, are both addable."""
-        asyncio.run(auth_prefs.update_user_prefs(self.user_id, endpoint="shows/all",
+        asyncio.run(auth_prefs.update_user_prefs(self.user_id, endpoint="shows",
                                                  tv_genres="-drama"))
         self.assertEqual(self.value("SELECT tv_genres FROM user_prefs WHERE user_id = ?",
                                     (self.user_id,)), "-drama")
-        store(a_record(genres=["drama"]), endpoint="shows/all")
+        store(a_record(genres=["drama"]), endpoint="shows")
         self.assertEqual([row["title"] for row in result_rows(self.typed("sever"))],
                          ["Severance"])
 
@@ -185,7 +201,7 @@ class TypingTests(_SearchTestCase):
         self.assertEqual(self.typed("s").strip(), "")
 
     def test_films_are_listed_under_the_film_medium(self):
-        store(a_record("Heat", 949, Media.MOVIE, runtime=170), endpoint="movies/releases")
+        store(a_record("Heat", 949, Media.MOVIE, runtime=170), endpoint="movies")
         self.assertEqual([r["title"] for r in result_rows(self.typed("heat", "movie"))], ["Heat"])
         self.assertEqual(result_rows(self.typed("heat")), [])
 
@@ -195,26 +211,35 @@ class EnterTests(_SearchTestCase):
     def test_enter_asks_the_services_and_draws_source_marked_rows(self):
         html = self.enter("title")
         rows = result_rows(html)
-        self.assertEqual(len(rows), ranker_routes.MAX_SEARCH_RESULTS)
-        self.assertEqual(rows[0]["body"], {"q": "title", "i": 0, "media": "show"})
+        # THE WHOLE ANSWER IS DRAWN: "more" lengthens it a page at a time, and a
+        # row is named by its place in it, so a cap would hide rows it named.
+        self.assertEqual(len(rows), len(self.catalogue.hits))
+        self.assertEqual(rows[0]["body"], {"q": "title", "i": "0", "media": "show"})
         self.assertEqual(rows[3]["data"], {"key": "show:tmdb:4", "q": "title", "i": "3",
                                            "media": "show"})
         self.assertIn('class="search-marks"', html)
         self.assertEqual([call["cached_only"] for call in self.catalogue.calls], [False])
 
-    def test_enter_reaches_trakt_only_for_a_viewer_with_nothing_linked(self):
-        self.enter("title")
+    def test_enter_reaches_tmdb_alone_for_a_viewer_with_nothing_linked(self):
+        html = self.enter("title")
         call, = self.catalogue.calls
-        self.assertEqual(call["asked"], [Source.TRAKT])
+        self.assertEqual(call["asked"], [Source.TMDB])
+        self.assertNotIn("Also search", html)
 
-    def test_enter_reaches_simkl_too_with_the_viewers_own_token(self):
+    def test_a_linked_simkl_is_offered_and_asked_with_the_viewers_own_token(self):
         async def _token(user_id, *args, **kwargs):
             return "viewer-simkl-token" if user_id == self.user_id else None
         with mock.patch.object(simkl_routes, "access_token_for_user", _token):
-            self.enter("title")
-        call, = self.catalogue.calls
-        self.assertEqual(call["asked"], [Source.TRAKT, Source.SIMKL])
-        self.assertEqual(call["simkl_token"], "viewer-simkl-token")
+            offered = self.enter("title")
+            added = self.enter("title", also="simkl")
+        self.assertIn(">Also search Simkl<", offered)
+        self.assertNotIn(">Also search Simkl<", added)
+        self.assertEqual([c["asked"] for c in self.catalogue.calls],
+                         [[Source.TMDB], [Source.TMDB, Source.SIMKL]])
+        self.assertEqual(self.catalogue.calls[1]["simkl_token"], "viewer-simkl-token")
+        # Every row of the widened search names it, so its add re-reads it.
+        self.assertEqual(result_rows(added)[0]["body"],
+                         {"q": "title", "also": "simkl", "i": "0", "media": "show"})
 
     def test_the_budget_counts_enter_and_refuses_in_words(self):
         for _ in range(ranker_routes.SEARCH_MAX_PER_WINDOW):
@@ -242,10 +267,31 @@ class EnterTests(_SearchTestCase):
         self.assertIn("ranker-preview-hint", html)
         self.assertEqual(result_rows(html), [])
 
-    def test_no_service_to_ask_is_said_rather_than_searched(self):
-        with mock.patch.object(providers, "for_catalogue_search", lambda settings: []):
-            html = self.enter("title")
-        self.assertIn("No service is set up to search", html)
+    def test_no_tmdb_token_is_said_rather_than_searched_around(self):
+        save_settings(Settings(trakt_client_id="cid", simkl_public_calendar_enabled=False),
+                      clear_unset_secrets=True)
+        html = self.enter("title")
+        call, = self.catalogue.calls
+        self.assertEqual(call["asked"], [])
+        self.assertIn("is not configured", html)
+        self.assertNotIn("Nothing found.", html)
+
+    def test_no_tmdb_token_still_offers_the_services_the_viewer_linked(self):
+        """Not a fallback — nothing is asked until the viewer presses the
+        button that names the service, and the box goes on saying TMDB is not
+        configured beside that service's answer."""
+        save_settings(Settings(simkl_client_id="scid", simkl_public_calendar_enabled=False),
+                      clear_unset_secrets=True)
+
+        async def _token(user_id, *args, **kwargs):
+            return "viewer-simkl-token" if user_id == self.user_id else None
+        with mock.patch.object(simkl_routes, "access_token_for_user", _token):
+            offered = self.enter("title")
+            added = self.enter("title", also="simkl")
+        self.assertIn(">Also search Simkl<", offered)
+        self.assertEqual([c["asked"] for c in self.catalogue.calls], [[], [Source.SIMKL]])
+        self.assertTrue(result_rows(added))
+        self.assertIn("is not configured", added)
 
     def test_a_held_whole_title_is_drawn_held_and_a_keyless_hit_is_not_draggable(self):
         asyncio.run(ranker.add_titles(self.user_id, "b1", [show_ref("2")]))
@@ -269,6 +315,44 @@ class AddTests(_SearchTestCase):
         self.assertEqual((item["title"], item["ids"]), ("Title 3", {"tmdb": 3, "trakt": 30}))
         # The pick and the redraw both read the search back; nothing asked again.
         self.assertEqual([c["cached_only"] for c in self.catalogue.calls], [False, True, True])
+
+    def test_a_title_found_through_tmdb_learns_every_services_id(self):
+        """A board title found through TMDB's search held its tmdb id alone, so its
+        details panel had no Trakt or Simkl button though both list the title. The
+        add asks each service the title has no id from, by shared id, through the
+        title store — with the viewer's own settings, which is what lets Simkl be
+        asked at all."""
+        self.catalogue.hits = [a_hit(5, ids={"tmdb": 5}, source_ids={Source.TMDB: "5"})]
+
+        async def _token(user_id, *args, **kwargs):
+            return "viewer-simkl-token" if user_id == self.user_id else None
+        trakt = mock.AsyncMock(return_value={"trakt": 50, "trakt_slug": "title-5", "tmdb": 5})
+        simkl = mock.AsyncMock(return_value={"simkl": 500, "simkl_slug": "title-5"})
+        with mock.patch.object(simkl_routes, "access_token_for_user", _token), \
+             mock.patch("app.providers.trakt.detail.find_by_shared_id", trakt), \
+             mock.patch("app.providers.simkl.by_id.find_by_shared_id", simkl):
+            self.enter("title")
+            self.assertEqual(self.add({"q": "title", "i": 0, "media": "show"}).status_code, 200)
+        item = asyncio.run(ranker.fetch_item(self.user_id, "b1", "show:tmdb:5"))
+        self.assertEqual({name: item["ids"].get(name) for name in ("tmdb", "trakt", "simkl")},
+                         {"tmdb": 5, "trakt": 50, "simkl": 500})
+        self.assertEqual((item["ids"]["trakt_slug"], item["ids"]["simkl_slug"]),
+                         ("title-5", "title-5"))
+        trakt.assert_awaited_once()
+        simkl.assert_awaited_once()
+
+    def test_a_title_the_store_knows_by_a_higher_id_is_filed_there(self):
+        """A result naming a show only by its tvdb id is the title the store
+        already knows by its tmdb id; the board files it there, so it is drawn
+        as held beside the row already on the board rather than added again."""
+        store(a_record("Known", 900, ids={"trakt": 9, "tmdb": 900, "tvdb": 4321}))
+        asyncio.run(ranker.add_titles(self.user_id, "b1", [show_ref("900")]))
+        self.catalogue.hits = [a_hit(4321, ids={"tvdb": 4321}, key=ItemKey("show", "tvdb", "4321"),
+                                     source_ids={Source.SIMKL: "77"})]
+        self.enter("title")
+        self.assertIn("already on this board", self.add({"q": "title", "i": 0,
+                                                         "media": "show"}).text)
+        self.assertEqual(self.keys(), ["show:tmdb:900"])
 
     def test_a_simkl_only_pick_files_the_poster_its_row_was_drawn_with(self):
         """The row's picture is asked for by key afterwards, and a title nothing
@@ -358,7 +442,7 @@ class AddTests(_SearchTestCase):
         # in both engines), so what the answer must carry is the search's rows.
         self.assertIn('id="searchBox-b1"', html)
         rows = result_rows(html)
-        self.assertEqual(len(rows), ranker_routes.MAX_SEARCH_RESULTS)
+        self.assertEqual(len(rows), len(self.catalogue.hits))
         self.assertEqual([r["held"] for r in rows[:2]], [True, False])
 
     def test_the_page_carries_the_new_version_and_hoists_the_title(self):
@@ -450,9 +534,36 @@ class SeasonChecklistTests(_SearchTestCase):
         self.assertIn("suggested", html)
         self.assertIn("airs 1 Jan 2099", html)
         self.assertEqual(self.picks, [("Title 1", False)])
-        form = re.search(r'<form class="ranker-hit-form"[^>]*>', html).group(0)
+        form = re.search(r'<form class="season-checklist"[^>]*>', html).group(0)
         self.assertIn('hx-post="/rankings/boards/b1/items/add"', form)
         self.assertIn("hx-json-enc", form)
+
+    def test_the_checklist_leads_with_the_whole_show_greyed_once_held(self):
+        """Pressing a show's row opens this checklist rather than adding, so the
+        whole show is one of its choices — and never "this row", since a result
+        is not a row yet."""
+        self.enter("title")
+        whole = re.compile(r'<input type="checkbox" name="season:" value="1"([^>]*)>')
+        html = self.checklist(q="title", i="0")
+        self.assertNotIn("disabled", whole.search(html).group(1))
+        self.assertLess(html.index("Whole show"), html.index("Season 1"))
+        self.assertNotIn("this row", html)
+        asyncio.run(ranker.add_titles(self.user_id, "b1", [show_ref("1")]))
+        self.assertIn("disabled", whole.search(self.checklist(q="title", i="0")).group(1))
+
+    def test_the_whole_show_and_a_season_ticked_together_are_two_rows(self):
+        self.enter("title")
+        html = self.add({"q": "title", "i": "0", "media": "show", "want": "seasons",
+                         "season:": "1", "season:2": "1"}).text
+        self.assertIn("Added the whole show and 1 season to the pool.", html)
+        self.assertEqual(self.keys(), ["show:tmdb:1", "show:tmdb:1:s2"])
+
+    def test_the_whole_show_ticked_alone_adds_the_title(self):
+        self.enter("title")
+        html = self.add({"q": "title", "i": "0", "media": "show", "want": "seasons",
+                         "season:": "1"}).text
+        self.assertIn("Added the title to the pool.", html)
+        self.assertEqual(self.keys(), ["show:tmdb:1"])
 
     def test_a_multi_season_add_is_one_post_and_n_arrivals(self):
         self.enter("title")
@@ -471,9 +582,12 @@ class SeasonChecklistTests(_SearchTestCase):
         with mock.patch.object(self, "PICK", named):
             self.add({"q": "title", "i": "0", "media": "show", "want": "seasons",
                       "season:1": "1", "season:3": "1"})
+        board = asyncio.run(ranker.fetch_board(self.user_id, "b1"))
+        drawn = sorted([*board["pool"], *(i for c in board["categories"] for i in c["items"])],
+                       key=lambda item: item["season"])
         self.assertEqual(
             [(r["season"], r["season_count"], r["episode_count"], r["season_name"])
-             for r in self.rows("SELECT * FROM tier_items ORDER BY season")],
+             for r in drawn],
             [(1, None, 8, None), (3, None, 10, "The Return")])
         self.assertIn(("Title 1", True), self.picks, "the list must be read from the cache")
 
@@ -533,8 +647,11 @@ class SeasonChecklistTests(_SearchTestCase):
         self.assertIn('hx-sync="#searchResults:queue last"', summary)
         self.assertIn('hx-json-enc="false"', summary)
         self.assertIn('hx-trigger="click once"', summary)
-        self.assertIn('hx-sync="#searchResults:queue last"', _ROW.search(html).group(0))
         self.assertIn('hx-sync="#searchResults:queue last"', self.checklist(q="title", i="0"))
+        self.catalogue.hits.append(a_hit(9, media=Media.MOVIE))
+        film = re.search(r'<div class="search-row ranker-result"[^>]*>',
+                         self.enter("title", media="movie"))
+        self.assertIn('hx-sync="#searchResults:queue last"', film.group(0))
 
 
 class DragTests(_SearchTestCase):
@@ -579,15 +696,15 @@ class TheRankerDefinesNoSearchOfItsOwnTests(_SearchTestCase):
                 self.assertFalse(named & retired)
                 self.assertNotIn("search_titles", called)
 
-    def test_the_typed_half_is_the_calendars_verb_and_enter_is_the_shared_fan_out(self):
+    def test_the_typed_half_is_the_title_stores_verb_and_enter_is_the_shared_fan_out(self):
         """Pinned by behaviour as well as by name: typing reads through
-        entries.titles_matching, and Enter through title_search.search_catalogue."""
+        typed_search.titles_matching, and Enter through title_search.search_catalogue."""
         seen = []
 
         async def _typed(query, media, limit):
             seen.append(("typed", query))
             return []
-        with mock.patch.object(entries, "titles_matching", _typed), \
+        with mock.patch.object(typed_search, "titles_matching", _typed), \
              mock.patch.object(trakt_detail, "search_titles",
                                mock.AsyncMock(side_effect=AssertionError("provider"))), \
              mock.patch.object(simkl_search, "search_titles",

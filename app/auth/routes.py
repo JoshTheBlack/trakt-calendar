@@ -40,7 +40,6 @@ import dataclasses
 import logging
 from urllib.parse import quote
 
-import anyio.to_thread
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
 
@@ -53,7 +52,7 @@ from ..media import user_images
 from ..templating import templates
 # Bound as `trakt_auth` because inside app/auth/ a bare `trakt` would read as the
 # Trakt SOURCE (app/providers/trakt/); this is the login flow.
-from . import provider_avatars
+from . import provider_avatars, revocation
 from . import trakt as trakt_auth
 from .levels import AuthLevel
 
@@ -122,7 +121,7 @@ def _source_prefs():
 async def onboarding_page(request: Request):
     if await auth.any_users_exist():
         return RedirectResponse("/login", status_code=303)
-    settings = load_settings()
+    settings = await load_settings()
     return templates.TemplateResponse(request, "auth_onboarding.html", {
         "request": request,
         "has_trakt_token": bool(settings.trakt_access_token.strip()),
@@ -152,7 +151,7 @@ async def onboarding_create(request: Request):
     if await auth.any_users_exist():
         return refused(request, ALREADY_SET_UP)
 
-    settings = load_settings()
+    settings = await load_settings()
     # Both of these happen before the transaction opens: neither 200ms of Argon2
     # nor a call out to Trakt may sit inside a held write lock.
     password_hash = await auth.hash_password(password)
@@ -202,7 +201,7 @@ async def onboarding_create(request: Request):
 
     # BEFORE the session below, so the very first cookie this instance issues
     # already carries the right policy.
-    settings = _adopt_cookie_policy(settings, request)
+    settings = await _adopt_cookie_policy(settings, request)
     await auth.mark_logged_in(user_id)
     session_id = await auth.create_session(
         user_id,
@@ -230,7 +229,7 @@ class _InvalidInvite(Exception):
     """Raised inside the registration transaction to roll it back."""
 
 
-def _adopt_cookie_policy(settings, request: Request):
+async def _adopt_cookie_policy(settings, request: Request):
     """Pin the session-cookie Secure policy to what this browser actually used,
     and persist it. Returns the settings to issue the first cookie with.
 
@@ -251,7 +250,7 @@ def _adopt_cookie_policy(settings, request: Request):
     if detected == (settings.cookie_secure or "").strip().lower():
         return settings
     settings.cookie_secure = detected
-    save_settings(settings)
+    await save_settings(settings)
     logger.info(
         "Setup: session cookies set to %r — this browser reached the instance over %s. "
         "Change `cookie_secure` in data/settings.json if that is wrong.",
@@ -327,7 +326,7 @@ async def register_page(request: Request):
     and missing/unusable. Reachable only once an instance has been set up — an
     invite implies an admin already exists to have issued it, so this route is
     not part of the first-run path the way /login and /onboarding are."""
-    settings = load_settings()
+    settings = await load_settings()
     token = (request.query_params.get("invite") or "").strip()
     if not settings.allow_open_registration:
         invite = await auth.find_invite_by_token(token) if token else None
@@ -364,7 +363,7 @@ async def register(request: Request):
     invite tokens are secret, so every cause of a bad one looks identical from
     here.
     """
-    settings = load_settings()
+    settings = await load_settings()
     ip = auth.client_ip(request, settings)
     data = await authz.json_body(request)
     username = str(data.get("username") or "").strip()
@@ -449,7 +448,7 @@ async def register(request: Request):
 # sign in / sign out
 # ---------------------------------------------------------------------------
 
-def _settings_even_if_sealed() -> tuple[Settings, bool]:
+async def _settings_even_if_sealed() -> tuple[Settings, bool]:
     """Settings for a page that has to render while the at-rest key may be wrong,
     and whether it is. `open_secrets=False` on the second attempt, so the fields
     that come from app_secrets read as unset rather than raising.
@@ -468,18 +467,18 @@ def _settings_even_if_sealed() -> tuple[Settings, bool]:
     secrets could be opened.
     """
     try:
-        return load_settings(), False
+        return await load_settings(), False
     except secrets_box.SealedButWrongKey:
         # Deliberately not logged: the gate already reports this state at startup
         # and the page is about to say so in the one place a person will see it.
-        return load_settings(open_secrets=False), True
+        return await load_settings(open_secrets=False), True
 
 
 @guard.get("/login", AuthLevel.PUBLIC)
 async def login_page(request: Request):
     if not await auth.any_users_exist():
         return RedirectResponse("/onboarding", status_code=303)
-    settings, key_mismatch = _settings_even_if_sealed()
+    settings, key_mismatch = await _settings_even_if_sealed()
     response = templates.TemplateResponse(request, "auth_login.html", {
         "request": request,
         # Sign in with Trakt cannot work while a secret is sealed under the wrong
@@ -517,7 +516,7 @@ async def login_cookie_check(request: Request):
     reading the protocol in the browser). Reachable while the at-rest key is wrong,
     like /login itself: an administrator locked out of recovery by a cookie the
     browser refuses is exactly who needs this sentence."""
-    settings = load_settings(open_secrets=False)
+    settings = await load_settings(open_secrets=False)
     return templates.TemplateResponse(request, "_cookie_warning.html", {
         "request": request,
         "dropped": auth.session_cookie_would_be_dropped(request, settings),
@@ -552,7 +551,7 @@ async def login(request: Request):
     # Sign-in reads only the cookie policy and the proxy list, never a credential,
     # so it loads without decrypting secrets — an admin must be able to sign in and
     # reach recovery even while a stored secret is sealed under the wrong key.
-    settings = load_settings(open_secrets=False)
+    settings = await load_settings(open_secrets=False)
     ip = auth.client_ip(request, settings)
     username_key = username.lower()
 
@@ -634,7 +633,7 @@ async def logout(request: Request):
     # Signing someone out is a state change, so it is held to the same JSON-only
     # rule as every other mutating endpoint. The body itself is ignored.
     await authz.json_body(request)
-    settings = load_settings(open_secrets=False)
+    settings = await load_settings(open_secrets=False)
     session_id = auth.read_session_cookie(request, settings)
     if session_id:
         await auth.revoke_session(session_id)
@@ -677,10 +676,8 @@ ACCOUNT_SECTIONS = {
     "avatar": "_account_avatar.html",
     "names": "_account_names.html",
     "identities": "_account_identities.html",
-    "tracker_order": "_account_order.html",
     "metadata_order": "_account_order.html",
     "sharing": "_account_sharing.html",
-    "retired": "_account_retired.html",
     "credentials": "_account_credentials.html",
 }
 
@@ -696,7 +693,7 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
         # replaces it, and the caller passes the new one. Anything else reaching
         # here is a session revoked mid-request, which is a sign-in problem.
         raise auth.AuthError(401, "login_required", "Sign in to continue.")
-    settings = load_settings()
+    settings = await load_settings()
     identities = await auth.list_identities(user.user_id)
     linked = {row["provider"]: row["display_name"] for row in identities}
     # WHICH LINKED SERVICES NEED RECONNECTING, drawn fresh each time this page
@@ -715,9 +712,9 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
     if "simkl" in linked and await simkl_routes.access_token_for_user(user.user_id) is None:
         needs_reconnect.add("simkl")
     account = await auth.get_user(user.user_id)
-    orders = await _account_orders(user.user_id, linked, settings)
-    tracker_prefs = orders.prefs
+    orders = await _account_orders(user.user_id, settings)
     prefs = await auth.get_user_prefs(user.user_id)
+    pictures = await user_images.account_pictures(user.user_id)
     return {
         "request": request,
         # is_admin, calendar_available, ranker_available, version, build
@@ -738,7 +735,7 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
         "share_watch_history": bool(prefs["share_watch_history"]),
         # The saved-picture library, drawn with the page rather than fetched by it
         # — the same context every one of its own actions answers with.
-        "images": user_images.describe_images(user.user_id),
+        "images": await user_images.describe_images(user.user_id),
         "cap": user_images.MAX_IMAGES_PER_USER,
         "name_cap": user_images.MAX_IMAGE_NAME,
         # THE SERVICES THAT COULD SUPPLY A WATCH HISTORY AND ARE NOT LINKED, by
@@ -755,46 +752,23 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
         "tracker_services_missing": [
             provider.label for source, provider in providers.registered().items()
             if str(source) in providers.tracker_sources() and str(source) not in linked],
-        "orders": {"tracker_order": orders.tracker, "metadata_order": orders.metadata},
-        # WHOSE STORED NUMBERS STILL COUNT — every tracker service, linked or not.
-        #
-        # DELIBERATELY NOT NARROWED TO THE LINKED ONES, and narrowing it would
-        # remove the only row that matters: the service somebody wants to retire
-        # is almost always one they have ALREADY unlinked, which is what left its
-        # numbers stranded and every row amber in the first place.
-        #
-        # NOR NARROWED TO SERVICES THAT HAVE ACTUALLY CONTRIBUTED, which would be
-        # the tighter list and cannot be built from here. Which services a viewer
-        # has stored numbers from is the tracker's fact, and auth is a LAYER every
-        # feature may depend on and which depends on none of them
-        # (tests/kernel/test_layering.py) — reaching into distrakt for a nicer
-        # switch list would invert that for cosmetics. A switch over a service
-        # that contributed nothing simply does nothing, and says so.
-        # IN DECLARED ORDER — `tracker_sources()` is a frozenset and iterating it
-        # would put the switches in whatever order the set happened to hash into,
-        # which changes between runs and disagrees with every other per-service
-        # list on this page.
-        "tracker_retirable": [
-            {"source": str(source),
-             "label": provider.label,
-             "linked": str(source) in linked,
-             "counted": tracker_prefs.counts_tracker(source)}
-            for source, provider in providers.registered().items()
-            if str(source) in providers.tracker_sources()
-        ],
+        "orders": {"metadata_order": orders.metadata},
         "trakt_login_configured": settings.trakt_login_configured,
         "simkl_login_configured": settings.simkl_login_configured,
-        # Whether unlinking is offered at all. Without a password an account's
-        # linked identities are its only way in, so the last one may not be
-        # removed — showing a button that always refuses would be worse than
-        # showing none.
-        "can_unlink": bool(account and account["password_hash"]) or len(identities) > 1,
+        "tmdb_link_configured": settings.tmdb_link_configured,
+        # WHICH LINKS AN UNLINK IS OFFERED FOR. Without a password an account's
+        # links it can sign in with are its only way in, so the last of those may
+        # not be removed — showing a button that always refuses would be worse
+        # than showing none. A link nobody signs in with (TMDB's) is never a way
+        # in, so it can always go, and never counts as the one left
+        # (app/auth/revocation.py, identities.unlink_identity).
+        "can_unlink": _unlinkable(identities, bool(account and account["password_hash"])),
         # Drives whether the password form asks for a current password, and
         # whether the "a password is your way back in" nudge is shown.
         "has_password": bool(account and account["password_hash"]),
         "min_password_length": auth.MIN_PASSWORD_LENGTH,
         "display_name_max": auth.DISPLAY_NAME_MAX,
-        "has_avatar": user_images.has_avatar(user.user_id),
+        "has_avatar": pictures.has_avatar,
         # THE PICTURE'S OWN VERSION, SO A RELOAD CANNOT SHOW THE OLD ONE. These
         # images are served `private, max-age=86400`, which is right for a file
         # that rarely changes and wrong for the moment it does: the URL is
@@ -802,22 +776,21 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
         # goes on drawing it for a day. Carrying the file's mtime in the template
         # fixes it for every path at once — upload, adopt, refresh — rather than
         # each call site remembering.
-        "avatar_version": user_images.picture_version(
-            user_images.avatar_path(user.user_id)),
+        "avatar_version": pictures.avatar_version,
         # WHICH SERVICES HAVE GIVEN US A PICTURE, and which one (if any) the
         # account is currently wearing. The second is derived by comparing bytes
         # rather than stored, for the reason user_images.adopt_avatar_source
         # gives: the avatar is a COPY, so there is no "primary provider" field
         # and the honest answer is whether the two files match.
         "avatar_sources": [
-            {"source": name,
-             "label": "Uploaded" if name == user_images.UPLOAD_SOURCE else name.title(),
+            {"source": picture.source,
+             "label": ("Uploaded" if picture.source == user_images.UPLOAD_SOURCE
+                       else picture.source.title()),
              # Refresh means "ask them again", which only a service can answer.
-             "refreshable": name != user_images.UPLOAD_SOURCE,
-             "adopted": user_images.avatar_source_is_adopted(user.user_id, name),
-             "version": user_images.picture_version(
-                 user_images.avatar_source_path(user.user_id, name))}
-            for name in user_images.list_avatar_sources(user.user_id)
+             "refreshable": picture.source != user_images.UPLOAD_SOURCE,
+             "adopted": picture.adopted,
+             "version": picture.version}
+            for picture in pictures.sources
         ],
         # WHICH SERVICES COULD BE ASKED, as opposed to which have already
         # answered. An account linked before pictures were ever fetched has a
@@ -831,49 +804,64 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
     }
 
 
+def _unlinkable(identities, has_password: bool) -> frozenset[str]:
+    """The linked services the account page offers Unlink for: every link that is
+    not a way in, and a way in while a password or another way in remains — the
+    same rule identities.unlink_identity enforces, asked of the same table."""
+    ways_in = [row["provider"] for row in identities
+               if revocation.is_login_provider(row["provider"])]
+    return frozenset(
+        row["provider"] for row in identities
+        if not revocation.is_login_provider(row["provider"]) or has_password
+        or len(ways_in) > 1)
+
+
 @dataclasses.dataclass(frozen=True)
 class _Orders:
-    """The two "which service leads" lists the page offers, as it shows them."""
+    """The "whose description is read" list the page offers, as it shows it."""
     prefs: object
-    tracker: list[dict]
     metadata: list[dict]
 
 
-async def _account_orders(user_id: int, linked: dict, settings: Settings) -> _Orders:
-    """Which linked tracker decides, and whose description of a title is read, each
-    in the order it is currently asked in.
+async def _account_orders(user_id: int, settings: Settings) -> _Orders:
+    """Whose description of a title is read, in the order it is currently asked in.
 
-    WHICH LINKED TRACKER DECIDES: only the ones this account has LINKED, because
-    the choice is between services that actually answer — a service with no
-    identity here decides nothing, and offering it would be offering a preference
-    with no effect. Empty when fewer than two are linked, which is what hides the
-    control: there is no order to state when one service answers.
+    WHICH LINKED TRACKER DECIDES, WHOSE STORED NUMBERS STILL COUNT AND WHERE A
+    SEASON'S EPISODE TOTAL IS ASKED OF ARE NOT HERE: they are about the tracker and
+    sit in the tracker's own settings dialog (app/distrakt/tracker_settings.py).
+    This page keeps what is about the account.
 
-    WHOSE DESCRIPTION IS READ: NOT narrowed to what is linked, and this is where the
-    two differ sharply. A calendar is read with the instance's own credentials or
-    with none at all, so every source this instance can fill a calendar from
+    WHOSE DESCRIPTION IS READ: every source that can describe titles for this
+    instance, linked or not. A calendar is read with the instance's own credentials
+    or with none at all, so every source this instance can fill a calendar from
     describes titles for every account — asked through the registry's own function,
     so an operator switching one off empties this control by the same rule that
-    empties the calendar.
+    empties the calendar. Empty when fewer than two can describe, which is what
+    hides the control: there is no order to state when one service answers.
 
-    BOTH ARE ORDERED THROUGH THE FUNCTION THAT ACTS ON THEM (prefs.tracker_order,
-    prefs.source_order) rather than by reading the stored lists here. A screen with
-    its own reading of a preference could disagree with the code acting on it, and
-    a viewer would have no way to tell which was lying. The same lists are what a
-    move reorders (move_account_order), so a press moves what the viewer saw.
+    ORDERED THROUGH THE FUNCTION THAT ACTS ON IT (prefs.source_order) rather than
+    by reading the stored list here. A screen with its own reading of a preference
+    could disagree with the code acting on it, and a viewer would have no way to
+    tell which was lying. The same list is what a move reorders
+    (move_account_order), so a press moves what the viewer saw.
     """
     source_prefs = await _source_prefs().load(user_id)
-    linked_trackers = [str(source) for source in providers.registered()
-                       if str(source) in providers.tracker_sources() and str(source) in linked]
-    describing = [str(p.source) for p in providers.calendar_sources(settings=settings)]
+    # AND EVERY SOURCE THAT DESCRIBES TITLES WITHOUT PUBLISHING A CALENDAR, when
+    # this instance can ask it (TMDB): its answers are the pictures and the
+    # details a viewer reads, so an order that left it out would be an order the
+    # viewer could not put it in. A calendar source switched off by the operator
+    # still drops out, by the calendar's own rule above.
+    calendars = {str(p.source) for p in providers.calendar_sources(settings=settings)}
+    describing = [str(source) for source, provider in providers.registered().items()
+                  if str(source) in calendars
+                  or (not provider.capabilities.endpoints and provider.detail_port is not None
+                      and provider.detail_port.catalogue_configured(settings))]
 
     def entries(names: list[str]) -> list[dict]:
         return [{"source": name, "label": providers.registered()[name].label} for name in names]
 
     return _Orders(
         prefs=source_prefs,
-        tracker=entries(source_prefs.tracker_order(linked_trackers))
-        if len(linked_trackers) > 1 else [],
         metadata=entries(source_prefs.source_order(describing)) if len(describing) > 1 else [],
     )
 
@@ -887,8 +875,8 @@ async def _section(request: Request, session_id: str, section: str, **notes) -> 
 
 async def _card(request: Request, session_id: str, **notes) -> Response:
     """The whole account card, for an action that changes what several sections
-    offer — unlinking a service reaches the orders, the retired list, the tracker
-    notice and whether unlinking is still allowed at all."""
+    offer — unlinking a service reaches the order, the tracker notice and whether
+    unlinking is still allowed at all."""
     return templates.TemplateResponse(
         request, "_account_card.html", await _account_context(request, session_id, **notes))
 
@@ -906,28 +894,14 @@ async def unlink_identity(request: Request):
     user = await auth.require_session(request)
     data = await authz.json_body(request)
     provider = str(data.get("provider") or "").strip().lower()
-    if provider not in ("trakt", "plex", "simkl"):
+    if not revocation.is_linkable(provider):
         return await _card(request, user.session_id, link_message="Unknown provider.")
-    # Imported here rather than at module scope: trakt_routes.py and
-    # simkl_routes.py read this module's message constants, so the dependency
-    # only runs one way at import time.
-    from . import simkl_routes, trakt_routes
 
     # Read before the unlink (the token lives on the row it deletes), spent only
     # after one actually happened — an unlink that gets refused below must not
-    # leave the account linked to a token this app just killed.
-    #
-    # TRAKT AND SIMKL BOTH REVOKE NOW. Plex's token is invalidated by the user
-    # on plex.tv — there is no revocation endpoint to call for it, so it stays
-    # local-only. Simkl's v1 tokens documented no revocation at all, but v2
-    # does (app/auth/simkl.py.revoke_token); simkl_routes.revoke_token_value
-    # already reads a legacy-shaped stored token as nothing to revoke, so this
-    # call site does not need to tell the two apart itself.
-    stored_token = None
-    if provider == "trakt":
-        stored_token = await trakt_routes.stored_access_token(user.user_id)
-    elif provider == "simkl":
-        stored_token = await simkl_routes.stored_access_token(user.user_id)
+    # leave the account linked to a token this app just killed. Which services
+    # revoke at all, and how, is app/auth/revocation.py's table.
+    stored_token = await revocation.stored_token(provider, user.user_id)
     try:
         removed = await auth.unlink_identity(user.user_id, provider)
     except auth.LastLoginMethod:
@@ -938,19 +912,15 @@ async def unlink_identity(request: Request):
         return await _card(request, user.session_id, link_message="That account isn't linked.")
     # The unlink succeeded either way; a warning is about the part only the user
     # can finish, on the provider's own site, so it is said beside the rows.
-    warning = None
-    if provider == "trakt":
-        warning = await trakt_routes.revoke_token_value(stored_token)
-    elif provider == "simkl":
-        warning = await simkl_routes.revoke_token_value(stored_token)
+    warning = await revocation.revoke(provider, stored_token)
     return await _card(request, user.session_id, link_message=warning or "",
                        link_ok=not warning)
 
 
 @guard.post("/me/order/{kind}", AuthLevel.SESSION)
 async def move_account_order(kind: str, request: Request):
-    """Move one service a place up or down in one of the two "which service leads"
-    lists, and answer with that list.
+    """Move one service a place up or down in the "whose description is read" list,
+    and answer with that list.
 
     A MOVE, NOT THE WHOLE LIST FROM THE BROWSER. The page used to reorder its own
     DOM and post back what it read out of it; the server now takes the list it
@@ -963,27 +933,17 @@ async def move_account_order(kind: str, request: Request):
     about the other two. `source_prefs.save` is what refuses a name this app has
     never heard of and one named twice.
 
-    WHICH LINKED TRACKER DECIDES is not narrowed to what is linked TODAY when it is
-    stored — somebody who unlinks Trakt for a month has not stopped preferring it —
-    but the list this page offers is the linked services, and a press reorders
-    what was offered. What is linked decides who is ASKED
-    (watch_history.tracker_ports); this decides who leads among those that answer.
-
-    WHOSE DESCRIPTION IS READ is a reordering and never a filter: whether a service
-    appears on this account's calendar at all is stated in the calendar's own
-    filters panel.
+    A REORDERING AND NEVER A FILTER: whether a service appears on this account's
+    calendar at all is stated in the calendar's own filters panel. The tracker's
+    own lists are moved from the tracker's settings dialog, not here.
     """
     user = await auth.require_session(request)
     data = await authz.json_body(request)
-    field = {"tracker_order": "tracker_priority", "metadata_order": "metadata_order"}.get(kind)
-    if field is None:
-        return await _section(request, user.session_id, "tracker_order",
-                              order_message="There is no such list.", order_kind="tracker_order")
-    identities = await auth.list_identities(user.user_id)
-    linked = {row["provider"]: row["display_name"] for row in identities}
-    orders = await _account_orders(user.user_id, linked, load_settings())
-    names = [entry["source"] for entry in
-             (orders.tracker if kind == "tracker_order" else orders.metadata)]
+    if kind != "metadata_order":
+        return await _section(request, user.session_id, "metadata_order",
+                              order_message="There is no such list.", order_kind="metadata_order")
+    orders = await _account_orders(user.user_id, await load_settings())
+    names = [entry["source"] for entry in orders.metadata]
     source = str(data.get("source") or "")
     step = {"up": -1, "down": 1}.get(str(data.get("direction") or ""))
     if source not in names or step is None or not 0 <= names.index(source) + step < len(names):
@@ -992,64 +952,12 @@ async def move_account_order(kind: str, request: Request):
     at = names.index(source)
     names[at], names[at + step] = names[at + step], names[at]
     try:
-        await _source_prefs().save(dataclasses.replace(orders.prefs, **{field: names}))
+        await _source_prefs().save(dataclasses.replace(orders.prefs, metadata_order=names))
     except ValueError as exc:
         return await _section(request, user.session_id, kind, order_kind=kind,
                               order_message=str(exc))
     return await _section(request, user.session_id, kind, order_kind=kind,
                           order_moved=f"{source}-{data.get('direction')}")
-
-
-@guard.post("/me/tracker-retired", AuthLevel.SESSION)
-async def set_own_retired_trackers(request: Request):
-    """State which services' stored numbers this account no longer counts.
-
-    THE EXIT FROM A STATE THAT HAD NONE. Unlinking stops a service being ASKED,
-    which already worked; it could not stop the numbers it had already
-    contributed from counting, so every row it ever touched stayed amber for ever
-    and an account that had genuinely migrated read as permanently degraded. This
-    is how somebody says "I have moved off that one".
-
-    THE WHOLE SET IS THE ANSWER, like the order beside it and for the same reason:
-    "retire this one" says nothing about the others. The list is a form of one box
-    per service, `counted:<service>`, each with a hidden "0" before it so an
-    unticked box is still MENTIONED — a service the body does not name at all is
-    refused rather than read as retired, because that is a page that did not draw
-    it, not a person who unticked it.
-
-    NOT NARROWED TO WHAT IS LINKED TODAY, also like the order: retiring a service
-    and then re-linking it is a real sequence, and dropping the name on the way in
-    would silently un-retire it. `source_prefs.save` refuses a name this app has
-    never heard of.
-
-    NOTHING IS DELETED, HERE OR ANYWHERE THIS REACHES. The numbers stay where they
-    are and the rows still show them, marked as retired — because un-retiring has
-    to be able to put them straight back, and because a number that vanished
-    without explanation is the invisibility the freshness states exist to remove.
-    A FROZEN MONTH IS NOT TOUCHED AT ALL: what a month recorded is not a live
-    claim, and a preference stated today must not re-answer an earlier month.
-    """
-    user = await auth.require_session(request)
-    data = await authz.json_body(request)
-    prefix = "counted:"
-    mentioned = {key[len(prefix):]: value for key, value in data.items() if key.startswith(prefix)}
-    trackers = [str(source) for source in providers.registered()
-                if str(source) in providers.tracker_sources()]
-    unknown = sorted(set(mentioned) - set(trackers))
-    missing = [name for name in trackers if name not in mentioned]
-    if unknown or missing:
-        return await _section(request, user.session_id, "retired", retired_message=(
-            f"Unknown service: {', '.join(unknown)}." if unknown
-            else "Every service has to be stated. Reload the page and try again."))
-    source_prefs = _source_prefs()
-    prefs = await source_prefs.load(user.user_id)
-    try:
-        await source_prefs.save(dataclasses.replace(
-            prefs, tracker_retired=[name for name in trackers
-                                    if not route_params.ticked(mentioned[name])]))
-    except ValueError as exc:
-        return await _section(request, user.session_id, "retired", retired_message=str(exc))
-    return await _section(request, user.session_id, "retired")
 
 
 @guard.post("/me/share-watch-history", AuthLevel.SESSION)
@@ -1160,7 +1068,7 @@ async def set_own_password(request: Request):
     that new session, the only one left.
     """
     user = await auth.require_session(request)
-    settings = load_settings()
+    settings = await load_settings()
     ip = auth.client_ip(request, settings)
     # The current-password check is a guess-checking oracle, so it is throttled on
     # the same shared per-address counter a sign-in is — at the same tolerant
@@ -1235,7 +1143,7 @@ async def upload_avatar(request: Request):
 async def remove_avatar(request: Request):
     user = await auth.require_session(request)
     await authz.json_body(request)
-    user_images.delete_avatar(user.user_id)
+    await user_images.delete_avatar(user.user_id)
     return await _section(request, user.session_id, "avatar")
 
 
@@ -1257,7 +1165,9 @@ async def get_avatar(request: Request):
         return authz.error("`size` must be a whole number.")
     if not 16 <= size <= user_images.MASTER_SIZE:
         return authz.error(f"`size` must be between 16 and {user_images.MASTER_SIZE}.")
-    resized = await anyio.to_thread.run_sync(user_images.resize_master, path.read_bytes(), size)
+    resized = await user_images.resized(path, size)
+    if resized is None:
+        return Response(status_code=404)
     return Response(content=resized, media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
 
 
@@ -1303,7 +1213,9 @@ async def get_avatar_source(request: Request, source: str):
         return authz.error("`size` must be a whole number.")
     if not 16 <= size <= user_images.MASTER_SIZE:
         return authz.error(f"`size` must be between 16 and {user_images.MASTER_SIZE}.")
-    resized = await anyio.to_thread.run_sync(user_images.resize_master, path.read_bytes(), size)
+    resized = await user_images.resized(path, size)
+    if resized is None:
+        return Response(status_code=404)
     return Response(content=resized, media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
 
 
@@ -1320,7 +1232,7 @@ async def use_avatar_source(request: Request):
     name = _known_source(data.get("source"))
     if name is None:
         return await _section(request, user.session_id, "avatar", avatar_message="Unknown picture.")
-    if not user_images.adopt_avatar_source(user.user_id, name, only_if_missing=False):
+    if not await user_images.adopt_avatar_source(user.user_id, name, only_if_missing=False):
         return await _section(request, user.session_id, "avatar",
                               avatar_message="There is no saved picture of that kind.")
     return await _section(request, user.session_id, "avatar")
@@ -1346,7 +1258,7 @@ async def refresh_provider_avatar(request: Request):
     name = _known_slot(data.get("source"))
     if name is None:
         return await _section(request, user.session_id, "avatar", avatar_message="Unknown service.")
-    was_adopted = user_images.avatar_source_is_adopted(user.user_id, name)
+    was_adopted = await user_images.avatar_source_is_adopted(user.user_id, name)
     url = await provider_avatars.current_url(user.user_id, name)
     raw = await provider_avatars.fetch(name, url)
     if raw is None:
@@ -1357,7 +1269,7 @@ async def refresh_provider_avatar(request: Request):
     except user_images.ValidationError as exc:
         return await _section(request, user.session_id, "avatar", avatar_message=str(exc))
     if was_adopted:
-        user_images.adopt_avatar_source(user.user_id, name, only_if_missing=False)
+        await user_images.adopt_avatar_source(user.user_id, name, only_if_missing=False)
     return await _section(request, user.session_id, "avatar")
 
 
@@ -1368,7 +1280,7 @@ async def remove_avatar_source(request: Request):
     name = _known_source(data.get("source"))
     if name is None:
         return await _section(request, user.session_id, "avatar", avatar_message="Unknown picture.")
-    user_images.delete_avatar_source(user.user_id, name)
+    await user_images.delete_avatar_source(user.user_id, name)
     return await _section(request, user.session_id, "avatar")
 
 
@@ -1387,11 +1299,11 @@ async def remove_avatar_source(request: Request):
 # the rankings board's export picker, which chooses between them. What they share
 # is the one place the bytes are validated and stored — user_images.add_image.
 
-def _image_library(request: Request, user_id: int, message: str = "") -> Response:
+async def _image_library(request: Request, user_id: int, message: str = "") -> Response:
     """This account's saved pictures, as the account page draws them."""
     return templates.TemplateResponse(request, "_user_images.html", {
         "request": request,
-        "images": user_images.describe_images(user_id),
+        "images": await user_images.describe_images(user_id),
         "cap": user_images.MAX_IMAGES_PER_USER,
         "name_cap": user_images.MAX_IMAGE_NAME,
         "message": message,
@@ -1414,7 +1326,7 @@ async def upload_saved_image(request: Request):
                    "Remove one first.")
     except user_images.ValidationError as exc:
         message = str(exc)
-    return _image_library(request, user.user_id, message)
+    return await _image_library(request, user.user_id, message)
 
 
 @guard.post("/me/images/{image_uid}/name", AuthLevel.SESSION)
@@ -1426,19 +1338,19 @@ async def rename_saved_image(image_uid: str, request: Request):
     message = ""
     try:
         name = user_images.clean_name(data.get("name"))
-        if not user_images.set_image_name(user.user_id, image_uid, name):
+        if not await user_images.set_image_name(user.user_id, image_uid, name):
             message = "No such image."
     except user_images.ValidationError as exc:
         message = str(exc)
-    return _image_library(request, user.user_id, message)
+    return await _image_library(request, user.user_id, message)
 
 
 @guard.post("/me/images/{image_uid}/delete", AuthLevel.SESSION)
 async def remove_saved_image(image_uid: str, request: Request):
     user = await auth.require_session(request)
     await authz.json_body(request)
-    message = "" if user_images.delete_image(user.user_id, image_uid) else "No such image."
-    return _image_library(request, user.user_id, message)
+    message = "" if await user_images.delete_image(user.user_id, image_uid) else "No such image."
+    return await _image_library(request, user.user_id, message)
 
 
 @guard.get("/api/me/images/{image_uid}", AuthLevel.SESSION)

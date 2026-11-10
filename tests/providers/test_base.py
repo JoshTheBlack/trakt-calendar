@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
@@ -32,6 +32,7 @@ from app.providers.base import (
     Capabilities,
     Item,
     Media,
+    Reach,
     Source,
     collect_ids,
     epoch_moment,
@@ -153,6 +154,7 @@ class TestCapabilities:
     CAPS = Capabilities(
         endpoints=frozenset({"shows/new"}),
         days_before=30, days_after=90, private_user_data=False,
+        retain_seconds=None, reach=Reach.WINDOW,
     )
 
     def test_answers_only_the_endpoints_it_declares(self):
@@ -169,9 +171,41 @@ class TestCapabilities:
         """Trakt declares no window; an unbounded source must not accidentally
         read as one that covers nothing."""
         caps = Capabilities(endpoints=frozenset(), days_before=None,
-                            days_after=None, private_user_data=True)
+                            days_after=None, private_user_data=True,
+                            retain_seconds=None, reach=Reach.WINDOW)
         assert caps.covers(date(1999, 1, 1), today=date(2026, 7, 15))
         assert caps.covers(date(2099, 1, 1), today=date(2026, 7, 15))
+
+    def test_a_window_reach_speaks_for_the_window_asked(self):
+        assert self.CAPS.authoritative(date(2026, 10, 26), 7) == (date(2026, 10, 26),
+                                                                   date(2026, 11, 2))
+
+    def test_a_months_reach_speaks_for_every_month_the_window_touches(self):
+        caps = dataclasses.replace(self.CAPS, reach=Reach.MONTHS)
+        assert caps.authoritative(date(2026, 10, 12), 7) == (date(2026, 10, 1), date(2026, 11, 1))
+        assert caps.authoritative(date(2026, 10, 26), 7) == (date(2026, 10, 1), date(2026, 12, 1))
+        assert caps.authoritative(date(2026, 12, 28), 7) == (date(2026, 12, 1), date(2027, 2, 1))
+
+    def test_an_unknown_reach_is_an_error(self):
+        caps = dataclasses.replace(self.CAPS, reach="the whole year")
+        with pytest.raises(ValueError):
+            caps.authoritative(date(2026, 10, 12), 7)
+
+    def test_simkls_reach_is_the_months_its_calendar_reads(self):
+        """Simkl declares MONTHS because its fetch reads every month a window
+        touches, whole (simkl/calendar.py's `_months_covering`): the two must
+        name the same months, or a fill would take off listings of a month it
+        never read."""
+        from app.providers.simkl import _SimklProvider, calendar as simkl_calendar
+
+        caps = _SimklProvider.capabilities
+        for offset in range(0, 400, 3):
+            start = date(2026, 1, 1) + timedelta(days=offset)
+            months = simkl_calendar._months_covering(start, 7)
+            first, after = caps.authoritative(start, 7)
+            assert (first.year, first.month) == months[0]
+            last = after - timedelta(days=1)
+            assert (last.year, last.month) == months[-1]
 
 
 class TestRegistry:
@@ -222,7 +256,8 @@ class TestRegistry:
         page checks before it renders an explanation instead of a month. Simkl's
         calendar needs no credential at all, so it is listed here with NO
         Settings object in play whatsoever — calendar_sources() takes none."""
-        assert {p.source for p in providers.calendar_sources()} == {Source.TRAKT, Source.SIMKL}
+        assert {p.source for p in providers.calendar_sources()} == {
+            Source.TMDB, Source.TRAKT, Source.SIMKL}
 
     def test_a_source_with_no_calendar_port_would_be_in_neither_list(self):
         """The negative half of the rule above, pinned against whichever source
@@ -273,7 +308,7 @@ class TestRegistry:
     def test_switching_it_off_drops_unconfigured_simkl_from_the_fill(self):
         off = Settings(simkl_public_calendar_enabled=False)
         sources = {p.source for p in providers.calendar_sources(settings=off)}
-        assert sources == {Source.TRAKT}
+        assert sources == {Source.TMDB, Source.TRAKT}
 
     def test_switching_it_off_drops_a_configured_simkl_too(self):
         """The switch answers exactly one question — does Simkl contribute to
@@ -462,74 +497,119 @@ class TestTrackerPort:
         spy.assert_awaited_once()
 
 
-class TestCatalogueSearch:
-    """The registry answering "who can answer a catalogue search", which is
-    the whole mechanism a Trakt-only or a Simkl-only instance being able to
-    search at all rests on — see `for_catalogue_search`'s own docstring.
+TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJ0ZXN0In0.c2lnbmF0dXJl"
 
-    TRAKT AND SIMKL ASK GENUINELY DIFFERENT QUESTIONS HERE, and that is not an
-    inconsistency to paper over: Trakt's catalogue search authenticates with
-    the instance's own client id, same as every other Trakt catalogue read,
-    so a client id alone is real searchable state. Simkl's v2 search and
-    /redirect require a USER token (401 user_token_required otherwise), so
-    Simkl needs `simkl_configured` (client id AND a token) — which only reads
-    true on a per-viewer Settings object — where its per-title DetailPort
-    lookups stay client-id-only. See
+
+class TestSharedIdLookup:
+    """The registry answering "who can be asked which of its titles a shared id
+    names" — every service that answers the exact lookup, whichever box found the
+    title, and NOT the search boxes' list (see `for_shared_id_lookup`).
+
+    THE SERVICES ASK GENUINELY DIFFERENT QUESTIONS HERE, and that is not an
+    inconsistency to paper over: Trakt's lookup authenticates with the
+    instance's own client id and TMDB's with its read token, so either alone is
+    real askable state. Simkl's v2 /redirect requires a USER token (401
+    user_token_required otherwise), so Simkl needs `simkl_configured` (client
+    id AND a token) — which only reads true on a per-viewer Settings object. See
     app/providers/simkl/__init__.py._SimklProvider.catalogue_is_configured.
     """
 
     def test_no_source_is_offered_until_one_has_a_catalogue_credential(self):
-        assert providers.for_catalogue_search(Settings()) == []
+        assert providers.for_shared_id_lookup(Settings()) == []
 
     def test_a_trakt_only_instance_gets_exactly_trakt(self):
         trakt_only = Settings(trakt_client_id="id")
-        assert [s for s, _p in providers.for_catalogue_search(trakt_only)] == [Source.TRAKT]
+        assert [s for s, _p in providers.for_shared_id_lookup(trakt_only)] == [Source.TRAKT]
 
-    def test_a_simkl_client_id_alone_is_not_enough_to_search_it(self):
-        """THE CASE THAT CHANGED UNDER v2: a Simkl client id with no viewer
-        token used to be enough (see git history) — it no longer is, because
-        Simkl's search genuinely requires a user token now."""
+    def test_a_simkl_client_id_alone_is_not_enough_to_ask_it(self):
         simkl_only = Settings(simkl_client_id="id")
-        assert providers.for_catalogue_search(simkl_only) == []
+        assert providers.for_shared_id_lookup(simkl_only) == []
 
-    def test_a_simkl_only_viewer_with_their_own_token_gets_exactly_simkl(self):
-        """THE CASE THIS PORT EXISTS FOR: an instance with no Trakt client id
-        must still let a Simkl-linked viewer search — see this port's own
-        module docstring for what "not configured" means for each source."""
+    def test_a_simkl_linked_viewer_gets_simkl(self):
         simkl_linked = Settings(simkl_client_id="id", simkl_access_token="viewer-tok")
-        assert [s for s, _p in providers.for_catalogue_search(simkl_linked)] == [Source.SIMKL]
+        assert [s for s, _p in providers.for_shared_id_lookup(simkl_linked)] == [Source.SIMKL]
 
-    def test_both_configured_gets_both_in_registry_order(self):
-        both = Settings(trakt_client_id="id",
-                        simkl_client_id="id", simkl_access_token="viewer-tok")
-        assert [s for s, _p in providers.for_catalogue_search(both)] == [Source.TRAKT, Source.SIMKL]
+    def test_every_service_is_asked_in_registry_order_whatever_a_box_searches(self):
+        """TMDB being every box's default does not stop Trakt and Simkl being
+        asked by id: that lookup is how a title TMDB found learns their ids."""
+        every = Settings(tmdb_api_key=TMDB_TOKEN, trakt_client_id="id",
+                         simkl_client_id="id", simkl_access_token="viewer-tok")
+        assert [s for s, _p in providers.for_shared_id_lookup(every)] == [
+            Source.TMDB, Source.TRAKT, Source.SIMKL]
 
     def test_trakt_asks_the_catalogue_question_not_the_private_one(self):
-        """A client id with no access token is a real, searchable state for
-        Trakt — the private per-account token a search never sends must not
-        be what gates it. Simkl is the deliberate exception (see the class
-        docstring) and is asserted separately above."""
         client_id_only = Settings(trakt_client_id="id", trakt_access_token="")
         assert not Settings.trakt_configured.fget(client_id_only)
-        assert {s for s, _p in providers.for_catalogue_search(client_id_only)} == {Source.TRAKT}
+        assert {s for s, _p in providers.for_shared_id_lookup(client_id_only)} == {Source.TRAKT}
 
     def test_the_ports_returned_are_the_registered_search_ports(self):
         both = Settings(trakt_client_id="id",
                         simkl_client_id="id", simkl_access_token="viewer-tok")
-        pairs = dict(providers.for_catalogue_search(both))
+        pairs = dict(providers.for_shared_id_lookup(both))
         assert pairs[Source.TRAKT] is providers.get(Source.TRAKT).search_port
         assert pairs[Source.SIMKL] is providers.get(Source.SIMKL).search_port
 
-    def test_a_source_with_no_search_port_would_be_excluded(self):
-        """The negative half, pinned through the registry rather than by name
-        so this keeps meaning something once every registered source has a
-        search port — see the equivalent calendar-port test above."""
-        no_search = [p for p in providers.registered().values() if p.search_port is None]
-        both = Settings(trakt_client_id="id",
-                        simkl_client_id="id", simkl_access_token="viewer-tok")
-        offered = {s for s, _p in providers.for_catalogue_search(both)}
-        for provider in no_search:
-            assert provider.source not in offered
+
+class TestForSearch:
+    """Who a search box asks: the service searched by default, and a service the
+    viewer has LINKED only when the request adds it by name — see `for_search`.
+    No service stands in for another."""
+
+    def asked(self, settings, also=()):
+        return [entry.catalogue.key for entry in providers.for_search(settings, also).asked]
+
+    @staticmethod
+    def keys(catalogues):
+        return tuple(c.key for c in catalogues)
+
+    def test_the_default_is_tmdb_for_everyone_when_its_token_is_set(self):
+        settings = Settings(tmdb_api_key=TMDB_TOKEN, trakt_client_id="id")
+        assert self.asked(settings) == ["tmdb"]
+
+    def test_no_tmdb_token_is_said_and_nothing_is_asked_in_its_place(self):
+        """A Trakt client id is there, and Trakt is still not searched: the
+        box says TMDB is not configured instead."""
+        plan = providers.for_search(Settings(trakt_client_id="id"))
+        assert plan.asked == []
+        assert plan.unconfigured == ("tmdb",)
+
+    def test_a_linked_service_is_offered_and_not_asked(self):
+        linked = Settings(tmdb_api_key=TMDB_TOKEN, trakt_client_id="id",
+                          trakt_access_token="viewer-tok",
+                          simkl_client_id="id", simkl_access_token="viewer-tok")
+        plan = providers.for_search(linked)
+        assert self.asked(linked) == ["tmdb"]
+        # Simkl offers its two catalogues, each added on its own.
+        assert self.keys(plan.offered) == ("trakt", "simkl", "simkl-anime")
+        assert self.keys(plan.order) == ("tmdb", "trakt", "simkl", "simkl-anime")
+
+    def test_an_unlinked_service_is_not_offered(self):
+        """A Trakt client id is the instance's; "also search Trakt" is offered
+        to a viewer who linked Trakt and nobody else."""
+        plan = providers.for_search(Settings(tmdb_api_key=TMDB_TOKEN, trakt_client_id="id"))
+        assert plan.offered == ()
+
+    def test_an_added_service_is_asked_in_registry_order(self):
+        linked = Settings(tmdb_api_key=TMDB_TOKEN, trakt_client_id="id",
+                          trakt_access_token="viewer-tok",
+                          simkl_client_id="id", simkl_access_token="viewer-tok")
+        plan = providers.for_search(linked, ("simkl", "trakt"))
+        assert self.asked(linked, ("simkl", "trakt")) == ["tmdb", "trakt", "simkl"]
+        assert self.keys(plan.offered) == ("simkl-anime",)
+
+    def test_a_linked_service_still_works_with_no_tmdb_token(self):
+        linked = Settings(simkl_client_id="id", simkl_access_token="viewer-tok")
+        plan = providers.for_search(linked, ("simkl-anime",))
+        assert self.asked(linked, ("simkl-anime",)) == ["simkl-anime"]
+        assert plan.unconfigured == ("tmdb",)
+
+    @pytest.mark.parametrize("name", ["nope", "tmdb", "trakt"])
+    def test_a_name_the_viewer_may_not_add_is_refused(self, name):
+        """Unknown, already the default, or not linked: each is a refusal, never
+        quietly read as the default search."""
+        with pytest.raises(providers.UnknownSearchService):
+            providers.for_search(Settings(tmdb_api_key=TMDB_TOKEN, trakt_client_id="id"),
+                                 (name,))
 
 
 
@@ -569,3 +649,38 @@ class TheEpochConversionIsPortableTests(unittest.TestCase):
         zone themselves; a naive answer would silently be read as local."""
         self.assertEqual(epoch_moment(0).tzinfo, timezone.utc)
         self.assertEqual(epoch_moment(0).date(), date(1970, 1, 1))
+
+
+class APictureCarriesTheOnesBehindItTests(unittest.TestCase):
+    """providers.base.proxied_image's `fallbacks`: what the image proxy tries
+    when the first picture will not load. Measured against wsrv.nl: a proxied
+    `default` is answered with a 302 to it on the same host; a raw one would be
+    redirected to a host the page's img-src refuses."""
+
+    def test_no_fallbacks_is_the_address_it_always_was(self):
+        from urllib.parse import quote
+
+        from app.providers.base import proxied_image
+        self.assertEqual(proxied_image("https://a/1.jpg"),
+                         f"https://wsrv.nl/?url={quote('https://a/1.jpg', safe='')}&q=90&w=440&we")
+        self.assertEqual(proxied_image("https://a/1.jpg", fallbacks=[]),
+                         proxied_image("https://a/1.jpg"))
+
+    def test_each_fallback_is_proxied_with_the_rest_behind_it(self):
+        from urllib.parse import parse_qs, urlsplit
+
+        from app.providers.base import proxied_image
+        address = proxied_image("https://a/1.jpg", fallbacks=["https://b/2.jpg", "https://c/3.jpg"])
+        first = parse_qs(urlsplit(address).query)
+        self.assertEqual(first["url"], ["https://a/1.jpg"])
+        second = first["default"][0]
+        self.assertTrue(second.startswith("https://wsrv.nl/"), "a raw default leaves the host")
+        self.assertEqual(second, proxied_image("https://b/2.jpg", fallbacks=["https://c/3.jpg"]))
+        third = parse_qs(urlsplit(second).query)["default"][0]
+        self.assertEqual(third, proxied_image("https://c/3.jpg"))
+
+    def test_the_picture_itself_and_blanks_are_not_its_own_fallback(self):
+        from app.providers.base import proxied_image
+        self.assertEqual(proxied_image("https://a/1.jpg", fallbacks=["", "https://a/1.jpg"]),
+                         proxied_image("https://a/1.jpg"))
+        self.assertEqual(proxied_image("", fallbacks=["https://b/2.jpg"]), "")

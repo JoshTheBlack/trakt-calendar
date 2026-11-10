@@ -30,10 +30,12 @@ from unittest.mock import AsyncMock, patch
 
 from app import db
 from app.calendar import entries
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings
 from app.distrakt import watch_history
 from app import distrakt as distrakt_store
-from app.providers.base import Media, Record, SeasonsAnswer, Source, proxied_image
+from app.providers.tmdb import search as tmdb_search
+from app.providers.base import Media, Record, SearchPage, SeasonsAnswer, Source, proxied_image
 from app.providers.simkl import detail as simkl_detail
 from app.providers.simkl import search as simkl_search
 from app.providers.trakt import detail as trakt_detail
@@ -44,7 +46,9 @@ AIR = 1783540800.0  # 2026-07-08 20:00Z
 SEVERANCE_KEY = "show:tmdb:95396"
 HEAT_KEY = "movie:tmdb:949"
 
-_ROW = re.compile(r'<button class="search-row[^"]*"(.*?)>', re.S)
+# A show row is the <summary> its season picker unfolds under; a film row a
+# <button> that is the add.
+_ROW = re.compile(r'<(?:button|summary) class="search-row[^"]*"(.*?)>', re.S)
 _TITLE = re.compile(r'<span class="search-title">([^<]*)')
 
 
@@ -216,10 +220,11 @@ class TypedPickTests(AddFlowTestCase):
         store(_severance())
         self.warm((SEASONS_URL, SEASONS))
         html = self.pick(SEVERANCE_KEY)
-        self.assertIn("Pick a season for <span>Severance</span>", html)
-        self.assertIn("S01 (9 eps)", html)
+        self.assertIn("Pick seasons of Severance", html)
+        self.assertIn('name="season:1"', html)
+        self.assertIn("9 eps", html)
         # The season button names the same stored identity and the season.
-        self.assertIn(f'"t": "{SEVERANCE_KEY}"', html)
+        self.assertIn(f'name="t" value="{SEVERANCE_KEY}"', html)
         self.assertNotIn('"q"', html)
 
     def test_an_identity_nothing_stores_is_refused_rather_than_built(self):
@@ -289,13 +294,17 @@ class OnlyTheOtherServiceStoredItTests(AddFlowTestCase):
             year, month = self.current
             html = self.client.get(f"/distrakt/fragments/seasons?year={year}"
                                    f"&month={month}&t=show:tmdb:209867").text
-        self.assertIn("S01 (28 eps)", html)
+        self.assertIn('name="season:1"', html)
+        self.assertIn("28 eps", html)
         self.assertEqual(seasons.await_args.args[1], "2002")
 
 
 class EnterAsksTheViewersServicesTests(AppTestCase):
-    """Submitting still asks exactly the services this viewer can search with —
-    Trakt on the instance's client id, Simkl only with their own token."""
+    """Submitting asks TMDB, with the instance's read token, for everybody — and
+    a service the viewer has linked only when the request ADDS it (`also`), with
+    that viewer's own token. Nothing is searched in TMDB's place."""
+
+    TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJ0ZXN0In0.c2lnbmF0dXJl"
 
     def setUp(self):
         super().setUp()
@@ -304,33 +313,35 @@ class EnterAsksTheViewersServicesTests(AppTestCase):
         self.link_identity(self.user_id, "trakt", 77, "tok")
         self.sign_in_as(self.user_id)
 
-    def _asked(self, *, trakt_client: bool, simkl_client: bool, simkl_linked: bool):
-        save_settings(Settings(public_base_url=ORIGIN,
-                               trakt_client_id="cid" if trakt_client else "",
-                               simkl_client_id="scid" if simkl_client else ""))
+    def _asked(self, *, tmdb: bool = True, simkl_linked: bool = False, also: str = ""):
+        save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                               simkl_client_id="scid",
+                               tmdb_api_key=self.TMDB_TOKEN if tmdb else ""))
         if simkl_linked:
             self.link_identity(self.user_id, "simkl", 4242, "simkl-token")
-        trakt = AsyncMock(return_value=[])
-        simkl = AsyncMock(return_value=[])
-        with patch.object(trakt_detail, "search_titles", trakt), \
-             patch.object(simkl_search, "search_titles", simkl):
-            html = self.client.get("/distrakt/fragments/search?q=frieren").text
-        return {name for name, mock in (("trakt", trakt), ("simkl", simkl))
-                if mock.await_count}, html
+        mocks = {"tmdb": AsyncMock(return_value=SearchPage([])),
+                 "trakt": AsyncMock(return_value=[]), "simkl": AsyncMock(return_value=[])}
+        with patch.object(tmdb_search, "search_titles", mocks["tmdb"]),              patch.object(trakt_detail, "search_titles", mocks["trakt"]),              patch.object(simkl_search, "search_titles", mocks["simkl"]):
+            html = self.client.get(f"/distrakt/fragments/search?q=frieren&also={also}").text
+        return {name for name, mock in mocks.items() if mock.await_count}, html
 
-    def test_both(self):
-        asked, _ = self._asked(trakt_client=True, simkl_client=True, simkl_linked=True)
-        self.assertEqual(asked, {"trakt", "simkl"})
+    def test_tmdb_alone_by_default(self):
+        asked, html = self._asked(simkl_linked=True)
+        self.assertEqual(asked, {"tmdb"})
+        self.assertIn("Also search Trakt", html)
+        self.assertIn("Also search Simkl", html)
 
-    def test_trakt_only_for_a_viewer_who_never_linked_simkl(self):
-        asked, _ = self._asked(trakt_client=True, simkl_client=True, simkl_linked=False)
-        self.assertEqual(asked, {"trakt"})
+    def test_a_linked_service_joins_when_added(self):
+        asked, _ = self._asked(simkl_linked=True, also="trakt,simkl")
+        self.assertEqual(asked, {"tmdb", "trakt", "simkl"})
 
-    def test_simkl_only(self):
-        asked, _ = self._asked(trakt_client=False, simkl_client=True, simkl_linked=True)
-        self.assertEqual(asked, {"simkl"})
-
-    def test_neither(self):
-        asked, html = self._asked(trakt_client=False, simkl_client=True, simkl_linked=False)
+    def test_a_service_the_viewer_never_linked_is_neither_offered_nor_asked(self):
+        asked, html = self._asked(also="simkl")
         self.assertEqual(asked, set())
-        self.assertIn("No catalogue is configured", html)
+        self.assertNotIn("Also search Simkl", html)
+
+    def test_no_tmdb_token_asks_nobody_and_says_so(self):
+        asked, html = self._asked(tmdb=False)
+        self.assertEqual(asked, set())
+        self.assertIn("is not configured", html)
+        self.assertIn("Also search Trakt", html)

@@ -1,3 +1,4 @@
+{#- tight -#}
 {# A card badge that offers to filter on itself, and says what it is already
    filtering.
 
@@ -78,16 +79,32 @@
    {%- if oob %} hx-swap-oob="outerHTML:.fmark[data-fkey='{{ key }}']"{% endif %}></i>
 {%- endmacro %}
 
+{# THE THREE BUTTONS ARRIVE WHEN THE BADGE IS FIRST OPENED, not with the card:
+   the <summary> asks for them `click once` and they land right after it, inside
+   the <details> (`offer`, drawn by /calendar/fragments/badge — the house shape
+   the season picker's rows use). A card carries six or seven badges and nobody
+   opens most of them: MEASURED on one October's All Episodes, the menus were
+   6.2 KB and 29.5 elements of every card. Opening a badge for the first time
+   waits one short request; every open after that is the browser's own. The
+   request is on the summary and never on an ancestor of the buttons, because
+   htmx's attribute inheritance is on (static/js/boost.js) and a trigger on an
+   ancestor would become theirs. #}
 {% macro badge(dimension, token, label, media, classes='', wrap='') %}
 <details class="filter-badge {{ wrap }}" name="filter-badge"
          data-filter="{{ dimension }}" data-token="{{ token }}">
-    <summary class="{{ classes }}" title="Filter on {{ label }}">{{- mark(dimension, token, media) }}{{ caller() }}</summary>
-    <div class="filter-offer">
-        {% for value, text, look in (('exclude', 'Filter out', 'out'), ('include', 'Only this', 'in'), ('', 'Undo', 'undo')) %}
-        <button type="button" class="filter-offer-btn {{ look }}"
-                hx-post="/calendar/filters/badge" hx-json-enc hx-swap="none"
-                hx-vals='{{ {"dimension": dimension, "token": token, "media": media|string, "mode": value} | tojson }}'>{{ text }}</button>
-        {% endfor %}
-    </div>
+    <summary class="{{ classes }}" title="Filter on {{ label }}"
+             hx-get="/calendar/fragments/badge?{{ {'d': dimension, 't': token, 'm': media|string} | urlencode }}"
+             hx-trigger="click once" hx-swap="afterend">{{- mark(dimension, token, media) }}{{ caller() }}</summary>
 </details>
+{% endmacro %}
+
+{# The offer itself: three buttons, each posting one fact about one token. #}
+{% macro offer(dimension, token, media) %}
+<div class="filter-offer">
+    {%- for value, text, look in (('exclude', 'Filter out', 'out'), ('include', 'Only this', 'in'), ('', 'Undo', 'undo')) %}
+    <button type="button" class="filter-offer-btn {{ look }}"
+            hx-post="/calendar/filters/badge" hx-json-enc hx-swap="none"
+            hx-vals='{{ {"dimension": dimension, "token": token, "media": media|string, "mode": value} | tojson }}'>{{ text }}</button>
+    {%- endfor %}
+</div>
 {% endmacro %}

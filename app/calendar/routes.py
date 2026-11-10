@@ -24,27 +24,38 @@ import dataclasses
 import logging
 import re
 import secrets
-from datetime import date, datetime
+import time
+from collections import OrderedDict
+from functools import partial
+from typing import NamedTuple
+from datetime import date, datetime, timedelta
 from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import anyio.to_thread
 from fastapi import APIRouter, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from markupsafe import Markup
 
+from . import day_pages
 from . import (cache as calendar_cache, enrich as calendar_enrich,
-               entries as calendar_entries, filter as calendar_filter,
+               entries as calendar_entries, filter as calendar_filter, query as calendar_query,
                resolve as calendar_resolve, search as calendar_search,
                share_links, state as calendar_state, vocab)
-from .. import (auth, authz, cache, chrome, clock, db, details_panel,
-                route_params)
+from .. import (auth, authz, chrome, clock, db, details_panel, metadata,
+                route_params, templating)
+from ..metadata import identity as title_identity
+from ..metadata import panel as metadata_panel, pictures as metadata_pictures
+from ..metadata import refresh as metadata_refresh
+from ..metadata import rows as title_rows
 from ..auth import AuthLevel, viewer
 from ..config import load_settings
 from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, endpoint_choices, get_endpoint
 from ..integrations import routes as integrations_routes
-from ..media import logos
+from ..media import logos, posters
 from ..perftrace import span
-from ..providers import detail_source
+from ..providers import (UnknownSearchService, detail_source, season_choices,
+                        title_search)
 from ..providers.base import Media, Source, SourceUnavailable, parse_item_key, proxied_image
 from ..providers.trakt import TraktError
 from ..sources import prefs as source_prefs
@@ -67,8 +78,8 @@ INITIAL_DAY_BLOCKS = 5
 # of daily serials puts ninety titles on a single Tuesday — measured at 717ms of
 # template rendering for one month, which is pure Python and therefore holds the
 # event loop for its whole duration (a worker thread does not help: the GIL means
-# the render still runs on the one core the loop needs). Every day block and every
-# season line that same page then asks for queues behind it.
+# the render still runs on the one core the loop needs). Every day block that same
+# page then asks for queues behind it.
 #
 # So the budget is CARDS, which is what the paragraph above was always really
 # about, and the day count is left as a ceiling for the calendars where cards are
@@ -175,6 +186,12 @@ def _filters_summary(prefs: dict) -> str:
             # "where and how a film is released" is one dimension asked in two
             # halves.
             ("film release", prefs["movie_release_countries"] or prefs["movie_release_types"]),
+            ("language", prefs["tv_languages"] or prefs["movie_languages"]),
+            ("keyword", prefs["tv_keywords"] or prefs["movie_keywords"]),
+            ("show type", prefs["tv_show_types"]),
+            ("one service only", prefs["tv_single_service"] or prefs["movie_single_service"]),
+            ("no network", prefs["tv_sparse_no_network"]),
+            ("missing data", prefs["tv_missing"] or prefs["movie_missing"]),
         ) if value
     ]
     return ", ".join(named)
@@ -189,10 +206,12 @@ def _requested_endpoint(request: Request, prefs: dict, settings):
     )
 
 
-async def _viewer_source_selection(request: Request, user, media=None) -> source_prefs.SourcePrefs:
+async def _viewer_source_selection(request: Request, user, media=None, *,
+                                   source: str | None = None) -> source_prefs.SourcePrefs:
     """This viewer's saved source preferences for `media`, with `calendar_source`
     swapped for a `?source=` override when the query names one of the app's own
-    selections.
+    selections — or `source`, where the override arrived some other way (a big
+    day's signed control, `day_pages.Rest.source`).
 
     `media` NARROWS FIRST AND THE OVERRIDE STILL WINS, which is the order the two
     want: the medium picks which of the account's two saved answers is in play,
@@ -212,7 +231,7 @@ async def _viewer_source_selection(request: Request, user, media=None) -> source
     saved = await source_prefs.load(user.user_id)
     if media is not None:
         saved = saved.for_media(media)
-    requested = request.query_params.get("source")
+    requested = source if source is not None else request.query_params.get("source")
     if requested and source_prefs.is_selection(requested):
         return dataclasses.replace(saved, calendar_source=requested)
     return saved
@@ -313,6 +332,24 @@ def _filter_panel(prefs: dict, saved: source_prefs.SourcePrefs, settings, endpoi
             "show": vocab.count_set(prefs, vocab.TV_FIELDS),
             "movie": vocab.count_set(prefs, vocab.MOVIE_FIELDS),
         },
+        # ONE SWITCH PER TOGGLE DIMENSION, its name spelled by vocab like every
+        # other name this panel posts under.
+        "toggles": {field: {"name": vocab.toggle_name(field), "on": bool(prefs.get(field))}
+                    for field in vocab.TOGGLE_FIELDS},
+        # WHAT THE OPERATOR'S FLOOR ALREADY HIDES, for the rules a viewer can
+        # only tighten: a switch or a missing-data rule the floor has on is drawn
+        # on and fixed, saying so, rather than as a box that looks as though
+        # unticking it would bring something back. The panel's other dimensions
+        # are spec chips, which the floor narrows before them unseen.
+        "floor": {
+            **{field: bool(getattr(settings, field)) for field in vocab.TOGGLE_FIELDS},
+            **{field: calendar_filter.parse_spec(getattr(settings, field))[0]
+               for field in vocab.TICK_FIELDS},
+        },
+        # WHO "ONLY A CATALOGUE LISTS IT" MEANS, by the registry's own labels —
+        # the services whose listings arrive undescribed — so the rule's words
+        # name a service without this module naming one.
+        "sparse_labels": calendar_resolve.sparse_labels(),
         "sources": {
             "show": _source_toggles(Media.SHOW, settings, saved,
                                     (showing_sources or {}).get(Media.SHOW)),
@@ -403,8 +440,20 @@ def _coverage_gap(prefs: source_prefs.SourcePrefs,
         return None, None
     named = admitted[0].label
     message = f"{named}'s calendar doesn't reach {_calendar.month_name[month]} {year}."
-    alternatives = [p for p in providers.registered().values()
-                   if str(p.source) not in named_sources]
+    # WHERE THE SWITCH MAY SEND THE VIEWER: a service that fills calendars on this
+    # instance at all, whose calendar this instance can read, publishes this one,
+    # and reaches this month — the four things the switch promises by being
+    # offered. This used to walk the whole registry, so a service registered for
+    # some other job (one that describes titles and publishes no calendar) would
+    # have been offered first, and the link would have landed on an empty month
+    # with nothing saying why; a service with no credential filled in lands on
+    # the same empty month.
+    alternatives = [p for p in providers.calendar_sources(settings=settings)
+                    if str(p.source) not in named_sources
+                    and p.calendar_port.calendar_configured(settings)
+                    and (endpoint is None
+                         or providers.lists_calendar(p, endpoint.key, settings))
+                    and calendar_cache.month_covered(p, year, month)]
     switch_url = None
     if alternatives:
         switch_url = f"?year={year}&month={month}&source={alternatives[0].source}"
@@ -494,12 +543,15 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
         # calendar — dominated by the per-window Trakt fetch on a cold cache
         # (now concurrent across the windows, not one await at a time).
         with span("calendar.read_month", endpoint=endpoint.key, ym=f"{year}-{month:02d}") as sp:
+            # KEYS AND DAYS ONLY: every number the shell states is about the
+            # whole month and needs only each card's identity and day; the cards
+            # it draws inline are drawn once it knows which (`_month_context`).
             assembly.grouped, meta = await calendar_cache.assemble_range(
                 endpoint, settings, tz=tz,
                 start_date=date(year, month, 1), end_date=date(year, month, days),
                 **vocab.active_specs(prefs, endpoint.media, honour_pause=True),
                 not_watching_ids=not_watching,
-                prefs=source_selection,
+                prefs=source_selection, drawn=False,
             )
             sp.set(items=meta["total"])
         assembly.total = meta["total"]
@@ -521,10 +573,11 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
         # the cards, over the SERVER's full id list. Skipped on the error
         # paths: committing an empty month as the baseline would make the whole
         # month look new the next time it loads properly.
-        view_state = await calendar_state.resolve_view(
-            user.user_id, endpoint.key, year, month,
-            show_ids=meta["show_ids"], total=assembly.total, now=datetime.now(tz),
-        )
+        with span("calendar.view_state", ids=len(meta["show_ids"])):
+            view_state = await calendar_state.resolve_view(
+                user.user_id, endpoint.key, year, month,
+                show_ids=meta["show_ids"], total=assembly.total, now=datetime.now(tz),
+            )
         assembly.new_ids = view_state["new_ids"]
         assembly.delta = view_state["delta"]
         assembly.history = view_state["history"]
@@ -606,7 +659,7 @@ async def home(request: Request):
     a Discord post from when this one route served both the picker and the
     calendar. Forward it rather than asking someone to choose the month they
     already named."""
-    settings = load_settings()
+    settings = await load_settings()
     # Already resolved and cached by the dependency that let this request in.
     user = await auth.current_user(request)
     prefs = await auth.get_user_prefs(user.user_id)
@@ -685,22 +738,40 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
     # (app/sources/prefs.py). What they have LINKED is deliberately not part of
     # it: a calendar needs no viewer credential, so linkage narrows the tracker
     # and nothing here (app/sources/prefs.py's `admits_calendar`).
-    source_selection = await _viewer_source_selection(request, user, endpoint.media)
-
-    # This viewer's marks, read ONCE and handed to the assembly so the cards come
-    # out of the template already carrying the class. The client used to add it
-    # after the page had painted, which is what made hidden items visibly pop out.
-    not_watching = await calendar_state.not_watching_ids(user.user_id)
+    with span("calendar.viewer"):
+        source_selection = await _viewer_source_selection(request, user, endpoint.media)
+        # This viewer's marks, read ONCE and handed to the assembly so the cards
+        # come out of the template already carrying the class. The client used to
+        # add it after the page had painted, which is what made hidden items
+        # visibly pop out.
+        not_watching = await calendar_state.not_watching_ids(user.user_id)
     month_view = await assemble_month(
         user, settings, prefs, endpoint, tz, year, month, not_watching,
         source_selection)
     view = _view_preferences(prefs, settings)
+    # A MONTH DRAWN IS ITS TITLES VIEWED, for the descriptions somebody has
+    # already asked for: a card draws each service's own listing, which the
+    # calendar's fill keeps current, so a title nobody has opened is not
+    # described for being on a calendar — but one that has been, and whose
+    # description has passed its clock, is re-read behind the page
+    # (app/metadata/refresh.py).
+    with span("calendar.viewed"):
+        # A title for every card of the month, spelled on a worker thread.
+        metadata_refresh.viewed(
+            settings,
+            await anyio.to_thread.run_sync(lambda: [
+                metadata_refresh.Wanted(str(item.media), item.ids, item.season)
+                for group in month_view.grouped for item in group["items"]]),
+            budget=metadata_refresh.MONTH_BUDGET, missing=False)
 
     # Measured at 4.7ms against 31,358 stored airings, which is why it rides the
     # page render rather than a poll: a number a reader can refresh to is worth
     # more than one that ticks, and it costs the page less than asking for it
-    # would.
-    backlog_titles, backlog_seasons = await calendar_enrich.backlog()
+    # would. The weeks a service is still working out are held in process and
+    # cost nothing to count.
+    with span("calendar.backlog"):
+        backlog_titles, backlog_seasons = await calendar_enrich.backlog()
+        backlog_weeks = calendar_cache.pending_windows()
 
     _count_visible(month_view.grouped, month_view.not_watching_keys)
 
@@ -747,17 +818,62 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
     # day fetched afterwards could never work it out again; pointed at the answer,
     # the day route draws the marks itself. Written once per load rather than once
     # per day because it IS one answer about the month.
-    new_token = await _remember_new_marks(
-        user.user_id, endpoint.key, year, month, month_view.new_ids)
+    new_token = _remember_new_marks(user.user_id, endpoint.key, year, month,
+                                    month_view.new_ids)
+    with span("calendar.file_month"):
+        page_token = (_file_cards(user.user_id, endpoint.key, year, month,
+                                  await anyio.to_thread.run_sync(
+                                      lambda: _filed_cards(month_view.grouped)))
+                      if month_view.error is None else "")
+    # THE CHIPS COUNT THE WHOLE MONTH, so they are worked out before the inline
+    # days are swapped for what they draw — which, for a big day, is its first
+    # page alone.
+    with span("calendar.day_chips"):
+        day_chips = _day_chips(month_view, year, month, days, month_view.not_watching_keys,
+                               view["hide_not_watching"], anchor)
+    # THE INLINE DAYS ARE DRAWN NOW, AND ONLY THEY: the month's cards were read
+    # for their identity and day alone, and a day after them is drawn when it is
+    # scrolled to (`calendar_day`). The jump's card is the drawn one, which is
+    # what the template's identity test asks about. A BIG DAY DRAWS ITS FIRST
+    # PAGE and the control that asks for the rest (app/calendar/day_pages.py,
+    # which says which cards the first page is) — the jump's card among them,
+    # wherever it ranks.
+    specs = vocab.active_specs(prefs, endpoint.media, honour_pause=True)
+    pages = {}
+    for index in inline:
+        views = month_view.grouped[index]["items"]
+        pages[index] = await _first_page(
+            endpoint, settings, views, tz=tz, selection=source_selection, specs=specs,
+            anchor_at=next((at for at, view in enumerate(views) if view is anchor), None))
+    drawn = await calendar_cache.present(
+        endpoint, settings, [month_view.grouped[index]["items"][at] for index in sorted(inline)
+                             for at in pages[index]],
+        tz=tz, prefs=source_selection, **specs)
+    season_lines = await _season_lines(settings, drawn)
+    drawn_as = iter(drawn)
+    for index in sorted(inline):
+        group = month_view.grouped[index]
+        views, group["items"] = group["items"], [next(drawn_as) for _ in pages[index]]
+        if anchor is not None and any(view is anchor for view in views):
+            anchor = group["items"][pages[index].index(
+                next(at for at, view in enumerate(views) if view is anchor))]
+        if len(pages[index]) < len(views):
+            group["more"] = {
+                "count": len(views) - len(pages[index]),
+                "url": _rest_url(user.user_id, endpoint.key, date.fromisoformat(group["date"]),
+                                 views, pages[index], source=request.query_params.get("source"),
+                                 new=new_token, page=page_token)}
     for index, group in enumerate(month_view.grouped):
         group["inline"] = index in inline
         if not group["inline"]:
             group["url"] = _day_url(
                 endpoint.key, date.fromisoformat(group["date"]),
-                source=request.query_params.get("source"), new=new_token)
+                source=request.query_params.get("source"), new=new_token, page=page_token)
 
     logo_networks = await _logo_networks(
-        settings, [item for group in month_view.grouped for item in group["items"]])
+        settings, [item for group in month_view.grouped if group["inline"]
+                   for item in group["items"]])
+    card_pictures = await _card_pictures(user, settings)
     return {
         "request": request,
         "settings": settings,
@@ -797,6 +913,15 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
         # while the filter went on applying.
         "badge_modes": vocab.BadgeModes(prefs),
         "new_ids": month_view.new_ids,
+        # Which month a mark pressed on this page recounts (`_file_month`).
+        "page_token": page_token,
+        # AND WHAT THE PAGE ASKS, ONCE A MINUTE, ABOUT THAT MONTH: whether the
+        # store still draws it (`calendar_changed`, _month_changed.html).
+        "changed_url": (_changed_url(endpoint.key, year, month, page_token,
+                                     source=request.query_params.get("source"))
+                        if page_token else ""),
+        "month_url": _month_url(endpoint.key, year, month,
+                                source=request.query_params.get("source")),
         "stats": {"total": month_view.total, "watching": month_view.watching,
                   "not_watching": month_view.not_watching_count},
         "delta": month_view.delta,
@@ -804,9 +929,7 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
         # EVERY CONSUMER GETS THE EXPANDED SET, not the raw stored one. Mixing
         # the two is how a mark hides a card but not its day's chip: the card
         # asks about `mark_key` and the chip would be counting raw ids.
-        "day_chips": _day_chips(month_view, year, month, days,
-                                month_view.not_watching_keys,
-                                view["hide_not_watching"], anchor),
+        "day_chips": day_chips,
         "error": month_view.error,
         "partial": month_view.partial,
         "unenriched": month_view.unenriched,
@@ -819,6 +942,7 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
         # the lines disappearing IS the signal that the drains have settled.
         "backlog_titles": backlog_titles,
         "backlog_seasons": backlog_seasons,
+        "backlog_weeks": backlog_weeks,
         # How many films this viewer's own release filter took off this month,
         # so a page it emptied can name the filter that emptied it instead of
         # showing a month that looks like it has nothing in it.
@@ -836,6 +960,14 @@ async def _month_context(request: Request, user, settings, prefs: dict) -> dict:
         # WHICH NETWORKS HAVE A LOGO, asked once here rather than once per
         # card by the browser — see `_logo_networks`.
         "logo_networks": logo_networks,
+        # WHAT EACH CARD'S PICTURE IS DRAWN AS — see `_card_pictures`.
+        "card_pictures": card_pictures,
+        # THE LINE UNDER EACH DRAWN CARD, from the title store — `_season_lines`.
+        "season_lines": season_lines,
+        # WHERE A CARD'S COMPARE CONTROL ASKS FOR IT DRAWN WHOLE — see `_card_url`.
+        "card_expand": partial(_card_url, endpoint.key, year, month,
+                               source=request.query_params.get("source"), new=new_token,
+                               page=page_token),
         # How many cards the shell is actually turning into HTML, for the render
         # span the caller opens around it.
         "inline_cards": sum(len(group["items"]) for group in month_view.grouped
@@ -850,7 +982,7 @@ async def calendar_page(request: Request):
     announced as a placeholder that fetches itself from /calendar/day when the
     viewer reaches it, so the browser has a usable page long before a whole month
     of cards exists, and a day nobody scrolls to is never built at all."""
-    settings = load_settings()
+    settings = await load_settings()
     user = await auth.current_user(request)
     prefs = await auth.get_user_prefs(user.user_id)
     month = await _month_context(request, user, settings, prefs)
@@ -879,11 +1011,11 @@ async def calendar_page(request: Request):
         "distrakt_available": bool(user and user.distrakt_approved and user.has_tracker_identity),
     }
     # Jinja renders eagerly when the response is built, so this span is the cost of
-    # turning the shell's cards into HTML — the other half of the server's blocking
-    # time before the browser gets anything. It is now bounded by the inline day
-    # count rather than growing with the whole month.
+    # turning the shell's cards into HTML — bounded by the inline day count rather
+    # than growing with the whole month, and drawn off the event loop
+    # (templating.drawn).
     with span("calendar.render", cards=month["inline_cards"]):
-        return templates.TemplateResponse(request, "index.html", context)
+        return await templating.drawn(request, "index.html", context)
 
 
 _YMD = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -908,73 +1040,72 @@ def _month_date(value, year: int, month: int) -> date | None:
     return parsed
 
 
-# AT MOST ONE LOGO WARM-UP IN FLIGHT FOR THE WHOLE PROCESS. Every calendar
-# render can find missing tiles, and a busy instance would otherwise start a task
-# per request, all resolving the same networks against the same rate-limited API.
-# One at a time is enough: the work is idempotent and whatever this pass misses
-# the next render asks for again.
-_logo_warm_running = False
-
-
-def _warm_logos_later(settings, roster) -> None:
-    """Build the missing network tiles off the back of this request."""
-    global _logo_warm_running
-    if _logo_warm_running:
-        return
-    _logo_warm_running = True
-
-    async def _run():
-        global _logo_warm_running
-        try:
-            await logos.ensure_logos(settings, roster)
-        except Exception:
-            # Best-effort by design: a network whose tile cannot be built shows
-            # the emoji, which is exactly what it showed before. Never let it
-            # reach the request that scheduled it — that request has long since
-            # been answered.
-            logger.exception("network logo warm-up failed")
-        finally:
-            _logo_warm_running = False
-
-    asyncio.create_task(_run())
-
-
-async def _logo_networks(settings, items) -> set[str]:
-    """Which of these cards' networks this instance actually holds a tile for.
+async def _logo_networks(settings, items) -> dict[str, logos.Logo]:
+    """The badge each of these cards' networks has, {name: Logo} — a network absent
+    from the answer is drawn as the 📡 with its name.
 
     ONE QUESTION ANSWERED PER RESPONSE INSTEAD OF ONE REQUEST PER CARD. A network
-    badge is its logo where there is one and the viewer's emoji where there is
-    not, and the calendar used to settle that by pointing every badge at
-    /api/network-logo and handling the 404 in an `onerror`. Measured on a real
-    All Episodes September: 99 requests per load, every one of them a 404, all
-    competing with the day blocks and season lines for the browser's six
-    connections — to learn something the filesystem answers here for nothing.
+    badge is its logo where there is one and the fallback where there is not, and
+    the calendar used to settle that by pointing every badge at a logo route and
+    handling the 404 in an `onerror`. Measured on a real All Episodes September: 99
+    requests per load, every one of them a 404, all competing with the day blocks
+    and season lines for the browser's six connections — to learn something one
+    table read answers.
 
-    THE TRACKER ALREADY DID IT THIS WAY and `logos.tiled` was written for it; the
-    calendar simply never adopted it. This is that function, with the warm-up the
-    same page needs in front of it.
-
-    WARMED FIRST, BECAUSE OTHERWISE NOTHING WOULD EVER GENERATE ONE. The 404 was
-    not only a fallback, it was also the trigger: /api/network-logo builds a
-    missing tile on demand. Asking `tiled` without warming would mean a network
-    the calendar alone shows never getting a logo at all. `ensure_logos` is a
-    path check per already-known network and does real work only for the
-    genuinely missing, which is what makes it safe on every load.
+    THE NETWORKS NOT YET RESOLVED ARE RESOLVED BEHIND THIS RESPONSE
+    (`logos.for_page`), so a new network's logo appears on the next load rather
+    than delaying this one.
     """
     roster = {(item.network, item.ids.get("tmdb")) for item in items if item.network}
-    known = logos.tiled(network for network, _tmdb in roster)
-    # GENERATING THE MISSING ONES DOES NOT HAPPEN ON THIS REQUEST. Warming inline
-    # was the first shape and it cost the render 190ms warm and seven seconds
-    # cold, because a network nobody has resolved yet means a TMDB lookup and
-    # there can be a hundred of them on one month. The page draws the tiles that
-    # exist and asks for the rest to be built behind it, so a new network's logo
-    # appears on the next load rather than delaying this one — the same bargain
-    # the enrichment drain makes, and for the same reason.
-    missing = [(network, tmdb) for network, tmdb in roster
-               if network not in known and not logos.is_negative(network)]
-    if missing:
-        _warm_logos_later(settings, missing)
-    return known
+    with span("calendar.logos", networks=len(roster)):
+        return await logos.for_page(settings, roster)
+
+
+async def _card_pictures(user, settings) -> metadata_pictures.CardPictures:
+    """What this viewer's cards draw for a picture: the card's own, with this
+    app's report address behind it, so one that will not load is replaced at once
+    and its title healed (app/metadata/pictures.py) — in the viewer's own order,
+    the one every surface draws pictures in (posters.order_for). Every route that
+    draws a viewer's own cards hands this to the card template; the share page
+    does not, and keeps the static fallback chain."""
+    with span("calendar.card_pictures"):
+        order = posters.order_for(
+            (await source_prefs.load(user.user_id)).source_order(list(Source)))
+    return metadata_pictures.CardPictures(settings, order)
+
+
+async def _season_lines(settings, items) -> dict[str, dict]:
+    """The line under each of these cards — how many episodes its season has,
+    what aired last, what airs next — {airing key: line}, decided from the title
+    store as the cards are drawn (app/metadata/panel.py's `season_lines`, by
+    detail_source's season rule).
+
+    DRAWN WITH THE CARD, NOT ASKED FOR BY IT. Each card used to fetch its own
+    line as it scrolled into view: a request per card, a scrolled month's worth
+    of them, and each a service's season lookup — MEASURED at 4-13 s apiece
+    beside a month read on a copy of dev — so the line popped in late or not at
+    all. A season the store has no description of from the service that would
+    answer draws no line yet, and is queued behind the page (refresh.viewed,
+    naming that one service), so the next drawing has it."""
+    wanted, keys = [], []
+    for item in items:
+        title_key = str(getattr(item, "card", "") or "").rpartition("|")[0]
+        if title_key and item.season is not None and str(item.media) == str(Media.SHOW):
+            wanted.append(metadata_panel.SeasonWanted(title_key, str(item.media),
+                                                      dict(item.ids or {}), int(item.season)))
+            keys.append(item.airing_key)
+    if not wanted:
+        return {}
+    today = clock.today()
+    with span("calendar.season_lines", seasons=len(wanted)):
+        lines = await db.run(lambda conn: metadata_panel.season_lines(conn, settings, wanted,
+                                                                      today=today))
+        metadata_refresh.viewed(
+            settings, [metadata_refresh.Wanted(asked.media, asked.ids, asked.season,
+                                               source=str(found.owed.source))
+                       for asked, found in zip(wanted, lines) if found.owed is not None],
+            budget=metadata_refresh.MONTH_BUDGET)
+    return {key: found.line for key, found in zip(keys, lines) if found.line}
 
 
 def _library(user, settings) -> integrations_routes.LibraryView | None:
@@ -989,29 +1120,170 @@ def _library(user, settings) -> integrations_routes.LibraryView | None:
     return integrations_routes.LibraryView(settings) if user and user.is_admin else None
 
 
+# THE MONTH A PAGE DREW, FILED FOR ITS MARKS. A mark redraws the title's cards
+# and restates the counts and chips a mark moves, which are about the WHOLE
+# month: worked out by reading the month again, a mark took 1.5 s where its
+# title's own rows take a few milliseconds. So the page files what it drew —
+# every card's day, its title, and every spelling a mark can name it by
+# (state.item_spellings) — under a token its mark buttons carry, and a mark
+# recounts from that. A REFERENCE, like the is-new token: resolved as the account
+# making the request, so a token from somebody else's page reads nothing, and a
+# token that names nothing (a restart, an old tab) reads the month as before.
+#
+# IN MEMORY AND BOUNDED, because what it saves is a read and losing it costs one:
+# the last `_PAGES_MAX` pages, none older than `_PAGE_SECONDS` — pruned whenever
+# the store is touched, not only when a page files — AND NEVER MORE THAN
+# `_FILED_CARDS_MAX` CARDS IN ALL, because a page's size is the month's: one page
+# of an unfiltered All Episodes month files ~18,000 cards, and 256 such pages
+# held 3.4 GB in a process that runs for weeks (MEASURED on a copy of dev). The
+# oldest pages go first; a page bigger than the whole bound is not filed, and its
+# marks read the month as a page with no token does.
+#
+# AND EACH PAGE FILES LITTLE PER CARD: a month's cards are mostly a few hundred
+# titles' episodes, which spell their marks the same way, so equal spellings —
+# and equal days, mark keys and title keys — are one object for the whole page
+# (`_file_month`, which has the measurements).
+_PAGES_MAX = 256
+_PAGE_SECONDS = 2 * 60 * 60
+_FILED_CARDS_MAX = 200_000
+
+
+class _FiledCard(NamedTuple):
+    air_date: str
+    mark_key: str
+    title_key: str
+    spellings: frozenset
+
+
+class _FiledMonth(NamedTuple):
+    endpoint: str
+    year: int
+    month: int
+    cards: tuple
+    at: float
+    # When the store's rows were last known to draw exactly these cards — the
+    # filing, or a month-changed check that read the month again and found it
+    # the same (`calendar_changed`).
+    checked: float
+    # THE TITLES THIS PAGE HAS ASKED TO COMPARE (title-store keys), added by
+    # `calendar_card`: every card of such a title is drawn compared wherever this
+    # page draws it next — a late day, a big day's rest, a mark's redraw — or a
+    # day scrolled to after the press would bring the title's cards back bare.
+    # One set per page, never more than its titles; it goes with the page.
+    compared: set
+
+    def drawn(self) -> list[tuple[str, str]]:
+        """(day, mark key) of every card, in the order the page drew them."""
+        return [(card.air_date, card.mark_key) for card in self.cards]
+
+
+_pages: OrderedDict = OrderedDict()
+
+
+def _prune_pages(moment: float, *, room: int = 0) -> None:
+    """Let go of every filed page past `_PAGE_SECONDS`, then of the oldest until
+    `room` more cards fit under `_FILED_CARDS_MAX` and one more page under
+    `_PAGES_MAX`. Pages are filed in time order, so the oldest is always first."""
+    while _pages and moment - next(iter(_pages.values())).at > _PAGE_SECONDS:
+        _pages.popitem(last=False)
+    if not room:
+        return
+    held = sum(len(filed.cards) for filed in _pages.values())
+    while _pages and (len(_pages) >= _PAGES_MAX or held + room > _FILED_CARDS_MAX):
+        _key, gone = _pages.popitem(last=False)
+        held -= len(gone.cards)
+
+
+def _file_month(user_id: int, endpoint_key: str, year: int, month: int,
+                grouped: list[dict]) -> str:
+    """File the month a page drew (`grouped`, its keys-only cards) and return
+    the token naming it — or no token, for a page larger than the whole store."""
+    return _file_cards(user_id, endpoint_key, year, month, _filed_cards(grouped))
+
+
+def _filed_cards(grouped: list[dict]) -> tuple:
+    """What `_file_month` files of a page's cards — pure, so a page spells it on
+    a worker thread (a mark's every spelling, for every card: 0.33 s for an
+    unfiltered month on the event loop beside a restart's refills, MEASURED).
+
+    EQUAL VALUES ARE ONE OBJECT FOR THE PAGE (`shared`): every card of a title
+    spells its marks alike, so the page holds each distinct spelling set, day and
+    key once and a card refers to them. MEASURED on a copy of dev, user 1's
+    October All Episodes: 0.8 -> 0.2 MB a page with their filters (1,334 cards),
+    13.4 -> 3.8 MB with them paused (18,490 cards, 3,383 spelling sets for 3,339
+    titles) — so the whole store tops out near 40 MB at `_FILED_CARDS_MAX`."""
+    shared: dict = {}
+    return tuple(_FiledCard(shared.setdefault(group["date"], group["date"]),
+                            shared.setdefault(item.mark_key, item.mark_key),
+                            shared.setdefault(item.title_key, item.title_key),
+                            shared.setdefault(spelled := calendar_state.item_spellings(item),
+                                              spelled))
+                 for group in grouped for item in group["items"])
+
+
+def _file_cards(user_id: int, endpoint_key: str, year: int, month: int, cards: tuple) -> str:
+    """File `cards` (`_filed_cards`) as a page's month, here on the event loop,
+    which is the one place `_pages` is touched."""
+    moment = time.monotonic()
+    if len(cards) > _FILED_CARDS_MAX:
+        return ""
+    _prune_pages(moment, room=max(len(cards), 1))
+    token = secrets.token_urlsafe(9)
+    _pages[(user_id, token)] = _FiledMonth(endpoint_key, year, month, cards, moment, moment,
+                                           set())
+    return token
+
+
+def _filed_month(user_id: int, token: str, endpoint_key: str, year: int,
+                 month: int) -> _FiledMonth | None:
+    """The month `token` filed for this account, when it is this month."""
+    _prune_pages(time.monotonic())
+    filed = _pages.get((user_id, token)) if token else None
+    if filed is None or (filed.endpoint, filed.year, filed.month) != (endpoint_key, year, month):
+        return None
+    return filed
+
+
 # HOW LONG THE SHELL'S IS-NEW ANSWER OUTLIVES THE LOAD THAT MADE IT. It is read
 # by the days of ONE page as the reader scrolls through them, so its life is a
 # page's life and not a session's: half an hour is far past the longest anybody
 # spends scrolling a month, and short enough that an abandoned tab's answer is
 # gone rather than sitting in the store indefinitely.
 _NEW_MARKS_TTL_SECONDS = 30 * 60
+# IN PROCESS AND BOUNDED, like the filed month below: the answer is read back
+# only by this process's own late days, so writing it to the database bought
+# nothing a page uses — and cost one: it waited its turn in the writer queue
+# before the shell could draw, 3.2 s behind a restart's refills (MEASURED, a
+# filter save on a harness copy). The last `_NEW_LOADS_MAX` loads' answers, none
+# older than `_NEW_MARKS_TTL_SECONDS`, never more than `_NEW_KEYS_MAX` keys in
+# all — a month's answer is at most its titles, a few thousand with filters off.
+_NEW_LOADS_MAX = 256
+_NEW_KEYS_MAX = 200_000
+# (account, calendar, year, month, token) -> (filed at, the new mark keys). THE
+# ACCOUNT IS IN THE KEY, not only the token, so a token guessed or copied from
+# somebody else's page reads nothing — it names which titles were new to ONE
+# account, and the day route looks it up as the account making the request.
+# The month and calendar are in it for the ordinary reason: one reader can have
+# two tabs open on two months.
+_new_answers: OrderedDict = OrderedDict()
 
 
-def _new_marks_key(user_id: int, endpoint_key: str, year: int, month: int,
-                   token: str) -> str:
-    """Where one page load's is-new answer is filed in the shared cache.
+def _prune_new_answers(moment: float, *, room: int = 0) -> None:
+    """Let go of every answer past `_NEW_MARKS_TTL_SECONDS`, then of the oldest
+    until `room` more keys fit under `_NEW_KEYS_MAX` and one more answer under
+    `_NEW_LOADS_MAX`. Answers are filed in time order, so the oldest is first."""
+    while _new_answers and moment - next(iter(_new_answers.values()))[0] > _NEW_MARKS_TTL_SECONDS:
+        _new_answers.popitem(last=False)
+    if not room:
+        return
+    held = sum(len(keys) for _at, keys in _new_answers.values())
+    while _new_answers and (len(_new_answers) >= _NEW_LOADS_MAX or held + room > _NEW_KEYS_MAX):
+        _key, (_at, gone) = _new_answers.popitem(last=False)
+        held -= len(gone)
 
-    THE USER IS IN THE KEY, not only the token, so a token guessed or copied from
-    somebody else's page reads nothing — this names which titles were new to ONE
-    account, and the day route looks it up as the account making the request. The
-    month and calendar are in it for the ordinary reason: one reader can have two
-    tabs open on two months.
-    """
-    return f"calendar:new:{user_id}:{endpoint_key}:{year}-{month:02d}:{token}"
 
-
-async def _remember_new_marks(user_id: int, endpoint_key: str, year: int,
-                              month: int, new_ids: set[str]) -> str:
+def _remember_new_marks(user_id: int, endpoint_key: str, year: int,
+                        month: int, new_ids: set[str]) -> str:
     """File this load's is-new answer and return the token naming it.
 
     THE ANSWER IS THE SERVER'S, SO THE SERVER KEEPS IT. A day fetched after the
@@ -1026,18 +1298,20 @@ async def _remember_new_marks(user_id: int, endpoint_key: str, year: int,
 
     NO ANSWER IS NOT WORTH A KEY. A month with nothing new on it — much the
     commonest case, since every load commits the baseline the next one is diffed
-    against — writes nothing and hands back no token.
+    against — files nothing and hands back no token, and so does an answer
+    bigger than the whole store.
     """
-    if not new_ids:
+    if not new_ids or len(new_ids) > _NEW_KEYS_MAX:
         return ""
+    moment = time.monotonic()
+    _prune_new_answers(moment, room=len(new_ids))
     token = secrets.token_urlsafe(9)
-    await cache.set(_new_marks_key(user_id, endpoint_key, year, month, token),
-                    sorted(new_ids), retain_seconds=_NEW_MARKS_TTL_SECONDS)
+    _new_answers[(user_id, endpoint_key, year, month, token)] = (moment, frozenset(new_ids))
     return token
 
 
-async def _new_marks(user_id: int, endpoint_key: str, year: int, month: int,
-                     token: str) -> set[str]:
+def _new_marks(user_id: int, endpoint_key: str, year: int, month: int,
+               token: str) -> frozenset[str]:
     """The is-new keys a day may mark, read back from what the shell filed.
 
     A TOKEN THAT NAMES NOTHING MEANS NO MARKS, and that is honest rather than
@@ -1047,15 +1321,38 @@ async def _new_marks(user_id: int, endpoint_key: str, year: int, month: int,
     something is new that stopped being new hours ago.
     """
     if not token:
-        return set()
-    stored = await cache.get(
-        _new_marks_key(user_id, endpoint_key, year, month, token),
-        _NEW_MARKS_TTL_SECONDS)
-    return {str(key) for key in stored} if isinstance(stored, list) else set()
+        return frozenset()
+    _prune_new_answers(time.monotonic())
+    filed = _new_answers.get((user_id, endpoint_key, year, month, token))
+    return filed[1] if filed is not None else frozenset()
+
+
+def _page_token(request: Request) -> str:
+    """The page token a request carries (`_file_month`), when it is one."""
+    token = request.query_params.get("page") or ""
+    return token if _TOKEN.fullmatch(token) else ""
+
+
+_TOKEN = re.compile(r"[A-Za-z0-9_-]{1,32}")
+
+
+def _month_url(endpoint_key: str, year: int, month: int, *, source: str | None = None) -> str:
+    """The month's own page — what the month-changed sentence reloads."""
+    url = f"/calendar?year={year}&month={month}&endpoint={quote(endpoint_key)}"
+    return url + (f"&source={quote(source)}" if source else "")
+
+
+def _changed_url(endpoint_key: str, year: int, month: int, page: str, *,
+                 source: str | None = None) -> str:
+    """The month-changed check for the month `page` filed (`calendar_changed`),
+    asking with the same source selection the page was drawn with."""
+    url = (f"/calendar/changed?endpoint={quote(endpoint_key)}&year={year}&month={month}"
+           f"&page={quote(page, safe='')}")
+    return url + (f"&source={quote(source)}" if source else "")
 
 
 def _day_url(endpoint_key: str, day: date, *, source: str | None = None,
-             new: str = "") -> str:
+             new: str = "", page: str = "") -> str:
     """The content request for one day. Built in one place because the shell's
     placeholder and the retry button on a day that failed must ask for exactly the
     same thing.
@@ -1068,13 +1365,63 @@ def _day_url(endpoint_key: str, day: date, *, source: str | None = None,
 
     `new` is the token naming where this load's is-new answer is filed — see
     `_remember_new_marks`. One short opaque word, the same one on every
-    placeholder in the page, and absent for a month with nothing new on it."""
+    placeholder in the page, and absent for a month with nothing new on it.
+    `page` names the month the page drew, for the marks the day's cards carry
+    (`_file_month`)."""
     url = (f"/calendar/day?endpoint={quote(endpoint_key)}"
           f"&year={day.year}&month={day.month}&date={day.isoformat()}")
     if source:
         url += f"&source={quote(source)}"
     if new:
         url += f"&new={quote(new, safe='')}"
+    if page:
+        url += f"&page={quote(page, safe='')}"
+    return url
+
+
+async def _first_page(endpoint, settings, views, *, tz, selection, specs,
+                      anchor_at: int | None = None) -> tuple[int, ...]:
+    """The places in a day (`views`, keys-only, in the day's order) of the
+    cards its first page draws — every one for a day up to a page, and past it
+    the day ranked (day_pages.first_page) once each card's completeness has been
+    read: asked here alone, for the days that are paged, never by the month's
+    read."""
+    if len(views) <= day_pages.DAY_PAGE_CARDS:
+        return day_pages.first_page(views, anchor_at)
+    with span("calendar.first_page", cards=len(views)):
+        views = await calendar_cache.ranked(endpoint, settings, views, tz=tz, prefs=selection,
+                                            **specs)
+        return day_pages.first_page(views, anchor_at)
+
+
+def _rest_url(user_id: int, endpoint_key: str, day: date, views, drawn: tuple[int, ...], *,
+              source: str | None = None, new: str = "", page: str = "") -> str:
+    """The address a big day's "show the rest" control asks (`calendar_day_rest`):
+    one signed token (app/calendar/day_pages.py) naming this account, the
+    calendar and day, which of its cards were drawn (their places in `views`,
+    the day's every card in its order), the digest of the day those places
+    were counted in, and the same references a late day carries."""
+    return "/calendar/day/rest?t=" + day_pages.token(day_pages.Rest(
+        user_id, endpoint_key, day, tuple(drawn), day_pages.cards_digest(views),
+        source or "", new or "", page or "", db.now()))
+
+
+def _card_url(endpoint_key: str, year: int, month: int, item, *, source: str | None = None,
+              new: str = "", page: str = "") -> str:
+    """The address a card's one compare control fetches the card drawn whole
+    from (`calendar_card`). REFERENCES ONLY: which calendar and month, the card's
+    own row in the title store (`Record.card`, its title's key and episode row)
+    and its airing's digest, plus the same three references a late day carries —
+    the source override, the is-new token and the page token — so the card comes
+    back exactly as the page drew it, with every service's values beside."""
+    url = (f"/calendar/fragments/card?endpoint={quote(endpoint_key)}&year={year}&month={month}"
+           f"&card={quote(str(item.card or ''), safe='')}&airing={item.airing_key}")
+    if source:
+        url += f"&source={quote(source)}"
+    if new:
+        url += f"&new={quote(new, safe='')}"
+    if page:
+        url += f"&page={quote(page, safe='')}"
     return url
 
 
@@ -1086,7 +1433,8 @@ async def search_the_calendar(request: Request):
     TWO ANSWERS, TWO PROMISES, AND THE ROUTE KEEPS THEM APART — see
     app/calendar/search.py, which is where the whole argument lives. The stored
     half is confirmed by the real read path so a jump lands on a card that is
-    actually there; the catalogue half links to a MONTH, which fills on arrival.
+    actually there; the catalogue half lists TITLES, as every box does, and a
+    title's season picker (`calendar_search_seasons`) is where its months are.
 
     `live=1` IS THE ONLY THING THAT SPENDS A REQUEST, and the client sends it on
     Enter or the button rather than on every keystroke. Typing therefore costs an
@@ -1096,11 +1444,15 @@ async def search_the_calendar(request: Request):
     A FRAGMENT, NOT A PAGE. It renders the same results partial the shell embeds,
     so the typing path and a full submit produce identical markup.
 
-    SETTINGS IS THIS VIEWER'S OWN, not the instance-wide one — the catalogue
-    half's Simkl search now genuinely requires a user token (see
-    providers.for_catalogue_search's docstring), so an instance-wide Settings
-    object — which never carries a Simkl token — would read as "no Simkl" for
-    every viewer, linked or not. auth/viewer.py builds it.
+    SETTINGS IS THIS VIEWER'S OWN, not the instance-wide one — which services
+    the catalogue half may add is whom the viewer has linked
+    (providers.for_search), and an instance-wide Settings carries nobody's
+    token. auth/viewer.py builds it.
+
+    WHICH CATALOGUE SEARCH, BY REFERENCE: `also` and `pages`
+    (title_search.SearchRef), sent by the box's own widening controls. A name
+    the viewer may not add is refused in the results, never searched as
+    something else.
     """
     user = await auth.current_user(request)
     settings = await viewer.settings_for_user(user.user_id)
@@ -1124,32 +1476,29 @@ async def search_the_calendar(request: Request):
     found = await calendar_search.stored(
         query, settings=settings, prefs=prefs, tz=tz,
         source_selection=source_selection, marks=marks, endpoints=scope)
-    elsewhere = calendar_search.Results()
+    catalogue = calendar_search.Results()
+    ref = title_search.SearchRef.named(request.query_params)
+    refused = ""
     if live and query:
-        # THE STORED ANSWERS ARE HANDED OVER so the catalogue half does not offer
-        # somewhere the calendar already draws: naming the day beats naming the
-        # month, and offering both would be two rows for one answer.
-        #
-        # KEYED ON THE SEASON AS WELL AS THE TITLE, because a catalogue row is a
-        # season premiere rather than a show. `mark_key` is deliberately the
-        # TITLE's identity and carries no season (see Item.mark_key), so keying
-        # the skip on it alone would drop every season of a title the calendar
-        # happens to hold one airing of — hiding exactly the season somebody is
-        # searching for because a different one is on screen.
-        known = frozenset((a.item.mark_key, a.item.season) for a in found.airings)
         try:
-            elsewhere = await calendar_search.catalogue(
-                query, settings=settings, prefs=prefs, tz=tz, known=known)
+            # THE CALENDAR'S OWN MEDIUM, both only across every calendar — so
+            # the box answers one page of titles like every other box.
+            catalogue = await calendar_search.catalogue(
+                query, settings=settings, ref=ref,
+                media=((Media.SHOW, Media.MOVIE) if everywhere else (Media(endpoint.media),)))
         except SourceUnavailable as exc:
             # The stored half already has an answer worth drawing; a catalogue
             # that could not be reached is a missing addition to it, not a failed
             # search.
             logger.warning("Catalogue search failed: %s", exc)
+        except UnknownSearchService as exc:
+            refused = str(exc)
 
     return templates.TemplateResponse(request, "_search_results.html", {
         "request": request, "query": query, "live": live,
-        "airings": found.airings, "elsewhere": elsewhere.elsewhere,
-        "truncated": found.truncated, "failed": sorted(str(s) for s in elsewhere.failed),
+        "airings": found.airings, "found": catalogue.found,
+        "controls": catalogue.controls, "refused": refused, "search_ref": ref.fields(),
+        "truncated": found.truncated, "failed": sorted(str(s) for s in catalogue.failed),
         "everywhere": everywhere, "endpoint": endpoint,
         "not_watching": set(), "new_ids": set(), "can_filter": False,
         "settings": settings, "is_admin": bool(user and user.is_admin),
@@ -1181,7 +1530,7 @@ async def calendar_day(request: Request):
     account making the request and marks the cards from it. A token naming nothing
     — expired, or invented — marks nothing, which is what a late day did before
     the answer was carried at all."""
-    settings = load_settings()
+    settings = await load_settings()
     user = await auth.current_user(request)
     prefs = await auth.get_user_prefs(user.user_id)
     today = clock.today()
@@ -1193,17 +1542,65 @@ async def calendar_day(request: Request):
         return JSONResponse({"ok": False, "error": "Invalid date"}, status_code=400)
     if not settings.calendar_source_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+    try:
+        context, group, meta = await _draw_day(
+            request, user, settings, prefs, endpoint, year, month, day,
+            source=request.query_params.get("source"), new=request.query_params.get("new") or "",
+            page=_page_token(request))
+    except _DayFailed as failed:
+        # The shell is already on screen with the month's real numbers, so one day
+        # failing is a gap in the month, not a broken page. It replaces itself with
+        # a block that says so and offers to try again, rather than sitting there
+        # as a placeholder that looks like it is still loading.
+        return templates.TemplateResponse(
+            request, "_day_fragment.html", {**failed.context, "group": None,
+                                            "error": failed.message})
+    return await templating.drawn(
+        request, "_day_fragment.html",
+        # A day with nothing on it groups to nothing; the fragment then renders
+        # empty and the placeholder it replaces simply disappears, which is what an
+        # empty day should look like.
+        {**context, "group": group, "error": None, "partial": meta["partial"]},
+    )
 
+
+class _DayFailed(Exception):
+    """A day that could not be read, with what its error block is drawn from."""
+
+    def __init__(self, context: dict, message: str):
+        super().__init__(message)
+        self.context, self.message = context, message
+
+
+async def _draw_day(request: Request, user, settings, prefs, endpoint, year: int, month: int,
+                    day: date, *, source: str | None, new: str, page: str,
+                    rest: day_pages.Rest | None = None
+                    ) -> tuple[dict, dict | None, dict]:
+    """ONE DAY READ AND DRAWN for a viewer — what a late day draws (`rest`
+    None: its first page, app/calendar/day_pages.py) and what a big day's "show
+    the rest" control draws (every card but the places `rest.drawn` names,
+    which its page drew). (context, the day's group or None for a day holding
+    nothing, the read's numbers); raises _DayFailed.
+
+    THE DAY IS READ WHOLE AND DRAWN IN PART: its chip, and whether it is still
+    the day the shell counted (`month_changed`), are about every card on it,
+    which a page of it cannot answer; only the cards drawn are worked out in
+    full (calendar_cache.present). A press is also checked against the day its
+    places were counted in (`rest.counted`), which outlives the filed month.
+
+    Everything that decides WHAT this viewer may see comes from their session:
+    the per-user filters and their not-watching marks are read here, never taken
+    from the request, so this cannot be asked for someone else's view or for an
+    unfiltered day."""
     # Same source selection the shell resolved for this month — see _day_url:
     # the placeholder it built for this day already carries the same `source`
     # override, so this read asks the same source(s) the shell's own numbers
     # for the month were computed from.
-    source_selection = await _viewer_source_selection(request, user, endpoint.media)
-
+    source_selection = await _viewer_source_selection(request, user, endpoint.media,
+                                                      source=source or "")
+    specs = vocab.active_specs(prefs, endpoint.media, honour_pause=True)
     tz = _resolve_viewer_tz(user, settings)
     not_watching = await calendar_state.not_watching_ids(user.user_id)
-    new = await _new_marks(user.user_id, endpoint.key, year, month,
-                           request.query_params.get("new") or "")
     context = {
         "request": request, "not_watching": not_watching,
         # WHICH MONTH THIS DAY IS ON, for the watch toggle on each of its cards:
@@ -1214,128 +1611,404 @@ async def calendar_day(request: Request):
         # carrying the same stored answers (vocab.BadgeModes).
         "can_filter": True,
         "badge_modes": vocab.BadgeModes(prefs),
-        # The shell's is-new answer, for the cards on this day — see the docstring.
-        "new_ids": new,
+        # THE SHELL'S IS-NEW ANSWER, for the cards on this day. The diff and its
+        # baseline commit are a whole-month decision the shell already made and
+        # wrote; this reads the answer it filed back as the account making the
+        # request (`_new_marks`), and a token naming nothing marks nothing.
+        "new_ids": _new_marks(user.user_id, endpoint.key, year, month, new),
+        # And the month it filed, which a mark on one of these cards recounts.
+        "page_token": page,
         "settings": settings, "is_admin": bool(user and user.is_admin),
         # And the same add-to-library buttons, in the state they are in.
         "library": _library(user, settings),
+        "card_pictures": await _card_pictures(user, settings),
+        "card_expand": partial(_card_url, endpoint.key, year, month,
+                               source=source, new=new, page=page),
         "date": day.isoformat(), "label": calendar_cache.day_label(day),
         # The retry asks for exactly what the placeholder did, token included —
         # which is the whole of what a retry now has to carry forward.
-        "retry_url": _day_url(endpoint.key, day, source=request.query_params.get("source"),
-                              new=request.query_params.get("new") or ""),
+        "retry_url": _day_url(endpoint.key, day, source=source, new=new),
         "partial": False,
         # Replaced below once this day's items are known; the error path renders
         # no cards, so an empty set is the right answer for it.
-        "logo_networks": set(),
+        "logo_networks": {},
     }
     try:
         with span("calendar.day", endpoint=endpoint.key, day=day.isoformat()) as sp:
             grouped, meta = await calendar_cache.assemble_range(
-                endpoint, settings, tz=tz, start_date=day, end_date=day,
-                **vocab.active_specs(prefs, endpoint.media, honour_pause=True),
-                not_watching_ids=not_watching,
-                prefs=source_selection,
-            )
+                endpoint, settings, tz=tz, start_date=day, end_date=day, **specs,
+                not_watching_ids=not_watching, prefs=source_selection, drawn=False)
             sp.set(items=meta["total"])
-        # The expanded marks for THIS day's items, from the same assembler the
-        # shell used — a day fetched late must decide "is this marked" by exactly
-        # the rule the shell's own blocks were drawn with.
-        context["not_watching"] = meta["not_watching_keys"]
-        context["logo_networks"] = await _logo_networks(
-            settings, [item for group in grouped for item in group["items"]])
-        # NOTHING LAYS THIS DAY OUT: it arrives with its cards, and how wide it is
-        # and whether hide mode empties it are the stylesheet's questions about
-        # those cards (style.css's `--cols`), asked the moment it lands and asked
-        # again every time a mark changes the answer.
-        # Its chip in the jump-to strip is still the server's, drawn by the rule
-        # the shell's came from, so a day that arrives collapsed stops being a
-        # destination there.
-        if grouped:
-            context["chip"] = _day_chip(day, grouped[0]["items"], meta["not_watching_keys"],
-                                        prefs["hide_not_watching"])
     except TraktError as exc:
-        # The shell is already on screen with the month's real numbers, so one day
-        # failing is a gap in the month, not a broken page. It replaces itself with
-        # a block that says so and offers to try again, rather than sitting there
-        # as a placeholder that looks like it is still loading.
-        return templates.TemplateResponse(
-            request, "_day_fragment.html", {**context, "group": None, "error": str(exc)})
+        raise _DayFailed(context, str(exc)) from exc
+    views = grouped[0]["items"] if grouped else []
+    # The expanded marks for THIS day's items, from the same assembler the
+    # shell used — a day fetched late must decide "is this marked" by exactly
+    # the rule the shell's own blocks were drawn with.
+    context["not_watching"] = meta["not_watching_keys"]
+    # NOTHING LAYS THIS DAY OUT: it arrives with its cards, and how wide it is
+    # and whether hide mode empties it are the stylesheet's questions about
+    # those cards (style.css's `--cols`), asked the moment it lands and asked
+    # again every time a mark changes the answer.
+    # Its chip in the jump-to strip is still the server's, drawn by the rule
+    # the shell's came from, so a day that arrives collapsed stops being a
+    # destination there.
+    if views:
+        context["chip"] = _day_chip(day, views, meta["not_watching_keys"],
+                                    prefs["hide_not_watching"])
+    # WHAT THE SHELL COUNTED FOR THIS DAY, against what the day holds now. A
+    # refill can land between the two (_month_changed.html has the case), and
+    # the day draws what the store holds — the only thing it can draw — so
+    # where they differ it is the page's numbers that went stale, and the day
+    # says so for the whole page.
+    filed = _filed_month(user.user_id, page, endpoint.key, year, month)
+    if filed is not None:
+        counted = sorted(key for on, key in filed.drawn() if on == day.isoformat())
+        context["month_changed"] = counted != sorted(view.mark_key for view in views)
+        context["month_url"] = _month_url(endpoint.key, year, month, source=source)
+        # The titles this page has compared draw compared here too.
+        context["compared"] = frozenset(filed.compared)
+    if rest is None:
+        places = await _first_page(endpoint, settings, views, tz=tz,
+                                   selection=source_selection, specs=specs)
+    else:
+        # THE PLACES ARE PLACES IN THE DAY THE PAGE COUNTED. Where the day now
+        # holds other cards, or the same in another order, they name other cards
+        # than the page drew: what follows draws its best reading of them, and
+        # the page says the month changed — whether or not its filed month is
+        # still here to say so (day_pages.py says why the token carries it).
+        if day_pages.cards_digest(views) != rest.counted:
+            context["month_changed"] = True
+            context["month_url"] = _month_url(endpoint.key, year, month, source=source)
+        before = set(rest.drawn)
+        places = tuple(at for at in range(len(views)) if at not in before)
+    items = await calendar_cache.present(endpoint, settings, [views[at] for at in places],
+                                         tz=tz, prefs=source_selection, **specs)
+    context["logo_networks"] = await _logo_networks(settings, items)
+    context["season_lines"] = await _season_lines(settings, items)
+    if not grouped:
+        return context, None, meta
+    group = {**grouped[0], "items": items}
+    if rest is None and len(places) < len(views):
+        group["more"] = {"count": len(views) - len(places),
+                         "url": _rest_url(user.user_id, endpoint.key, day, views, places,
+                                          source=source, new=new, page=page)}
+    return context, group, meta
 
-    return templates.TemplateResponse(
-        request, "_day_fragment.html",
-        # A day with nothing on it groups to nothing; the fragment then renders
-        # empty and the placeholder it replaces simply disappears, which is what an
-        # empty day should look like.
-        {**context, "group": grouped[0] if grouped else None,
-         "error": None, "partial": meta["partial"]},
-    )
 
+@guard.get("/calendar/day/rest", AuthLevel.CALENDAR_APPROVED)
+async def calendar_day_rest(request: Request):
+    """THE REST OF A BIG DAY — every card its page did not draw, in the day's
+    order — for the control the day drew in their place (app/calendar/day_pages.py
+    says why a day is drawn in pages, and which cards a page draws first). The
+    answer replaces the control: the cards land in the
+    day's own grid, its chip is redrawn out of band, and where the day no longer
+    holds what the shell counted, the page says so (`_draw_day`).
 
-@guard.get("/calendar/jump", AuthLevel.CALENDAR_APPROVED)
-async def jump_to_a_searched_title(request: Request):
-    """Follow a search result that this instance's calendar does not hold: write
-    the one airing, then send the reader to the month it lands on.
-
-    A REDIRECT AND NOT A PAGE, so the address bar ends up on the calendar itself.
-    Back then returns to wherever the reader was rather than replaying a write,
-    and a reload of the month is an ordinary month load.
-
-    IT WRITES ONE THING BECAUSE ONE THING WAS ASKED FOR. The search offers
-    everything that matched — sixteen rows for a franchise — and writing all of
-    them would turn one act of curiosity into sixteen decisions about a calendar
-    everybody on this instance shares. Following a result is the act that names
-    exactly one.
-
-    THE QUERY NAMES A SERVICE AND THAT SERVICE'S OWN ID, AND NOTHING ELSE IS
-    BELIEVED. Title, date, network, poster and the shared ids all come back from
-    the service, so this link cannot be hand-edited into a calendar row of
-    somebody's choosing — see calendar/search.py's `fill_one_gap`.
-
-    A WRITE THAT COULD NOT HAPPEN STILL REDIRECTS. The month is worth opening
-    either way: it may hold the title from an ordinary fill, and if it does not
-    the reader sees the month they asked for rather than an error about
-    machinery.
-    """
-    settings = load_settings()
+    EVERYTHING IT ACTS ON IS IN ONE SIGNED TOKEN, read as the account making the
+    request: a token another account's page drew, an edited one, or one past its
+    life answers with a sentence and a link to reload, in the control's place."""
     user = await auth.current_user(request)
-    today = clock.today()
-    params = request.query_params
-    year = route_params.valid_year(params.get("year"), today.year)
-    month = route_params.valid_month(params.get("month"), today.month)
-    endpoint = get_endpoint(params.get("endpoint"))
-    destination = (f"/calendar?year={year}&month={month}"
-                   f"&endpoint={quote(endpoint.key, safe='')}")
-
-    # A NAME THIS APP DOES NOT KNOW IS NOT AN ERROR, it is a link from an older
-    # version or a hand-edited one; the reader still gets the month.
+    rest = day_pages.read(request.query_params.get("t") or "", user_id=user.user_id,
+                          now=db.now())
+    endpoint = ENDPOINTS.get(rest.endpoint) if rest is not None else None
+    if (rest is None or endpoint is None
+            or not all(_TOKEN.fullmatch(token) for token in (rest.new, rest.page) if token)):
+        return templates.TemplateResponse(request, "_day_rest.html",
+                                          {"request": request, "refused": True})
+    settings = await load_settings()
+    prefs = await auth.get_user_prefs(user.user_id)
+    day = rest.day
     try:
-        source = Source(str(params.get("source") or ""))
-    except ValueError:
-        source = None
-    source_id = str(params.get("id") or "").strip()
-    if source is None or not source_id:
-        return RedirectResponse(destination, status_code=303)
+        context, group, _meta = await _draw_day(
+            request, user, settings, prefs, endpoint, day.year, day.month, day,
+            source=rest.source or None, new=rest.new, page=rest.page, rest=rest)
+    except _DayFailed as failed:
+        return templates.TemplateResponse(request, "_day_rest.html", {
+            **failed.context, "refused": False, "error": failed.message, "group": None})
+    return await templating.drawn(request, "_day_rest.html", {
+        **context, "refused": False, "error": None, "group": group})
+
+
+# What a compare control's `card` and `airing` may be: a title-store key and an
+# episode row, joined by the last "|", and an airing's sixteen hex digits
+# (Item.airing_key). Bounded: they reach a database read and nothing else.
+_CARD_REF = re.compile(r"[^\s|]{3,200}\|[^\s|]{1,120}")
+_AIRING = re.compile(r"[0-9a-f]{16}")
+
+
+@guard.get("/calendar/fragments/card", AuthLevel.CALENDAR_APPROVED)
+async def calendar_card(request: Request):
+    """A TITLE'S CARDS DRAWN WHOLE — every service's value beside the winner, the
+    flips and the pairs of chips — for the compare control a card whose services
+    disagree carries (_card.html says why a card is drawn without them). The
+    answer replaces the card that asked, and every other card of its title on
+    the month that has something to compare is sent out of band
+    (_compared_cards.html) — comparing a show compares it everywhere the page
+    holds it, as a mark marks it everywhere. And the page FILES the title as
+    compared (`_FiledMonth.compared`), so a day it draws later draws the title's
+    cards compared too.
+
+    THE CARDS ARE READ AS A MARK READS ITS TITLE: its title's own rows, every
+    listing of them whole (calendar/query.py's `titles`), placed and judged for
+    this viewer — their filters, their source selection, their order. A card the
+    address names that this read does not draw any more (a refill moved it, a
+    description filtered it) answers 204 and the page is left as it is; the
+    month-changed sentence is what says the page went stale.
+
+    WHAT THE CARDS ARE WEARING IS THE PAGE'S: whether one is marked, from this
+    viewer's marks now; whether it is new, from the shell's filed answer (the
+    `new` token, `_new_marks`); its mark button recounts the page's filed month
+    (`page`)."""
+    settings = await load_settings()
+    user = await auth.current_user(request)
+    prefs = await auth.get_user_prefs(user.user_id)
+    today = clock.today()
+    year = route_params.valid_year(request.query_params.get("year"), today.year)
+    month = route_params.valid_month(request.query_params.get("month"), today.month)
+    endpoint = _requested_endpoint(request, prefs, settings)
+    card = request.query_params.get("card") or ""
+    airing = request.query_params.get("airing") or ""
+    if not _CARD_REF.fullmatch(card) or not _AIRING.fullmatch(airing):
+        return JSONResponse({"ok": False, "error": "Invalid card"}, status_code=400)
+    title_key, _bar, _unit = card.rpartition("|")
+    tz = _resolve_viewer_tz(user, settings)
+    selection = await _viewer_source_selection(request, user, endpoint.media)
+    viewer = calendar_query.Viewer(
+        endpoint, settings, selection, tz,
+        vocab.complete_specs(vocab.active_specs(prefs, endpoint.media, honour_pause=True)))
+    first = date(year, month, 1)
+    last = date(year, month, _calendar.monthrange(year, month)[1])
+    placed = await calendar_query.titles(viewer, {title_key})
+    views = sorted((view for view in placed.views
+                    if first <= date.fromisoformat(view.air_date) <= last),
+                   key=lambda view: (view.air_date, view.air_ts))
+    items = await calendar_query.present(viewer, views)
+    found = next((item for item in items if item.airing_key == airing), None)
+    if found is None:
+        return Response(status_code=204)
+    # THE TITLE'S OTHER CARDS, where drawing them whole changes anything: one
+    # with nothing to compare draws the same either way.
+    others = [item for item in items if item is not found
+              and (item.alternatives or item.air_choices)]
+    page = _page_token(request)
+    filed = _filed_month(user.user_id, page, endpoint.key, year, month)
+    if filed is not None:
+        filed.compared.add(title_key)
+    not_watching = await calendar_state.not_watching_ids(user.user_id)
+    drawn = [found, *others]
+    return await templating.drawn(request, "_compared_cards.html", {
+        "request": request, "item": found, "others": others, "expanded": True,
+        "not_watching": {item.mark_key for item in drawn
+                         if calendar_state.marked(not_watching, item)},
+        "new_ids": _new_marks(user.user_id, endpoint.key, year, month,
+                              request.query_params.get("new") or ""),
+        "can_filter": True, "badge_modes": vocab.BadgeModes(prefs),
+        "card_pictures": await _card_pictures(user, settings),
+        "settings": settings, "is_admin": bool(user and user.is_admin),
+        "library": _library(user, settings),
+        "logo_networks": await _logo_networks(settings, drawn),
+        "season_lines": await _season_lines(settings, drawn),
+        "month": month, "year": year, "endpoint": endpoint,
+        "page_token": page,
+    })
+
+
+@guard.get("/calendar/changed", AuthLevel.CALENDAR_APPROVED)
+async def calendar_changed(request: Request):
+    """Whether the month a page drew is still the month the store holds — what
+    the page asks once a minute (_month_changed.html says why it asks).
+
+    CHEAP UNTIL SOMETHING CHANGED: a store notes the windows whose rows it
+    rewrote (entries.changed_since), and a month none of whose windows has been
+    rewritten since the page last knew it answers 204 with nothing read. Only
+    then is the month read again — keys and days only, asking nobody, the read
+    the shell made — and compared card for card with what the page filed, so a
+    refill that changed rows this viewer does not see (another viewer's genre,
+    a description's words) raises nothing.
+
+    The page's filed month is the account's own (`_filed_month`): a token from
+    somebody else's page, or one that has expired, names nothing, and the answer
+    is the quiet element, which stops the asking."""
+    user = await auth.current_user(request)
+    settings = await load_settings()
+    prefs = await auth.get_user_prefs(user.user_id)
+    today = clock.today()
+    year = route_params.valid_year(request.query_params.get("year"), today.year)
+    month = route_params.valid_month(request.query_params.get("month"), today.month)
+    endpoint = _requested_endpoint(request, prefs, settings)
+    token = _page_token(request)
+    filed = _filed_month(user.user_id, token, endpoint.key, year, month)
+    if filed is None:
+        return templates.TemplateResponse(request, "_month_changed.html", {"request": request})
+    first = date(year, month, 1)
+    after = date(year, month, _calendar.monthrange(year, month)[1]) + timedelta(days=1)
+    # A day either side: a viewer's local month reaches into the UTC day beyond
+    # each of its ends.
+    if not calendar_entries.changed_since(endpoint.key, first - timedelta(days=1),
+                                          after + timedelta(days=1), filed.checked):
+        return Response(status_code=204)
+    checked = time.monotonic()
+    try:
+        grouped, _meta = await calendar_cache.assemble_range(
+            endpoint, settings, tz=_resolve_viewer_tz(user, settings),
+            start_date=first, end_date=after - timedelta(days=1),
+            **vocab.active_specs(prefs, endpoint.media, honour_pause=True),
+            not_watching_ids=await calendar_state.not_watching_ids(user.user_id),
+            prefs=await _viewer_source_selection(request, user, endpoint.media),
+            drawn=False, allow_fetch=False)
+    except TraktError:
+        # Nothing could be read to compare with; ask again next time.
+        return Response(status_code=204)
+    if [(group["date"], view.mark_key) for group in grouped
+            for view in group["items"]] == filed.drawn():
+        _pages[(user.user_id, token)] = filed._replace(checked=checked)
+        return Response(status_code=204)
+    return templates.TemplateResponse(request, "_month_changed.html", {
+        "request": request, "month_changed": True,
+        "month_url": _month_url(endpoint.key, year, month,
+                                source=request.query_params.get("source"))})
+
+
+async def _searched_title(params, settings):
+    """The catalogue result a picker or a jump names — by the query, the
+    medium, the search's own reference and its place in that answer — re-read
+    from the stored search, or None. The medium is one the box searched.
+
+    `params` is whichever carries the reference: the picker's query string, or
+    the jump's posted body, which names the result the same way."""
     try:
         media = Media(params.get("media") or "show")
     except ValueError:
-        media = Media.SHOW
-    season = route_params.season(params.get("season"))
+        return None, Media.SHOW
+    hit = await title_search.resolve_hit(settings, media, str(params.get("q") or ""),
+                                         params.get("i"), title_search.SearchRef.named(params))
+    return hit, media
 
-    landing = await calendar_search.fill_one_gap(
-        settings, source=source, source_id=source_id, media=media,
-        season=season, endpoint_key=endpoint.key,
-        tz=_resolve_viewer_tz(user, settings), now=db.now())
-    if landing:
-        # THE DAY RIDES WITH THE MARK, as it does on a stored result's link
-        # (calendar/search.py's Jump.url): a card past the days the page draws
-        # inline does not exist when the browser looks for #jump-target, so a
-        # mark alone landed at the top of the month.
-        destination += (f"&highlight={quote(landing.mark, safe='')}"
-                        f"&day={quote(landing.day, safe='')}#jump-target")
-    # 303, so following this is a GET however the browser got here, and so a
-    # reload of where it lands does not re-run the write.
-    return RedirectResponse(destination, status_code=303)
+
+@guard.get("/calendar/fragments/search-seasons", AuthLevel.CALENDAR_APPROVED)
+async def calendar_search_seasons(request: Request):
+    """A catalogue result's season picker — the app's one season checklist
+    (_season_checklist.html), asked for when the result's row is pressed, never
+    with the search. Its choices are calendar/search.py's `picker`: the seasons
+    the leading service dates, those the viewer's filters hide refused with the
+    reason, those the calendar already draws linking to their card, and pressing
+    any other season is the jump (one press per season — _search_seasons.html).
+
+    EVERY OUTCOME IS DRAWN, at 200, as a sentence where the list would be: a
+    non-200 is never swapped, and the slot would stay as it was."""
+    user = await auth.current_user(request)
+    settings = await viewer.settings_for_user(user.user_id)
+    return await _season_picker(request, user, settings, request.query_params)
+
+
+async def _season_picker(request: Request, user, settings, params, *,
+                         note: str = "") -> Response:
+    """One result's season picker, drawn from `params` — the result's reference
+    and the calendar, as the row's GET names them and the jump's body carries
+    them — with `note` under it."""
+    hit, media = await _searched_title(params, settings)
+    context = {"request": request, "options": [], "note": note, "title": "",
+               "media": str(media),
+               "endpoint": route_params.last_value(params.get("endpoint")) or "",
+               "ref": {name: route_params.last_value(params.get(name)) for name in
+                       ("q", "media", "i", "also", "pages") if params.get(name)}}
+    if hit is None:
+        context["note"] = "That search has expired — search for it again."
+    else:
+        try:
+            chosen = await calendar_search.picker(
+                settings, hit, media, prefs=await auth.get_user_prefs(user.user_id),
+                tz=_resolve_viewer_tz(user, settings),
+                source_selection=await _viewer_source_selection(request, user))
+        except SourceUnavailable as exc:
+            logger.info("calendar picker: %s could not be described (%s)", hit.title, exc)
+            chosen = calendar_search.Picker([], [])
+            context["note"] = "Couldn't look this title up just now — try again in a moment."
+        context["options"] = chosen.options
+        context["title"] = hit.title
+        if not chosen.options and not context["note"]:
+            context["note"] = ("No service here can date this film." if media is Media.MOVIE
+                               else "No season of this show has a date yet.")
+    return templates.TemplateResponse(request, "_search_seasons.html", context)
+
+
+@guard.post("/calendar/jump", AuthLevel.CALENDAR_APPROVED)
+async def jump_to_a_searched_title(request: Request):
+    """Follow a catalogue result's picker: write the airings its ticked seasons
+    name (a film: its release), then send the reader to the first one's month.
+
+    A POST, BECAUSE IT WRITES. It was a GET, which put a write to the calendar
+    every viewer shares behind an address — one a prefetch, a crawler or a
+    reload could follow — and outside the request-shape guard that every other
+    write in this app stands behind. The checklist posts itself with json-enc,
+    so the body is the form's own fields and nothing else.
+
+    ANSWERED WITH `HX-Redirect`, a navigation of the whole window, so the
+    address bar ends up on the calendar itself, Back returns to wherever the
+    reader was rather than replaying a write, and a reload of the month is an
+    ordinary month load. NOT `HX-Location`: the vendored htmx follows that with
+    a fetch and never reads the `#jump-target` fragment off the path it was
+    given, so the page arrived at the top of the month instead of on the card.
+    A whole-window navigation keeps the fragment, and the browser scrolls to the
+    card the route shipped inline (`_month_context`'s anchor) on its own. 204
+    rather than an empty 200, as everywhere this app answers with a navigation:
+    htmx acts on the header before it decides anything about swapping.
+
+    IT WRITES WHAT WAS TICKED AND NOTHING ELSE. The search offers everything that
+    matched — sixteen rows for a franchise — and writing all of them would turn
+    one act of curiosity into sixteen decisions about a calendar everybody on
+    this instance shares. The picker is the act that names them.
+
+    THE BODY NAMES A RESULT BY REFERENCE, AND NOTHING ABOUT THE TITLE IS
+    BELIEVED. The result is re-read from the stored search; its title, dates,
+    network, poster and ids come back from the services, and each airing is
+    written by a service that lists the calendar (calendar/search.py's `jump`) —
+    so this request cannot be hand-made into a calendar row of somebody's
+    choosing.
+
+    A WRITE THAT COULD NOT HAPPEN STILL NAVIGATES. The month is worth opening
+    either way; a result the store no longer holds opens the calendar the reader
+    was on.
+
+    A CARD THE READER'S FILTERS HIDE DOES NOT. Who lists a season's card is known
+    only once it is written and its week filled, and a card one service lists
+    is hidden from a reader who hides those (calendar/search.py's `jump`) — so
+    the answer is the picker again, in place, at 200, the season now refused
+    with the reason and a sentence saying why nothing opened.
+    """
+    user = await auth.current_user(request)
+    settings = await viewer.settings_for_user(user.user_id)
+    data = await authz.json_body(request)
+    endpoint = get_endpoint(route_params.last_value(data.get("endpoint")))
+    fallback = f"/calendar?endpoint={quote(endpoint.key, safe='')}"
+    hit, media = await _searched_title(data, settings)
+    if hit is None:
+        return Response(status_code=204, headers={"HX-Redirect": fallback})
+    # Each ticked choice, as a number — or None for the one choice that is not a
+    # season (a film's release, a show's premiere when no season list answered).
+    seasons: list = []
+    for value in season_choices.ticked(data):
+        try:
+            seasons.append(int(value) if value else None)
+        except ValueError:
+            continue
+    try:
+        # LANDED WHERE THIS VIEWER'S CALENDAR DRAWS IT, so the jump reads the
+        # card under their own filters and sources (calendar/search.py's `jump`).
+        landing = await calendar_search.jump(
+            settings, hit, media, seasons, tz=_resolve_viewer_tz(user, settings),
+            now=db.now(), prefs=await auth.get_user_prefs(user.user_id),
+            source_selection=await _viewer_source_selection(request, user))
+    except SourceUnavailable as exc:
+        logger.info("calendar jump: %s could not be described (%s)", hit.title, exc)
+        landing = calendar_search.Landing("")
+    if landing.hidden:
+        what = "that film" if media is Media.MOVIE else "that season"
+        return await _season_picker(
+            request, user, settings, data,
+            note=f"Your filters hide {what} on this calendar, so there is no card to go to.")
+    return Response(status_code=204, headers={"HX-Redirect": landing.url or fallback})
 
 
 def _library_answer(request: Request, *, marks=(), message: str = "",
@@ -1384,14 +2057,14 @@ async def add_to_library(request: Request):
     IT NAMES THE CARD AND NOT THE TITLE'S IDS. The body is `{key, target}`: the
     shared identity the card already carries and which service to add to. The ids
     are read back off the rows this instance drew that card from
-    (`entries.group_identity`), so a page-supplied id can never reach a write into
+    (`metadata.group_identity`), so a page-supplied id can never reach a write into
     the operator's own library — the rule the rankings board already follows for
     the same reason, and the one that makes an edited attribute worth nothing.
 
     IT ANSWERS MARKUP, not JSON: the buttons redrawn and a toast, both out of band
     — see `_library_answer`."""
     data = await authz.json_body(request)
-    settings = load_settings()
+    settings = await load_settings()
     target = str(data.get("target") or "")
     if target not in integrations_routes.LIBRARY_ID_KEYS:
         return _library_answer(request, message="Unknown service.", ok=False)
@@ -1399,7 +2072,7 @@ async def add_to_library(request: Request):
         return _library_answer(
             request, ok=False,
             message=f"{integrations_routes.LIBRARY_NAMES[target]} isn't configured.")
-    held = await calendar_entries.group_identity(str(data.get("key") or ""))
+    held = await metadata.group_identity(str(data.get("key") or ""))
     if held is None:
         return _library_answer(request, message="This calendar no longer holds that title.",
                                ok=False)
@@ -1443,7 +2116,7 @@ async def add_all_fragment(request: Request):
     Cancelling could not be markup alone: the confirmation replaced the button, so
     putting the button back means drawing it, and the one place it is drawn is
     this partial."""
-    settings = load_settings()
+    settings = await load_settings()
     prefs = await auth.get_user_prefs((await auth.current_user(request)).user_id)
     return _add_all_answer(request, _requested_endpoint(request, prefs, settings))
 
@@ -1475,7 +2148,7 @@ async def add_month_to_library(request: Request):
     NEITHER STEP COMMITS THE IS-NEW BASELINE: that is the page load's decision
     alone (`assemble_month`), and a button press is not a visit."""
     data = await authz.json_body(request)
-    settings = load_settings()
+    settings = await load_settings()
     user = await auth.current_user(request)
     prefs = await auth.get_user_prefs(user.user_id)
     today = clock.today()
@@ -1559,68 +2232,6 @@ async def add_month_to_library(request: Request):
         marks=_marks_for(integrations_routes.LibraryView(settings), target, added))
 
 
-@guard.get("/calendar/fragments/season-line", AuthLevel.CALENDAR_APPROVED)
-async def season_line_fragment(request: Request):
-    """The line under a card — how many episodes, what aired last, what airs
-    next — drawn for the card that asked.
-
-    THE CARD FETCHES IT FOR ITSELF as it scrolls into view: _card.html draws a
-    slot carrying `hx-trigger="intersect once"`, the house pattern
-    _day_skeleton.html already uses, and this answer replaces the slot. It used to
-    be JSON that a script turned into markup behind a hand-held
-    IntersectionObserver — one that had to be disconnected and rebuilt on every
-    boosted navigation and never saw the cards on a day that arrived late. htmx
-    processes a late day's slots as they land, so there is nothing to re-arm.
-
-    THE CALLER HANDS OVER IDS, NOT A SERVICE, exactly as the details fragment
-    below does. `detail_source.choose` picks who can answer, so a Simkl-only card
-    gets its line as readily as one Trakt listed, and
-    `DetailPort.fetch_season_summary` is what makes asking either the same act.
-
-    NOTHING TO SAY IS AN EMPTY ANSWER AT 200, which removes the slot the way an
-    empty day removes its placeholder. That covers a title nobody can describe,
-    a request naming no season, and a service that could not be reached — caught
-    as the shared degradation contract rather than one service's error type, so a
-    rate limit never renders as "no episodes": a line that is not drawn states
-    nothing. A non-200 would not be swapped at all (static/js/boost.js's
-    `noSwap`), leaving an empty slot behind for a trigger that fires once.
-
-    Gated on the CATALOGUE credential per source, never on an access token: a
-    season's episode list is public, globally cached and the same for everybody,
-    so it must not stop working because one person's token lapsed.
-    """
-    from .. import providers  # deferred: see _coverage_gap, same reason
-    from ..providers import season as season_rules
-
-    settings = load_settings()
-    params = request.query_params
-    season = route_params.season(params.get("season"))
-    asked = detail_source.ids_from_query(params)
-    chosen = detail_source.choose(settings, asked)
-    provider = providers.get(chosen.source) if chosen is not None else None
-    line = None
-    if season is not None and provider is not None and provider.detail_port is not None:
-        try:
-            media = Media(params.get("media", "show"))
-            # The same season rule the panel follows (detail_source.for_season):
-            # a service with no episodes of this season hands it to the next.
-            _answered, detail = await detail_source.for_season(
-                settings, asked, chosen,
-                lambda answerer: providers.get(answerer.source).detail_port.fetch_season_summary(
-                    settings, answerer.source_id, season, media),
-                lambda summary: int((summary or {}).get("total") or 0) > 0)
-        except SourceUnavailable as exc:
-            logger.info("No season line from %s: %s", chosen.source, exc)
-        except ValueError:
-            # A medium this app does not have, which only a hand-built address
-            # can name. Nothing to describe, and nothing worth a 500.
-            pass
-        else:
-            line = season_rules.tile_summary(detail, clock.today())
-    return templates.TemplateResponse(request, "_season_line.html", {
-        "request": request, "line": line, "season": season})
-
-
 @guard.get("/calendar/fragments/details", AuthLevel.CALENDAR_APPROVED)
 async def details_fragment(request: Request):
     """The details panel's contents for one card."""
@@ -1668,7 +2279,7 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     just looking at.
 
     THE REQUEST NAMES A SERVICE FOR EACH, NOT THE VALUE. `?title=simkl` is read
-    back out of the row this card was drawn from (`entries.stored_values`), which
+    back out of the row this card was drawn from (`title_rows.stored_values`), which
     is one indexed lookup on the `key` the card already sends, and it means
     nothing a caller WROTE is rendered into a response served from the owner's
     origin — the rule share_routes._Described has always held the public panel to,
@@ -1686,7 +2297,7 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     """
     user = await auth.current_user(request)
     params = request.query_params
-    settings = load_settings()
+    settings = await load_settings()
     media = params.get("media", "show")
     season = route_params.season(params.get("season"))
     asked = detail_source.ids_from_query(params)
@@ -1701,8 +2312,8 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
         # the chosen service has no episodes of is answered by the next service
         # that does (detail_source.for_season). A whole panel also pools every
         # service's videos; a season tab draws none, so it asks for none.
-        describe = (detail_source.describe_season if episodes_only
-                    else detail_source.describe_panel)
+        describe = (metadata_panel.describe_season if episodes_only
+                    else metadata_panel.describe_panel)
         chosen, details = await describe(settings, chosen, asked, media, season)
     except SourceUnavailable:
         # The shared degradation contract rather than one service's error type:
@@ -1726,25 +2337,41 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     # ONE MAP FOR THE BUTTONS AND THE TICKS, which is the rule the tracker's own
     # panel states: a service with a working tick has a working button, and two
     # maps would let the same panel spell the same service's address two ways.
-    ids = {**asked, **detail_source.names_from_query(params),
-           **(details.get("ids") or {})}
+    # AND EVERY ID THE TITLE STORE KNOWS beneath it (identity.every_id), found by
+    # the card's own title key: a service a lookup by shared id found the title
+    # at has a page for it, though neither the card nor the describing service
+    # named that id. A hand-edited key spells the caller's own buttons and
+    # nobody else's, as it reads the caller's own ticks.
+    ids = await title_identity.every_id(media, {
+        **asked, **detail_source.names_from_query(params), **(details.get("ids") or {})},
+        key=str(params.get("key") or ""))
+    # A PANEL OPENED IS A TITLE VIEWED: every service's description of it, and
+    # of the season on screen, that is past its clock is re-read behind the
+    # reader (app/metadata/refresh.py).
+    metadata_refresh.viewed(
+        settings, [metadata_refresh.Wanted(media, ids, season)],
+        budget=metadata_refresh.PANEL_BUDGET)
     progress = await _viewer_progress(request, params.get("key"), season, ids)
     if episodes_only:
         return details_panel.season_pane(request, details, media=media,
                                          season=season, progress=progress)
     # WHAT THE CARD IS SHOWING, read back from the row it was drawn from — one
     # lookup for all three, and the only thing the request itself supplied is a
-    # service's name per field. See the docstring, and `entries.stored_values`.
-    shown = await calendar_entries.stored_values(
+    # service's name per field. See the docstring, and `title_rows.stored_values`.
+    shown = await title_rows.stored_values(
         params.get("key", ""),
-        {name: params.get(name, "") for name in calendar_entries.SHOWN_FIELDS})
+        {name: params.get(name, "") for name in title_rows.SHOWN_FIELDS})
     # `stored_values` reads the STORED column, which is the source's own raw
     # address (the calendar cache holds every source's records unfiltered and
     # unproxied — see app/calendar/cache.py; proxying is `render()`'s job, done
     # when a Record becomes a card's Item, and this route bypasses render() to
     # read the row directly). This is a second place that hands a picture to a
     # browser, so it proxies here too, through the same function render() uses.
-    poster = proxied_image(shown.get("poster", "")) or ""
+    # And reported like the card's own, when it will not load
+    # (app/metadata/pictures.py).
+    poster = ((await _card_pictures(user, settings)).picture(
+        media, ids, params.get("key", ""), params.get("poster", ""), shown.get("poster", ""))
+        or proxied_image(shown.get("poster", "")) or "")
     return details_panel.panel(
         request, details, media=media, season=season,
         title=shown.get("title", ""), poster=poster,
@@ -1752,11 +2379,11 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
         links=detail_source.outbound_links(ids, media),
         progress=progress,
         actions=await _library_actions(request, settings, media, params),
-        # THE CARD'S OWN SEASON IS THE COUNT, because a card for season 4 is a
-        # card for a title with three earlier ones behind it. Nothing has to be
-        # looked up to know that, which is what lets the picker be offered here at
-        # all — and a card naming no season gets no strip rather than a guess.
-        season_count=season or 0,
+        # NO COUNT FROM THE CARD: its season is a tab of its own
+        # (details_panel.panel), and the earlier ones are the describing
+        # service's count. A season's number is not how many came before it —
+        # Simkl numbers a daily show's seasons by year, and a card of season
+        # 2026 counted to 2,026 tabs.
         # WHAT A TAB CARRIES, NAMED. The id parameters come from `details_url`'s
         # own walk over `Source`, so a third service registers once rather than
         # being added here too; `key` rides beside them because the ticks are
@@ -1768,7 +2395,7 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
         # see the route's own docstring — but deciding whether to ask Simkl
         # about a card its calendar is missing is the one question here that is
         # NOT public any more: Simkl's v2 search and /redirect require this
-        # viewer's own token (providers.for_catalogue_search's docstring), so an
+        # viewer's own token (providers.for_shared_id_lookup's docstring), so an
         # instance-wide object would silently never ask, for anybody.
         follow_up=await _completion_follow_up(
             await viewer.settings_for_user(user.user_id), params, season))
@@ -1793,7 +2420,8 @@ async def _completion_follow_up(settings, params, season: int | None) -> str:
         "year": route_params.valid_year(params.get("year"), today.year),
         "month": route_params.valid_month(params.get("month"), today.month)})
     return Markup(templates.get_template("_details_follow_up.html").render(
-        query=query, key=key, season=season, airing=_airing_ref(params.get("airing"))))
+        query=query, key=key, season=season, airing=_airing_ref(params.get("airing")),
+        day=_day_ref(params.get("day"))))
 
 
 # What Item.airing_key looks like (a blake2s digest, 8 bytes as hex). It is only
@@ -1805,6 +2433,15 @@ _AIRING_REF = re.compile(r"[0-9a-f]{16}")
 def _airing_ref(value) -> str:
     text = str(value or "")
     return text if _AIRING_REF.fullmatch(text) else ""
+
+
+def _day_ref(value) -> str:
+    """A card's drawn day as the page drew it (YYYY-MM-DD), or "". It goes into
+    a selector too (`#day-…`), so only a real date is let through."""
+    try:
+        return date.fromisoformat(str(value or "")).isoformat()
+    except ValueError:
+        return ""
 
 
 async def _library_actions(request: Request, settings, media: str, params) -> str:
@@ -1905,7 +2542,7 @@ _CARD_KEY = re.compile(r"[A-Za-z0-9._-]+(?::[A-Za-z0-9._-]+){1,2}")
 
 
 async def _marked_answer(request: Request, user, endpoint, year: int, month: int,
-                         item_id: str, *, drawn_as: str = "",
+                         item_id: str, *, drawn_as: str = "", drawn_on: str = "",
                          season: int | None = None) -> Response:
     """What a mark looks like on screen, drawn by the side that decided it.
 
@@ -1929,25 +2566,36 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
     part of an airing's digest: MEASURED, Dexter: Original Sin's card was drawn as
     one airing and redrawn as another, so the answer addressed a card the page did
     not have and the page kept the Trakt-only card until a reload. The one card
-    of that season is sent to replace the card as it was drawn.
+    of that season is sent to replace the card as it was drawn — or, when the
+    service that joined comes first in this viewer's order and dates the episode
+    to another day (`drawn_on` is the day the page drew it on), to that day's
+    grid, with the card on the old day taken off: one episode is one card, on
+    the day the viewer's first service gives (calendar/cache.py's `placed`).
 
     A TITLE THAT IS NOT ON THIS MONTH ANSWERS WITH THE COUNTS ALONE. That is not
     an error: the mark is a statement about the show and it has been stored
     whatever month is on screen, and a page whose month does not draw the title
     has nothing to redraw.
     """
-    settings = load_settings()
+    settings = await load_settings()
     prefs = await auth.get_user_prefs(user.user_id)
     tz = _resolve_viewer_tz(user, settings)
     not_watching = await calendar_state.not_watching_ids(user.user_id)
+    selection = await _viewer_source_selection(request, user, endpoint.media)
+    specs = vocab.active_specs(prefs, endpoint.media, honour_pause=True)
+    filed = _filed_month(user.user_id, _page_token(request), endpoint.key, year, month)
+    if filed is not None:
+        return await _marked_from_filed(
+            request, user, settings, prefs, endpoint, year, month, item_id, filed,
+            not_watching=not_watching, selection=selection, specs=specs, tz=tz,
+            drawn_as=drawn_as, drawn_on=drawn_on, season=season)
     try:
         grouped, meta = await calendar_cache.assemble_range(
             endpoint, settings, tz=tz,
             start_date=date(year, month, 1),
             end_date=date(year, month, _calendar.monthrange(year, month)[1]),
-            **vocab.active_specs(prefs, endpoint.media, honour_pause=True),
-            not_watching_ids=not_watching,
-            prefs=await _viewer_source_selection(request, user, endpoint.media),
+            **specs, not_watching_ids=not_watching,
+            prefs=selection, drawn=False,
             # `allow_fetch=False`, WHICH IS THE WHOLE DIFFERENCE BETWEEN THIS READ
             # AND THE PAGE'S. The page asked for this month and filled whatever it
             # had to; this is redrawing cards that are ALREADY ON SCREEN, so
@@ -1972,8 +2620,11 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
     # and matching on equality then found no card and redrew nothing — the button
     # did not flip until a reload.
     covers = {item_id}
-    items = [item for group in grouped for item in group["items"]
-             if calendar_state.marked(covers, item)]
+    # ONLY THE TITLE'S CARDS ARE DRAWN — what the answer redraws.
+    items = await calendar_cache.present(
+        endpoint, settings, [view for group in grouped for view in group["items"]
+                             if calendar_state.marked(covers, view)],
+        tz=tz, prefs=selection, **specs)
     # A TITLE THIS READ NO LONGER DRAWS HAS ITS CARDS TAKEN OFF THE PAGE. The eye
     # was pressed on a card, so the title was on screen; if the month read now
     # draws none of it, something changed since the page was drawn — REPORTED:
@@ -1994,26 +2645,92 @@ async def _marked_answer(request: Request, user, endpoint, year: int, month: int
     chips = [_day_chip(date.fromisoformat(group["date"]), group["items"], marked,
                        prefs["hide_not_watching"])
              for group in grouped if group["date"] in days]
+    return await _marked_cards(request, user, settings, prefs, endpoint, year, month,
+                               items, chips, gone, marked,
+                               {"watching": meta["watching"], "not_watching": meta["not_watching"]},
+                               drawn_as=drawn_as, drawn_on=drawn_on, season=season)
+
+
+async def _marked_from_filed(request: Request, user, settings, prefs, endpoint, year: int,
+                             month: int, item_id: str, filed: _FiledMonth, *, not_watching,
+                             selection, specs, tz, drawn_as: str, drawn_on: str,
+                             season: int | None) -> Response:
+    """`_marked_answer` for a page that filed the month it drew: the counts and
+    chips recounted from what it filed, by the same mark rule, and the title's
+    cards drawn from the title's own rows — A MARK REDRAWS BY ITS TITLE'S ROWS.
+    The counts describe the month as the page drew it, which is the month the
+    reader is looking at."""
+    covers = {item_id}
+    covered = [card for card in filed.cards if not card.spellings.isdisjoint(covers)]
+    viewer = calendar_query.Viewer(endpoint, settings, selection, tz,
+                                   vocab.complete_specs(specs))
+    first = date(year, month, 1)
+    last = date(year, month, _calendar.monthrange(year, month)[1])
+    placed = await calendar_query.titles(viewer, {card.title_key for card in covered})
+    views = sorted((view for view in placed.views
+                    if first <= date.fromisoformat(view.air_date) <= last
+                    and calendar_state.marked(covers, view)),
+                   key=lambda view: (view.air_date, view.air_ts))
+    items = await calendar_query.present(viewer, views)
+    gone = item_id if not items and _CARD_KEY.fullmatch(item_id) else ""
+    marked = {card.mark_key for card in filed.cards if not card.spellings.isdisjoint(not_watching)}
+    days = sorted({card.air_date for card in covered})
+    chips = [_day_chip(date.fromisoformat(day), [card for card in filed.cards
+                                                 if card.air_date == day],
+                       marked, prefs["hide_not_watching"]) for day in days]
+    unwatched = sum(1 for card in filed.cards if card.mark_key in marked)
+    return await _marked_cards(request, user, settings, prefs, endpoint, year, month,
+                               items, chips, gone, marked,
+                               {"watching": len(filed.cards) - unwatched,
+                                "not_watching": unwatched},
+                               drawn_as=drawn_as, drawn_on=drawn_on, season=season)
+
+
+async def _marked_cards(request: Request, user, settings, prefs, endpoint, year: int,
+                        month: int, items, chips, gone: str, marked, stats: dict, *,
+                        drawn_as: str, drawn_on: str, season: int | None) -> Response:
+    """The mark's answer drawn: the title's cards, the chips of its days and the
+    two counts a mark moves, out of band (_marked_cards.html)."""
     logo_networks = await _logo_networks(settings, items)
+    season_lines = await _season_lines(settings, items)
+    filed = _filed_month(user.user_id, _page_token(request), endpoint.key, year, month)
     completed = [item for item in items if season is None or item.season == season]
-    replaces = ({completed[0].airing_key: drawn_as}
-                if drawn_as and len(completed) == 1 else {})
-    return templates.TemplateResponse(request, "_marked_cards.html", {
+    replaces: dict = {}
+    moved = None
+    if drawn_as and len(completed) == 1:
+        if drawn_on and completed[0].air_date != drawn_on:
+            moved = completed[0]
+            items = [item for item in items if item is not moved]
+        else:
+            replaces = {completed[0].airing_key: drawn_as}
+    return await templating.drawn(request, "_marked_cards.html", {
         "chips": chips, "gone": gone, "replaces": replaces,
+        "moved": moved, "moved_from": drawn_as if moved is not None else "",
         "request": request, "items": items,
-        "not_watching": marked, "new_ids": meta.get("new_ids") or set(),
+        "not_watching": marked, "new_ids": set(),
         "can_filter": True, "badge_modes": vocab.BadgeModes(prefs),
+        "card_pictures": await _card_pictures(user, settings),
+        # A redrawn card is drawn as the page draws it, its compare control
+        # included; it carries no is-new mark (`new_ids` above), so neither does
+        # what that control fetches.
+        "card_expand": partial(_card_url, endpoint.key, year, month,
+                               source=request.query_params.get("source"),
+                               page=_page_token(request)),
         "settings": settings, "is_admin": bool(user and user.is_admin),
         "library": _library(user, settings),
         # WHICH NETWORKS HAVE A LOGO, asked once here rather than once per
         # card by the browser — see `_logo_networks`.
         "logo_networks": logo_networks,
+        "season_lines": season_lines,
+        # A title this page compared is redrawn compared.
+        "compared": frozenset(filed.compared) if filed is not None else frozenset(),
         "month": month, "year": year, "endpoint": endpoint,
+        # The redrawn cards' marks recount the same filed month.
+        "page_token": _page_token(request),
         # THE ASSEMBLER'S OWN COUNTS, not a second tally of the same items: it
-        # already translated this viewer's stored marks into mark keys to build
-        # `grouped`, and counting them again here would be a second answer to a
-        # question that has one.
-        "stats": {"watching": meta["watching"], "not_watching": meta["not_watching"]},
+        # already translated this viewer's stored marks into mark keys, and
+        # counting them again here would be a second answer to one question.
+        "stats": stats,
     })
 
 
@@ -2036,7 +2753,7 @@ async def complete_card(request: Request):
 
     SETTINGS IS THIS VIEWER'S OWN. The service being asked may be Simkl, whose
     v2 search and /redirect require a user token (see
-    providers.for_catalogue_search's docstring) — an instance-wide Settings
+    providers.for_shared_id_lookup's docstring) — an instance-wide Settings
     object carries no such token at all (config.load_settings leaves any stored
     operator token out), which would make this ask silently never happen for
     anybody, linked or not — auth/viewer.py builds the viewer's own.
@@ -2056,11 +2773,12 @@ async def complete_card(request: Request):
         return Response(status_code=200)
     stored = await calendar_search.complete_from_other_service(
         settings, source=source, endpoint_key=endpoint.key, title_key=key,
-        season=season, tz=_resolve_viewer_tz(user, settings), now=db.now())
+        season=season, now=db.now())
     if not stored:
         return Response(status_code=200)
     return await _marked_answer(request, user, endpoint, year, month, key,
-                                drawn_as=_airing_ref(payload.get("airing")), season=season)
+                                drawn_as=_airing_ref(payload.get("airing")),
+                                drawn_on=_day_ref(payload.get("day")), season=season)
 
 
 @guard.post("/api/state", AuthLevel.CALENDAR_APPROVED)
@@ -2178,6 +2896,50 @@ def _network_list(value) -> list[str]:
     return names
 
 
+def _keyword_list(value) -> list[str]:
+    """Keywords as a de-duplicated, lower-cased list, a later answer for a
+    keyword replacing an earlier one.
+
+    NEVER SPLIT ON A COMMA, the one way this differs from `_network_list`: a
+    TMDB keyword's own name can hold one ("san francisco, california"). Lower-
+    cased because TMDB spells every keyword so and the match folds
+    (filter.parse_keyword_spec), so "Anime" and "anime" are one entry.
+    """
+    raw = [str(v) for v in value] if isinstance(value, list) else [str(value or "")]
+    kept: dict[str, str] = {}
+    for item in raw:
+        spelled = " ".join(item.split()).lower()
+        bare = spelled[1:].strip() if spelled.startswith("-") else spelled
+        if bare:
+            kept.pop(bare, None)
+            kept[bare] = f"-{bare}" if spelled.startswith("-") else bare
+    return list(kept.values())
+
+
+def _missing_spec(value) -> str:
+    """The ticked missing-data rules, in the order the panel lists them. A rule
+    is ticked or not, so an exclude is not an answer it can hold and a token no
+    rule names is dropped (filter.MISSING_RULES) — kept, either would be stored
+    and drawn as though it did something."""
+    ticked, _excludes = calendar_filter.parse_spec(str(value or ""))
+    return ", ".join(rule for rule in calendar_filter.MISSING_RULES if rule in ticked)
+
+
+def _normalized(field: str, value):
+    """`value` in the shape `field`'s column stores, through the normalizer for
+    its kind — ONE dispatch for the panel's save, its typed chips and a card's
+    badge, so the three cannot store one answer in different shapes."""
+    if field == vocab.NETWORK_FILTER:
+        return _network_list(value)
+    if field in (vocab.TV_KEYWORDS, vocab.MOVIE_KEYWORDS):
+        return _keyword_list(value)
+    if field == vocab.MOVIE_RELEASE_TYPES:
+        return _release_type_spec(value)
+    if field in vocab.TICK_FIELDS:
+        return _missing_spec(value)
+    return _filter_spec(value)
+
+
 @guard.post("/api/me/prefs", AuthLevel.CALENDAR_APPROVED)
 async def post_me_prefs(request: Request):
     """Persist a partial update to the viewer's own calendar view preferences.
@@ -2256,7 +3018,7 @@ async def _view_answer(request: Request, user, endpoint, year: int, month: int,
     stored is by definition what drew it, and letting a preference toggle spend a
     sequence of paced upstream calls would be the wrong thing to do with a press.
     """
-    settings = load_settings()
+    settings = await load_settings()
     prefs = await auth.get_user_prefs(user.user_id)
     view = _view_preferences(prefs, settings)
     context = {
@@ -2277,7 +3039,7 @@ async def _view_answer(request: Request, user, endpoint, year: int, month: int,
                 **vocab.active_specs(prefs, endpoint.media, honour_pause=True),
                 not_watching_ids=await calendar_state.not_watching_ids(user.user_id),
                 prefs=await _viewer_source_selection(request, user, endpoint.media),
-                allow_fetch=False,
+                allow_fetch=False, drawn=False,
             )
         except TraktError:
             # The preference IS saved; a month that cannot be re-read leaves the
@@ -2335,20 +3097,16 @@ def _source_selection_from_form(data: dict, settings,
 def _normalized_specs(data: dict) -> dict:
     """The chip answers in this payload, as the shapes the columns store.
 
-    THROUGH THE SAME NORMALIZERS EVERY OTHER WRITER USES, so a spec assembled
-    from chips is stored in the shape a badge press and the old text fields both
-    produced. `movie_release_types` is the one with a vocabulary narrow enough to
-    validate, and it is dropped here rather than at read for the reason its own
-    normalizer states.
+    THROUGH THE SAME NORMALIZERS EVERY OTHER WRITER USES (`_normalized`), so a
+    spec assembled from chips is stored in the shape a badge press and the old
+    text fields both produced. `movie_release_types` and the missing-data rules
+    have vocabularies narrow enough to validate, and an unknown token is dropped
+    here rather than at read for the reason each normalizer states.
     """
-    specs = dict(vocab.specs_from_form(data))
-    for field, value in list(specs.items()):
-        if field == vocab.NETWORK_FILTER:
-            specs[field] = _network_list(value)
-        elif field == vocab.MOVIE_RELEASE_TYPES:
-            specs[field] = _release_type_spec(value)
-        else:
-            specs[field] = _filter_spec(value)
+    specs = {field: _normalized(field, value)
+             for field, value in vocab.specs_from_form(data).items()}
+    # THE SWITCHES TOO, each mentioned only when its tab was drawn.
+    specs.update(vocab.toggles_from_form(data))
     return specs
 
 
@@ -2370,7 +3128,7 @@ def _prefs_showing(data: dict, prefs: dict, *, cleared: tuple[str, ...] = ()) ->
     """
     showing = {**prefs, **_normalized_specs(data)}
     for field in cleared:
-        showing[field] = [] if field in vocab.LIST_FIELDS else ""
+        showing[field] = vocab.empty(field)
     if "filters_on" in data:
         showing["filters_paused"] = not route_params.ticked(data["filters_on"])
     return showing
@@ -2417,7 +3175,7 @@ async def filters_panel_fragment(request: Request):
     """
     user = await auth.current_user(request)
     prefs = await auth.get_user_prefs(user.user_id)
-    settings = load_settings()
+    settings = await load_settings()
     # THE SAVED PREFERENCE, not the `?source=` override the toolbar may be
     # showing: the panel offers to make permanent what this account actually
     # stated rather than what it happens to be looking at right now.
@@ -2448,7 +3206,7 @@ async def add_filter_chip(request: Request):
     """
     user = await auth.current_user(request)
     prefs = await auth.get_user_prefs(user.user_id)
-    settings = load_settings()
+    settings = await load_settings()
     saved = await source_prefs.load(user.user_id)
     data = await authz.json_body(request)
     field = str(route_params.last_value(data.get("field")) or "")
@@ -2456,9 +3214,14 @@ async def add_filter_chip(request: Request):
         return authz.error("Not a filter this panel offers")
 
     showing = _prefs_showing(data, prefs)
-    is_list = field in vocab.LIST_FIELDS
     spec = showing.get(field)
-    for raw in str(route_params.last_value(data.get("token")) or "").split(","):
+    typed = str(route_params.last_value(data.get("token")) or "")
+    # A COMMA-SEPARATED PASTE IS SEVERAL TOKENS, except for keywords: a TMDB
+    # keyword's own name can hold a comma ("san francisco, california"), so what
+    # was typed into that box is one keyword.
+    pasted = ([typed] if field in (vocab.TV_KEYWORDS, vocab.MOVIE_KEYWORDS)
+              else typed.split(","))
+    for raw in pasted:
         token = raw.strip()
         # A colon would produce a field name that reads as a different field, so
         # it is dropped rather than misfiled. Silently, because the panel comes
@@ -2466,8 +3229,10 @@ async def add_filter_chip(request: Request):
         # holds nothing anybody has lost.
         if not vocab.addable(token):
             continue
-        spec = calendar_filter.merge_token(spec, token, vocab.INCLUDE, is_list=is_list)
-    showing[field] = _network_list(spec) if is_list else _filter_spec(spec)
+        spec = calendar_filter.merge_token(spec, token, vocab.INCLUDE,
+                                           is_list=field in vocab.LIST_FIELDS,
+                                           cased=field in vocab.CASED_FIELDS)
+    showing[field] = _normalized(field, spec)
     return templates.TemplateResponse(request, "_filters_panel.html",
                                       _panel_context(request, settings, showing, saved,
                                                      _sources_showing(data)))
@@ -2492,7 +3257,7 @@ async def clear_filters(request: Request):
     """
     user = await auth.current_user(request)
     prefs = await auth.get_user_prefs(user.user_id)
-    settings = load_settings()
+    settings = await load_settings()
     saved = await source_prefs.load(user.user_id)
     data = await authz.json_body(request)
     medium = str(route_params.last_value(data.get("medium")) or "")
@@ -2546,7 +3311,7 @@ async def post_filters(request: Request):
     """
     user = await auth.current_user(request)
     data = await authz.json_body(request)
-    settings = load_settings()
+    settings = await load_settings()
 
     # SERVICES FIRST, BECAUSE THIS IS THE HALF THAT CAN REFUSE. Refusing before
     # anything is written leaves the panel exactly as the viewer left it rather
@@ -2576,20 +3341,43 @@ async def post_filters(request: Request):
     if "filters_on" in data:
         updates["filters_paused"] = not route_params.ticked(data["filters_on"])
     if updates:
-        await auth.update_user_prefs(user.user_id, **updates)
-        # Mirrored into share_links exactly as the badge route does -- that
-        # table's owner-default columns are seeded from user_prefs and have no
-        # editor of their own. The PAUSE is deliberately not among them: it is a
-        # private look at your own calendar, and a share link keeps filtering
-        # whatever the owner is currently looking at.
-        if await share_links.get(user.user_id) is not None:
-            await share_links.update_owner_defaults(
-                user.user_id, **{k: v for k, v in updates.items() if k != "filters_paused"})
+        with span("filters.save", fields=len(updates)):
+            await auth.update_user_prefs(user.user_id, **updates)
+            # Mirrored into share_links exactly as the badge route does -- that
+            # table's owner-default columns are seeded from user_prefs and have
+            # no editor of their own. The PAUSE is deliberately not among them:
+            # it is a private look at your own calendar, and a share link keeps
+            # filtering whatever the owner is currently looking at.
+            if await share_links.get(user.user_id) is not None:
+                await share_links.update_owner_defaults(
+                    user.user_id, **{k: v for k, v in updates.items() if k != "filters_paused"})
 
     prefs = await auth.get_user_prefs(user.user_id)
     month = await _month_context(request, user, settings, prefs)
     with span("calendar.render", cards=month["inline_cards"]):
-        return templates.TemplateResponse(request, "_filters_answer.html", month)
+        return await templating.drawn(request, "_filters_answer.html", month)
+
+
+@guard.get("/calendar/fragments/badge", AuthLevel.CALENDAR_APPROVED)
+async def filter_badge_offer(request: Request):
+    """A card badge's three buttons, asked for the first time the badge is
+    opened (_filter_badge.html says why they are not drawn with the card).
+
+    THE SAME ANSWER FOR EVERYBODY ASKING ABOUT ONE TOKEN: the buttons say what
+    a press would send and nothing about what is stored — that is the badge's
+    own mark, drawn with the card and redrawn by every press — so this reads no
+    preference. A dimension the calendar does not filter on, an empty token, or
+    a medium this app does not have is refused, as the press would be."""
+    dimension = request.query_params.get("d") or ""
+    token = (request.query_params.get("t") or "").strip()
+    try:
+        media = str(Media(request.query_params.get("m") or ""))
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid medium"}, status_code=400)
+    if vocab.badge_field(dimension, media) is None or not token or len(token) > 200:
+        return JSONResponse({"ok": False, "error": "Invalid badge"}, status_code=400)
+    return templates.TemplateResponse(request, "_filter_offer.html", {
+        "request": request, "dimension": dimension, "token": token, "media": media})
 
 
 @guard.post("/calendar/filters/badge", AuthLevel.CALENDAR_APPROVED)
@@ -2648,11 +3436,12 @@ async def post_filter_badge(request: Request):
     if mode not in vocab.MODES:
         return answer("That isn't one of the three answers a badge offers.", False, 400)
 
-    is_list = field in vocab.LIST_FIELDS
-    merged = calendar_filter.merge_token(prefs.get(field), token, mode, is_list=is_list)
+    merged = calendar_filter.merge_token(prefs.get(field), token, mode,
+                                         is_list=field in vocab.LIST_FIELDS,
+                                         cased=field in vocab.CASED_FIELDS)
     # THROUGH THE SAME NORMALIZERS THE PANEL'S OWN SAVE USES, so a spec written by
     # a badge and one saved from the panel cannot come out in different shapes.
-    merged = _network_list(merged) if is_list else _filter_spec(merged)
+    merged = _normalized(field, merged)
     await auth.update_user_prefs(user.user_id, **{field: merged})
     # Mirrored into share_links exactly as post_me_prefs does -- that table's
     # owner-default columns are seeded from user_prefs and have no editor of
@@ -2693,34 +3482,3 @@ async def post_me_timezone(request: Request):
     if await share_links.get(user.user_id) is not None:
         await share_links.update_owner_defaults(user.user_id, timezone=tz_name)
     return Response(status_code=204, headers={"HX-Refresh": "true"})
-
-
-# `private` rather than `public`: this response now requires a session, so a
-# shared cache in front of the app has no business holding a copy.
-_LOGO_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
-
-
-@guard.get("/api/network-logo", AuthLevel.CALENDAR_APPROVED)
-async def api_network_logo(request: Request):
-    """A processed network-logo PNG tile for a network name (calendar + distrakt).
-
-    Calendar-level, which is where these are overwhelmingly requested from. The
-    distrakt page shows them too, so a user approved for distrakt but NOT for the
-    calendar sees the emoji fallback there instead of logos — the same thing that
-    happens for any network without a logo, and not worth a second access level.
-
-    Generates it from TMDB on first request when `tmdb` is supplied and a TMDB key
-    is set; serves the disk cache thereafter. 404 -> the caller falls back to the
-    emoji/text tag."""
-    name = (request.query_params.get("name") or "").strip()
-    tmdb = request.query_params.get("tmdb")
-    if not name:
-        return Response(status_code=404)
-    path = logos.cached_tile(name)
-    if path is None and not logos.is_negative(name):
-        path = await logos.ensure_logo(load_settings(), name, tmdb)
-    if path is None or not path.exists():
-        return Response(status_code=404, headers=_LOGO_CACHE_HEADERS)
-    # ?download=1 -> attachment (for the emoji-map "download logo" button).
-    filename = f"{logos.slug(name)}.png" if request.query_params.get("download") else None
-    return FileResponse(path, media_type="image/png", filename=filename, headers=_LOGO_CACHE_HEADERS)

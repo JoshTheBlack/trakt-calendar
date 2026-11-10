@@ -273,6 +273,52 @@
                         networks. Put a <code>-</code> in front of a name to exclude it instead
                         (<code>-Netflix</code>). Blank means every network is cached.</span>
                 </div>
+                {# THE FLOOR'S NEWER DIMENSIONS, the same six a viewer can set in their own
+                   🎚️ Filters, and the same chips and tick boxes where the floor is per
+                   medium (app/calendar/vocab.py's FLOOR_FIELDS). Only the language floor
+                   is also applied before caching; the rest judge a whole card — who lists
+                   it, what TMDB says of it — which only the calendar's read can, so they
+                   apply there, for everyone, ahead of every viewer's own. #}
+                <p class="hint">The fields below apply to every viewer too. Language is also applied
+                    before caching, like the ones above; the rest are applied when a calendar is read,
+                    because they judge a whole card. A title nothing has described yet is shown until
+                    it is, except by the no-network rule.</p>
+                <div class="two-col">
+                    {{ settings_fields.text('languages', 'Languages', settings.languages, 'en, -ja',
+                                            'Comma-separated ISO 639-1 codes (both TV and movies), with - to exclude.') }}
+                    <div class="field">
+                        <label for="s_keywords">Keywords</label>
+                        <textarea id="s_keywords" name="keywords" form="settingsForm" spellcheck="false"
+                                  placeholder="anime&#10;-based on manga">{{ settings.keywords | join('\n') }}</textarea>
+                        <span class="hint">TMDB's keywords, both TV and movies, <strong>one per line</strong>
+                            (some hold a comma). A <code>-</code> in front excludes it.</span>
+                    </div>
+                </div>
+                <div class="field">
+                    <span class="field-label">Show types <span class="hint">(TV, as TMDB says)</span></span>
+                    <div class="fchips">
+                        {% for state in floor_chips.tv_show_types %}{{ filter_chips.chip(state, 'tv_show_types', loop.index, id_prefix='floor-chip', form='settingsForm') }}{% endfor %}
+                    </div>
+                </div>
+                <div class="two-col">
+                    {% for field, label in (('tv_missing', 'TV: hide shows missing'), ('movie_missing', 'Movies: hide films missing')) %}
+                    <div class="field">
+                        <span class="field-label">{{ label }}</span>
+                        <input type="hidden" name="{{ floor_presence[field] }}" value="" form="settingsForm">
+                        <div class="fticks">
+                            {% for state in floor_chips[field] %}{{ filter_chips.tick(state.name, 'include', state.label, 'floor-tick-' ~ field ~ '-' ~ loop.index, on=state.mode == 'include', form='settingsForm') }}{% endfor %}
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                <div class="two-col">
+                    {{ settings_fields.checkbox('tv_single_service', 'Hide shows only one service lists', settings.tv_single_service) }}
+                    {{ settings_fields.checkbox('movie_single_service', 'Hide films only one service lists', settings.movie_single_service) }}
+                </div>
+                {% if sparse_labels %}
+                {{ settings_fields.checkbox('tv_sparse_no_network', 'Hide shows only ' ~ sparse_labels ~ ' lists that name no network', settings.tv_sparse_no_network,
+                                            'Hidden even before ' ~ sparse_labels ~ ' has described them — a new listing names no network until it is, a few minutes later.') }}
+                {% endif %}
                 <div class="two-col">
                     {{ settings_fields.number('pagination_limit') }}
                     {{ settings_fields.number('cache_ttl_minutes') }}
@@ -313,9 +359,15 @@
                     {{ settings_fields.secret('seer_api_key', 'Seerr API key') }}
                 </div>
 
-                <div class="settings-section">🖼️ TMDB <span class="hint">(network logos for Discord emoji art)</span></div>
+                <div class="settings-section">🎬 TMDB <span class="hint">(describes titles first, plus posters and network logos)</span></div>
                 <div class="two-col">
-                    {{ settings_fields.secret('tmdb_api_key', 'TMDB API key') }}
+                    {{ settings_fields.secret('tmdb_api_key', 'TMDB API Read Access Token',
+                       hint=settings.tmdb_credential_problem
+                            or 'The long token from themoviedb.org → Settings → API, not the short API key.') }}
+                    {{ settings_fields.text('tmdb_language', 'TMDB language', settings.tmdb_language, 'en-US',
+                       'The language TMDB describes titles in, like en-US or de-DE.') }}
+                    {{ settings_fields.text('tmdb_region', 'TMDB region', settings.tmdb_region, 'US',
+                       'The country whose film releases the movie calendar lists.') }}
                 </div>
             </div>
         </div>

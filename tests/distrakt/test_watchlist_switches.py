@@ -13,7 +13,7 @@ import time
 from html import unescape
 from unittest.mock import patch
 
-from app import db
+from app import auth, db
 from app.distrakt import watchlist_writes as ww
 from app.providers.base import Source
 from tests.distrakt.test_gating import DistraktTestCase
@@ -191,3 +191,32 @@ class BothServicesTests(SwitchTestCase):
         answer = self.press(True, source=str(Source.TRAKT))
         self.assertEqual(asyncio.run(ww.switched_on(self.user_id)), [str(Source.TRAKT)])
         self.assertIn("Adding 1…", text(answer.text))
+
+
+class TheTmdbSwitchTests(SwitchTestCase):
+    """A viewer who linked TMDB on their account page gets its switch in the
+    same header, through providers.for_watchlist — nothing in the tracker names
+    TMDB."""
+
+    TMDB_ACCOUNT = "6a5edaa7df66e2fc7c922663"
+
+    def setUp(self):
+        super().setUp()
+        asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
+            conn, user_id=self.user_id, provider="tmdb", provider_user_id=self.TMDB_ACCOUNT,
+            display_name="JoshTheBlack", access_token="the-viewers-tmdb-token")))
+
+    def test_the_header_offers_tmdb_beside_the_others(self):
+        panel = text(self.page().split('id="watchlistPanel"', 1)[1])
+        self.assertIn("Add these shows to TMDB", panel)
+        self.assertIn("Add these shows to Simkl", panel)
+
+    def test_it_links_out_to_the_tmdb_watchlist_by_username(self):
+        self.assertIn('href="https://www.themoviedb.org/u/JoshTheBlack/watchlist/tv"',
+                      self.page())
+
+    def test_switching_tmdb_on_asks_for_a_pass(self):
+        self.add_listed(1)
+        resp = self.press(True, source="tmdb")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(asyncio.run(ww.switched_on(self.user_id)), ["tmdb"])

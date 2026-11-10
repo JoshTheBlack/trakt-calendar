@@ -16,6 +16,7 @@ real.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 import dataclasses
 import json
 import re
@@ -29,14 +30,17 @@ from fastapi.testclient import TestClient
 
 from app import auth, db, providers
 from app.calendar import cache as calendar_cache, routes as calendar_routes
-from app.calendar import state as calendar_state
+from app.calendar import entries as calendar_entries, state as calendar_state
 from app.calendar import vocab
-from app.endpoints import ENDPOINTS
-from app.providers.base import Capabilities
+from app.endpoints import ENDPOINTS, get_endpoint
+from app.metadata import refresh as metadata_refresh
+from app.providers.base import Capabilities, Reach, Source
 from app.providers.trakt import TraktError
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings, settling
 from app.sources import prefs as source_prefs
 from app.main import app
+from tests import support
 from tests.support import ORIGIN, migrated_db, window_fetch
 
 
@@ -44,6 +48,10 @@ def _configured_settings() -> Settings:
     """`settings.calendar_source_configured` gates the whole read path in index() — without
     credentials it never calls calendar_cache.read_month at all."""
     return Settings(trakt_client_id="test-client-id", trakt_access_token="test-access-token")
+
+
+# A TMDB read token's shape (three base64url segments), with nothing secret in it.
+_TMDB_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJyb3V0ZXMifQ.c2lnbmF0dXJl"
 
 
 def _entry(slug: str, title: str, first_aired: str) -> dict:
@@ -68,10 +76,10 @@ class _ThirdSource:
     source = "mercury"
     label = "Mercury"
     sync_port = None
-    calendar_port = object()
+    calendar_port = SimpleNamespace(calendar_configured=lambda settings: True)
     capabilities = Capabilities(
         endpoints=frozenset({"shows"}), days_before=None, days_after=None,
-        private_user_data=False)
+        private_user_data=False, retain_seconds=None, reach=Reach.WINDOW)
 
     def is_configured(self, settings) -> bool:
         return True
@@ -85,7 +93,7 @@ class CalendarRouteTestCase(unittest.TestCase):
     def setUp(self):
         migrated_db("calroute")
         save_settings(_configured_settings())
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        self.client = TestClient(settling(app), base_url=ORIGIN, headers={"Origin": ORIGIN})
 
     def serving_month(self, entries=()):
         """Hold the calendar fetch still for the life of the test.
@@ -698,6 +706,20 @@ class PartialDataBannerTests(CalendarRouteTestCase):
         self.assertIn("error-banner", resp.text)
         self.assertNotIn("warning-banner", resp.text)
 
+    def test_weeks_a_service_is_still_working_out_are_counted_not_warned_about(self):
+        """Nothing failed — TMDB's season premieres are derived behind the page —
+        so the stats box counts the weeks beside the other work under way, and
+        the line goes when they are done."""
+        with patch("app.calendar.cache.fetch_window_records", window_fetch([])), \
+                patch("app.calendar.cache.pending_windows", return_value=3):
+            resp = self.client.get("/?year=2026&month=7")
+        self.assertIn("Weeks being worked out", resp.text)
+        self.assertIn('id="statBacklogWeeks">3<', resp.text)
+        self.assertNotIn("warning-banner", resp.text)
+        with patch("app.calendar.cache.fetch_window_records", window_fetch([])):
+            resp = self.client.get("/?year=2026&month=7")
+        self.assertNotIn("statBacklogWeeks", resp.text)
+
 
 class AnEmptyMonthSaysWhyTests(CalendarRouteTestCase):
     """OBSERVED by the owner on months far ahead: every empty month said "No
@@ -1050,6 +1072,23 @@ class ServerRenderedViewTests(CalendarRouteTestCase):
     def _stored_baseline(self) -> dict:
         return asyncio.run(calendar_state.load_view_state(
             self.user_id, self.ENDPOINT, 2026, 7))
+
+    def test_a_month_drawn_names_its_titles_for_the_descriptions_already_asked_for(self):
+        """Every card, to the title store's refresh queue — but only a
+        description somebody already asked for is due for being on a calendar
+        (`missing=False`): a card draws each service's own listing."""
+        seen = []
+        with patch.object(metadata_refresh, "viewed",
+                          lambda settings, wanted, **kw: seen.append((list(wanted), kw))):
+            self.client.get(self.PAGE)
+        (wanted, kw), = [(wanted, kw) for wanted, kw in seen if kw.get("missing") is False]
+        self.assertEqual(kw["budget"], metadata_refresh.MONTH_BUDGET)
+        self.assertEqual(len(wanted), 4)
+        # The only other thing a month asks is the season lines its drawn cards
+        # could not be given — each naming the one service owed it.
+        for wanted, kw in seen:
+            if kw.get("missing") is not False:
+                self.assertTrue(all(item.source for item in wanted))
 
     def test_the_stat_tiles_carry_the_whole_months_counts(self):
         self.client.post("/api/state?year=2026&month=7&endpoint=shows",
@@ -1435,6 +1474,206 @@ class RouteSplitTests(CalendarRouteTestCase):
         self.assertRegex(html, r'(?s)class="stats-pill".*?</button>\s*<div id="statsBar" class="stats-bar" popover>')
 
 
+class TheMonthChangedNoticeTests(CalendarRouteTestCase):
+    """A month drawn and then refilled under the page says so — asked once a
+    minute by the page, and at once by a late day that draws something else."""
+
+    PAGE = "/calendar?year=2026&month=7&endpoint=shows"
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in_as(self._make_user("changed_viewer"))
+        # More days than the shell draws inline, so the 10th is a late day.
+        self.entries = [_entry(f"show-{day}", f"Show {day}", f"2026-07-{day:02d}T20:00:00Z")
+                        for day in range(1, 11)]
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch(self.entries))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _changed_url(self, html: str) -> str:
+        found = re.search(r'id="monthChanged" hidden hx-get="([^"]+)" hx-trigger="every 60s"',
+                          html)
+        self.assertIsNotNone(found, "the page draws no month-changed check")
+        return found.group(1).replace("&amp;", "&")
+
+    def _refill(self, day: int) -> None:
+        """The week holding `day` refilled from whatever the fetch answers now."""
+        window = calendar_cache.window_start(date(2026, 7, day))
+        asyncio.run(support.load_window(get_endpoint("shows"), _configured_settings(), window,
+                                        force=True))
+
+    def test_the_page_asks_about_the_month_it_filed(self):
+        html = self.client.get(self.PAGE).text
+        url = self._changed_url(html)
+        token = re.search(r"&page=([A-Za-z0-9_-]+)", _day_urls(html)[0]).group(1)
+        self.assertEqual(url, f"/calendar/changed?endpoint=shows&year=2026&month=7&page={token}")
+
+    def test_a_month_nothing_has_rewritten_answers_nothing(self):
+        url = self._changed_url(self.client.get(self.PAGE).text)
+        self.assertEqual(self.client.get(url).status_code, 204)
+        # A refill whose answer is what is stored rewrites no row, so it is not
+        # a change either — and the month is not read again to find that out.
+        self._refill(8)
+        with patch.object(calendar_cache, "assemble_range") as read:
+            self.assertEqual(self.client.get(url).status_code, 204)
+        read.assert_not_called()
+
+    def test_a_refill_that_changes_the_month_raises_the_sentence(self):
+        url = self._changed_url(self.client.get(self.PAGE).text)
+        self.entries.append(_entry("show-late", "Show Late", "2026-07-08T21:00:00Z"))
+        self._refill(8)
+        answer = self.client.get(url)
+        self.assertEqual(answer.status_code, 200)
+        self.assertIn("This month has changed since the page was drawn", answer.text)
+        # The sentence replaces the asker, so the page stops asking.
+        self.assertNotIn("hx-trigger", answer.text)
+        self.assertIn('href="/calendar?year=2026&amp;month=7&amp;endpoint=shows"', answer.text)
+
+    def test_rows_rewritten_without_changing_what_this_viewer_sees_raise_nothing(self):
+        """A store changed the week's rows, but the month this viewer draws is
+        card for card what the page filed: read once, then quiet again."""
+        url = self._changed_url(self.client.get(self.PAGE).text)
+        calendar_entries._note_changed("shows", [calendar_cache.window_start(
+            date(2026, 7, 8)).isoformat()])
+        self.assertEqual(self.client.get(url).status_code, 204)
+        with patch.object(calendar_cache, "assemble_range") as read:
+            self.assertEqual(self.client.get(url).status_code, 204)
+        read.assert_not_called()
+
+    def test_a_late_day_that_draws_something_else_says_so_at_once(self):
+        html = self.client.get(self.PAGE).text
+        day = next(url for url in _day_urls(html) if "date=2026-07-10" in url)
+        self.assertNotIn("monthChanged", self.client.get(day).text)
+        self.entries.append(_entry("show-late", "Show Late", "2026-07-10T19:00:00Z"))
+        self._refill(10)
+        late = self.client.get(day).text
+        self.assertIn("Show Late", late)
+        self.assertIn('id="monthChanged" class="warning-banner" role="status" '
+                      'hx-swap-oob="true"', late)
+
+    def test_a_token_that_names_nothing_stops_the_asking(self):
+        answer = self.client.get(
+            "/calendar/changed?endpoint=shows&year=2026&month=7&page=nothing-filed")
+        self.assertEqual(answer.status_code, 200)
+        self.assertIn('id="monthChanged" hidden', answer.text)
+        self.assertNotIn("hx-get", answer.text)
+
+
+class TheIsNewAnswerIsHeldInProcessTests(unittest.TestCase):
+    """The shell's is-new answer is filed in process for its late days — never
+    written to the database, where it waited its turn behind a restart's refills
+    before the page could draw — and the process runs for weeks: answers go by
+    age whenever the store is touched, and the store holds no more than
+    `_NEW_LOADS_MAX` loads and `_NEW_KEYS_MAX` keys in all."""
+
+    def setUp(self):
+        calendar_routes._new_answers.clear()
+        self.addCleanup(calendar_routes._new_answers.clear)
+        self.now = 1_000.0
+        clock = patch.object(calendar_routes.time, "monotonic", lambda: self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def _file(self, *keys: str) -> str:
+        return calendar_routes._remember_new_marks(1, "shows", 2026, 7, set(keys))
+
+    def _read(self, token: str) -> frozenset:
+        return calendar_routes._new_marks(1, "shows", 2026, 7, token)
+
+    def test_it_reads_back_for_its_own_account_calendar_and_month(self):
+        token = self._file("show:tmdb:1")
+        self.assertEqual(self._read(token), {"show:tmdb:1"})
+        for other in ((2, "shows", 2026, 7), (1, "movies", 2026, 7), (1, "shows", 2026, 8)):
+            with self.subTest(other=other):
+                self.assertEqual(calendar_routes._new_marks(*other, token), frozenset())
+
+    def test_an_answer_past_its_life_goes_when_the_store_is_read(self):
+        token = self._file("show:tmdb:1")
+        self.now += calendar_routes._NEW_MARKS_TTL_SECONDS + 1
+        self.assertEqual(self._read(token), frozenset())
+        self.assertEqual(len(calendar_routes._new_answers), 0)
+
+    def test_the_oldest_answers_go_past_the_loads_held(self):
+        with patch.object(calendar_routes, "_NEW_LOADS_MAX", 3):
+            tokens = [self._file(f"show:tmdb:{n}") for n in range(5)]
+        self.assertEqual(len(calendar_routes._new_answers), 3)
+        self.assertEqual([bool(self._read(token)) for token in tokens],
+                         [False, False, True, True, True])
+
+    def test_the_oldest_answers_go_once_the_keys_held_would_pass_the_bound(self):
+        with patch.object(calendar_routes, "_NEW_KEYS_MAX", 10):
+            first = self._file(*(f"a{n}" for n in range(6)))
+            second = self._file(*(f"b{n}" for n in range(6)))
+            self.assertEqual(self._read(first), frozenset())
+            self.assertEqual(len(self._read(second)), 6)
+            self.assertEqual(self._file(*(f"c{n}" for n in range(11))), "")
+
+    def test_nothing_new_files_nothing(self):
+        self.assertEqual(self._file(), "")
+        self.assertEqual(len(calendar_routes._new_answers), 0)
+
+
+class TheFiledMonthIsBoundedTests(unittest.TestCase):
+    """The month a page drew is filed in process for its marks and late days, and
+    the process runs for weeks: the store lets go of a page by age whenever it
+    is touched, holds no more than `_FILED_CARDS_MAX` cards in all — a page's
+    size is its month's, and an unfiltered All Episodes month is ~18,000 cards —
+    and keeps each distinct spelling once a page."""
+
+    def setUp(self):
+        calendar_routes._pages.clear()
+        self.addCleanup(calendar_routes._pages.clear)
+        self.now = 1_000.0
+        clock = patch.object(calendar_routes.time, "monotonic", lambda: self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    @staticmethod
+    def _month(cards: int, *, titles: int = 1) -> list[dict]:
+        items = [SimpleNamespace(mark_key=f"show:tmdb:{n % titles}",
+                                 title_key=f"show:tmdb:{n % titles}", id=f"slug-{n % titles}",
+                                 media="show", ids={"tmdb": n % titles}, known_ids={})
+                 for n in range(cards)]
+        return [{"date": "2026-07-04", "items": items}]
+
+    def _file(self, cards: int, **kwargs) -> str:
+        return calendar_routes._file_month(1, "shows", 2026, 7, self._month(cards, **kwargs))
+
+    def test_a_page_past_its_age_goes_when_the_store_is_read(self):
+        token = self._file(3)
+        self.now += calendar_routes._PAGE_SECONDS + 1
+        self.assertIsNone(calendar_routes._filed_month(1, token, "shows", 2026, 7))
+        self.assertEqual(len(calendar_routes._pages), 0)
+
+    def test_the_oldest_pages_go_once_the_cards_held_would_pass_the_bound(self):
+        with patch.object(calendar_routes, "_FILED_CARDS_MAX", 10):
+            first, second = self._file(4), self._file(4)
+            third = self._file(4)
+            self.assertIsNone(calendar_routes._filed_month(1, first, "shows", 2026, 7))
+            self.assertIsNotNone(calendar_routes._filed_month(1, second, "shows", 2026, 7))
+            self.assertIsNotNone(calendar_routes._filed_month(1, third, "shows", 2026, 7))
+            self.assertLessEqual(sum(len(filed.cards) for filed in calendar_routes._pages.values()),
+                                 10)
+
+    def test_a_page_bigger_than_the_whole_store_is_not_filed(self):
+        with patch.object(calendar_routes, "_FILED_CARDS_MAX", 10):
+            kept = self._file(4)
+            self.assertEqual(self._file(11), "")
+            self.assertIsNotNone(calendar_routes._filed_month(1, kept, "shows", 2026, 7))
+
+    def test_no_more_pages_than_the_page_bound(self):
+        with patch.object(calendar_routes, "_PAGES_MAX", 3):
+            for _ in range(5):
+                self._file(1)
+        self.assertEqual(len(calendar_routes._pages), 3)
+
+    def test_a_titles_cards_share_one_spelling_set(self):
+        token = self._file(30, titles=3)
+        cards = calendar_routes._filed_month(1, token, "shows", 2026, 7).cards
+        self.assertEqual(len({id(card.spellings) for card in cards}), 3)
+        self.assertEqual(len({id(card.air_date) for card in cards}), 1)
+
+
 class CalendarShellTests(CalendarRouteTestCase):
     """The page ships the first few days and asks for the rest itself."""
 
@@ -1458,9 +1697,14 @@ class CalendarShellTests(CalendarRouteTestCase):
         # Every later day stands there as itself and fetches only itself, so no day
         # is fetched twice, none is missed, and one nobody reaches costs nothing.
         self.assertEqual(_placeholder_dates(html), later)
+        # Each names the month the page filed for its marks (`_file_month`) —
+        # one token for the page, on every day and every card's mark.
+        token = re.search(r"&page=([A-Za-z0-9_-]+)", _day_urls(html)[0]).group(1)
         self.assertEqual(
             _day_urls(html),
-            [f"/calendar/day?endpoint=shows&year=2026&month=7&date={day}" for day in later])
+            [f"/calendar/day?endpoint=shows&year=2026&month=7&date={day}&page={token}"
+             for day in later])
+        self.assertIn(f"&amp;page={token}", html)
 
     def test_a_placeholder_carries_what_the_page_needs_before_its_cards_exist(self):
         """Its heading, its anchor, the reserved height, and what this viewer would
@@ -1705,7 +1949,8 @@ class TheJumpAnchorIsRenderedByTheServerTests(CalendarRouteTestCase):
 
 
 class FollowingASearchResultWritesOneAiringTests(CalendarRouteTestCase):
-    """`/calendar/jump` — the click, and the only thing that writes.
+    """`/calendar/jump` — a result's season picker submitted, and the only thing
+    that writes.
 
     WHY A WRITE HAPPENS AT ALL. A service can be missing its own title: Trakt's
     show record dates Half Man's first season to 2026-04-28T20:00Z and Trakt's
@@ -1715,91 +1960,169 @@ class FollowingASearchResultWritesOneAiringTests(CalendarRouteTestCase):
     WHY IT HAPPENS HERE AND NOT IN THE SEARCH. The write first ran over every row
     a search returned, which turned typing "traitors" and pressing Enter into
     sixteen premieres written to a calendar everybody on the instance shares.
-    Following one result is the act that names exactly one thing.
+    The picker is the act that names what is written — and calendar/search.py's
+    `jump` (tested there) writes exactly that.
+
+    THE BODY NAMES A RESULT BY REFERENCE: the query, the medium, the search's
+    own reference and its place, and the seasons ticked. Nothing about the title.
     """
 
-    MONTH = "/calendar?year=2026&month=4&endpoint=shows"
-    JUMP = ("/calendar/jump?source=trakt&id=246405&media=show&season=1"
-            "&endpoint=shows&year=2026&month=4")
+    JUMP = {"q": "half man", "media": "show", "i": "0", "also": "trakt",
+            "season:1": "1", "season:3": "1", "endpoint": "shows"}
 
     def setUp(self):
         super().setUp()
         self.sign_in_as(self._make_user("jumper2"))
 
-    def _go(self, url=None, mark="show:tmdb:1"):
-        from app.calendar.search import Landing
+    def _go(self, body=None, *, hit="found", destination="/calendar?year=2026&month=4",
+            hidden=False):
+        from app.calendar import search as calendar_search
+        from app.providers import title_search
+        from app.providers.season_choices import SeasonOption
 
-        async def _fill(settings, **kw):
-            self.asked = kw
-            return Landing(mark, "2026-04-28") if mark else Landing()
+        self.named = []
+        self.jumped = []
 
-        with patch("app.calendar.search.fill_one_gap", _fill):
-            return self.client.get(url or self.JUMP, follow_redirects=False)
+        async def _resolve(settings, media, query, index, ref):
+            self.named.append((media, query, index, ref))
+            return SimpleNamespace(title="Half Man") if hit else None
 
-    def test_it_redirects_to_the_month_with_the_card_named(self):
+        async def _jump(settings, found, media, seasons, *, tz, now, **_viewer):
+            self.jumped.append((media, seasons))
+            return calendar_search.Landing(destination, hidden=hidden)
+
+        async def _picker(settings, found, media, *, prefs, tz, source_selection=None):
+            # The picker as it stands once the jump has written the season: held,
+            # and refused by this reader's filters.
+            return calendar_search.Picker([SeasonOption(1, blocked="your filters hide it")], [])
+
+        with patch.object(title_search, "resolve_hit", _resolve), \
+             patch("app.calendar.search.jump", _jump), \
+             patch("app.calendar.search.picker", _picker):
+            return self.client.post("/calendar/jump", json=body or self.JUMP,
+                                    follow_redirects=False)
+
+    def test_it_re_reads_the_named_result_and_jumps_to_what_was_ticked(self):
         resp = self._go()
-        self.assertEqual(resp.status_code, 303)
-        where = resp.headers["location"]
-        self.assertIn("year=2026", where)
-        self.assertIn("month=4", where)
-        self.assertIn("highlight=", where)
-        self.assertTrue(where.endswith("#jump-target"), where)
+        self.assertEqual(resp.status_code, 204)
+        self.assertEqual(resp.headers["hx-redirect"], "/calendar?year=2026&month=4")
+        (media, query, index, ref), = self.named
+        self.assertEqual((str(media), query, index, ref.also), ("show", "half man", "0", ("trakt",)))
+        self.assertEqual(self.jumped, [(self.jumped[0][0], [1, 3])])
 
-    def test_it_names_the_day_so_a_card_past_the_first_days_is_found(self):
-        """The page draws only its first few days inline and fetches the rest as
-        the reader scrolls, so a mark alone could name a card that did not exist
-        yet: the jump landed at the top of the month. The day is what the page
-        uses to draw that day's cards with the page, as a stored result's link
-        does."""
-        where = self._go().headers["location"]
-        self.assertIn("&day=2026-04-28", where)
+    def test_a_get_writes_nothing(self):
+        """The jump WRITES airings into the calendar every viewer shares, so an
+        address alone — a prefetch, a crawler, a reload — must not reach it."""
+        from urllib.parse import urlencode
 
-    def test_it_asks_the_service_for_exactly_what_the_link_named(self):
-        self._go()
-        self.assertEqual(str(self.asked["source"]), "trakt")
-        self.assertEqual(self.asked["source_id"], "246405")
-        self.assertEqual(self.asked["season"], 1)
-        self.assertEqual(self.asked["endpoint_key"], "shows")
+        with patch("app.calendar.search.jump",
+                   AsyncMock(side_effect=AssertionError("a GET wrote"))):
+            resp = self.client.get("/calendar/jump?" + urlencode(self.JUMP),
+                                   follow_redirects=False)
+        self.assertEqual(resp.status_code, 405)
 
-    def test_a_write_that_could_not_happen_still_opens_the_month(self):
-        """The month is worth opening either way — it may hold the title from an
-        ordinary fill, and if it does not the reader sees the month they asked
-        for rather than an error about machinery."""
-        resp = self._go(mark="")
-        self.assertEqual(resp.status_code, 303)
-        where = resp.headers["location"]
-        self.assertNotIn("highlight=", where)
-        self.assertNotIn("#jump-target", where)
+    def test_a_form_encoded_post_is_refused_before_it_is_read(self):
+        """The request-shape guard every write in this app stands behind."""
+        with patch("app.calendar.search.jump",
+                   AsyncMock(side_effect=AssertionError("a form post wrote"))):
+            resp = self.client.post("/calendar/jump", data=self.JUMP)
+        self.assertGreaterEqual(resp.status_code, 400)
 
-    def test_a_service_this_app_does_not_know_is_not_an_error(self):
-        """A link from an older version, or a hand-edited one. The reader still
-        gets the month; nothing is written."""
-        called = []
+    def test_a_films_one_choice_is_its_release(self):
+        self._go({"q": "heat", "media": "movie", "i": "0", "season:": "1",
+                  "endpoint": "movies"})
+        self.assertEqual(self.jumped[0][1], [None])
 
-        async def _fill(settings, **kw):
-            called.append(kw)
-            return "x"
+    def test_a_result_the_store_no_longer_holds_opens_the_calendar_and_writes_nothing(self):
+        resp = self._go(hit=None)
+        self.assertEqual(resp.status_code, 204)
+        self.assertEqual(resp.headers["hx-redirect"], "/calendar?endpoint=shows")
+        self.assertEqual(self.jumped, [])
 
-        with patch("app.calendar.search.fill_one_gap", _fill):
-            resp = self.client.get(
-                "/calendar/jump?source=nosuchservice&id=1&endpoint=shows"
-                "&year=2026&month=4", follow_redirects=False)
-        self.assertEqual(resp.status_code, 303)
-        self.assertEqual(called, [], "an unknown service reached the writer")
+    def test_a_jump_with_nowhere_to_land_still_opens_the_calendar(self):
+        """The month is worth opening either way; with nothing ticked there is no
+        month, so the reader stays on the calendar they were searching."""
+        resp = self._go(destination="")
+        self.assertEqual(resp.headers["hx-redirect"], "/calendar?endpoint=shows")
 
-    def test_a_link_naming_no_id_writes_nothing(self):
-        called = []
+    def test_a_medium_this_app_does_not_know_is_not_an_error(self):
+        resp = self._go({"q": "x", "media": "album", "i": "0", "endpoint": "shows"})
+        self.assertEqual(resp.status_code, 204)
+        self.assertEqual(self.jumped, [])
 
-        async def _fill(settings, **kw):
-            called.append(kw)
-            return "x"
+    def test_a_card_the_readers_filters_hide_is_said_in_place_and_opens_nothing(self):
+        """Yellowjackets' second season: written, its week filled, listed by TMDB
+        alone, and hidden from a reader who hides what one service lists. The
+        month it would open draws nothing to land on, so the picker comes back
+        into its own slot with the season refused and a sentence saying why."""
+        resp = self._go(hidden=True)
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("hx-redirect", resp.headers)
+        self.assertIn("Your filters hide that season on this calendar", resp.text)
+        self.assertIn("your filters hide it", resp.text)
+        self.assertNotIn('name="season:1"', resp.text)
+        # The same reference, so the redrawn picker can be pressed again.
+        for field in ('name="q" value="half man"', 'name="i" value="0"',
+                      'name="endpoint" value="shows"'):
+            self.assertIn(field, resp.text)
 
-        with patch("app.calendar.search.fill_one_gap", _fill):
-            resp = self.client.get(
-                "/calendar/jump?source=trakt&endpoint=shows&year=2026&month=4",
-                follow_redirects=False)
-        self.assertEqual(resp.status_code, 303)
-        self.assertEqual(called, [])
+
+class ASearchResultsSeasonPickerTests(CalendarRouteTestCase):
+    """`/calendar/fragments/search-seasons` — the app's one season checklist for
+    a calendar search result, whose submit is the jump."""
+
+    URL = "/calendar/fragments/search-seasons?q=half%20man&media=show&i=0&endpoint=shows"
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in_as(self._make_user("picker2"))
+
+    def _get(self, *, hit=True, options=()):
+        from app.calendar import search as calendar_search
+        from app.providers import title_search
+
+        async def _resolve(settings, media, query, index, ref):
+            return SimpleNamespace(title="Half Man") if hit else None
+
+        async def _picker(settings, found, media, *, prefs, tz, source_selection=None):
+            return calendar_search.Picker(list(options), [])
+
+        with patch.object(title_search, "resolve_hit", _resolve),              patch("app.calendar.search.picker", _picker):
+            return self.client.get(self.URL).text
+
+    def test_every_season_is_one_press_and_pressing_one_is_the_jump(self):
+        """A season the calendar draws is a link to its card; any other is a
+        button naming its own season, pressed straight into the jump — one kind
+        of row, no checkbox and no Go. A refused season says why and is no
+        button at all."""
+        from app.providers.season_choices import SeasonOption
+        html = self._get(options=[
+            SeasonOption(1), SeasonOption(2, suggested=True),
+            SeasonOption(3, blocked="your filters hide it"),
+            SeasonOption(4, href="/calendar?year=2026&month=11#jump-target")])
+        # A json-enc POST, because following it writes; the answer is the
+        # navigation, or — a card the reader's filters hide — this picker again,
+        # into its own slot.
+        self.assertIn('hx-post="/calendar/jump"', html)
+        self.assertIn('hx-json-enc=""', html)
+        self.assertIn('hx-target="closest .search-pick"', html)
+        self.assertIn('hx-swap="innerHTML"', html)
+        self.assertNotIn('action="/calendar/jump', html)
+        for field in ('name="q" value="half man"', 'name="i" value="0"',
+                      'name="media" value="show"', 'name="endpoint" value="shows"'):
+            self.assertIn(field, html)
+        self.assertNotIn('type="checkbox"', html)
+        self.assertNotIn("Go to", html)
+        self.assertRegex(html, r'<button type="submit" class="season-choice is-link" '
+                               r'name="season:1" value="1">')
+        self.assertRegex(html, r'<button type="submit" class="season-choice is-suggested is-link" '
+                               r'name="season:2" value="1">')
+        self.assertNotIn('name="season:3"', html)
+        self.assertIn("your filters hide it", html)
+        self.assertIn('href="/calendar?year=2026&amp;month=11#jump-target"', html)
+
+    def test_a_result_the_store_no_longer_holds_says_so(self):
+        self.assertIn("That search has expired", self._get(hit=False))
 
 
 class CalendarSearchRouteTests(CalendarRouteTestCase):
@@ -1863,6 +2186,28 @@ class CalendarSearchRouteTests(CalendarRouteTestCase):
         # not a control the results repeat.
         self.assertIn("Search every calendar", resp.text)
 
+    def test_no_tmdb_token_says_so_and_still_offers_a_linked_service(self):
+        """Nothing is asked in TMDB's place; the box names it and offers the
+        services the viewer linked, each asked only when its button is pressed."""
+        from app import db
+        from app.providers import title_search
+        # The viewer has linked Trakt, which is what makes it theirs to add.
+        asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
+            conn, user_id=self.user_id, provider="trakt", provider_user_id=1,
+            access_token="viewer-trakt-token")))
+        asked = []
+
+        async def _catalogue(entries, settings, media, query, *, pages=1, cached_only=False):
+            asked.append([str(entry.source) for entry in entries])
+            return title_search.SearchMergeResult(hits=[], failed=frozenset())
+        with patch.object(title_search, "search_catalogue", _catalogue):
+            plain = self.client.get(f"{self.URL}&q=drama&live=1").text
+            added = self.client.get(f"{self.URL}&q=drama&live=1&also=trakt").text
+        self.assertIn("is not configured", plain)
+        self.assertIn(">Also search Trakt<", plain)
+        self.assertEqual(asked, [[], ["trakt"]])
+        self.assertIn("is not configured", added)
+
     def test_an_empty_query_asks_for_one_rather_than_listing_everything(self):
         resp = self.client.get(f"{self.URL}&q=")
         self.assertEqual(resp.status_code, 200)
@@ -1874,6 +2219,322 @@ class CalendarSearchRouteTests(CalendarRouteTestCase):
         self.client.cookies.clear()
         self.assertIn(self.client.get(f"{self.URL}&q=drama").status_code,
                       (302, 303, 401, 403))
+
+class TheCardDrawnWholeTests(CalendarRouteTestCase):
+    """`/calendar/fragments/card`: the one card a compare control names, drawn
+    whole for this viewer — read by its title's rows, judged by their filters,
+    wearing their marks — or nothing at all when the store no longer draws it."""
+
+    PAGE = "/calendar?endpoint=shows&year=2026&month=7"
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("card_viewer")
+        self.sign_in_as(self.user_id)
+        self.drama = _entry("the-drama", "The Drama", "2026-07-15T20:00:00Z")
+        self.drama["show"]["genres"] = ["drama"]
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch([self.drama]))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        html = self.client.get(self.PAGE).text
+        self.airing = re.search(r'data-id="%s" data-airing="([0-9a-f]{16})"'
+                                % re.escape(_mark_key("the-drama")), html).group(1)
+        (row,) = asyncio.run(db.fetch_all(
+            "SELECT e.title_key, e.unit FROM episodes e JOIN titles t "
+            "ON t.title_key = e.title_key WHERE t.trakt_title = 'The Drama'"))
+        self.card = f"{row['title_key']}|{row['unit']}"
+
+    def _get(self, card=None, airing=None, extra=""):
+        return self.client.get(
+            f"/calendar/fragments/card?endpoint=shows&year=2026&month=7"
+            f"&card={quote(card or self.card, safe='')}&airing={airing or self.airing}{extra}")
+
+    def test_it_answers_with_the_card_alone_drawn_whole(self):
+        response = self._get()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.text.lstrip().startswith('<div class="card'))
+        self.assertIn(f'data-airing="{self.airing}"', response.text)
+        self.assertIn("The Drama", response.text)
+        self.assertNotIn("card-expand", response.text)
+        self.assertNotIn("day-block", response.text)
+
+    def test_it_wears_this_viewers_mark(self):
+        asyncio.run(calendar_state.set_not_watching(self.user_id, "the-drama", True))
+        self.assertIn("not-watching", _card_class(self._get().text, _mark_key("the-drama")))
+
+    def test_a_card_the_store_does_not_draw_any_more_answers_nothing(self):
+        response = self._get(airing="0" * 16)
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.text, "")
+
+    def test_a_card_this_viewers_filters_hide_answers_nothing(self):
+        self.client.post("/calendar/filters", json={
+            vocab.field_name(vocab.TV_GENRES, "drama"): "exclude"})
+        self.assertEqual(self._get().status_code, 204)
+
+    def test_an_address_naming_no_card_is_refused(self):
+        for card, airing in (("no-bar-at-all", None), ("a b|c", None), (None, "not-hex"),
+                             ("x" * 400 + "|S1E1", None)):
+            with self.subTest(card=card, airing=airing):
+                self.assertEqual(self._get(card=card, airing=airing).status_code, 400)
+
+    def test_it_is_a_signed_in_viewers_alone(self):
+        self.client.cookies.clear()
+        self.assertIn(self._get().status_code, (302, 303, 401, 403))
+
+
+class ComparingATitleComparesItEverywhereTests(CalendarRouteTestCase):
+    """Pressing one card's compare control draws every card of its title on the
+    page whole — the others out of band in the same answer — and the page files
+    the title as compared, so a day drawn after the press, and a mark's redraw,
+    draw it compared too (calendar_card, _FiledMonth.compared). No script: the
+    answer's markup says where each card goes."""
+
+    PAGE = "/calendar?endpoint=shows&year=2026&month=7"
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("compare_viewer")
+        self.sign_in_as(self.user_id)
+        drama = []
+        for number, aired in ((1, "2026-07-01T20:00:00Z"), (2, "2026-07-20T20:00:00Z")):
+            entry = _entry("the-drama", "The Drama", aired)
+            entry["episode"]["number"] = number
+            entry["show"]["ids"]["tmdb"] = 4242
+            drama.append(entry)
+        # Four more days first, so the drama's second week is a late day.
+        fillers = [_entry(f"filler-{n}", f"Filler {n}", f"2026-07-0{n + 2}T20:00:00Z")
+                   for n in range(calendar_routes.INITIAL_DAY_BLOCKS - 1)]
+        listed = support.calendar_records(drama + fillers, get_endpoint("shows"))
+        trakt = [dataclasses.replace(record, overview="In Trakt words.") for record in listed]
+        # SIMKL LISTS THE DRAMA TOO, in other words: a disagreement to compare.
+        simkl = [dataclasses.replace(record, source=Source.SIMKL, id="4242",
+                                     ids={"simkl": 4242, "tmdb": 4242},
+                                     overview="In Simkl words.")
+                 for record in listed if record.title == "The Drama"]
+
+        async def fetch(endpoint, settings, start, *, covered=(), sources=None):
+            answering = [str(provider.source)
+                         for provider in calendar_cache._window_sources(endpoint, settings, start)]
+            if sources is not None:
+                answering = [name for name in answering if name in set(map(str, sources))]
+            records = ((trakt if "trakt" in answering else [])
+                       + (simkl if "simkl" in answering else []))
+            return records, answering, []
+
+        patcher = patch("app.calendar.cache.fetch_window_records", fetch)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def _compare_urls(html: str) -> list[str]:
+        return [h.replace("&amp;", "&") for h in re.findall(
+            r'class="source-swap card-expand"[^>]*hx-get="(/calendar/fragments/card\?[^"]+)"', html)]
+
+    def _late_day(self, shell: str) -> str:
+        url = next(url for url in _day_urls(shell) if "date=2026-07-20" in url)
+        return self.client.get(url).text
+
+    def test_the_answer_redraws_the_titles_other_cards_out_of_band(self):
+        shell = self.client.get(self.PAGE).text
+        (url,) = self._compare_urls(shell)
+        answer = self.client.get(url)
+        self.assertEqual(answer.status_code, 200)
+        self.assertTrue(answer.text.lstrip().startswith('<div class="card'))
+        oob = re.findall(r"hx-swap-oob=\"outerHTML:\.card\[data-airing='([0-9a-f]{16})'\]\"",
+                         answer.text)
+        self.assertEqual(len(oob), 1, "the drama's other episode, and nothing else")
+        self.assertNotIn(re.search(r'airing=([0-9a-f]{16})', url).group(1), oob)
+        self.assertEqual(answer.text.count('class="flip-pick"') % 2, 0)
+        self.assertGreaterEqual(answer.text.count("In Simkl words."), 2)
+        self.assertNotIn("card-expand", answer.text)
+        self.assertNotIn("Filler", answer.text)
+
+    def test_a_day_drawn_after_the_press_draws_the_title_compared(self):
+        shell = self.client.get(self.PAGE).text
+        self.client.get(self._compare_urls(shell)[0])
+        day = self._late_day(shell)
+        self.assertIn("In Simkl words.", day)
+        self.assertIn('class="flip-pick"', day)
+        self.assertNotIn("card-expand", day)
+
+    def test_until_it_is_pressed_a_day_draws_the_title_bare(self):
+        day = self._late_day(self.client.get(self.PAGE).text)
+        self.assertIn("card-expand", day)
+        self.assertNotIn('class="flip-pick"', day)
+
+    def test_another_page_has_compared_nothing(self):
+        shell = self.client.get(self.PAGE).text
+        self.client.get(self._compare_urls(shell)[0])
+        reloaded = self.client.get(self.PAGE).text
+        self.assertIn("card-expand", self._late_day(reloaded))
+
+    def test_a_marks_redraw_keeps_the_title_compared(self):
+        shell = self.client.get(self.PAGE).text
+        url = self._compare_urls(shell)[0]
+        self.client.get(url)
+        page = re.search(r"[?&]page=([A-Za-z0-9_-]+)", url).group(1)
+        key = re.search(r'data-id="([^"]+)" data-airing="%s"'
+                        % re.search(r'airing=([0-9a-f]{16})', url).group(1), shell).group(1)
+        answer = self.client.post(
+            f"/api/state?year=2026&month=7&endpoint=shows&page={page}",
+            json={"item_id": key, "not_watching": True})
+        self.assertEqual(answer.status_code, 200)
+        self.assertIn('class="flip-pick"', answer.text)
+        self.assertNotIn("card-expand", answer.text)
+
+
+class BigDaysArePagedTests(CalendarRouteTestCase):
+    """A day holding more than a page of cards draws its first page and a
+    control that asks for the rest (app/calendar/day_pages.py) — the page here is
+    two cards — while its count, its chip and what the shell filed stay the
+    whole day's."""
+
+    PAGE = "/calendar?endpoint=shows&year=2026&month=7"
+    BIG = "2026-07-15"
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("big_day_viewer")
+        self.sign_in_as(self.user_id)
+        self.entries = [_entry(f"show-{n}", f"Show {n}", f"2026-07-15T{10 + n:02d}:00:00Z")
+                        for n in range(5)]
+        # Two quiet days first, so the big day is a late one.
+        self.entries += [_entry(f"early-{n}", f"Early {n}", f"2026-07-0{n + 1}T20:00:00Z")
+                         for n in range(calendar_routes.INITIAL_DAY_BLOCKS)]
+        fetch = patch("app.calendar.cache.fetch_window_records",
+                      window_fetch(lambda endpoint, start: self.entries))
+        fetch.start()
+        self.addCleanup(fetch.stop)
+        page = patch.object(calendar_routes.day_pages, "DAY_PAGE_CARDS", 2)
+        page.start()
+        self.addCleanup(page.stop)
+
+    def _late_day(self) -> str:
+        shell = self.client.get(self.PAGE).text
+        url = next(url for url in _day_urls(shell) if f"date={self.BIG}" in url)
+        return self.client.get(url).text
+
+    @staticmethod
+    def _rest_url(html: str) -> str:
+        return re.search(r'hx-get="(/calendar/day/rest\?t=[A-Za-z0-9_-]+)"', html).group(1)
+
+    def test_a_big_day_draws_its_first_page_and_counts_the_whole_day(self):
+        html = self._late_day()
+        self.assertEqual(len(re.findall(r'data-airing="[0-9a-f]{16}"', html)), 2)
+        self.assertIn("5 items", html)
+        self.assertIn("Show the other 3", html)
+        self.assertIn(f'id="day-chip-{self.BIG}"', html)
+        self.assertIn('title="5 items"', html)
+
+    def test_the_first_page_is_the_days_best_ranked_cards_in_its_own_order(self):
+        """Every card here is Trakt's alone, so the more complete one ranks
+        first: the day's last card makes the page, ahead of the second."""
+        self.entries[4]["show"].update({"overview": "Words.", "network": "HBO",
+                                        "genres": ["drama"]})
+        html = self._late_day()
+        self.assertIn("Show 0", html)
+        self.assertIn("Show 4", html)
+        self.assertNotIn("Show 1", html)
+        self.assertLess(html.index("Show 0"), html.index("Show 4"))
+        rest = self.client.get(self._rest_url(html)).text
+        self.assertEqual(re.findall(r'class="show-title">(Show \d)<', rest),
+                         ["Show 1", "Show 2", "Show 3"])
+
+    def test_the_rest_draws_every_other_card_and_nothing_twice(self):
+        html = self._late_day()
+        first = set(re.findall(r'data-airing="([0-9a-f]{16})"', html))
+        rest = self.client.get(self._rest_url(html))
+        self.assertEqual(rest.status_code, 200)
+        others = set(re.findall(r'data-airing="([0-9a-f]{16})"', rest.text))
+        self.assertEqual(len(others), 3)
+        self.assertFalse(first & others)
+        self.assertNotIn("day-block", rest.text)
+        self.assertNotIn("monthChanged", rest.text)
+
+    def test_another_accounts_control_draws_nothing_of_theirs(self):
+        url = self._rest_url(self._late_day())
+        self.sign_in_as(self._make_user("somebody_else"))
+        answer = self.client.get(url)
+        self.assertEqual(answer.status_code, 200)
+        self.assertNotIn("data-airing", answer.text)
+        self.assertIn("open too long", answer.text)
+
+    def test_an_edited_control_draws_nothing(self):
+        url = self._rest_url(self._late_day())
+        edited = url[:-3] + ("AAA" if not url.endswith("AAA") else "BBB")
+        self.assertNotIn("data-airing", self.client.get(edited).text)
+
+    def test_a_day_changed_since_the_page_says_so_with_its_rest(self):
+        html = self._late_day()
+        self.entries.append(_entry("show-late", "Show Late", "2026-07-15T15:30:00Z"))
+        asyncio.run(support.load_window(get_endpoint("shows"), _configured_settings(),
+                                        calendar_cache.window_start(date(2026, 7, 15)),
+                                        force=True))
+        rest = self.client.get(self._rest_url(html)).text
+        self.assertIn('id="monthChanged" class="warning-banner"', rest)
+
+    def test_a_day_changed_since_the_page_says_so_once_its_filed_month_has_gone(self):
+        """The control outlives what the shell filed: its own digest of the day
+        is what tells its places are no longer places in it."""
+        html = self._late_day()
+        self.entries.insert(0, _entry("show-early", "Show Early", "2026-07-15T09:30:00Z"))
+        asyncio.run(support.load_window(get_endpoint("shows"), _configured_settings(),
+                                        calendar_cache.window_start(date(2026, 7, 15)),
+                                        force=True))
+        calendar_routes._pages.clear()
+        rest = self.client.get(self._rest_url(html)).text
+        self.assertIn('id="monthChanged" class="warning-banner"', rest)
+
+    def test_an_unchanged_day_says_nothing_once_its_filed_month_has_gone(self):
+        html = self._late_day()
+        calendar_routes._pages.clear()
+        rest = self.client.get(self._rest_url(html))
+        self.assertEqual(len(re.findall(r'data-airing="[0-9a-f]{16}"', rest.text)), 3)
+        self.assertNotIn("monthChanged", rest.text)
+
+    def test_an_inline_big_day_is_paged_too(self):
+        self.entries = [_entry(f"show-{n}", f"Show {n}", f"2026-07-01T{10 + n:02d}:00:00Z")
+                        for n in range(5)]
+        shell = self.client.get(self.PAGE).text
+        self.assertIn("Show the other 3", shell)
+        self.assertEqual(_stat(shell, "statTotal"), "5")
+
+    def test_the_card_a_jump_names_is_drawn_wherever_it_falls_in_its_day(self):
+        shell = self.client.get(
+            f"{self.PAGE}&highlight={quote(_mark_key('show-4'))}&day={self.BIG}").text
+        self.assertIn('id="jump-target"', shell)
+        self.assertIn("Show 4", shell)
+
+
+class ABadgesButtonsOnDemandTests(CalendarRouteTestCase):
+
+    """`/calendar/fragments/badge`: the three buttons a card badge asks for the
+    first time it is opened."""
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in_as(self._make_user("badge_viewer"))
+
+    def test_the_three_buttons_post_one_fact_each(self):
+        response = self.client.get("/calendar/fragments/badge?d=genre&t=game-show&m=show")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.text.strip().startswith('<div class="filter-offer">'))
+        self.assertEqual(response.text.count('hx-post="/calendar/filters/badge"'), 3)
+        self.assertIn('"token": "game-show"', response.text)
+
+    def test_a_badge_the_calendar_does_not_filter_on_is_refused(self):
+        for query in ("d=day&t=Monday&m=show", "d=genre&t=&m=show", "d=genre&t=drama&m=book",
+                      f"d=genre&t={'x' * 300}&m=show"):
+            with self.subTest(query=query):
+                self.assertEqual(
+                    self.client.get(f"/calendar/fragments/badge?{query}").status_code, 400)
+
+    def test_it_is_a_signed_in_viewers_alone(self):
+        self.client.cookies.clear()
+        self.assertIn(self.client.get("/calendar/fragments/badge?d=genre&t=drama&m=show")
+                      .status_code, (302, 303, 401, 403))
+
 
 class CalendarDayRouteTests(CalendarRouteTestCase):
     """The content route: ONE day's block, and nothing else."""
@@ -1958,8 +2619,7 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         find the shell's own commit and conclude nothing is new. The shell FILES
         its answer and the day resolves the token naming it."""
         drama = _mark_key("the-drama")
-        token = asyncio.run(calendar_routes._remember_new_marks(
-            self.user_id, "shows", 2026, 7, {drama}))
+        token = calendar_routes._remember_new_marks(self.user_id, "shows", 2026, 7, {drama})
         marked = self.client.get(f"{self.DAY}&new={token}").text
         self.assertIn("is-new", _card_class(marked, drama))
         # Re-reading the baseline is not how it decides: with no token, nothing is
@@ -1983,15 +2643,14 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         resolves to nothing rather than to their answer."""
         drama = _mark_key("the-drama")
         stranger = self._make_user("is_new_stranger")
-        token = asyncio.run(calendar_routes._remember_new_marks(
-            stranger, "shows", 2026, 7, {drama}))
+        token = calendar_routes._remember_new_marks(stranger, "shows", 2026, 7, {drama})
         self.assertNotIn("is-new", self.client.get(f"{self.DAY}&new={token}").text)
 
     def test_an_is_new_key_naming_nothing_on_the_day_marks_nothing(self):
         """The day's cards ask whether THEIR key is among the answer, so a key for
         a title on another day marks no card here."""
-        token = asyncio.run(calendar_routes._remember_new_marks(
-            self.user_id, "shows", 2026, 7, {_mark_key("the-comedy")}))
+        token = calendar_routes._remember_new_marks(
+            self.user_id, "shows", 2026, 7, {_mark_key("the-comedy")})
         text = self.client.get(f"{self.DAY}&new={token}").text
         self.assertIn("The Drama", text)
         self.assertNotIn("is-new", text)
@@ -2001,8 +2660,8 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         survive a failure — and it is the whole of what a retry carries forward
         now, which is one opaque word instead of a list of keys rebuilt into the
         page."""
-        token = asyncio.run(calendar_routes._remember_new_marks(
-            self.user_id, "shows", 2026, 7, {_mark_key("the-drama")}))
+        token = calendar_routes._remember_new_marks(
+            self.user_id, "shows", 2026, 7, {_mark_key("the-drama")})
 
         def fake(endpoint, start):
             raise TraktError("Trakt unreachable", 503)
@@ -2172,8 +2831,21 @@ class TheCalendarDoesNotGoDarkOverOneServicesCredentialTests(CalendarRouteTestCa
         save_settings(Settings())
         self.user_id = self._make_user("simkl_only_viewer")
         self.sign_in_as(self.user_id)
-        patcher = patch("app.calendar.cache.fetch_window_records",
-                        window_fetch([_entry("show-a", "Show A", "2026-07-15T20:00:00Z")]))
+        # SIMKL'S LISTING, the only service in play here: support.window_fetch
+        # attributes its records to Trakt, which this instance cannot ask.
+        listed = support.calendar_records(
+            [_entry("show-a", "Show A", "2026-07-15T20:00:00Z")], get_endpoint("shows/new"))
+        simkl = [dataclasses.replace(record, source=Source.SIMKL, id="4242",
+                                     ids={"simkl": 4242}) for record in listed]
+
+        async def fetch(endpoint, settings, start, *, covered=(), sources=None):
+            answering = [str(provider.source)
+                         for provider in calendar_cache._window_sources(endpoint, settings, start)]
+            if sources is not None:
+                answering = [name for name in answering if name in set(map(str, sources))]
+            return (simkl if "simkl" in answering else []), answering, []
+
+        patcher = patch("app.calendar.cache.fetch_window_records", fetch)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -2204,3 +2876,82 @@ class TheCalendarDoesNotGoDarkOverOneServicesCredentialTests(CalendarRouteTestCa
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class TheCoverageGapSwitchTests(unittest.TestCase):
+    """_coverage_gap: a viewer who named one calendar source and asked for a month
+    that source does not reach is told so, and offered a service that DOES fill
+    calendars here, publishes this one and reaches the month.
+
+    It used to offer whichever registered service came first, so a service that
+    describes titles and publishes no calendar would have been the link — to an
+    empty month with nothing saying why.
+    """
+
+    FAR = date.today().year + 3   # past Simkl's declared forward reach
+
+    def _gap(self, registry=None, settings=None):
+        from app.endpoints import get_endpoint
+        prefs = source_prefs.SourcePrefs(user_id=1, calendar_source="simkl")
+        registry = registry or providers.registered()
+        with patch.object(providers, "registered", lambda: registry):
+            return calendar_routes._coverage_gap(
+                prefs, self.FAR, 1, settings or _configured_settings(),
+                endpoint=get_endpoint("shows/new"))
+
+    def test_the_switch_names_a_service_that_reaches_the_month(self):
+        message, url = self._gap()
+        self.assertIn("doesn't reach", message)
+        self.assertIn("source=trakt", url)
+
+    def test_a_service_whose_calendar_this_instance_cannot_read_is_never_the_switch(self):
+        """TMDB comes first in the declared order and reaches every month, but
+        with no read token filled in it has nothing on this calendar — the switch
+        would land on an empty month. With one, it is the first offered."""
+        _message, url = self._gap()
+        self.assertNotIn("tmdb", url)
+        _message, url = self._gap(settings=dataclasses.replace(
+            _configured_settings(), tmdb_api_key=_TMDB_TOKEN))
+        self.assertIn("source=tmdb", url)
+
+    def test_a_service_with_no_calendar_is_never_the_switch(self):
+        describer = type("Describer", (), {
+            "source": "mercury", "label": "Mercury", "calendar_port": None,
+            "capabilities": Capabilities(endpoints=frozenset(), days_before=None,
+                                         days_after=None, private_user_data=False,
+                                         retain_seconds=None, reach=Reach.WINDOW)})()
+        _message, url = self._gap({"mercury": describer, **providers.registered()})
+        self.assertNotIn("mercury", url or "")
+        self.assertIn("source=trakt", url)
+
+
+class CardPicturesReportTests(CalendarRouteTestCase):
+    """A VIEWER'S OWN CARD reports a picture that will not load: its picture is
+    drawn with this app's report address as the image proxy's default
+    (app/metadata/pictures.py). A SHARE PAGE never does — it draws the same card
+    with the static fallback chain, and a stranger's view costs the owner
+    nothing."""
+
+    REPORT = "api%2Fposters%2Fmissed"
+
+    def setUp(self):
+        super().setUp()
+        save_settings(dataclasses.replace(_configured_settings(),
+                                          public_base_url="https://testserver"))
+        self.user_id = self._make_user("card_pictures_viewer")
+        self.sign_in_as(self.user_id)
+        entry = _entry("pictured", "Pictured", "2026-07-15T20:00:00Z")
+        entry["show"]["images"] = {"poster": ["media.trakt.tv/images/shows/1/p.jpg"]}
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch([entry]))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_viewers_card_reports_and_a_share_page_does_not(self):
+        html = self.client.get("/?year=2026&month=7&endpoint=shows").text
+        self.assertIn("media.trakt.tv%2Fimages%2Fshows%2F1%2Fp.jpg", html)
+        self.assertIn(self.REPORT, html)
+        from app.calendar import share_links
+        token = asyncio.run(share_links.get_or_create(self.user_id))["token"]
+        shared = self.client.get(f"/s/{token}?year=2026&month=7&endpoint=shows").text
+        self.assertIn("media.trakt.tv%2Fimages%2Fshows%2F1%2Fp.jpg", shared)
+        self.assertNotIn(self.REPORT, shared)

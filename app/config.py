@@ -13,10 +13,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
+
+import anyio.to_thread
 
 from . import route_params, secrets_box
 from .perftrace import span
@@ -91,7 +94,18 @@ SECRET_FIELDS = frozenset({
     "radarr_api_key",
     "seer_api_key",
     "tmdb_api_key",
+    "tmdb_user_token",
 })
+
+# A SIGNED-IN PERSON'S OWN CREDENTIAL AND THE ACCOUNT IT NAMES, carried on a
+# Settings object only as auth.viewer.settings_for_user builds it for that person.
+# NEVER STORED AS A SETTING AND NEVER LOADED FROM ONE: `global_field_names` leaves
+# them out, `write_settings` writes no secret row for them, and load_settings
+# drops any value a hand-edited file or a stray row holds. A save of a per-viewer
+# object would otherwise file one person's grant as the instance's, and every
+# other viewer's writes would go to that person's list. The token is ALSO in
+# SECRET_FIELDS, so it is redacted wherever a Settings object is drawn.
+VIEWER_FIELDS = frozenset({"tmdb_user_token", "tmdb_account_id"})
 
 # STORED SECRETS THAT MUST NEVER REACH AN INSTANCE-WIDE Settings OBJECT.
 # `simkl_access_token` was once an operator-pasted AUTH V1 token. Under AUTH V2
@@ -178,6 +192,21 @@ class Settings:
     show_certifications: str = DEFAULT_SHOW_CERTIFICATIONS
     movie_certifications: str = DEFAULT_MOVIE_CERTIFICATIONS
     network_filter: list[str] = field(default_factory=list)
+    # THE FLOOR'S OTHER SIX DIMENSIONS, each the operator's answer for every
+    # viewer and each a viewer filter too (app/calendar/vocab.py's FLOOR_FIELDS
+    # says which medium each governs and why). Language and keywords are one
+    # floor for both media, like genres and countries; keywords are a LIST,
+    # because a TMDB keyword's own name can hold a comma. The rest carry the
+    # viewer's column names, so the Settings panel draws them with the Filters
+    # panel's own chips. Nothing is filtered by any of them until set.
+    languages: str = ""
+    keywords: list[str] = field(default_factory=list)
+    tv_show_types: str = ""
+    tv_single_service: bool = False
+    movie_single_service: bool = False
+    tv_sparse_no_network: bool = False
+    tv_missing: str = ""
+    movie_missing: str = ""
     pagination_limit: int = 300
     hide_not_watching: bool = False
     cache_ttl_minutes: int = 720  # detail/cast/episode cache lifetime
@@ -234,8 +263,40 @@ class Settings:
     # posts, and sharing it meant any user's roster import registered networks
     # into the operator's map. Nothing seeds a new user's map — it fills in from
     # their own roster, and travels via the tracker's Backup export.
-    # TMDB API key — used to fetch network logos (distrakt) for Discord emoji art.
+    # TMDB's API READ ACCESS TOKEN — the long one, sent as a bearer header. A
+    # catalogue every surface reads (a title's description, its season totals,
+    # its videos, network logos and posters), so it is an instance credential
+    # like Trakt's client id rather than anybody's account.
+    #
+    # THE FIELD KEEPS ITS OLD NAME, `tmdb_api_key`, because that is the key it is
+    # sealed under in app_secrets: renaming it would orphan every instance's
+    # stored credential. What it HOLDS is now only the read token — see
+    # `tmdb_token_error`, which refuses the short v3 key on save, and
+    # `tmdb_configured`, which reads a v3 key stored before that refusal existed
+    # as no credential at all rather than sending it.
     tmdb_api_key: str = ""
+    # THE LANGUAGE TMDB ANSWERS IN, an IETF tag TMDB accepts ("en-US", "de-DE").
+    # Sent on every catalogue read and part of every cached answer's key
+    # (providers/tmdb/transport.url_for), so changing it never serves an answer
+    # written in the old language. One instance setting, deliberately: catalogue
+    # answers are cached for everybody, and a per-viewer language would be a
+    # per-viewer value reaching shared storage.
+    tmdb_language: str = "en-US"
+    # THE COUNTRY WHOSE RELEASES THE FILM CALENDAR LISTS, as an ISO 3166-1 code.
+    # A film is released on different days in different countries; TMDB's
+    # release calendar is asked for one, and this is which.
+    tmdb_region: str = "US"
+    # ONE SIGNED-IN PERSON'S OWN TMDB GRANT, AND NEVER AN INSTANCE SETTING. The
+    # user access token TMDB's v4 sign-in issued them, and the account it names
+    # (TMDB's 24-character account object id, which its account reads are
+    # addressed by). Both are empty on every instance-wide object and swapped in
+    # by auth.viewer.settings_for_user, exactly as a viewer's Trakt and Simkl
+    # tokens are; neither is ever loaded from storage or written to it
+    # (VIEWER_FIELDS), because the only home of a person's grant is their
+    # linked_identities row (app/auth/tmdb_routes.py). The instance's
+    # `tmdb_api_key` above is a CATALOGUE credential and answers nothing here.
+    tmdb_user_token: str = ""
+    tmdb_account_id: str = ""
     # Session cookie Secure flag: "always" (default) | "never" | "auto".
     # Deliberately not scheme detection by default — behind a TLS-terminating
     # proxy the app itself is served over plain HTTP, so detection would report
@@ -297,6 +358,13 @@ class Settings:
         nf = clean.get("network_filter")
         if isinstance(nf, str):
             clean["network_filter"] = [s.strip() for s in nf.split(",") if s.strip()]
+        # ...and the keyword floor as ONE KEYWORD A LINE: a keyword's own name can
+        # hold a comma ("san francisco, california"), so a comma cannot divide
+        # them. Lower-cased, as TMDB spells every keyword.
+        kw = clean.get("keywords")
+        if isinstance(kw, str):
+            clean["keywords"] = [" ".join(line.split()).lower()
+                                 for line in kw.splitlines() if line.strip()]
         for name, declared in _scalar_field_types().items():
             if name not in clean:
                 continue
@@ -494,7 +562,82 @@ class Settings:
 
     @property
     def tmdb_configured(self) -> bool:
-        return bool(self.tmdb_api_key.strip())
+        """Whether this instance holds a TMDB credential it will SEND.
+
+        A READ TOKEN AND NOTHING ELSE. A v3 key stored before the Settings field
+        began refusing one is still in app_secrets, and reading it as configured
+        would put TMDB first in front of every title and then answer 401 on every
+        call. Read as unset, TMDB simply steps aside and the other services
+        describe titles as they did; the Settings page says why
+        (`tmdb_credential_problem`).
+        """
+        token = self.tmdb_api_key.strip()
+        return bool(token) and tmdb_token_error(token) is None
+
+    @property
+    def tmdb_account_configured(self) -> bool:
+        """Whether this object carries ONE PERSON'S OWN TMDB grant — the private
+        question, true only on a Settings auth.viewer.settings_for_user built for
+        a viewer who linked TMDB. Never true of an instance-wide object (see
+        VIEWER_FIELDS). The instance's read token is `tmdb_configured`, a
+        different credential for a different question."""
+        return bool(self.tmdb_user_token.strip() and self.tmdb_account_id.strip())
+
+    @property
+    def tmdb_link_configured(self) -> bool:
+        """Whether "Connect TMDB" can be offered. TMDB's sign-in is started with
+        the instance's read token (a request token is asked for with it) and
+        sends the browser back to `public_base_url` — never an address worked out
+        from the request, which a forwarded Host header could make point
+        anywhere. Both are mandatory."""
+        return self.tmdb_configured and bool(self.public_base_url.strip())
+
+    @property
+    def tmdb_credential_problem(self) -> str:
+        """The sentence the Settings page draws under a stored TMDB credential
+        this app will not send, or "". Saving cannot have produced one any more;
+        an instance that stored a v3 key earlier sees this instead of a TMDB that
+        silently does nothing."""
+        token = self.tmdb_api_key.strip()
+        return (tmdb_token_error(token) or "") if token else ""
+
+
+# ---------------------------------------------------------------------------
+# TMDB's three settings, judged on the way in
+# ---------------------------------------------------------------------------
+
+# TMDB'S READ TOKEN IS A JWT: three base64url segments joined by dots, the first
+# of which decodes to a JSON header and so always begins "eyJ". The v3 key TMDB
+# also issues is 32 hex characters and travels in the query string, which this
+# app will not do — a credential in a URL reaches access logs and cache keys.
+_JWT = re.compile(r"eyJ[\w-]+\.[\w-]+\.[\w-]+")
+_TMDB_TOKEN_SENTENCE = (
+    "That isn't a TMDB API Read Access Token. Paste the long token from "
+    "themoviedb.org → Settings → API (\"API Read Access Token\"), not the short "
+    "API key.")
+# TMDB's language parameter is an ISO 639-1 language, optionally with an ISO
+# 3166-1 country ("en", "en-US"); its region parameter is the country alone.
+_TMDB_LANGUAGE = re.compile(r"[a-z]{2}(-[A-Z]{2})?")
+_TMDB_REGION = re.compile(r"[A-Z]{2}")
+
+
+def tmdb_token_error(value: str) -> str | None:
+    """The sentence refusing `value` as TMDB's credential, or None when it is
+    a read token. An empty value is not this function's concern — an empty
+    credential field means "leave it alone" (apply_form)."""
+    return None if _JWT.fullmatch(value.strip()) else _TMDB_TOKEN_SENTENCE
+
+
+def tmdb_language_error(value: str) -> str | None:
+    if _TMDB_LANGUAGE.fullmatch(value):
+        return None
+    return "TMDB language must look like en-US (a language, optionally a country)."
+
+
+def tmdb_region_error(value: str) -> str | None:
+    if _TMDB_REGION.fullmatch(value):
+        return None
+    return "TMDB region must be a two-letter country code, like US or GB."
 
 
 def public_base_url_error(value: str) -> str | None:
@@ -539,7 +682,7 @@ def public_base_url_override() -> str:
     return candidate
 
 
-def warn_if_public_base_url_overridden() -> None:
+async def warn_if_public_base_url_overridden() -> None:
     """Say loudly, once at startup, that the environment is winning over a
     DIFFERENT stored base URL.
 
@@ -556,7 +699,7 @@ def warn_if_public_base_url_overridden() -> None:
     override = public_base_url_override()
     if not override:
         return
-    stored = load_settings(open_secrets=False, apply_env_override=False).public_base_url
+    stored = (await load_settings(open_secrets=False, apply_env_override=False)).public_base_url
     if stored == override:
         return
     logger.warning(
@@ -742,6 +885,8 @@ def apply_form(current: Settings, form: dict) -> Settings:
         if name in SECRET_FIELDS:
             typed = route_params.last_value(form.get(name))
             if isinstance(typed, str) and typed.strip():
+                if error := _typed_secret_error(name, typed):
+                    raise SettingsFormError(error)
                 update[name] = typed
             elif route_params.ticked(form.get(clear_field(name))):
                 update[name] = None
@@ -761,9 +906,24 @@ def apply_form(current: Settings, form: dict) -> Settings:
         else:
             update[name] = value
     settings = apply_update(current, update)
-    if error := public_base_url_error(settings.public_base_url):
-        raise SettingsFormError(error)
+    for error in (public_base_url_error(settings.public_base_url),
+                  tmdb_language_error(settings.tmdb_language),
+                  tmdb_region_error(settings.tmdb_region)):
+        if error:
+            raise SettingsFormError(error)
     return settings
+
+
+# A credential whose SHAPE says it is the wrong one, refused with a sentence
+# rather than stored. Judged only on a value somebody TYPED: a stored credential
+# is never drawn back, so a blank field (keep it) and a clear box (remove it)
+# have nothing to judge.
+_SECRET_SHAPES = {"tmdb_api_key": tmdb_token_error}
+
+
+def _typed_secret_error(name: str, typed: str) -> str | None:
+    judge = _SECRET_SHAPES.get(name)
+    return judge(typed) if judge else None
 
 
 def _as_bool(v) -> bool:
@@ -804,6 +964,7 @@ def global_field_names() -> frozenset[str]:
     return frozenset(
         name for name in Settings.__dataclass_fields__  # type: ignore[attr-defined]
         if name not in SECRET_FIELDS and name not in RECOVERY_FIELDS
+        and name not in VIEWER_FIELDS
     )
 
 
@@ -822,7 +983,7 @@ def _read_settings_file() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _read_db_config() -> tuple[dict, dict]:
+def _read_db_config(conn) -> tuple[dict, dict]:
     """The non-secret globals and the secrets held in the DB, as two dicts.
 
     Returns ({}, {}) if the config tables are not present yet, so a call before the
@@ -832,7 +993,6 @@ def _read_db_config() -> tuple[dict, dict]:
     """
     from . import db  # local import: db imports this module, so the cycle is broken here
     try:
-        conn = db.connection()
         row = conn.execute("SELECT value FROM app_settings WHERE name = 'app'").fetchone()
         secret_rows = conn.execute("SELECT name, value FROM app_secrets").fetchall()
     except db.DatabaseError:
@@ -862,7 +1022,7 @@ def _write_settings_file(data: dict) -> None:
     os.replace(tmp, SETTINGS_FILE)
 
 
-def load_settings(open_secrets: bool = True, *, apply_env_override: bool = True) -> Settings:
+async def load_settings(open_secrets: bool = True, *, apply_env_override: bool = True) -> Settings:
     """Assemble one Settings object from its three homes: the two recovery fields
     from settings.json, the non-secret globals from app_settings, and the secrets
     from app_secrets. Everything downstream still sees a fully-populated Settings;
@@ -879,19 +1039,51 @@ def load_settings(open_secrets: bool = True, *, apply_env_override: bool = True)
     PUBLIC_BASE_URL environment variable. Only the startup warning asks for that —
     it is the one caller that needs the value the override is displacing, so that
     the line it logs can name both. Every other caller wants what is in force.
+
+    ON A WORKER THREAD, THROUGH db.run, like every other read in the app: reading
+    settings.json, the two queries and decrypting every stored secret used to run
+    on whichever thread asked — almost always the event loop — and a writer
+    holding the database's lock stalled every request behind a settings read for
+    up to the busy timeout. UNCACHED, so a saved setting takes effect on the very
+    next request, at one thread hop per call.
     """
-    # TIMED BECAUSE THIS IS SYNCHRONOUS WORK ON WHATEVER THREAD ASKED, and almost
-    # every caller is a route handler, which means the event loop. It reads
-    # settings.json off disk, runs two SQLite queries on this thread's connection,
-    # and decrypts every stored secret — none of it awaited, all of it blocking
-    # every other request in flight for as long as it takes. That is affordable
-    # only while it stays sub-millisecond; on a slow or contended filesystem it
-    # stops being, and this span is how that shows up instead of being blamed on
-    # whichever route happened to be holding it.
+    from . import db  # local import: db imports this module, so the cycle is broken here
     with span("config.load_settings", secrets=open_secrets):
-        ensure_data_dir()
-        file_data = _read_settings_file()
-        globals_doc, stored_secrets = _read_db_config()
+        settings, reduce = await db.run(
+            lambda conn: _assemble_settings(conn, open_secrets, apply_env_override))
+    if reduce:
+        # A hand-edited settings.json holding more than the recovery fields is
+        # folded into the database and the file shrunk back — by a save of its
+        # own, so the database copy is committed before the file is shrunk and a
+        # rolled-back write can never strand a value already gone from the file.
+        #
+        # THIS SAVE MUST NEVER CLEAR A SECRET, which is why it relies on
+        # save_settings' default. `settings` here can legitimately carry blank
+        # credentials that are not blank in storage: every open_secrets=False
+        # caller (the request-shape guard, sign-in, the session lookup) loads
+        # exactly that way, and one of them runs on essentially every request.
+        # Letting this write treat "blank" as "delete" meant a hand-edited
+        # settings.json — the documented recovery path — wiped every stored
+        # credential the moment anybody used the app.
+        await save_settings(settings)
+
+    # Last, so the override is never what the file reduction above persists: it
+    # wins over the stored value in memory and leaves no trace of its own in the
+    # database, which is what makes removing the variable enough to undo it.
+    if apply_env_override and (override := public_base_url_override()):
+        settings.public_base_url = override
+
+    return settings
+
+
+def _assemble_settings(conn, open_secrets: bool,
+                       apply_env_override: bool) -> tuple[Settings, bool]:
+    """`load_settings`' reading and merging, on the worker thread holding `conn`:
+    (the settings, whether settings.json holds keys the database owns and should
+    be shrunk — never while a sealed secret could not be read, `degraded` below)."""
+    ensure_data_dir()
+    file_data = _read_settings_file()
+    globals_doc, stored_secrets = _read_db_config(conn)
     if not open_secrets:
         stored_secrets = {}
 
@@ -903,7 +1095,7 @@ def load_settings(open_secrets: bool = True, *, apply_env_override: bool = True)
             trakt_client_id=os.environ.get("TRAKT_CLIENT_ID", ""),
             trakt_access_token=os.environ.get("TRAKT_ACCESS_TOKEN", ""),
             public_base_url=public_base_url_override() if apply_env_override else "",
-        )
+        ), False
 
     # Decrypt the stored secrets here so every downstream reader (trakt.py, arr.py,
     # seer.py, the token refresh in main.py) sees plaintext through the ordinary
@@ -917,7 +1109,7 @@ def load_settings(open_secrets: bool = True, *, apply_env_override: bool = True)
     secrets: dict[str, str] = {}
     degraded = False
     for name, stored in stored_secrets.items():
-        if name in OPERATOR_SECRETS_NOT_LOADED:
+        if name in OPERATOR_SECRETS_NOT_LOADED or name in VIEWER_FIELDS:
             continue
         plain = secrets_box.open_(stored)
         if plain is None:
@@ -934,42 +1126,17 @@ def load_settings(open_secrets: bool = True, *, apply_env_override: bool = True)
     merged = {**globals_doc, **secrets, **file_data}
     # Filtered here as well as in the decrypt loop above, so a hand-edited
     # settings.json cannot put one back either.
-    for name in OPERATOR_SECRETS_NOT_LOADED:
+    for name in OPERATOR_SECRETS_NOT_LOADED | VIEWER_FIELDS:
         merged.pop(name, None)
     settings = Settings.from_dict(merged)
-
+    # Skipped entirely while `degraded`, because re-saving would seal the
+    # blanked-out secrets and destroy the values the restored key could still
+    # recover.
     file_has_db_owned_keys = any(key not in RECOVERY_FIELDS for key in file_data)
-    if file_has_db_owned_keys and not degraded:
-        from . import db
-        # Only reduce the file when we own the write path (not inside a caller's
-        # transaction), so the DB copy is committed before the file is shrunk — a
-        # rolled-back transaction must never strand a value that has already been
-        # removed from the file. If we are inside one, skip it; the next plain
-        # load reduces the file safely. Skipped entirely while `degraded`, because
-        # re-saving would seal the blanked-out secrets and destroy the values the
-        # restored key could still recover.
-        #
-        # THIS SAVE MUST NEVER CLEAR A SECRET, which is why it relies on
-        # save_settings' default. `settings` here can legitimately carry blank
-        # credentials that are not blank in storage: every open_secrets=False
-        # caller (the request-shape guard, sign-in, the session lookup) loads
-        # exactly that way, and one of them runs on essentially every request.
-        # Letting this write treat "blank" as "delete" meant a hand-edited
-        # settings.json — the documented recovery path — wiped every stored
-        # credential the moment anybody used the app.
-        if not db.connection().in_transaction:
-            save_settings(settings)
-
-    # Last, so the override is never what the file reduction above persists: it
-    # wins over the stored value in memory and leaves no trace of its own in the
-    # database, which is what makes removing the variable enough to undo it.
-    if apply_env_override and (override := public_base_url_override()):
-        settings.public_base_url = override
-
-    return settings
+    return settings, file_has_db_owned_keys and not degraded
 
 
-def save_settings(settings: Settings, *, clear_unset_secrets: bool = False) -> None:
+async def save_settings(settings: Settings, *, clear_unset_secrets: bool = False) -> None:
     """Persist to the three homes: the globals JSON to app_settings, each set
     secret to app_secrets, and the two recovery fields to settings.json. The
     Settings dataclass API is unchanged; only the destinations moved.
@@ -986,14 +1153,34 @@ def save_settings(settings: Settings, *, clear_unset_secrets: bool = False) -> N
     config.apply_update has already turned "omitted" into keep and an explicit
     null into clear. Deleting a row that is not there is a no-op, so an
     intentional clear still leaves nothing behind.
+
+    THROUGH db.transaction, ON A WORKER THREAD, like every other write: it used to
+    take the write lock on whichever thread asked — the event loop — so while
+    another writer held the lock every request waited behind it, and the save
+    then raised. `write_settings` is the database half, for a caller composing a
+    save into a transaction of its own.
     """
-    ensure_data_dir()
-    from . import db
+    from . import db  # local import: db imports this module, so the cycle is broken here
+
+    recovery = await db.transaction(
+        lambda conn: write_settings(conn, settings, clear_unset_secrets=clear_unset_secrets))
+    # File last, and only once the DB write is durable: the DB is the source of
+    # truth for globals and secrets, so a crash between the two must leave the DB
+    # correct and merely the tiny recovery file stale — never a secret stranded in
+    # a rolled-back table.
+    await anyio.to_thread.run_sync(_write_settings_file, recovery)
+
+
+def write_settings(conn, settings: Settings, *, clear_unset_secrets: bool = False) -> dict:
+    """`save_settings`' database half — the globals and the secrets — inside the
+    caller's transaction (`save_settings` says what `clear_unset_secrets` means).
+    Returns the recovery fields, for settings.json: the caller writes the file
+    once its transaction has committed, since only it knows that it will."""
     from .auth import encryption_flow  # local: encryption_flow -> config would cycle
 
     data = settings.to_dict()
     globals_doc = {name: data[name] for name in sorted(global_field_names())}
-    secrets = {name: data.get(name, "") for name in SECRET_FIELDS}
+    secrets = {name: data.get(name, "") for name in SECRET_FIELDS - VIEWER_FIELDS}
     recovery = {name: data[name] for name in sorted(RECOVERY_FIELDS)}
 
     # While the key is missing or wrong, sealing a secret would write plaintext over
@@ -1005,48 +1192,27 @@ def save_settings(settings: Settings, *, clear_unset_secrets: bool = False) -> N
     # guard for every other save path.
     write_secrets = not encryption_flow.secret_writes_blocked()
 
-    def _persist(conn) -> None:
-        conn.execute(
-            "INSERT INTO app_settings (name, value) VALUES ('app', ?) "
-            "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
-            (json.dumps(globals_doc),),
-        )
-        if not write_secrets:
-            return
-        for name, value in secrets.items():
-            if value:
-                # Sealed before it lands in the row when a key is configured, and
-                # stored verbatim when not — the plaintext value is what decides
-                # store-vs-delete, so a cleared credential still leaves no row.
-                conn.execute(
-                    "INSERT INTO app_secrets (name, value) VALUES (?, ?) "
-                    "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
-                    (name, secrets_box.seal(value)),
-                )
-            elif clear_unset_secrets:
-                # An unset secret is absence of a row, so `secrets_set` and storage
-                # agree and a cleared credential leaves nothing behind.
-                conn.execute("DELETE FROM app_secrets WHERE name = ?", (name,))
-            # Otherwise the stored row stands: see the docstring — a blank field
-            # on this object is not evidence that anybody asked for it to go.
-
-    conn = db.connection()
-    owns = not conn.in_transaction
-    if owns:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            _persist(conn)
-        except BaseException:
-            conn.execute("ROLLBACK")
-            raise
-        conn.execute("COMMIT")
-    else:
-        _persist(conn)
-
-    # File last, and only once the DB write is durable: the DB is the source of
-    # truth for globals and secrets, so a crash between the two must leave the DB
-    # correct and merely the tiny recovery file stale — never a secret stranded in
-    # a rolled-back table. When participating in a caller's transaction we cannot
-    # know it will commit, so the caller owns the file write in that case.
-    if owns:
-        _write_settings_file(recovery)
+    conn.execute(
+        "INSERT INTO app_settings (name, value) VALUES ('app', ?) "
+        "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+        (json.dumps(globals_doc),),
+    )
+    if not write_secrets:
+        return recovery
+    for name, value in secrets.items():
+        if value:
+            # Sealed before it lands in the row when a key is configured, and
+            # stored verbatim when not — the plaintext value is what decides
+            # store-vs-delete, so a cleared credential still leaves no row.
+            conn.execute(
+                "INSERT INTO app_secrets (name, value) VALUES (?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+                (name, secrets_box.seal(value)),
+            )
+        elif clear_unset_secrets:
+            # An unset secret is absence of a row, so `secrets_set` and storage
+            # agree and a cleared credential leaves nothing behind.
+            conn.execute("DELETE FROM app_secrets WHERE name = ?", (name,))
+        # Otherwise the stored row stands: see the docstring — a blank field
+        # on this object is not evidence that anybody asked for it to go.
+    return recovery

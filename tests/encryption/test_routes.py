@@ -22,7 +22,8 @@ from fastapi.testclient import TestClient
 
 from app import auth, config, db, secrets_box
 from app.auth import encryption_flow
-from app.config import Settings, save_settings
+from app.config import Settings
+from tests.support import save_settings, settling
 from app.auth.encryption_routes import RECOVERY_PATH, RESET_CONFIRM_PHRASE
 from app.main import app
 from tests.support import migrated_db
@@ -45,7 +46,7 @@ class EncryptionRouteTestCase(unittest.TestCase):
         migrated_db("encroutes")
         _set_key(None)
         save_settings(Settings())
-        self.client = TestClient(app, base_url="https://testserver",
+        self.client = TestClient(settling(app), base_url="https://testserver",
                                  headers={"Origin": "https://testserver"})
 
     def tearDown(self):

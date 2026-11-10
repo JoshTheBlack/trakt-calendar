@@ -752,9 +752,23 @@ body.hide-not-watching .card.not-watching:not(#jump-target) { display: none; }
    its cards at all.
    A DAY HOLDING THE JUMP'S CARD IS NOT EMPTY, however marked the rest of it is:
    a card made visible inside a collapsed day is still nowhere (measured: a day
-   whose every title was marked stayed display none around the anchor). */
-body.hide-not-watching .day-block:not(.is-skeleton):not(:has(.card:is(:not(.not-watching), #jump-target))),
+   whose every title was marked stayed display none around the anchor).
+   NOR IS A BIG DAY WITH ITS REST STILL TO SHOW: the cards behind its control
+   (`.day-more`, app/calendar/day_pages.py) are not on the page to be asked. */
+body.hide-not-watching .day-block:not(.is-skeleton):not(:has(.card:is(:not(.not-watching), #jump-target))):not(:has(.day-more)),
 body.hide-not-watching .day-block.is-skeleton[data-visible="0"] { display: none; }
+/* A BIG DAY'S "SHOW THE OTHER N" (_day_more.html), and what answers it when
+   there is nothing to show: a row of its own at the end of the day's cards,
+   across every column of the grid and the whole width of the poster wall. */
+.day-more, .day-more-note { grid-column: 1 / -1; flex: 1 0 100%; justify-self: center; }
+.day-more {
+    padding: 10px 22px; border-radius: 999px; border: 1px solid var(--card-border);
+    background: var(--bg-panel); color: var(--text); font: inherit; font-weight: 600;
+    font-size: 0.85rem; cursor: pointer;
+}
+.day-more:hover, .day-more:focus-visible { border-color: var(--gold-soft); outline: none; }
+.day-more.htmx-request { opacity: 0.6; cursor: progress; }
+.day-more-note { margin: 0; text-align: center; color: var(--text-dim); font-size: 0.85rem; }
 
 .poster-wrap { position: relative; width: 100%; aspect-ratio: 2/3; background: linear-gradient(135deg, #1c2130, #10131b); overflow: hidden; }
 .poster-wrap img { width: 100%; height: 100%; object-fit: cover; transition: filter .22s ease; }
@@ -773,10 +787,22 @@ body.hide-not-watching .day-block.is-skeleton[data-visible="0"] { display: none;
 .runtime-badge { top: 9px; left: 9px; color: var(--text-dim); }
 .ep-badge { bottom: 9px; left: 9px; border-color: rgba(79,163,224,0.5); color: var(--accent-blue); }
 .network-badge { bottom: 9px; right: 9px; max-width: 42%; overflow: hidden; text-overflow: ellipsis; border-color: rgba(79,163,224,0.5); color: var(--accent-blue); }
-/* When a TMDB logo loads, drop the badge chrome and show just the tile; on load
-   error (.no-logo) the img is hidden and the 📡 text fallback shows instead. */
+/* THE NETWORK LOGO IS TMDB'S OWN PICTURE THROUGH THE IMAGE PROXY, FRAMED HERE
+   (media/logos.py). Where a network has a logo the badge drops its chrome and
+   shows just the framed logo; where it has none (.no-logo) the img is absent and
+   the 📡 text fallback shows instead. The frame is what the Discord tile's plate
+   was before badges stopped being composited: a light plate for the usual dark or
+   coloured logo, a dark one for a LIGHT logo (.is-light, set from the stored
+   luminance), because a white logo on a white plate is no logo at all. The inset is
+   the tile's, scaled (14/128 of the side) so the logo breathes inside its plate. */
+.network-logo, .distrakt-logo {
+    --logo-plate: #fff; --logo-inset: 3px;
+    box-sizing: border-box; padding: var(--logo-inset); background: var(--logo-plate);
+    border-radius: 5px; object-fit: contain;
+}
+.network-logo.is-light, .distrakt-logo.is-light { --logo-plate: #2b2d31; }
 .network-badge:not(.no-logo) { padding: 0; background: none; border: none; backdrop-filter: none; }
-.network-badge .network-logo { display: block; height: 26px; width: 26px; border-radius: 6px; object-fit: contain; }
+.network-badge .network-logo { display: block; height: 26px; width: 26px; }
 .network-badge .network-fallback { display: none; }
 .network-badge.no-logo .network-logo { display: none; }
 .network-badge.no-logo .network-fallback { display: inline; }
@@ -1100,6 +1126,10 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 .ffield-head { display: flex; align-items: center; gap: 8px; }
 .ffield-label { font-size: 0.74rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-dim); font-weight: 700; }
 .ffield-count { font-size: 0.72rem; color: var(--gold-soft); }
+/* A dimension drawn inside another's field (show types inside genres): set off
+   by a quieter label of its own, on the field's own rhythm. */
+.fsubfield { display: flex; flex-direction: column; gap: 8px; padding-top: 4px; }
+.fsubfield-label { font-size: 0.68rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-faint); font-weight: 700; }
 
 /* WHERE THE PROSE WENT. Every paragraph this panel used to shout is behind one
    of these, so the reasoning is a press away and never in the way. A details
@@ -1182,9 +1212,19 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
     transition: border-color .12s ease, color .12s ease, background .12s ease;
 }
 .fsource::before { content: "\25CB"; margin-right: 7px; opacity: 0.55; }
-.fsources input:checked + .fsource { border-color: var(--gold); color: var(--gold-soft); background: rgba(232,181,69,0.12); }
-.fsources input:checked + .fsource::before { content: "\2713"; opacity: 1; }
-.fsources input:focus-visible + .fsource { outline: 2px solid var(--gold); outline-offset: 2px; }
+/* THE SAME BOXES FOR A FILTER'S OWN ON-OR-OFF RULES (_filter_chip.html's `tick`):
+   the missing-data rules and the two switches. Without the services' last-one-
+   stays-on rule below — every rule off is an ordinary answer here. A box the
+   operator's floor already applies is fixed on, and reads as fixed. */
+.fticks { display: flex; gap: 6px; flex-wrap: wrap; }
+.fticks input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.fticks input:disabled + .fsource { cursor: default; opacity: 0.7; }
+.fsources input:checked + .fsource,
+.fticks input:checked + .fsource { border-color: var(--gold); color: var(--gold-soft); background: rgba(232,181,69,0.12); }
+.fsources input:checked + .fsource::before,
+.fticks input:checked + .fsource::before { content: "\2713"; opacity: 1; }
+.fsources input:focus-visible + .fsource,
+.fticks input:focus-visible + .fsource { outline: 2px solid var(--gold); outline-offset: 2px; }
 /* AN EMPTY CALENDAR WITH NO EXPLANATION READS AS A BROKEN APP, so the last
    service showing does not offer to be switched off. `:not(:has(input:checked ~
    input:checked))` is "no second box in this group is ticked", which makes the
@@ -1275,11 +1315,17 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
    the poster's bottom edge. The middle of that edge because the four corners are
    spoken for — runtime and episode down the left, rating and the watching eye
    down the right, the network's logo bottom-right. */
-.poster-wrap .flip-value > .source-swap {
+.poster-wrap .flip-value > .source-swap,
+.poster-wrap > .card-expand {
     position: absolute; bottom: 9px; left: 50%; transform: translateX(-50%); z-index: 6;
     padding: 3px; background: rgba(10,12,16,0.82); backdrop-filter: blur(4px);
 }
-.poster-wrap .flip-value > .source-swap .source-logo { height: 15px; }
+.poster-wrap .flip-value > .source-swap .source-logo,
+.poster-wrap > .card-expand .source-logo { height: 15px; }
+/* THE CONTROL THAT ASKS FOR THE CARD DRAWN WHOLE (_card.html) is a <button>
+   dressed as the flip's mark, so the browser's own button face goes. */
+.card-expand { font: inherit; color: inherit; }
+.card-expand:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 .flip:has(.flip-pick:focus-visible) .flip-pick:checked + .flip-value > .source-swap {
     outline: 2px solid var(--gold); outline-offset: 2px;
 }
@@ -1304,6 +1350,10 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 .chip.dual { display: inline-flex; align-items: center; gap: 8px; border-color: rgba(232,181,69,0.35); }
 .dual-value { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .dual-value .source-logo { height: 11px; opacity: 0.85; }
+/* WHEN THE SERVICES DISAGREE ABOUT THE DAY the chip names two days and times,
+   which is wider than a narrow card: each value keeps itself on one line and the
+   chip wraps between them rather than running off the card's edge. */
+.chip.dual.day { flex-wrap: wrap; row-gap: 2px; }
 
 .premiere-info { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--card-border); font-size: 0.82rem; font-weight: 600; display: flex; justify-content: space-between; gap: 8px; }
 .premiere-info .time { color: var(--text-faint); font-weight: 400; }
@@ -1324,6 +1374,12 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
    fill behind white lettering leaves the name of the place you are about to go
    the least readable thing on the card. */
 .trakt-btn:hover { background: rgba(232,181,69,0.14); border-color: var(--gold); box-shadow: 0 0 14px rgba(232,181,69,0.35); transform: translateY(-2px); }
+/* A SERVICE THAT KNOWS THE TITLE BUT DOES NOT LIST THIS AIRING keeps its button,
+   greyed and dimmed: its page for the title is real, and full colour stays with
+   the services the card was drawn from. Hovering gives the colour back, so the
+   button still says plainly where a click goes. */
+.trakt-btn.unlisted img { filter: grayscale(1); opacity: 0.45; }
+.trakt-btn.unlisted:hover img { filter: none; opacity: 1; }
 /* The service NAME, on the button that goes there. Height rather than width, so
    two wordmarks of different proportions sit on one optical line. */
 .source-wordmark { height: 15px; width: auto; max-width: 100%; object-fit: contain; display: block; }
@@ -1570,6 +1626,10 @@ button.search-row { width: 100%; background: none; font: inherit; text-align: le
 .search-row.is-unkeyable { cursor: default; opacity: 0.62; }
 .search-row.is-unkeyable:hover { background: none; border-color: transparent; }
 .search-note { color: var(--gold-soft); font-size: 0.78rem; }
+/* Under a services' answer (_title_search.html's `widen`): who else to ask, and
+   "more". A wrapping row of small buttons, so a phone takes them two lines. */
+.search-widen { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 2px; }
+.search-unconfigured { display: block; margin: 8px 0 2px; }
 /* Which service(s) returned a row, before the rest of its line. */
 .search-marks { display: inline-flex; align-items: center; gap: 3px; margin-right: 6px;
                 vertical-align: middle; }
@@ -1784,13 +1844,6 @@ button.search-row { width: 100%; background: none; font: inherit; text-align: le
 .season-info .si { display: inline-flex; align-items: center; gap: 4px; }
 .season-info .si b { color: var(--text-dim); font-weight: 600; }
 .season-info .si.next b { color: var(--green); }
-/* The slot a card's season line fetches itself into (_card.html). OUT OF THE CARD
-   BODY'S FLOW, because that body is a flex column with a gap and an in-flow empty
-   slot would open one under every card until its answer landed — or for good,
-   where the answer is nothing. Zero height and still observed: an
-   IntersectionObserver reports an element with no area once it lies inside the
-   root, which is what `intersect` waits for. */
-.season-line-slot { position: absolute; width: 1px; height: 0; pointer-events: none; }
 
 /* ---- Details modal content ---- */
 .details-loading { color: var(--text-faint); font-size: 0.9rem; padding: 8px 0; }
@@ -1925,6 +1978,45 @@ button.search-row { width: 100%; background: none; font: inherit; text-align: le
 .ep-row .ep-title { flex: 1; font-size: 0.85rem; }
 .ep-row .ep-date { color: var(--text-faint); font-size: 0.76rem; white-space: nowrap; }
 .ep-row .ep-rating { color: var(--gold-soft); font-size: 0.76rem; }
+/* AN EPISODE'S PLACE IN ITS SEASON, where the describing service names one that
+   matters (base.EPISODE_MARKS): beside the episode's name, small, in the gold the
+   panel's other facts are marked in. Not `.ep-badge`, which is a card's own
+   episode label, positioned over its poster. */
+.ep-place { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+            border: 1px solid var(--gold-soft); color: var(--gold-soft); font-size: 0.68rem;
+            font-weight: 600; letter-spacing: 0.3px; vertical-align: 1px; white-space: nowrap; }
+/* What airs next, under the show's description. */
+.details-next { margin-top: 10px; color: var(--text-dim); font-size: 0.84rem; }
+.details-next .ep-num { color: var(--accent-blue); font-weight: 700; }
+/* A season's own videos in its pane: one row of choices, each aimed at the
+   panel's one player. */
+.season-videos { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 0; padding: 0; }
+/* THE TITLE'S LOGO IN THE HEADING, at the heading's own scale: a stacked or
+   square logo no taller than about a line and a half of it, a wide one no wider
+   than a short title would run — at 56px by 360px most logos were the largest
+   thing in the panel.
+   A LIGHT HALO, because a logo is lettering made for whatever background its
+   studio chose and nothing says which: MEASURED through the proxy, 60 of 75
+   shows' English logos were light, 11 mid-toned and 4 dark — Last Week Tonight's
+   black lettering all but vanished on this panel. The halo outlines dark
+   lettering and is lost in the edge of light lettering, so no picture has to be
+   fetched and measured to choose a frame (the network badges' `.is-light` is
+   measured, and costs a download per network). It is an OUTLINE more than a
+   glow — a half-pixel line at full white, then a short soft edge — because the
+   thin strokes of a dark logo need a line to be read by, and a wide glow bright
+   enough to give one bloomed around every coloured logo (compared side by side
+   in Chromium and Firefox over Last Week Tonight, Stranger Things and Dark
+   Winds). */
+/* THE HEADING IS AS TALL AS THE LOGO MAY BE, text or not, because the head
+   centres what it holds: the logo arrives after the text heading the opening
+   click wrote, and a heading growing under it moved the add-to-library buttons
+   beside it as it landed. */
+#detailsTitle { min-height: 36px; display: flex; align-items: center; }
+.details-logo { display: block; max-height: 36px; max-width: min(100%, 220px); width: auto;
+                height: auto;
+                filter: drop-shadow(0 0 0.5px #fff)
+                        drop-shadow(0 0 1px rgba(255,255,255,0.9))
+                        drop-shadow(0 0 4px rgba(255,255,255,0.4)); }
 .d-empty { color: var(--text-faint); font-size: 0.84rem; }
 @media (max-width: 520px) { .details-hero img { width: 90px; } }
 
@@ -2461,6 +2553,9 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
     color: var(--muted, #8b93a7); border: 1px solid currentColor; opacity: 0.75;
     line-height: 1.6; cursor: help;
 }
+/* A title no tracking service lists: the same chip, in the warning colour,
+   because unlike "dropped" it means the row's counts can never move. */
+.distrakt-untracked { color: var(--warn, #d8a33a); opacity: 1; }
 /* An episode watched that nothing here knows about. Thin, and set apart from the
    bucket rows below it: it is a question rather than part of the month, and it
    sits above every section because a question under six headings is one nobody
@@ -2477,7 +2572,7 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
     flex: 0 0 auto; width: 26px; height: 26px; display: flex; align-items: center;
     justify-content: center; font-size: 0.72rem; color: var(--text-faint); overflow: hidden;
 }
-.distrakt-badge .distrakt-logo { max-width: 26px; max-height: 26px; border-radius: 5px; object-fit: contain; }
+.distrakt-badge .distrakt-logo { width: 26px; height: 26px; }
 /* The title's poster, beside the network badge rather than instead of it: the
    badge is the network (a film's is 🎬), the picture is the title. Small enough on a wide list that
    a row grows by a few pixels, not a thumbnail's height; a phone draws it larger
@@ -2649,12 +2744,12 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
    long name, and a phone's row does not draw it at all. */
 .distrakt-emoji-net { flex: 1 1 auto; min-width: 0; padding: 0 6px 0 4px; font-family: inherit; font-size: 0.74rem; color: var(--text-dim); }
 .distrakt-emoji-tools > .btn-ghost { flex: 0 0 auto; }
-/* The default emoji's own small panel, a popover under its pill in the header
-   (_distrakt_emoji_default.html). */
-.emoji-default-panel { width: 240px; padding: 10px; gap: 6px; white-space: normal; }
-.emoji-default-panel label { font-size: 0.78rem; font-weight: 600; color: var(--text-dim); }
-.emoji-default-panel input { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; }
-.emoji-default-panel .distrakt-note { margin: 0; font-size: 0.74rem; }
+/* The tracker settings dialog (_distrakt_settings.html): its controls are the
+   account page's rows, stacked, and the default emoji's field is monospace
+   because what it holds is a Discord code (":tv:") rather than prose. */
+.distrakt-settings-body { display: flex; flex-direction: column; gap: 12px; }
+.distrakt-settings-body input#emojiDefault { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; }
+.distrakt-settings-body .auth-sub { margin-top: 0; }
 /* The list switches' panel, a popover under its pill in the header
    (_distrakt_watchlists.html). Its width never exceeds a phone's, less the
    page's gutters, so the panel cannot push the page sideways. */
@@ -2745,7 +2840,7 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     /* On the facts line, so a line of text's height: the badge is sized down
        to it rather than making the second line taller than the first. */
     .distrakt-badge { width: 18px; height: 18px; }
-    .distrakt-badge .distrakt-logo { max-width: 18px; max-height: 18px; }
+    .distrakt-badge .distrakt-logo { width: 18px; height: 18px; --logo-inset: 2px; }
     /* ON A PHONE THE CODE TAKES THE NETWORK NAME'S PLACE. There is no
        width for both (a 390px row overflowed by 31px with the two side by side);
        the logo beside it already says which network it is, and editing the code
@@ -2813,7 +2908,6 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 /* Narrower than the calendar's page-wide banner: this one sits inside a modal. */
 .distrakt-search-warn { margin: 0 0 8px 0; padding: 8px 12px; font-size: 0.82rem; }
 
-.distrakt-season-pick { margin-top: 14px; }
 .distrakt-season-list { display: flex; flex-wrap: wrap; gap: 8px; }
 
 /* The backfill plan's month rows. Two elements draw one kind of line: a month
@@ -2942,24 +3036,49 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
    is written. The stylesheet, not a filter on the result's trigger: htmx builds
    `click[...]` with the Function constructor, which the app's
    Content-Security-Policy refuses. The drag library already declines to pick a
-   held one up. Only the ROW: a held show's seasons can still be opened and added. */
+   held one up. A held SHOW's row is dimmed but still opens — its seasons can be
+   added, and its checklist greys the whole show. */
 .ranker-hit.is-held > .ranker-result { opacity: 0.45; pointer-events: none; }
-.ranker-hit-seasons { margin: 0 8px 4px 52px; font-size: 0.76rem; }
-.ranker-hit-seasons > summary {
-    cursor: pointer; color: var(--text-faint); width: fit-content; padding: 1px 4px;
-    border-radius: 6px;
-}
-.ranker-hit-seasons > summary:hover { color: var(--text); background: rgba(255,255,255,0.06); }
-.ranker-hit-form { display: flex; flex-direction: column; gap: 2px; padding: 4px 0; }
-.ranker-hit-choice {
+.ranker-hit.is-held > .search-hit > .ranker-result { opacity: 0.45; }
+/* THE ONE SEASON PICKER (_season_checklist.html) — the tracker's add, the board's
+   add and the calendar's jump draw it alike. */
+.season-checklist { display: flex; flex-direction: column; gap: 2px; padding: 4px 0;
+                    font-size: 0.8rem; }
+.season-checklist-heading { margin: 0 0 4px; font-weight: 600; }
+.season-choice {
     display: flex; align-items: baseline; gap: 8px; padding: 2px 4px; border-radius: 6px;
-    cursor: pointer;
+    cursor: pointer; color: inherit; text-decoration: none;
 }
-.ranker-hit-choice:hover { background: rgba(255,255,255,0.05); }
-.ranker-hit-choice.is-suggested .ranker-season-label { color: var(--gold-soft); font-weight: 600; }
-.ranker-hit-choice.is-held { cursor: default; opacity: 0.45; }
-.ranker-hit-choice .ranker-season-note { margin-left: auto; }
-.ranker-hit-form > button { align-self: flex-start; margin-top: 4px; }
+.season-choice:hover { background: rgba(255,255,255,0.05); }
+.season-choice.is-suggested .season-label { color: var(--gold-soft); font-weight: 600; }
+.season-choice.is-held { cursor: default; opacity: 0.45; }
+/* A held season the surface can send the viewer to stays readable: it is a way
+   there, not a refusal. */
+.season-choice.is-link { opacity: 1; cursor: pointer; text-decoration: underline; }
+.season-note { margin-left: auto; font-size: 0.7rem; color: var(--text-faint); white-space: nowrap; }
+.season-checklist > button { align-self: flex-start; margin-top: 4px; }
+/* A SEASON THAT IS ONE PRESS (the calendar's picker) is a submit button drawn as
+   the same row as the link beside it, so a season on the calendar and one not
+   on it yet read as one list. */
+.season-checklist > button.season-choice {
+    align-self: stretch; margin-top: 0; background: none; border: 0; font: inherit;
+    text-align: left;
+}
+/* A calendar or tracker search result is a <details> whose <summary> is the row: the
+   season picker unfolds UNDER the row pressed, sliding open, and folds away when
+   the row is pressed again (_search_results.html). The summary's own marker goes;
+   the row's "Seasons →" says what pressing it does. */
+.search-hit > summary { list-style: none; }
+.search-hit > summary::-webkit-details-marker { display: none; }
+.search-hit > .search-pick { margin: 0 8px 6px 54px; }
+.search-hit[open] > .search-pick > * { animation: search-pick-open 160ms ease-out; }
+@keyframes search-pick-open {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .search-hit[open] > .search-pick > * { animation: none; }
+}
 
 /* ---- what a board could put back ----
    HIDDEN WHILE IT HOLDS NOTHING, by asking whether it holds an entry. The
@@ -3276,7 +3395,7 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 /* ---- the seed's own confirmation, and the backup's line ----
    The seed control turns into its question and back, one partial per state, the
    way the calendar's "Add all" does. */
-.ranker-seed-confirm { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ranker-seed, .ranker-seed-confirm { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ranker-restore-status { font-size: 0.78rem; color: var(--text-dim); margin-top: 6px; }
 .ranker-restore-status:empty { display: none; }
 

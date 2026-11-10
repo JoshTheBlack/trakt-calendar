@@ -1,7 +1,7 @@
 {% extends '_base.html' %}
 {% import '_distrakt_modals.html' as modals %}
 {% import '_distrakt_import.html' as imports %}
-{% import '_distrakt_emoji_default.html' as default_emoji %}
+{% import '_distrakt_settings.html' as tracker_settings with context %}
 {% import '_distrakt_watchlists.html' as lists %}
 {% set site_suffix = false %}
 {% set progress_bar = true %}
@@ -37,17 +37,8 @@
         {{ imports.button(month_query) }}
         <button type="button" class="pill-btn" command="show-modal" commandfor="addShowModal">➕ Add show</button>
         <button type="button" class="pill-btn" command="show-modal" commandfor="addMovieModal">🎬 Add film</button>
-        {#- The default emoji — see _distrakt_emoji_default.html. A network's own
-            code is edited on its rows. -#}
-        <div class="nav-menu emoji-default-menu">
-            {{ default_emoji.pill(default_network_emoji) }}
-            <div class="nav-menu-items emoji-default-panel" id="emojiDefaultMenu" popover>
-                <label for="emojiDefault">Default emoji</label>
-                {{ default_emoji.field(default_network_emoji, month_query) }}
-                <p class="distrakt-note">What your Discord posts use for a network with
-                    no code of its own. A row's code is edited on the row itself.</p>
-            </div>
-        </div>
+        {#- The tracker's own settings — see _distrakt_settings.html. -#}
+        {{ tracker_settings.button() }}
         {#- The list switches — see _distrakt_watchlists.html. -#}
         <div class="nav-menu watchlist-menu">
             {{ lists.pill(watchlists) }}
@@ -270,4 +261,8 @@
 <div id="toastHost"></div>
 
 {{ modals.all(catalogue_sources, as_finished, film_day, film_max, month_query) }}
+
+{# The settings dialog, apart from the add flow's overlays: those are redrawn
+   closed by every answer, and this one is meant to stay open between presses. #}
+{{ tracker_settings.dialog(settings_panel, default_network_emoji, month_query) }}
 {% endblock %}

@@ -15,11 +15,13 @@ GET/second, so a viewer loading a month would wait on it. Instead:
           One batched query, no network call. A title nobody has looked up is
           stored `enriched=False`, which is what lets app/calendar/filter.py
           exempt it rather than judge it on values nobody has fetched yet.
-  DRAIN   the heartbeat calls `drain()`, which asks app/calendar/entries.py for
-          every Simkl id the stored calendar names, subtracts the ones
-          `simkl_titles` already answers for (or a failure still inside its
-          backoff), fetches a bounded batch of what is left, and writes the
-          answer to BOTH `simkl_titles` and the calendar row it belongs to. A
+  DRAIN   the heartbeat calls `drain()`, which asks the title store
+          (app/metadata/rows.py) for every Simkl row still carrying no answer,
+          hands over any answer `simkl_titles` already holds for one, fetches a
+          bounded batch of what is left (less a failure still inside its
+          backoff), and writes the answer to BOTH `simkl_titles` and the title
+          row it belongs to. A row that HAS its answer is kept current by being
+          viewed (app/metadata/refresh.py), not by this. A
           FILL also asks for a drain the moment it stores new records, through
           `run_drain`/`schedule_drain` below.
   READ    does nothing. The fields are on the row.
@@ -30,7 +32,7 @@ one compressed blob: a refill replaced it wholesale with a fresh, unenriched
 payload, so anything written into it was erased and the only way a viewer saw
 enrichment was to reapply it on every single read. Rows removed what that rested
 on — a refill rewrites the airings but is forbidden to demote an enriched title
-(entries._UPSERT_TITLE), and the drain updates the row directly — so a stored
+(app/metadata/rows.py's listing upsert), and the drain updates the row directly — so a stored
 value is never older than the last drain pass rather than as old as the window,
 and `enriched` records what the row CONTAINS instead of what a reader would have
 to look up to find out.
@@ -58,32 +60,37 @@ NEITHER THIS MODULE NOR THE READ PATH MAKES A NETWORK CALL FOR ENRICHMENT.
 a public share page — which reaches the calendar with allow_fetch=False — store
 and serve without ever spending the instance's Simkl budget.
 
-"ALREADY ANSWERED" ALSO MEANS "UNDER THE CURRENT EXTRACTION". A row a narrower
-extraction wrote — every simkl_titles row that existed before ids/type/
-anime_type/trailers/etc. were added to what app/providers/simkl/titles.py's
-`_extract` keeps — carries no `extract_version` key at all, and `drain` reads
-that the same way it reads a version number that does not match: owed, not done,
-exactly like a title never attempted. Without this an already-answered row from
-the old shape would sit there for its full 30-day retention before the wider
-extraction ever touched it. Backoff still governs FAILURES (a stored empty
-payload); a stale-shaped SUCCESS is re-fetched on the next drain tick regardless
-of backoff, because nothing about it failed. `apply_stored_enrichment` is NOT
-gated on the version — it applies whatever fields an old row already carries, so
-a title enriched under the old shape stays enriched (just missing the newer
-fields) while it waits its turn.
+"ALREADY ANSWERED" ALSO MEANS "UNDER THE CURRENT EXTRACTION", for the rows this
+drain owes. A row a narrower extraction wrote — every simkl_titles row that
+existed before ids/type/anime_type/trailers/etc. were added to what
+app/providers/simkl/titles.py's `_extract` keeps — carries no `extract_version`
+key at all, and `drain` reads that the same way it reads a version number that
+does not match: owed, not done, exactly like a title never attempted. Backoff
+still governs FAILURES (a stored empty payload); a stale-shaped SUCCESS is
+re-fetched on the next drain tick regardless of backoff, because nothing about
+it failed. A title row ALREADY ANSWERED is not this drain's: the title store
+re-reads it whole when somebody views it past its clock, which reads it under
+whatever extraction is current. `apply_stored_enrichment` is NOT gated on the
+version — it applies whatever fields an old row already carries, so a title
+enriched under the old shape stays enriched (just missing the newer fields)
+while it waits its turn.
 """
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import zlib
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import cache as calendar_cache
 from . import entries
-from .. import db
+from .. import after_response, db
 from .. import perftrace
+from ..metadata import refresh as metadata_refresh
+from ..metadata import rows as title_rows
+from ..metadata import tables
 from ..providers.base import Media, Record, Source, SourceUnavailable
 from ..providers.simkl import titles as simkl_titles
 from ..providers.simkl import transport as simkl_transport
@@ -216,14 +223,31 @@ async def _read_rows(keys) -> dict[tuple[int, str], dict]:
     """The stored `simkl_titles` rows for `keys` (an iterable of (simkl_id,
     media)), keyed the same way. ONE QUERY PER MEDIA KIND present in `keys` —
     at most two, since `media` is the app's own closed 'show'/'movie'
-    vocabulary — never one query per id."""
+    vocabulary — never one query per id.
+
+    READ AND DECOMPRESSED TOGETHER ON THE WORKER THREAD, never back on the event
+    loop. A drain pass reads every Simkl title the stored calendar names — 25,123
+    on the development copy, 13 MB compressed — and unpacking that many payloads
+    is ~430 ms of CPU. Done after the query returned, it blocked the loop for
+    250–350 ms on every heartbeat, and every one of those stalls, sampled from a
+    second thread, was in `_decompress` here.
+    """
+    keys = list(keys)
+    if not keys:
+        return {}
+    return await db.run(lambda conn: _stored_rows(conn, keys))
+
+
+def _stored_rows(conn: db.Connection, keys) -> dict[tuple[int, str], dict]:
+    """`_read_rows`, on the connection given — for a caller already on a
+    worker thread."""
     by_media: dict[str, list[int]] = {}
     for simkl_id, media in keys:
         by_media.setdefault(media, []).append(simkl_id)
     out: dict[tuple[int, str], dict] = {}
     for media, ids in by_media.items():
         placeholders = ",".join("?" for _ in ids)
-        rows = await db.fetch_all(
+        rows = conn.execute(
             f"SELECT simkl_id, payload, fetched_at, failed_at, fail_count "
             f"FROM simkl_titles WHERE media = ? AND simkl_id IN ({placeholders})",
             (media, *ids),
@@ -238,40 +262,76 @@ async def _read_rows(keys) -> dict[tuple[int, str], dict]:
     return out
 
 
-async def _upsert_success(simkl_id: int, media: str, fields: dict, now: int) -> None:
-    """Record what a lookup found, in BOTH places, and they are not duplicates.
+# HOW MANY ANSWERS ONE STATEMENT CARRIES. An answer's payload is compressed
+# bytes, which a JSON array cannot hold — and SQLite's `unhex()`, which would let
+# one, arrived in 3.41, after the 3.40 an older python:3.12-slim image ships — so
+# answers travel as one multi-row VALUES list with the bytes bound as
+# parameters. Four parameters an answer, and SQLite allows 32,766 since 3.32
+# (999 before), so 240 sits under either: a full drain batch is two statements.
+_ANSWERS_PER_STATEMENT = 240
+
+_STORE_ANSWERS = (
+    "INSERT INTO simkl_titles (simkl_id, media, payload, fetched_at, failed_at, fail_count) "
+    "VALUES {rows} "
+    "ON CONFLICT(simkl_id, media) DO UPDATE SET "
+    "payload = excluded.payload, fetched_at = excluded.fetched_at, "
+    "failed_at = NULL, fail_count = 0")
+
+# `WHERE true` because an upsert over a SELECT is otherwise ambiguous to SQLite's
+# parser (the ON is read as a join constraint).
+_STORE_FAILURES = (
+    "INSERT INTO simkl_titles (simkl_id, media, payload, fetched_at, failed_at, fail_count) "
+    "SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), :empty, :now, :now, 1 "
+    "FROM json_each(:rows) WHERE true "
+    "ON CONFLICT(simkl_id, media) DO UPDATE SET "
+    "failed_at = excluded.failed_at, fail_count = simkl_titles.fail_count + 1 "
+    "RETURNING simkl_id, media, fail_count")
+
+
+async def _upsert_successes(answers: list[tuple[int, str, dict]], now: int) -> None:
+    """Record what lookups found, in BOTH places, and they are not duplicates.
 
     `simkl_titles` keeps the RAW ANSWER — the whole payload, under the extraction
     version that produced it, with the failure backoff beside it. It is what
     makes a re-fetch decidable: a row written by a narrower extraction is owed
     again, and only the payload can say which extraction wrote it.
 
-    `calendar_titles` takes the PROJECTION of that answer onto the stored title,
-    which is what the read path serves. Writing it here is what retired the
-    read-time overlay: the fields are on the row a viewer's month already reads,
-    so nothing has to be joined back in per request, and `enriched` becomes a
-    statement about what the row CONTAINS rather than about what a reader would
-    have to look up to find out.
+    The title store's row (app/metadata/rows.py) takes the PROJECTION of that
+    answer onto the stored title, which is what every reader serves. Writing it
+    here is what retired the read-time overlay: the fields are on the row a
+    viewer's month already reads, so nothing has to be joined back in per request,
+    and `enriched` becomes a statement about what the row CONTAINS rather than
+    about what a reader would have to look up to find out. The ids the answer
+    learned reach the title's identity in the same write, so a title that learns
+    enough to be re-keyed is re-keyed then.
 
     The second write is a projection of the first and can be rebuilt from it, so
     this is one fact stored once and materialized once, not two truths to keep
     in step.
+
+    ONE WRITE FOR THE WHOLE BATCH, however many answered — `_record` says why.
     """
-    blob = _compress(fields)
-    await db.execute(
-        "INSERT INTO simkl_titles (simkl_id, media, payload, fetched_at, failed_at, fail_count) "
-        "VALUES (?, ?, ?, ?, NULL, 0) "
-        "ON CONFLICT(simkl_id, media) DO UPDATE SET "
-        "payload = excluded.payload, fetched_at = excluded.fetched_at, "
-        "failed_at = NULL, fail_count = 0",
-        (simkl_id, media, blob, now),
-    )
-    await entries.apply_enrichment(str(Source.SIMKL), simkl_id, media, fields, now)
+    if not answers:
+        return
+    params = [[simkl_id, media, _compress(fields), now] for simkl_id, media, fields in answers]
+
+    def _work(conn) -> None:
+        for chunk in itertools.batched(params, _ANSWERS_PER_STATEMENT):
+            conn.execute(_STORE_ANSWERS.format(rows=", ".join(["(?, ?, ?, ?, NULL, 0)"] * len(chunk))),
+                         [value for row in chunk for value in row])
+
+    await db.transaction(_work)
+    await title_rows.apply_enrichment_many(str(Source.SIMKL), answers, now)
 
 
-async def _upsert_failure(simkl_id: int, media: str, now: int) -> int:
-    """Record an attempt that found nothing usable, and answer how many times
-    this title has now failed in a row.
+async def _upsert_success(simkl_id: int, media: str, fields: dict, now: int) -> None:
+    """One answer recorded: `_upsert_successes` for a batch of one."""
+    await _upsert_successes([(simkl_id, media, fields)], now)
+
+
+async def _upsert_failures(failed: list[tuple[int, str]], now: int) -> dict[tuple[int, str], int]:
+    """Record attempts that found nothing usable, and answer how many times
+    each title has now failed in a row.
 
     The payload written on the FIRST attempt is the empty answer (there is
     nothing else to store yet); a later failure of a title that once succeeded
@@ -284,16 +344,18 @@ async def _upsert_failure(simkl_id: int, media: str, now: int) -> int:
     out of the table on the clock it was first written on, and so be asked about
     again from scratch rather than never again.
     """
-    blob = _compress({})
-    row = await db.fetch_one(
-        "INSERT INTO simkl_titles (simkl_id, media, payload, fetched_at, failed_at, fail_count) "
-        "VALUES (?, ?, ?, ?, ?, 1) "
-        "ON CONFLICT(simkl_id, media) DO UPDATE SET "
-        "failed_at = excluded.failed_at, fail_count = simkl_titles.fail_count + 1 "
-        "RETURNING fail_count",
-        (simkl_id, media, blob, now, now),
-    )
-    return int(row["fail_count"]) if row else 1
+    if not failed:
+        return {}
+    params = {"rows": json.dumps([[int(simkl_id), str(media)] for simkl_id, media in failed]),
+              "empty": _compress({}), "now": now}
+    rows = await db.transaction(lambda conn: conn.execute(_STORE_FAILURES, params).fetchall())
+    return {(int(row["simkl_id"]), str(row["media"])): int(row["fail_count"]) for row in rows}
+
+
+async def _upsert_failure(simkl_id: int, media: str, now: int) -> int:
+    """One failure recorded: `_upsert_failures` for a batch of one."""
+    counts = await _upsert_failures([(simkl_id, media)], now)
+    return counts.get((int(simkl_id), str(media)), 1)
 
 
 # CONSECUTIVE FAILURES BEFORE THE DRAIN STOPS ASKING ABOUT A TITLE. Simkl's
@@ -406,11 +468,20 @@ async def overlay_match_ids(records: list[Record]) -> list[Record]:
     enrichment held an external id for 6 of 98. The other 92 are titles Trakt
     simply does not have, which is a catalogue difference no matching can close.
     Single-digit gains are the honest expectation.
+
+    ON A WORKER THREAD, read and merged both (`match_ids`): a month of Simkl's
+    records is thousands of them, and this is a fill's own list.
     """
+    return await db.run(lambda conn: match_ids(conn, records))
+
+
+def match_ids(conn: db.Connection, records: list[Record]) -> list[Record]:
+    """`overlay_match_ids`, on the connection given — for a fill already on a
+    worker thread (app/calendar/cache.py's `_answers`)."""
     candidates = _simkl_candidates(records)
     if not candidates:
         return records
-    rows = await _read_rows(candidates.keys())
+    rows = _stored_rows(conn, list(candidates.keys()))
     for key, group in candidates.items():
         row = rows.get(key)
         if row is None:
@@ -432,9 +503,9 @@ async def enrich_now(settings, records: list[Record], *, now: int) -> list[Recor
     lookup, and handing them a card with no genres and no certification — which
     every filter then declines to act on — is worse than the moment it costs.
 
-    IT IS THE DRAIN'S OWN MACHINERY, not a second copy. `_fetch_one` asks Simkl
-    and writes the answer into `simkl_titles`; `apply_stored_enrichment` reads
-    that back onto the records. So a title learned this way is learned for the
+    IT IS THE DRAIN'S OWN MACHINERY, not a second copy. `_look_up` asks Simkl,
+    `_record` writes the answers into `simkl_titles`, and
+    `apply_stored_enrichment` reads that back onto the records. So a title learned this way is learned for the
     WHOLE INSTANCE — every other window naming it is enriched too, and the drain
     finds one less thing owed rather than the same work queued twice.
 
@@ -451,14 +522,20 @@ async def enrich_now(settings, records: list[Record], *, now: int) -> list[Recor
     """
     owed = {(int(r.ids["simkl"]), str(r.media)) for r in records
             if r.source is Source.SIMKL and not r.enriched and r.ids.get("simkl")}
+    looked = []
+    # Deliberately broad, both: see this function's own last paragraph. Whatever
+    # went wrong, the caller still has a drawable record.
     for simkl_id, media in owed:
         try:
-            await _fetch_one(settings, simkl_id, media, now)
-        # Deliberately broad: see this function's own last paragraph. Whatever
-        # went wrong, the caller still has a drawable record.
+            looked.append(await _look_up(settings, simkl_id, media))
         except Exception:
             logger.warning("immediate enrichment failed for simkl id %s (%s)",
                            simkl_id, media, exc_info=True)
+    try:
+        await _record(looked, now)
+    except Exception:
+        logger.warning("immediate enrichment of %d title(s) could not be stored",
+                       len(looked), exc_info=True)
     return await apply_stored_enrichment(records)
 
 
@@ -474,7 +551,7 @@ async def apply_stored_enrichment(records: list[Record]) -> list[Record]:
     to reapply it on every single read.
 
     Rows removed what that rested on. A refill rewrites the airings but is
-    forbidden to demote an enriched title (entries._UPSERT_TITLE), and the drain
+    forbidden to demote an enriched title (app/metadata/rows.py), and the drain
     writes the row directly, so a stored value is never older than the last drain
     pass rather than as old as the window.
 
@@ -484,11 +561,20 @@ async def apply_stored_enrichment(records: list[Record]) -> list[Record]:
     answer sat in the next table along. `overlay_match_ids` stays separate and
     stays ids-only: it has to run before the group keys are derived, which is a
     different job at a different moment.
+
+    ON A WORKER THREAD, read and applied both (`give_stored_enrichment`), as
+    `overlay_match_ids` is.
     """
+    return await db.run(lambda conn: give_stored_enrichment(conn, records))
+
+
+def give_stored_enrichment(conn: db.Connection, records: list[Record]) -> list[Record]:
+    """`apply_stored_enrichment`, on the connection given — for a caller already
+    on a worker thread."""
     candidates = _simkl_candidates(records)
     if not candidates:
         return records
-    rows = await _read_rows(candidates.keys())
+    rows = _stored_rows(conn, list(candidates.keys()))
     for key, group in candidates.items():
         fields = (rows.get(key) or {}).get("fields")
         if not fields:
@@ -501,7 +587,7 @@ async def apply_stored_enrichment(records: list[Record]) -> list[Record]:
 def _apply(record: Record, fields: dict[str, Any]) -> None:
     """Put what a lookup found onto one record.
 
-    IT READS THE PAYLOAD THROUGH `entries.enrichment_values` AND NOT ITSELF. The
+    IT READS THE PAYLOAD THROUGH `title_rows.enrichment_values` AND NOT ITSELF. The
     other writer — the drain updating a stored row directly — goes through the
     same function, and when each had its own reading they drifted: one looked for
     `ratings` where the payload says `rating`, and 225 titles on a live instance
@@ -509,7 +595,7 @@ def _apply(record: Record, fields: dict[str, Any]) -> None:
     is the RECORD-shaped half of the write; what a field means lives in one
     place.
     """
-    value = entries.enrichment_values(fields)
+    value = title_rows.enrichment_values(fields)
     record.genres = list(value["genres"])
     record.network = value["network"]
     record.country = value["country"]
@@ -550,9 +636,9 @@ def _apply(record: Record, fields: dict[str, Any]) -> None:
 # what the window contained.
 #
 # BOTH HALVES ARE ANSWERED BY THE DRAIN BECOMING A WRITER OF THE ROW. It updates
-# `calendar_titles` when it learns something, so a stored value is never older
+# the title store's row when it learns something, so a stored value is never older
 # than the last drain pass rather than as old as the window; and a refill is
-# forbidden to demote an enriched field (entries._UPSERT_TITLE), so the fields
+# forbidden to demote an enriched field (app/metadata/rows.py), so the fields
 # survive the thing that used to erase them. `enriched` now records what the row
 # CONTAINS instead of what a reader would have to look up to find out, which
 # makes it more accurate, not less.
@@ -590,36 +676,82 @@ async def _forget_unusable(rows: list[tuple[int, str]]) -> None:
 
 
 async def _owed_titles() -> dict[tuple[int, str], str]:
-    """Every (simkl_id, media) any currently-stored calendar window names,
-    mapped to that title's display name — the full set of Simkl titles this
-    instance's calendar could show, independent of whether a viewer has ever
-    read the window naming them. See the module docstring for why this
-    replaces an in-memory queue fed by reads.
+    """Every (simkl_id, media) the title store holds a Simkl row for that has no
+    answer yet, mapped to that title's display name — derived from storage, so
+    it is complete whether or not a viewer has ever read the window naming them.
+    See the module docstring for why this replaces an in-memory queue fed by
+    reads.
 
-    Filtering OWED down to what is actually worth fetching (excluding a title
-    already answered, and one still inside its backoff) is `drain`'s job, not
-    this function's — it stays a pure "what does the cache currently name"
-    question so it has exactly one reason to change.
+    ONLY THE UNANSWERED, READ THROUGH THE INDEX ON `enriched`. It used to be every
+    Simkl title the store holds, each one's stored answer decompressed every tick
+    to check which extraction wrote it — 25,123 of them on the development copy,
+    about 0.7 s of worker time a minute, nearly all of it confirming answers that
+    were already there. A title that IS answered is kept current by being viewed
+    while stale (app/metadata/refresh.py), which re-reads it under whatever
+    extraction is current.
+
+    Filtering OWED down to what is actually worth fetching (excluding one still
+    inside its backoff, or one answered by an older extraction) is `drain`'s job,
+    not this function's.
     """
-    return await entries.stored_titles(str(Source.SIMKL), "simkl", _media_values())
+    return await title_rows.unenriched(str(Source.SIMKL), "simkl", _media_values())
 
 
-async def _fetch_one(settings, simkl_id: int, media: str, now: int) -> bool:
+class _Looked(NamedTuple):
+    """What one lookup came back with, before anything is written.
+
+    `fields` is the answer, or None when there was none. `counts` says whether
+    a missing answer is a fact about this title: an instance-wide refusal is
+    not, and is recorded nowhere (`_look_up` says why)."""
+    simkl_id: int
+    media: str
+    fields: dict | None
+    counts: bool = True
+
+
+async def _look_up(settings, simkl_id: int, media: str) -> _Looked:
     fields = await simkl_titles.fetch_title(settings, simkl_id, Media(media))
-    if fields is None:
-        # AN INSTANCE-WIDE REFUSAL IS NOT A FACT ABOUT THIS TITLE, and recording
-        # it as one is how a single 412 poisoned an entire table. `fetch_title`
-        # answers None for every failure it meets — that is deliberate, since a
-        # missing title and an unreachable service are indistinguishable from a
-        # status code there — but the breaker knows which of those just happened,
-        # and a blocked call never reached Simkl to have an opinion about this id.
-        # Written down because the shape was observed: a fresh deployment ended
-        # up with 372 of its 388 rows marked failed, every one of them a title
-        # Simkl would have answered for, each carrying a backoff it had not
-        # earned.
-        if simkl_transport.blocked_seconds_remaining() > 0:
-            return False
-        failures = await _upsert_failure(simkl_id, media, now)
+    if fields is not None:
+        return _Looked(simkl_id, media, fields)
+    # AN INSTANCE-WIDE REFUSAL IS NOT A FACT ABOUT THIS TITLE, and recording it
+    # as one is how a single 412 poisoned an entire table. `fetch_title` answers
+    # None for every failure it meets — that is deliberate, since a missing
+    # title and an unreachable service are indistinguishable from a status code
+    # there — but the breaker knows which of those just happened, and a blocked
+    # call never reached Simkl to have an opinion about this id. Asked HERE, the
+    # moment the call came back, rather than when the batch is written, because
+    # that is when the breaker's answer is about this call. Written down because
+    # the shape was observed: a fresh deployment ended up with 372 of its 388
+    # rows marked failed, every one of them a title Simkl would have answered
+    # for, each carrying a backoff it had not earned.
+    return _Looked(simkl_id, media, None,
+                   counts=simkl_transport.blocked_seconds_remaining() <= 0)
+
+
+async def _record(looked: list[_Looked], now: int) -> None:
+    """Write what a set of lookups came back with: the answers in one go, the
+    failures in another, each a fixed number of statements however many there
+    are.
+
+    A LOOKUP NEVER WRITES ITS OWN ANSWER, and that is the measured reason this
+    exists. Each answer used to be written as it arrived — the raw answer, then
+    its projection onto the title row, which first finds the row by reading
+    every row Simkl has in the store (app/metadata/rows.py's `_ANSWERED_ROWS`).
+    With a pass's batch in flight at once that was hundreds of full reads and
+    twice as many write transactions, each on a worker thread: MEASURED on a
+    harness copy of dev with a backlog of Simkl films, every one of the forty
+    worker threads busy and a month's page answering in 29.7 s, its own phases
+    accounting for 11 of them. Written once a batch, the same backlog drained
+    faster, with at most seven workers busy and the page in 5.7 s. One write
+    per batch is one read of the store and two transactions.
+    """
+    answers = [(found.simkl_id, found.media, found.fields)
+               for found in looked if found.fields is not None]
+    failed = [(found.simkl_id, found.media)
+              for found in looked if found.fields is None and found.counts]
+    await _upsert_successes(answers, now)
+    counts = await _upsert_failures(failed, now)
+    for (simkl_id, media), failures in counts.items():
         # THE COUNT, WHILE IT IS STILL COUNTING. A drain that reports "fetched 0
         # of 10" every tick says nothing about whether it is getting anywhere,
         # and the ceiling that ends it is invisible until it is reached — which
@@ -639,9 +771,6 @@ async def _fetch_one(settings, simkl_id: int, media: str, now: int) -> bool:
             logger.info("Simkl enrichment: giving up on simkl id %s (%s) after %d "
                         "failed lookups; it will be asked about again when its "
                         "stored row ages out.", simkl_id, media, failures)
-        return False
-    await _upsert_success(simkl_id, media, fields, now)
-    return True
 
 
 @perftrace.job("title enrichment")
@@ -663,6 +792,12 @@ async def drain(settings, *, now: int | None = None) -> int:
     RUNS THROUGH CATALOG_POOL, WHICH ALLOWS PARALLEL REQUESTS — see
     app/providers/simkl/transport.py — so the batch is fetched concurrently
     rather than one title at a time.
+
+    AND WRITTEN ONCE, WHEN THE BATCH HAS COME BACK (`_record` has the
+    measurement). So a pass's answers reach the cards together, about forty
+    seconds after it starts at CATALOG_MIN_INTERVAL's pace for a full batch,
+    and a pass a restart interrupts has written nothing: its titles are still
+    owed, and the next pass asks them again.
 
     AND IT ASKS WHETHER IT MAY CALL AT ALL FIRST, exactly as `drain_releases`
     does below. Simkl's calendar needs no credential, so an instance can have a
@@ -689,11 +824,12 @@ async def drain(settings, *, now: int | None = None) -> int:
     if not owed:
         return 0
     rows = await _read_rows(owed.keys())
-    # WHICH STORED TITLES HAVE AN ANSWER BUT HAVE NOT BEEN GIVEN IT. A calendar
-    # row starts unenriched and only a write marks it otherwise, so a title whose
-    # lookup landed a moment after its row was written — or whose answer was
-    # stored by a version of this app that did not yet project onto the calendar
-    # — is answered in `simkl_titles` and blank on the row a viewer reads.
+    # A TITLE OWED HERE MAY ALREADY HAVE ITS ANSWER. Every owed row is one the
+    # title store holds unanswered, so a title whose lookup landed a moment after
+    # its row was written — or whose answer was stored by a version of this app
+    # that did not yet project onto the calendar — is answered in `simkl_titles`
+    # and blank on the row a viewer reads, and is handed it below without a
+    # lookup.
     #
     # THE SKIP BELOW IS WHY THIS CANNOT BE LEFT TO SORT ITSELF OUT. A title the
     # per-title table already answers is never fetched again, so nothing would
@@ -702,7 +838,6 @@ async def drain(settings, *, now: int | None = None) -> int:
     # that was wrong: the fill covers rows it CREATES, not rows that already
     # exist and are waiting. Five films on one real August calendar sat unenriched
     # with complete stored answers beside them.
-    unprojected = await entries.unenriched(str(Source.SIMKL), "simkl")
     rebuild: list[tuple[int, str, dict]] = []
     stale: list[tuple[int, str]] = []
     batch: list[tuple[int, str, str]] = []
@@ -715,11 +850,10 @@ async def drain(settings, *, now: int | None = None) -> int:
             current = bool(fields) and fields.get("extract_version") == simkl_titles.EXTRACT_VERSION
             if current:
                 # Already answered under the current extraction: NOTHING TO
-                # FETCH, but possibly something to write. Bounded like the fetch
+                # FETCH, but the row is owed the answer. Bounded like the fetch
                 # batch, so a large backlog is many small ticks rather than one
                 # long one.
-                if ((simkl_id, media) in unprojected
-                        and len(rebuild) < DRAIN_BATCH_SIZE):
+                if len(rebuild) < DRAIN_BATCH_SIZE:
                     rebuild.append((simkl_id, media, fields))
                 continue
             # A SUCCESS ROW WITH NO fields IS A STORED FAILURE (see
@@ -770,18 +904,21 @@ async def drain(settings, *, now: int | None = None) -> int:
         # already paid for; handing them to the rows that lack them is a local
         # write, and doing it first means a pass with nothing to fetch still
         # makes progress.
-        written = await entries.apply_enrichment_many(str(Source.SIMKL), rebuild, ts)
+        written = await title_rows.apply_enrichment_many(str(Source.SIMKL), rebuild, ts)
         logger.info("Simkl enrichment: gave %d stored answer(s) to calendar rows "
                     "that did not have them; no lookup was needed.", written)
     if not batch:
         return 0
     results = await asyncio.gather(
-        *(_fetch_one(settings, simkl_id, media, ts) for simkl_id, media, _title in batch),
+        *(_look_up(settings, simkl_id, media) for simkl_id, media, _title in batch),
         return_exceptions=True,
     )
+    # A lookup that raised is left for the next pass, as one whose own write
+    # raised always was; the rest are written together (`_record` says why).
+    await _record([result for result in results if isinstance(result, _Looked)], ts)
     fetched = 0
     for (simkl_id, media, title), result in zip(batch, results):
-        if result is True:
+        if isinstance(result, _Looked) and result.fields is not None:
             fetched += 1
             # DEBUG, not INFO: the summary line below is the operator-facing
             # one (the same reasoning calendar/cache.py's pre-warm line
@@ -828,12 +965,20 @@ async def _read_release_rows(trakt_ids) -> dict[int, dict]:
     ids = [int(i) for i in trakt_ids]
     if not ids:
         return {}
+    return await db.run(lambda conn: _release_rows(conn, ids))
+
+
+def _release_rows(conn: db.Connection, ids: list[int]) -> dict[int, dict]:
+    """`_read_release_rows`, on the connection given — read and decompressed on
+    the thread or process that asked."""
+    if not ids:
+        return {}
     placeholders = ",".join("?" for _ in ids)
-    rows = await db.fetch_all(
+    rows = conn.execute(
         f"SELECT trakt_id, payload, fetched_at, failed_at, fail_count "
         f"FROM trakt_releases WHERE trakt_id IN ({placeholders})",
         tuple(ids),
-    )
+    ).fetchall()
     return {
         int(row["trakt_id"]): {
             "fields": _decompress(row["payload"]),
@@ -903,10 +1048,16 @@ async def overlay_releases(records: list[Record]) -> list[Record]:
     app/calendar/filter.py reads as "this record cannot answer" and keeps, so a
     film waiting on its first lookup is never dropped by a filter.
     """
+    return await db.run(lambda conn: give_releases(conn, records))
+
+
+def give_releases(conn: db.Connection, records: list) -> list:
+    """`overlay_releases`, on the connection given — for a read already on a
+    worker thread or in a worker process (app/calendar/query.py)."""
     candidates = _trakt_film_candidates(records)
     if not candidates:
         return records
-    rows = await _read_release_rows(candidates.keys())
+    rows = _release_rows(conn, [int(i) for i in candidates.keys()])
     for trakt_id, group in candidates.items():
         row = rows.get(trakt_id)
         if row is None or not row["fields"]:
@@ -930,7 +1081,7 @@ async def _owed_films() -> dict[int, str]:
     which about 25 came from Trakt. This costs tens of calls a month, not
     thousands.
     """
-    films = await entries.stored_titles(str(Source.TRAKT), "trakt", (str(Media.MOVIE),))
+    films = await title_rows.stored_titles(str(Source.TRAKT), "trakt", (str(Media.MOVIE),))
     return {trakt_id: title for (trakt_id, _media), title in films.items()}
 
 
@@ -1092,7 +1243,7 @@ async def drain_episodes(settings, *, now: int | None = None) -> int:
 
     IT DOES NOT STOP WHEN EVERY SEASON HAS BEEN ANSWERED ONCE. A season falls due
     again on a clock keyed to when its episodes AIRED — see
-    entries.episode_stale_after — because the titles and overviews this fills in
+    app/metadata/rows.py's episode_stale_after — because the titles and overviews this fills in
     are routinely corrected in the days after broadcast, not only published
     before it. Never-answered seasons still take the batch first.
 
@@ -1183,20 +1334,36 @@ async def backlog(*, now: int | None = None) -> tuple[int, int]:
     six for ever, and a readout that never reaches zero cannot say "settled" —
     which is the one thing it was added to say. Giving up is logged where it
     happens, so the titles are not lost, only uncounted.
+
+    A TITLE NOBODY HAS ASKED ABOUT YET IS THE FIRST THING COUNTED, and it was
+    the one thing that was not. It has no `simkl_titles` row at all, so the
+    join's columns are NULL, and `NOT (NULL >= n AND ...)` is NULL rather than
+    true — the row dropped out of the count. A month stored a minute ago read
+    "settled" while the drain worked through every title in it; only a title
+    that had FAILED at least once was ever counted. `COALESCE` reads "never
+    asked" as no failures, which is what it is. And it counts Simkl's rows: the
+    drain's worklist is Simkl's (title_rows.unenriched), and another service's
+    unanswered row is not this drain's to owe.
     """
     ts = db.now() if now is None else now
+    simkl = str(Source.SIMKL)
     titles = await db.fetch_value(
-        "SELECT COUNT(*) FROM calendar_titles t "
+        f"SELECT COUNT(*) FROM {tables.TITLES} t "
         "LEFT JOIN simkl_titles s "
-        "  ON s.simkl_id = json_extract(t.ids_json, '$.simkl') AND s.media = t.media "
-        "WHERE t.enriched = 0 "
+        f"  ON s.simkl_id = json_extract(t.{simkl}_ids_json, '$.simkl') AND s.media = t.media "
+        f"WHERE t.{simkl}_enriched = 0 AND t.{simkl}_id IS NOT NULL "
         # An empty payload is a stored failure (see _upsert_failure); a row WITH
         # a payload is an answer this title has not been given yet, and no number
         # of later failures makes that stop being owed.
-        "  AND NOT (s.fail_count >= ? AND (s.payload IS NULL OR length(s.payload) <= ?))",
+        "  AND NOT (COALESCE(s.fail_count, 0) >= ? "
+        "           AND (s.payload IS NULL OR length(s.payload) <= ?))",
         (_GIVE_UP_AFTER, _EMPTY_PAYLOAD_MAX_BYTES))
-    return (int(titles or 0),
-            await entries.owed_season_count(str(Source.TRAKT), "trakt", ts))
+    # AND EVERY OTHER SERVICE'S SPARSE LISTINGS, which the title store's refresh
+    # queue completes rather than this drain (TMDB's — Capabilities.
+    # describes_sparse_listings): one number for "titles still being looked
+    # up", whichever pass is doing the looking, counted by the pass that does.
+    titles = int(titles or 0) + await metadata_refresh.listings_owed()
+    return (titles, await entries.owed_season_count(str(Source.TRAKT), "trakt", ts))
 
 
 async def run_drain(settings) -> int:
@@ -1251,6 +1418,19 @@ async def run_drain(settings) -> int:
         # number and is what the latch's callers and its tests are written
         # against. This one reports itself in its own log line.
         try:
+            # THE TITLE STORE'S REFRESH QUEUE, SECOND: rows a viewer's page found
+            # stale, and a dead picture's whole title at the front of it
+            # (app/metadata/refresh.py). After the Simkl half for the same reason
+            # the others follow it, and ahead of them because a viewer asked.
+            # Held rows nearing a service's ceiling join it first, behind what
+            # viewers queued, and a sparse listing a fill stored (TMDB's) behind
+            # those — it is drawn already, only less fully.
+            await metadata_refresh.queue_ceiling(settings)
+            await metadata_refresh.queue_listed(settings)
+            await metadata_refresh.run(settings)
+        except Exception:
+            logger.error("Title store refresh failed.", exc_info=True)
+        try:
             await drain_releases(settings)
         except Exception:
             # Never let the other service's pass fail this one's answer — the
@@ -1289,7 +1469,7 @@ def _forget_drain_task(task: asyncio.Task) -> None:
 def schedule_drain(settings) -> None:
     """Ask the drain to run soon rather than waiting for the next heartbeat
     tick. Call this when a window FILL stores new records (see
-    app/calendar/cache.py's `load_window`) — never from a read: the read path
+    app/calendar/cache.py's `ensure_window`) — never from a read: the read path
     already promises no outbound call (see the module docstring), and firing
     a drain from a read would put that promise in the same
     function it is meant to hold for.
@@ -1297,7 +1477,9 @@ def schedule_drain(settings) -> None:
     FIRE AND FORGET, ON PURPOSE, AND NEVER AWAITED BY THE CALLER. The caller
     is a request that just finished fetching and storing a calendar window;
     it must not wait on enrichment to answer that request, so this schedules
-    the work as a background task and returns immediately. Coalescing is
+    the work as a background task, started once that request's answer has
+    been sent (after_response) — a drain's lookups do not run beside the page
+    that asked for them — and returns immediately. Coalescing is
     `run_drain`'s job, not this function's — calling this while a pass is
     already running is exactly as safe as calling it while nothing is
     running, because `run_drain` folds a busy call into the rerun flag rather
@@ -1314,6 +1496,10 @@ def schedule_drain(settings) -> None:
         asyncio.get_running_loop()
     except RuntimeError:
         return
+    after_response.later(lambda: _start_drain(settings))
+
+
+def _start_drain(settings) -> None:
     task = asyncio.create_task(run_drain(settings))
     _drain_tasks.add(task)
     task.add_done_callback(_forget_drain_task)
