@@ -663,7 +663,7 @@ def _title_values(answer: Mapping[str, Any], source: str, ids: dict) -> dict:
     runtime = answer.get("runtime")
     return {
         **rows.facts_values(answer.get("keywords"), answer.get("show_type")),
-        "ids_json": json.dumps(ids, sort_keys=True),
+        "ids_json": id_rules.stored(ids),
         "year": str(year) if isinstance(year, int) else str(year or ""),
         "network": str(answer.get("network") or ""),
         "country": str(answer.get("country") or ""),

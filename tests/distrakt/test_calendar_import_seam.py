@@ -132,25 +132,15 @@ class TheMonthlyImportSurvivesTheStorageChangeTests(unittest.IsolatedAsyncioTest
         # ...and the rows themselves are untouched by either read.
         self.assertEqual(len(await listings()), 2)
 
-    async def test_a_mark_in_a_namespace_the_record_cannot_carry_still_excludes(self):
-        """THE FAILURE THE RECORD COULD NOT ANSWER. A mark may be stored under any
-        spelling a title has ever been known by, and the calendar accepts six of
-        them. A RECORD's id map is `collect_ids`, an allowlist built for the ids
-        the tracker files rows under, and three of those six are not in it — so
-        asking the question of a record was unanswerable however carefully it was
-        asked. Measured: a viewer's Nocturne mark reads `lazarus`, which the card
-        carries as Simkl's `tvdbslug`; the calendar hid the show and the import
-        added it.
-
-        So the mark is applied to the ITEM, at the last moment the whole id map
-        exists, and this is the test that fails if it ever moves back.
-        """
-        record = _record(Source.TRAKT, "nocturne", tmdb=292741)
-        record.ids = {**record.ids, "tvdbslug": "lazarus"}
-        await self._fill(NEW, [record])
-        self.assertEqual({r["title"] for r in await self._import()}, {"Nocturne"})
-        kept = await self._import(marks={"lazarus"})
-        self.assertEqual(kept, [], "a mark the record cannot carry still has to exclude")
+    # THE NAMESPACE-THE-RECORD-CANNOT-CARRY TEST IS GONE, AND ITS SUBJECT WITH
+    # IT. A viewer's Nocturne mark read `lazarus`, which the card carried as
+    # Simkl's `tvdbslug` and the record (`collect_ids`, an allowlist) did not,
+    # so the calendar hid the show and the import added it. The store keeps no
+    # `tvdbslug`, `traktslug` or `mdlslug` now — every writer files a group's
+    # ids in one spelling (metadata/ids.py's `stored`), and the migration that
+    # made it so rewrote each mark spelled that way to its title's key — so a
+    # card carries no spelling its record lacks. That the mark is still asked of
+    # the ITEM, across every copy of a title, is what the next test pins.
 
     async def test_a_mark_matching_one_services_copy_excludes_the_title(self):
         """MEASURED ON A REAL OCTOBER: Treasure Island was marked under

@@ -65,7 +65,7 @@ class OneHitPerTitleTests(StoredTitleTestCase):
         self.assertEqual(list(hit.source_ids), [Source.TRAKT, Source.SIMKL])
         self.assertEqual(hit.title, "Frieren: Beyond Journey's End")
         # The ids union — the whole reason a merge is worth more than either row.
-        self.assertEqual(hit.ids["mal"], "52991")
+        self.assertEqual(hit.ids["mal"], 52991)
         self.assertEqual(hit.ids["tmdb"], 209867)
         self.assertEqual(hit.key, ItemKey("show", "tmdb", "209867"))
         self.assertEqual(hit.title_key, "show:tmdb:209867")

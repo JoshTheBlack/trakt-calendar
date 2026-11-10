@@ -128,7 +128,7 @@ class EnrichmentReachesTheStoredRowTests(EnrichTestCase):
         self.assertEqual(got.certification, "TV-MA")
         self.assertEqual(got.network, "AMC")
         self.assertEqual(got.runtime, 45)
-        self.assertEqual(got.ids["tvdb"], "999")
+        self.assertEqual(got.ids["tvdb"], 999)
 
     async def test_the_movie_fields_reach_the_record_the_card_draws(self):
         """Simkl's calendar CDN entries carry no language and no year, so those
@@ -155,7 +155,7 @@ class EnrichmentReachesTheStoredRowTests(EnrichTestCase):
 
     async def test_enrichment_upgrades_ids_without_overwriting_ones_already_there(self):
         """The calendar file's own ids must survive; enrichment only ADDS a
-        namespace the fill never had (tvdb, mal, anidb). A lookup overwriting one
+        namespace the fill never had (tvdb, mal). A lookup overwriting one
         would be re-identifying the title under cover of enriching it."""
         record = _simkl_record(1)
         record.ids["mal"] = "already-there"
@@ -164,7 +164,7 @@ class EnrichmentReachesTheStoredRowTests(EnrichTestCase):
             "genres": [], "ids": {"tvdb": "999", "mal": "should-not-override"},
         }, now=1000)
         got = await self._one()
-        self.assertEqual(got.ids["tvdb"], "999")
+        self.assertEqual(got.ids["tvdb"], 999)
         self.assertEqual(got.ids["mal"], "already-there")
         self.assertEqual(got.ids["simkl"], 1)
 
