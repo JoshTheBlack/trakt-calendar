@@ -49,7 +49,7 @@ from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from typing import Any, TypeVar
 
-from . import db
+from . import db, logging_setup
 
 logger = logging.getLogger(__name__)
 
@@ -81,10 +81,7 @@ def _worker_started() -> None:
     a console's Ctrl+C is the web process's to act on, and it leaves when the web
     process does (`_leave_with_the_web_process`)."""
     db.become_read_only()
-    root = logging.getLogger()
-    for handler in [h for h in root.handlers if isinstance(h, logging.FileHandler)]:
-        root.removeHandler(handler)
-        handler.close()
+    logging_setup.without_file()
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     _leave_with_the_web_process()
 
