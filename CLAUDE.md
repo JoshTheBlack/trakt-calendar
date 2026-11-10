@@ -247,7 +247,12 @@ writer queue. A read whose callers pass their own functions (`query.titles`'
 most `read_pool.DEFAULT_MOST`; 0 reads on threads, which the suite does —
 tests/conftest.py — and tests/kernel/test_read_pool.py runs a real one). Workers
 are SPAWNED on every platform (the web process has threads by then, and a fork
-copies a held lock), started and warmed by the lifespan (`query.ready`), write no
+copies a held lock), and the web process may not be a DAEMON — Python refuses a
+daemon process children — which is why the Dockerfile's CMD serves from
+Hypercorn's own process (`--workers 0`): Hypercorn's default worker is a daemon,
+and an image without the flag fails its start-up (tests/kernel/test_read_pool.py
+reads the CMD). They are
+started and warmed by the lifespan (`query.ready`), write no
 log file, ignore Ctrl+C, are rebuilt by the next read when one dies, and LEAVE WHEN
 THE WEB PROCESS DOES, however it ended (`read_pool._leave_with_the_web_process`,
 waiting on the parent's sentinel): a web process stopped by force says nothing,

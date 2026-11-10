@@ -74,4 +74,13 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # Nothing diagnostic is lost — app/perftrace.py times every request, names the
 # slow ones with their phases broken down, and logs them all at DEBUG. To get the
 # raw log back for an investigation, append --access-logfile - to this command.
-CMD ["hypercorn", "app.main:app", "--bind", "0.0.0.0:8000"]
+#
+# --workers 0 SERVES THE APP FROM HYPERCORN'S OWN PROCESS, and the image cannot
+# start without it. By default Hypercorn spawns one worker to serve from and makes
+# it a DAEMON process (its `daemon` setting, true by default and not switchable
+# off from the command line), and Python refuses to let a daemon process start
+# children — so the calendar's read pool (app/read_pool.py), started by the
+# lifespan, failed the start-up with "daemonic processes are not allowed to have
+# children" and Hypercorn exited. With 0 there is one process, PID 1, which
+# starts the pool and takes the container's stop signal itself.
+CMD ["hypercorn", "app.main:app", "--bind", "0.0.0.0:8000", "--workers", "0"]

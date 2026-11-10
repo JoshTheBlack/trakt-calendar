@@ -48,6 +48,43 @@ def _write(conn) -> None:
     conn.execute("INSERT INTO app_meta (key, value) VALUES ('x', 'y')")
 
 
+class TheImageServesFromAProcessThatMayHaveChildrenTests(unittest.TestCase):
+    """The Docker image runs `hypercorn app.main:app`, never run.py, and Hypercorn
+    serves from a worker it makes a DAEMON unless told to serve from its own
+    process — and a daemon process may not start the pool's workers, so the
+    lifespan failed and the image never answered. Only the CMD decides it, so the
+    CMD is what is read."""
+
+    def test_hypercorns_own_workers_are_daemons(self):
+        from hypercorn.config import Config
+        self.assertTrue(Config().daemon, "if this changed, the CMD's --workers 0 may "
+                                         "no longer be what lets the pool start")
+
+    def test_the_image_serves_from_hypercorns_own_process(self):
+        cmd = [line for line in (ROOT / "Dockerfile").read_text(encoding="utf-8").splitlines()
+               if line.startswith("CMD")]
+        self.assertTrue(cmd, "Dockerfile has no CMD to check.")
+        self.assertIn('"--workers", "0"', cmd[-1])
+
+    def test_a_daemon_process_cannot_start_a_pool(self):
+        """What the CMD avoids, so the reason above stays true and not folklore."""
+        ctx = multiprocessing.get_context("spawn")
+        process = ctx.Process(target=_start_a_pool, daemon=True)
+        process.start()
+        process.join(60)
+        self.assertNotEqual(process.exitcode, 0)
+
+
+def _start_a_pool() -> None:
+    """In a daemon process: start a pool of one, as the lifespan does."""
+    with mock.patch.dict(os.environ, {"READ_PROCESSES": "1"}):
+        read_pool.start(warm=_nothing)
+
+
+def _nothing() -> None:
+    pass
+
+
 class HowManyWorkersTests(unittest.TestCase):
 
     def test_the_variable_decides(self):
