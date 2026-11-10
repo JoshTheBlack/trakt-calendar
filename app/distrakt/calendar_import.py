@@ -205,13 +205,14 @@ def _keyable(item: Item, marked: set[str]) -> dict | None:
     fail the import.
 
     THE MARK IS ASKED OF THE CARD AND NOT OF THE RECORD. A mark may be stored
-    under any spelling a title has ever been known by — the calendar accepts six
-    of them — while a record's id map is `collect_ids`, an ALLOWLIST that keeps
-    the ids the tracker files rows under and drops the rest. Three of those six
-    (`traktslug`, `tvdbslug`, `mdlslug`) are among the dropped, so a record
-    simply cannot answer this question: measured here, a viewer's Nocturne mark
-    reads `lazarus`, which the card carries as Simkl's `tvdbslug` and the record
-    does not carry at all.
+    under any spelling a title has ever been known by, while a record's id map
+    is `collect_ids` of the card's own ids — no display id, and none of the ids
+    the store knows from services the card was not drawn from (`known_ids`).
+    Measured when it was a record's question: a viewer's Nocturne mark read
+    `lazarus`, which the card carried as Simkl's `tvdbslug` and the record did
+    not carry at all. (That namespace is no longer kept, and migration 50
+    rewrote such marks to their title's key; the card is still the one that
+    holds every spelling.)
 
     `marked` is `_marked_titles`' answer: the titles a mark covers, whichever copy
     of them it matched.

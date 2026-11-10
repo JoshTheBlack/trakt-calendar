@@ -277,21 +277,19 @@ class TheImportReadsTheMarkTheCalendarWroteTests(unittest.IsolatedAsyncioTestCas
         """MEASURED, on a real instance. The mark reads `grey-s-anatomy` — Trakt's
         slug — while the card resolved to Simkl's description and carries
         `greys-anatomy`. The calendar hid the show; the import's own narrower copy
-        of this rule did not, and added it."""
+        of this rule did not, and added it. (Simkl's `traktslug` carried it then;
+        the store keeps Trakt's own name, `trakt_slug`, and no longer that one.)"""
         rec = {"media": "show", "ids": {
             "slug": "greys-anatomy", "simkl": 3296, "simkl_slug": "greys-anatomy",
             "tmdb": "1416", "imdb": "tt0413573", "tvdb": "73762",
-            "tvdbslug": "greys-anatomy", "traktslug": "grey-s-anatomy"}}
+            "trakt_slug": "grey-s-anatomy"}}
         self.assertTrue(calendar_import.matches_not_watching(rec, {"grey-s-anatomy"}))
 
-    def test_a_mark_in_a_namespace_the_card_only_has_from_one_service(self):
-        """The second measured case: Nocturne was marked under `lazarus`, which
-        appears on the card only as Simkl's `tvdbslug`. A copy that looked at the
-        slug and the Trakt id never saw that namespace at all."""
-        rec = {"media": "show", "ids": {
-            "slug": "nocturne", "simkl": 2089449, "tmdb": "292741",
-            "tvdb": "430654", "tvdbslug": "lazarus", "traktslug": "nocturne"}}
-        self.assertTrue(calendar_import.matches_not_watching(rec, {"lazarus"}))
+    # NOCTURNE'S `lazarus` MARK — Simkl's `tvdbslug`, a namespace the card held
+    # from one service alone — WAS THE SECOND MEASURED CASE. The store keeps no
+    # such namespace now, and migration 50 rewrote each mark spelled in one to its
+    # title's key (tests/kernel/test_migration_50.py), which the first test above
+    # recognises.
 
     def test_it_asks_the_same_question_the_calendar_asks(self):
         """THE POINT OF THE REPAIR, not just its symptoms. A rule every surface
@@ -300,7 +298,6 @@ class TheImportReadsTheMarkTheCalendarWroteTests(unittest.IsolatedAsyncioTestCas
         which is exactly what happened. Any spelling the grid accepts, this
         accepts."""
         ids = {"slug": "a-show", "simkl_slug": "b-show", "trakt_slug": "c-show",
-               "traktslug": "d-show", "tvdbslug": "e-show", "mdlslug": "f-show",
                "tmdb": "999"}
         rec = {"media": "show", "ids": ids}
         for namespace, spelling in ids.items():

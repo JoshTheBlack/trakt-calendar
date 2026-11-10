@@ -37,6 +37,7 @@ _NOT_A_TITLE_KEY = {
     ("api_cache", "cache_key"): "a response's address — keys may appear inside it as text, "
                                 "and a marker under a retired key only costs a lookup",
     ("app_meta", "key"): "an instance fact's name",
+    ("passkeys", "public_key"): "a passkey's public key",
     ("tier_item_removals", "item_json"): "listed as a holder column",
 }
 

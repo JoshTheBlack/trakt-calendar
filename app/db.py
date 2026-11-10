@@ -4761,6 +4761,109 @@ ALTER TABLE linked_identities ADD COLUMN session_token TEXT;
                 folded)
 
 
+# 50 — passkeys, and the not-watching marks spelled in a namespace the title
+# store stopped keeping.
+#
+# A PASSKEY IS ONE MORE WAY INTO AN ACCOUNT THAT ALREADY EXISTS (app/auth/
+# passkeys.py). Nothing here is a secret: a credential id names a passkey, its
+# public key is public by definition, and the per-account handle a passkey
+# carries as its user id is random and names nobody — so nothing is sealed.
+#
+# THE MARKS. Simkl's calendar file names a title in spaces no other writer
+# keeps — `traktslug`, `tvdbslug`, `mdlslug` — and a not-watching mark made
+# before mark keys existed may be spelled in one of them (a show marked
+# `lazarus`, Simkl's tvdb name for Nocturne). The calendar matched such a mark
+# through those spaces on the card's ids, which come from the store. Every
+# writer now files a group's ids in one spelling that keeps none of them
+# (app/metadata/ids.py), so the match would end, and the show come back. So a
+# mark no spelling the store still keeps matches, equal to one of those names
+# on exactly ONE stored title, is rewritten to that title's key — the key a
+# card's `mark_key` is. A name on two titles is left alone (rewriting it would
+# hide a title the viewer may never have marked), and so is one nothing names
+# (it matches nothing today either). Run once, where 49's copy of every group's
+# ids still holds the names exactly as the listings filed them.
+_M50_PASSKEYS = """
+CREATE TABLE passkeys (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    -- the authenticator's credential id, base64url: what a sign-in names
+    credential_id TEXT    NOT NULL UNIQUE,
+    -- the COSE public key. Public by definition, so not sealed.
+    public_key    BLOB    NOT NULL,
+    sign_count    INTEGER NOT NULL DEFAULT 0,
+    -- the transports the browser reported, for the next prompt's hints
+    transports    TEXT    NOT NULL DEFAULT '[]',
+    name          TEXT    NOT NULL,
+    -- the authenticator's backup state: a synced passkey, or one device's
+    backed_up     INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL,
+    last_used_at  INTEGER
+);
+CREATE INDEX ix_passkeys_user ON passkeys(user_id);
+-- the random per-account handle a passkey carries as its user id
+ALTER TABLE users ADD COLUMN passkey_handle TEXT;
+CREATE UNIQUE INDEX ux_users_passkey_handle ON users(passkey_handle)
+    WHERE passkey_handle IS NOT NULL;
+"""
+
+# The spellings a title is still matched by once its groups' ids are filed in
+# one spelling (calendar/state.py's `mark_spellings`): its key, the key each
+# shared id spells, each service's own name for it and its own id.
+_M50_SHARED = ("tmdb", "tvdb", "imdb", "mal")
+_M50_NAMES = ("slug", "simkl_slug", "trakt_slug")
+_M50_RETIRED = ("traktslug", "tvdbslug", "mdlslug")
+
+
+def MIGRATION_50(conn: sqlite3.Connection) -> None:
+    _run_script(conn, _M50_PASSKEYS)
+
+    kept: set[str] = set()
+    retired: dict[str, set[str]] = {}
+    groups = ", ".join(f"{source}_id, {source}_ids_json" for source in _M49_SOURCES)
+    for row in conn.execute(f"SELECT title_key, media, ids_json, {groups} FROM titles"):
+        key, media = str(row[0]), str(row[1])
+        kept.add(key)
+        maps = [row[2]] + [row[4 + 2 * at] for at in range(len(_M49_SOURCES))]
+        for own in (row[3 + 2 * at] for at in range(len(_M49_SOURCES))):
+            if own not in (None, ""):
+                kept.add(str(own))
+        for text in maps:
+            try:
+                ids = json.loads(text or "{}")
+            except ValueError:
+                continue
+            if not isinstance(ids, dict):
+                continue
+            for name in _M50_SHARED:
+                if ids.get(name) not in (None, "", 0):
+                    kept.add(f"{media}:{name}:{ids[name]}")
+            for name in _M50_NAMES:
+                if ids.get(name) not in (None, ""):
+                    kept.add(str(ids[name]))
+            for name in _M50_RETIRED:
+                if ids.get(name) not in (None, ""):
+                    retired.setdefault(str(ids[name]), set()).add(key)
+
+    rewritten = ambiguous = 0
+    marks = conn.execute("SELECT user_id, item_id, created_at FROM not_watching_shows").fetchall()
+    for user_id, item_id, created_at in marks:
+        if item_id in kept or item_id not in retired:
+            continue
+        titles = retired[item_id]
+        if len(titles) != 1:
+            ambiguous += 1
+            continue
+        (key,) = titles
+        conn.execute("INSERT OR IGNORE INTO not_watching_shows (user_id, item_id, created_at) "
+                     "VALUES (?, ?, ?)", (user_id, key, created_at))
+        conn.execute("DELETE FROM not_watching_shows WHERE user_id = ? AND item_id = ?",
+                     (user_id, item_id))
+        rewritten += 1
+    logger.info("Migration 50: passkeys added; %d not-watching mark(s) spelled in a retired "
+                "Simkl namespace rewritten to their title's key, %d naming more than one "
+                "title left as they were", rewritten, ambiguous)
+
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -4811,6 +4914,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (47, MIGRATION_47),
     (48, MIGRATION_48),
     (49, MIGRATION_49),
+    (50, MIGRATION_50),
 ]
 
 
