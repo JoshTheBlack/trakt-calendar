@@ -102,8 +102,17 @@ def api_headers(settings: Settings, paginate: bool = True, *, account: bool = Tr
     A PER-TITLE LOOKUP KEEPS IT although it behaves the same way (a season
     lookup measured identically): a tracker read spends the ASKING ACCOUNT's own
     Trakt allowance rather than the instance's shared one, which
-    tests/distrakt/test_gating.py holds, and trading that for Trakt's cache is a
-    decision about rate limits rather than a fix.
+    tests/distrakt/test_gating.py holds. GOING WITHOUT IT WOULD SAVE NO
+    ALLOWANCE, because a Cloudflare HIT is counted like any other request.
+    MEASURED against the live API, 2026-11-09: 500 anonymous GETs of one show's
+    `extended=full`, every one a HIT (`age` hours old, `public, max-age=86400,
+    s-maxage=43200`), then the 501st refused — 429, `Retry-After: 300`,
+    Cloudflare's HTML page — and five uncached titles straight after refused the
+    same way. The limit is enforced at the edge and counts what the cache
+    answers. So an anonymous lookup only moves its cost from the viewer's own
+    500 to the 500 every calendar fill shares, for a faster first answer
+    (50-160 ms from the edge) that the shared response cache already makes
+    rare.
 
     THERE IS NO CHEAP WHOLE-LIBRARY READ BEHIND `paginate=False`, and this
     docstring used to claim there was. It said that omitting the pagination
