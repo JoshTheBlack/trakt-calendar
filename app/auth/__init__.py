@@ -62,9 +62,11 @@ from .levels import (DEPENDENCY_FOR_LEVEL, AuthError, AuthLevel, current_user, r
                      require_calendar, require_distrakt, require_ranker, require_session)
 from .lockout import (ATTEMPT_RETENTION_SECONDS, HANDSHAKE_MAX_ATTEMPTS, HANDSHAKE_WINDOW_SECONDS,
                       INVITE_MAX_ATTEMPTS, INVITE_WINDOW_SECONDS, LOGIN_IP_MAX_ATTEMPTS,
-                      LOGIN_MAX_ATTEMPTS, LOGIN_WINDOW_SECONDS, REGISTER_MAX_ATTEMPTS,
+                      LOGIN_MAX_ATTEMPTS, LOGIN_WINDOW_SECONDS, PASSKEY_MAX_ATTEMPTS,
+                      PASSKEY_WINDOW_SECONDS, REGISTER_MAX_ATTEMPTS,
                       REGISTER_WINDOW_SECONDS, check_lockout, clear_attempts, cooldown_remaining,
-                      handshake_start_limited, is_locked_out, rate_limited, record_attempt,
+                      handshake_start_limited, is_locked_out, passkey_start_limited,
+                      rate_limited, record_attempt,
                       record_registration_attempt, registration_rate_limited,
                       sweep_login_attempts)
 from .passwords import VerifyResult, burn_dummy_verify, hash_password, verify_password
@@ -88,7 +90,8 @@ __all__ = [
     "HandshakeError", "IDENTIFIER_RE", "INVITE_MAX_ATTEMPTS", "INVITE_WINDOW_SECONDS",
     "IdentityInUse", "IdentityWritesBlocked", "LOGIN_IP_MAX_ATTEMPTS", "LOGIN_MAX_ATTEMPTS",
     "LOGIN_WINDOW_SECONDS", "LastAdmin", "LastLoginMethod", "LoginOutcome",
-    "MIN_PASSWORD_LENGTH", "ProviderIdentity", "REFRESH_LEASE_SECONDS",
+    "MIN_PASSWORD_LENGTH", "PASSKEY_MAX_ATTEMPTS", "PASSKEY_WINDOW_SECONDS",
+    "ProviderIdentity", "REFRESH_LEASE_SECONDS",
     "REGISTER_MAX_ATTEMPTS", "REGISTER_WINDOW_SECONDS", "RESERVED_IDENTIFIERS",
     "RegistrationRefused", "SIGN_IN_HINT", "SIGN_IN_HINT_SECURE", "SESSION_ABSOLUTE_SECONDS", "SESSION_REFRESH_INTERVAL",
     "SESSION_SLIDING_SECONDS", "UserNotFound", "VerifyResult", "WIPE_DATA_TABLES", "WaysIn",
@@ -106,7 +109,8 @@ __all__ = [
     "insert_user_prefs", "invite_is_usable", "is_locked_out", "link_provider_identity",
     "list_identities", "list_invite_redemptions", "list_invites", "list_retired_identifiers",
     "list_users_overview", "login_with_provider_identity", "mark_logged_in",
-    "normalize_display_name", "parse_trusted_networks", "peek_handshake",
+    "normalize_display_name", "parse_trusted_networks", "passkey_start_limited",
+    "peek_handshake",
     "peer_is_trusted_proxy", "rate_limited", "read_handshake_cookie", "read_session_cookie",
     "record_attempt", "record_registration_attempt", "redeem_invite",
     "registration_rate_limited", "release_identity_refresh",

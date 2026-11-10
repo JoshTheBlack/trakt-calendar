@@ -408,7 +408,7 @@ class WhereTheyAreOfferedTests(PasskeyTestCase):
         self.assertEqual(self.client.post("/login/passkey/offer", json={}).status_code, 204)
 
     def test_throttled_the_button_is_not_drawn(self):
-        with patch.object(auth, "handshake_start_limited", return_value=True):
+        with patch.object(auth, "passkey_start_limited", return_value=True):
             resp, options = self.offer()
         self.assertIsNone(options)
         self.assertNotIn("passwordFold", unescape(resp.text))
@@ -419,6 +419,68 @@ class WhereTheyAreOfferedTests(PasskeyTestCase):
         page = self.client.get("/me").text
         self.assertIn("public base URL to be https", page)
         self.assertNotIn("/me/passkeys/begin", page)
+
+
+class ABudgetOfItsOwnTests(PasskeyTestCase):
+    """Every public passkey handshake — the sign-in page's offer and each
+    refusal's fresh button — is minted under one budget per address, apart from
+    the one the services' sign-in buttons share."""
+
+    def make_settings(self):
+        return Settings(simkl_public_calendar_enabled=False, public_base_url=ORIGIN,
+                        trakt_client_id="client-id", trakt_client_secret="client-secret")
+
+    def minted(self) -> int:
+        return asyncio.run(db.fetch_value(
+            "SELECT COUNT(*) FROM auth_handshakes WHERE provider = 'passkey'"))
+
+    def test_loading_the_sign_in_page_spends_none_of_the_services_budget(self):
+        for _ in range(auth.HANDSHAKE_MAX_ATTEMPTS):
+            _resp, options = self.offer()
+            self.assertIsNotNone(options)
+        resp = self.client.get("/auth/trakt/start", follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
+
+    def test_refusals_past_the_budget_mint_nothing_more(self):
+        answers =[self.client.post("/login/passkey",
+                                    json={"credential": "", "error": "NotAllowedError"})
+                   for _ in range(auth.PASSKEY_MAX_ATTEMPTS + 10)]
+        # bad credentials, straight through the per-address lockout
+        answers += [self.client.post("/login/passkey", json={"credential": "{}", "error": ""})
+                    for _ in range(auth.LOGIN_IP_MAX_ATTEMPTS + 10)]
+        self.assertEqual(self.minted(), auth.PASSKEY_MAX_ATTEMPTS)
+        self.assertIsNotNone(_attr(answers[auth.PASSKEY_MAX_ATTEMPTS - 1].text,
+                                   "data-passkey-get"))
+        last = unescape(answers[-1].text)
+        self.assertIsNone(_attr(last, "data-passkey-get"))
+        self.assertIn(passkeys.REFUSED, last)
+        self.assertIn("Passkey sign-in is paused", last)
+
+    def test_the_offer_stops_at_its_budget_and_the_services_start_goes_on(self):
+        for _ in range(auth.PASSKEY_MAX_ATTEMPTS):
+            asyncio.run(auth.record_attempt("passkey_ip", "testclient", True))
+        _resp, options = self.offer()
+        self.assertIsNone(options)
+        self.assertEqual(self.minted(), 0)
+        self.assertEqual(
+            self.client.get("/auth/trakt/start", follow_redirects=False).status_code, 303)
+
+    def test_a_refusal_over_budget_still_says_what_happened(self):
+        for _ in range(auth.PASSKEY_MAX_ATTEMPTS):
+            asyncio.run(auth.record_attempt("passkey_ip", "testclient", True))
+        resp = self.client.post("/login/passkey",
+                                json={"credential": "", "error": "NotAllowedError"})
+        text = unescape(resp.text)
+        self.assertIn("No passkey was used", text)
+        self.assertIn(f'data-passkey-origin="{ORIGIN}" hidden', text)
+        self.assertIsNone(_attr(text, "data-passkey-get"))
+
+    def test_a_refused_request_is_not_counted(self):
+        for _ in range(auth.PASSKEY_MAX_ATTEMPTS + 5):
+            self.offer()
+        self.assertEqual(asyncio.run(db.fetch_value(
+            "SELECT COUNT(*) FROM login_attempts WHERE key_type = 'passkey_ip'")),
+            auth.PASSKEY_MAX_ATTEMPTS)
 
 
 class TheSignInHintTests(PasskeyTestCase):
@@ -510,7 +572,7 @@ class TheSignInHintTests(PasskeyTestCase):
 
     def test_a_throttled_offer_opens_the_fold(self):
         self.client.cookies.set(auth.SIGN_IN_HINT_SECURE, "passkey")
-        with patch.object(auth, "handshake_start_limited", return_value=True):
+        with patch.object(auth, "passkey_start_limited", return_value=True):
             resp, options = self.offer()
         self.assertIsNone(options)
         self.assertIn('id="passwordFold" open', unescape(resp.text))

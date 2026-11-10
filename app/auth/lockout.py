@@ -40,6 +40,11 @@ INVITE_WINDOW_SECONDS = 60 * 60
 # minutes is far more than any human does and far less than a script wants.
 HANDSHAKE_MAX_ATTEMPTS = 30
 HANDSHAKE_WINDOW_SECONDS = 10 * 60
+# The passkey sign-in's handshakes: one for every load of the sign-in page and
+# one for every refused attempt, each a row and nothing more. As generous as the
+# services' starts and counted apart from them (passkey_start_limited says why).
+PASSKEY_MAX_ATTEMPTS = 30
+PASSKEY_WINDOW_SECONDS = 10 * 60
 # Old enough that no limiter above still needs the row, so one sweep interval
 # covers all three (plus the share-page limiter built on the same table).
 ATTEMPT_RETENTION_SECONDS = 24 * 60 * 60
@@ -179,6 +184,28 @@ async def handshake_start_limited(request: Request, settings: Settings | None = 
     )
     await record_attempt("handshake_ip", ip, True)
     return limited
+
+
+async def passkey_start_limited(request: Request, settings: Settings) -> bool:
+    """Whether this address has been handed too many passkey sign-in handshakes,
+    recording this one when it has not.
+
+    A BUDGET OF ITS OWN ('passkey_ip'), not the services' starts' above: the
+    sign-in page asks for a passkey button on every load, so sharing that budget
+    let thirty loads of the page refuse the Trakt button. Those starts share one
+    budget so nobody gets a second by alternating services, and one of them costs
+    an outbound call; this costs a row, and a page load must spend none of theirs.
+
+    COUNTS WHAT IT MINTS, so a refused request records nothing: the budget is a
+    bound on rows, and recording refusals would only hold the address shut for as
+    long as somebody kept asking (the reason `cooldown_remaining` gives).
+    """
+    ip = cookies.client_ip(request, settings)
+    if await rate_limited("passkey_ip", ip, max_attempts=PASSKEY_MAX_ATTEMPTS,
+                          window_seconds=PASSKEY_WINDOW_SECONDS):
+        return True
+    await record_attempt("passkey_ip", ip, True)
+    return False
 
 
 async def registration_rate_limited(ip: str, invite_token: str | None) -> bool:

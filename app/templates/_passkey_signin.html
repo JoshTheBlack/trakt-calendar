@@ -15,10 +15,18 @@
    passkey.js reveals it only where `location.origin` is that origin and the
    browser has the credential API.
 
-   THROTTLED, nothing is drawn — and a page that leads with a passkey opens its
-   password fold out of band, saying why. #}
+   THROTTLED, no button is drawn — only a refusal's sentence, saying passkeys are
+   paused — and a page that leads with a passkey opens its password fold out of
+   band, saying why. #}
 {% if throttled %}
+{% if message and not lead %}
+<div id="passkeySignIn" class="passkey-sign-in" data-passkey-origin="{{ origin }}" hidden>
+  <div class="auth-divider">or</div>
+  <p class="auth-error" role="alert">{{ message }} Passkey sign-in is paused for a few minutes.</p>
+</div>
+{% else %}
 <div id="passkeySignIn" hidden></div>
+{% endif %}
 {% if lead %}{{ password.fold(true, fold_open=true, oob=true,
                                fold_message='Passkey sign-in is paused for a few minutes. Use your password.') }}{% endif %}
 {% else %}

@@ -359,7 +359,11 @@ stolen session could otherwise add a passkey that outlives the password change
 meant to evict it; an account with no password is drawn the control disabled.
 Signing in: one sentence for every refusal (`passkeys.REFUSED`), failures on the
 per-address counter, a locked address refused uncounted, then the end every
-first-party sign-in shares (`routes._signed_in`). The sign-in page's button is
+first-party sign-in shares (`routes._signed_in`). Every public passkey handshake —
+the page's offer and each refusal's fresh button — is minted by one helper
+(`routes._passkey_button`) under a budget of its own
+(`lockout.passkey_start_limited`, `passkey_ip`), never the services' sign-in
+buttons' shared one: the page asks on every load, and thirty loads spent theirs. The sign-in page's button is
 asked for by passkey.js, not by an htmx `load` trigger: htmx wires a page before
 the deferred json-enc extension has run, so a `load`-triggered post goes out
 form-encoded and the shape guard refuses it (415, MEASURED) — true of any

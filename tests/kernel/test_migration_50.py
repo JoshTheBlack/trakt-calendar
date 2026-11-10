@@ -45,6 +45,7 @@ def _mark(conn, user_id: int, item_id: str, created_at: int = 7) -> None:
 class _Migrated(unittest.TestCase):
 
     NAME = "migration-50.db"
+    UP_TO_50 = [m for m in db.MIGRATIONS if m[0] <= 50]
 
     @classmethod
     def setUpClass(cls):
@@ -74,7 +75,8 @@ class _Migrated(unittest.TestCase):
         _mark(conn, 1, "show:tvdb:5", 1)
         _mark(conn, 1, "show:tmdb:999")
         cls.before = cls.marks()
-        cls.version = db.migrate_sync(conn)
+        with patch.object(db, "MIGRATIONS", cls.UP_TO_50):
+            cls.version = db.migrate_sync(conn)
 
     @classmethod
     def tearDownClass(cls):
@@ -146,5 +148,6 @@ class ThePasskeySchemaTests(_Migrated):
 
     def test_running_again_changes_nothing(self):
         before = self.marks()
-        self.assertEqual(db.migrate_sync(self.conn), 50)
+        with patch.object(db, "MIGRATIONS", self.UP_TO_50):
+            self.assertEqual(db.migrate_sync(self.conn), 50)
         self.assertEqual(self.marks(), before)

@@ -1202,7 +1202,17 @@ async def _passkey_button(request: Request, settings: Settings,
                           relying_party: passkeys.RelyingParty, *, lead: bool,
                           message: str = "") -> Response:
     """The "Sign in with a passkey" button, on a fresh handshake pinned to this
-    browser, with the sentence an attempt before it ended in."""
+    browser, with the sentence an attempt before it ended in.
+
+    EVERY PUBLIC PASSKEY HANDSHAKE IS MINTED HERE, the offer's and each refusal's,
+    under one budget per address of its own (`passkey_start_limited`, which says
+    why it is not the services' buttons' budget). Over it, no handshake and no
+    button: the sentence alone — and a page that leads with a passkey opens its
+    password fold, since there is nothing to lead with."""
+    if await auth.passkey_start_limited(request, settings):
+        return templates.TemplateResponse(request, "_passkey_signin.html", {
+            "request": request, "throttled": True, "origin": relying_party.origin,
+            "lead": lead, "message": message})
     state = await passkeys.start("login")
     response = templates.TemplateResponse(request, "_passkey_signin.html", {
         "request": request, "options": passkeys.sign_in_options(relying_party, state),
@@ -1215,10 +1225,8 @@ async def _passkey_button(request: Request, settings: Settings,
 async def offer_passkey_sign_in(request: Request):
     """The sign-in page's passkey button, asked for once the page has loaded.
 
-    THROTTLED LIKE EVERY SIGN-IN START (`handshake_start_limited`, one budget per
-    address across every service), because each answer is a handshake row. When
-    throttled no button is drawn — and a page that leads with a passkey opens its
-    password fold instead, with a sentence, since there is nothing to lead with.
+    Each answer is a handshake row, so it is throttled where every passkey
+    handshake is (`_passkey_button`).
 
     Loads settings without opening secrets, as /login does: nothing here needs
     one, and it must work while the at-rest key is wrong."""
@@ -1227,11 +1235,8 @@ async def offer_passkey_sign_in(request: Request):
     relying_party = passkeys.relying_party(settings)
     if relying_party is None:
         return Response(status_code=204)
-    lead = auth.leads_with_passkey(request, settings)
-    if await auth.handshake_start_limited(request, settings):
-        return templates.TemplateResponse(request, "_passkey_signin.html", {
-            "request": request, "throttled": True, "lead": lead})
-    return await _passkey_button(request, settings, relying_party, lead=lead)
+    return await _passkey_button(request, settings, relying_party,
+                                 lead=auth.leads_with_passkey(request, settings))
 
 
 @guard.post("/login/passkey", AuthLevel.PUBLIC)
@@ -1240,8 +1245,9 @@ async def sign_in_with_passkey(request: Request):
 
     EVERY REFUSAL IS ONE SENTENCE (passkeys.REFUSED) — an unknown or removed
     passkey, another account's, a bad signature, a disabled account and a locked
-    out address alike — and answers with a fresh button, so a refusal is never an
-    oracle for whether a passkey is known here. Failures count on the per-address
+    out address alike — and answers with a fresh button (within the passkey
+    handshakes' budget, `_passkey_button`), so a refusal is never an oracle for
+    whether a passkey is known here. Failures count on the per-address
     sign-in counter; a locked-out address is refused WITHOUT being counted, for
     the reason `login` gives; success clears it. A press the browser itself
     refused is not a failure and is not counted.

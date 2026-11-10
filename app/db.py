@@ -4864,6 +4864,40 @@ def MIGRATION_50(conn: sqlite3.Connection) -> None:
                 "title left as they were", rewritten, ambiguous)
 
 
+# 51 — a throttle key for the passkey sign-in's handshakes.
+#
+# Widen login_attempts.key_type to admit 'passkey_ip'. Every answer of the
+# sign-in page's passkey offer, and of every refused passkey sign-in, is a fresh
+# handshake row, and the sign-in page asks for one on every load — so they need a
+# budget, and it cannot be the one the services' sign-in buttons share
+# ('handshake_ip'): a page load would spend it, and thirty loads of the sign-in
+# page left the Trakt button answering "too many attempts". That budget is shared
+# so nobody gets a second one by alternating services, and a service's start can
+# cost an outbound call (Plex's); a passkey handshake costs a row and nothing
+# else, so it is counted apart (app/auth/lockout.py's `passkey_start_limited`).
+#
+# SQLite cannot alter a CHECK constraint in place, so the table is rebuilt
+# exactly as migrations 7, 14 and 41 rebuilt it, the rows copied across: a
+# rebuild that forgot an in-progress lockout would be a way to clear one.
+MIGRATION_51 = """
+CREATE TABLE login_attempts_new (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_type     TEXT    NOT NULL CHECK (key_type IN
+                     ('username', 'ip', 'register_ip', 'invite_ip', 'share_ip',
+                      'handshake_ip', 'ranker_search', 'ranker_export',
+                      'share_detail_fetch', 'passkey_ip')),
+    key_value    TEXT    NOT NULL,
+    attempted_at INTEGER NOT NULL,
+    succeeded    INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO login_attempts_new (id, key_type, key_value, attempted_at, succeeded)
+    SELECT id, key_type, key_value, attempted_at, succeeded FROM login_attempts;
+DROP TABLE login_attempts;
+ALTER TABLE login_attempts_new RENAME TO login_attempts;
+CREATE INDEX ix_login_attempts_lookup ON login_attempts(key_type, key_value, attempted_at);
+"""
+
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -4915,6 +4949,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (48, MIGRATION_48),
     (49, MIGRATION_49),
     (50, MIGRATION_50),
+    (51, MIGRATION_51),
 ]
 
 
