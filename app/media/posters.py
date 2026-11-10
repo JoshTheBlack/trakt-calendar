@@ -71,7 +71,7 @@ from PIL import Image
 
 from . import artwork
 from ..providers.trakt import calendar as trakt_calendar, transport as trakt_transport
-from .. import providers
+from .. import files, providers
 from ..config import DATA_DIR
 from ..perftrace import span
 from ..providers.base import Media, POSTER_PARAMS, Source, proxied_image
@@ -541,9 +541,8 @@ async def ensure_title_posters(settings, keys, order: tuple[str, ...] = DEFAULT_
 
 def _store_keyed(media: str, title_key: str, source: str, raw: bytes) -> Path:
     """`_store`, for a title with no tmdb id. In a worker thread, as `_store` is."""
-    _dir(media).mkdir(parents=True, exist_ok=True)
     tile = _key_tile_path(media, title_key, source)
-    tile.write_bytes(raw)
+    files.write_whole(tile, raw)
     logger.info("poster[%s/%s]: GENERATED from %s -> %s", media, title_key, source, tile.name)
     return tile
 
@@ -559,10 +558,11 @@ def _store(media: str, tmdb: int, source: str, raw: bytes, season: int | None = 
 
     RUN IN A WORKER THREAD by every caller: a tile is ~95 KB, and an export or a
     share card writes dozens of them, each of which would otherwise be a disk
-    write on the event loop every other request waits behind."""
-    _dir(media).mkdir(parents=True, exist_ok=True)
+    write on the event loop every other request waits behind. WRITTEN WHOLE
+    (app/files.py), because a share card and an export compositing the same
+    tile on other threads would otherwise read it half-written."""
     tile = _tile_path(media, tmdb, source, season)
-    tile.write_bytes(raw)
+    files.write_whole(tile, raw)
     logger.info("poster[%s/%s]: GENERATED from %s -> %s", media, tmdb, source, tile.name)
     return tile
 

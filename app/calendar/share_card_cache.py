@@ -39,6 +39,7 @@ import time
 from pathlib import Path
 
 from . import share_card
+from .. import files
 from ..config import DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -137,10 +138,13 @@ def store_render(path: Path, payload: bytes) -> None:
     Best-effort throughout: failing to cache an image the caller is already
     holding is not a reason to fail the request it is about to answer. Nothing is
     trimmed here — the heartbeat owns that, see `sweep`.
+
+    WRITTEN WHOLE (app/files.py): two unfurls of one link render at once, and
+    one reading the other's file mid-write served a broken card — which an
+    unfurler keeps.
     """
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(payload)
+        files.write_whole(path, payload)
     except OSError:
         logger.warning("Could not cache a share card at %s", path, exc_info=True)
 
