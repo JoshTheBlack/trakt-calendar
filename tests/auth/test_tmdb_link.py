@@ -138,7 +138,7 @@ class TheLinkTests(TmdbLinkTestCase):
     def test_an_approved_link_stores_the_grant_and_lands_on_the_account_page(self):
         state, _ = self.start()
         resp = self.callback(state)
-        self.assertEqual((resp.status_code, resp.headers["location"]), (303, "/me"))
+        self.assertEqual((resp.status_code, resp.headers["location"]), (303, "/me?tab=sign-in"))
         row = self.stored()
         self.assertEqual((row["provider_user_id"], row["display_name"]),
                          (ACCOUNT, "JoshTheBlack"))

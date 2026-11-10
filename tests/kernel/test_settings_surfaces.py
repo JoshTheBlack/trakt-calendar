@@ -67,10 +67,13 @@ class SelfServiceCredentialsTests(SettingsSurfaceTestCase):
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertIn("Username saved.", resp.text)
         self.assertEqual(asyncio.run(auth.get_user(user_id))["username"], "claimed")
-        # The form is gone, and the names and the heading beside it follow out of band.
+        # The answer is the names section, its form gone; the heading and the Sign-in
+        # tab's password section, whose line pointed here, follow out of band.
         self.assertNotIn('id="newUsername"', resp.text)
-        self.assertRegex(resp.text, r'id="accountNames" hx-swap-oob="outerHTML"')
+        self.assertRegex(resp.text, r'^\s*(?:<!--.*?-->\s*)?<div class="auth-list" id="accountNames"')
         self.assertRegex(resp.text, r'<h1 id="accountHeading" hx-swap-oob="outerHTML">claimed</h1>')
+        self.assertRegex(resp.text, r'id="accountCredentials"[^>]*hx-swap-oob="outerHTML"')
+        self.assertNotIn('choose one on Profile', resp.text)
 
     def test_changing_an_existing_username_is_not_self_service(self):
         """A username is a public identifier — it is what /u/<name> links are

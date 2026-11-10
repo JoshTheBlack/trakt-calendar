@@ -4,21 +4,33 @@
 
    The display name's form answers with this section drawn from what was STORED —
    whitespace collapsed — and the heading out of band, since the heading is the
-   same name. A username claimed from the credentials section redraws this one out
-   of band too (`names_oob`), because this is where the username row is. #}
-<div class="auth-list" id="accountNames"{% if names_oob %} hx-swap-oob="outerHTML"{% endif %}>
+   same name.
+
+   CLAIMING A USERNAME is here too, for an account made through Plex, Trakt or
+   Simkl that has none. Offered once; changing it afterwards stays with an
+   administrator, because it is what /u/<name> share links are built from. A
+   claim answers with this section and the heading out of band, as a display name
+   does. #}
+<div class="auth-list" id="accountNames" hx-target="#accountNames" hx-swap="outerHTML">
   <div class="row">
     <span class="label">Username</span>
     <span class="auth-badge off">{{ user.username or "Not set" }}</span>
   </div>
+  {% if not user.username %}
+  <form class="auth-inline-form" hx-post="/me/username" hx-json-enc hx-boost="false">
+    <label for="newUsername">Choose a username</label>
+    <input type="text" id="newUsername" name="username" autocomplete="username" spellcheck="false"
+           placeholder="your-name" required>
+    <button class="btn-ghost tiny" type="submit">Save</button>
+  </form>
+  {% endif %}
   <div class="row">
     <span class="label">Display name</span>
     <span class="auth-badge {{ 'ok' if user.display_name else 'off' }}">
       {{ user.display_name or "Using your username" }}
     </span>
   </div>
-  <form class="auth-inline-form" hx-post="/me/display-name" hx-json-enc hx-boost="false"
-        hx-target="#accountNames" hx-swap="outerHTML">
+  <form class="auth-inline-form" hx-post="/me/display-name" hx-json-enc hx-boost="false">
     <label for="newDisplayName">Change your display name</label>
     {# Capitals and spaces are the reason this field exists, so nothing here
        lowercases or strips them. Left empty, it clears the name and the
@@ -31,6 +43,8 @@
   </form>
   <p class="auth-sub">Shown on your account and used by default on ranker exports.
     Leave it empty to go back to your username.</p>
-  <p class="auth-error" role="alert">{{ names_message }}</p>
+  <p class="auth-error{{ ' is-ok' if names_ok }}" role="{{ 'status' if names_ok else 'alert' }}">{{ names_message }}</p>
 </div>
 {% if names_changed %}{% with oob = true %}{% include '_account_heading.html' %}{% endwith %}{% endif %}
+{# A username claimed takes the Sign-in tab's "choose one on Profile" line away. #}
+{% if credentials_oob %}{% include '_account_credentials.html' %}{% endif %}

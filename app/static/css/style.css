@@ -2144,6 +2144,39 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
 .auth-provider-btn.ready { color: var(--text); cursor: pointer; text-decoration: none; }
 .auth-provider-btn.ready:hover { background: rgba(255,255,255,0.07); border-color: var(--gold-soft); }
 
+/* THE ACCOUNT PAGE'S TABS: radios and these rules, as the tracker's are. The
+   radios sit outside the card (auth_me.html says why), so a panel and a label are
+   chosen by `:has()` on the element holding both. */
+.account-tab-radio { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.account-tab-strip {
+    display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--card-border);
+}
+.account-tab {
+    border-bottom: 2px solid transparent; color: var(--text-dim); padding: 9px 16px;
+    cursor: pointer; font-size: 0.9rem; font-weight: 600;
+}
+.account-tab:hover { color: var(--text); }
+.account-panel { display: none; flex-direction: column; gap: 18px; }
+#accountTabs:has(#account-tab-sign-in:checked) [data-account-panel="sign-in"],
+#accountTabs:has(#account-tab-profile:checked) [data-account-panel="profile"],
+#accountTabs:has(#account-tab-preferences:checked) [data-account-panel="preferences"] {
+    display: flex;
+}
+#accountTabs:has(#account-tab-sign-in:checked) .account-tab[for="account-tab-sign-in"],
+#accountTabs:has(#account-tab-profile:checked) .account-tab[for="account-tab-profile"],
+#accountTabs:has(#account-tab-preferences:checked) .account-tab[for="account-tab-preferences"] {
+    color: var(--gold-soft); border-bottom-color: var(--gold);
+}
+#accountTabs:has(#account-tab-sign-in:focus-visible) .account-tab[for="account-tab-sign-in"],
+#accountTabs:has(#account-tab-profile:focus-visible) .account-tab[for="account-tab-profile"],
+#accountTabs:has(#account-tab-preferences:focus-visible) .account-tab[for="account-tab-preferences"] {
+    outline: 2px solid var(--gold); outline-offset: -2px;
+}
+@media (max-width: 420px) { .account-tab { padding: 8px 10px; font-size: 0.84rem; } }
+/* A sentence pointing at another tab: a label for that tab's radio, drawn as a link. */
+.auth-tab-link { color: var(--accent-blue); cursor: pointer; }
+.auth-tab-link:hover { text-decoration: underline; }
+
 /* THE PASSKEY BUTTON, from the sign-in page's load POST (_passkey_signin.html):
    a column like the service buttons, its divider inside it so a page with no
    button draws no stray "or". Leading the page, it is the gold one. */

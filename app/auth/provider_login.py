@@ -252,7 +252,8 @@ async def _link(*, identity: auth.ProviderIdentity, current, already_linked: str
     except auth.IdentityWritesBlocked:
         return Refusal(KEY_UNHEALTHY, key_unhealthy, 409)
     await seed_provider_avatar(current.user_id, identity)
-    return LinkResult(user_id=current.user_id, redirect_target="/me")
+    # The account page's Sign-in tab, where the service just linked is listed.
+    return LinkResult(user_id=current.user_id, redirect_target="/me?tab=sign-in")
 
 
 # The instance's own token for a service, where it has one, by Settings field —

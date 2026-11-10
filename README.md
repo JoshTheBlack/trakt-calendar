@@ -138,7 +138,7 @@ docker run -p 8000:8000 -v trakt-data:/data \
 
 A passkey is one more way to sign in to an account that already exists, beside its password
 and its Trakt, Simkl or Plex sign-in — not a second factor, and not a way to create an
-account. Add one from the Account page: it asks for the account's current password first, so
+account. Add one from the Account page's Sign-in tab: it asks for the account's current password first, so
 an account made through Trakt, Simkl or Plex sets a password before it can add one. Each
 passkey can be renamed or removed there, and the last way into an account can't be removed.
 

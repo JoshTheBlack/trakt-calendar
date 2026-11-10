@@ -37,7 +37,7 @@
         </select>
     </div>
     <span class="hint">Name, view and remove saved images on your
-        <a href="/me">account page</a>. Uploading here saves it there too.</span>
+        <a href="/me?tab=profile">account page</a>. Uploading here saves it there too.</span>
     {# UPLOADING IS THE ONE THING LEFT THAT IS THE BROWSER'S, and only the reading
        part: the shape guard admits application/json alone, so the bytes reach the
        body as a field. The name, the submit and the answer are the form's — and
@@ -63,6 +63,6 @@
     </div>
     {% else %}
     <span class="hint">You have all {{ export_image_cap }} saved pictures. Remove one on your
-        <a href="/me">account page</a> to add another.</span>
+        <a href="/me?tab=profile">account page</a> to add another.</span>
     {% endif %}
 </div>

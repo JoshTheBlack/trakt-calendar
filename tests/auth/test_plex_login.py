@@ -571,7 +571,7 @@ class LinkOutcomeTests(PlexAuthTestCase):
     def test_linking_attaches_the_identity(self):
         user = self.make_user("linker", calendar_approved=True)
         self.sign_in_as(user)
-        self.assertSignedInTo(self.poll(self.start("/auth/plex/link")), "/me")
+        self.assertSignedInTo(self.poll(self.start("/auth/plex/link")), "/me?tab=sign-in")
         rows = self.identities()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["user_id"], user)
@@ -593,7 +593,7 @@ class LinkOutcomeTests(PlexAuthTestCase):
     def test_a_second_plex_account_is_refused_while_one_is_linked(self):
         user = self.make_user("linker", calendar_approved=True)
         self.sign_in_as(user)
-        self.assertSignedInTo(self.poll(self.start("/auth/plex/link")), "/me")
+        self.assertSignedInTo(self.poll(self.start("/auth/plex/link")), "/me?tab=sign-in")
         self.assertStopped(self.poll(self.start("/auth/plex/link", pin=_pin(pin_id=PIN_ID + 1)),
                                      account={"id": OTHER_PLEX_ID, "name": "second"}),
                            plex_routes.HOLDS_ANOTHER)

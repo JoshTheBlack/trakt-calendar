@@ -2,7 +2,14 @@
    several of its sections offer — unlinking a service reaches the order, the
    tracker notice and whether unlinking is still allowed. Every
    other action answers only its own section, each of which is its own template
-   included below. #}
+   included below.
+
+   THREE TABS (auth_me.html holds their radios and says why there): SIGN-IN —
+   the linked services, passkeys and the password, which decide each other (a
+   passkey needs a password first; what may be unlinked depends on both); PROFILE
+   — who the account is: its picture, saved images, names and what it has been
+   granted; PREFERENCES — how the account reads things. The notices stay above the
+   strip, so they are seen whichever tab is open. #}
 <div class="auth-card" id="accountCard">
   {% include '_account_heading.html' %}
 
@@ -23,68 +30,80 @@
   <p class="auth-notice"><strong>Connect {{ tracker_services_missing | join(' or ') }}
     to finish setting up distrakt.</strong>
     It reads your own watch history with your own token, so it has nothing to read
-    until one of the accounts below is connected.</p>
+    until one of your accounts is connected, on the
+    <label class="auth-tab-link" for="account-tab-sign-in">Sign-in</label> tab.</p>
   {% endif %}
 
-  {% include '_account_avatar.html' %}
+  <nav class="account-tab-strip" aria-label="Account sections">
+    {%- for tab in account_tabs %}
+    <label class="account-tab" for="account-tab-{{ tab.key }}">{{ tab.label }}</label>
+    {%- endfor %}
+  </nav>
 
-  {# RANKER IMAGES. The pictures an exported poster grid can carry at its top
-     instead of the profile picture. They live here rather than only inside the
-     export dialog because they belong to the account, not to one export: this
-     is where you can see what you have, tell them apart by name, and get rid
-     of one. Deliberately unexplained on screen — the thumbnails say what they
-     are, and the export dialog is where the choice is actually made. #}
-  {% include "_user_images.html" %}
+  <div class="account-panel" data-account-panel="sign-in">
+    {% include '_account_identities.html' %}
+    {% include '_account_passkeys.html' %}
+    {% include '_account_credentials.html' %}
+  </div>
 
-  {% include '_account_names.html' %}
+  <div class="account-panel" data-account-panel="profile">
+    {% include '_account_avatar.html' %}
 
-  <div class="auth-list">
-    <div class="row">
-      <span class="label">Calendar access</span>
-      <span class="auth-badge {{ 'ok' if user.calendar_approved else 'pending' }}">
-        {{ "Approved" if user.calendar_approved else "Pending" }}
-      </span>
-    </div>
-    {# Rendered either way, unlike the two rows below: the ranker is a normal
-       visible feature, so an account that hasn't been granted it yet is better
-       told that this is where the answer will appear than left wondering why
-       a link it saw mentioned refuses. #}
-    <div class="row">
-      <span class="label">Rankings access</span>
-      <span class="auth-badge {{ 'ok' if user.ranker_approved else 'pending' }}">
-        {{ "Approved" if user.ranker_approved else "Pending" }}
-      </span>
-    </div>
-    {# Both rows are rendered ONLY when the answer is yes. distrakt is an
-       easter egg — telling someone it exists and they can't have it is worse
-       than not mentioning it, and "Not granted" is exactly that disclosure.
-       "Administrator: No" is the same shape of non-information for everybody
-       who isn't one. #}
-    {% if user.distrakt_approved %}
-    <div class="row">
-      <span class="label">distrakt access</span>
-      <span class="auth-badge ok">Approved</span>
-    </div>
-    {% endif %}
-    {% if user.is_admin %}
-    <div class="row">
-      <span class="label">Administrator</span>
-      <span class="auth-badge ok">Yes</span>
-    </div>
-    {% endif %}
-    <div class="row">
-      <span class="label">Timezone</span>
-      <span class="auth-badge off">{{ user.timezone or "Instance default" }}</span>
+    {# RANKER IMAGES. The pictures an exported poster grid can carry at its top
+       instead of the profile picture. They live here rather than only inside the
+       export dialog because they belong to the account, not to one export: this
+       is where you can see what you have, tell them apart by name, and get rid
+       of one. Deliberately unexplained on screen — the thumbnails say what they
+       are, and the export dialog is where the choice is actually made. #}
+    {% include "_user_images.html" %}
+
+    {% include '_account_names.html' %}
+
+    <div class="auth-list">
+      <div class="row">
+        <span class="label">Calendar access</span>
+        <span class="auth-badge {{ 'ok' if user.calendar_approved else 'pending' }}">
+          {{ "Approved" if user.calendar_approved else "Pending" }}
+        </span>
+      </div>
+      {# Rendered either way, unlike the two rows below: the ranker is a normal
+         visible feature, so an account that hasn't been granted it yet is better
+         told that this is where the answer will appear than left wondering why
+         a link it saw mentioned refuses. #}
+      <div class="row">
+        <span class="label">Rankings access</span>
+        <span class="auth-badge {{ 'ok' if user.ranker_approved else 'pending' }}">
+          {{ "Approved" if user.ranker_approved else "Pending" }}
+        </span>
+      </div>
+      {# Both rows are rendered ONLY when the answer is yes. distrakt is an
+         easter egg — telling someone it exists and they can't have it is worse
+         than not mentioning it, and "Not granted" is exactly that disclosure.
+         "Administrator: No" is the same shape of non-information for everybody
+         who isn't one. #}
+      {% if user.distrakt_approved %}
+      <div class="row">
+        <span class="label">distrakt access</span>
+        <span class="auth-badge ok">Approved</span>
+      </div>
+      {% endif %}
+      {% if user.is_admin %}
+      <div class="row">
+        <span class="label">Administrator</span>
+        <span class="auth-badge ok">Yes</span>
+      </div>
+      {% endif %}
+      <div class="row">
+        <span class="label">Timezone</span>
+        <span class="auth-badge off">{{ user.timezone or "Instance default" }}</span>
+      </div>
     </div>
   </div>
 
-  {% include '_account_identities.html' %}
-
-  {% with order_kind = 'metadata_order' %}{% include '_account_order.html' %}{% endwith %}
-
-  {% include '_account_sharing.html' %}
-  {% include '_account_passkeys.html' %}
-  {% include '_account_credentials.html' %}
+  <div class="account-panel" data-account-panel="preferences">
+    {% with order_kind = 'metadata_order' %}{% include '_account_order.html' %}{% endwith %}
+    {% include '_account_sharing.html' %}
+  </div>
 
   {# Both actions that used to sit here — open the calendar, sign out — are in
      the header now, where they are on every other page too. #}

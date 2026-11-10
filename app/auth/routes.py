@@ -656,8 +656,11 @@ async def me_page(request: Request):
     calendar_approved lands here from /login and stays here whenever they try
     to reach a gated route."""
     user = await auth.require_session(request)
+    keys = [tab["key"] for tab in ACCOUNT_TABS]
+    asked = request.query_params.get("tab")
     return templates.TemplateResponse(
-        request, "auth_me.html", await _account_context(request, user.session_id))
+        request, "auth_me.html", await _account_context(
+            request, user.session_id, account_tab=asked if asked in keys else keys[0]))
 
 
 # ---------------------------------------------------------------------------
@@ -679,6 +682,14 @@ async def me_page(request: Request):
 # A REFUSAL IS A SENTENCE IN THE SECTION, at 200. A non-200 is never swapped, so a
 # statused refusal would be a press that did nothing.
 
+# THE ACCOUNT PAGE'S TABS, in the order the strip draws them; the first is the one
+# a bare /me opens on. `?tab=` names another — the way back from linking a service
+# names Sign-in — and a name not here opens the first.
+ACCOUNT_TABS = (
+    {"key": "sign-in", "label": "Sign-in"},
+    {"key": "profile", "label": "Profile"},
+    {"key": "preferences", "label": "Preferences"},
+)
 ACCOUNT_SECTIONS = {
     "avatar": "_account_avatar.html",
     "names": "_account_names.html",
@@ -732,6 +743,7 @@ async def _account_context(request: Request, session_id: str, **notes) -> dict:
         # is_admin, calendar_available, ranker_available, version, build
         # for the shared header.
         **chrome.page_context(user),
+        "account_tabs": ACCOUNT_TABS,
         # This page gates the tracker's menu item server-side rather than leaving
         # it to CSS — it must not mention the tracker at all to an account without
         # the grant. Same two conditions the tracker's own access level enforces.
@@ -1034,27 +1046,28 @@ async def set_own_username(request: Request):
     free the old name for somebody else to claim. That path stays with an
     administrator, who has the retired-identifier machinery to do it safely.
 
-    Answered with the credentials section, and the heading and the names beside it
-    out of band — the heading falls back to a username, and the names row shows it.
+    Answered with the names section, where the form is, and the heading out of
+    band — it falls back to a username — and the Sign-in tab's password section,
+    whose "choose one on Profile" line a claim takes away.
     """
     user = await auth.require_session(request)
     data = await authz.json_body(request)
     account = await auth.get_user(user.user_id)
     if account and account["username"]:
-        return await _section(request, user.session_id, "credentials", credentials_message=(
+        return await _section(request, user.session_id, "names", names_message=(
             "You already have a username. An administrator can change it."))
     username = str(data.get("username") or "").strip().lower()
     if err := await auth.username_availability_error(username):
-        return await _section(request, user.session_id, "credentials", credentials_message=err)
+        return await _section(request, user.session_id, "names", names_message=err)
     try:
         await auth.admin_set_username(user.user_id, username)
     except db.IntegrityError:
         # Lost a race between the availability check and this write; the UNIQUE
         # column is the real arbiter, exactly as registration treats it.
-        return await _section(request, user.session_id, "credentials",
-                              credentials_message="That username is taken.")
-    return await _section(request, user.session_id, "credentials", names_changed=True,
-                          credentials_ok=True, credentials_message="Username saved.")
+        return await _section(request, user.session_id, "names",
+                              names_message="That username is taken.")
+    return await _section(request, user.session_id, "names", names_changed=True,
+                          credentials_oob=True, names_ok=True, names_message="Username saved.")
 
 
 @guard.post("/me/display-name", AuthLevel.SESSION)
