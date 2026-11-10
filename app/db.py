@@ -49,7 +49,7 @@ import sqlite3
 import threading
 import time
 import weakref
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple, TypeVar
@@ -528,7 +528,8 @@ def _report_hold(fn: Callable, held_from: float) -> None:
 
 
 def aggregated(conn: sqlite3.Connection, columns: Sequence[str], source_sql: str,
-               params: Sequence[Any] | Mapping[str, Any] = ()) -> list[list]:
+               params: Sequence[Any] | Mapping[str, Any] = (), *,
+               exact: Collection[int] = ()) -> list[list]:
     """The rows `source_sql` (a FROM … clause) finds, as lists of `columns`
     (SQL expressions) in the order a plain SELECT would return them — read in
     ONE aggregated row.
@@ -538,15 +539,51 @@ def aggregated(conn: sqlite3.Connection, columns: Sequence[str], source_sql: str
     another thread is busy. MEASURED on a copy of dev's restart burst, a month's
     19,607 episode rows took 5.6–7.0 s to read that way and 0.14 s idle; read
     as one row it is one step, and the parse of its 3 MB holds the lock 54 ms.
-    A REAL keeps the 15 significant digits SQLite's JSON spells it with — whole
-    epoch seconds and ratings are exact."""
-    (found,) = conn.execute(aggregated_sql(columns, source_sql), params).fetchone()
-    return json.loads(found) if found else []
+
+    A REAL COMES BACK WITH THE 15 SIGNIFICANT DIGITS SQLite's JSON spells it
+    with: an epoch second is exact, a service's rating is not (Trakt states
+    8.893616676330566, and this reads 8.89361667633057). Harmless to a read that
+    only draws or decides; wrong for one whose values are WRITTEN BACK — the
+    title store's re-key rewrote a merged title's episode rows from such a read
+    (app/metadata/merge.py), and on the production pull's first start the
+    conversion's accounting found a Trakt rating that was no longer the one
+    stored. Such a reader names the columns that may hold a REAL (`exact`, their
+    positions in `columns`), and those come back as the float a plain SELECT
+    gives. Only those, and only for such a reader: MEASURED on a copy of dev, a
+    week's whole episode rows read 74 ms plain, 87 ms with its five REAL
+    columns exact and 278 ms with every column spelled; the calendar's month
+    read, which writes nothing it reads, passes none."""
+    exact = sorted(set(exact))
+    (found,) = conn.execute(aggregated_sql(columns, source_sql, exact=exact),
+                            params).fetchone()
+    rows = json.loads(found) if found else []
+    if not exact:
+        return rows
+    for row in rows:
+        reals = row.pop()
+        for at, real in zip(exact, reals):
+            if real == "1":
+                row[at] = float(row[at])
+    return rows
 
 
-def aggregated_sql(columns: Sequence[str], source_sql: str) -> str:
-    """The one statement `aggregated` runs."""
-    return f"SELECT json_group_array(json_array({', '.join(columns)})) {source_sql}"
+def aggregated_sql(columns: Sequence[str], source_sql: str, *,
+                   exact: Collection[int] = ()) -> str:
+    """The one statement `aggregated` runs. Each column `exact` names is spelled,
+    when it holds a REAL, with the 17 significant digits that bring a double
+    back unchanged (printf's `%!.17g`, as text), and a last column says which
+    of them did, one "1" or "0" each — a flag rather than SQLite's JSON subtype,
+    whose passage through CASE differs between SQLite versions, so every
+    version reads the spelling as the string it is."""
+    exact = sorted(set(exact))
+    selected = list(columns)
+    if exact:
+        for at in exact:
+            selected[at] = (f"CASE typeof({columns[at]}) WHEN 'real' "
+                            f"THEN printf('%!.17g', {columns[at]}) ELSE {columns[at]} END")
+        selected.append("'' || " + " || ".join(f"(typeof({columns[at]}) = 'real')"
+                                               for at in exact))
+    return f"SELECT json_group_array(json_array({', '.join(selected)})) {source_sql}"
 
 
 async def fetch_one(sql: str, params: Sequence[Any] = ()) -> sqlite3.Row | None:

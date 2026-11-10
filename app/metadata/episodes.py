@@ -518,10 +518,16 @@ def _aggregated(conn: db.Connection, source_sql: str, params) -> list[dict]:
     """The episode rows `source_sql` (a FROM … clause over `e`) finds, whole,
     read in ONE aggregated row (db.aggregated says why) — the reads a write
     makes inside its lock (a merge, the titles a merge reshaped) and a window's
-    span its store decides from."""
+    span its store decides from. EXACT IN EVERY COLUMN THE SCHEMA DECLARES REAL,
+    because a merge writes these rows back whole (app/metadata/merge.py): a
+    rating comes back as stored, not as the 15 digits an aggregated read
+    otherwise spells it with."""
     names = _whole_rows()
+    reals = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({tables.EPISODES})")
+             if str(row[2]).upper() == "REAL"}
     return [dict(zip(names, values))
-            for values in db.aggregated(conn, [f"e.{n}" for n in names], source_sql, params)]
+            for values in db.aggregated(conn, [f"e.{n}" for n in names], source_sql, params,
+                                        exact=[at for at, n in enumerate(names) if n in reals])]
 
 
 def listing_names() -> list[str]:

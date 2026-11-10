@@ -140,6 +140,27 @@ class ARekeyMergesEachServicesGroupTests(DatabaseTestCase):
         self.assertEqual((row["trakt_air_ts"], row["tmdb_air_ts"]),
                          (at("2026-10-01"), at("2026-10-02")))
 
+    async def test_an_episodes_words_move_exactly_as_stored(self):
+        """A merge writes both titles' episode rows back whole, so what it read
+        them as is what is stored: Trakt states a rating to seventeen digits,
+        and one read through SQLite's JSON spelling came back with fifteen."""
+        rating = 8.893616676330566
+
+        def _hold(conn):
+            put_title(conn, "trakt", "show", "t", OLD, ids={"trakt": 7})
+            put_listing(conn, "trakt", "show", "t", "shows", OLD, at("2026-10-01"),
+                        season=1, number=2)
+            conn.execute(f"UPDATE {tables.EPISODES} SET trakt_rating = ?, trakt_votes = 47, "
+                         "trakt_fetched_at = ? WHERE title_key = ? AND unit = 'S1E2'",
+                         (rating, NOW, OLD))
+            put_title(conn, "tmdb", "show", "900", NEW)
+
+        await db.transaction(_hold)
+        await self.merge()
+        row = await _row(NEW, "S1E2")
+        self.assertEqual((row["trakt_rating"], row["trakt_votes"], row["trakt_air_ts"]),
+                         (rating, 47, at("2026-10-01")))
+
     async def test_one_services_two_listings_of_an_episode_are_a_listing_and_a_repeat(self):
         def _hold(conn):
             put_title(conn, "simkl", "show", "55", OLD)

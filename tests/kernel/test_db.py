@@ -1352,6 +1352,35 @@ class PragmaTests(DbTestCase):
         self.assertTrue(all(fk == 1 and str(jm).lower() == "wal" for fk, jm in results))
 
 
+class AggregatedReadTests(unittest.TestCase):
+    """db.aggregated reads every row as one: SQLite's JSON spells a REAL with 15
+    significant digits, so the columns a reader names `exact` come back as a
+    plain SELECT gives them — and only those cost the spelling."""
+
+    def setUp(self):
+        self.conn = __import__("sqlite3").connect(":memory:")
+        self.conn.execute("CREATE TABLE t (rating REAL, name TEXT, n INTEGER, at REAL)")
+        self.rows = [(8.893616676330566, "one", 3, 1791673200.0), (0.1, "two", None, None),
+                     (None, "8.25", 7, -2.5)]
+        self.conn.executemany("INSERT INTO t VALUES (?, ?, ?, ?)", self.rows)
+        self.columns = ["rating", "name", "n", "at"]
+
+    def test_a_plain_read_spells_a_rating_with_fifteen_digits(self):
+        read = db.aggregated(self.conn, self.columns, "FROM t ORDER BY rowid")
+        self.assertEqual(read[0][0], 8.89361667633057)
+
+    def test_the_exact_columns_come_back_as_a_select_gives_them(self):
+        read = db.aggregated(self.conn, self.columns, "FROM t ORDER BY rowid", exact=[0, 3])
+        self.assertEqual([tuple(row) for row in read], self.rows)
+
+    def test_a_text_column_is_never_read_as_a_number(self):
+        read = db.aggregated(self.conn, self.columns, "FROM t ORDER BY rowid", exact=[0, 1])
+        self.assertEqual(read[2][1], "8.25")
+
+    def test_nothing_found_is_no_rows(self):
+        self.assertEqual(db.aggregated(self.conn, self.columns, "FROM t WHERE 0", exact=[0]), [])
+
+
 class HelperTests(DbTestCase):
     async def test_execute_reports_lastrowid_and_rowcount(self):
         now = db.now()
