@@ -154,8 +154,8 @@ class WhatARequestStartsBehindItStartsOnceItHasAnsweredTests(unittest.TestCase):
         from app.config import Settings
         view = SimpleNamespace(endpoint=SimpleNamespace(key="shows"), year=2026, month=10)
         with patch.object(share_routes, "_warm_job", self._nothing), \
-                patch.object(share_routes, "select_tile_items", lambda visible: visible), \
-                patch.object(share_routes, "_poster_refs", lambda items: [("item", "ref")]), \
+                patch.object(share_routes, "_wanted",
+                             lambda items, featured: ([], [("item", "ref")])), \
                 patch.object(share_routes, "_warming", set()):
             self.assertEqual(self._order(lambda events: share_routes._spawn_poster_warm(
                 view, 1, [], Settings(), ("tmdb",))), ["sent", "task"])

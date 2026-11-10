@@ -1,7 +1,8 @@
 """Per-user JSON export / restore of the whole tracker dataset.
 
 The export is one user's complete distrakt data — every month, roster row,
-watch-state row, per-season progress, movie watch and emoji mapping — as a single
+watch-state row, per-season progress, movie watch, emoji mapping and the shows
+each month's share picture features — as a single
 document carrying a schema version. Restore is the inverse: REPLACE (not merge),
 in one transaction, scoped to the requesting user.
 """
@@ -11,9 +12,10 @@ import json
 import logging
 
 from .. import db, metadata
+from ..calendar import share_highlights
 from ..metadata import descriptions
 from ..metadata import labels as title_labels
-from ..providers.base import Media, collect_ids, item_key, resolve_key
+from ..providers.base import Media, collect_ids, item_key, parse_item_key, resolve_key
 from . import store
 from .store import IDENTITY_COLUMNS, MONTH_RECORD_COLUMNS, USER_RECORD_COLUMNS
 
@@ -79,6 +81,13 @@ _EXPORT_TABLES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # that nothing seeds it, so a restore that dropped it would lose work that
     # cannot be recovered from anywhere else.
     ("distrakt_prefs", ("network_emojis_json", "default_network_emoji", "updated_at")),
+    # THE SHOWS EACH MONTH'S SHARE PICTURE FEATURES (app/calendar/share_highlights.py),
+    # chosen on the tracker's own rows. They travel because they are the viewer's
+    # choices, like the emoji map, and nothing could choose them again; a restore
+    # files each under the key its title answers to now (see `_work` below).
+    # Not a version bump: a document without the table leaves the highlights
+    # alone, and an older instance ignores a table it does not know.
+    ("share_highlights", ("year", "month", "title_key", "position", "created_at")),
 )
 # DELIBERATELY NOT HERE, AND SO NEITHER EXPORTED NOR REPLACED BY A RESTORE:
 #   watchlist_targets and watchlist_writes (app/distrakt/watchlist_writes.py) —
@@ -393,6 +402,8 @@ async def restore_user_data(user_id: int, doc: dict) -> None:
         if not isinstance(rows, list):
             raise RestoreError(f"{table} must be a list")
         payload[table] = rows
+    if "share_highlights" in payload:
+        payload["share_highlights"] = _restored_highlights(payload["share_highlights"])
     titles = _restored_titles(payload)
 
     def _work(conn: db.Connection) -> None:
@@ -448,7 +459,12 @@ _RESTORED_IDS = {"trakt_id": "trakt", "simkl_id": "simkl", "tmdb": "tmdb", "tvdb
 
 
 def _restored_titles(payload: dict[str, list]) -> dict[str, tuple[str, dict]]:
-    """{key a restored row is filed under: (media, every id those rows state)}."""
+    """{key a restored row is filed under: (media, every id those rows state)}.
+
+    A FEATURED SHOW is filed by its title key alone (share_highlights.title_key),
+    and that key is a shared id in its own space — "show:tmdb:1396" is tmdb
+    1396 — so it is registered by the id it spells, beside whatever the tracker's
+    own rows state of the same title."""
     out: dict[str, tuple[str, dict]] = {}
     for rows in payload.values():
         for row in rows:
@@ -459,4 +475,26 @@ def _restored_titles(payload: dict[str, list]) -> dict[str, tuple[str, dict]]:
             for column, name in _RESTORED_IDS.items():
                 if row.get(column) not in (None, ""):
                     held.setdefault(name, row[column])
+    for row in payload.get("share_highlights") or []:
+        try:
+            spelled = parse_item_key(row.get("title_key"))
+        except ValueError:
+            continue
+        held = out.setdefault(str(spelled), (spelled.media, {}))[1]
+        held.setdefault(spelled.match_source, spelled.match_id)
     return out
+
+
+def _restored_highlights(rows: list) -> list:
+    """The featured shows a document restores: at most the most a month may
+    feature (share_highlights.MAX_HIGHLIGHTS) for each month, in the order they
+    were chosen — a document is a file a person can edit, and the write that
+    holds the limit everywhere else is not the one a restore makes."""
+    kept: dict[tuple, list] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise RestoreError("share_highlights rows must be objects")
+        kept.setdefault((row.get("year"), row.get("month")), []).append(row)
+    return [row for month in kept.values()
+            for row in sorted(month, key=lambda r: (r.get("position") or 0))
+            [:share_highlights.MAX_HIGHLIGHTS]]

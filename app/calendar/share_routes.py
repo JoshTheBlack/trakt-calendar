@@ -26,9 +26,10 @@ from __future__ import annotations
 import asyncio
 import calendar as _calendar
 import dataclasses
+import hashlib
 import json
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from itertools import groupby
@@ -42,7 +43,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 
 from . import (cache as calendar_cache, resolve as calendar_resolve,
-               share_card, share_card_cache, share_code, share_links,
+               share_card, share_card_cache, share_code, share_highlights, share_links,
                state as calendar_state, vocab)
 from .. import (after_response, auth, authz, chrome, clock, details_panel, perftrace,
                 route_params, templating)
@@ -475,13 +476,18 @@ async def _render(request: Request, share_row) -> Response:
     with span("share.not_watching"):
         nw_ids = await calendar_state.not_watching_ids(owner_id)
     visible = _visible_items(items, view, nw_ids)
+    # What the card of this view features (share_highlights). Read here only for
+    # the card's sake — its warm-up and its address below; the page draws the
+    # same month whatever the owner featured.
+    featured = await share_highlights.for_card(owner_id, view.endpoint.key,
+                                               view.year, view.month)
 
     # Start resolving the artwork this month's preview picture will want, and do
     # not wait for it: a crawler fetches the page first and the picture second,
     # so by the time anyone asks for the card the posters are usually already on
     # disk.
     _spawn_poster_warm(view, owner_id, visible, settings,
-                       _poster_order(await source_prefs.load(owner_id)))
+                       _poster_order(await source_prefs.load(owner_id)), featured)
 
     grouped = [
         {"date": day, "label": datetime.strptime(day, "%Y-%m-%d").strftime("%A, %d %B"), "items": list(rows)}
@@ -496,7 +502,7 @@ async def _render(request: Request, share_row) -> Response:
     # origin. Absent a configured base there is nothing safe to advertise, so
     # the tags are simply omitted and the link falls back to a bare text preview.
     base = _public_base(settings)
-    og_image = _card_url(view, share_row, base)
+    og_image = _card_url(view, share_row, base, card_digest(visible, featured))
     og_url = None
     if base:
         urls = share_links.share_urls(share_row, share_row["owner_username"], base)
@@ -637,9 +643,14 @@ def _card_view_params(view: ShareView) -> dict[str, str]:
     return params
 
 
-def _card_url(view: ShareView, share_row, base: str) -> str | None:
+def _card_url(view: ShareView, share_row, base: str, digest: str) -> str | None:
     """Where this page's preview picture lives, absolutely, or None when the
     instance has no configured public origin to build a URL from.
+
+    `digest` (`card_digest`) RIDES ON THE END AS `v`, which the picture's route
+    reads nothing from: it is there so the address changes when what the card
+    draws does, and an unfurler that keeps pictures by address fetches the new
+    one. After the view's own params, so a `p=` code stays the short form.
 
     ALWAYS THE TOKEN FORM, from all three kinds of share link, because the token
     is the most anonymous of the three identifiers this app has: a username or a
@@ -652,7 +663,8 @@ def _card_url(view: ShareView, share_row, base: str) -> str | None:
     """
     if not base:
         return None
-    return f"{base}/s/{share_row['token']}/og.jpg{share_links.link_query(_card_view_params(view))}"
+    query = share_links.link_query(_card_view_params(view))
+    return f"{base}/s/{share_row['token']}/og.jpg{query}{'&' if query else '?'}v={digest}"
 
 
 # How many titles ever get a tile, whatever the month holds. Read from the
@@ -807,6 +819,70 @@ def select_tile_items(items: Sequence[Item], limit: int = MAX_CARD_TILES) -> lis
     return sorted(items, key=lambda item: (tile_tier(item), item.air_ts))[:max(0, limit)]
 
 
+def title_of(item: Item) -> str:
+    """The title store's key for the title `item` is a listing of — the first
+    half of `Item.card` ("{title key}|{unit}"), which the calendar's read sets on
+    every airing it draws. A highlight is filed under the same key."""
+    return str(item.card or "").rpartition("|")[0]
+
+
+def tile_candidates(items: Sequence[Item], featured: Collection[str] = frozenset(),
+                    limit: int = MAX_CARD_TILES) -> list[Item]:
+    """`select_tile_items`, with the owner's FEATURED titles first: one airing
+    of each featured title the view shows — its best by the same ranking — then
+    the ranking of everything else, the first `limit` in all.
+
+    A GUARANTEE, NOT A NARROWING (app/calendar/share_highlights.py). With
+    nothing featured this IS `select_tile_items`, so the card is the card it
+    always was; with something featured the grid is still filled from the
+    ranking, and the display order is still the date order `arrange_tiles`
+    gives it. A featured title the view does not show — filtered out, narrowed
+    away, hidden as not-watching — is not among `items`, so it is never drawn:
+    the card cannot advertise what its page does not show. Every other airing
+    of a featured title is left out, so one title is one tile."""
+    if not featured:
+        return select_tile_items(items, limit)
+    first: list[Item] = []
+    rest: list[Item] = []
+    seen: set[str] = set()
+    for item in select_tile_items(items, len(items)):
+        title = title_of(item)
+        if title not in featured:
+            rest.append(item)
+        elif title not in seen:
+            seen.add(title)
+            first.append(item)
+    return [*first, *rest][:max(0, limit)]
+
+
+def _wanted(items: Sequence[Item], featured: Collection[str]
+            ) -> tuple[list[tuple[Item, tuple[str, object]]], list[tuple[Item, tuple[str, object]]]]:
+    """(every candidate a card may draw, the leading grid's worth of them) —
+    each with the (media, tmdb) its poster is filed under. The first is how far
+    the grid reaches for a title it can draw; the second is what is warmed and
+    what the card's address names (`card_digest`)."""
+    candidates = _poster_refs(tile_candidates(items, featured, limit=TILE_CANDIDATES))
+    return candidates, candidates[:MAX_CARD_TILES]
+
+
+def card_digest(items: Sequence[Item], featured: Collection[str] = frozenset()) -> str:
+    """A short digest of what the card of this view draws — the count, and each
+    wanted tile's title, date and premiere mark, in date order — for the
+    picture's ADDRESS. An unfurler keeps a picture by its address, so an address
+    that does not change when the line-up does is a stale card for every post
+    after the change (Discord kept a wrong one): with this in it, a different
+    line-up is a different address, and the same line-up the same one. The
+    picture itself is still addressed by everything it draws
+    (share_card_cache.render_key); this needs no poster on disk, so the page can
+    say it without waiting on artwork."""
+    _candidates, wanted = _wanted(items, featured)
+    tiles = sorted((_air_moment(item) is None, _air_moment(item) or 0.0, item.title,
+                    _tile_date_label(item), tile_tier(item) == _TIER_SERIES_PREMIERE)
+                   for item, _ref in wanted)
+    blob = json.dumps([len(items), tiles], separators=(",", ":"), ensure_ascii=False)
+    return hashlib.blake2s(blob.encode("utf-8"), digest_size=6).hexdigest()
+
+
 def _item_order(item: Item, order: tuple[str, ...]) -> tuple[str, ...]:
     """The artwork order for ONE item: the service actually describing it first,
     then the owner's preference behind that.
@@ -881,7 +957,8 @@ async def _warm_posters(settings, refs, order, *, budget: float | None) -> None:
 
 
 async def _resolve_tiles(settings, visible: Sequence[Item], order: tuple[str, ...], *,
-                         budget: float | None) -> tuple[tuple[share_card.Tile, ...], bool]:
+                         budget: float | None, featured: Collection[str] = frozenset()
+                         ) -> tuple[tuple[share_card.Tile, ...], bool]:
     """The card's poster tiles, and whether anything it wanted is still coming.
 
     The second half of the pair is what decides whether the finished picture may
@@ -912,9 +989,12 @@ async def _resolve_tiles(settings, visible: Sequence[Item], order: tuple[str, ..
     arrangement happens LAST, after the titles with no artwork have dropped out,
     so the dates a reader sees run in order across whatever tiles survived
     rather than across the ones that were hoped for.
+
+    THE OWNER'S FEATURED TITLES LEAD THE RANKING (`tile_candidates`), so each
+    one the view shows takes a tile before anything ranked; one with no artwork
+    costs itself a place like any candidate, and the next ranked title takes it.
     """
-    candidates = _poster_refs(select_tile_items(visible, limit=TILE_CANDIDATES))
-    wanted = candidates[:MAX_CARD_TILES]
+    candidates, wanted = _wanted(visible, featured)
     # The one place a card request can wait on the network. `budget` is the wall
     # clock it is allowed — a span at or just under it means the budget FIRED and
     # the card that follows is a tile short on purpose, which is a very different
@@ -995,7 +1075,9 @@ async def assemble_card(view: ShareView, share_row, settings, *,
 
     tiles, complete = await _resolve_tiles(
         settings, visible, _poster_order(await source_prefs.load(owner_id)),
-        budget=budget)
+        budget=budget,
+        featured=await share_highlights.for_card(owner_id, view.endpoint.key,
+                                                 view.year, view.month))
     avatar = await anyio.to_thread.run_sync(_avatar_bytes, owner_id)
     card = share_card.Card(
         month_label=view.month_label, year=view.year, count=len(visible),
@@ -1022,7 +1104,8 @@ _warm_tasks: set[asyncio.Task] = set()
 
 
 def _spawn_poster_warm(view: ShareView, owner_id: int, visible: Sequence[Item],
-                       settings, order: tuple[str, ...]) -> None:
+                       settings, order: tuple[str, ...],
+                       featured: Collection[str] = frozenset()) -> None:
     """Start resolving the artwork this month's card will want once the page
     has been answered (after_response), and return immediately.
 
@@ -1039,7 +1122,9 @@ def _spawn_poster_warm(view: ShareView, owner_id: int, visible: Sequence[Item],
     key = (owner_id, view.endpoint.key, view.year, view.month)
     if key in _warming or len(_warming) >= _WARM_CEILING:
         return
-    refs = [(item, ref) for item, ref in _poster_refs(select_tile_items(visible))]
+    # The grid's worth the card itself warms first (`_wanted`), the owner's
+    # featured titles among them.
+    _candidates, refs = _wanted(visible, featured)
     if refs:
         after_response.later(lambda: _start_poster_warm(key, refs, settings, order))
 

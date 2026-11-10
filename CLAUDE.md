@@ -958,7 +958,19 @@ card is one of the TWO public paths that may make an outbound call (the details
 panel, below, is the other): it warms poster ARTWORK, bounded to what the grid
 draws and to a wall clock, for titles the calendar cache already holds. It never
 fetches the CALENDAR (`allow_fetch=False`), so an empty cached month stays an
-empty card.
+empty card. THE OWNER MAY FEATURE UP TO TEN OF A MONTH'S PREMIERES ON IT
+(`app/calendar/share_highlights.py`, chosen by a star on the tracker's rows), and
+a feature is a GUARANTEE, NEVER A NARROWING: on a premieres card alone, every
+featured title the view SHOWS takes a tile before the ranking fills the rest
+(`share_routes.tile_candidates`), the grid stays in date order, the count stays
+the page's, and a featured title the view filters, narrows or hides is not drawn —
+the rule above, not a choice. With nothing featured the card is
+`select_tile_items`' byte for byte. The page never changes. AND THE PICTURE'S
+ADDRESS NAMES WHAT IT DRAWS: an unfurler keeps a picture by its address (Discord
+kept a wrong one), so the og:image URL ends `&v=` a digest of the count and the
+wanted tiles' titles, dates and premiere marks (`share_routes.card_digest`, after
+the `p=` code), which the picture's route ignores; the file on disk is still
+addressed by everything it draws (`share_card_cache.render_key`).
 
 **A page draws a picture's ADDRESS; a tile on disk is for compositing only, and
 a title costs at most one lookup, ever.** `app/media/posters.py` owns both halves

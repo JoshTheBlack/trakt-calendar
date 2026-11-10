@@ -23,7 +23,8 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
-from app import auth, clock, db, distrakt
+from app import auth, clock, db, distrakt, metadata
+from app.calendar import share_highlights
 from app.providers.base import ItemKey
 from app.distrakt import backup
 from app.distrakt import watch_history as wh
@@ -51,6 +52,9 @@ async def _seed_dataset(user_id: int, *, tag: str) -> None:
         "kind": distrakt.RecordKind.KEEPUP, "watched": 2, "total": 6,
     })
     await distrakt.dismiss_prompt(user_id, ItemKey("show", "tmdb", "808"), 3)
+    # A show July's share picture features.
+    await share_highlights.feature(user_id, 2026, 7, "show:tmdb:555", True,
+                                   eligible=["show:tmdb:555"])
     # A frozen month, which is where the snapshot fields and movies_json matter.
     doc = await distrakt.load_month(user_id, "2026-07")
     doc["closed"] = True
@@ -956,6 +960,7 @@ class BackupCoversTheWholeSchemaTests(unittest.IsolatedAsyncioTestCase):
         ("distrakt_show_progress", "user_id"): "same",
         ("distrakt_movie_watches", "user_id"): "same",
         ("distrakt_prefs", "user_id"): "same",
+        ("share_highlights", "user_id"): "same",
         ("distrakt_watch_state", "play_counts_json"): (
             "the play-count sweep is a COMPARISON BASELINE, not data. Restoring "
             "one beside progress rows that may have moved would let it claim "
@@ -1041,6 +1046,49 @@ class RestoreCarriesEveryExportedColumnTests(ExportTestCase):
         await distrakt.restore_user_data(self.user_id, doc)
 
         self.assertEqual(await _snapshot(self.user_id), before)
+
+
+class TheFeaturedShowsTravelTests(ExportTestCase):
+    """The shows each month's share picture features are the viewer's choices,
+    and a backup carries them like the emoji map (app/distrakt/backup.py)."""
+
+    def a_doc(self, keys: list[str]) -> dict:
+        return {"schema": backup.EXPORT_SCHEMA, "share_highlights": [
+            {"year": 2026, "month": 9, "title_key": key, "position": n + 1, "created_at": 1}
+            for n, key in enumerate(keys)]}
+
+    async def test_a_wiped_tracker_gets_its_featured_shows_back(self):
+        await _seed_dataset(self.user_id, tag="mine")
+        doc = await distrakt.export_user_data(self.user_id)
+        self.assertEqual([row["title_key"] for row in doc["share_highlights"]],
+                         ["show:tmdb:555"])
+        await db.execute("DELETE FROM share_highlights WHERE user_id = ?", (self.user_id,))
+        await distrakt.restore_user_data(self.user_id, doc)
+        self.assertEqual(await share_highlights.for_month(self.user_id, 2026, 7),
+                         ("show:tmdb:555",))
+
+    async def test_a_key_the_store_has_retired_is_restored_under_the_current_one(self):
+        """The file was written before the title learned a higher id: the
+        restore files the highlight under the key the title answers to now."""
+        await db.transaction(lambda conn: metadata.register(
+            conn, "show", {"tmdb": 999, "tvdb": 77}, filed_under="show:tmdb:999"))
+        await distrakt.restore_user_data(self.user_id, self.a_doc(["show:tvdb:77"]))
+        self.assertEqual(await share_highlights.for_month(self.user_id, 2026, 9),
+                         ("show:tmdb:999",))
+
+    async def test_a_file_naming_more_than_the_most_restores_the_first_chosen(self):
+        keys = [f"show:tmdb:{4000 + n}" for n in range(share_highlights.MAX_HIGHLIGHTS + 2)]
+        await distrakt.restore_user_data(self.user_id, self.a_doc(list(reversed(keys))))
+        restored = await share_highlights.for_month(self.user_id, 2026, 9)
+        self.assertEqual(len(restored), share_highlights.MAX_HIGHLIGHTS)
+        self.assertEqual(restored[0], keys[-1])
+
+    async def test_a_file_without_them_leaves_them_alone(self):
+        await share_highlights.feature(self.user_id, 2026, 9, "show:tmdb:1", True,
+                                       eligible=["show:tmdb:1"])
+        await distrakt.restore_user_data(self.user_id, {"schema": backup.EXPORT_SCHEMA})
+        self.assertEqual(await share_highlights.for_month(self.user_id, 2026, 9),
+                         ("show:tmdb:1",))
 
 
 async def _snapshot(user_id: int) -> dict:

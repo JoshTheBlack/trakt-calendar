@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import calendar as _calendar
+import hashlib
 import json
 import logging
 from collections.abc import Mapping, Sequence
@@ -38,7 +39,7 @@ from . import (arrival, backfill, counts, discord_fmt, episode_progress, lifecyc
 from .. import distrakt as distrakt_store
 from .. import auth, authz, chrome, clock, db, details_panel, metadata, providers, route_params
 from ..auth import AuthLevel, viewer
-from ..calendar import share_links
+from ..calendar import share_highlights, share_links
 from ..config import load_settings
 from ..metadata import identity as title_identity
 from ..metadata import panel as metadata_panel
@@ -1529,11 +1530,61 @@ def _emoji_context(emojis: dict, default_emoji: str, network_logos: dict[str, lo
     }
 
 
+def _featurable(inputs: discord_fmt.PostInputs | None) -> frozenset[str]:
+    """The titles a month premiered that its page draws a row of — its premiere
+    records, whatever bucket a row of them is drawn in now — from what the month
+    was drawn from (the rows are `inputs.shows`, the page's own list). A
+    premiere the page draws no row of has no star to press, so it is not one a
+    press may feature either."""
+    if inputs is None:
+        return frozenset()
+    drawn = {str(show.get("key")) for show in inputs.shows}
+    return frozenset(str(show["key"]) for show in
+                     (*inputs.series_premieres, *inputs.season_premieres)
+                     if show.get("key") and str(show["key"]) in drawn)
+
+
+async def _month_premiere_keys(user_id: int, year: int, month: int) -> frozenset[str]:
+    """Every title the month premiered, read from its records — for a press or a
+    removal with no drawn month in hand: one read, no service asked."""
+    records = await distrakt_store.month_records(
+        user_id, distrakt_store.month_key(year, month), distrakt_store.PREMIERE_KINDS)
+    return frozenset(str(record["key"]) for record in records)
+
+
+def _feature_context(featurable: frozenset[str], featured: Sequence[str]) -> dict:
+    """What a row's feature control and the month's feature line are drawn from
+    (templates/_distrakt_rows.html's `feature`, `feature_line`).
+
+    ONE BUILDER FOR THE MONTH AND FOR A PRESS'S ANSWER, for `_emoji_context`'s
+    reason: the answer's controls replace the month's out of band, so they are
+    drawn from the same rule.
+
+    A TITLE THE MONTH PREMIERED is what may be featured — the choice is among the
+    month's new and returning shows — and every row of it carries the control,
+    whatever bucket it is drawn in now: a premiere that began airing and moved to
+    Keep-up is the same show on the same month's card. `feature_ref` is what an
+    answer addresses every copy by: a digest, because a key holds colons and an
+    imdb id whatever a service spelled it with, and an out-of-band selector must
+    hold neither a space nor a quote."""
+    shown = [key for key in featured if key in featurable]
+    return {
+        "featurable": featurable,
+        "featured": frozenset(shown),
+        "featured_count": len(shown),
+        "featured_full": len(shown) >= share_highlights.MAX_HIGHLIGHTS,
+        "featured_most": share_highlights.MAX_HIGHLIGHTS,
+        "feature_ref": lambda key: hashlib.blake2s(str(key).encode("utf-8"),
+                                                   digest_size=8).hexdigest(),
+    }
+
+
 def _month_context(request: Request, payload: dict, year: int, month: int,
                    emojis: dict, default_emoji: str, settings, *,
                    message: str = "", ok: bool = True,
                    pictures: dict | None = None, is_admin: bool = False,
-                   network_logos: dict[str, logos.Logo] | None = None) -> dict:
+                   network_logos: dict[str, logos.Logo] | None = None,
+                   featured: Sequence[str] = ()) -> dict:
     """The month fragment's whole context, out of the payload and nothing else.
 
     ONE READER OF THE PAYLOAD. Every mutating route answers through this, so what
@@ -1568,6 +1619,8 @@ def _month_context(request: Request, payload: dict, year: int, month: int,
         # Which networks have a badge is asked once for the whole response rather
         # than once per row, and never of the browser.
         **_emoji_context(emojis, default_emoji, network_logos or {}, is_admin),
+        # Which of the month's premieres its share card features.
+        **_feature_context(_featurable(payload.get("post_inputs")), featured),
         # A row's picture, resolved for the whole page before it is drawn
         # (_row_pictures) — "" where nothing is known yet.
         "poster_for": lambda show: (pictures or {}).get((str(show.get("key")),
@@ -1711,11 +1764,12 @@ async def _month_answer(request: Request, user_id: int, year: int, month: int,
             (show.get("network"), (show.get("ids") or {}).get("tmdb"))
             for show in payload.get("shows") or []])
     user = await auth.current_user(request)
+    featured = await share_highlights.for_month(user_id, year, month)
     return templates.TemplateResponse(
         request, "_distrakt_month.html",
         {**_month_context(request, payload, year, month, emojis, default_emoji, settings,
                           message=message, ok=ok, pictures=pictures, is_admin=user.is_admin,
-                          network_logos=network_logos),
+                          network_logos=network_logos, featured=featured),
          "overlays": overlays})
 
 
@@ -2352,6 +2406,53 @@ async def api_distrakt_emoji(request: Request):
     return response if kept else _and_the_month(response)
 
 
+@guard.post("/api/distrakt/feature", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_feature(request: Request):
+    """A row's star: feature one of the month's premieres on the picture a share
+    link of the month unfurls into, or stop featuring it
+    (app/calendar/share_highlights.py).
+
+    THE ANSWER IS SMALL AND OUT OF BAND, as a saved emoji code's is: every star
+    on the month and the line counting them (_distrakt_feature_answer.html),
+    drawn from the month the page was drawn from (post_memo) — a feature changes
+    no row's counts or bucket and no post, so the month is not worked out again.
+    Where nothing is kept for the month (a restart since it was drawn), the
+    month's records say what it premiered and the whole month is the answer,
+    which is the one that still draws every star.
+
+    THE MOST A MONTH MAY FEATURE IS DECIDED WHERE IT IS WRITTEN
+    (share_highlights.feature, in one transaction). The page disables the other
+    stars at the most, so a refusal here is two tabs pressing at once, and it is
+    said in a line with every star redrawn as it now stands.
+    """
+    user_id = await _distrakt_user_id(request)
+    data = await authz.json_body(request)
+    year, month = _viewed_month(request)
+    try:
+        key = str(parse_item_key(data.get("key")))
+    except ValueError:
+        return _month_refusal(request, "That isn't a show this month premiered.")
+    on = data.get("on") is True
+    kept = post_memo.recall(user_id, distrakt_store.month_key(year, month))
+    featurable = (_featurable(kept) if kept is not None
+                  else await _month_premiere_keys(user_id, year, month))
+    if key not in featurable:
+        return _month_refusal(request, "That isn't a show this month premiered.")
+    written = await share_highlights.feature(user_id, year, month, key, on, eligible=featurable)
+    message = (f"This month’s share picture already features {share_highlights.MAX_HIGHLIGHTS} "
+               "shows — unstar one first." if written.full else "")
+    if kept is None:
+        settings = await viewer.settings_for_user(user_id)
+        return await _month_answer(request, user_id, year, month, settings,
+                                   message=message, ok=not written.full)
+    return templates.TemplateResponse(request, "_distrakt_feature_answer.html", {
+        "request": request,
+        "month_query": f"?year={year}&month={month}",
+        "message": message, "message_ok": not written.full,
+        **_feature_context(featurable, written.featured),
+    })
+
+
 @guard.post("/api/distrakt/emoji-default", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_emoji_default(request: Request):
     """Save the code a network with none of its own posts as, from the settings
@@ -2615,6 +2716,11 @@ async def api_distrakt_remove(request: Request):
         if departing is not None:
             watchlist_writes.withdraw(user_id, departing)
         return _month_refusal(request, "Show/season not found in that month")
+    # A show no longer premiering on the month is no longer featured on its share
+    # picture: its star went with its row, and a highlight nobody can see would
+    # keep a tile — and a place among the most a month may feature — for good.
+    await share_highlights.keep_only(user_id, year, month,
+                                     await _month_premiere_keys(user_id, year, month))
 
     settings = await viewer.settings_for_user(user_id)
     return await _month_answer(

@@ -36,6 +36,8 @@
     calendar isn't there yet" and "nobody was tracking that far back". -#}
 <div class="distrakt-empty">{{ empty_note or 'Nothing tracked yet this month.' }}</div>
 {%- else %}
+{#- Only on a month that premiered something: nothing else may be featured. -#}
+{%- if featurable %}{{ row.feature_line() }}{% endif %}
 {%- for section in sections %}
 <div class="distrakt-bucket-head">{{ section.label }}</div>
 {%- for show in section.rows %}

@@ -377,7 +377,9 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         deferred=True),
     (DISTRAKT, CALENDAR): Edge(
         "the tracker imports a month's premieres, honours 'not watching', and "
-        "links a Discord post at the viewer's own calendar. Its name repair "
+        "links a Discord post at the viewer's own calendar; its rows choose which "
+        "of a month's premieres the share picture features (calendar/share_highlights), "
+        "and a backup carries those choices. Its name repair "
         "re-reads the title store only when the stored calendar's signature has "
         "moved. And a title added to "
         "a tracker by hand writes the premiere airing no feed carried, through "

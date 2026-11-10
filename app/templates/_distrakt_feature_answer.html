@@ -1,0 +1,16 @@
+{% import '_distrakt_rows.html' as row with context %}
+{% import '_toast.html' as toast %}
+{# A STAR PRESSED, answered out of band to everything it changes and nothing else:
+   every star on the month — each show's copies by `data-title`, and every other
+   show's too, because the tenth star disables the rest and taking one away
+   enables them — and the line above the list that counts them
+   (routes.api_distrakt_feature). The month itself is not worked out again: a
+   feature changes no row's counts, bucket or post.
+
+   Context: `message`/`message_ok`, plus what _distrakt_rows.html's `feature` and
+   `feature_line` need. #}
+{%- for key in featurable | sort %}
+{{ row.feature(key, oob=true) }}
+{%- endfor %}
+{{ row.feature_line(oob=true) }}
+{{ toast.flash(message, message_ok) }}
