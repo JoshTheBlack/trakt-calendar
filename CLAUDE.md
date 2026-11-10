@@ -198,7 +198,7 @@ trim, id bridge and de-dupe (`cache._kept`, `enrich.match_ids`), its stored
 enrichment (`enrich.give_stored_enrichment`), its filing by window and digests
 (`entries._file_by_window`), its listings and completed ids (`metadata.listings`,
 `complete_records`), its picture sightings; a read's day trim and order
-(`cache._in_day_order`), its grouping, marks and counts (`cache._assembled`), a
+(`query.in_day_order`), its grouping, marks and counts (`cache._assembled`), a
 page's filed month (`routes._filed_cards`) and its viewed titles. WHAT STAYS ON
 THE LOOP is every in-process structure those feed — `_storing` /
 `_stored_from`, `_note_changed`, `cache._pending`, the refill latches,
@@ -713,7 +713,9 @@ orders, filters off and one service alone. ITS READS COME BACK IN ONE AGGREGATED
 ROW (`db.aggregated`: the month's rows, its titles' identities, the judging's
 verdicts — a row a step, each step winning the interpreter lock back, read a
 month's 19,607 rows in 5.6–7.0 s beside a restart's refills, 0.14 s idle; one row
-is one step, in the same order), and every connection reads the file through a
+is one step, in the same order — but a REAL in 15 significant digits, so a read
+whose rows are WRITTEN BACK names its REAL columns `exact`, as the episode rows a
+merge rewrites do: `episodes._aggregated`), and every connection reads the file through a
 memory map (`db.MMAP_BYTES`: the rows' SQL 235 → 126 ms). With a card one service
 lists placed without asking the resolvers (`query.place`) and a row's instants
 read by column names spelled once (`episodes.instants_of`), MEASURED on a copy
@@ -1023,7 +1025,7 @@ numbers by year. VIDEOS ARE THE ONE FIELD WHOSE VALUES ARE POOLED, and the
 exception is deliberate: a missing or wrong default video is recoverable only
 when the alternatives are on screen and say who listed them, and one field from
 one service showed nothing for a title whose only video was a teaser. Each
-answer's `videos` is that service's own list; `detail_source.describe_panel` —
+answer's `videos` is that service's own list; `panel.describe_panel` (app/metadata/panel.py) —
 what every surface calls for a whole panel, a season tab calling
 `describe_season` — asks every other service the ids name for its list
 (`DetailPort.fetch_videos`) beside the description, and
@@ -1143,10 +1145,12 @@ removal history and both exports (`exports.RankedTitle.label`, which the text
 and the render cache's key read, and whose two halves the image captions on two
 lines — the show's name, then `RankedTitle.subtitle`); and a row's counts
 describe the row — a season
-has no season count and its own episode total. `core._redefine_row` REWRITES
-those (`_DEFINING_FACTS`) whenever a row's season changes, from the season list
-already read (`seasons.season_facts`) or blank, never carrying the old
-definition's numbers across.
+has no season count and its own episode total. Those are the title store's
+words for that season of the title (`labels.board_columns`), so
+`core._redefine_row` — the one write of an existing row's season — changes the
+season alone (and `_ARRIVING_FACTS` where an arrival knows them): there is no
+copy on the row to rewrite, and none of the old definition's numbers to carry
+across.
 A BOARD BACKUP says which it is in fields rather than a key: version 2
 (`core.EXPORT_SCHEMA`) lists `season` and `season_name` on every title and
 refuses a title that leaves either out, because in a file that can hold seasons

@@ -293,10 +293,9 @@ the floor already applies shows in their 🎚️ Filters ticked and fixed.
 
 With a TMDB token in Settings, TMDB is the first service asked about any title that
 carries a TMDB id — which is nearly every title Trakt or Simkl lists. It describes the
-title in the details panel, gives the tracker its season totals (in an order that tracker's
-own settings can change), supplies posters and network logos, and adds its videos to the
-panel's menu. Trakt and Simkl answer what TMDB
-doesn't know, and a season TMDB has no episodes of goes to the next service that does.
+title in the details panel, supplies posters and network logos, and adds its videos to the
+panel's menu. Trakt and Simkl answer what TMDB doesn't know, and a season TMDB has no
+episodes of goes to the next service that does.
 A panel TMDB describes also shows the show's own logo as its heading, the episode airing
 next (while it is still to come), finales and mid-season finales in the episode list, and a
 season's own trailers ahead of the show's; a film TMDB files in a collection can add the
@@ -304,8 +303,6 @@ whole collection to a rankings board from its panel there. A title described bef
 upgraded gains these the next time it's re-read, which happens when it is looked at.
 Anyone who set their own service order on their **Account** page keeps it; TMDB comes after
 the services they named.
-
-TMDB keeps no watch history, so it never backs the tracker.
 
 **TMDB also lists three calendars**, beside Trakt and Simkl: **Series Premieres** (shows
 whose first episode airs that day), **Movie Premieres** (films with a limited, theatrical or
@@ -345,9 +342,9 @@ calendars the card is drawn from are in colour; one that knows the title but doe
 this airing — or that your calendar leaves out — is greyed until you hover it. The details
 panel offers every service that knows the title, wherever it is opened.
 
-**Every search box searches TMDB** when you press Enter, and all three behave alike: the
-calendar's Find a title, the tracker's Add show and Add film, and the rankings board.
-Twenty results at a time, with **More from TMDB** for the next twenty. Under the results,
+**Every search box searches TMDB** when you press Enter, and they behave alike: the
+calendar's Find a title and the rankings board's. Twenty results at a time, with **More
+from TMDB** for the next twenty. Under the results,
 **Also search Trakt**, **Also search Simkl** and **Also search Simkl Anime** appear for each
 service *you* have linked; each adds that catalogue's results below the rest, searched with
 your own account, and then offers its own **More from …**. (Simkl keeps anime apart from its
@@ -355,22 +352,20 @@ TV catalogue, and one search does not reach both.) Typing still lists only title
 instance already holds, and costs nothing.
 
 **Opening a show gives the same season checklist everywhere**: each season with its episode
-count, the suggested one marked, the ones you already have greyed. The tracker can add
-several seasons at once, and so can a rankings board, whose checklist also offers the
-**Whole show** (dragging a result into a tier adds the whole title). On the calendar, seasons your filters hide say so, seasons already
-on your calendar link to their day, and **Go** opens the month of the season you ticked,
-on its card when the calendar draws one. A title found on TMDB is looked up on Trakt and Simkl by its
-TMDB id when it's added, so the tracker can read your history for it. A show neither
-lists can still be added; its row is marked **untracked**, because nothing will count what
-you watch of it. A calendar season TMDB found is added as TMDB's own card on a calendar TMDB
+count, the suggested one marked, the ones you already have greyed. A rankings board can add
+several seasons at once, with the **Whole show** first (dragging a result into a tier adds
+the whole title). On the calendar each season is one press: one your calendar already draws
+opens its card, any other is added and opens on its card, and one your filters hide says so
+where you pressed it. A title found on TMDB is looked up on Trakt and Simkl by its TMDB id
+when it's added. A calendar season TMDB found is added as TMDB's own card on a calendar TMDB
 lists (a series or season premiere, a film's release); on Finales or All Episodes it opens
 the month it should be in.
 
 Get the token at [themoviedb.org → Settings → API](https://www.themoviedb.org/settings/api):
 copy the **API Read Access Token** (the long one). The short "API Key" is refused —
 it travels in the address of every request, where a credential ends up in logs. Nothing
-TMDB answers is kept longer than six months, which is TMDB's own limit; titles on your
-tracker or a rankings board are re-read shortly before then, so they never lose their names.
+TMDB answers is kept longer than six months, which is TMDB's own limit; titles on a
+rankings board are re-read shortly before then, so they never lose their names.
 
 Without a token, TMDB steps aside and the other services describe titles as before. The
 search boxes say TMDB isn't configured rather than searching something else; anyone who
@@ -558,13 +553,13 @@ app/
                        long each may be kept
     descriptions.py   A service's description of a title, filed and read back
     panel.py          The details panel's answer, from the store first
-    labels.py         What a tracker or board row is called and counts, read with it
+    labels.py         What a ███████ or board row is called and counts, read with it
     refresh.py        Re-reading what a page found stale, behind the page
     pictures.py       A picture that won't load: the next one, and the title healed
     picture_routes.py The public address such a picture reports to
     typed_search.py   The stored titles an add box lists as you type
     backfill.py       Registering, once, everything stored before the store existed,
-                       and the words the tracker's and boards' rows carried
+                       and the words the ███████'s and boards' rows carried
   ████████/         The █████ ███████: store, live counts, month rollover, backup,
                      per-user prefs, and the calendar premiere import
     routes.py         The ███████ page and its API
