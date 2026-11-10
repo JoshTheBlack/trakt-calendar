@@ -2418,7 +2418,16 @@ async def api_distrakt_feature(request: Request):
     no row's counts or bucket and no post, so the month is not worked out again.
     Where nothing is kept for the month (a restart since it was drawn), the
     month's records say what it premiered and the whole month is the answer,
-    which is the one that still draws every star.
+    which is the one that still draws every star — and which keeps the month for
+    the next press.
+
+    THAT ANSWER SAYS WHERE IT GOES. The star is `hx-swap="none"`, and htmx drops
+    a "none" swap's main content: only what is out of band lands. The whole
+    month's stars are drawn in place, not out of band, so without HX-Retarget /
+    HX-Reswap the highlight was saved while the star stayed hollow and the line
+    unchanged until a reload — on every tab left open across a deploy. They aim
+    it where every other month answer goes (`#distraktShowList`, as
+    _distrakt_rows.html's `month_post` controls do).
 
     THE MOST A MONTH MAY FEATURE IS DECIDED WHERE IT IS WRITTEN
     (share_highlights.feature, in one transaction). The page disables the other
@@ -2443,8 +2452,11 @@ async def api_distrakt_feature(request: Request):
                "shows — unstar one first." if written.full else "")
     if kept is None:
         settings = await viewer.settings_for_user(user_id)
-        return await _month_answer(request, user_id, year, month, settings,
-                                   message=message, ok=not written.full)
+        answer = await _month_answer(request, user_id, year, month, settings,
+                                     message=message, ok=not written.full)
+        answer.headers["HX-Retarget"] = "#distraktShowList"
+        answer.headers["HX-Reswap"] = "innerHTML swapEmpty:false"
+        return answer
     return templates.TemplateResponse(request, "_distrakt_feature_answer.html", {
         "request": request,
         "month_query": f"?year={year}&month={month}",
