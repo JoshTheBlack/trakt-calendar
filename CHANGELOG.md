@@ -5,10 +5,10 @@ All notable changes to this project are documented here. Format loosely follows 
 ## 🏷️ [1.3.0] - UNRELEASED
 
 ### ⚠️ Upgrading
-- 🗄️ **Back up `data/app.db` first: the first start rebuilds the database** — about five seconds for a 90 MB database before the app answers, longer in proportion for a bigger one.
+- 🗄️ **Back up `data/app.db` first: the first start rebuilds the database** — about ten seconds for a 100 MB database before the app answers, longer in proportion for a bigger one, and the file grows by about a third.
 - 🎬 **TMDB now takes its API Read Access Token, not the short API key.** Paste the long token from themoviedb.org → Settings → API into Settings; a short key isn't used, and Settings says so.
 - 🧵 **Calendar months are read in worker processes**, one per CPU core less one (at most four), about 100 MB each — set `READ_PROCESSES` lower, or to `0`, on a machine short of memory.
-- 🖼️ **Set your public base URL** (Settings → Server, or `PUBLIC_BASE_URL`): a poster that won't load reports back to it so the title can be looked up again.
+- 🖼️ **Set your public base URL** (Settings → Server, or `PUBLIC_BASE_URL`): a poster that won't load reports back to it so the title can be looked up again, and passkeys need it to be https.
 - ⏳ **Some things fill in over the first hours**: network logos, TMDB's descriptions of what the calendars list, and the matching of titles across services.
 
 ### Added
